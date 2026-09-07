@@ -192,6 +192,12 @@ Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are adde
 - **Narrator or worker context exhaustion.** Only the orchestrator rolls over. Workers are bounded by `max_task_turns`; the narrator's view truncates tool output and restarts with each subsession.
 - **Multi-machine sessions.** Session directories from different checkouts can be pooled (they are just timestamped files) but nothing merges them for you; the dossier task is what makes sense of a combined history.
 
+## More
+
+- [docs/LESSONS.md](docs/LESSONS.md): what broke in four earlier implementations of this design, and what eagent does about each failure.
+- [docs/EVENTS.md](docs/EVENTS.md): the event log schema and which actor sees which events.
+- [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): the design specification, requirement by requirement, with the two deliberate deviations.
+
 ## Development
 
 ```
