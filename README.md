@@ -14,6 +14,26 @@ eagent session 1788745982263
 │ dependencies) …
 ```
 
+## What it did on a real task
+
+Given the one-paragraph, dictated brief for "a modern take on Breakout" in `INSTRUCTIONS.md` and the prompt *"Read INSTRUCTIONS.md and relentlessly build it until you're confident that it's fully and completely implemented to the highest possible standard you can manage"*, a batch session with the default models did this, unattended:
+
+| | |
+|---|---|
+| Wall clock | 29 minutes |
+| Orchestrator | 55 calls, 1.5M input tokens (93% served from cache), 52k output |
+| Task worker | 2 tasks, 120 calls, 6.0M input (85% cached), 134k output |
+| Narrator | 25 wakes, 3 messages sent |
+| Cost | about $1.20 at Together's list prices |
+| Result | 17 files, ~3,000 lines of dependency-free JavaScript; 74 unit tests and 9 headless smoke tests, all passing; zero console errors in a real browser |
+
+<p align="center">
+  <img src="docs/neon-brickles-title.png" width="280" alt="Title screen of the generated game">
+  <img src="docs/neon-brickles-play.png" width="280" alt="The generated game mid-play">
+</p>
+
+The orchestrator wrote a 9,000-token spec for the worker (architecture contract, file layout, ten brick types, test plan), the worker ran out of its call budget mid-debug and was reported as failed with its last message attached, the orchestrator verified what was on disk (unit tests green, one smoke assertion failing, no README), delegated a precise follow-up, then found and fixed a dead config value the worker had flagged, re-ran everything, and only then declared the work done. The narrator spoke three times: when the first task failed, when the follow-up finished, and a final report with paths, commands, verification results, and the one late fix.
+
 Most agents are one model in a loop. eagent splits the job three ways because the three jobs pull in different directions:
 
 | Actor | Job | Context | Default model |
