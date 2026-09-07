@@ -104,7 +104,10 @@ attempted, as the specification says.
 ## Beyond the spec
 
 - `eagent -c` / `eagent resume` reopen a session after a crash or Ctrl-C and close whatever was left open.
-- `eagent show`, `eagent replay`, `eagent sessions`, `eagent doctor --live`, `eagent config --write`.
-- Retry with backoff for transient provider failures; streams that stall or close early are retried, never accepted as fragments; malformed tool calls are sanitised on replay so one bad turn cannot poison a session.
+- `eagent show`, `eagent replay`, `eagent sessions`, `eagent doctor --live`, `eagent config list/save/show`, `eagent prompts`.
+- `eagent serve`: a web UI over the same logs, with live chat and question answering through a per-session inbox, a session browser, task and tool-call drill-down, a timeline, and configuration (presets, bundles, prompts, key presence, bundle saving).
+- Named configuration bundles in `.agents/eagent/configs/`, built-in presets for GLM, Astra, Anthropic (Fable 5.1 / Opus 5 / Sonnet 5), all-DeepSeek, and all-Qwen routings.
+- Prompts as embedded Markdown templates with per-project overrides.
+- Retry with backoff for transient provider failures; streams that stall or close early are retried, never accepted as fragments; malformed tool calls are sanitised on replay so one bad turn cannot poison a session; oversized tool output is spilled to files the model can page through.
 - Interactive sessions accept input while the orchestrator is working; `/status`, `/tasks`, `/procs`, `/kill`, `/schedules`.
-- A harness integration test suite drives the whole runtime against a scripted provider.
+- A harness integration test suite drives the whole runtime against a scripted provider, and two chaos suites inject random provider faults and kill/resume loops while checking log invariants.
