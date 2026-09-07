@@ -53,8 +53,11 @@ type Proc struct {
 	mu       sync.Mutex
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
-	buf      []byte
-	dropped  int
+	buf      []byte // head + marker + tail once output has been dropped
+	written  int    // total bytes the process has produced (logical length)
+	dropped  int    // bytes removed from the middle
+	headLen  int    // bytes of buf that are the preserved head (0 = nothing dropped)
+	markLen  int    // bytes of buf that are the drop marker
 	status   Status
 	exitCode int
 	ended    time.Time
@@ -188,17 +191,9 @@ func (p *Proc) pump(r io.ReadCloser) {
 		if n > 0 {
 			p.mu.Lock()
 			p.buf = append(p.buf, chunk[:n]...)
+			p.written += n
 			if len(p.buf) > MaxBuffer {
-				// Drop the middle: keep the first quarter and the last half.
-				head := MaxBuffer / 4
-				tail := MaxBuffer / 2
-				removed := len(p.buf) - head - tail
-				p.dropped += removed
-				nb := make([]byte, 0, head+tail+64)
-				nb = append(nb, p.buf[:head]...)
-				nb = append(nb, []byte(fmt.Sprintf("\n[... %d bytes of output dropped ...]\n", p.dropped))...)
-				nb = append(nb, p.buf[len(p.buf)-tail:]...)
-				p.buf = nb
+				p.drop()
 			}
 			p.mu.Unlock()
 		}
@@ -206,6 +201,32 @@ func (p *Proc) pump(r io.ReadCloser) {
 			return
 		}
 	}
+}
+
+// drop discards the middle of the buffer, keeping the first quarter of the
+// cap as the head and the last half as the tail, with a marker between.
+// Caller holds p.mu.
+func (p *Proc) drop() {
+	head := MaxBuffer / 4
+	tail := MaxBuffer / 2
+	var headBytes []byte
+	if p.headLen == 0 {
+		headBytes = p.buf[:head]
+	} else {
+		headBytes = p.buf[:p.headLen]
+		head = p.headLen
+	}
+	tailBytes := p.buf[len(p.buf)-tail:]
+	// Everything between the head and the new tail is gone (minus any old marker).
+	p.dropped = p.written - head - tail
+	marker := []byte(fmt.Sprintf("\n[... %d bytes of output dropped ...]\n", p.dropped))
+	nb := make([]byte, 0, head+len(marker)+tail)
+	nb = append(nb, headBytes...)
+	nb = append(nb, marker...)
+	nb = append(nb, tailBytes...)
+	p.buf = nb
+	p.headLen = head
+	p.markLen = len(marker)
 }
 
 // Get looks up a process by handle.
@@ -309,32 +330,30 @@ func (p *Proc) Wait(ctx context.Context, d time.Duration) bool {
 
 // Output returns the retained output from logical byte offset cursor, and
 // the new cursor. Offsets count every byte the process ever wrote, so a
-// cursor stays valid after the middle of the buffer has been dropped.
+// cursor stays valid after the middle of the buffer has been dropped; a
+// cursor that falls in the dropped region yields the marker and the tail.
 func (p *Proc) Output(cursor int) (string, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	total := p.dropped + len(p.buf)
+	total := p.written
 	if cursor < 0 {
 		cursor = 0
 	}
 	if cursor >= total {
 		return "", total
 	}
-	if p.dropped == 0 {
+	if p.headLen == 0 {
 		return string(p.buf[cursor:]), total
 	}
-	// Buffer layout after a drop: [head | marker | tail]. The head is the
-	// logical range [0, headLen); the tail is [total-tailLen, total).
-	headLen := MaxBuffer / 4
-	tailLen := MaxBuffer / 2
+	tailLen := len(p.buf) - p.headLen - p.markLen
+	tailStart := total - tailLen
 	switch {
-	case cursor < headLen:
+	case cursor < p.headLen:
 		return string(p.buf[cursor:]), total
-	case cursor >= total-tailLen:
+	case cursor >= tailStart:
 		return string(p.buf[len(p.buf)-(total-cursor):]), total
 	default:
-		// Inside the hole: everything from the marker on.
-		return string(p.buf[headLen:]), total
+		return string(p.buf[p.headLen:]), total
 	}
 }
 
