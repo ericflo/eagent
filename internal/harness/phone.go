@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -149,9 +150,13 @@ func (r *Runtime) startPhone() {
 		p.lastID = msg.ID
 		p.threadID = thread.ID
 		p.mu.Unlock()
-		// Thread meta the app renders: where the session runs and on what.
+		// Thread meta the app renders as chips: where the session runs and on what.
 		host, _ := os.Hostname()
-		_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: map[string]any{"cwd": r.opts.Project, "host": host, "model": models["orchestrator"]}})
+		meta := map[string]any{"cwd": r.opts.Project, "host": host, "model": models["orchestrator"]}
+		if branch := gitBranch(ctx, r.opts.Project); branch != "" {
+			meta["branch"] = branch
+		}
+		_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
 		remote := p.isRemote()
 		r.post(func() {
 			r.append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: thread.ID, ExternalID: strings.TrimPrefix(p.ref, "ext:"), BaseURL: p.client.BaseURL, RemoteMode: remote}))
@@ -237,6 +242,23 @@ func (p *phone) close(reason string) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// gitBranch names the checked-out branch of a project, or "" when it is not
+// a git checkout or is on a detached head. Bounded so a slow disk cannot
+// hold up the mirror.
+func gitBranch(ctx context.Context, project string) string {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", project, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "HEAD" {
+		return ""
+	}
+	return b
+}
 
 // ---- outbound ---------------------------------------------------------------
 

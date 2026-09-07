@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1227,6 +1228,27 @@ func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
 	metas := fp.metaPatches()
 	if len(metas) == 0 || metas[0]["cwd"] != project || metas[0]["host"] == "" || metas[0]["model"] == "" {
 		t.Fatalf("thread meta = %v", metas)
+	}
+	if _, has := metas[0]["branch"]; has {
+		t.Fatalf("a temp dir is not a git checkout; meta = %v", metas[0])
+	}
+}
+
+func TestGitBranch(t *testing.T) {
+	dir := t.TempDir()
+	if gitBranch(context.Background(), dir) != "" {
+		t.Fatal("a plain directory has no branch")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	for _, args := range [][]string{{"init", "-q", "-b", "feature/x"}, {"-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if got := gitBranch(context.Background(), dir); got != "feature/x" {
+		t.Fatalf("branch = %q", got)
 	}
 }
 
