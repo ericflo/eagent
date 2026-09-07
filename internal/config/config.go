@@ -62,6 +62,10 @@ type Config struct {
 	// NarratorTickSeconds is how often the narrator is woken while the
 	// orchestrator is busy and nothing else has woken it.
 	NarratorTickSeconds int `json:"narrator_tick_seconds"`
+	// NarratorQuietSeconds is how long the user may go without hearing from
+	// the narrator while work continues before the steer asks for a short
+	// progress line. 0 disables the reminder.
+	NarratorQuietSeconds int `json:"narrator_quiet_seconds"`
 	// RolloverTokens is the orchestrator prompt size that triggers a new
 	// subsession and a dossier.
 	RolloverTokens int `json:"rollover_tokens"`
@@ -167,7 +171,8 @@ func Defaults() Config {
 		TaskConcurrency:             3,
 		MaxTaskTurns:                150,
 		MaxOrchestratorCallsPerTurn: 40,
-		NarratorTickSeconds:         90,
+		NarratorTickSeconds:         30,
+		NarratorQuietSeconds:        180,
 		RolloverTokens:              150_000,
 		BashWaitSeconds:             20,
 		BashTimeoutSeconds:          600,
@@ -630,6 +635,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v > 0 {
 		cfg.RolloverTokens = v
+	}
+	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
+		cfg.NarratorQuietSeconds = v
 	}
 	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_TICK_SECONDS")); err == nil && v > 0 {
 		cfg.NarratorTickSeconds = v

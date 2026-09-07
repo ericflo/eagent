@@ -33,8 +33,8 @@ func (r *Runtime) maybeWakeNarrator() {
 	}
 	reason := r.narrPending
 	r.narrPending = ""
-	if reason != wakeFinal && r.narrWorthy <= r.narrLastSeen {
-		return // nothing new since it last looked
+	if reason != wakeFinal && reason != wakePeriodic && r.narrWorthy <= r.narrLastSeen {
+		return // nothing new since it last looked (the tick decides for itself)
 	}
 	r.startNarratorTurn(reason)
 }
@@ -54,8 +54,12 @@ func (r *Runtime) narratorTick() {
 		if !busy {
 			return
 		}
-		// Only if the orchestrator's world moved since the narrator looked.
-		if r.narrWorthy <= r.narrLastSeen {
+		// Wake when the orchestrator's world moved since the narrator looked,
+		// or when the user has waited past the quiet limit even though nothing
+		// new landed (a long command, a long think): that is when they most
+		// want to hear which step is taking its time.
+		limit := time.Duration(r.cfg.NarratorQuietSeconds) * time.Second
+		if r.narrWorthy <= r.narrLastSeen && !(limit > 0 && r.quietFor() >= limit) {
 			return
 		}
 		if r.narrPending == "" {
@@ -99,7 +103,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		if r.phone != nil {
 			phoneLine = PhoneStatus(r.phone.isRemote())
 		}
-		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak)
+		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), time.Duration(r.cfg.NarratorQuietSeconds)*time.Second, r.inflightLines(time.Now()))
 		r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
 		msgs = r.st.NarratorView(nil)
 		seenSeq = r.st.LastSeq()
@@ -194,6 +198,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 					id = r.st.NextQuestionID()
 					r.append(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: id, Text: text, Options: opts}))
 					r.narrLastSaid = text
+					r.narrSaidAt = time.Now()
 				})
 				r.ui.Ask(id, text, opts)
 				var onPhone bool
@@ -244,6 +249,7 @@ func (r *Runtime) deliverMessage(text string, important bool, atts ...event.Atta
 		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text, Important: important, Attachments: atts}))
 		r.narrLastSaid = text
 		r.narrSaidSeq = ev.Seq
+		r.narrSaidAt = time.Now()
 	})
 	if s := attachmentSummary(atts); s != "" {
 		text += "\n" + s
@@ -270,4 +276,98 @@ func (r *Runtime) deliverFallbackFinal() {
 		}
 	})
 	r.deliverMessage(b.String(), true)
+}
+
+// quietFor is how long the user has gone without a narrator message, or
+// since the session started when there has been none. Loop goroutine only.
+func (r *Runtime) quietFor() time.Duration {
+	if !r.narrSaidAt.IsZero() {
+		return time.Since(r.narrSaidAt)
+	}
+	if !r.st.Started.IsZero() {
+		return time.Since(r.st.Started)
+	}
+	return 0
+}
+
+// inflightLines names what is running right now and for how long, so the
+// narrator can tell the user which command or step is taking its time.
+// Loop goroutine only.
+func (r *Runtime) inflightLines(now time.Time) []string {
+	var out []string
+	for _, p := range r.st.RunningProcs() {
+		owner := "the orchestrator"
+		if p.Task != "" {
+			owner = "task " + p.Task
+		}
+		out = append(out, fmt.Sprintf("`%s` (%s, %s) has been running for %s", shortCommand(p.Command), p.Handle, owner, since(p.Started, now)))
+	}
+	for _, t := range r.st.RunningTasks() {
+		if t.Status == "running" {
+			line := fmt.Sprintf("task %s (%q) has been working for %s, %d model calls so far", t.ID, t.Title, since(t.Created, now), t.Turns)
+			if step, at := r.lastStep(t.ID); step != "" {
+				line += fmt.Sprintf("; its latest step, %s ago: %s", since(at, now), step)
+			}
+			out = append(out, line)
+		}
+	}
+	if r.orchBusy && !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
+		out = append(out, fmt.Sprintf("the orchestrator's current model call has been going for %s (a long think or a long reply)", since(r.orchCallAt, now)))
+	}
+	return out
+}
+
+// shortCommand trims a shell command to its first line, at most 90 characters.
+func shortCommand(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+		cmd = cmd[:i] + " …"
+	}
+	if len(cmd) > 90 {
+		cmd = cmd[:89] + "…"
+	}
+	return cmd
+}
+
+// lastStep describes a task worker's most recent action (its last tool call,
+// or its last words), so the narrator can say why a task is taking a while.
+// Loop goroutine only.
+func (r *Runtime) lastStep(taskID string) (string, time.Time) {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Type != event.Assistant || ev.Actor != event.ActorTask || ev.Task != taskID {
+			continue
+		}
+		var d event.AssistantData
+		_ = ev.Decode(&d)
+		var parts []string
+		for _, tc := range d.ToolCalls {
+			args, err := llm.ArgsObject(tc.Args)
+			if err != nil {
+				parts = append(parts, tc.Name)
+				continue
+			}
+			switch tc.Name {
+			case "bash":
+				cmd, _ := args["command"].(string)
+				parts = append(parts, "`"+shortCommand(cmd)+"`")
+			case "write_file", "edit_file", "read_file", "view_image":
+				p, _ := args["path"].(string)
+				parts = append(parts, tc.Name+" "+p)
+			case "bash_poll", "bash_write", "bash_kill":
+				h, _ := args["handle"].(string)
+				parts = append(parts, tc.Name+" "+h)
+			default:
+				parts = append(parts, tc.Name)
+			}
+		}
+		if len(parts) == 0 && strings.TrimSpace(d.Text) != "" {
+			parts = append(parts, fmt.Sprintf("said %q", clipTail(d.Text, 100)))
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		return strings.Join(parts, ", "), ev.Time
+	}
+	return "", time.Time{}
 }

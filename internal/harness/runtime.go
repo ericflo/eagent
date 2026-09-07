@@ -83,8 +83,9 @@ type Runtime struct {
 	narrLastSeen int64  // seq the narrator saw on its latest call
 	narrWorthy   int64  // seq of the newest event the narrator can observe
 	narrLastSaid string
-	narrSaidSeq  int64 // seq of the last narrator.message
-	narrFinal    bool  // final report delivered
+	narrSaidSeq  int64     // seq of the last narrator.message
+	narrSaidAt   time.Time // when the user last heard from the narrator (message or question)
+	narrFinal    bool      // final report delivered
 	narrTicker   *time.Timer
 	phone        *phone // Finalechat mirror; nil when off
 	toolImagesMu sync.Mutex
@@ -394,6 +395,9 @@ func (r *Runtime) noteWake(ev event.Event) {
 	case event.UserMessage, event.UserAnswer, event.ScheduleFire, event.Dossier:
 		r.lastWake = ev.Seq
 		r.narrFinal = false
+		if ev.Type == event.UserMessage || ev.Type == event.UserAnswer {
+			r.wakeNarrator(wakeUser) // acknowledge at once; do not wait for results
+		}
 	case event.TaskEnd:
 		var d event.TaskEndData
 		_ = ev.Decode(&d)

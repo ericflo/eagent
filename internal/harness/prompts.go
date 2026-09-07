@@ -109,7 +109,11 @@ const (
 	wakeFinal    = "final"
 )
 
-func steerNarrator(st *state.State, now time.Time, reason string, interactive, phone bool, lastMessage string, mustSpeak bool) string {
+// steerNarrator writes the narrator's per-call instruction. quietFor is how
+// long the user has gone without a narrator message (since the session
+// started if there has been none); quietLimit is the configured cadence, 0
+// for none.
+func steerNarrator(st *state.State, now time.Time, reason string, interactive, phone bool, lastMessage string, mustSpeak bool, quietFor, quietLimit time.Duration, inflight []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] You were woken because: %s.", now.Local().Format("15:04:05"), reason)
 	if !st.Started.IsZero() {
@@ -124,6 +128,8 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 		}
 	case wakeDone:
 		b.WriteString(" Send the final report now unless your last message already covers everything; in that case hold.")
+	case wakeUser:
+		b.WriteString(" The user just wrote to you. Reply now, in a sentence or two: acknowledge what they asked and say what is happening first. Do not wait for results; the next message will carry them.")
 	case wakeError:
 		if interactive {
 			b.WriteString(" The orchestrator has stopped because its model calls keep failing. Tell the user plainly what happened, what state the work is in, and that typing a message will make it try again.")
@@ -146,6 +152,20 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 	}
 	if running := st.RunningTasks(); len(running) > 0 {
 		fmt.Fprintf(&b, " %d task(s) are still running.", len(running))
+	}
+	if len(inflight) > 0 {
+		fmt.Fprintf(&b, " In flight right now: %s. If something has run for more than a minute or two, tell the user which one, by name, and that the wait is expected.", strings.Join(inflight, "; "))
+	}
+	if reason != wakeFinal && reason != wakeDone && reason != wakeUser && !st.Ended {
+		working := !st.Idle() || len(st.RunningTasks()) > 0
+		switch {
+		case lastMessage == "" && quietFor >= time.Minute:
+			fmt.Fprintf(&b, " The user has heard nothing from you in the %s since they asked; tell them now, in two or three sentences, what you understood the job to be and how it is being done.", roundDur(quietFor))
+		case lastMessage != "" && quietLimit > 0 && quietFor >= quietLimit && working:
+			fmt.Fprintf(&b, " The user last heard from you %s ago and work is still going; send a short progress line now: what finished, what is happening, what comes next. Only hold if truly nothing has moved since your last message.", roundDur(quietFor))
+		case lastMessage != "":
+			fmt.Fprintf(&b, " The user last heard from you %s ago.", roundDur(quietFor))
+		}
 	}
 	if lastMessage != "" {
 		fmt.Fprintf(&b, " Your last message to the user (do not repeat it): %q", clipTail(lastMessage, 400))
@@ -181,4 +201,15 @@ func clipTail(s string, n int) string {
 		return s
 	}
 	return "..." + s[len(s)-n:]
+}
+
+// roundDur is a human duration for steers: 45s, 3m, 1h10m.
+func roundDur(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 }

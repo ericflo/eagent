@@ -1015,3 +1015,43 @@ func TestOrchestratorEditNudge(t *testing.T) {
 		t.Fatalf("no nudge in the last steer: %s", steers[len(steers)-1])
 	}
 }
+
+// The steer keeps the narrator on a cadence: an orientation message early,
+// then a progress line whenever the user has waited past the limit while
+// work continues, and nothing extra when they heard from it recently.
+func TestNarratorSteerCadence(t *testing.T) {
+	st := state.New()
+	st.Started = time.Now().Add(-2 * time.Minute)
+	// A fresh session with no narrator message yet, two minutes in.
+	s := steerNarrator(st, time.Now(), wakePeriodic, false, true, "", false, 2*time.Minute, 3*time.Minute, nil)
+	if !strings.Contains(s, "heard nothing from you") || !strings.Contains(s, "what you understood the job to be") {
+		t.Fatalf("no orientation prompt: %s", s)
+	}
+	// Later, with a previous message four minutes old and a task running.
+	st.Tasks["t1"] = &state.Task{ID: "t1", Status: "running"}
+	st.TaskOrder = []string{"t1"}
+	s = steerNarrator(st, time.Now(), wakePeriodic, false, true, "Building the parser.", false, 4*time.Minute, 3*time.Minute, nil)
+	if !strings.Contains(s, "last heard from you 4m ago") || !strings.Contains(s, "send a short progress line now") {
+		t.Fatalf("no progress prompt: %s", s)
+	}
+	// Recently spoken: just the fact, no push.
+	s = steerNarrator(st, time.Now(), wakePeriodic, false, true, "Building the parser.", false, 40*time.Second, 3*time.Minute, nil)
+	if !strings.Contains(s, "last heard from you 40s ago") || strings.Contains(s, "progress line now") {
+		t.Fatalf("unexpected push: %s", s)
+	}
+	// Cadence disabled.
+	s = steerNarrator(st, time.Now(), wakePeriodic, false, true, "Building the parser.", false, 10*time.Minute, 0, nil)
+	if strings.Contains(s, "progress line now") {
+		t.Fatalf("cadence should be off: %s", s)
+	}
+	// A user message asks for an acknowledgement at once.
+	s = steerNarrator(st, time.Now(), wakeUser, true, false, "", true, 5*time.Second, 3*time.Minute, nil)
+	if !strings.Contains(s, "Reply now") || strings.Contains(s, "heard nothing from you") {
+		t.Fatalf("acknowledgement steer: %s", s)
+	}
+	// What is in flight is named, with the ask to say which one.
+	s = steerNarrator(st, time.Now(), wakePeriodic, false, true, "Building.", false, 4*time.Minute, 3*time.Minute, []string{"`npm test` (p3, task t1) has been running for 3m10s"})
+	if !strings.Contains(s, "In flight right now: `npm test`") || !strings.Contains(s, "which one, by name") {
+		t.Fatalf("inflight steer: %s", s)
+	}
+}

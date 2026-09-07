@@ -142,7 +142,7 @@ var narratorOnly = []llm.Tool{
 			"text":{"type":"string"},
 			"options":{"type":"array","items":{"type":"string"}}
 		},"required":["text"]}`),
-	def("hold", "Say nothing for now.",
+	def("hold", "Say nothing for now. Only when the user heard from you recently and nothing has moved since; a long silence is worse than a short progress line.",
 		`{"type":"object","properties":{"reason":{"type":"string","description":"One line, for the log."}}}`),
 }
 

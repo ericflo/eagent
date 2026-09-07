@@ -1,0 +1,502 @@
+{
+  "generated_from": "reports/*.json (metrics, code-metrics, rubric, play observations); run date 2026-09-07",
+  "presets": {
+    "glm": {
+      "orchestrator": "GLM-5.3",
+      "worker": "GLM-5.3-Flash",
+      "narrator": "DeepSeek V4 Flash (Together AI)",
+      "duration_seconds": 2268.5,
+      "end_reason": "done",
+      "cost_usd": 2.1864,
+      "cost_usd_per_actor": {
+        "orchestrator": 2.0995,
+        "task": 0.0565,
+        "narrator": 0.0304
+      },
+      "tokens": {
+        "input": 4270894,
+        "output": 163042,
+        "cached": 3318848,
+        "per_actor": {
+          "orchestrator": {
+            "input": 3475101,
+            "output": 134209,
+            "cached": 2944000
+          },
+          "task": {
+            "input": 347437,
+            "output": 27037,
+            "cached": 76160
+          },
+          "narrator": {
+            "input": 448356,
+            "output": 1796,
+            "cached": 298688
+          }
+        }
+      },
+      "cache_ratio": 0.7771,
+      "model_calls": 130,
+      "model_calls_per_actor": {
+        "orchestrator": 68,
+        "task": 36,
+        "narrator": 26
+      },
+      "tasks": {
+        "created": 6,
+        "completed": 6,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_messages": 3,
+      "narrator_questions": 0,
+      "errors": {
+        "count": 0,
+        "brief": []
+      },
+      "routes": 0,
+      "loc": 3335,
+      "loc_including_tests": 3772,
+      "files": 13,
+      "tests": {
+        "exists": true,
+        "command": "npm test (no-op placeholder: 'echo Error: no test specified'); real suite: node test/full.js (playwright-core headless browser harness)",
+        "result": "pass",
+        "details": "node test/full.js completed exit=0: menu/game-over/over-screen/touch-UI checks all reported OK, FPS ~61, ERRORS(0). Suite includes harness.js, full.js, deep.js, endstates.js, hud_new.js, shots.js (playwright-core based). npm test itself exits 1 by design (placeholder script)."
+      },
+      "dependencies": {
+        "npmRuntime": {
+          "playwright-core": "^1.56.1"
+        },
+        "cdn": [
+          "Google Fonts (fonts.googleapis.com, Rajdhani + Orbitron)"
+        ],
+        "notes": "playwright-core used only by test harness, not the game itself; game has no runtime deps"
+      },
+      "audio_used": true,
+      "console_errors_in_play": 0,
+      "page_errors_in_play": 0,
+      "rubric": {
+        "breakthrough": 3,
+        "juice": 3,
+        "powerballs": 3,
+        "specialbricks": 3,
+        "paddle2d": 3,
+        "mouse": 3,
+        "mobile": 2,
+        "polish": 3,
+        "audio": 3
+      },
+      "rubric_total": 26,
+      "rubric_evidence": {
+        "breakthrough": "js/game.js:248-306 full breach system \u2014 ball above bricks triggers 'BREACH!' banner, breachBounces raise breachTier to x64 (CFG.BREACH_TIER_MAX:6), totalMult()=comboMult()*breachMult(); levels.js designs each level with a 'breach path' into the attic",
+        "juice": "js/game.js:188-193 'const tierBoost = 1 + G.breachTier * 0.22; FX.burst(...10 + G.breachTier*2...*tierBoost); FX.flash; FX.shake(3 + G.breachTier * 1.2)' \u2014 particles/flash/shake all scale with breach tier; audio pitch scales with combo (audio.js:465 'var pitch = 1 + Math.min(c,24)/18; // brighter with combo')",
+        "powerballs": "js/game.js:334-361 + config.js POWERUPS: piercer ('Ball pierces bricks'), inferno ('Burning ball, chains powder', fire splash at game.js:715), split/triple (splitBalls() game.js:361) \u2014 three distinct ball power-ups, weighted drop pool",
+        "specialbricks": "config.js FAST_GATE:640 ('fast' needs ball speed; game.js:750 'if (br.t===\"fast\" && speed < CFG.FAST_GATE) // rejected: too slow'), ward bricks gated by approach-direction cone (WARD_CONE, 'SHIELD' reflect), anchor (indestructible), powder (chain-explodes) \u2014 four non-hit-count mechanics",
+        "paddle2d": "config.js BAND_TOP:900/BAND_H:190 paddle vertical band; game.js:654-673 'slamActive = paddle.slamT>0 || paddle.vy < CFG.SLAM_VY ... newSpeed = sp*CFG.SLAM_BOOST(1.45); else if (paddle.vy < -140) sp*1.12; b.vy += paddle.vy*0.16' \u2014 up-motion thrust plus slam mechanic",
+        "mouse": "js/game.js:395 'window.addEventListener(\"mousemove\", ... input.mouseX/Y, mouseActive)' with input priority 'touch > mouse > keys > gamepad' (game.js:496)",
+        "mobile": "game.js:423-453 touchstart/touchmove with preventDefault, multi-touch identifier tracking, fast-upward-swipe slam; DOM SLAM button shown only on touch devices (isTouchDevice(), touchUI) \u2014 first-class touch but drag-anywhere rather than a literal thumbstick",
+        "polish": "Pause screen/visibilitychange auto-pause (game.js:1591), DOM menu/help/over/pause screens, canvas HUD, gamepad support; loop is rAF with capped dt (Math.min(dt,1/20)) plus ball sub-stepping rather than fixed timestep; no TODO/FIXME found; dead code minimal (btnPause handler 'if paused togglePause(); else togglePause()' is a trivial redundancy)",
+        "audio": "audio.js is a 712-line fully synthesized engine: setBreach(level) 'drives music layers, drone, arp rate', setMultiplier 'opens master filter, raises arp rate', setCombo raises impact pitch, breachEnter/Exit sweeps, 25ms lookahead music scheduler \u2014 intensity explicitly scales with breach/multiplier"
+      },
+      "play_observations": [
+        "clicked start button",
+        "midplay shot taken after ~5s of mouse movement",
+        "state: {\"hasCanvas\":true,\"canvasSize\":[600,800],\"bodyText\":\"GAME OVER\\n20\\nLEVEL\\n1 / 10\\nBEST COMBO\\n\u00d71 (1)\\nMAX BREACH\\n\u00d71\\nALL-TIME BEST\\n20\\n\u21bb PLAY AGAIN\\n\u2261 MAIN MENU\",\"keys\":[\"oncontentvisibilityautostatechange\",\"onpopstate\",\"ongamepadconnected\",\"ongamepaddisconnected\"]}"
+      ]
+    },
+    "openrouter-high": {
+      "orchestrator": "Kimi K3",
+      "worker": "GLM-5.3",
+      "narrator": "GLM-5.3-Flash (OpenRouter)",
+      "duration_seconds": 1164.6,
+      "end_reason": "done",
+      "cost_usd": 1.2328,
+      "cost_usd_per_actor": {
+        "orchestrator": 0.5066,
+        "task": 0.7194,
+        "narrator": 0.0068
+      },
+      "tokens": {
+        "input": 1886542,
+        "output": 83306,
+        "cached": 1666048,
+        "per_actor": {
+          "orchestrator": {
+            "input": 511140,
+            "output": 15319,
+            "cached": 465408
+          },
+          "task": {
+            "input": 1263368,
+            "output": 66791,
+            "cached": 1178240
+          },
+          "narrator": {
+            "input": 112034,
+            "output": 1196,
+            "cached": 22400
+          }
+        }
+      },
+      "cache_ratio": 0.8831,
+      "model_calls": 101,
+      "model_calls_per_actor": {
+        "orchestrator": 31,
+        "task": 57,
+        "narrator": 13
+      },
+      "tasks": {
+        "created": 2,
+        "completed": 1,
+        "failed": 1
+      },
+      "rollovers": 0,
+      "narrator_messages": 2,
+      "narrator_questions": 0,
+      "errors": {
+        "count": 1,
+        "brief": [
+          "task t1: api error 404: {\"error\":{\"message\":\"No endpoints found that support image input\",\"code\":404,\"metadata\":{\"routing_funnel\":[{\"step\":\"Initial E"
+        ]
+      },
+      "routes": 0,
+      "loc": 1071,
+      "loc_including_tests": null,
+      "files": 1,
+      "tests": {
+        "exists": false,
+        "command": null,
+        "result": "n/a",
+        "details": "Single-file build (index.html), no package.json, no test files"
+      },
+      "dependencies": {
+        "npmRuntime": {},
+        "cdn": [],
+        "notes": "Fully self-contained single HTML file, no external links"
+      },
+      "audio_used": true,
+      "console_errors_in_play": 0,
+      "page_errors_in_play": 0,
+      "rubric": {
+        "breakthrough": 3,
+        "juice": 3,
+        "powerballs": 3,
+        "specialbricks": 3,
+        "paddle2d": 3,
+        "mouse": 3,
+        "mobile": 2,
+        "polish": 3,
+        "audio": 3
+      },
+      "rubric_total": 26,
+      "rubric_evidence": {
+        "breakthrough": "index.html boardStep: 'frenzy: any ball above topmost alive brick row ... frenzy=Math.min(1, frenzy + dt*0.24)' with FRENZY_CAP tiers x2^lvl up to x32, score ticks 'gain=Math.pow(2,frenzyLvl)*5', HUD prompt 'GET THE BALL ABOVE THE BRICKS \u2192 FRENZY', levels 'deliberately include gaps/channels'",
+        "juice": "'spark(br.x+br.w/2,..., 10+frenzyLvl*4, hue, 240+frenzyLvl*40); shakeIt(1.2 + frenzyLvl*0.6)' in destroyBrick; arpTick 'tempo = 0.42 - frenzyLvl*0.05' and pitch 'root = 220 * Math.pow(1.12, frenzyLvl)' \u2014 particle count, shake, and music tempo/pitch all scale with frenzy/combo",
+        "powerballs": "P_KINDS: MULTI (adds 2 balls), LASER (laserTimer, pierce: 'const pierce = laserTimer>0 || b.fire'), FIRE (fireball pierce with neighbor splash in destroyBrick) \u2014 three working ball power-ups plus WIDE/SLOW paddle effects",
+        "specialbricks": "T_ANGLE requires near-vertical approach ('brickAngleOK: Math.abs(b.vx) < Math.abs(b.vy)*0.62' else 'ANGLE LOCKED' repel), T_SPEED 'sp > 480 + level*12' else 'TOO SLOW' repel; only CORE uses multiple hits and is rare/late-level \u2014 angle and speed mechanics dominate",
+        "paddle2d": "PADDLE_MIN_Y/MAX_Y (~120px band); 'paddle.y += (ty-paddle.y)*...' follows pointerY; collidePaddle 'THRUST: if(paddle.vy < -60){ sp=clamp(sp*1.22+paddle.vy*-0.06,...); thrustFlash=1; ...THRUST!' \u2014 upward paddle motion accelerates ball",
+        "mouse": "'canvas.addEventListener(\"mousemove\", e=>{ const p=toBoard(e); pointerX=p.x; pointerY=p.y; })' drives both paddle axes; mousedown launches / routes on-screen buttons",
+        "mobile": "touchstart/touchmove/touchend with preventDefault {passive:false}, touch-action:none CSS, touch-friendly 52x32 pause/mute buttons and large overlay buttons \u2014 solid direct-touch control but no thumbstick widget",
+        "polish": "Fixed timestep: 'const STEP=1/120 ... while(acc>=STEP){ acc-=STEP; update(STEP,...) }' with delta cap; pause scene + visibilitychange auto-pause, mute with localStorage persistence, HUD with frenzy meter/effect timers, help screen, endless mode, high score; hitButton/drawButton system; no TODO/FIXME",
+        "audio": "AudioContext with distinct SFX per brick type (sBreak branches: sawtooth sweep for angle, noise+sub thud for speed), noise-buffer hits, and an arp music loop whose tempo, pitch, and waveform escalate with frenzy level (arpTick)"
+      },
+      "play_observations": [
+        "clicked center + Space",
+        "midplay shot taken after ~5s of mouse movement",
+        "state: {\"hasCanvas\":true,\"canvasSize\":[600,800],\"bodyText\":\"\",\"keys\":[\"oncontentvisibilityautostatechange\",\"onpopstate\",\"ongamepadconnected\",\"ongamepaddisconnected\",\"sGameOver\",\"startGame\",\"drawGame\"]}"
+      ]
+    },
+    "anthropic-high": {
+      "orchestrator": "Claude Fable 5.1",
+      "worker": "Claude Opus 5",
+      "narrator": "Claude Sonnet 5",
+      "duration_seconds": 4243.236545,
+      "end_reason": "done",
+      "cost_usd": 15.5364,
+      "cost_usd_per_actor": {
+        "orchestrator": 3.5855,
+        "task": 11.6904,
+        "narrator": 0.2604
+      },
+      "tokens": {
+        "input": 12009756,
+        "output": 174855,
+        "cached": 11174644,
+        "per_actor": {
+          "orchestrator": {
+            "input": 943830,
+            "output": 16487,
+            "cached": 741901
+          },
+          "task": {
+            "input": 10771953,
+            "output": 155368,
+            "cached": 10234127
+          },
+          "narrator": {
+            "input": 293973,
+            "output": 3000,
+            "cached": 198616
+          }
+        }
+      },
+      "cache_ratio": 0.9305,
+      "model_calls": 177,
+      "model_calls_per_actor": {
+        "orchestrator": 30,
+        "task": 131,
+        "narrator": 16
+      },
+      "tasks": {
+        "created": 3,
+        "completed": 3,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_messages": 3,
+      "narrator_questions": 0,
+      "errors": {
+        "count": 0,
+        "brief": []
+      },
+      "routes": 0,
+      "loc": 3195,
+      "loc_including_tests": 3919,
+      "files": 10,
+      "tests": {
+        "exists": true,
+        "command": "python3 -m http.server 8731 & node test/verify.mjs (and node test/tiers.mjs)",
+        "result": "pass",
+        "details": "verify.mjs exit=0: multiplier/on-top hysteresis and level-clear checks passed, errors:[]. tiers.mjs exit=0: tier screenshots x2/x5/x10 multiplier values in expected bands, errors:[]. Tests are playwright-based browser tests requiring a local static server (started successfully). Suite also includes flow, levels, mobile, ontop, perf, rate, soak, feel, dbg."
+      },
+      "dependencies": {
+        "npmRuntime": {
+          "playwright": "^1.63.0"
+        },
+        "cdn": [],
+        "notes": "playwright used only by tests; game itself dependency-free"
+      },
+      "audio_used": true,
+      "console_errors_in_play": 0,
+      "page_errors_in_play": 0,
+      "rubric": {
+        "breakthrough": 3,
+        "juice": 3,
+        "powerballs": 3,
+        "specialbricks": 3,
+        "paddle2d": 3,
+        "mouse": 3,
+        "mobile": 3,
+        "polish": 3,
+        "audio": 3
+      },
+      "rubric_total": 27,
+      "rubric_evidence": {
+        "breakthrough": "game.js updateOnTop(): hysteretic column-aware on-top detection ('A ball starts riding when it is above the top of the highest intact brick in its own column band'), multiplier ramps to 60 while riding, 4 escalation tiers with callouts ('ON TOP!', 'TOPSIDE GOD') and topBonus() escalation rewards.",
+        "juice": "breakBrick(): 'this.fx.burst(brick.cx, brick.cy, color, (this.onTop ? 14 : 9) + tier * 6, 220 + tier * 45 ...)' plus shake '(this.onTop ? 3.5 : 2) + tier * 0.7', fx.js tier palettes, chromatic aberration, hitstop, and adaptive fps-driven particle budget.",
+        "powerballs": "balls.js POWERUPS: MULTIBALL, FIRE ('FIREBALL', fireTime=8, passes through bricks), HEAVY, GHOST, ROCKET ball powers applied via Ball.applyPower(), plus paddle powers (WIDE/STICKY/MAGNET) \u2014 ball power-ups are the majority and fully wired into physics.",
+        "specialbricks": "brickResponse(): PRISM needs a steep angle ('STEEP!'), STEEL needs speed >= STEEL_SPEED ('FASTER!'), ANVIL must be hit 'from above', plus PORTAL_A/B teleport bricks, indestructible WALL, pass-through GLASS, BOOM chain explosions \u2014 all non-multi-hit mechanics.",
+        "paddle2d": "paddle.js BAND_TOP/BAND_BOTTOM vertical band; physics.js paddleBounce(): 'const up = -p.vy; let newSpeed = speed + up * 0.30' with smash when up > 620 ('SMASH!' + hitstop + fx.addShake(11)).",
+        "mouse": "game.js updatePaddleControl(): 'mouse: absolute follow \u2014 p.moveTo(inp.absolute.x, Math.max(BAND_TOP, Math.min(BAND_BOTTOM, inp.absolute.y)) ...)', input.js sets this.absolute on pointermove for non-touch.",
+        "mobile": "input.js: 'Virtual thumbstick anchored where the thumb landed' (this.stick = { baseX, baseY, ... }), relative-drag delta for paddle, tap-to-launch, document touchmove/touchstart preventDefault, pointer capture, releaseAll on blur/visibilitychange.",
+        "polish": "main.js fixed timestep 'STEP = 1/120' accumulator loop with fps watchdog + adaptive render scale; pause on visibilitychange/blur; high-score persistence; test/soak.mjs autoplay harness; no TODO/FIXME/dead code found in src/.",
+        "audio": "audio.js full Web Audio graph (compressor, convolution reverb, drone): 'update(dt, {multiplier, onTop, playing})' ramps musicBus/drone/filter with intensity, and while on-top runs a tier-layered arpeggio with 'bpm = 110 + tier * 40 + this.intensity * 90'."
+      },
+      "play_observations": [
+        "clicked center + Space",
+        "midplay shot taken after ~5s of mouse movement",
+        "state: {\"hasCanvas\":true,\"canvasSize\":[1280,800],\"bodyText\":\"\",\"keys\":[\"oncontentvisibilityautostatechange\",\"onpopstate\",\"ongamepadconnected\",\"ongamepaddisconnected\",\"__game\"]}"
+      ]
+    },
+    "anthropic-med": {
+      "orchestrator": "Claude Opus 5",
+      "worker": "Claude Sonnet 5",
+      "narrator": "Claude Haiku 4.5",
+      "duration_seconds": 11179.004301,
+      "end_reason": "done",
+      "cost_usd": 24.7968,
+      "cost_usd_per_actor": {
+        "orchestrator": 6.29,
+        "narrator": 0.3952,
+        "task": 18.1117
+      },
+      "tokens": {
+        "input": 54054558,
+        "output": 539189,
+        "cached": 51157235,
+        "per_actor": {
+          "orchestrator": {
+            "input": 3846614,
+            "output": 46011,
+            "cached": 3131855
+          },
+          "narrator": {
+            "input": 949968,
+            "output": 10484,
+            "cached": 674695
+          },
+          "task": {
+            "input": 49257976,
+            "output": 482694,
+            "cached": 47350685
+          }
+        }
+      },
+      "cache_ratio": 0.9464,
+      "model_calls": 836,
+      "model_calls_per_actor": {
+        "orchestrator": 61,
+        "narrator": 42,
+        "task": 733
+      },
+      "tasks": {
+        "created": 15,
+        "completed": 15,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_messages": 19,
+      "narrator_questions": 0,
+      "errors": {
+        "count": 0,
+        "brief": []
+      },
+      "routes": 0,
+      "loc": 5896,
+      "loc_including_tests": null,
+      "files": 17,
+      "tests": {
+        "exists": false,
+        "command": null,
+        "result": "n/a",
+        "details": "No test suite. Only shoot.js (a CDP screenshot helper tool, not tests) and excluded tmp_playtest.mjs/tmp_check.mjs leftover scripts. No package.json."
+      },
+      "dependencies": {
+        "npmRuntime": {},
+        "cdn": [],
+        "notes": "No package.json; shoot.js uses Node's built-in WebSocket to a browser CDP endpoint \u2014 no npm deps"
+      },
+      "audio_used": true,
+      "console_errors_in_play": 0,
+      "page_errors_in_play": 0,
+      "rubric": {
+        "breakthrough": 3,
+        "juice": 3,
+        "powerballs": 3,
+        "specialbricks": 3,
+        "paddle2d": 3,
+        "mouse": 3,
+        "mobile": 3,
+        "polish": 3,
+        "audio": 3
+      },
+      "rubric_total": 27,
+      "rubric_evidence": {
+        "breakthrough": "game.js _updateRooftopState(): ball above bricks.topY => 'ROOFTOP!' banner, flash/shake/shockwave/slowmo, 'this._multTimer >= 1.6 -> _bumpMultiplier()' stepping through MULT_STEPS [1,2,4,8,16,32] with debounce grace.",
+        "juice": "ParticleSystem(2200) with trails/shockwaves/confetti, Juice (shake/flash/slowmo/tint), onBrickDestroyed(): 'HIGH-MULTIPLIER ESCALATION: at 8x+ every break gets extra particle emission', background.update driven by intensity + (multiplier-8)/24 escalation, rooftopAura particles while riding.",
+        "powerballs": "powerups.js POWERUP_TYPES includes 'multi' (spawns 2 balls), 'fire' and 'heavy' set b.mode on all balls (entities.js BALL_MODE_COLORS fire/heavy/ghost with fire flicker glow), 'nova' arms the ball (_triggerNova 220px blast on next paddle hit); 'laser' fires paddle bolts.",
+        "specialbricks": "bricks.js canBreak(): 'angle' requires incoming direction within 35deg of stored angle, 'speed' needs speed >= threshold, 'slow' needs speed <= threshold, 'phase' bricks turn intangible on a sine cycle ('time your shot'), 'mirror' never breaks and deflects 90deg \u2014 all non-multi-hit.",
+        "paddle2d": "entities.js Paddle.update clamps ty to 'yMin = H - 320 + h/2 ... yMax = H - 90'; _reflectPaddle(): 'if (pvy < 0) { const boost = 1 + Math.min(0.35, |pvy|/2600); speed *= boost' with smash sfx/particles when |pvy|>700.",
+        "mouse": "core/input.js window mousemove/mousedown handlers set 'this.target.x = p.x; this.target.y = p.y' via toLogical view transform; note: target only updates while _mouseActive (after first mousedown).",
+        "mobile": "core/input.js touchstart/touchmove/touchend handlers with first touch becoming the stick ('_stickTouchId'), second finger = tap action, deadzone + 130px radius, drawn thumbstick (drawThumbstick with pulsing ring), stick re-promotion on touch end.",
+        "polish": "main.js 'FIXED_STEP = 1/120' accumulator with MAX_SUBSTEPS and slowmo timeScale; game.js full state machine (title/ready/playing/paused/dead/gameover/levelclear), restart(), results screen, tutorial hints, anti-stall PRESSURE system, no TODO/FIXME found.",
+        "audio": "core/audio.js (712 lines) procedural engine: setIntensity() ramps filter cutoff '400 + intensity*(6000-400)' and '_bpm = 110 + intensity*40'; setRooftop(true) opens a shimmer high-arp layer and 7kHz cutoff; extensive sfx set (brick, clang, mirror, laser, explosion, rooftop, riser)."
+      },
+      "play_observations": [
+        "clicked center + Space",
+        "midplay shot taken after ~5s of mouse movement",
+        "state: {\"hasCanvas\":true,\"canvasSize\":[1280,800],\"bodyText\":\"\",\"keys\":[\"oncontentvisibilityautostatechange\",\"onpopstate\",\"ongamepadconnected\",\"ongamepaddisconnected\"]}"
+      ]
+    },
+    "openai-high": {
+      "orchestrator": "GPT-6 Astra (high)",
+      "worker": "GPT-5.6 Sol",
+      "narrator": "GPT-5.6 Luna",
+      "duration_seconds": 1462.372019,
+      "end_reason": "done",
+      "cost_usd": 31.5916,
+      "cost_usd_per_actor": {
+        "orchestrator": 23.005,
+        "task": 8.4721,
+        "narrator": 0.1145
+      },
+      "tokens": {
+        "input": 6930046,
+        "output": 113883,
+        "cached": 438562,
+        "per_actor": {
+          "orchestrator": {
+            "input": 2343506,
+            "output": 15061,
+            "cached": 131452
+          },
+          "task": {
+            "input": 3981129,
+            "output": 94485,
+            "cached": 241686
+          },
+          "narrator": {
+            "input": 605411,
+            "output": 4337,
+            "cached": 65424
+          }
+        }
+      },
+      "cache_ratio": 0.0633,
+      "model_calls": 273,
+      "model_calls_per_actor": {
+        "orchestrator": 60,
+        "task": 183,
+        "narrator": 30
+      },
+      "tasks": {
+        "created": 9,
+        "completed": 9,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_messages": 17,
+      "narrator_questions": 0,
+      "errors": {
+        "count": 0,
+        "brief": []
+      },
+      "routes": 0,
+      "loc": 1504,
+      "loc_including_tests": 2298,
+      "files": 5,
+      "tests": {
+        "exists": true,
+        "command": "npm test",
+        "result": "pass",
+        "details": "npm test (node --test tests/*.test.js): 9 tests, 9 pass, 0 fail, 0 skipped. Unit tests only \u2014 the playwright e2e suite (npm run test:e2e, requires webServer + browsers) was not run."
+      },
+      "dependencies": {
+        "npmRuntime": {},
+        "devDependencies": [
+          "@playwright/test",
+          "vite"
+        ],
+        "cdn": [],
+        "notes": "No runtime dependencies; devDeps are vite (build) and playwright (e2e tests)"
+      },
+      "audio_used": true,
+      "console_errors_in_play": 0,
+      "page_errors_in_play": 0,
+      "rubric": {
+        "breakthrough": 3,
+        "juice": 3,
+        "powerballs": 3,
+        "specialbricks": 3,
+        "paddle2d": 3,
+        "mouse": 3,
+        "mobile": 3,
+        "polish": 3,
+        "audio": 2
+      },
+      "rubric_total": 26,
+      "rubric_evidence": {
+        "breakthrough": "updateBall(): 'if (!ball.overdrive && ball.y < top - ball.r) { ball.overdrive = true; callout(ABOVE THE LINE - OVERDRIVE)'; mechanics.js multiplier() grows 1.8*1.105^hits + time*0.035 capped 16, and hitBrick() gives 'BREAKTHROUGH \u00b7 ECHO REWARD' extra ball at 8 overdrive hits.",
+        "juice": "hitBrick(): 'shake = Math.min(18, shake + 2 + mult * 0.3); flash = Math.min(0.3, flash + 0.035); burst(..., 10 + Math.floor(mult / 2), 180 + mult * 10)' plus mult
+[... truncated: showing 500 of 625 lines (24000 of 32353 bytes). Use offset/limit to read the rest.]

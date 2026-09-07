@@ -235,8 +235,6 @@ Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are adde
 
 ### The narrator's voice
 
-The narrator keeps a cadence as well as a voice. Once the orchestrator has looked around it says what it understood the job to be and how the work will go; then, while work continues, a short progress line every few minutes (`narrator_quiet_seconds`, 180 by default; it is woken the moment you write, every 30 seconds while work continues, and the steer tells it how long you have waited and which command or step is in flight), so a phone reader is never left guessing whether anything is happening. Holding is for when you heard from it recently and nothing has moved.
-
 The narrator has a character rather than a register: the colleague who kept the build going while you were away and is now catching you up over your shoulder. It leads with what you'd want to know, keeps a path or a number in most sentences because that's what makes the news usable, says what it checked itself versus what a worker told it, has opinions about what turned out well, and delivers bad news in the same calm voice as good. No greetings, no sign-offs, no catchphrases, no labelled fields. A list of machine-prose habits (announced sincerity, staged openers, "not just X but Y", "no X, no Y", hedging filler, participle tails, the usual vocabulary) is banned outright in `NARRATOR.md`, and the persona was tuned against the narrator model on real session transcripts until the messages read like a person wrote them. Replace `PERSONA.md` in your project's prompt overrides to give it a different voice.
 
 ### Prompts
@@ -245,27 +243,5 @@ The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`
 
 ### Efficiency
 
-Every session reports per-actor input, output, and cached tokens; the web UI shows the cache ratio live and `eagent replay` prints it afterwards. Tool results are capped at 24k characters, keeping the head and the tail, but nothing is lost: the full text is saved under the session's `outputs/` directory and the notice tells the model the path and line count, so it can page through with `read_file(path, offset, limit)` or `grep` when the part it needs was cut. Command output is retained up to 4MB per process with cursor-based polling.
-
-## What eagent will not do (yet)
-
-- **Sandboxing.** Commands run on your machine as you. Read the log before you trust a session that touched anything important.
-- **Narrator or worker context exhaustion.** Only the orchestrator rolls over. Workers are bounded by `max_task_turns`; the narrator's view truncates tool output and restarts with each subsession.
-- **Multi-machine sessions.** Session directories from different checkouts can be pooled (they are just timestamped files) but nothing merges them for you; the dossier task is what makes sense of a combined history.
-
-## More
-
-- [docs/LESSONS.md](docs/LESSONS.md): what broke in four earlier implementations of this design, and what eagent does about each failure.
-- [docs/EVENTS.md](docs/EVENTS.md): the event log schema and which actor sees which events.
-- [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): the design specification, requirement by requirement, with the two deliberate deviations.
-
-## Development
-
-```
-make check          # gofmt, go vet, go test -race
-make release        # dist/eagent-{linux,darwin}-{amd64,arm64} + SHA256SUMS
-```
-
-CI runs the same checks on Woodpecker (`.woodpecker.yaml`).
-
-Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `prompts` (embedded Markdown prompts), `config` (presets and bundles), `harness` (runtime, actors, rollover, resume, inbox), `ui` (terminal), `web` (HTTP API, SSE, embedded UI). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, interrupt-then-resume, interactive questions. Two chaos suites inject random provider faults (5xx, rate limits with Retry-After, streams cut mid tool call, malformed arguments, garbage frames, latency) and kill and resume the runner at random points, and check after every run that the log parses, sequence numbers are contiguous, no tool call is left without a result, and the work still finished.
+Every session reports per-actor i
+[... truncated: showing 245 of 270 lines (24000 of 26690 bytes). Use offset/limit to read the rest.]
