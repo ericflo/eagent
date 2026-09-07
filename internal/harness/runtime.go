@@ -131,7 +131,8 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 	}
 	r, err := build(cfg, opts, ui, sess, state.New())
 	if err != nil {
-		sess.Close()
+		// Nothing was committed; leave no stub behind.
+		_ = sess.Discard()
 		return nil, err
 	}
 	// Record the routes actually in use, which differ from the configured
@@ -373,8 +374,10 @@ func (r *Runtime) post(fn func()) {
 func (r *Runtime) append(ev event.Event) event.Event {
 	ev, err := r.sess.Append(ev)
 	if err != nil {
+		// The log is the record; without it nothing can be trusted. End with
+		// a failing exit code and reason rather than a quiet 0.
 		r.ui.Log("FATAL: cannot append to session log: %v", err)
-		r.stop()
+		r.beginShutdown("error", 1)
 		return ev
 	}
 	r.st.Apply(ev)

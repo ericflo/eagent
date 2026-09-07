@@ -2,6 +2,7 @@
 package main
 
 import (
+	"io"
 	"context"
 	"encoding/json"
 	"errors"
@@ -162,7 +163,10 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	opts := harness.Options{Project: project, Interactive: !*batch, Verbose: *verbose, Answer: *answer}
+	// Interactive only when someone can actually type: a pipe, a file, or
+	// /dev/null on stdin would otherwise read as an immediate "quit" and the
+	// run would exit 0 having done nothing.
+	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer}
 	var sessionPath string
 	if cmd == "resume" {
 		if len(rest) < 1 {
@@ -182,14 +186,14 @@ func run(args []string) int {
 		sessionPath = info.Path
 	}
 	opts.Prompt = strings.TrimSpace(strings.Join(rest, " "))
-	if opts.Prompt == "" && *batch && sessionPath == "" {
-		// Allow the prompt on stdin in batch mode.
+	if opts.Prompt == "" && !opts.Interactive && sessionPath == "" {
+		// A non-interactive run may take its prompt on stdin.
 		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
 			raw, _ := readAll(os.Stdin)
 			opts.Prompt = strings.TrimSpace(string(raw))
 		}
 		if opts.Prompt == "" {
-			return fail(errors.New("batch mode needs a prompt: eagent -p \"...\""))
+			return fail(errors.New("a non-interactive run needs a prompt: eagent -p \"...\" (stdin is not a terminal)"))
 		}
 	}
 
@@ -780,6 +784,20 @@ func cmdPrompts(project string, args []string) int {
 		return 0
 	}
 	return fail(fmt.Errorf("unknown prompts command %q", args[0]))
+}
+
+// stdinIsTerminal reports whether standard input is a terminal, so a run
+// without -p can prompt the user. A pipe or a file is not a character
+// device; /dev/null is, but unlike a terminal it is seekable.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	if _, err := os.Stdin.Seek(0, io.SeekCurrent); err == nil {
+		return false
+	}
+	return true
 }
 
 func displayAddr(addr string) string {

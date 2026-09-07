@@ -124,6 +124,9 @@ func TestRetryableAsksTimeoutNotType(t *testing.T) {
 		{&url.Error{Op: "Get", URL: "https://x", Err: errors.New("http: server gave HTTP response to HTTPS client")}, false},
 		{&net.OpError{Op: "dial", Err: errors.New("connect: connection refused")}, true},
 		{errors.New("unexpected EOF"), true},
+		{&url.Error{Op: "Post", URL: "https://x", Err: errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=3, ErrCode=NO_ERROR")}, true},
+		{&url.Error{Op: "Post", URL: "https://x", Err: errors.New("http2: client connection lost")}, true},
+		{&url.Error{Op: "Post", URL: "https://x", Err: errors.New("use of closed network connection")}, true},
 	}
 	for _, c := range cases {
 		if got := retryable(c.err); got != c.want {

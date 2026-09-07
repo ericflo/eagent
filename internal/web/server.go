@@ -257,6 +257,12 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 		return SessionSummary{}, nil, err
 	}
 	st := state.Replay(evs)
+	return s.summarizeState(info, st), st, nil
+}
+
+// summarizeState summarizes an already-folded log.
+func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary {
+	evs := st.Events
 	sum := SessionSummary{
 		ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size,
 		Models: st.Models, Cwd: st.Cwd, Events: len(evs),
@@ -304,7 +310,7 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 	default:
 		sum.Status = "interrupted"
 	}
-	return sum, st, nil
+	return sum
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -325,10 +331,16 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) detail(info store.Info) (*SessionDetail, error) {
-	sum, st, err := s.summarize(info)
+	_, st, err := s.summarize(info)
 	if err != nil {
 		return nil, err
 	}
+	return s.detailState(info, st), nil
+}
+
+// detailState renders the detail of an already-folded log.
+func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
+	sum := s.summarizeState(info, st)
 	d := &SessionDetail{SessionSummary: sum, Idle: st.Idle(), LastSeq: st.LastSeq(), Context: st.ContextTokens(event.ActorOrchestrator), Interactive: st.Interactive, Phone: st.Phone}
 	if st.LastYield != nil {
 		d.Done = st.LastYield.Done
@@ -392,7 +404,7 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 	if d.Schedules == nil {
 		d.Schedules = []ScheduleView{}
 	}
-	return d, nil
+	return d
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
@@ -462,6 +474,15 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, errors.New("streaming unsupported"))
 		return
 	}
+	// One reducer per stream, advanced with the bytes the tailer reads, so
+	// an idle tab does not re-read and re-fold the whole log for every
+	// status frame.
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	st := state.Replay(evs)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -475,11 +496,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	statusTick := time.NewTicker(2 * time.Second)
 	defer statusTick.Stop()
-	emitStatus := func() {
-		if d, err := s.detail(info); err == nil {
-			send("status", d)
-		}
-	}
+	emitStatus := func() { send("status", s.detailState(info, st)) }
 	emitStatus()
 	tail := newTailer(info.Path, after)
 	for {
@@ -488,6 +505,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-tick.C:
 			for _, ev := range tail.next() {
+				// ?after=N may re-deliver events the replay already folded;
+				// applying them twice would double token totals.
+				if ev.Seq > st.LastSeq() {
+					st.Apply(ev)
+				}
 				send("append", EventView{Event: ev, File: ev.Source.File, Line: ev.Source.Line})
 			}
 		case <-statusTick.C:

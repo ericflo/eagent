@@ -154,7 +154,7 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 		fmt.Fprintf(&b, " %d task(s) are still running.", len(running))
 	}
 	if len(inflight) > 0 {
-		fmt.Fprintf(&b, " In flight right now: %s. If something has run for more than a minute or two, tell the user which one, by name, and that the wait is expected.", strings.Join(inflight, "; "))
+		fmt.Fprintf(&b, " In flight right now: %s. These lines are the whole of what is known about the work in progress: describe only steps, checks, and files that appear in them or in the log, and if a call has not returned you do not know what it is doing. If something has run for more than a minute or two, tell the user which one, by name, how long, and that the wait is expected.", strings.Join(inflight, "; "))
 	}
 	if reason != wakeFinal && reason != wakeDone && reason != wakeUser && !st.Ended {
 		working := !st.Idle() || len(st.RunningTasks()) > 0

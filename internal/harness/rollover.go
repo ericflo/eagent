@@ -42,7 +42,7 @@ func (r *Runtime) startRollover() {
 }
 
 func (r *Runtime) createDossierTask(reason string) {
-	files, _ := r.sess.Files()
+	files := r.dossierFiles()
 	id := r.st.NextTaskID()
 	desc := r.dossierTask(r.sess.Path, files, r.st, reason)
 	r.append(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: id, Title: "Dossier for the new subsession", Description: desc, Kind: "dossier"}))
@@ -63,7 +63,7 @@ func (r *Runtime) finishRollover(taskID, status, summary string) {
 		// rather than leaving the orchestrator amnesiac.
 		if !strings.Contains(r.st.Tasks[taskID].Description, "SECOND ATTEMPT") {
 			r.ui.Log("dossier %s was unusable (%s, %d chars, %d citations); retrying", taskID, status, len(text), cites)
-			files, _ := r.sess.Files()
+			files := r.dossierFiles()
 			id := r.st.NextTaskID()
 			desc := "SECOND ATTEMPT. The previous dossier attempt was rejected: " + rejectReason(status, len(text), cites) + ".\n\n" + r.dossierTask(r.sess.Path, files, r.st, "")
 			r.append(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: id, Title: "Dossier for the new subsession (retry)", Description: desc, Kind: "dossier"}))
@@ -119,4 +119,18 @@ func (r *Runtime) fallbackDossier(partial string) string {
 		b.WriteString("\nPARTIAL DOSSIER FROM THE WORKER:\n" + partial)
 	}
 	return b.String()
+}
+
+// dossierFiles lists the completed subsession files: everything but the one
+// the harness is appending to, which holds nothing yet except this task.
+func (r *Runtime) dossierFiles() []string {
+	files, _ := r.sess.Files()
+	cur := r.sess.Current()
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		if f != cur {
+			out = append(out, f)
+		}
+	}
+	return out
 }

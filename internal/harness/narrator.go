@@ -8,6 +8,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // wakeNarrator requests a narrator turn. Loop goroutine only. If a turn is
@@ -308,17 +309,102 @@ func (r *Runtime) inflightLines(now time.Time) []string {
 	}
 	for _, t := range r.st.RunningTasks() {
 		if t.Status == "running" {
-			line := fmt.Sprintf("task %s (%q) has been working for %s, %d model calls so far", t.ID, t.Title, since(t.Created, now), t.Turns)
-			if step, at := r.lastStep(t.ID); step != "" {
-				line += fmt.Sprintf("; its latest step, %s ago: %s", since(at, now), step)
-			}
-			out = append(out, line)
+			out = append(out, taskEvidence(r.st, t, now))
 		}
 	}
 	if r.orchBusy && !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
 		out = append(out, fmt.Sprintf("the orchestrator's current model call has been going for %s (a long think or a long reply)", since(r.orchCallAt, now)))
 	}
 	return out
+}
+
+// taskEvidence states, from the log alone, what a running task has actually
+// done: how many model calls came back, whether one is in flight and for how
+// long, how many commands ran, which files it wrote, and its latest visible
+// step. The narrator learns nothing else about the task, on purpose: a step
+// that is not here has not happened, however plausible it sounds.
+func taskEvidence(st *state.State, t *state.Task, now time.Time) string {
+	calls, cmds := 0, 0
+	var files []string
+	seen := map[string]bool{}
+	inCall := false
+	var callStart time.Time
+	var step string
+	var stepAt time.Time
+	for _, ev := range st.Events {
+		if ev.Task != t.ID || ev.Actor != event.ActorTask {
+			continue
+		}
+		switch ev.Type {
+		case event.TurnStart:
+			inCall, callStart = true, ev.Time
+		case event.TurnEnd:
+			inCall = false
+		case event.Assistant:
+			calls++
+			var d event.AssistantData
+			_ = ev.Decode(&d)
+			var parts []string
+			for _, tc := range d.ToolCalls {
+				args, err := llm.ArgsObject(tc.Args)
+				if err != nil {
+					parts = append(parts, tc.Name)
+					continue
+				}
+				switch tc.Name {
+				case "bash":
+					cmds++
+					cmd, _ := args["command"].(string)
+					parts = append(parts, "`"+shortCommand(cmd)+"`")
+				case "write_file", "edit_file":
+					p, _ := args["path"].(string)
+					if p != "" && !seen[p] {
+						seen[p] = true
+						files = append(files, p)
+					}
+					parts = append(parts, tc.Name+" "+p)
+				case "read_file", "view_image", "list_dir":
+					p, _ := args["path"].(string)
+					parts = append(parts, tc.Name+" "+p)
+				default:
+					parts = append(parts, tc.Name)
+				}
+			}
+			if len(parts) == 0 && strings.TrimSpace(d.Text) != "" {
+				parts = append(parts, fmt.Sprintf("said %q", clipTail(d.Text, 100)))
+			}
+			if len(parts) > 0 {
+				step, stepAt = strings.Join(parts, ", "), ev.Time
+			}
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "task %s (%q) has been working for %s", t.ID, t.Title, since(t.Created, now))
+	if calls == 0 {
+		b.WriteString("; no model call has come back yet")
+	} else {
+		fmt.Fprintf(&b, "; %d model call(s) have come back", calls)
+	}
+	if inCall {
+		fmt.Fprintf(&b, "; its current model call has been running for %s and has produced nothing visible yet", since(callStart, now))
+	}
+	switch {
+	case cmds == 0 && len(files) == 0:
+		b.WriteString("; it has run no commands and written no files so far")
+	default:
+		fmt.Fprintf(&b, "; %d command(s) run, %d file(s) written", cmds, len(files))
+		if len(files) > 0 {
+			shown := files
+			if len(shown) > 3 {
+				shown = shown[len(shown)-3:]
+			}
+			fmt.Fprintf(&b, " (%s)", strings.Join(shown, ", "))
+		}
+	}
+	if step != "" {
+		fmt.Fprintf(&b, "; latest visible step, %s ago: %s", since(stepAt, now), step)
+	}
+	return b.String()
 }
 
 // shortCommand trims a shell command to its first line, at most 90 characters.

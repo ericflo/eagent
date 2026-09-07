@@ -254,7 +254,7 @@ func (p *phone) pushStatus() time.Duration {
 	defer cancel()
 	var err error
 	if want.Text == "" {
-		err = p.client.ClearActivity(ctx, p.ref)
+		err = p.client.ClearActivity(ctx, p.ref, now.UnixNano())
 	} else {
 		want.Seq = now.UnixNano()
 		_, err = p.client.SetActivity(ctx, p.ref, want)

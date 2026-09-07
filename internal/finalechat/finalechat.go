@@ -101,6 +101,9 @@ type Message struct {
 	// "token" (an agent, including this one mirroring terminal input). Rows
 	// from before the field existed have "".
 	Origin string `json:"origin,omitempty"`
+	// Deleted marks a tombstone: a message removed since the last page. It
+	// keeps paging anchors valid and carries no body.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 // Attachment is a file on a message. URL and ThumbURL are relative to the
@@ -442,9 +445,15 @@ func (c *Client) SetActivity(ctx context.Context, ref string, a Activity) (bool,
 	return out.Applied, err
 }
 
-// ClearActivity drops the status line. An unknown thread is not an error.
-func (c *Client) ClearActivity(ctx context.Context, ref string) error {
-	err := c.do(ctx, http.MethodDelete, "/api/v1/threads/"+refPath(ref)+"/activity", nil, nil, nil, 0)
+// ClearActivity drops the status line. seq (nanoseconds, like Activity.Seq)
+// records a watermark so a slower set with an older seq cannot bring the
+// line back; 0 sends none. An unknown thread is not an error.
+func (c *Client) ClearActivity(ctx context.Context, ref string, seq int64) error {
+	q := url.Values{}
+	if seq > 0 {
+		q.Set("seq", strconv.FormatInt(seq, 10))
+	}
+	err := c.do(ctx, http.MethodDelete, "/api/v1/threads/"+refPath(ref)+"/activity", q, nil, nil, 0)
 	var e *Error
 	if errors.As(err, &e) && e.Status == 404 {
 		return nil

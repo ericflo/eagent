@@ -228,6 +228,16 @@ func orchestratorNotification(ev event.Event) string {
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
 		return d.Text + attachmentNotes(d.Attachments)
+	case event.NarratorQuestion:
+		// The answer that follows names this question; without it a terse
+		// option like "Yes" would be unreadable.
+		var d event.NarratorQuestionData
+		_ = ev.Decode(&d)
+		s := fmt.Sprintf("[The narrator asked the user question %s]\n%s", d.ID, d.Text)
+		if len(d.Options) > 0 {
+			s += "\nOptions: " + strings.Join(d.Options, " | ")
+		}
+		return s
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)

@@ -276,7 +276,7 @@ func TestFeaturesActivityAndIdempotentRetry(t *testing.T) {
 	if err != nil || !applied || len(activity) != 1 || activity[0]["kind"] != "tool" || activity[0]["seq"] != float64(42) || activity[0]["ttl_seconds"] != float64(90) {
 		t.Fatalf("activity = %v applied=%v err=%v", activity, applied, err)
 	}
-	if err := c.ClearActivity(context.Background(), "ext:s"); err != nil || cleared != 1 {
+	if err := c.ClearActivity(context.Background(), "ext:s", 43); err != nil || cleared != 1 {
 		t.Fatalf("clear: %v (%d)", err, cleared)
 	}
 	// 502 then success: retried once, one message, origin parsed.

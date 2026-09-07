@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -50,22 +51,24 @@ type Proc struct {
 	Spec
 	Started time.Time
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	buf      []byte // head + marker + tail once output has been dropped
-	written  int    // total bytes the process has produced (logical length)
-	dropped  int    // bytes removed from the middle
-	headLen  int    // bytes of buf that are the preserved head (0 = nothing dropped)
-	markLen  int    // bytes of buf that are the drop marker
-	status   Status
-	exitCode int
-	ended    time.Time
-	deadline time.Time
-	timer    *time.Timer
-	done     chan struct{} // output pipe drained
-	reaped   chan struct{} // cmd.Wait returned
-	waiters  []chan struct{}
+	mu         sync.Mutex
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	buf        []byte // head + marker + tail once output has been dropped
+	written    int    // total bytes the process has produced (logical length)
+	dropped    int    // bytes removed from the middle
+	headLen    int    // bytes of buf that are the preserved head (0 = nothing dropped)
+	markLen    int    // bytes of buf that are the drop marker
+	status     Status
+	exitCode   int
+	ended      time.Time
+	startTicks int64 // the shell's start time in clock ticks since boot, from /proc; 0 if unknown
+	reapTicks  int64 // clock ticks since boot when the shell was reaped; 0 if unknown
+	deadline   time.Time
+	timer      *time.Timer
+	done       chan struct{} // output pipe drained
+	reaped     chan struct{} // cmd.Wait returned
+	waiters    []chan struct{}
 }
 
 // Manager tracks processes for one session.
@@ -129,6 +132,9 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 		pw.Close()
 		return nil, err
 	}
+	if cmd.Process != nil {
+		p.startTicks = startTicksOf(cmd.Process.Pid)
+	}
 	pw.Close() // child holds its copy
 	p.Started = time.Now()
 	if spec.Timeout > 0 {
@@ -148,6 +154,7 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 			p.timer.Stop()
 		}
 		p.ended = time.Now()
+		p.reapTicks = clockTicks()
 		if p.status == Running {
 			p.status = Exited
 		}
@@ -269,17 +276,102 @@ func (m *Manager) KillAll() {
 	}
 }
 
-// KillGroup terminates a running process's group, or SIGKILLs whatever is
-// left in the group of one that already finished (a `cmd &` that outlived
-// its shell).
+// KillGroup terminates a running process's group, or kills what is left of
+// the group of one that already finished (a `cmd &` that outlived its
+// shell). A reaped pid may have been recycled, so the leftovers are found
+// one by one: processes whose group is ours and which started before the
+// shell was reaped. Where that cannot be checked (no /proc), nothing is
+// killed: a straggler is better than a stranger.
 func (p *Proc) KillGroup() {
 	if p.Status() == Running {
 		p.Kill()
 		return
 	}
-	if pid := p.PID(); pid > 0 {
-		_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH is fine
+	pid := p.PID()
+	if pid <= 0 {
+		return
 	}
+	p.mu.Lock()
+	from, to := p.startTicks, p.reapTicks
+	p.mu.Unlock()
+	for _, member := range groupMembers(pid, from, to) {
+		_ = syscall.Kill(member, syscall.SIGKILL) // ESRCH is fine
+	}
+}
+
+// groupMembers lists the pids in process group pgid that started between
+// the shell's own start and its reap (inclusive, in clock ticks), by reading
+// /proc: our descendants cannot predate the shell, and a group started by a
+// recycled pid postdates the reap. Empty when /proc is unavailable.
+func groupMembers(pgid int, fromTicks, toTicks int64) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil || toTicks == 0 {
+		return nil
+	}
+	var out []int
+	for _, e := range entries {
+		n, err := strconv.Atoi(e.Name())
+		if err != nil || n <= 0 {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// "pid (comm) state ppid pgrp ... starttime": comm may contain spaces,
+		// so split after the last ')'.
+		i := strings.LastIndexByte(string(raw), ')')
+		if i < 0 {
+			continue
+		}
+		f := strings.Fields(string(raw[i+1:]))
+		if len(f) < 20 {
+			continue
+		}
+		pgrp, _ := strconv.Atoi(f[2])
+		start, _ := strconv.ParseInt(f[19], 10, 64)
+		if pgrp == pgid && start > 0 && start >= fromTicks && start <= toTicks {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// startTicksOf reads a process's start time (clock ticks since boot) from
+// /proc; 0 when unavailable.
+func startTicksOf(pid int) int64 {
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	i := strings.LastIndexByte(string(raw), ')')
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(string(raw[i+1:]))
+	if len(f) < 20 {
+		return 0
+	}
+	start, _ := strconv.ParseInt(f[19], 10, 64)
+	return start
+}
+
+// clockTicks is the system uptime in clock ticks (USER_HZ, 100 on Linux),
+// the unit /proc/<pid>/stat reports start times in. 0 when unavailable.
+func clockTicks() int64 {
+	raw, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	f := strings.Fields(string(raw))
+	if len(f) == 0 {
+		return 0
+	}
+	secs, err := strconv.ParseFloat(f[0], 64)
+	if err != nil {
+		return 0
+	}
+	return int64(secs * 100)
 }
 
 // Status returns the lifecycle state.

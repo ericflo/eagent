@@ -39,7 +39,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 |---|---|---|---|
 | `user.message` | user | `text`, `source` (`web`, `finalechat`, or absent for the terminal), `attachments` (files saved under `<session>/attachments/`: `path`, `name`, `content_type`, `size`, `kind`, `width`, `height`) | Wakes the orchestrator. |
 | `user.answer` | user | `question_id`, `text`, `source`, `attachments` | Answers a `narrator.question`; wakes the orchestrator. |
-| `turn.start` / `turn.end` | orchestrator, narrator | `reason` | Brackets one actor turn (one or more model calls). Informational. |
+| `turn.start` / `turn.end` | orchestrator, narrator, task | `reason` | Brackets one actor turn (one or more model calls); for a task worker (`task` set) each model call, so a reader can tell how long a call has been in flight. Informational. |
 | `assistant` | any model actor | `provider`, `model`, `text`, `reasoning`, `tool_calls[{id,name,args}]`, `native`, `usage{input,output,cached,reasoning}`, `elapsed_ms`, `seen_seq`, `stop` | One model response. `native` is the provider's own representation (Responses output items, Anthropic content blocks) replayed verbatim on later calls. `seen_seq` is the last event the prompt contained; anything after it is delivered on the next call. |
 | `tool.result` | same actor | `call_id`, `name`, `output`, `is_error` | Always rendered directly after the call that produced it. |
 | `harness.message` | orchestrator or task | `text` | Steering the harness chose to persist (resume notice, nudge after a tool-less reply, recovery after a provider error). |

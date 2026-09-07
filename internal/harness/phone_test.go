@@ -1458,3 +1458,47 @@ func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
 		t.Fatalf("status cleared %d times", fp.clearedCount())
 	}
 }
+
+// The narrator's in-flight line for a task is built only from what the log
+// shows: a call that has not returned is reported as exactly that, and a
+// task with no tool calls is said to have run nothing and written nothing.
+func TestTaskEvidenceReportsOnlyTheLog(t *testing.T) {
+	st := state.New()
+	base := time.Date(2026, 9, 7, 16, 0, 0, 0, time.UTC)
+	seq := int64(0)
+	add := func(ev event.Event, at time.Time) {
+		seq++
+		ev.Seq, ev.Time = seq, at
+		st.Apply(ev)
+	}
+	add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "Build the game", Description: "write index.html, then check for node and a browser, then syntax-check"}).WithTask("t1"), base)
+	add(event.New(event.TaskStart, event.ActorHarness, event.TaskCreateData{ID: "t1"}).WithTask("t1"), base.Add(time.Second))
+	add(event.New(event.TurnStart, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(2*time.Second))
+	add(event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "Starting."}).WithTask("t1"), base.Add(30*time.Second))
+	add(event.New(event.TurnEnd, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(30*time.Second))
+	add(event.New(event.TurnStart, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(31*time.Second))
+	now := base.Add(8 * time.Minute)
+	got := taskEvidence(st, st.Tasks["t1"], now)
+	for _, want := range []string{"1 model call(s) have come back", "current model call has been running for 7m", "produced nothing visible yet", "run no commands and written no files"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("evidence lacks %q: %s", want, got)
+		}
+	}
+	for _, never := range []string{"node", "browser", "syntax"} {
+		if strings.Contains(strings.ToLower(got), never) {
+			t.Errorf("evidence leaks the plan (%q): %s", never, got)
+		}
+	}
+	// Once the worker writes a file, the line says which.
+	add(event.New(event.Assistant, event.ActorTask, event.AssistantData{ToolCalls: []event.ToolCall{tc("write_file", `{"path":"index.html","content":"<html>"}`)}}).WithTask("t1"), base.Add(9*time.Minute))
+	add(event.New(event.TurnEnd, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(9*time.Minute))
+	got = taskEvidence(st, st.Tasks["t1"], base.Add(10*time.Minute))
+	if !strings.Contains(got, "1 file(s) written (index.html)") || strings.Contains(got, "nothing visible yet") || !strings.Contains(got, "latest visible step, 1m") {
+		t.Fatalf("evidence after a write: %s", got)
+	}
+	// The steer tells the narrator these lines are all it knows.
+	steer := steerNarrator(st, now, wakePeriodic, true, false, "", false, 4*time.Minute, 3*time.Minute, []string{got})
+	if !strings.Contains(steer, "whole of what is known") || !strings.Contains(steer, got) {
+		t.Fatalf("steer = %s", steer)
+	}
+}

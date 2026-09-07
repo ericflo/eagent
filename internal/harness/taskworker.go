@@ -106,6 +106,9 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 			r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: steer}).WithTask(t.ID))
 			msgs = r.st.TaskView(t.ID)
 			seenSeq = r.st.LastSeq()
+			// The call is bracketed in the log so the narrator can say how long
+			// the worker's current call has been running, from evidence.
+			r.append(event.New(event.TurnStart, event.ActorTask, event.TurnData{Reason: "call"}).WithTask(t.ID))
 		})
 		if missing {
 			return "failed", "task vanished from state"
@@ -115,6 +118,9 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 			Messages: msgs, Tools: r.taskTools, CacheKey: r.sess.ID + "-task-" + t.ID,
 		}
 		resp, err := r.completeActor(ctx, event.ActorTask, t.ID, req)
+		r.sync(func() {
+			r.append(event.New(event.TurnEnd, event.ActorTask, event.TurnData{Reason: "call"}).WithTask(t.ID))
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				continue

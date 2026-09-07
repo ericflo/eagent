@@ -475,8 +475,12 @@ func (r *Runtime) waitTool(c caller, taskIDs, handles []string, timeoutSeconds i
 			}
 		}
 		for h := range w.procs {
-			if p := r.st.Procs[h]; p == nil {
-				already = fmt.Sprintf("no such process %s", h)
+			// Handles belong to the actor (and task) that started them, like
+			// every other bash_* tool: a worker's server is not the
+			// orchestrator's to wait on.
+			o := r.procOwner[h]
+			if p := r.st.Procs[h]; p == nil || o.actor != c.actor || o.task != c.task {
+				already = fmt.Sprintf("no such process %s (see bash_list)", h)
 			} else if p.Status != "running" {
 				already = fmt.Sprintf("process %s already finished (%s, exit %d); use bash_poll for its output", h, p.Status, p.ExitCode)
 			}

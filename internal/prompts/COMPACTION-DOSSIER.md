@@ -3,7 +3,7 @@ Write a dossier for the orchestrator, whose context window just filled up. It is
 Session directory: {{.SessionDir}}
 Subsession files (oldest first): {{.Files}}
 
-Use session_list, session_read, and session_search to study the logs. Start with session_read on the newest file (the most recent work), then the earlier ones. Read the user's messages verbatim. Follow task reports and tool results to establish what is actually on disk; check the filesystem with bash or read_file when it matters.
+Use session_list, session_read, and session_search to study the logs. Start with session_read on the last file listed above (the newest completed subsession, where the most recent work is), then the earlier ones. session_list also shows the file being written right now; it holds nothing but this task, so skip it. Read the user's messages verbatim. Follow task reports and tool results to establish what is actually on disk; check the filesystem with bash or read_file when it matters.
 
 Write the dossier in this shape (markdown):
 1. USER'S GOAL: the request(s) as the user wrote them, plus any clarifications or decisions they made.

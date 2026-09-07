@@ -211,7 +211,7 @@ func (p *phone) close(reason string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		if p.has("activity") {
-			_ = p.client.ClearActivity(ctx, p.ref)
+			_ = p.client.ClearActivity(ctx, p.ref, time.Now().UnixNano())
 		}
 		body := "eagent session ended (" + reason + ")."
 		switch reason {
@@ -411,9 +411,10 @@ func (p *phone) poll(r *Runtime) {
 			p.lastID = m.ID
 			mine := p.posted[m.ID]
 			p.mu.Unlock()
-			if mine || m.Sender != "user" || m.Origin == "token" {
+			if mine || m.Deleted || m.Sender != "user" || m.Origin == "token" {
 				// Only the user speaking from the app counts; a token-posted
-				// "user" message is an agent's mirror (ours or another's).
+				// "user" message is an agent's mirror (ours or another's), and
+				// a tombstone is a message the user took back.
 				continue
 			}
 			body := strings.TrimSpace(m.Body)

@@ -97,6 +97,13 @@ func Resolve(root, ref string) (Info, error) {
 		return Info{}, fmt.Errorf("no sessions in %s", root)
 	}
 	if ref == "" || ref == "latest" {
+		// The newest session that has something in it: a start that failed
+		// before its first event must not shadow the real one.
+		for i := len(sessions) - 1; i >= 0; i-- {
+			if sessions[i].Size > 0 {
+				return sessions[i], nil
+			}
+		}
 		return sessions[len(sessions)-1], nil
 	}
 	var matches []Info
@@ -361,6 +368,15 @@ func (s *Session) newSubsession(now time.Time) (string, error) {
 }
 
 // Close releases the file and lock.
+// Discard closes a session and removes its directory. Only for a session
+// that never had an event committed: a stub would otherwise shadow the real
+// latest session for `-c` and `resume latest`.
+func (s *Session) Discard() error {
+	path := s.Path
+	_ = s.Close()
+	return os.RemoveAll(path)
+}
+
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

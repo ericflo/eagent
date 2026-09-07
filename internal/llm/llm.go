@@ -169,6 +169,19 @@ func (e *APIError) RejectsImages() bool {
 	return false
 }
 
+// badImage reports a 4xx about this particular picture (too big, wrong
+// dimensions, undecodable) rather than a model that cannot see at all.
+// Such a refusal must not be remembered: the next picture may be fine.
+func (e *APIError) badImage() bool {
+	b := strings.ToLower(e.Body)
+	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "does not match"} {
+		if strings.Contains(b, k) {
+			return true
+		}
+	}
+	return false
+}
+
 // ToolResult is the outcome of one tool call.
 type ToolResult struct {
 	CallID  string
@@ -372,9 +385,15 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if err != nil && hasImages(req) {
 			var ae *APIError
 			if errors.As(err, &ae) && ae.RejectsImages() {
-				// A text-only model: say so once and go on without pictures,
-				// on this call and every later one through this client.
-				if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+				if ae.badImage() {
+					// This picture was refused (too big, undecodable): go on
+					// without it this once, and say why. The model can see.
+					if c.OnRetry != nil {
+						c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text alone", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
+					}
+				} else if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+					// A text-only model: say so once and go on without pictures,
+					// on this call and every later one through this client.
 					c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
 				}
 				req = withoutImages(req)
@@ -433,7 +452,21 @@ func retryable(err error) bool {
 	return strings.Contains(msg, "EOF") || strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "broken pipe") || strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "TLS handshake") || strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "stream error") || strings.Contains(msg, "unexpected end")
+		strings.Contains(msg, "stream error") || strings.Contains(msg, "unexpected end") ||
+		// HTTP/2 teardowns on the long-lived connections to the gateways: a
+		// rolling deploy (GOAWAY), a lost keepalive, a closed connection.
+		strings.Contains(msg, "GOAWAY") || strings.Contains(msg, "connection lost") ||
+		strings.Contains(msg, "conn is closed") || strings.Contains(msg, "conn not usable") ||
+		strings.Contains(msg, "use of closed network connection")
+}
+
+// shortBody trims an error body to one line of at most n characters.
+func shortBody(b string, n int) string {
+	b = strings.Join(strings.Fields(b), " ")
+	if len(b) > n {
+		return b[:n-1] + "…"
+	}
+	return b
 }
 
 func backoff(attempt int, err error) time.Duration {
