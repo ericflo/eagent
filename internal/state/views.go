@@ -38,9 +38,26 @@ func (s *State) currentEvents() []event.Event {
 // results, matching what the model actually saw.
 func (s *State) OrchestratorView() []llm.Message {
 	events := s.currentEvents()
-	return renderActor(events, event.ActorOrchestrator, "", func(ev event.Event) string {
+	msgs := renderActor(events, event.ActorOrchestrator, "", func(ev event.Event) string {
 		return orchestratorNotification(ev)
 	})
+	// A subsession's dossier is always the opening message, even if other
+	// notifications landed in the file before the dossier task finished.
+	for i, ev := range events {
+		if ev.Type != event.Dossier || i == 0 {
+			continue
+		}
+		text := orchestratorNotification(ev)
+		for j, m := range msgs {
+			if m.Role == "user" && m.Text == text && j > 0 {
+				copy(msgs[1:j+1], msgs[0:j])
+				msgs[0] = m
+				break
+			}
+		}
+		break
+	}
+	return msgs
 }
 
 // TaskView renders one task's private conversation.

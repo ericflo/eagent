@@ -234,6 +234,7 @@ func (s *State) Apply(ev event.Event) {
 			cur.Dossier = d.Text
 			cur.DossierTask = d.TaskID
 		}
+		s.LastYield = nil
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
 		s.LastYield = nil

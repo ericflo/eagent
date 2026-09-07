@@ -298,6 +298,42 @@ func (s *Session) NewSubsession(now time.Time) (string, error) {
 	return s.newSubsession(now)
 }
 
+// NewSubsessionName allocates the next subsession file name without opening
+// it, so the closing event of the current file can name its successor.
+func (s *Session) NewSubsessionName(now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := NewID(now) + ".jsonl"
+	for i := 0; ; i++ {
+		if _, err := os.Stat(filepath.Join(s.Path, name)); errors.Is(err, os.ErrNotExist) && name != s.current {
+			return name, nil
+		}
+		now = now.Add(time.Millisecond)
+		name = NewID(now) + ".jsonl"
+		if i > 1000 {
+			return "", errors.New("could not allocate a subsession name")
+		}
+	}
+}
+
+// OpenSubsession closes the current file and starts appending to name.
+func (s *Session) OpenSubsession(name string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+	f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
+	if err != nil {
+		return "", err
+	}
+	s.file = f
+	s.current = name
+	s.closed = false
+	return name, nil
+}
+
 func (s *Session) newSubsession(now time.Time) (string, error) {
 	if s.file != nil {
 		_ = s.file.Close()
