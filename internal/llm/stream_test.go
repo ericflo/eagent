@@ -272,3 +272,43 @@ func TestAnthropicStreamingAndAlternation(t *testing.T) {
 		t.Fatal("system prompt should carry a cache breakpoint")
 	}
 }
+
+func TestTruncatedStreamIsRetried(t *testing.T) {
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&n, 1) == 1 {
+			// Connection drops mid tool call: no finish_reason, no usage.
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"delegate","arguments":"{"}}]}}]}`)
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "x"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Text != "ok" || atomic.LoadInt32(&n) != 2 {
+		t.Fatalf("text=%q attempts=%d", resp.Text, n)
+	}
+}
+
+func TestMalformedArgsAreSanitisedOnReplay(t *testing.T) {
+	msgs := chatMessages(Request{Messages: []Message{
+		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "delegate", Args: normalizeArgs("{")}}},
+		{Role: "tool", Results: []ToolResult{{CallID: "c1", Output: "rejected"}}},
+	}})
+	fn := msgs[0]["tool_calls"].([]map[string]any)[0]["function"].(map[string]any)
+	if !json.Valid([]byte(fn["arguments"].(string))) {
+		t.Fatalf("replayed arguments are not valid JSON: %s", fn["arguments"])
+	}
+	items := responsesInput(Request{Messages: []Message{
+		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "delegate", Args: normalizeArgs("{")}}},
+	}})
+	if it := items[0].(map[string]any); !json.Valid([]byte(it["arguments"].(string))) {
+		t.Fatalf("responses replay arguments invalid: %s", it["arguments"])
+	}
+}

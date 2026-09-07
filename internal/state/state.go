@@ -137,6 +137,12 @@ type State struct {
 	// Counters continue id sequences across restarts.
 	taskSeq, procSeq, scheduleSeq, questionSeq int
 	Errors                                     []string
+
+	// lastWakeSeq is the newest event that should wake the orchestrator;
+	// lastOrchSeen is what its latest call was shown. A yield produced by a
+	// call that predates a wake is stale and does not make the session idle.
+	lastWakeSeq  int64
+	lastOrchSeen int64
 }
 
 // New returns an empty state.
@@ -182,6 +188,13 @@ func (s *State) NextTaskID() string     { s.taskSeq++; return "t" + strconv.Itoa
 func (s *State) NextProcHandle() string { s.procSeq++; return "p" + strconv.Itoa(s.procSeq) }
 func (s *State) NextScheduleID() string { s.scheduleSeq++; return "s" + strconv.Itoa(s.scheduleSeq) }
 func (s *State) NextQuestionID() string { s.questionSeq++; return "q" + strconv.Itoa(s.questionSeq) }
+
+func (s *State) wake(seq int64) {
+	s.LastYield = nil
+	if seq > s.lastWakeSeq {
+		s.lastWakeSeq = seq
+	}
+}
 
 func bump(counter *int, id string, prefix string) {
 	if n, err := strconv.Atoi(strings.TrimPrefix(id, prefix)); err == nil && n > *counter {
@@ -234,10 +247,10 @@ func (s *State) Apply(ev event.Event) {
 			cur.Dossier = d.Text
 			cur.DossierTask = d.TaskID
 		}
-		s.LastYield = nil
+		s.wake(ev.Seq)
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
-		s.LastYield = nil
+		s.wake(ev.Seq)
 		if ev.Type == event.UserAnswer {
 			var d event.UserAnswerData
 			_ = ev.Decode(&d)
@@ -262,6 +275,9 @@ func (s *State) Apply(ev event.Event) {
 			}
 		} else {
 			s.LastUsage[key] = d.Usage
+			if ev.Actor == event.ActorOrchestrator {
+				s.lastOrchSeen = d.SeenSeq
+			}
 		}
 		tot := s.Totals[key]
 		tot.Input += d.Usage.Input
@@ -301,7 +317,7 @@ func (s *State) Apply(ev event.Event) {
 			t.EndedSeq = ev.Seq
 			t.Ended = ev.Time
 			if t.Kind != "dossier" {
-				s.LastYield = nil
+				s.wake(ev.Seq)
 			}
 		}
 	case event.Note:
@@ -329,7 +345,7 @@ func (s *State) Apply(ev event.Event) {
 				sc.Cancelled = true
 			}
 		}
-		s.LastYield = nil
+		s.wake(ev.Seq)
 	case event.ScheduleCancel:
 		var d event.ScheduleCancelData
 		_ = ev.Decode(&d)
@@ -350,16 +366,21 @@ func (s *State) Apply(ev event.Event) {
 			p.ExitCode = d.ExitCode
 			p.ExitSeq = ev.Seq
 			if d.Notify && p.Actor == event.ActorOrchestrator && p.Task == "" {
-				s.LastYield = nil
+				s.wake(ev.Seq)
 			}
 		}
 	case event.Yield:
 		var d event.YieldData
 		_ = ev.Decode(&d)
+		if s.lastWakeSeq > s.lastOrchSeen {
+			// Something arrived while the yielding call was in flight; the
+			// orchestrator has not seen it, so it is not idle.
+			return
+		}
 		s.LastYield = &Yield{Seq: ev.Seq, Done: d.Done, Reason: d.Reason}
 	case event.HarnessMessage:
 		if ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			s.LastYield = nil
+			s.wake(ev.Seq)
 		}
 	case event.Error:
 		var d event.ErrorData

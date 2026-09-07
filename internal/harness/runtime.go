@@ -92,9 +92,11 @@ type Runtime struct {
 	lastWake     int64 // seq of the newest event that should wake the orchestrator
 	lastOrchText string
 
-	procCursor map[string]int // handle -> bytes already shown
-	procOwner  map[string]owner
-	procSeenAt map[string]bool // handle -> tool result already delivered final output
+	procCursor   map[string]int // handle -> bytes already shown
+	procOwner    map[string]owner
+	procSeenAt   map[string]bool // handle -> tool result already delivered final output
+	procAttended map[string]bool // handle -> owner is blocked waiting on it right now
+	closed       chan struct{}   // closed when the loop has fully stopped
 }
 
 type owner struct{ actor, task string }
@@ -181,11 +183,13 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		narrTools: tools.NarratorTools(),
 		loop:      make(chan func(), 1024),
 		ctx:       ctx, stop: cancel,
-		running:    map[string]context.CancelFunc{},
-		timers:     map[string]*time.Timer{},
-		procCursor: map[string]int{},
-		procOwner:  map[string]owner{},
-		procSeenAt: map[string]bool{},
+		running:      map[string]context.CancelFunc{},
+		timers:       map[string]*time.Timer{},
+		procCursor:   map[string]int{},
+		procOwner:    map[string]owner{},
+		procSeenAt:   map[string]bool{},
+		procAttended: map[string]bool{},
+		closed:       make(chan struct{}),
 	}
 	var err error
 	if r.orchRoutes, err = cfg.Orchestrator.Routes(); err != nil {
@@ -233,17 +237,19 @@ func (r *Runtime) SessionID() string { return r.sess.ID }
 
 // ---- loop plumbing --------------------------------------------------------
 
-// sync runs fn on the loop goroutine and waits for it.
+// sync runs fn on the loop goroutine and waits for it. During shutdown the
+// loop keeps serving closures until the actors have stopped, so late events
+// (a final narrator message, a tool result) are still recorded.
 func (r *Runtime) sync(fn func()) {
 	done := make(chan struct{})
 	select {
 	case r.loop <- func() { fn(); close(done) }:
-	case <-r.ctx.Done():
+	case <-r.closed:
 		return
 	}
 	select {
 	case <-done:
-	case <-r.ctx.Done():
+	case <-r.closed:
 	}
 }
 
@@ -251,7 +257,7 @@ func (r *Runtime) sync(fn func()) {
 func (r *Runtime) post(fn func()) {
 	select {
 	case r.loop <- fn:
-	case <-r.ctx.Done():
+	case <-r.closed:
 	}
 }
 
@@ -305,12 +311,14 @@ func (r *Runtime) noteWake(ev event.Event) {
 }
 
 // orchestratorHasWork reports whether the orchestrator should be running.
+// The reducer clears LastYield whenever something arrives that the
+// orchestrator has not seen (including during the call that yielded), so
+// "not idle" is the whole test once the session has a user message.
 func (r *Runtime) orchestratorHasWork() bool {
-	if r.st.LastYield == nil {
-		return r.st.LastUserSeq > 0 || r.lastWake > 0
+	if r.st.LastYield != nil {
+		return false
 	}
-	// Idle, unless something arrived after what it last saw.
-	return r.lastWake > r.lastOrchSeen && r.lastWake > r.st.LastYield.Seq
+	return r.st.LastUserSeq > 0 || r.lastWake > 0
 }
 
 // Run drives the session until it ends or ctx is cancelled. It returns the
@@ -403,7 +411,7 @@ func (r *Runtime) maybeEnd() {
 	if r.ending || r.orchBusy || r.rolling || r.narrBusy {
 		return
 	}
-	if !r.st.Idle() {
+	if !r.st.Idle() || r.orchestratorHasWork() {
 		return
 	}
 	if len(r.st.RunningTasks()) > 0 || len(r.st.ActiveSchedules()) > 0 {
@@ -472,11 +480,27 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 func (r *Runtime) finish() {
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
-	select {
-	case <-waitDone:
-	case <-time.After(5 * time.Second):
-		r.ui.Log("some actor goroutines did not stop in time")
+	grace := 5 * time.Second
+	if r.narrBusy {
+		grace = 75 * time.Second // the final report gets a chance to land
 	}
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+drain:
+	for {
+		select {
+		case fn := <-r.loop:
+			fn() // actors finishing up still record their events
+		case p := <-r.procs.Exited():
+			r.onProcExit(p)
+		case <-waitDone:
+			break drain
+		case <-deadline.C:
+			r.ui.Log("some actor goroutines did not stop in time")
+			break drain
+		}
+	}
+	close(r.closed)
 	for _, p := range r.procs.Running() {
 		p.Kill()
 	}
@@ -599,9 +623,9 @@ func (r *Runtime) onProcExit(p *procs.Proc) {
 		return
 	}
 	reason := string(p.Status())
-	// Notify the owner only if it already moved on (its tool result did not
-	// include the final output).
-	notify := !r.procSeenAt[p.Handle]
+	// Notify the owner only if it already moved on: its tool result did not
+	// include the final output and it is not blocked waiting on the process.
+	notify := !r.procSeenAt[p.Handle] && !r.procAttended[p.Handle]
 	tail := ""
 	if notify {
 		tail = tools.Truncate(p.Tail(4000), 4000)
@@ -619,9 +643,6 @@ func (r *Runtime) onProcExit(p *procs.Proc) {
 func (r *Runtime) rearmSchedules() {
 	now := time.Now()
 	for _, sc := range r.st.ActiveSchedules() {
-		if _, err := sched.Parse(sc.Spec); err != nil {
-			continue
-		}
 		next := sc.Next
 		if next.IsZero() || next.Before(now) {
 			// Missed while we were away: fire soon, once.
@@ -649,12 +670,16 @@ func (r *Runtime) fireSchedule(id string) {
 	if sc == nil || sc.Cancelled || r.ending {
 		return
 	}
-	s, err := sched.Parse(sc.Spec)
-	if err != nil {
-		return
-	}
 	now := time.Now()
-	next := s.Next(now)
+	var next time.Time
+	if sc.Kind != sched.Once {
+		// Relative specs ("in 10m") must not be re-parsed: a one-shot fires once.
+		s, err := sched.Parse(sc.Spec)
+		if err != nil {
+			return
+		}
+		next = s.Next(now)
+	}
 	r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: id, Note: sc.Note, Next: next}))
 	if !next.IsZero() {
 		r.armSchedule(id, next)

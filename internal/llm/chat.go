@@ -158,6 +158,11 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 	if err != nil {
 		return nil, err
 	}
+	if finish == "" {
+		// The connection ended before the provider signalled completion; what
+		// we have is a fragment, not a response.
+		return nil, ErrTruncatedStream
+	}
 
 	idxs := make([]int, 0, len(calls))
 	for i := range calls {
@@ -246,15 +251,16 @@ func chatMessages(req Request) []map[string]any {
 }
 
 // argsString renders tool-call arguments as the JSON string the wire wants.
+// Malformed arguments (stored as a JSON string) are wrapped in a valid object
+// so that one bad turn can never make every later request fail validation.
 func argsString(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return "{}"
 	}
-	// Invalid arguments are stored as a JSON string; unwrap for replay so the
-	// model sees what it actually produced.
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return s
+		wrapped, _ := json.Marshal(map[string]string{"_malformed": s})
+		return string(wrapped)
 	}
 	return string(raw)
 }

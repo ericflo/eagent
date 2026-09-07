@@ -114,14 +114,20 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 			return fmt.Sprintf("%s deadline extended to %s", p.Handle, d.Local().Format("15:04:05")), false
 		}
 	case "bash_list":
-		var b strings.Builder
-		for _, p := range r.procs.All() {
-			if o := r.procOwner[p.Handle]; o.actor == c.actor && o.task == c.task {
-				b.WriteString(p.Describe() + "\n")
+		var mine []*procs.Proc
+		r.sync(func() {
+			for _, p := range r.procs.All() {
+				if o := r.procOwner[p.Handle]; o.actor == c.actor && o.task == c.task {
+					mine = append(mine, p)
+				}
 			}
-		}
-		if b.Len() == 0 {
+		})
+		if len(mine) == 0 {
 			return "no processes started", false
+		}
+		var b strings.Builder
+		for _, p := range mine {
+			b.WriteString(p.Describe() + "\n")
 		}
 		return b.String(), false
 
@@ -309,22 +315,29 @@ func (r *Runtime) ownedProc(c caller, handle string) (*procs.Proc, bool) {
 	return p, true
 }
 
-// startBash launches a command and waits briefly for it.
+// startBash launches a command and waits briefly for it. The start event,
+// owner, and attended flag are recorded before the process is launched so a
+// command that exits instantly cannot race its own bookkeeping.
 func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSeconds int) (string, bool) {
 	var handle string
-	r.sync(func() { handle = r.st.NextProcHandle() })
-	spec := procs.Spec{Handle: handle, Command: command, Cwd: r.projectPath(), Owner: c.actor + "/" + c.task}
+	cwd := r.projectPath()
+	r.sync(func() {
+		handle = r.st.NextProcHandle()
+		r.procOwner[handle] = owner{c.actor, c.task}
+		r.procAttended[handle] = waitSeconds > 0
+		r.append(event.New(event.ProcStart, c.actor, event.ProcStartData{Handle: handle, Command: command, Cwd: cwd, TimeoutS: timeoutSeconds}).WithTask(c.task))
+	})
+	spec := procs.Spec{Handle: handle, Command: command, Cwd: cwd, Owner: c.actor + "/" + c.task}
 	if timeoutSeconds > 0 {
 		spec.Timeout = time.Duration(timeoutSeconds) * time.Second
 	}
 	p, err := r.procs.Start(spec)
 	if err != nil {
+		r.sync(func() {
+			r.append(event.New(event.ProcExit, c.actor, event.ProcExitData{Handle: handle, ExitCode: -1, Reason: "failed", Tail: err.Error()}).WithTask(c.task))
+		})
 		return "could not start command: " + err.Error(), true
 	}
-	r.sync(func() {
-		r.procOwner[handle] = owner{c.actor, c.task}
-		r.append(event.New(event.ProcStart, c.actor, event.ProcStartData{Handle: handle, Command: command, Cwd: spec.Cwd, TimeoutS: timeoutSeconds}).WithTask(c.task))
-	})
 	if waitSeconds > 0 {
 		p.Wait(c.ctx, time.Duration(waitSeconds)*time.Second)
 	}
@@ -338,9 +351,16 @@ func (r *Runtime) pollBash(c caller, handle string, waitSeconds int) (string, bo
 		return "no such process " + handle + " (see bash_list)", true
 	}
 	if waitSeconds > 0 {
-		p.Wait(c.ctx, time.Duration(waitSeconds)*time.Second)
+		r.attend(p.Handle, c.ctx, time.Duration(waitSeconds)*time.Second, p)
 	}
 	return r.renderProc(c, p, waitSeconds > 0), false
+}
+
+// attend blocks on a process while marking it attended, so an exit during
+// the wait is delivered in the tool result rather than as a notification.
+func (r *Runtime) attend(handle string, ctx context.Context, d time.Duration, p *procs.Proc) {
+	r.sync(func() { r.procAttended[handle] = true })
+	p.Wait(ctx, d)
 }
 
 // renderProc formats a process's new output and status for the model, and
@@ -353,6 +373,7 @@ func (r *Runtime) renderProc(c caller, p *procs.Proc, waited bool) string {
 	finished := status != procs.Running
 	r.sync(func() {
 		r.procCursor[p.Handle] = next
+		r.procAttended[p.Handle] = false
 		if finished {
 			r.procSeenAt[p.Handle] = true
 		}
@@ -437,6 +458,14 @@ func (r *Runtime) waitTool(c caller, taskIDs, handles []string, timeoutSeconds i
 		})
 		return fmt.Sprintf("nothing finished within %ds; still running. You can wait again, check on them, or do other work.", timeoutSeconds), false
 	case <-c.ctx.Done():
+		r.sync(func() {
+			for i, x := range r.waiters {
+				if x == w {
+					r.waiters = append(r.waiters[:i], r.waiters[i+1:]...)
+					break
+				}
+			}
+		})
 		return "wait cancelled: the session is stopping", true
 	}
 }

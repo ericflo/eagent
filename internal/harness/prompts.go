@@ -188,6 +188,12 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive bo
 		}
 	case wakeDone:
 		b.WriteString(" Send the final report now unless your last message already covers everything; in that case hold.")
+	case wakeError:
+		if interactive {
+			b.WriteString(" The orchestrator has stopped because its model calls keep failing. Tell the user plainly what happened, what state the work is in, and that typing a message will make it try again.")
+		} else {
+			b.WriteString(" The orchestrator has stopped because its model calls keep failing, and this non-interactive session ends now. Tell the user plainly what happened, what state the work is in, and that `eagent -c` resumes it. Do not say it will retry on its own.")
+		}
 	case wakeYield:
 		if interactive {
 			b.WriteString(" The orchestrator is waiting. If it asked for a decision, ask the user (ask_user). Otherwise tell the user where things stand, briefly, if that has changed since your last message.")

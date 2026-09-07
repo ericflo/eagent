@@ -345,7 +345,7 @@ func TestInterruptAndResume(t *testing.T) {
 			switch {
 			case strings.Contains(all, "Task t2 completed"):
 				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done after resume"}`)}}
-			case strings.Contains(all, "was interrupted"):
+			case strings.Contains(all, "interrupted"):
 				if !strings.Contains(all, "Task t2 started") {
 					return reply{calls: []event.ToolCall{tc("delegate", `{"title":"again","description":"redo"}`)}}
 				}
@@ -386,7 +386,9 @@ func TestInterruptAndResume(t *testing.T) {
 	}
 	evs, _ := store.Read(rt.sess.Path)
 	st := state.Replay(evs)
-	if st.EndReason != "interrupted" || st.Tasks["t1"].Status != "running" {
+	// The task is either recorded as interrupted at shutdown (normal) or
+	// still marked running (if the worker did not stop within the grace).
+	if st.EndReason != "interrupted" || (st.Tasks["t1"].Status != "running" && st.Tasks["t1"].Status != "interrupted") {
 		t.Fatalf("after interrupt: reason=%s task=%s", st.EndReason, st.Tasks["t1"].Status)
 	}
 
@@ -494,5 +496,168 @@ func TestInteractiveQuestionAndAnswer(t *testing.T) {
 	}
 	if !answered {
 		t.Fatal("numbered option was not mapped to its text")
+	}
+}
+
+// fileContains reports whether the session log on disk has the text.
+func fileContains(sessionPath, needle string) bool {
+	evs, err := store.Read(sessionPath)
+	if err != nil {
+		return false
+	}
+	for _, ev := range evs {
+		if strings.Contains(ev.Type, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWakeDuringYieldingCallIsNotLost(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	var sessionPath string
+	var mu sync.Mutex
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "Task t1 completed"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"saw the result"}`)}}
+			case strings.Contains(all, "Task t1 started"):
+				// Yield "waiting for t1", but only deliver the reply once t1's
+				// result is already on disk, so the yield is stale.
+				mu.Lock()
+				sp := sessionPath
+				mu.Unlock()
+				for i := 0; i < 400 && !fileContains(sp, "task.end"); i++ {
+					time.Sleep(10 * time.Millisecond)
+				}
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting for t1"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("delegate", `{"title":"w","description":"do w"}`)}}
+			}
+		case "task":
+			return reply{calls: []event.ToolCall{tc("complete_task", `{"status":"completed","summary":"w done"}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"ok"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "go"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	sessionPath = rt.sess.Path
+	mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d (the stale yield ended the session early); logs %v", code, ui.logs)
+	}
+	if s.count("orch") != 3 {
+		t.Fatalf("orchestrator calls = %d, want 3 (delegate, stale yield, real yield)", s.count("orch"))
+	}
+}
+
+func TestOneShotScheduleFiresOnce(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "fired at"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"timer fired"}`)}}
+			case strings.Contains(all, "schedule s1 created"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting for the timer"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("schedule", `{"spec":"in 5s","note":"check back"}`)}}
+			}
+		default:
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"ok"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "go"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Speed the timer up: the harness arms from the stored Next, so rewrite it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	code := rt.Run(ctx)
+	if code != 0 {
+		t.Fatalf("exit %d after %s; logs %v", code, time.Since(start), ui.logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	fires := 0
+	for _, ev := range evs {
+		if ev.Type == event.ScheduleFire {
+			fires++
+		}
+	}
+	if fires != 1 {
+		t.Fatalf("one-shot schedule fired %d times", fires)
+	}
+	st := state.Replay(evs)
+	if len(st.ActiveSchedules()) != 0 {
+		t.Fatal("one-shot schedule still active after firing")
+	}
+}
+
+func TestFastCommandsDoNotNotify(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			n := strings.Count(all, "exited with code 0")
+			if n < 3 {
+				return reply{calls: []event.ToolCall{tc("bash", `{"command":"echo hi"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ran commands"}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"ok"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "go"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d logs %v", code, ui.logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	exits := 0
+	for _, ev := range evs {
+		if ev.Type == event.ProcExit {
+			exits++
+			var d event.ProcExitData
+			_ = ev.Decode(&d)
+			if d.Notify {
+				t.Fatalf("fast command %s was reported as a notification although its result was delivered inline", d.Handle)
+			}
+		}
+	}
+	if exits != 3 {
+		t.Fatalf("expected 3 process exits, got %d", exits)
+	}
+	if s.count("orch") != 4 {
+		t.Fatalf("orchestrator calls = %d, want 4 (no spurious wakes)", s.count("orch"))
 	}
 }

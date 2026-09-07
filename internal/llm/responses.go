@@ -122,6 +122,9 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 	if failure != nil {
 		return nil, failure
 	}
+	if len(final) == 0 {
+		return nil, ErrTruncatedStream
+	}
 
 	// Prefer the authoritative output list from the final response.
 	var fin struct {

@@ -78,7 +78,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 	for turn := 1; ; turn++ {
 		if ctx.Err() != nil {
 			if r.ctx.Err() != nil {
-				return "interrupted", "the session stopped while this task was running"
+				return "interrupted", "the runner stopped while this task was running; its partial work may be on disk. Check, then re-delegate what is missing."
 			}
 			return "cancelled", "cancelled by the orchestrator"
 		}

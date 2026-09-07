@@ -83,6 +83,7 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 	var blocks []*block
 	out := &Response{}
 	stop := ""
+	stopped := false
 	var failure *APIError
 	err = c.readSSE(ctx, resp, func(ev sseEvent) error {
 		var frame struct {
@@ -168,6 +169,8 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 			if frame.Usage != nil {
 				out.Usage.Output = frame.Usage.Output
 			}
+		case "message_stop":
+			stopped = true
 		case "error":
 			msg := "stream error"
 			if frame.Error != nil {
@@ -185,6 +188,9 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 	}
 	if failure != nil {
 		return nil, failure
+	}
+	if !stopped {
+		return nil, ErrTruncatedStream
 	}
 
 	var text, reasoning strings.Builder

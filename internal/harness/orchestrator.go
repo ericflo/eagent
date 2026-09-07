@@ -69,6 +69,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 	c := caller{actor: event.ActorOrchestrator, ctx: ctx}
 	nudges := 0
 	calls := 0
+	failures := 0
 	for {
 		if ctx.Err() != nil {
 			return "interrupted"
@@ -111,6 +112,14 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 				return "context"
 			}
 			r.ui.Log("orchestrator: model call failed: %v", shortErr(err))
+			failures++
+			if failures == 1 {
+				// One recovery attempt: the failure is on the record, the
+				// history is re-rendered (malformed calls are sanitised), and
+				// the model gets to continue.
+				r.recordHarnessMessage(event.ActorOrchestrator, "", "Your previous response could not be processed by the model provider ("+shortErr(err)+"). Continue from where you were; if you were mid-way through a tool call, issue it again.")
+				continue
+			}
 			// Pause the session rather than spin: tell the narrator, yield.
 			r.sync(func() {
 				r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "the model call failed repeatedly: " + shortErr(err) + ". Resume the session to retry."}))
@@ -118,6 +127,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 			})
 			return "error"
 		}
+		failures = 0
 		r.ui.Stream(event.ActorOrchestrator, "", "", "")
 		ev := r.recordAssistant(event.ActorOrchestrator, "", resp, seenSeq)
 		_ = ev

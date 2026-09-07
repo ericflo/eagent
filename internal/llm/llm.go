@@ -149,6 +149,8 @@ type Client struct {
 	HTTP     *http.Client
 	// IdleTimeout aborts a stream that produces no bytes for this long.
 	IdleTimeout time.Duration
+	// CallTimeout bounds one attempt end to end (zero = none).
+	CallTimeout time.Duration
 	// MaxAttempts bounds retries of transient failures.
 	MaxAttempts int
 	// OnRetry is called before each retry with the failure.
@@ -164,6 +166,7 @@ func NewClient(ep Endpoint) *Client {
 		Endpoint:    ep,
 		HTTP:        &http.Client{Timeout: 0}, // per-request deadlines are set via context
 		IdleTimeout: 120 * time.Second,
+		CallTimeout: 15 * time.Minute,
 		MaxAttempts: 6,
 		UserAgent:   "eagent/1.0 (+https://github.com/ericflo/eagent)",
 	}
@@ -240,6 +243,10 @@ func (e *APIError) ContextOverflow() bool {
 // ErrIdle is returned when a stream stalls.
 var ErrIdle = errors.New("stream idle timeout")
 
+// ErrTruncatedStream is returned when a stream closes before the provider
+// signalled completion.
+var ErrTruncatedStream = errors.New("stream ended before completion")
+
 // Complete performs one model call with retries on transient failures.
 func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	var lastErr error
@@ -249,7 +256,13 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 	}
 	for attempt := 1; attempt <= attempts; attempt++ {
 		start := time.Now()
-		resp, err := c.once(ctx, req, obs)
+		callCtx := ctx
+		if c.CallTimeout > 0 {
+			var cancel context.CancelFunc
+			callCtx, cancel = context.WithTimeout(ctx, c.CallTimeout)
+			defer cancel()
+		}
+		resp, err := c.once(callCtx, req, obs)
 		if err == nil {
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
@@ -283,7 +296,7 @@ func retryable(err error) bool {
 	if errors.As(err, &ae) {
 		return ae.Retryable()
 	}
-	if errors.Is(err, ErrIdle) {
+	if errors.Is(err, ErrIdle) || errors.Is(err, ErrTruncatedStream) {
 		return true
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

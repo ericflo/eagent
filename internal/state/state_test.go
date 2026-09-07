@@ -85,17 +85,19 @@ func TestDanglingCallGetsSyntheticError(t *testing.T) {
 
 func TestYieldAndWakeSemantics(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting"}))
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))                                                             // 3
+	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 3})) // 4
+	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting"}))                                             // 5
 	st := Replay(b.events)
 	if !st.Idle() {
 		t.Fatal("should be idle after yield")
 	}
-	b.add(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "tick"}))
+	b.add(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "tick"})) // 6
 	st = Replay(b.events)
 	if st.Idle() {
 		t.Fatal("schedule fire must wake")
 	}
+	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c2", "yield", `{}`)}, SeenSeq: 6})) // 7
 	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "finished"}))
 	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "d1", Status: "completed"}).WithTask("d1"))
 	st = Replay(b.events)
@@ -194,5 +196,25 @@ func TestIDCountersContinueAfterReplay(t *testing.T) {
 	st := Replay(b.events)
 	if st.NextTaskID() != "t4" || st.NextProcHandle() != "p8" || st.NextScheduleID() != "s3" {
 		t.Fatal("counters did not continue")
+	}
+}
+
+func TestStaleYieldDoesNotIdle(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))                               // 3
+	b.add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Kind: "work", Title: "w"})) // 4
+	// The yielding call saw through 4; t1 finishes while it is in flight.
+	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t1", Status: "completed", Summary: "done"}).WithTask("t1"))               // 5
+	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 4})) // 6
+	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting for t1"}))                                      // 7
+	st := Replay(b.events)
+	if st.Idle() {
+		t.Fatal("a yield that predates an unseen task result must not make the session idle")
+	}
+	// Once a later call has seen everything, a yield counts.
+	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c2", "yield", `{}`)}, SeenSeq: 7}))
+	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "finished"}))
+	if st = Replay(b.events); !st.Idle() || !st.LastYield.Done {
+		t.Fatal("a yield after seeing everything must idle the session")
 	}
 }

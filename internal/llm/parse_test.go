@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -61,8 +62,8 @@ func TestMalformedArgsAreReported(t *testing.T) {
 	if _, err := ArgsObject(raw); err == nil {
 		t.Fatal("expected an error for truncated JSON")
 	}
-	if argsString(raw) != `{"path": "a.txt", "content": "unterminated` {
-		t.Fatalf("replay should show the raw text, got %s", argsString(raw))
+	if replay := argsString(raw); !json.Valid([]byte(replay)) || !strings.Contains(replay, "_malformed") {
+		t.Fatalf("replay must be valid JSON carrying the malformed text, got %s", replay)
 	}
 	if _, err := ArgsObject(normalizeArgs("")); err != nil {
 		t.Fatal("empty args should be an empty object")
