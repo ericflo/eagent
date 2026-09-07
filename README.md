@@ -34,6 +34,8 @@ Given the one-paragraph, dictated brief for "a modern take on Breakout" in `INST
 
 The orchestrator wrote a 9,000-token spec for the worker (architecture contract, file layout, ten brick types, test plan), the worker ran out of its call budget mid-debug and was reported as failed with its last message attached, the orchestrator verified what was on disk (unit tests green, one smoke assertion failing, no README), delegated a precise follow-up, then found and fixed a dead config value the worker had flagged, re-ran everything, and only then declared the work done. The narrator spoke three times: when the first task failed, when the follow-up finished, and a final report with paths, commands, verification results, and the one late fix.
 
+The same brief was run three more times to check consistency, once with `SIGINT` sent 200 seconds in and the session resumed with `eagent -c`. All four produced a working game with its own passing test suite. The resumed run split the build into six parallel tasks, then during its own integration pass found and fixed six bugs the workers' tests had missed (an audio-module crash, a broken tap-to-start, an unbounded multiplier), and finished with 59 rule tests, 12 physics tests, and a 26-scenario real-Chromium end-to-end suite green. A separate run with the same brief but a 20k-token rollover threshold rolled its context over ten times and still finished.
+
 Most agents are one model in a loop. eagent splits the job three ways because the three jobs pull in different directions:
 
 | Actor | Job | Context | Default model |
