@@ -263,3 +263,4 @@ select { max-width: 100%; }
   .card { padding: 12px; }
 }
 .card h3 .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .card td.nowrap { white-space: normal; overflow-wrap: anywhere; } }

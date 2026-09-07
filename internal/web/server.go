@@ -182,15 +182,15 @@ type SessionDetail struct {
 }
 
 type TaskView struct {
-	ID      string    `json:"id"`
-	Title   string    `json:"title"`
-	Kind    string    `json:"kind"`
-	Status  string    `json:"status"`
-	Summary string    `json:"summary"`
-	Turns   int       `json:"turns"`
-	Created time.Time `json:"created"`
-	Ended   time.Time `json:"ended,omitempty"`
-	Usage   UsageView `json:"usage"`
+	ID      string     `json:"id"`
+	Title   string     `json:"title"`
+	Kind    string     `json:"kind"`
+	Status  string     `json:"status"`
+	Summary string     `json:"summary"`
+	Turns   int        `json:"turns"`
+	Created time.Time  `json:"created"`
+	Ended   *time.Time `json:"ended,omitempty"` // nil while the task is running
+	Usage   UsageView  `json:"usage"`
 }
 
 type ProcView struct {
@@ -321,7 +321,12 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 	d.Question = st.Question
 	for _, id := range st.TaskOrder {
 		t := st.Tasks[id]
-		d.Tasks = append(d.Tasks, TaskView{ID: t.ID, Title: t.Title, Kind: t.Kind, Status: t.Status, Summary: t.Summary, Turns: t.Turns, Created: t.Created, Ended: t.Ended, Usage: usageView(event.ActorTask, t.Turns, t.Usage)})
+		var ended *time.Time
+		if !t.Ended.IsZero() {
+			e := t.Ended
+			ended = &e
+		}
+		d.Tasks = append(d.Tasks, TaskView{ID: t.ID, Title: t.Title, Kind: t.Kind, Status: t.Status, Summary: t.Summary, Turns: t.Turns, Created: t.Created, Ended: ended, Usage: usageView(event.ActorTask, t.Turns, t.Usage)})
 	}
 	for _, h := range st.ProcOrder {
 		p := st.Procs[h]

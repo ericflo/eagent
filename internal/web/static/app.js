@@ -28,6 +28,7 @@ const fmtDate = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocal
 const k = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n ?? 0);
 const dur = ms => ms >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%3600000)/60000)}m` : ms >= 60000 ? `${Math.floor(ms/60000)}m${Math.round((ms%60000)/1000)}s` : ms >= 1000 ? (ms/1000).toFixed(1)+'s' : `${ms}ms`;
 const money = usd => usd >= 1 ? '$' + usd.toFixed(2) : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '<$0.01' : '$0';
+const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) && d.getFullYear() > 1 ? d : null; };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
 async function api(path, opts) {
   const r = await fetch(path, Object.assign({headers: {'Content-Type': 'application/json'}}, opts));
@@ -290,7 +291,7 @@ function renderTasks(pane) {
       h('td', {class: 'num'}, t.id), h('td', {class: 'wrap'}, t.title || '(untitled)', t.kind === 'dossier' ? h('span', {class: 'badge', style: 'margin-left:6px'}, 'notes') : null),
       h('td', null, h('span', {class: 'badge ' + t.status}, t.status)), h('td', {class: 'num'}, t.turns),
       h('td', {class: 'num'}, `${k(t.usage.input)} · ${k(t.usage.output)} (${Math.round(t.usage.cache_ratio * 100)}%)`),
-      h('td', {class: 'num'}, t.ended && t.created ? dur(new Date(t.ended) - new Date(t.created)) : t.created ? dur(Date.now() - new Date(t.created)) + '…' : '')))));
+      h('td', {class: 'num'}, when(t.ended) && when(t.created) ? dur(when(t.ended) - when(t.created)) : when(t.created) ? dur(Date.now() - when(t.created)) + '…' : '')))));
   const parts = [usage, chartsCard(d)];
   parts.push(h('div', {class: 'card'}, h('h3', null, 'Tasks'), d.tasks.length ? table : h('div', {class: 'sub'}, 'Nothing delegated yet.')));
   if (d.procs.length) { const procs = S.allProcs ? d.procs : d.procs.slice(-25); parts.push(h('div', {class: 'card'}, h('h3', null, 'Processes', h('span', {class: 'sub'}, `${d.procs.length}`), d.procs.length > 25 ? h('button', {class: 'ghost small', style: 'margin-left:auto', onclick: () => { S.allProcs = !S.allProcs; renderTab(); }}, S.allProcs ? 'show recent' : 'show all') : null), h('table', null, h('tbody', null, ...procs.map(p => h('tr', null, h('td', {class: 'num'}, p.handle), h('td', null, h('span', {class: 'badge ' + p.status}, p.status + (p.status !== 'running' ? ` ${p.exit_code}` : ''))), h('td', {class: 'nowrap'}, p.task || p.actor), h('td', {class: 'wrap'}, h('code', {class: 'inline'}, clip(p.command, 120))))))))); }
@@ -306,7 +307,7 @@ function chartsCard(d) {
   const start = evs.length ? new Date(evs[0].ts).getTime() : Date.now();
   const end = Math.max(start + 1000, d.alive ? Date.now() : new Date(evs[evs.length-1].ts).getTime());
   const span = end - start;
-  const W = 900, LW = 92, RW = W - LW - 12;
+  const W = 900, LW = 124, RW = W - LW - 12;
   const x = t => LW + (Math.min(Math.max(t, start), end) - start) / span * RW;
   const rows = [];
   // orchestrator turns
@@ -314,7 +315,7 @@ function chartsCard(d) {
   for (const e of evs) { if (e.actor === 'orchestrator' && e.type === 'turn.start') open = new Date(e.ts).getTime(); if (e.actor === 'orchestrator' && e.type === 'turn.end' && open) { turns.push([open, new Date(e.ts).getTime()]); open = null; } }
   if (open) turns.push([open, end]);
   rows.push({label: 'orchestrator', bars: turns.map(([a, b]) => ({a, b, cls: 'orch'}))});
-  for (const t of d.tasks) { const a = new Date(t.created).getTime(); const b = t.ended ? new Date(t.ended).getTime() : end; rows.push({label: `${t.id} ${clip(t.title, 14)}`, bars: [{a, b, cls: t.status, title: `${t.id} ${t.title} · ${t.status} · ${dur(b - a)}`}]}); }
+  for (const t of d.tasks) { const a = when(t.created)?.getTime() ?? start; const b = when(t.ended)?.getTime() ?? end; rows.push({label: `${t.id} ${clip(t.title, 16)}`, bars: [{a, b, cls: t.status, title: `${t.id} ${t.title} · ${t.status} · ${dur(b - a)}`}]}); }
   const RH = 18, top = 22, height = top + rows.length * RH + 8;
   const g = svg('svg', {viewBox: `0 0 ${W} ${height}`, class: 'gantt', preserveAspectRatio: 'none'});
   // time axis
@@ -449,7 +450,7 @@ async function renderConfig() {
     h('div', {class: 'kv'}, ...['orchestrator', 'task', 'narrator'].flatMap(a => { const x = eff[a]; return [h('span', {class: 'k'}, a), h('span', null, h('code', {class: 'inline'}, x.model), ` · ${x.protocol} · ${x.base_url.replace(/^https?:\/\//, '')}`, x.reasoning_effort ? ` · effort ${x.reasoning_effort}` : '', x.fallback ? ` · fallback ${x.fallback.model}` : '')]; }),
       h('span', {class: 'k'}, 'task concurrency'), h('span', null, eff.task_concurrency), h('span', {class: 'k'}, 'fresh context at'), h('span', null, `${k(eff.rollover_tokens)} tokens`), h('span', {class: 'k'}, 'max task calls'), h('span', null, eff.max_task_turns)),
     h('div', {style: 'margin-top:10px'}, ...Object.entries(c.keys).sort().map(([env, on]) => h('span', {class: 'key'}, h('span', {class: 'd' + (on ? ' on' : '')}), env))));
-  const bundleRows = (list, kind) => h('table', null, h('tbody', null, ...list.map(b => h('tr', null, h('td', null, h('code', {class: 'inline'}, b.name), b.active ? h('span', {class: 'badge completed', style: 'margin-left:6px'}, 'active') : null), h('td', {class: 'wrap'}, b.models), h('td', {class: 'sub wrap'}, b.invalid ? 'invalid: ' + b.invalid : b.description),
+  const bundleRows = (list, kind) => h('table', null, h('tbody', null, ...list.map(b => h('tr', null, h('td', {class: 'nowrap'}, h('code', {class: 'inline'}, b.name), b.active ? h('span', {class: 'badge completed', style: 'margin-left:6px'}, 'active') : null), h('td', {class: 'wrap'}, b.models), h('td', {class: 'sub wrap'}, b.invalid ? 'invalid: ' + b.invalid : b.description),
     h('td', null, h('button', {onclick: () => newSessionDialog(kind === 'preset' ? {preset: b.name} : {config: b.name})}, 'New session'))))));
   const presets = h('div', {class: 'card'}, h('h3', null, 'Built-in presets'), bundleRows(c.presets, 'preset'), h('div', {class: 'sub', style: 'margin-top:8px'}, 'Use one with ', h('code', {class: 'inline'}, 'eagent --preset NAME …'), ' or ', h('code', {class: 'inline'}, 'eagent doctor --live --preset NAME'), ' to prove it works first.'));
   const bundles = h('div', {class: 'card'}, h('h3', null, 'Project bundles'), c.bundles.length ? bundleRows(c.bundles, 'bundle') : h('div', {class: 'sub'}, 'None yet.'),
@@ -470,7 +471,7 @@ async function renderConfig() {
     h('div', {style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center'}, nameIn, descIn, fromSel, saveBtn),
     h('details', null, h('summary', null, 'advanced: paste a full configuration'), jsonTa, h('div', {class: 'sub'}, 'Start from the effective configuration below; keys are never stored, only the environment variable names.')));
   const promptsCard = h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('table', null, h('tbody', null, ...c.prompts.map(p => h('tr', {class: 'row', onclick: () => promptEditor(p.name)},
-    h('td', null, h('code', {class: 'inline'}, p.name)), h('td', {class: 'sub'}, p.source === 'built-in' ? 'built-in' : 'project override'), h('td', {class: 'sub'}, {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context'}[p.name] || ''))))),
+    h('td', {class: 'nowrap'}, h('code', {class: 'inline'}, p.name)), h('td', {class: 'sub nowrap'}, p.source === 'built-in' ? 'built-in' : 'project override'), h('td', {class: 'sub'}, {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context'}[p.name] || ''))))),
     h('div', {class: 'sub', style: 'margin-top:8px'}, 'Click a prompt to read or edit it. Edits are saved as project overrides in ', h('code', {class: 'inline'}, c.files.prompts), ' and apply to new sessions.'));
   const raw = h('div', {class: 'card'}, h('h3', null, 'Effective configuration'), h('pre', {class: 'code'}, JSON.stringify(eff, null, 2)), h('div', {class: 'sub'}, 'Project file: ', h('code', {class: 'inline'}, c.files.config), ' · ', h('code', {class: 'inline'}, 'eagent config'), ' prints this.'));
   $('#main').replaceChildren(h('div', {class: 'pane'}, models, presets, bundles, saveCard, promptsCard, raw));
