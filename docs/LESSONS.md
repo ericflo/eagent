@@ -166,3 +166,21 @@ rejected and retried if it does not.
   prompts and tool lists fixed per subsession, and appends all per-call
   steering as the final message. Measured on a 55-call orchestrator session:
   93% of input tokens served from cache.
+
+## 10. What a six-preset grid taught
+
+On 2026-09-07 six presets each built the same game spec in parallel, and a
+seventh session measured the results: cost, tokens, cache ratio, rubric
+scores against the spec, and scripted Chromium play. Profiling the six event
+logs found four more habits worth fixing, and the fixes are in the history:
+steers are recorded as events so each prompt is an exact extension of the
+last, restoring OpenAI's prefix cache (`fb9bd9d`); every actor has a route
+fallback and a billing failure is never retried (`95b364a`); unchanged
+re-reads and re-viewed screenshots are curbed, and an orchestrator doing the
+workers' job is told to delegate (`d08c0d4`); and a gateway 404 "no endpoints
+support image input" is treated as an image rejection and falls back to text
+(`4b8e277`). The exercise also left an open question: a playable game
+existed after 15 minutes and the run spent another 2 hours 50 minutes on
+polish passes because the prompt said "relentlessly" and nothing in the
+harness signals diminishing returns. The full grid, with costs and evidence,
+is [docs/breakout-grid.md](breakout-grid.md).

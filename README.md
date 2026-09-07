@@ -36,6 +36,8 @@ The orchestrator wrote a 9,000-token spec for the worker (architecture contract,
 
 The same brief was run three more times to check consistency, once with `SIGINT` sent 200 seconds in and the session resumed with `eagent -c`. All four produced a working game with its own passing test suite. The resumed run split the build into six parallel tasks, then during its own integration pass found and fixed six bugs the workers' tests had missed (an audio-module crash, a broken tap-to-start, an unbounded multiplier), and finished with 59 rule tests, 12 physics tests, and a 26-scenario real-Chromium end-to-end suite green. A separate run with the same brief but a 20k-token rollover threshold rolled its context over ten times and still finished.
 
+The same brief was then run on six presets at once, from a $0.71 five-minute build to a $24.80 three-hour one, and the six results were measured, played and judged side by side: [docs/breakout-grid.md](docs/breakout-grid.md) has the full grid — the cost and quality tables, the rubric with evidence, screenshots of every build, and what profiling the six runs changed in the harness.
+
 Most agents are one model in a loop. eagent splits the job three ways because the three jobs pull in different directions:
 
 | Actor | Job | Context | Default model |
@@ -256,6 +258,7 @@ Every session reports per-actor input, output, and cached tokens; the web UI sho
 ## More
 
 - [docs/LESSONS.md](docs/LESSONS.md): what broke in four earlier implementations of this design, and what eagent does about each failure.
+- [docs/breakout-grid.md](docs/breakout-grid.md): six presets building the same game in parallel, measured, played and judged side by side.
 - [docs/EVENTS.md](docs/EVENTS.md): the event log schema and which actor sees which events.
 - [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): the design specification, requirement by requirement, with the two deliberate deviations.
 
