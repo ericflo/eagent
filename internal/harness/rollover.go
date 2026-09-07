@@ -73,7 +73,7 @@ func (r *Runtime) finishRollover(taskID, status, summary string) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, event.DossierData{TaskID: taskID, Text: text}))
 	r.rolling = false
-	r.wakeNarrator("a new subsession started with a dossier")
+	r.wakeNarrator("the orchestrator restarted with a fresh context and its working notes")
 }
 
 func rejectReason(status string, chars, cites int) string {

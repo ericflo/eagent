@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -206,9 +207,19 @@ func (r *Runtime) narratorTurn(reason string) string {
 	return "done"
 }
 
+// leakedToken matches provider control markup that occasionally escapes into
+// model text, e.g. DeepSeek's <｜DSML｜…> tool markup or <|im_end|>.
+var leakedToken = regexp.MustCompile(`</?[｜|][^<>]{0,80}>`)
+
+// cleanNarration removes leaked control tokens and trailing junk.
+func cleanNarration(text string) string {
+	text = leakedToken.ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
+
 // deliverMessage records and shows a narrator message.
 func (r *Runtime) deliverMessage(text string) {
-	text = strings.TrimSpace(text)
+	text = cleanNarration(text)
 	r.sync(func() {
 		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text}))
 		r.narrLastSaid = text

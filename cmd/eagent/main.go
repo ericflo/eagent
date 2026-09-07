@@ -46,6 +46,8 @@ Usage:
   eagent config save NAME [desc]     save the effective configuration as a named bundle
   eagent config show NAME            print a bundle's effective configuration
   eagent prompts [export|show NAME]  list, export, or print the actor prompts
+  eagent view <id> [--actor narrator|orchestrator|task --task tN] [--until SEQ]
+                                     print the exact prompt an actor would receive (for prompt work)
   eagent version
 
 Flags (before positional arguments):
@@ -86,6 +88,8 @@ func run(args []string) int {
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
 		task     = fs.String("task", "", "filter by task id")
+		until    = fs.Int64("until", 0, "view: only events up to this seq")
+		asJSON   = fs.Bool("as-json", false, "view: machine-readable output")
 		live     = fs.Bool("live", false, "doctor: make a small live call per actor")
 		write    = fs.Bool("write", false, "config: write config.json")
 		helpFlag = fs.Bool("h", false, "help")
@@ -109,7 +113,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "version", "help":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -141,6 +145,11 @@ func run(args []string) int {
 		return cmdPrompts(project, rest)
 	case "serve":
 		return cmdServe(project, *addr, *preset, *bundle, *verbose)
+	case "view":
+		if len(rest) < 1 {
+			return fail(errors.New("usage: eagent view <session-id> [--actor narrator] [--until SEQ]"))
+		}
+		return cmdView(project, rest[0], *actor, *task, *until, *asJSON)
 	}
 
 	cfg, err := config.LoadBundle(project, *preset, *bundle)
@@ -757,6 +766,90 @@ func cmdServe(project, addr, preset, bundle string, verbose bool) int {
 	fmt.Fprintf(os.Stderr, "eagent web UI for %s\n  http://%s/\n", project, displayAddr(addr))
 	if err := web.ListenAndServe(ctx, addr, ws); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fail(err)
+	}
+	return 0
+}
+
+// cmdView renders an actor's prompt from the log, the way the runtime would.
+func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
+	info, err := store.Resolve(store.Root(project), ref)
+	if err != nil {
+		return fail(err)
+	}
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		return fail(err)
+	}
+	if until > 0 {
+		var cut []event.Event
+		for _, ev := range evs {
+			if ev.Seq <= until {
+				cut = append(cut, ev)
+			}
+		}
+		evs = cut
+	}
+	st := state.Replay(evs)
+	set, err := prompts.Load(project)
+	if err != nil {
+		return fail(err)
+	}
+	cfg, _ := config.Load(project, "")
+	if actor == "" {
+		actor = event.ActorNarrator
+	}
+	var system string
+	var msgs []llm.Message
+	switch actor {
+	case event.ActorNarrator:
+		persona := strings.TrimSpace(cfg.Persona)
+		if persona == "" {
+			persona = strings.TrimSpace(set.Render("PERSONA.md", nil))
+		}
+		system = set.Render("NARRATOR.md", prompts.NarratorData{Persona: persona})
+		msgs = st.NarratorView(nil)
+	case event.ActorOrchestrator:
+		system = set.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: st.Cwd, Instructions: cfg.Instructions, Interactive: st.Interactive})
+		msgs = st.OrchestratorView()
+	case event.ActorTask:
+		if task == "" {
+			return fail(errors.New("--task is required for the task view"))
+		}
+		system = set.Render("TASK-WORKER.md", prompts.TaskData{Project: st.Cwd, Instructions: cfg.Instructions})
+		msgs = st.TaskView(task)
+	default:
+		return fail(fmt.Errorf("unknown actor %q", actor))
+	}
+	if asJSON {
+		type msg struct {
+			Role      string           `json:"role"`
+			Text      string           `json:"text,omitempty"`
+			ToolCalls []event.ToolCall `json:"tool_calls,omitempty"`
+			Results   []llm.ToolResult `json:"results,omitempty"`
+		}
+		out := struct {
+			System   string `json:"system"`
+			Messages []msg  `json:"messages"`
+		}{System: system}
+		for _, m := range msgs {
+			out.Messages = append(out.Messages, msg{Role: m.Role, Text: m.Text, ToolCalls: m.ToolCalls, Results: m.Results})
+		}
+		raw, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(raw))
+		return 0
+	}
+	fmt.Printf("=== system (%d chars) ===\n%s\n", len(system), system)
+	for i, m := range msgs {
+		fmt.Printf("\n=== %d %s ===\n", i+1, m.Role)
+		if m.Text != "" {
+			fmt.Println(m.Text)
+		}
+		for _, tc := range m.ToolCalls {
+			fmt.Printf("[tool call %s %s %s]\n", tc.ID, tc.Name, string(tc.Args))
+		}
+		for _, r := range m.Results {
+			fmt.Printf("[result %s %s] %s\n", r.CallID, r.Name, r.Output)
+		}
 	}
 	return 0
 }

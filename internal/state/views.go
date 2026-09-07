@@ -348,7 +348,7 @@ func Observe(ev event.Event, maxChars int) string {
 	case event.Dossier:
 		var d event.DossierData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s [new subsession] The orchestrator's context was reset. Dossier it received:\n%s", ts, clip(d.Text, maxChars*3))
+		return fmt.Sprintf("%s [fresh context] The orchestrator restarted with a fresh context; its working notes, carried over from the log:\n%s", ts, clip(d.Text, maxChars*3))
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
@@ -395,7 +395,7 @@ func Observe(ev event.Event, maxChars int) string {
 		var d event.TaskCreateData
 		_ = ev.Decode(&d)
 		if d.Kind == "dossier" {
-			return fmt.Sprintf("%s the harness asked the task worker to write a dossier of the session so far (%s)", ts, d.ID)
+			return fmt.Sprintf("%s the orchestrator's context is being reset; a worker is writing up the working notes it will restart from (%s)", ts, d.ID)
 		}
 		return fmt.Sprintf("%s task %s delegated: %s\n  %s", ts, d.ID, d.Title, clip(d.Description, maxChars))
 	case event.TaskEnd:

@@ -216,6 +216,10 @@ Two failure modes seen in the wild get special treatment. A stream that closes b
 
 Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are added to the orchestrator's and worker's system prompts.
 
+### The narrator's voice
+
+The narrator has a character rather than a register: the colleague who kept the build going while you were away and is now catching you up over your shoulder. It leads with what you'd want to know, keeps a path or a number in most sentences because that's what makes the news usable, says what it checked itself versus what a worker told it, has opinions about what turned out well, and delivers bad news in the same calm voice as good. No greetings, no sign-offs, no catchphrases, no labelled fields. A list of machine-prose habits (announced sincerity, staged openers, "not just X but Y", "no X, no Y", hedging filler, participle tails, the usual vocabulary) is banned outright in `NARRATOR.md`, and the persona was tuned against the narrator model on real session transcripts until the messages read like a person wrote them. Replace `PERSONA.md` in your project's prompt overrides to give it a different voice.
+
 ### Prompts
 
 The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`, `TASK-WORKER.md`, `NARRATOR.md`, `PERSONA.md` (the narrator's voice), and `COMPACTION-DOSSIER.md` (the dossier task). `eagent prompts` lists them with their sources; `eagent prompts export` copies them into `.agents/eagent/prompts/` where any edited file overrides the built-in one for that project. They are Go templates with a handful of variables (`{{.Project}}`, `{{.Instructions}}`, `{{.Interactive}}`, `{{.Persona}}`, …).

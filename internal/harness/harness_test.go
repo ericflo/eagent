@@ -795,3 +795,16 @@ func TestTwoSessionsInOneProject(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanNarrationStripsLeakedTokens(t *testing.T) {
+	in := "Done. The file is in place.</｜DSML｜parameter>"
+	if got := cleanNarration(in); got != "Done. The file is in place." {
+		t.Fatalf("got %q", got)
+	}
+	if got := cleanNarration("ok<|im_end|>"); got != "ok" {
+		t.Fatalf("got %q", got)
+	}
+	if got := cleanNarration("a < b and b > c"); got != "a < b and b > c" {
+		t.Fatalf("ordinary text altered: %q", got)
+	}
+}

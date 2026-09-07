@@ -104,6 +104,9 @@ const (
 func steerNarrator(st *state.State, now time.Time, reason string, interactive bool, lastMessage string, mustSpeak bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] You were woken because: %s.", now.Local().Format("15:04:05"), reason)
+	if !st.Started.IsZero() {
+		fmt.Fprintf(&b, " The session has been running for %s.", since(st.Started, now))
+	}
 	switch reason {
 	case wakeFinal:
 		if mustSpeak {
