@@ -105,7 +105,7 @@ Both continuous actors are built so their prompts grow only at the end:
 - Everything that changes per call (time, running tasks, context usage, wake reason) is a steering message appended as the *final* user turn and never persisted.
 - Native reasoning state (OpenAI Responses encrypted reasoning items, Anthropic thinking blocks) is stored and replayed verbatim. OpenAI gets a `prompt_cache_key`; Anthropic gets `cache_control` breakpoints; Together caches automatically.
 
-In practice the orchestrator's cached share sits above 60% from the second call on.
+In practice the orchestrator's cached share has been 85–93% of input tokens over full sessions.
 
 ### Dossiers instead of compaction
 
@@ -142,7 +142,7 @@ Not yet read/summarized: … canon-evidence.md — 1728 lines, NOT READ (needs ~
 - Prior dossier (covers subsession 1 only): 1788751587025.jsonl:26-29 — this dossier supersedes it.
 ```
 
-The orchestrator, told in its steering message that it was at 19k of 20k tokens, wrote its reading notes to a scratch file *before* the reset so nothing was lost; the next dossier pointed at that file. Nobody programmed that. The orchestrator can `session_read` any cited range at full fidelity. Because each dossier is rebuilt from the original events, nothing decays into a summary of a summary; each one is written for the work at hand. A dossier without citations is rejected and retried once; if the worker still fails, a harness-built briefing keeps the session going. The narrator starts the new subsession from the same dossier.
+The orchestrator, told in its steering message that it was at 19k of 20k tokens, wrote its reading notes to a scratch file *before* the reset so nothing was lost; the next dossier pointed at that file. Nobody programmed that. The session went on to roll over ten times in total and finished the job: eight summaries and an index, every link resolving, no file summarised twice and none skipped. The orchestrator can `session_read` any cited range at full fidelity. Because each dossier is rebuilt from the original events, nothing decays into a summary of a summary; each one is written for the work at hand. A dossier without citations is rejected and retried once; if the worker still fails, a harness-built briefing keeps the session going. The narrator starts the new subsession from the same dossier.
 
 ### Shell commands never block the harness
 
@@ -162,7 +162,7 @@ File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) can read anywher
   "task":         { "model": "zai-org/GLM-5.3-Flash", "reasoning_effort": "low", "…": "…" },
   "narrator":     { "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "reasoning_effort": "none", "…": "…" },
   "task_concurrency": 3,
-  "max_task_turns": 60,
+  "max_task_turns": 100,
   "narrator_tick_seconds": 90,
   "rollover_tokens": 150000,
   "bash_wait_seconds": 20,

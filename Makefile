@@ -14,3 +14,12 @@ check: test
 
 install:
 	go install ./cmd/eagent
+
+# Cross-platform binaries (no cgo, so plain GOOS/GOARCH builds work).
+release:
+	mkdir -p dist
+	GOOS=linux  GOARCH=amd64 go build -ldflags "-s -w -X main.version=$(VERSION)" -o dist/eagent-linux-amd64 ./cmd/eagent
+	GOOS=linux  GOARCH=arm64 go build -ldflags "-s -w -X main.version=$(VERSION)" -o dist/eagent-linux-arm64 ./cmd/eagent
+	GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=$(VERSION)" -o dist/eagent-darwin-arm64 ./cmd/eagent
+	GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X main.version=$(VERSION)" -o dist/eagent-darwin-amd64 ./cmd/eagent
+	cd dist && sha256sum eagent-* > SHA256SUMS
