@@ -248,6 +248,7 @@ func (r *Runtime) observer(actor, task string) *llm.Observer {
 		Text:      func(d string) { r.ui.Stream(actor, task, "text", d) },
 		Reasoning: func(d string) { r.ui.Stream(actor, task, "reasoning", d) },
 		ToolCall:  func(n string) { r.ui.Stream(actor, task, "tool", n) },
+		Reset:     func() { r.ui.Stream(actor, task, "", "") },
 	}
 }
 

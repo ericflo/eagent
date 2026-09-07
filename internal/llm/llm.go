@@ -126,6 +126,15 @@ type Observer struct {
 	Text      func(delta string)
 	Reasoning func(delta string)
 	ToolCall  func(name string)
+	// Reset is called before a retry so a display does not keep showing
+	// progress from the failed attempt.
+	Reset func()
+}
+
+func (o *Observer) reset() {
+	if o != nil && o.Reset != nil {
+		o.Reset()
+	}
 }
 
 func (o *Observer) text(s string) {
@@ -289,6 +298,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if c.OnRetry != nil {
 			c.OnRetry(attempt, err, wait)
 		}
+		obs.reset()
 		select {
 		case <-time.After(wait):
 		case <-ctx.Done():
