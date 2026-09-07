@@ -257,8 +257,10 @@ func TestEndToEndDelegationAndFinish(t *testing.T) {
 	if got := s.count("orch"); got != 3 {
 		t.Fatalf("orchestrator calls = %d, want 3", got)
 	}
-	// The narrator must not have been woken without anything new to see.
-	if n := s.count("narr"); n > 3 {
+	// The narrator must not have been woken without anything new to see:
+	// at most the user's message (acknowledged at once), the delegation, the
+	// task's end, and the final report.
+	if n := s.count("narr"); n > 4 {
 		t.Fatalf("narrator called %d times", n)
 	}
 }
