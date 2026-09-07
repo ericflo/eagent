@@ -35,6 +35,12 @@ type fakePhone struct {
 	cond      *sync.Cond
 	files     map[string]fakeFile // attachment id -> bytes served to the agent
 	uploaded  []fakeFile          // files the agent posted
+	features  []string            // what /me advertises
+	activity  []map[string]any    // bodies of POST …/activity
+	cleared   int                 // DELETE …/activity calls
+	keys      map[string]string   // client_key -> message id
+	dupes     int                 // posts answered from a known key
+	metas     []map[string]any    // PATCH thread meta bodies
 }
 
 type fakeFile struct {
@@ -43,7 +49,7 @@ type fakeFile struct {
 }
 
 func newFakePhone(remote bool) *fakePhone {
-	f := &fakePhone{questions: map[string]map[string]any{}, remote: remote, files: map[string]fakeFile{}}
+	f := &fakePhone{questions: map[string]map[string]any{}, remote: remote, files: map[string]fakeFile{}, keys: map[string]string{}, features: []string{"activity", "idempotency", "dismiss", "attachments"}}
 	f.cond = sync.NewCond(&f.mu)
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
@@ -69,6 +75,14 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		for k, v := range r.MultipartForm.Value {
 			if len(v) > 0 {
 				body[k] = v[0]
+			}
+		}
+		for _, k := range []string{"meta", "activity"} {
+			if raw, ok := body[k].(string); ok {
+				var obj map[string]any
+				if json.Unmarshal([]byte(raw), &obj) == nil {
+					body[k] = obj
+				}
 			}
 		}
 		var atts []map[string]any
@@ -102,14 +116,31 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", `inline; filename="`+file.name+`"`)
 		_, _ = w.Write(file.data)
 	case path == "/api/v1/me":
-		_ = json.NewEncoder(w).Encode(map[string]any{"auth": "token", "base_url": f.srv.URL, "push_enabled": true, "version": "test", "user": map[string]any{"display_name": "Tester", "email": "t@x", "settings": map[string]any{"notify_all_messages": false, "remote_mode": f.remote}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"auth": "token", "base_url": f.srv.URL, "push_enabled": true, "version": "test", "features": f.features, "user": map[string]any{"display_name": "Tester", "email": "t@x", "settings": map[string]any{"notify_all_messages": false, "remote_mode": f.remote}}})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodPost:
 		f.mu.Lock()
+		if key, _ := body["client_key"].(string); key != "" {
+			if id, ok := f.keys[key]; ok {
+				f.dupes++
+				var orig map[string]any
+				for _, m := range f.messages {
+					if m["id"] == id {
+						orig = m
+					}
+				}
+				f.mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{"message": orig, "thread": map[string]any{"id": "t1"}, "created": false})
+				return
+			}
+		}
 		sender, _ := body["sender"].(string)
 		if sender == "" {
 			sender = "agent"
 		}
-		m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": sender, "body": body["body"], "format": "markdown", "importance": body["importance"], "meta": body["meta"], "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": sender, "body": body["body"], "format": "markdown", "importance": body["importance"], "meta": body["meta"], "origin": "token", "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		if key, _ := body["client_key"].(string); key != "" {
+			f.keys[key] = m["id"].(string)
+		}
 		if m["importance"] == nil {
 			m["importance"] = "normal"
 		}
@@ -200,6 +231,29 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"question": q})
+	case strings.HasSuffix(path, "/activity") && r.Method == http.MethodPost:
+		f.mu.Lock()
+		if len(f.messages) == 0 {
+			f.mu.Unlock()
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no thread"}}`))
+			return
+		}
+		f.activity = append(f.activity, body)
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"applied": true, "thread": map[string]any{"id": "t1", "activity": map[string]any{"text": body["text"], "kind": body["kind"]}}})
+	case strings.HasSuffix(path, "/activity") && r.Method == http.MethodDelete:
+		f.mu.Lock()
+		f.cleared++
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{"id": "t1"}})
+	case strings.HasPrefix(path, "/api/v1/threads/") && r.Method == http.MethodPatch:
+		f.mu.Lock()
+		if meta, ok := body["meta"].(map[string]any); ok {
+			f.metas = append(f.metas, meta)
+		}
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{"id": "t1"}})
 	default:
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"` + path + `"}}`))
@@ -212,7 +266,7 @@ func (f *fakePhone) userReply(text string) { f.userReplyWith(text, nil) }
 // userReplyWith is the user sending words and/or files from the phone.
 func (f *fakePhone) userReplyWith(text string, atts []map[string]any) {
 	f.mu.Lock()
-	m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "body": text, "format": "text", "importance": "normal", "meta": map[string]any{}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "origin": "session", "body": text, "format": "text", "importance": "normal", "meta": map[string]any{}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if len(atts) > 0 {
 		m["attachments"] = atts
 	}
@@ -1056,5 +1110,284 @@ func TestNarratorSteerCadence(t *testing.T) {
 	s = steerNarrator(st, time.Now(), wakePeriodic, false, true, "Building.", false, 4*time.Minute, 3*time.Minute, []string{"`npm test` (p3, task t1) has been running for 3m10s"})
 	if !strings.Contains(s, "In flight right now: `npm test`") || !strings.Contains(s, "which one, by name") {
 		t.Fatalf("inflight steer: %s", s)
+	}
+}
+
+// tokenUserMessage is what another agent (or our own mirror) posting as the
+// user looks like: sender user, origin token. The runtime must ignore it.
+func (f *fakePhone) tokenUserMessage(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.messages = append(f.messages, map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "body": text, "format": "markdown", "importance": "normal", "origin": "token", "created_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	f.cond.Broadcast()
+}
+
+// dismiss is the user declining every pending question from the app.
+func (f *fakePhone) dismiss() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	any := false
+	for _, q := range f.questions {
+		if q["status"] == "pending" {
+			q["status"] = "dismissed"
+			q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			any = true
+		}
+	}
+	f.cond.Broadcast()
+	return any
+}
+
+func (f *fakePhone) statuses() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.activity...)
+}
+
+func (f *fakePhone) clearedCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cleared }
+
+func (f *fakePhone) metaPatches() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any(nil), f.metas...)
+}
+
+// While a command runs the phone shows a "tool" status naming it (secrets
+// blanked); every post carries an idempotency key scoped to the session;
+// the thread meta says where the session runs; the status is cleared at
+// the end.
+func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "MARKER_7731") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ran it"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("bash", `{"command":"sleep 3.5; echo token=abc123 MARKER_7731"}`)}}
+		default:
+			if strings.Contains(all, "ran it") && !strings.Contains(all, "Ran it.") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Ran it."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "run it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("exit %d logs=%v", code, logs)
+	}
+	sts := fp.statuses()
+	var tool map[string]any
+	for _, a := range sts {
+		if a["kind"] == "tool" {
+			tool = a
+		}
+	}
+	if tool == nil {
+		t.Fatalf("no tool status was sent; statuses=%v", sts)
+	}
+	if tool["text"] != "Running sleep 3.5; echo token=… MARKER_7731" || tool["ttl_seconds"] != float64(90) || tool["seq"] == nil {
+		t.Fatalf("tool status = %v", tool)
+	}
+	if fp.clearedCount() < 1 {
+		t.Fatal("the status was not cleared at the end")
+	}
+	prefix := "eagent:" + rt.sess.ID + ":"
+	fp.mu.Lock()
+	posts := append([]map[string]any(nil), fp.posts...)
+	fp.mu.Unlock()
+	if len(posts) < 3 {
+		t.Fatalf("posts = %d", len(posts))
+	}
+	for _, p := range posts {
+		key, _ := p["client_key"].(string)
+		if !strings.HasPrefix(key, prefix) {
+			t.Fatalf("post without a session-scoped key: %v", p)
+		}
+	}
+	last, _ := posts[len(posts)-1]["client_key"].(string)
+	if !strings.HasSuffix(last, ":end:done:0") {
+		t.Fatalf("end note key = %s", last)
+	}
+	metas := fp.metaPatches()
+	if len(metas) == 0 || metas[0]["cwd"] != project || metas[0]["host"] == "" || metas[0]["model"] == "" {
+		t.Fatalf("thread meta = %v", metas)
+	}
+}
+
+// A "user" message posted with a token (another agent's mirror) is not the
+// user speaking; a dismissed question is answered with the standing
+// instruction to decide, and the session goes on to finish.
+func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "dismissed this question"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"decided blue"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{
+					tc("note", `{"text":"I need the user to pick a colour: red or blue."}`),
+					tc("yield", `{"done":false,"reason":"waiting for the colour decision"}`),
+				}}
+			}
+		default:
+			switch {
+			case strings.Contains(all, "Went with blue"):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "decided blue"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Went with blue."}`)}}
+			case strings.Contains(all, "pick a colour") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	fp.tokenUserMessage("red")
+	select {
+	case code := <-done:
+		t.Fatalf("session ended (%d) on a token-origin message", code)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if !fp.dismiss() {
+		t.Fatal("nothing to dismiss")
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			_, _, logs := ui.snapshot()
+			t.Fatalf("exit %d logs=%v", code, logs)
+		}
+	case <-time.After(25 * time.Second):
+		t.Fatal("session did not finish after the dismissal")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.EndReason != "done" {
+		t.Fatalf("end reason = %s", st.EndReason)
+	}
+	var answers []event.UserAnswerData
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.UserMessage:
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if strings.Contains(d.Text, "red") {
+				t.Fatalf("a token-origin message became user input: %+v", d)
+			}
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			answers = append(answers, d)
+		}
+	}
+	if len(answers) != 1 || answers[0].Source != "finalechat" || answers[0].Text != dismissedAnswer {
+		t.Fatalf("answers = %+v", answers)
+	}
+	if got := fp.postsWhere(func(p map[string]any) bool { return p["body"] == "red" }); len(got) != 0 {
+		t.Fatalf("the token message was mirrored back: %v", got)
+	}
+}
+
+// An older deployment that lists no features gets plain posts: no status
+// calls, no idempotency keys, and everything else still works.
+func TestPhoneWithoutFeaturesSendsNoStatusOrKeys(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"nothing to do"}`)}}
+		}
+		if strings.Contains(all, "nothing to do") && !strings.Contains(all, "Nothing to do.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Nothing to do."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	fp.features = []string{}
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("exit %d logs=%v", code, logs)
+	}
+	if n := len(fp.statuses()); n != 0 || fp.clearedCount() != 0 {
+		t.Fatalf("status calls against a server without the feature: %d set, %d cleared", n, fp.clearedCount())
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	if len(fp.posts) < 2 {
+		t.Fatalf("posts = %d", len(fp.posts))
+	}
+	for _, p := range fp.posts {
+		if _, has := p["client_key"]; has {
+			t.Fatalf("client_key sent to a server without idempotency: %v", p)
+		}
+	}
+}
+
+func TestRedactSecrets(t *testing.T) {
+	cases := map[string]string{
+		"curl -H 'Authorization: Bearer fc_AbCdEf0123456789xyz' https://x.test": "curl -H 'Authorization: bearer …' https://x.test",
+		"OPENAI_API_KEY=sk-live-0123456789abcdef go test ./...":                 "OPENAI_API_KEY=… go test ./...",
+		"psql postgres://eric:hunter2@db.example/app -c 'select 1'":             "psql postgres://…@db.example/app -c 'select 1'",
+		"tool --api-key abc123 --password 'p w' run":                            "tool --api-key … --password … run",
+		"echo token: xyz && export DB_PASSWORD=\"s3cret\"":                      "echo token: … && export DB_PASSWORD=…",
+		"git push origin main":                          "git push origin main",
+		"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 in a log": "… in a log",
+	}
+	for in, want := range cases {
+		if got := redactSecrets(in); got != want {
+			t.Errorf("redact(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	if got := oneLine("  a\n\n b   c ", 3); got != "a …" {
+		t.Errorf("oneLine = %q", got)
 	}
 }

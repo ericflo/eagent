@@ -68,7 +68,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 | `route` | harness | `actor`, `provider`, `base_url`, `model`, `reason` | A fallback route took over; the reducer updates the actor's model and endpoint. |
 | `tool.result` (images) | any | `images` on a `view_image` result: the pictures shown to the model right after it, copied under `<session>/attachments/` | See `view_image`. |
 | `steer` | orchestrator, task, narrator | `text` | The harness's per-call instruction to that actor (wake reason, context budget, what to do now), recorded right before the call so each prompt is a strict extension of the previous one and provider prompt caches keep hitting. Not observed by the narrator. |
-| `phone.thread` | harness | `thread_id`, `external_id`, `base_url`, `remote_mode` | The session is mirrored to the user's phone through Finalechat; `external_id` is `eagent:<session>`. |
+| `phone.thread` | harness | `thread_id`, `external_id`, `base_url`, `remote_mode` | The session is mirrored to the user's phone through Finalechat; `external_id` is `eagent:<session>`. Recorded again, with the new `remote_mode`, when the user flips remote mode mid-session. The phone's live status line is not an event: it is derived from the state and never written to the log. |
 | `error` | harness | `where`, `text` | A model call failed after retries; the narrator sees it. |
 
 ## Who sees what

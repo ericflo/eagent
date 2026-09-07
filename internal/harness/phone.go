@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,18 @@ type phone struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	queue  chan func(context.Context)
+
+	sid     string // the eagent session id
+	resumes int    // how many times the session had been resumed when the mirror started
+
+	// The status line (see phonestatus.go): want is what the loop last
+	// derived, sent is what the server shows, stats feed the thread meta.
+	features map[string]bool
+	want     finalechat.Activity
+	sent     finalechat.Activity
+	sentAt   time.Time
+	stats    phoneStats
+	wake     chan struct{}
 
 	mu         sync.Mutex
 	posted     map[string]bool   // message ids we created (skipped on poll)
@@ -71,6 +84,7 @@ func (r *Runtime) startPhone() {
 		client: client, ref: finalechat.Ref("eagent:" + r.sess.ID),
 		title: filepath.Base(r.opts.Project), agent: fc.AgentName(),
 		timeout: fc.QuestionTimeout(), mirror: fc.Mirror(),
+		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
 		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, gone: map[string]bool{},
 	}
@@ -94,6 +108,10 @@ func (r *Runtime) startPhone() {
 			}
 		}
 	}
+	models := map[string]string{}
+	for k, v := range r.st.Models {
+		models[k] = v
+	}
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
@@ -106,6 +124,7 @@ func (r *Runtime) startPhone() {
 		}
 		p.mu.Lock()
 		p.remote = me.User.Settings.RemoteMode
+		p.features = featureSet(me.Features)
 		p.mu.Unlock()
 		body := "eagent session started here."
 		if resumed {
@@ -114,7 +133,7 @@ func (r *Runtime) startPhone() {
 		if strings.TrimSpace(prompt) != "" {
 			body = prompt
 		}
-		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "session_id": r.sess.ID}}
+		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
 		if strings.TrimSpace(prompt) != "" {
 			req.Sender, req.Format = "user", "markdown"
 		}
@@ -130,6 +149,9 @@ func (r *Runtime) startPhone() {
 		p.lastID = msg.ID
 		p.threadID = thread.ID
 		p.mu.Unlock()
+		// Thread meta the app renders: where the session runs and on what.
+		host, _ := os.Hostname()
+		_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: map[string]any{"cwd": r.opts.Project, "host": host, "model": models["orchestrator"]}})
 		remote := p.isRemote()
 		r.post(func() {
 			r.append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: thread.ID, ExternalID: strings.TrimPrefix(p.ref, "ext:"), BaseURL: p.client.BaseURL, RemoteMode: remote}))
@@ -145,8 +167,9 @@ func (r *Runtime) startPhone() {
 				}
 			})
 		}
-		p.wg.Add(1)
+		p.wg.Add(2)
 		go p.poll(r)
+		go p.keeper(r)
 	})
 }
 
@@ -175,6 +198,9 @@ func (p *phone) worker() {
 // close posts the closing note and waits briefly for the queue to drain.
 func (p *phone) close(reason string) {
 	p.enqueue(func(ctx context.Context) {
+		if p.has("activity") {
+			_ = p.client.ClearActivity(ctx, p.ref)
+		}
 		body := "eagent session ended (" + reason + ")."
 		switch reason {
 		case "done":
@@ -184,7 +210,7 @@ func (p *phone) close(reason string) {
 		case "interrupted":
 			body = "eagent was interrupted. Resume the session to continue."
 		}
-		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "reason": reason}})
+		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "reason": reason}, ClientKey: p.key("end", reason, strconv.Itoa(p.resumes))})
 	})
 	done := make(chan struct{})
 	go func() {
@@ -216,6 +242,8 @@ func boolPtr(b bool) *bool { return &b }
 
 // observe mirrors a newly recorded event. Loop goroutine only.
 func (p *phone) observe(r *Runtime, ev event.Event) {
+	p.noteState(r)
+	seq := strconv.FormatInt(ev.Seq, 10)
 	switch ev.Type {
 	case event.NarratorMessage:
 		var d event.NarratorMessageData
@@ -226,16 +254,21 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		text, atts := d.Text, d.Attachments
 		p.enqueue(func(ctx context.Context) {
-			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}, Files: attachmentFiles(atts)}
+			// The status the work is in right now rides on the message, so
+			// it does not blink off while the orchestrator keeps going.
+			act := p.attach()
+			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
 			msg, _, err := p.client.Post(ctx, p.ref, req)
 			if err != nil && len(req.Files) > 0 {
 				// The files may be refused (storage off, too large); the words still matter.
 				req.Files = nil
 				req.Body = text + "\n\n(" + attachmentSummary(atts) + " could not be uploaded)"
+				req.ClientKey = p.key("m", seq, "text")
 				msg, _, err = p.client.Post(ctx, p.ref, req)
 			}
 			if err == nil {
 				p.remember(msg.ID)
+				p.markSent(act)
 			}
 		})
 	case event.NarratorQuestion:
@@ -258,7 +291,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				_ = p.client.Cancel(ctx, fid)
 			}
 			if p.mirror {
-				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq}})
+				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq}, ClientKey: p.key("a", seq)})
 				if err == nil {
 					p.remember(msg.ID)
 				}
@@ -272,7 +305,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		text := d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq}})
+			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq}, ClientKey: p.key("u", seq)})
 			if err == nil {
 				p.remember(msg.ID)
 			}
@@ -291,7 +324,11 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.mu.Unlock()
 	p.enqueue(func(ctx context.Context) {
-		q, _, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}})
+		var act *finalechat.Activity
+		if p.has("activity") {
+			act = &finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL, Seq: time.Now().UnixNano()}
+		}
+		q, _, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid), Activity: act})
 		if err != nil {
 			p.mu.Lock()
 			p.gone[qid] = true
@@ -303,6 +340,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.questions[qid] = q.ID
 		p.fromPhone[q.ID] = qid
 		p.mu.Unlock()
+		p.markSent(act)
+		// A question is when remote mode matters most: re-read it now.
+		p.refreshMe(r)
 		p.wg.Add(1)
 		go p.watchQuestion(r, q.ID, qid)
 	})
@@ -353,7 +393,9 @@ func (p *phone) poll(r *Runtime) {
 			p.lastID = m.ID
 			mine := p.posted[m.ID]
 			p.mu.Unlock()
-			if mine || m.Sender != "user" {
+			if mine || m.Sender != "user" || m.Origin == "token" {
+				// Only the user speaking from the app counts; a token-posted
+				// "user" message is an agent's mirror (ours or another's).
 				continue
 			}
 			body := strings.TrimSpace(m.Body)
@@ -407,6 +449,19 @@ func (p *phone) watchQuestion(r *Runtime, fid, qid string) {
 		case "pending":
 			continue
 		case "answered":
+			return
+		case "dismissed":
+			// The user declined from the phone: the question is over, and the
+			// orchestrator hears that it must decide for itself.
+			p.mu.Lock()
+			p.gone[qid] = true
+			p.mu.Unlock()
+			r.post(func() {
+				if r.st.Question == nil || r.st.Question.ID != qid {
+					return
+				}
+				r.handleInbox(InboxMessage{Type: "answer", Text: dismissedAnswer, QuestionID: qid, From: "finalechat"})
+			})
 			return
 		default: // cancelled | expired
 			p.mu.Lock()

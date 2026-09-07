@@ -51,6 +51,11 @@ func Resolve(tokenEnv, baseURL string) (*Client, bool) {
 	if v := strings.TrimSpace(os.Getenv(tokenEnv)); v != "" {
 		c.Token, c.Source = v, "$"+tokenEnv
 	}
+	if c.BaseURL == "" {
+		// An explicit FINALECHAT_URL (a local or staging server) outranks
+		// the address remembered by the CLI's config file.
+		c.BaseURL = strings.TrimSpace(os.Getenv("FINALECHAT_URL"))
+	}
 	if c.Token == "" || c.BaseURL == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			path := filepath.Join(home, ".config", "finalechat", "config.json")
@@ -71,11 +76,7 @@ func Resolve(tokenEnv, baseURL string) (*Client, bool) {
 		}
 	}
 	if c.BaseURL == "" {
-		if v := os.Getenv("FINALECHAT_URL"); v != "" {
-			c.BaseURL = v
-		} else {
-			c.BaseURL = DefaultBaseURL
-		}
+		c.BaseURL = DefaultBaseURL
 	}
 	if c.Token == "" {
 		return nil, false
@@ -96,6 +97,10 @@ type Message struct {
 	Meta        map[string]any `json:"meta"`
 	CreatedAt   time.Time      `json:"created_at"`
 	Attachments []Attachment   `json:"attachments,omitempty"`
+	// Origin says who really wrote it: "session" (the user, from the app) or
+	// "token" (an agent, including this one mirroring terminal input). Rows
+	// from before the field existed have "".
+	Origin string `json:"origin,omitempty"`
 }
 
 // Attachment is a file on a message. URL and ThumbURL are relative to the
@@ -174,14 +179,40 @@ type Thread struct {
 	ArchivedAt       *time.Time `json:"archived_at"`
 	Muted            bool       `json:"muted"`
 	PendingQuestions int        `json:"pending_questions"`
+	Activity         *Status    `json:"activity"` // the live status line, or nil
+}
+
+// Status is the live status line the app shows as a typing indicator.
+type Status struct {
+	Text      string    `json:"text"`
+	Kind      string    `json:"kind"`
+	At        time.Time `json:"at"`
+	Since     time.Time `json:"since"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// Activity sets the status line: one short line about what the agent is
+// doing right now. It lapses after TTLSeconds unless set again, and a
+// message or question from the agent clears it unless that post carries
+// its own Activity.
+type Activity struct {
+	Text       string `json:"text"`
+	Kind       string `json:"kind,omitempty"` // thinking | working | typing | waiting | tool
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+	// Seq orders concurrent writers: a write whose seq is not above the live
+	// status's is ignored. A nanosecond timestamp works.
+	Seq int64 `json:"seq,omitempty"`
 }
 
 // Me describes the account behind a token.
 type Me struct {
-	Auth        string `json:"auth"`
-	BaseURL     string `json:"base_url"`
-	PushEnabled bool   `json:"push_enabled"`
-	Version     string `json:"version"`
+	Auth string `json:"auth"`
+	// Features lists the deployment's optional capabilities: activity,
+	// idempotency, dismiss, push, attachments. Older servers send none.
+	Features    []string `json:"features"`
+	BaseURL     string   `json:"base_url"`
+	PushEnabled bool     `json:"push_enabled"`
+	Version     string   `json:"version"`
 	User        struct {
 		DisplayName string `json:"display_name"`
 		Email       string `json:"email"`
@@ -202,6 +233,13 @@ type PostRequest struct {
 	Meta       map[string]any `json:"meta,omitempty"`
 	Title      string         `json:"title,omitempty"` // only when this creates the ext: thread
 	Agent      string         `json:"agent,omitempty"` // only when this creates the ext: thread
+	// Activity is the status to show after this message, so the line does
+	// not blink off while the agent keeps working.
+	Activity *Activity `json:"activity,omitempty"`
+	// ClientKey makes the post idempotent within the thread: a retry with the
+	// same key returns the original message instead of a duplicate. Posts
+	// carrying a key are retried on transport errors, 429, and 5xx.
+	ClientKey string `json:"client_key,omitempty"`
 	// Files are uploaded and attached in the same request (multipart).
 	Files []File `json:"-"`
 }
@@ -216,6 +254,8 @@ type AskRequest struct {
 	Meta           map[string]any `json:"meta,omitempty"`
 	Title          string         `json:"title,omitempty"`
 	Agent          string         `json:"agent,omitempty"`
+	Activity       *Activity      `json:"activity,omitempty"`
+	ClientKey      string         `json:"client_key,omitempty"`
 }
 
 // PatchRequest updates a thread.
@@ -232,13 +272,30 @@ type Error struct {
 	Status  int
 	Code    string
 	Message string
+	// RetryAfter is the server's Retry-After on a 429, when it sent one.
+	RetryAfter time.Duration
+	// RequestID is the X-Request-Id to quote when reporting a problem.
+	RequestID string
 }
+
+// Temporary reports whether a retry might succeed: 429 and 5xx.
+func (e *Error) Temporary() bool { return e.Status == 429 || e.Status >= 500 }
 
 func (e *Error) Error() string {
 	if e.Message == "" {
 		return fmt.Sprintf("finalechat: HTTP %d %s", e.Status, e.Code)
 	}
 	return fmt.Sprintf("finalechat: %s (%s)", e.Message, e.Code)
+}
+
+// Has reports whether the deployment lists a feature.
+func (m Me) Has(feature string) bool {
+	for _, f := range m.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // Ref names a thread by the external id you chose.
@@ -261,9 +318,19 @@ func (c *Client) Post(ctx context.Context, ref string, req PostRequest) (Message
 		Thread  Thread  `json:"thread"`
 	}
 	path := "/api/v1/threads/" + refPath(ref) + "/messages"
+	body, contentType, wait, err := postBody(req)
+	if err != nil {
+		return Message{}, Thread{}, err
+	}
+	err = c.send(ctx, http.MethodPost, path, contentType, body, &out, wait, req.ClientKey != "")
+	return out.Message, out.Thread, err
+}
+
+// postBody encodes a message post: JSON, or multipart when it carries files.
+func postBody(req PostRequest) (body []byte, contentType string, wait int, err error) {
 	if len(req.Files) == 0 {
-		err := c.do(ctx, http.MethodPost, path, nil, req, &out, 0)
-		return out.Message, out.Thread, err
+		raw, err := json.Marshal(req)
+		return raw, "application/json", 0, err
 	}
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -278,12 +345,17 @@ func (c *Client) Post(ctx context.Context, ref string, req PostRequest) (Message
 	field("sender", req.Sender)
 	field("title", req.Title)
 	field("agent", req.Agent)
+	field("client_key", req.ClientKey)
 	if req.Notify != nil {
 		field("notify", strconv.FormatBool(*req.Notify))
 	}
 	if req.Meta != nil {
 		raw, _ := json.Marshal(req.Meta)
 		field("meta", string(raw))
+	}
+	if req.Activity != nil {
+		raw, _ := json.Marshal(req.Activity)
+		field("activity", string(raw))
 	}
 	for _, f := range req.Files {
 		h := textproto.MIMEHeader{}
@@ -293,17 +365,91 @@ func (c *Client) Post(ctx context.Context, ref string, req PostRequest) (Message
 		}
 		pw, err := mw.CreatePart(h)
 		if err != nil {
-			return Message{}, Thread{}, err
+			return nil, "", 0, err
 		}
 		if _, err := pw.Write(f.Data); err != nil {
-			return Message{}, Thread{}, err
+			return nil, "", 0, err
 		}
 	}
 	if err := mw.Close(); err != nil {
-		return Message{}, Thread{}, err
+		return nil, "", 0, err
 	}
-	err := c.doRaw(ctx, http.MethodPost, path, nil, mw.FormDataContentType(), &buf, &out, 60)
-	return out.Message, out.Thread, err
+	return buf.Bytes(), mw.FormDataContentType(), 60, nil
+}
+
+// retrySleep waits between attempts; tests shorten it.
+var retrySleep = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// send performs one request, and when retry is set (the request is
+// idempotent) tries up to three times on transport errors, 429 (honouring
+// Retry-After) and 5xx, with a short backoff.
+func (c *Client) send(ctx context.Context, method, path, contentType string, body []byte, out any, wait int, retry bool) error {
+	attempts := 1
+	if retry {
+		attempts = 3
+	}
+	var err error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			d := time.Duration(i) * time.Second
+			var e *Error
+			if errors.As(err, &e) && e.RetryAfter > 0 {
+				d = e.RetryAfter
+				if d > 10*time.Second {
+					d = 10 * time.Second
+				}
+			}
+			if !retrySleep(ctx, d) {
+				return err
+			}
+		}
+		var rdr io.Reader
+		if body != nil {
+			rdr = bytes.NewReader(body)
+		}
+		err = c.doRaw(ctx, method, path, nil, contentType, rdr, out, wait)
+		if err == nil {
+			return nil
+		}
+		var e *Error
+		if errors.As(err, &e) && !e.Temporary() {
+			return err // the request itself is wrong; trying again will not help
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// SetActivity sets or refreshes the status line. applied is false when the
+// server kept a newer status (by seq) or the same text still had most of
+// its life. A thread that does not exist yet is a 404: post a message first.
+func (c *Client) SetActivity(ctx context.Context, ref string, a Activity) (bool, error) {
+	var out struct {
+		Applied bool `json:"applied"`
+	}
+	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/activity", nil, a, &out, 0)
+	return out.Applied, err
+}
+
+// ClearActivity drops the status line. An unknown thread is not an error.
+func (c *Client) ClearActivity(ctx context.Context, ref string) error {
+	err := c.do(ctx, http.MethodDelete, "/api/v1/threads/"+refPath(ref)+"/activity", nil, nil, nil, 0)
+	var e *Error
+	if errors.As(err, &e) && e.Status == 404 {
+		return nil
+	}
+	return err
 }
 
 // Download fetches an attachment by its relative URL (or id) into w and
@@ -354,7 +500,11 @@ func (c *Client) Ask(ctx context.Context, ref string, req AskRequest) (Question,
 		Question Question `json:"question"`
 		Thread   Thread   `json:"thread"`
 	}
-	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/questions", nil, req, &out, 0)
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return Question{}, Thread{}, err
+	}
+	err = c.send(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/questions", "application/json", raw, &out, 0, req.ClientKey != "")
 	return out.Question, out.Thread, err
 }
 
@@ -495,7 +645,12 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 		return fmt.Errorf("finalechat: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		e := &Error{Status: resp.StatusCode}
+		e := &Error{Status: resp.StatusCode, RequestID: resp.Header.Get("X-Request-Id")}
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 {
+				e.RetryAfter = time.Duration(secs) * time.Second
+			}
+		}
 		var env struct {
 			Error struct {
 				Code    string `json:"code"`
@@ -515,7 +670,9 @@ func (c *Client) doRaw(ctx context.Context, method, path string, query url.Value
 	}
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return fmt.Errorf("finalechat: bad response: %w", err)
+			// The server accepted the request; only the reply is unreadable.
+			// An Error with a 2xx status is never retried.
+			return &Error{Status: resp.StatusCode, Code: "bad_response", Message: "bad response: " + err.Error(), RequestID: resp.Header.Get("X-Request-Id")}
 		}
 	}
 	return nil

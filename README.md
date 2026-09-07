@@ -102,6 +102,8 @@ If you use [Finalechat](https://www.finalechat.com), eagent talks to you there t
 
 This turns `eagent -p "…"` into a headless run you can steer from anywhere: a batch session with a question open on your phone waits for the answer instead of ending. The wait is bounded by `question_timeout_seconds` (an hour by default), after which the session stops as awaiting-input and can be resumed.
 
+Between messages the phone shows what the session is doing right now: a status line ("Running go test ./…", "Working on the parser task", "Thinking about the next step", "Waiting for your answer") with how long it has been at it. It comes from the harness's own state, so it is always true: a running command names the command (credentials in it are blanked), a running task names the task and its latest step, a pending question says so. It is written at most every few seconds, refreshed before it can lapse, carried on the narrator's own messages so it never blinks off mid-work, and cleared when the session ends. Dismissing a question from the phone (declining to answer) ends the wait: the orchestrator is told you declined and to use its judgement, cautiously, and say what it chose. Every post to the phone carries an idempotency key, so a lost response is retried without duplicating the message, and rate limits are honoured. If you flip remote mode in the app mid-session, eagent notices within a few minutes and whenever it asks a question. Against an older Finalechat deployment that lacks these features, eagent simply does without them; `FINALECHAT_URL` points it at a local or staging server.
+
 It is on whenever a token is found. Turn it off per project with
 
 ```json
