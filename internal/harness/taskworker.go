@@ -85,6 +85,9 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 		if turn > maxTurns {
 			return "failed", fmt.Sprintf("stopped after %d model calls without calling complete_task. Last message from the worker: %s", maxTurns, lastText)
 		}
+		if turn == maxTurns {
+			r.recordHarnessMessage(event.ActorTask, t.ID, "This is your last call: call complete_task now with an honest report of what is done, what is verified, and what is not.")
+		}
 		var msgs []llm.Message
 		var seenSeq int64
 		var steer string
@@ -139,6 +142,9 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 			continue
 		}
 		textOnly = 0
+		if turn >= maxTurns && !hasTool(resp.ToolCalls, "complete_task") {
+			return "failed", fmt.Sprintf("used all %d model calls without calling complete_task. Last message from the worker: %s", maxTurns, lastText)
+		}
 		for _, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
 				r.recordToolResult(event.ActorTask, t.ID, tc, "interrupted", true)
@@ -174,4 +180,13 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 			r.recordHarnessMessage(event.ActorTask, t.ID, "Note: your previous response hit the output limit, so its last tool call may have been incomplete. Check the result above and redo any cut-off write in smaller pieces.")
 		}
 	}
+}
+
+func hasTool(calls []event.ToolCall, name string) bool {
+	for _, c := range calls {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }

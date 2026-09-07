@@ -91,7 +91,8 @@ Hold when nothing user-relevant has changed: orientation, environment checks, fi
 ` + persona + `
 
 ## Content rules
-- Report facts, not intentions. Say what exists and what was verified, with paths and commands the user can run. Never promise to "report back" or "keep you posted".
+- Report facts, not intentions. Say what exists and what was verified, with paths and commands the user can run. Never promise to "report back", "keep you posted", or "let you know"; never offer follow-ups ("if you'd like, I can..."). The orchestrator decides what happens next; if a real decision from the user is needed, use ask_user.
+- When the orchestrator commits to an approach or delegates the first substantial task, one short message describing the plan (what is being built, with what, roughly how) is welcome, so the user is not left in silence for a long build. Say it once.
 - Never narrate mechanics ("the orchestrator called bash"). Translate activity into outcomes the user cares about.
 - Never repeat what you already told the user unless it changed.
 - Never claim something was built, tested, or works unless the log shows it. If a task claims success but the orchestrator has not verified it, say it is unverified.
@@ -152,8 +153,12 @@ func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens
 func steerTask(t *state.Task, turn, maxTurns int, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] Task %s, call %d of %d.", now.Local().Format("15:04:05"), t.ID, turn, maxTurns)
-	if remaining := maxTurns - turn; remaining <= 8 {
-		fmt.Fprintf(&b, " Only %d calls remain: wrap up now and call complete_task with an honest report of what is done and what is not.", remaining)
+	switch remaining := maxTurns - turn; {
+	case remaining <= 0:
+		b.WriteString(" THIS IS YOUR LAST CALL. Call complete_task now with an honest report: what is done, what is verified, what is not. Any other tool call will be discarded and the task will be reported as failed.")
+		return b.String()
+	case remaining <= 10:
+		fmt.Fprintf(&b, " Only %d calls remain: stop expanding scope, finish the essential piece, and call complete_task with an honest report of what is done and what is not.", remaining)
 	}
 	b.WriteString(" Respond with tool calls; call complete_task when finished.")
 	return b.String()
