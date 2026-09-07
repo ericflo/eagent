@@ -364,6 +364,7 @@ func (t *Terminal) emitJSON(v any) {
 // Log implements harness.UI.
 func (t *Terminal) Log(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	msg = strings.ReplaceAll(strings.TrimRight(msg, "\n"), "\n", "\n  ")
 	t.write(t.err, t.dim("  "+msg)+"\n")
 }
 
