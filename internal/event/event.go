@@ -291,10 +291,13 @@ type HarnessMessageData struct {
 	Text string `json:"text"`
 }
 
-// YieldData records the orchestrator declaring it has nothing to do.
+// YieldData records the orchestrator declaring it has nothing to do. Forced
+// yields are issued by the harness (repeated failures, refusal to call tools)
+// and always make the session idle, even if unseen events arrived.
 type YieldData struct {
 	Done   bool   `json:"done"`
 	Reason string `json:"reason,omitempty"`
+	Forced bool   `json:"forced,omitempty"`
 }
 
 // RouteData records a provider routing decision (e.g. Astra fallback).

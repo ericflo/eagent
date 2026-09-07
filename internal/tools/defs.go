@@ -29,10 +29,11 @@ var shellTools = []llm.Tool{
 			"wait_seconds":{"type":"integer","description":"Wait up to this long for the command to finish before reading. Default 0, max 300."}
 		},"required":["handle"]}`),
 	def("bash_write",
-		"Send text to a running command's stdin (for prompts and REPLs). Set close=true to close stdin (send EOF).",
+		"Send a line to a running command's stdin (for prompts and REPLs). A newline is appended unless the text already ends with one (set raw=true to send bytes exactly). Set close=true to close stdin (send EOF) afterwards.",
 		`{"type":"object","properties":{
 			"handle":{"type":"string"},
-			"input":{"type":"string","description":"Text to write. Include a trailing newline to submit a line."},
+			"input":{"type":"string","description":"Text to send; submitted as a line."},
+			"raw":{"type":"boolean","description":"Send input exactly as given, without appending a newline."},
 			"close":{"type":"boolean"}
 		},"required":["handle"]}`),
 	def("bash_kill", "Terminate a running command and its whole process group.",

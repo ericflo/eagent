@@ -218,3 +218,15 @@ func TestStaleYieldDoesNotIdle(t *testing.T) {
 		t.Fatal("a yield after seeing everything must idle the session")
 	}
 }
+
+func TestForcedYieldAlwaysIdles(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
+	// No assistant event ever succeeded (every model call failed), then the
+	// harness forces a yield: the session must be idle, not loop.
+	b.add(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: "recover"}))
+	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "failed"}))
+	if st := Replay(b.events); !st.Idle() {
+		t.Fatal("forced yield must idle the session")
+	}
+}

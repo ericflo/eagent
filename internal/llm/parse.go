@@ -126,3 +126,29 @@ func coerceValue(v string) any {
 	}
 	return v
 }
+
+// RepairLeakedArgs fixes a GLM failure mode where the model's native argument
+// markup leaks inside a JSON string value, e.g.
+// {"tasks":"[\"t1\"]<arg_key>timeout_seconds</arg_key><arg_value>600</arg_value>"}.
+// The value is cut at the first tag and the remaining key/value pairs are
+// added as separate arguments. It returns true if anything changed.
+func RepairLeakedArgs(obj map[string]any) bool {
+	changed := false
+	for k, v := range obj {
+		s, ok := v.(string)
+		if !ok || !strings.Contains(s, "<arg_key>") {
+			continue
+		}
+		cut := strings.Index(s, "<arg_key>")
+		head := strings.TrimSpace(s[:cut])
+		obj[k] = coerceValue(head)
+		for _, kv := range argKeyValue.FindAllStringSubmatch(s[cut:], -1) {
+			key := strings.TrimSpace(kv[1])
+			if _, exists := obj[key]; !exists {
+				obj[key] = coerceValue(strings.TrimSpace(kv[2]))
+			}
+		}
+		changed = true
+	}
+	return changed
+}

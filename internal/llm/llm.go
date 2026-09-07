@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -158,6 +159,11 @@ type Client struct {
 	// UserAgent is sent with every request. Some CDNs reject empty or
 	// library-default agents.
 	UserAgent string
+
+	// anthropicBudgeted remembers whether this model wants the older
+	// budget-style thinking parameter instead of adaptive thinking.
+	anthropicBudgeted atomic.Bool
+	anthropicRetried  atomic.Bool
 }
 
 // NewClient returns a client with sensible defaults.

@@ -59,7 +59,22 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 	}
 	strs := func(k string) []string {
 		var out []string
-		if arr, ok := args[k].([]any); ok {
+		v := args[k]
+		if s, ok := v.(string); ok {
+			// Some models stringify arrays: "[\"t1\"]" or "t1, t2".
+			var arr []any
+			if err := json.Unmarshal([]byte(s), &arr); err == nil {
+				v = arr
+			} else {
+				for _, part := range strings.Split(s, ",") {
+					if part = strings.TrimSpace(part); part != "" {
+						out = append(out, part)
+					}
+				}
+				return out
+			}
+		}
+		if arr, ok := v.([]any); ok {
 			for _, x := range arr {
 				if s, ok := x.(string); ok {
 					out = append(out, s)
@@ -89,11 +104,15 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		if !ok {
 			return "no such process " + str("handle"), true
 		}
-		if err := p.Write(str("input"), boolean("close")); err != nil {
+		input := str("input")
+		if input != "" && !boolean("raw") && !strings.HasSuffix(input, "\n") {
+			input += "\n"
+		}
+		if err := p.Write(input, boolean("close")); err != nil {
 			return err.Error(), true
 		}
-		time.Sleep(300 * time.Millisecond)
-		return r.pollBash(c, str("handle"), 0)
+		// Give the program a moment to react, then report.
+		return r.pollBash(c, str("handle"), 2)
 	case "bash_kill":
 		p, ok := r.ownedProc(c, str("handle"))
 		if !ok {

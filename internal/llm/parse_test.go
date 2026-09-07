@@ -87,3 +87,16 @@ func TestAPIErrorClassification(t *testing.T) {
 		t.Fatal("503 must retry")
 	}
 }
+
+func TestRepairLeakedArgs(t *testing.T) {
+	obj, err := ArgsObject(json.RawMessage(`{"tasks":"[\"t1\"]<arg_key>timeout_seconds</arg_key><arg_value>600</arg_value>"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj["timeout_seconds"] != int64(600) {
+		t.Fatalf("timeout not recovered: %v", obj)
+	}
+	if arr, ok := obj["tasks"].([]any); !ok || len(arr) != 1 || arr[0] != "t1" {
+		t.Fatalf("tasks not recovered: %#v", obj["tasks"])
+	}
+}

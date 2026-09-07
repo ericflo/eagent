@@ -90,7 +90,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		reason = ""
 		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{
-			System:   orchestratorSystem(r.projectPath(), r.cfg.Instructions),
+			System:   orchestratorSystem(r.projectPath(), r.cfg.Instructions, r.opts.Interactive),
 			Messages: msgs, Tools: r.orchTools, CacheKey: r.sess.ID + "-orchestrator",
 		}
 		resp, err := r.completeOrchestrator(ctx, req)
@@ -122,7 +122,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 			}
 			// Pause the session rather than spin: tell the narrator, yield.
 			r.sync(func() {
-				r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "the model call failed repeatedly: " + shortErr(err) + ". Resume the session to retry."}))
+				r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "the model call failed repeatedly: " + shortErr(err) + ". Resume the session to retry."}))
 				r.wakeNarrator(wakeError)
 			})
 			return "error"
@@ -140,7 +140,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 			nudges++
 			if nudges > 2 {
 				r.sync(func() {
-					r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "orchestrator stopped calling tools: " + firstLine(strings.TrimSpace(resp.Text), 200)}))
+					r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "orchestrator stopped calling tools: " + firstLine(strings.TrimSpace(resp.Text), 200)}))
 				})
 				return "yield"
 			}

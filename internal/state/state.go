@@ -372,7 +372,7 @@ func (s *State) Apply(ev event.Event) {
 	case event.Yield:
 		var d event.YieldData
 		_ = ev.Decode(&d)
-		if s.lastWakeSeq > s.lastOrchSeen {
+		if s.lastWakeSeq > s.lastOrchSeen && !d.Forced {
 			// Something arrived while the yielding call was in flight; the
 			// orchestrator has not seen it, so it is not idle.
 			return

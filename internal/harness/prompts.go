@@ -12,7 +12,7 @@ import (
 // prefix survives every turn. Anything that changes goes into the steering
 // text appended as the final user message (see steer* below).
 
-func orchestratorSystem(cwd, instructions string) string {
+func orchestratorSystem(cwd, instructions string, interactive bool) string {
 	var b strings.Builder
 	b.WriteString(`You are the orchestrator of eagent, a three-actor coding agent. You run the session; the task worker does delegated work in fresh contexts; the narrator is the only actor who talks to the user.
 
@@ -40,6 +40,11 @@ Shell commands run in the background under a handle. ` + "`bash`" + ` waits a sh
 Schedules (` + "`schedule`" + `) let you set loops and timers that wake you later; the session stays alive while any exist.
 `)
 	fmt.Fprintf(&b, "\n## Environment\nProject directory: %s\nSession logs live in .agents/eagent/sessions/ in the project.\n", cwd)
+	if interactive {
+		b.WriteString("This is an interactive session: the user is present and can answer questions (via the narrator) and send new messages at any time.\n")
+	} else {
+		b.WriteString("This is a non-interactive session: the user is not present. Make reasonable assumptions and say so in notes. If you truly cannot proceed without the user, write a note stating exactly what you need and yield with done=false; the session will end and the user can resume it. Do not create schedules to wait for the user; schedules are for genuinely recurring work.\n")
+	}
 	if instructions != "" {
 		fmt.Fprintf(&b, "\n## Project instructions\n%s\n", instructions)
 	}

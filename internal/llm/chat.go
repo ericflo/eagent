@@ -286,6 +286,7 @@ func ArgsObject(raw json.RawMessage) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	if err := json.Unmarshal(raw, &obj); err == nil {
+		RepairLeakedArgs(obj)
 		return obj, nil
 	}
 	var s string

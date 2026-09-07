@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -46,20 +47,27 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 			body["tool_choice"] = map[string]any{"type": "none"}
 		}
 	}
+	thinking := false
 	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" {
-		budget := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
-		if budget == 0 {
-			budget = 8192
-		}
-		if budget >= maxTokens {
-			budget = maxTokens / 2
-		}
-		if budget >= 1024 {
-			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
-			// Thinking is incompatible with forced tool use.
-			if req.ToolChoice == "required" {
-				delete(body, "tool_choice")
+		thinking = true
+		if c.anthropicBudgeted.Load() {
+			// Older models: explicit budget.
+			budget := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
+			if budget == 0 {
+				budget = 8192
 			}
+			if budget >= maxTokens {
+				budget = maxTokens / 2
+			}
+			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": max(budget, 1024)}
+		} else {
+			// Current models: adaptive thinking steered by effort.
+			body["thinking"] = map[string]any{"type": "adaptive"}
+			body["output_config"] = map[string]any{"effort": e}
+		}
+		// Thinking is incompatible with forced tool use.
+		if req.ToolChoice == "required" {
+			delete(body, "tool_choice")
 		}
 	}
 	resp, err := c.post(ctx, "/messages", body, map[string]string{
@@ -67,8 +75,17 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 		"anthropic-version": "2023-06-01",
 	})
 	if err != nil {
+		var ae *APIError
+		if thinking && errors.As(err, &ae) && ae.Status == 400 && strings.Contains(ae.Body, "thinking") {
+			// The model wants the other thinking flavour; remember and retry once.
+			c.anthropicBudgeted.Store(!c.anthropicBudgeted.Load())
+			if !c.anthropicRetried.Swap(true) {
+				return c.anthropic(ctx, req, obs)
+			}
+		}
 		return nil, err
 	}
+	c.anthropicRetried.Store(false)
 
 	type block struct {
 		Type      string          `json:"type"`
