@@ -155,7 +155,9 @@ func withoutImages(req Request) Request {
 
 // RejectsImages reports a 4xx that means the model does not take pictures.
 func (e *APIError) RejectsImages() bool {
-	if e.Status != 400 && e.Status != 422 {
+	// 400/422 from the model, or a gateway's 404 "no endpoints support
+	// image input" (OpenRouter phrases it that way).
+	if e.Status != 400 && e.Status != 422 && e.Status != 404 {
 		return false
 	}
 	b := strings.ToLower(e.Body)
