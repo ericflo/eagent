@@ -661,3 +661,76 @@ func TestFastCommandsDoNotNotify(t *testing.T) {
 		t.Fatalf("orchestrator calls = %d, want 4 (no spurious wakes)", s.count("orch"))
 	}
 }
+
+func TestResumeRepairsTornLog(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	block := make(chan struct{})
+	var phase sync.Map
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "created done.txt") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
+			}
+			if _, resumed := phase.Load("resumed"); !resumed {
+				return reply{block: block}
+			}
+			return reply{calls: []event.ToolCall{tc("write_file", `{"path":"done.txt","content":"ok"}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"done"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "go"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for i := 0; i < 200 && s.count("orch") == 0; i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	if code := rt.Run(ctx); code != 130 {
+		t.Fatalf("exit %d", code)
+	}
+	// Simulate a crash mid-write: a partial JSON line at the end of the file.
+	files, _ := store.ReadOnly(rt.sess.Path).Files()
+	f, _ := os.OpenFile(filepath.Join(rt.sess.Path, files[len(files)-1]), os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString(`{"seq":999,"type":"user.message","actor":"user","data":{"text":"trunc`)
+	f.Close()
+
+	phase.Store("resumed", true)
+	close(block)
+	ui := &fakeUI{}
+	rt2, err := Resume(testConfig(s.srv.URL), Options{Project: project}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatalf("resume over a torn log failed: %v", err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel2()
+	if code := rt2.Run(ctx2); code != 0 {
+		t.Fatalf("resumed exit %d logs %v", code, ui.logs)
+	}
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last int64
+	for _, ev := range evs {
+		if ev.Seq != last+1 {
+			t.Fatalf("sequence gap after repair: %d after %d", ev.Seq, last)
+		}
+		last = ev.Seq
+	}
+	if _, err := os.Stat(filepath.Join(rt.sess.Path, files[len(files)-1]+".torn")); err != nil {
+		t.Fatal("torn bytes were not preserved")
+	}
+	if _, err := os.Stat(filepath.Join(project, "done.txt")); err != nil {
+		t.Fatal("work did not finish after the repair")
+	}
+}

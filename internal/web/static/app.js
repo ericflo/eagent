@@ -330,11 +330,31 @@ async function renderConfig() {
   const presets = h('div', {class: 'card'}, h('h3', null, 'Built-in presets'), bundleRows(c.presets, 'preset'), h('div', {class: 'sub', style: 'margin-top:8px'}, 'Use one with ', h('code', {class: 'inline'}, 'eagent --preset NAME …')));
   const bundles = h('div', {class: 'card'}, h('h3', null, 'Project bundles'), c.bundles.length ? bundleRows(c.bundles, 'bundle') : h('div', {class: 'sub'}, 'None yet.'),
     h('div', {class: 'sub', style: 'margin-top:8px'}, 'Bundles live in ', h('code', {class: 'inline'}, c.files.bundles), ' and are meant to be committed. Save the current configuration as one with ', h('code', {class: 'inline'}, 'eagent config save NAME "description"'), '; select with ', h('code', {class: 'inline'}, '--config NAME'), ' or ', h('code', {class: 'inline'}, 'EAGENT_CONFIG=NAME'), '.'));
+  const nameIn = h('input', {placeholder: 'name (e.g. eric-fast)', style: 'font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)'});
+  const descIn = h('input', {placeholder: 'description', style: 'font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);flex:1;min-width:200px'});
+  const fromSel = h('select', {style: 'font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)'},
+    h('option', {value: ''}, 'copy: current configuration'), ...c.presets.map(p => h('option', {value: p.name}, `copy preset · ${p.name}`)), ...c.bundles.map(b => h('option', {value: b.name}, `copy bundle · ${b.name}`)));
+  const jsonTa = h('textarea', {style: 'width:100%;min-height:160px;margin-top:8px;font:12.5px var(--mono);padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)', placeholder: 'Optional: full configuration JSON to save instead of a copy. Leave empty to copy the selection above.'});
+  const saveMsg = h('span', {class: 'sub'});
+  const saveBtn = h('button', {class: 'primary', onclick: async () => {
+    saveMsg.textContent = '';
+    try {
+      const body = {name: nameIn.value.trim(), description: descIn.value.trim(), from: fromSel.value};
+      if (jsonTa.value.trim()) body.config = JSON.parse(jsonTa.value);
+      const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify(body)});
+      saveMsg.textContent = `saved ${r.path}`; renderConfig();
+    } catch (e) { saveMsg.textContent = 'error: ' + e.message; }
+  }}, 'Save bundle');
+  const saveCard = h('div', {class: 'card'}, h('h3', null, 'Save a bundle'),
+    h('div', {class: 'sub', style: 'margin-bottom:8px'}, 'Bundles are files under .agents/eagent/configs/ meant to be committed, so teammates can pick each other\'s setups with --config NAME.'),
+    h('div', {style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center'}, nameIn, descIn, fromSel, saveBtn, saveMsg),
+    h('details', null, h('summary', null, 'advanced: paste a full configuration'), jsonTa,
+      h('div', {class: 'sub'}, 'Start from the effective configuration below; keys are never stored, only the environment variable names.')));
   const promptsCard = h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('table', null, h('tbody', null, ...c.prompts.map(p => h('tr', {class: 'row', onclick: async () => { const r = await api(`/api/prompts/${p.name}`); showModal(h('div', null, h('h2', null, p.name, ' ', h('span', {class: 'badge'}, r.source)), h('pre', null, r.text), h('div', {class: 'foot'}, h('button', {onclick: closeModal}, 'Close')))); }},
     h('td', null, h('code', {class: 'inline'}, p.name)), h('td', {class: 'sub'}, p.source))))),
     h('div', {class: 'sub', style: 'margin-top:8px'}, 'Override any prompt by putting a file with the same name in ', h('code', {class: 'inline'}, c.files.prompts), ' (', h('code', {class: 'inline'}, 'eagent prompts export'), ' copies the defaults there).'));
   const raw = h('div', {class: 'card'}, h('h3', null, 'Effective configuration'), h('pre', null, JSON.stringify(eff, null, 2)), h('div', {class: 'sub'}, 'Project file: ', h('code', {class: 'inline'}, c.files.config), ' · ', h('code', {class: 'inline'}, 'eagent config'), ' prints this.'));
-  $('#main').replaceChildren(h('div', {class: 'pane'}, models, presets, bundles, promptsCard, raw));
+  $('#main').replaceChildren(h('div', {class: 'pane'}, models, presets, bundles, saveCard, promptsCard, raw));
 }
 
 // ---- new session -------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -96,6 +97,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/sessions/{id}/stop", s.postStop)
 	s.mux.HandleFunc("POST /api/sessions/{id}/resume", s.postResume)
 	s.mux.HandleFunc("GET /api/config", s.getConfig)
+	s.mux.HandleFunc("POST /api/config/bundles", s.saveBundle)
 	s.mux.HandleFunc("GET /api/prompts/{name}", s.getPrompt)
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "project": s.Project})
@@ -403,7 +405,6 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, raw)
 		flusher.Flush()
 	}
-	last := after
 	tick := time.NewTicker(400 * time.Millisecond)
 	defer tick.Stop()
 	statusTick := time.NewTicker(2 * time.Second)
@@ -414,23 +415,102 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	emitStatus()
+	tail := newTailer(info.Path, after)
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-tick.C:
-			evs, err := store.Read(info.Path)
-			if err != nil {
-				continue
-			}
-			for _, ev := range evs {
-				if ev.Seq > last {
-					send("append", EventView{Event: ev, File: ev.Source.File, Line: ev.Source.Line})
-					last = ev.Seq
-				}
+			for _, ev := range tail.next() {
+				send("append", EventView{Event: ev, File: ev.Source.File, Line: ev.Source.Line})
 			}
 		case <-statusTick.C:
 			emitStatus()
+		}
+	}
+}
+
+// tailer reads only the bytes appended since its last call, across all
+// subsession files, so following a large session stays cheap.
+type tailer struct {
+	dir     string
+	after   int64
+	offsets map[string]int64 // file -> bytes consumed
+	lines   map[string]int   // file -> lines consumed
+}
+
+func newTailer(dir string, after int64) *tailer {
+	return &tailer{dir: dir, after: after, offsets: map[string]int64{}, lines: map[string]int{}}
+}
+
+func (t *tailer) next() []event.Event {
+	entries, err := os.ReadDir(t.dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	var out []event.Event
+	for _, name := range names {
+		path := filepath.Join(t.dir, name)
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		off := t.offsets[name]
+		if _, err := f.Seek(off, 0); err != nil {
+			f.Close()
+			continue
+		}
+		data, err := readAvailable(f)
+		f.Close()
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		// Only complete lines; the remainder is re-read next time.
+		cut := strings.LastIndexByte(string(data), '\n') + 1
+		if cut == 0 {
+			continue
+		}
+		for _, line := range strings.Split(string(data[:cut]), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			t.lines[name]++
+			var ev event.Event
+			if json.Unmarshal([]byte(line), &ev) != nil {
+				continue
+			}
+			ev.Source = event.Source{File: name, Line: t.lines[name]}
+			if ev.Seq > t.after {
+				out = append(out, ev)
+				t.after = ev.Seq
+			}
+		}
+		t.offsets[name] = off + int64(cut)
+	}
+	return out
+}
+
+func readAvailable(f *os.File) ([]byte, error) {
+	var buf []byte
+	chunk := make([]byte, 64<<10)
+	for {
+		n, err := f.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+		if len(buf) > 16<<20 {
+			return buf, nil
 		}
 	}
 }
@@ -711,6 +791,47 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(v.Bundles, func(i, j int) bool { return v.Bundles[i].Name < v.Bundles[j].Name })
 	writeJSON(w, v)
+}
+
+// saveBundle writes a named configuration from the UI. The body carries the
+// name, a description, and either a full config object or a preset/bundle to
+// copy.
+func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		From        string          `json:"from"` // preset or bundle name to copy, optional
+		Config      json.RawMessage `json:"config"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b); err != nil || strings.TrimSpace(b.Name) == "" {
+		writeErr(w, 400, errors.New("name is required"))
+		return
+	}
+	var cfg config.Config
+	var err error
+	if len(b.Config) > 0 && string(b.Config) != "null" {
+		cfg = config.Defaults()
+		if err = json.Unmarshal(b.Config, &cfg); err != nil {
+			writeErr(w, 400, fmt.Errorf("config: %w", err))
+			return
+		}
+		if err = cfg.Validate(); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+	} else {
+		cfg, err = config.LoadBundle(s.Project, "", b.From)
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+	}
+	path, err := config.SaveBundle(s.Project, strings.TrimSpace(b.Name), strings.TrimSpace(b.Description), cfg)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	writeJSON(w, map[string]any{"path": path, "name": b.Name})
 }
 
 func (s *Server) getPrompt(w http.ResponseWriter, r *http.Request) {

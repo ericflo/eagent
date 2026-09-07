@@ -501,7 +501,11 @@ func (s *State) UsageLine() string {
 		if u.Input == 0 && u.Output == 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s %d calls, %s in (%s cached), %s out", a, s.Calls[a], humanInt(u.Input), humanInt(u.Cached), humanInt(u.Output)))
+		pct := 0
+		if u.Input > 0 {
+			pct = u.Cached * 100 / u.Input
+		}
+		parts = append(parts, fmt.Sprintf("%s %d calls, %s in (%d%% cached), %s out", a, s.Calls[a], humanInt(u.Input), pct, humanInt(u.Output)))
 	}
 	if len(parts) == 0 {
 		return "usage: none yet"
