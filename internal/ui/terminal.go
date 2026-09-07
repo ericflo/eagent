@@ -18,12 +18,15 @@ import (
 
 // Terminal is the default UI.
 type Terminal struct {
-	out     io.Writer // narrator output
-	err     *os.File  // status, activity, logs
-	tty     bool
-	color   bool
-	verbose bool
-	jsonOut bool
+	out         io.Writer // narrator output
+	err         *os.File  // status, activity, logs
+	tty         bool
+	color       bool
+	verbose     bool
+	jsonOut     bool
+	interactive bool
+	lastOutput  time.Time
+	lastStatus  string
 
 	mu       sync.Mutex
 	status   harness.Status
@@ -53,13 +56,15 @@ type Options struct {
 // New builds a terminal UI. When interactive, it starts reading stdin.
 func New(opts Options) *Terminal {
 	t := &Terminal{
-		out:      os.Stdout,
-		err:      os.Stderr,
-		verbose:  opts.Verbose,
-		jsonOut:  opts.JSON,
-		stream:   map[string]*streamState{},
-		stopSpin: make(chan struct{}),
-		started:  time.Now(),
+		out:         os.Stdout,
+		err:         os.Stderr,
+		verbose:     opts.Verbose,
+		jsonOut:     opts.JSON,
+		interactive: opts.Interactive,
+		stream:      map[string]*streamState{},
+		stopSpin:    make(chan struct{}),
+		started:     time.Now(),
+		lastOutput:  time.Now(),
 	}
 	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
 		t.tty = true
@@ -69,10 +74,40 @@ func New(opts Options) *Terminal {
 		t.input = make(chan string)
 		go t.readInput()
 	}
-	if t.tty {
+	if t.tty && !t.interactive {
 		go t.spin()
 	}
+	if t.interactive && !t.jsonOut {
+		go t.heartbeat()
+	}
 	return t
+}
+
+// heartbeat prints a status line every 30s while work is happening and
+// nothing else has been printed. Interactive sessions cannot use the
+// in-place spinner: redrawing the line would erase what the user is typing.
+func (t *Terminal) heartbeat() {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			t.mu.Lock()
+			line := t.statusText()
+			quiet := time.Since(t.lastOutput) >= 30*time.Second
+			changed := line != t.lastStatus
+			t.mu.Unlock()
+			if line == "" || !quiet || !changed {
+				continue
+			}
+			t.mu.Lock()
+			t.lastStatus = line
+			t.mu.Unlock()
+			t.write(t.err, t.dim("  … "+line)+"\n")
+		case <-t.stopSpin:
+			return
+		}
+	}
 }
 
 func (t *Terminal) readInput() {
@@ -137,7 +172,7 @@ func (t *Terminal) clearLocked() {
 }
 
 func (t *Terminal) redrawLocked() {
-	if !t.tty || t.idle || t.question {
+	if !t.tty || t.interactive || t.idle || t.question {
 		t.clearLocked()
 		return
 	}
@@ -265,6 +300,7 @@ func (t *Terminal) Idle(waiting bool) {
 func (t *Terminal) write(w io.Writer, s string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.lastOutput = time.Now()
 	t.clearLocked()
 	if t.idle && t.input != nil {
 		fmt.Fprint(t.err, "\r\033[K")
