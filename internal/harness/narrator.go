@@ -33,7 +33,7 @@ func (r *Runtime) maybeWakeNarrator() {
 	}
 	reason := r.narrPending
 	r.narrPending = ""
-	if reason != wakeFinal && r.st.LastSeq() <= r.narrLastSeen {
+	if reason != wakeFinal && r.narrWorthy <= r.narrLastSeen {
 		return // nothing new since it last looked
 	}
 	r.startNarratorTurn(reason)
@@ -55,7 +55,7 @@ func (r *Runtime) narratorTick() {
 			return
 		}
 		// Only if the orchestrator's world moved since the narrator looked.
-		if r.st.LastSeq() <= r.narrLastSeen {
+		if r.narrWorthy <= r.narrLastSeen {
 			return
 		}
 		if r.narrPending == "" {

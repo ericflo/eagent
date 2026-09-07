@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // closeInterrupted repairs state after a restart: dangling tool calls get
@@ -76,6 +77,9 @@ func (r *Runtime) closeInterrupted() {
 	}
 	r.lastOrchSeen = 0
 	for _, ev := range r.st.Events {
+		if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
+			r.narrWorthy = ev.Seq
+		}
 		if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
 			var d event.AssistantData
 			_ = ev.Decode(&d)

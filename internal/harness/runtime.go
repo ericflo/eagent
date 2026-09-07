@@ -75,6 +75,7 @@ type Runtime struct {
 	narrBusy     bool
 	narrPending  string // reason for a wake requested during a turn
 	narrLastSeen int64  // seq the narrator saw on its latest call
+	narrWorthy   int64  // seq of the newest event the narrator can observe
 	narrLastSaid string
 	narrSaidSeq  int64 // seq of the last narrator.message
 	narrFinal    bool  // final report delivered
@@ -272,6 +273,9 @@ func (r *Runtime) append(ev event.Event) event.Event {
 
 // noteWake tracks which events should wake whom.
 func (r *Runtime) noteWake(ev event.Event) {
+	if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
+		r.narrWorthy = ev.Seq
+	}
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer, event.ScheduleFire, event.Dossier:
 		r.lastWake = ev.Seq

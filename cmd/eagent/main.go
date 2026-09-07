@@ -404,6 +404,7 @@ func cmdDoctor(project, preset string, live bool) int {
 			fmt.Printf("  ✗ %-12s %s: %v\n", name, a.Model, err)
 			return
 		}
+		anyLive := false
 		for i, ep := range routes {
 			label := "  ✓"
 			if i > 0 {
@@ -428,15 +429,22 @@ func cmdDoctor(project, preset string, live bool) int {
 				cancel()
 				switch {
 				case err != nil:
-					ok = false
-					line += fmt.Sprintf("\n      ✗ live call failed: %v", err)
+					line += fmt.Sprintf("\n      ✗ live call failed: %v", clip(err.Error(), 200))
 				case len(resp.ToolCalls) == 0:
+					anyLive = true
 					line += fmt.Sprintf("\n      ! live call ok in %s but no tool call was returned (text: %q)", time.Since(start).Round(time.Millisecond), clip(resp.Text, 80))
 				default:
+					anyLive = true
 					line += fmt.Sprintf("\n      ✓ live tool call ok in %s (%d in / %d out tokens)", time.Since(start).Round(time.Millisecond), resp.Usage.Input, resp.Usage.Output)
 				}
 			}
 			fmt.Println(line)
+		}
+		if live && !anyLive {
+			ok = false
+			fmt.Printf("      no working route for %s\n", name)
+		} else if live && len(routes) > 1 {
+			fmt.Printf("      (a failing primary route is fine while a fallback works; the switch is automatic)\n")
 		}
 	}
 	fmt.Println("models:")
