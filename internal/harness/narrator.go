@@ -162,9 +162,18 @@ func (r *Runtime) narratorTurn(reason string) string {
 					r.recordToolResult(event.ActorNarrator, "", tc, "one message per wake; combine them next time", true)
 					continue
 				}
+				atts, err := r.narratorAttachments(args["attachments"])
+				if err != nil {
+					r.recordToolResult(event.ActorNarrator, "", tc, "not sent: "+err.Error()+". Fix the attachment or send the message without it.", true)
+					continue
+				}
 				important, _ := args["important"].(bool)
-				r.deliverMessage(text, important || reason == wakeFinal)
-				r.recordToolResult(event.ActorNarrator, "", tc, "delivered", false)
+				r.deliverMessage(text, important || reason == wakeFinal, atts...)
+				if len(atts) > 0 {
+					r.recordToolResult(event.ActorNarrator, "", tc, fmt.Sprintf("delivered with %d attachment(s)", len(atts)), false)
+				} else {
+					r.recordToolResult(event.ActorNarrator, "", tc, "delivered", false)
+				}
 				spoke = true
 			case "ask_user":
 				text, _ := args["text"].(string)
@@ -226,16 +235,19 @@ func cleanNarration(text string) string {
 }
 
 // deliverMessage records and shows a narrator message.
-func (r *Runtime) deliverMessage(text string, important bool) {
+func (r *Runtime) deliverMessage(text string, important bool, atts ...event.Attachment) {
 	text = cleanNarration(text)
 	r.sync(func() {
 		if r.st.LastYield != nil && r.st.LastYield.Done {
 			important = true // the final report always earns the notification
 		}
-		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text, Important: important}))
+		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text, Important: important, Attachments: atts}))
 		r.narrLastSaid = text
 		r.narrSaidSeq = ev.Seq
 	})
+	if s := attachmentSummary(atts); s != "" {
+		text += "\n" + s
+	}
 	r.ui.Narrate(text)
 }
 

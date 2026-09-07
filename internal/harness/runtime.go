@@ -81,7 +81,9 @@ type Runtime struct {
 	narrSaidSeq  int64 // seq of the last narrator.message
 	narrFinal    bool  // final report delivered
 	narrTicker   *time.Timer
-	phone        *phone                        // Finalechat mirror; nil when off
+	phone        *phone // Finalechat mirror; nil when off
+	toolImagesMu sync.Mutex
+	toolImages   map[string][]event.Attachment // call id -> pictures for the model (view_image)
 	running      map[string]context.CancelFunc // task id -> cancel
 	waiters      []*waiter
 	timers       map[string]*time.Timer // schedule id -> timer
@@ -591,9 +593,9 @@ func (r *Runtime) onInput(line string) { r.onInputFrom(line, "") }
 
 // onInputFrom records a line from the user; source is "" for the terminal,
 // otherwise "web" or "finalechat".
-func (r *Runtime) onInputFrom(line, source string) {
+func (r *Runtime) onInputFrom(line, source string, atts ...event.Attachment) {
 	line = strings.TrimSpace(line)
-	if line == "" {
+	if line == "" && len(atts) == 0 {
 		return
 	}
 	if strings.HasPrefix(line, "/") {
@@ -606,10 +608,10 @@ func (r *Runtime) onInputFrom(line, source string) {
 		if n := optionIndex(line, q.Options); n >= 0 {
 			text = q.Options[n]
 		}
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source}))
+		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Attachments: atts}))
 		return
 	}
-	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source}))
+	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source, Attachments: atts}))
 }
 
 func optionIndex(line string, options []string) int {

@@ -95,6 +95,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.getSession)
 	s.mux.HandleFunc("GET /api/sessions/{id}/events", s.getEvents)
 	s.mux.HandleFunc("GET /api/sessions/{id}/stream", s.stream)
+	s.mux.HandleFunc("GET /api/sessions/{id}/attachments/{name}", s.getAttachment)
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.postMessage)
 	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.postAnswer)
 	s.mux.HandleFunc("POST /api/sessions/{id}/stop", s.postStop)
@@ -1063,6 +1064,37 @@ func estimateCost(st *state.State) (float64, bool) {
 		total += c
 	}
 	return total, priced
+}
+
+// ---- attachments ----------------------------------------------------------------
+
+// getAttachment serves a file from a session's attachments directory.
+func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
+	info, err := s.resolve(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 404, err)
+		return
+	}
+	name := filepath.Base(r.PathValue("name"))
+	if name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+		writeErr(w, 400, errors.New("bad attachment name"))
+		return
+	}
+	path := filepath.Join(info.Path, "attachments", name)
+	f, err := os.Open(path)
+	if err != nil {
+		writeErr(w, 404, errors.New("no such attachment"))
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		writeErr(w, 404, errors.New("no such attachment"))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, name, st.ModTime(), f)
 }
 
 // ---- prompt overrides --------------------------------------------------------

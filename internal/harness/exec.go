@@ -157,6 +157,17 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		return b.String(), false
 
 	// ---- files ----
+	case "view_image":
+		att, err := r.viewImage(str("path"))
+		if err != nil {
+			return err.Error(), true
+		}
+		r.stashImage(tc.ID, att)
+		dims := ""
+		if att.Width > 0 {
+			dims = fmt.Sprintf(", %dx%d", att.Width, att.Height)
+		}
+		return fmt.Sprintf("%s (%s, %s%s) follows this result as an image.", att.Name, att.ContentType, humanBytes(att.Size), dims), false
 	case "read_file":
 		out, err := r.files.ReadFile(str("path"), num("offset", 0), num("limit", 0), r.cfg.ToolOutputMaxChars)
 		if err != nil {
@@ -533,8 +544,9 @@ func summarizeReasoning(s string) string {
 
 // recordToolResult appends a tool result.
 func (r *Runtime) recordToolResult(actor, task string, tc event.ToolCall, out string, isErr bool) {
+	images := r.takeImages(tc.ID)
 	r.sync(func() {
-		r.append(event.New(event.ToolResult, actor, event.ToolResultData{CallID: tc.ID, Name: tc.Name, Output: out, IsError: isErr}).WithTask(task))
+		r.append(event.New(event.ToolResult, actor, event.ToolResultData{CallID: tc.ID, Name: tc.Name, Output: out, IsError: isErr, Images: images}).WithTask(task))
 	})
 }
 

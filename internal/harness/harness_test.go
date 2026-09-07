@@ -170,8 +170,17 @@ func lastUserText(msgs []map[string]any) string {
 func allText(msgs []map[string]any) string {
 	var b strings.Builder
 	for _, m := range msgs {
-		if s, ok := m["content"].(string); ok {
-			b.WriteString(s + "\n")
+		switch c := m["content"].(type) {
+		case string:
+			b.WriteString(c + "\n")
+		case []any: // text parts next to images
+			for _, p := range c {
+				if pm, ok := p.(map[string]any); ok {
+					if t, ok := pm["text"].(string); ok {
+						b.WriteString(t + "\n")
+					}
+				}
+			}
 		}
 	}
 	return b.String()

@@ -224,7 +224,17 @@ func chatMessages(req Request) []map[string]any {
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "user":
-			msgs = append(msgs, map[string]any{"role": "user", "content": m.Text})
+			if len(m.Images) == 0 {
+				msgs = append(msgs, map[string]any{"role": "user", "content": m.Text})
+				continue
+			}
+			parts := []map[string]any{{"type": "text", "text": m.Text}}
+			for _, im := range m.Images {
+				if u := im.dataURL(); u != "" {
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": u}})
+				}
+			}
+			msgs = append(msgs, map[string]any{"role": "user", "content": parts})
 		case "assistant":
 			am := map[string]any{"role": "assistant"}
 			if m.Text != "" || len(m.ToolCalls) == 0 {

@@ -41,6 +41,9 @@ var shellTools = []llm.Tool{
 	def("bash_extend", "Give a running command more time before its timeout kills it. Sets the deadline to now + seconds (0 removes the deadline).",
 		`{"type":"object","properties":{"handle":{"type":"string"},"seconds":{"type":"integer"}},"required":["handle","seconds"]}`),
 	def("bash_list", "List commands you have started and their status.", `{"type":"object","properties":{}}`),
+	def("view_image",
+		"Look at an image file (png, jpeg, gif, webp): a screenshot the user sent, a picture you rendered, a page you captured. The image is shown to you right after this result. If your model cannot see images the result says so; then delegate the looking to a task worker or describe the file another way.",
+		`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
 	def("read_file",
 		"Read a text file. Reads the whole file by default (large files are truncated with a note); pass offset (1-based line) and limit to read a window.",
 		`{"type":"object","properties":{
@@ -129,7 +132,8 @@ var narratorOnly = []llm.Tool{
 	def("send_message", "Send a message to the user. Markdown is fine.",
 		`{"type":"object","properties":{
 			"text":{"type":"string"},
-			"important":{"type":"boolean","description":"Buzz the user's phone for this one: the work is finished, something blocks you, or you found something they would want to know right now. Leave it off for progress."}
+			"important":{"type":"boolean","description":"Buzz the user's phone for this one: the work is finished, something blocks you, or you found something they would want to know right now. Leave it off for progress."},
+			"attachments":{"type":"array","items":{"type":"string"},"description":"Paths of files to send with the message: a screenshot of what was built, a diff, a log. Up to 8 files of 10 MB each; the path must exist in the project."}
 		},"required":["text"]}`),
 	def("ask_user",
 		"Ask the user a question and wait for the answer. Offer options when there is a natural short list; free text is always accepted.",

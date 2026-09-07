@@ -1,12 +1,15 @@
 package finalechat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,4 +140,62 @@ func asError(err error, target **Error) bool {
 		*target = e
 	}
 	return ok
+}
+
+func TestMultipartPostAndDownload(t *testing.T) {
+	var gotCT string
+	var gotFields map[string]string
+	var gotFile struct {
+		name, ct string
+		data     []byte
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/threads/ext:e/messages" && r.Method == http.MethodPost:
+			gotCT = r.Header.Get("Content-Type")
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				w.WriteHeader(400)
+				return
+			}
+			gotFields = map[string]string{}
+			for k, v := range r.MultipartForm.Value {
+				gotFields[k] = v[0]
+			}
+			for _, hs := range r.MultipartForm.File {
+				h := hs[0]
+				f, _ := h.Open()
+				gotFile.data, _ = io.ReadAll(f)
+				gotFile.name, gotFile.ct = h.Filename, h.Header.Get("Content-Type")
+			}
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"message":{"id":"m9","thread_id":"t","sender":"agent","body":"x","format":"markdown","importance":"normal","meta":{},"created_at":"2026-09-07T00:00:00Z","attachments":[{"id":"a1","kind":"file","content_type":"text/plain","filename":"notes.txt","size":5,"url":"/api/v1/attachments/a1"}]},"thread":{"id":"t"}}`))
+		case r.URL.Path == "/api/v1/attachments/a1":
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Disposition", `inline; filename="notes.txt"`)
+			_, _ = w.Write([]byte("hello"))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "fc_test"}
+	msg, _, err := c.Post(context.Background(), Ref("e"), PostRequest{Body: "x", Importance: "important", Notify: boolp(false), Meta: map[string]any{"k": "v"}, Files: []File{{Name: "notes.txt", ContentType: "text/plain", Data: []byte("hello")}}})
+	if err != nil || len(msg.Attachments) != 1 || msg.Attachments[0].ID != "a1" {
+		t.Fatalf("post = %+v err=%v", msg, err)
+	}
+	if !strings.HasPrefix(gotCT, "multipart/form-data") || gotFields["body"] != "x" || gotFields["importance"] != "important" || gotFields["notify"] != "false" || gotFields["meta"] != `{"k":"v"}` {
+		t.Fatalf("multipart fields = %v (ct %s)", gotFields, gotCT)
+	}
+	if gotFile.name != "notes.txt" || gotFile.ct != "text/plain" || string(gotFile.data) != "hello" {
+		t.Fatalf("file part = %+v", gotFile)
+	}
+	var buf bytes.Buffer
+	ct, name, err := c.Download(context.Background(), msg.Attachments[0].URL, &buf)
+	if err != nil || ct != "text/plain" || name != "notes.txt" || buf.String() != "hello" {
+		t.Fatalf("download = %q %q %q err=%v", ct, name, buf.String(), err)
+	}
+	if _, _, err := c.Download(context.Background(), "missing", &buf); err == nil {
+		t.Fatal("404 should be an error")
+	}
 }

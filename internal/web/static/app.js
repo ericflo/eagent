@@ -246,9 +246,9 @@ async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {
 function chatNode(ev) {
   const d = ev.data || {};
   switch (ev.type) {
-    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
-    case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
-    case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)})));
+    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, d.text ? h('div', {html: md(d.text)}) : null, attachmentsNode(d.attachments)));
+    case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
+    case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
@@ -275,6 +275,15 @@ function chatNode(ev) {
   }
   return null;
 }
+function attachmentsNode(atts) {
+  if (!atts || !atts.length) return null;
+  const base = (a) => a.path.split('/').pop();
+  const url = (a) => `/api/sessions/${S.sid}/attachments/${encodeURIComponent(base(a))}`;
+  return h('div', {class: 'atts'}, ...atts.map(a => a.kind === 'image' || /^image\//.test(a.content_type)
+    ? h('a', {class: 'att-img', href: url(a), target: '_blank', title: `${a.name} · ${a.content_type} · ${fmtBytes(a.size)}`}, h('img', {src: url(a), alt: a.name, loading: 'lazy'}))
+    : h('a', {class: 'att-file', href: url(a), target: '_blank'}, '📎 ', a.name, h('span', {class: 'sub'}, ` ${a.content_type} · ${fmtBytes(a.size)}`))));
+}
+const fmtBytes = n => n >= 1048576 ? (n/1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n/1024) + ' KB' : (n||0) + ' B';
 function srcLabel(src) { return src === 'finalechat' ? ' · from your phone' : src === 'web' ? ' · web' : ''; }
 function act(ev, cls, kind, text) { return h('div', {class: 'act ' + cls}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, kind), h('span', null, clip(text, 300))); }
 
@@ -386,6 +395,7 @@ function renderCall(tc, r) {
     case 'bash_poll': case 'bash_kill': case 'bash_extend': case 'bash_write': return h('div', {class: 'call'}, head('', a.handle + (a.input ? ' ← ' + JSON.stringify(a.input) : '')), res);
     case 'write_file': { const c = String(a.content || ''); const lines = c.split('\n').length; return h('div', {class: 'call'}, head(`${lines} lines`, a.path), h('details', {open: lines <= 40}, h('summary', null, 'content'), h('pre', {class: 'code'}, c)), res); }
     case 'edit_file': return h('div', {class: 'call'}, head('', a.path), h('div', {class: 'diff'}, h('pre', {class: 'code old'}, a.old_text || ''), h('pre', {class: 'code new'}, a.new_text || '')), res);
+    case 'view_image': { const res2 = r && r.images && r.images.length ? h('div', {class: 'res'}, attachmentsNode(r.images), r.is_error ? h('pre', {class: 'code'}, r.output) : null) : res; return h('div', {class: 'call'}, head('', a.path), res2); }
     case 'read_file': return h('div', {class: 'call'}, head(a.offset ? `from line ${a.offset}${a.limit ? ', ' + a.limit + ' lines' : ''}` : '', a.path), res);
     case 'list_dir': case 'session_list': case 'session_read': case 'session_search': return h('div', {class: 'call'}, head('', a.path || a.file || a.query || ''), res);
     case 'delegate': return h('div', {class: 'call'}, head('', a.title), h('details', null, h('summary', null, 'task description'), h('pre', {class: 'code'}, a.description || '')), res);

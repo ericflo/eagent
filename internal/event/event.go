@@ -157,13 +157,39 @@ type UserMessageData struct {
 	// Source says where the message came from when it was not the terminal:
 	// "web" or "finalechat" (the user's phone).
 	Source string `json:"source,omitempty"`
+	// Attachments are files the user sent, saved under the session directory.
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is a file carried by a message: a screenshot the user sent
+// from their phone, or one the narrator attached to a report. Bytes live
+// at Path, under the session's attachments/ directory.
+type Attachment struct {
+	Path        string `json:"path"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	Size        int64  `json:"size"`
+	Kind        string `json:"kind,omitempty"` // image | file
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	ID          string `json:"id,omitempty"` // the remote id when known
+}
+
+// IsImage reports whether the attachment is a picture a model could look at.
+func (a Attachment) IsImage() bool {
+	switch a.ContentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return true
+	}
+	return a.Kind == "image"
 }
 
 // UserAnswerData answers a narrator question.
 type UserAnswerData struct {
-	QuestionID string `json:"question_id"`
-	Text       string `json:"text"`
-	Source     string `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
+	QuestionID  string       `json:"question_id"`
+	Text        string       `json:"text"`
+	Source      string       `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // TurnData brackets one actor turn (one or more model calls).
@@ -209,6 +235,9 @@ type ToolResultData struct {
 	Name    string `json:"name"`
 	Output  string `json:"output"`
 	IsError bool   `json:"is_error,omitempty"`
+	// Images are pictures the tool produced for the model to look at
+	// (view_image); they follow the result as a user message with the image.
+	Images []Attachment `json:"images,omitempty"`
 }
 
 // TaskCreateData delegates work to the task worker.
@@ -239,6 +268,8 @@ type NarratorMessageData struct {
 	// Important marks a message the narrator wanted to buzz the user's
 	// phone for (a finished job, a blocker, a finding).
 	Important bool `json:"important,omitempty"`
+	// Attachments are files sent with the message (screenshots, logs).
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // PhoneThreadData records the Finalechat thread mirroring this session.

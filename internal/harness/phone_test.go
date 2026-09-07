@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -30,10 +33,17 @@ type fakePhone struct {
 	seq       int
 	remote    bool
 	cond      *sync.Cond
+	files     map[string]fakeFile // attachment id -> bytes served to the agent
+	uploaded  []fakeFile          // files the agent posted
+}
+
+type fakeFile struct {
+	name, contentType string
+	data              []byte
 }
 
 func newFakePhone(remote bool) *fakePhone {
-	f := &fakePhone{questions: map[string]map[string]any{}, remote: remote}
+	f := &fakePhone{questions: map[string]map[string]any{}, remote: remote, files: map[string]fakeFile{}}
 	f.cond = sync.NewCond(&f.mu)
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
@@ -49,11 +59,48 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	var body map[string]any
-	if r.Body != nil {
+	path := r.URL.Path
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		body = map[string]any{}
+		for k, v := range r.MultipartForm.Value {
+			if len(v) > 0 {
+				body[k] = v[0]
+			}
+		}
+		var atts []map[string]any
+		for _, hs := range r.MultipartForm.File {
+			for _, h := range hs {
+				fh, _ := h.Open()
+				data, _ := io.ReadAll(fh)
+				fh.Close()
+				f.mu.Lock()
+				f.uploaded = append(f.uploaded, fakeFile{name: h.Filename, contentType: h.Header.Get("Content-Type"), data: data})
+				f.mu.Unlock()
+				atts = append(atts, map[string]any{"id": "up-" + h.Filename, "kind": "file", "content_type": h.Header.Get("Content-Type"), "filename": h.Filename, "size": len(data), "url": "/api/v1/attachments/up-" + h.Filename})
+			}
+		}
+		body["_attachments"] = atts
+	} else if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
-	path := r.URL.Path
 	switch {
+	case strings.HasPrefix(path, "/api/v1/attachments/"):
+		id := strings.TrimPrefix(path, "/api/v1/attachments/")
+		f.mu.Lock()
+		file, ok := f.files[id]
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no attachment"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", file.contentType)
+		w.Header().Set("Content-Disposition", `inline; filename="`+file.name+`"`)
+		_, _ = w.Write(file.data)
 	case path == "/api/v1/me":
 		_ = json.NewEncoder(w).Encode(map[string]any{"auth": "token", "base_url": f.srv.URL, "push_enabled": true, "version": "test", "user": map[string]any{"display_name": "Tester", "email": "t@x", "settings": map[string]any{"notify_all_messages": false, "remote_mode": f.remote}}})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodPost:
@@ -65,6 +112,10 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": sender, "body": body["body"], "format": "markdown", "importance": body["importance"], "meta": body["meta"], "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
 		if m["importance"] == nil {
 			m["importance"] = "normal"
+		}
+		if atts, ok := body["_attachments"].([]map[string]any); ok && len(atts) > 0 {
+			m["attachments"] = atts
+			delete(body, "_attachments")
 		}
 		f.messages = append(f.messages, m)
 		f.posts = append(f.posts, body)
@@ -156,11 +207,24 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // userReply is the user typing on the phone.
-func (f *fakePhone) userReply(text string) {
+func (f *fakePhone) userReply(text string) { f.userReplyWith(text, nil) }
+
+// userReplyWith is the user sending words and/or files from the phone.
+func (f *fakePhone) userReplyWith(text string, atts []map[string]any) {
 	f.mu.Lock()
-	f.messages = append(f.messages, map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "body": text, "format": "text", "importance": "normal", "meta": map[string]any{}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	m := map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "body": text, "format": "text", "importance": "normal", "meta": map[string]any{}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if len(atts) > 0 {
+		m["attachments"] = atts
+	}
+	f.messages = append(f.messages, m)
 	f.cond.Broadcast()
 	f.mu.Unlock()
+}
+
+func (f *fakePhone) uploads() []fakeFile {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeFile{}, f.uploaded...)
 }
 
 // answer is the user tapping an option: the question resolves and a user
@@ -544,5 +608,203 @@ func TestPhoneReasksPendingQuestionOnResume(t *testing.T) {
 	st := state.Replay(evs)
 	if st.EndReason != "done" || st.Question != nil {
 		t.Fatalf("end=%s question=%v", st.EndReason, st.Question)
+	}
+}
+
+// Files travel both ways: a screenshot the user sends from the phone is
+// saved under the session and handed to the orchestrator with its path (and
+// as an image), and a file the narrator attaches goes up as multipart.
+func TestPhoneAttachmentsBothWays(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	// A tiny valid PNG (1x1) the fake phone will serve as the user's screenshot.
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 'I', 'D', 'A', 'T', 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82}
+	if err := os.WriteFile(filepath.Join(project, "shot.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var sawImagePart, sawAttachmentNote bool
+	var mu sync.Mutex
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			// Look for the picture the user sent: as a note with the path and as an image part.
+			for _, m := range msgs {
+				if m["role"] != "user" {
+					continue
+				}
+				if parts, ok := m["content"].([]any); ok {
+					for _, p := range parts {
+						if pm, ok := p.(map[string]any); ok && pm["type"] == "image_url" {
+							mu.Lock()
+							sawImagePart = true
+							mu.Unlock()
+						}
+					}
+				}
+			}
+			if strings.Contains(all, "The user attached a file") && strings.Contains(all, "in-") {
+				mu.Lock()
+				sawAttachmentNote = true
+				mu.Unlock()
+				return reply{calls: []event.ToolCall{tc("note", `{"text":"Got the screenshot; the result is at shot.png"}`), tc("yield", `{"done":true,"reason":"done with the picture"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting for the picture"}`)}}
+		default:
+			switch {
+			case strings.Contains(all, "Here is the shot"):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "done with the picture"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Here is the shot.","attachments":["shot.png"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	fp.files["att-1"] = fakeFile{name: "IMG_1.png", contentType: "image/png", data: png}
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "look at what I send you"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the thread", func() bool { return fp.postCount() >= 1 })
+	// The user sends a screenshot from the phone with no words.
+	fp.userReplyWith("", []map[string]any{{"id": "att-1", "kind": "image", "content_type": "image/png", "filename": "IMG_1.png", "size": len(png), "width": 1, "height": 1, "url": "/api/v1/attachments/att-1"}})
+	select {
+	case code := <-done:
+		if code != 0 {
+			_, _, logs := ui.snapshot()
+			evs, _ := store.Read(rt.sess.Path)
+			for _, ev := range evs {
+				t.Logf("%d %-12s %s %s", ev.Seq, ev.Actor, ev.Type, clipTail(string(ev.Data), 160))
+			}
+			t.Fatalf("exit %d logs=%v", code, logs)
+		}
+	case <-time.After(30 * time.Second):
+		_, _, logs := ui.snapshot()
+		t.Fatalf("did not finish; logs=%v", logs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawAttachmentNote {
+		t.Fatal("the orchestrator was not told about the attached file")
+	}
+	if !sawImagePart {
+		t.Fatal("the orchestrator did not receive the image as an image part")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	var in, out []event.Attachment
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.UserMessage:
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if d.Source == "finalechat" {
+				in = d.Attachments
+			}
+		case event.NarratorMessage:
+			var d event.NarratorMessageData
+			_ = ev.Decode(&d)
+			out = d.Attachments
+		}
+	}
+	if len(in) != 1 || in[0].ContentType != "image/png" || in[0].Size != int64(len(png)) || !strings.HasPrefix(filepath.Base(in[0].Path), "in-att-1-") {
+		t.Fatalf("inbound attachment = %+v", in)
+	}
+	if _, err := os.Stat(in[0].Path); err != nil {
+		t.Fatalf("downloaded file missing: %v", err)
+	}
+	if len(out) != 1 || out[0].Name != "shot.png" || out[0].Kind != "image" || !strings.HasPrefix(out[0].Path, rt.sess.Path) {
+		t.Fatalf("outbound attachment = %+v", out)
+	}
+	ups := fp.uploads()
+	if len(ups) != 1 || ups[0].name != "shot.png" || ups[0].contentType != "image/png" || len(ups[0].data) != len(png) {
+		t.Fatalf("uploads = %+v", ups)
+	}
+}
+
+// view_image shows a picture to the model right after the tool result, and
+// a file named imperfectly is still found in the project.
+func TestViewImageShowsPictureAndFindsFilesByName(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 'I', 'D', 'A', 'T', 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82}
+	if err := os.MkdirAll(filepath.Join(project, "out"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "out", "render.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var sawImage bool
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			for _, m := range msgs {
+				if parts, ok := m["content"].([]any); ok && m["role"] == "user" {
+					for _, p := range parts {
+						if pm, ok := p.(map[string]any); ok && pm["type"] == "image_url" {
+							mu.Lock()
+							sawImage = true
+							mu.Unlock()
+						}
+					}
+				}
+			}
+			if strings.Contains(all, "follows this result as an image") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"looked"}`)}}
+			}
+			// A wrong directory, the right name: the harness should find it.
+			return reply{calls: []event.ToolCall{tc("view_image", `{"path":"/tmp/wrong/place/render.png"}`)}}
+		}
+		if strings.Contains(all, "looked") && !strings.Contains(all, "Seen.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Seen."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Interactive: false, Prompt: "look at the render"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	var found bool
+	for _, ev := range evs {
+		if ev.Type == event.ToolResult {
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			t.Logf("tool.result %s images=%+v err=%v out=%s", d.Name, d.Images, d.IsError, clipTail(d.Output, 120))
+			if d.Name == "view_image" && len(d.Images) == 1 && d.Images[0].Width == 1 && strings.HasPrefix(d.Images[0].Path, rt.sess.Path) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("view_image result did not record the image with its size under the session")
+	}
+	view := state.Replay(evs).OrchestratorView()
+	for _, m := range view {
+		t.Logf("view %s images=%d text=%s", m.Role, len(m.Images), clipTail(m.Text, 80))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawImage {
+		t.Fatal("the model never received the image part")
 	}
 }

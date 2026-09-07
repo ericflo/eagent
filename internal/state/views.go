@@ -143,7 +143,7 @@ func renderActor(events []event.Event, actor, task string, notify func(event.Eve
 	var msgs []llm.Message
 	emitNotify := func(ev event.Event) {
 		if text := notify(ev); text != "" {
-			msgs = append(msgs, llm.Message{Role: "user", Text: text})
+			msgs = append(msgs, llm.Message{Role: "user", Text: text, Images: imagesOf(ev)})
 		}
 	}
 	for i, ev := range events {
@@ -165,6 +165,19 @@ func renderActor(events []event.Event, actor, task string, notify func(event.Eve
 					tm.Results = append(tm.Results, llm.ToolResult{CallID: r.CallID, Name: r.Name, Output: r.Output, IsError: r.IsError})
 				}
 				msgs = append(msgs, tm)
+				var pics []llm.Image
+				var names []string
+				for _, tc := range d.ToolCalls {
+					for _, a := range results[tc.ID].Images {
+						if a.IsImage() {
+							pics = append(pics, llm.Image{Path: a.Path, MediaType: a.ContentType})
+							names = append(names, a.Name)
+						}
+					}
+				}
+				if len(pics) > 0 {
+					msgs = append(msgs, llm.Message{Role: "user", Text: "[image from view_image: " + strings.Join(names, ", ") + "]", Images: pics})
+				}
 			}
 			if sp := spanByIdx[i]; sp != nil {
 				for _, j := range sp.deferred {
@@ -192,11 +205,11 @@ func orchestratorNotification(ev event.Event) string {
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
-		return d.Text
+		return d.Text + attachmentNotes(d.Attachments)
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("[The user answered question %s]\n%s", d.QuestionID, d.Text)
+		return fmt.Sprintf("[The user answered question %s]\n%s", d.QuestionID, d.Text) + attachmentNotes(d.Attachments)
 	case event.TaskEnd:
 		var d event.TaskEndData
 		_ = ev.Decode(&d)
@@ -352,11 +365,11 @@ func Observe(ev event.Event, maxChars int) string {
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s USER: %s", ts, d.Text)
+		return fmt.Sprintf("%s USER: %s%s", ts, d.Text, attachmentBrief(d.Attachments))
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s USER answered %s: %s", ts, d.QuestionID, d.Text)
+		return fmt.Sprintf("%s USER answered %s: %s%s", ts, d.QuestionID, d.Text, attachmentBrief(d.Attachments))
 	case event.Assistant:
 		if ev.Actor != event.ActorOrchestrator {
 			return "" // task-worker internals are not the narrator's business
@@ -489,4 +502,74 @@ func clip(s string, max int) string {
 		ts++
 	}
 	return s[:head] + fmt.Sprintf(" [... %d chars ...] ", ts-head) + s[ts:]
+}
+
+// attachmentNotes tells the orchestrator where the user's files landed and
+// what they are, so it can open them (images are also shown to it directly
+// when its model accepts pictures).
+func attachmentNotes(atts []event.Attachment) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n[The user attached ")
+	if len(atts) == 1 {
+		b.WriteString("a file")
+	} else {
+		fmt.Fprintf(&b, "%d files", len(atts))
+	}
+	b.WriteString(", saved locally:")
+	for _, a := range atts {
+		fmt.Fprintf(&b, "\n- %s (%s, %s", a.Name, a.ContentType, humanSize(a.Size))
+		if a.Width > 0 && a.Height > 0 {
+			fmt.Fprintf(&b, ", %dx%d", a.Width, a.Height)
+		}
+		fmt.Fprintf(&b, ") at %s", a.Path)
+	}
+	b.WriteString("\nText files can be read with read_file; other files with a shell command.]")
+	return b.String()
+}
+
+// attachmentBrief is the narrator's one-line view of what was attached.
+func attachmentBrief(atts []event.Attachment) string {
+	if len(atts) == 0 {
+		return ""
+	}
+	var names []string
+	for _, a := range atts {
+		names = append(names, a.Name)
+	}
+	return fmt.Sprintf(" [attached: %s]", strings.Join(names, ", "))
+}
+
+// imagesOf lists the pictures on a user event for models that can look.
+func imagesOf(ev event.Event) []llm.Image {
+	var atts []event.Attachment
+	switch ev.Type {
+	case event.UserMessage:
+		var d event.UserMessageData
+		_ = ev.Decode(&d)
+		atts = d.Attachments
+	case event.UserAnswer:
+		var d event.UserAnswerData
+		_ = ev.Decode(&d)
+		atts = d.Attachments
+	}
+	var out []llm.Image
+	for _, a := range atts {
+		if a.IsImage() {
+			out = append(out, llm.Image{Path: a.Path, MediaType: a.ContentType})
+		}
+	}
+	return out
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/float64(1<<10))
+	}
+	return fmt.Sprintf("%d B", n)
 }

@@ -268,3 +268,8 @@ select { max-width: 100%; }
 .card tr.group:first-child td { padding-top: 4px; }
 .badge.buzz { color: var(--warn); background: var(--warn-soft); margin-left: 4px; }
 .badge.phone { color: var(--ok); background: var(--ok-soft); }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.att-img img { max-width: 320px; max-height: 240px; border-radius: 8px; border: 1px solid var(--line); display: block; background: var(--code); }
+.att-file { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--ink); text-decoration: none; font-size: 12.5px; }
+.att-file:hover { border-color: var(--accent); }
+.msg.user .bubble .atts { justify-content: flex-end; }

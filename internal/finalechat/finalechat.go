@@ -11,7 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -84,15 +87,43 @@ func Resolve(tokenEnv, baseURL string) (*Client, bool) {
 
 // Message is one entry in a thread.
 type Message struct {
-	ID         string         `json:"id"`
-	ThreadID   string         `json:"thread_id"`
-	Sender     string         `json:"sender"` // agent | user | system
-	Body       string         `json:"body"`
-	Format     string         `json:"format"`
-	Importance string         `json:"importance"`
-	Meta       map[string]any `json:"meta"`
-	CreatedAt  time.Time      `json:"created_at"`
+	ID          string         `json:"id"`
+	ThreadID    string         `json:"thread_id"`
+	Sender      string         `json:"sender"` // agent | user | system
+	Body        string         `json:"body"`
+	Format      string         `json:"format"`
+	Importance  string         `json:"importance"`
+	Meta        map[string]any `json:"meta"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Attachments []Attachment   `json:"attachments,omitempty"`
 }
+
+// Attachment is a file on a message. URL and ThumbURL are relative to the
+// base URL.
+type Attachment struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // image | file
+	ContentType string `json:"content_type"`
+	Filename    string `json:"filename"`
+	Size        int64  `json:"size"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	URL         string `json:"url"`
+	ThumbURL    string `json:"thumb_url,omitempty"`
+}
+
+// File is a local file to upload with a message.
+type File struct {
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
+// Limits mirror the server's.
+const (
+	MaxAttachments    = 8
+	MaxAttachmentSize = 10 << 20
+)
 
 // IsAnswer reports whether the message records the answer to a question,
 // and returns that question's id.
@@ -171,6 +202,8 @@ type PostRequest struct {
 	Meta       map[string]any `json:"meta,omitempty"`
 	Title      string         `json:"title,omitempty"` // only when this creates the ext: thread
 	Agent      string         `json:"agent,omitempty"` // only when this creates the ext: thread
+	// Files are uploaded and attached in the same request (multipart).
+	Files []File `json:"-"`
 }
 
 // AskRequest creates a question.
@@ -221,13 +254,98 @@ func (c *Client) Me(ctx context.Context) (Me, error) {
 }
 
 // Post adds a message to the thread, creating an ext: thread on first use.
+// With Files it becomes one multipart request that uploads and posts.
 func (c *Client) Post(ctx context.Context, ref string, req PostRequest) (Message, Thread, error) {
 	var out struct {
 		Message Message `json:"message"`
 		Thread  Thread  `json:"thread"`
 	}
-	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/messages", nil, req, &out, 0)
+	path := "/api/v1/threads/" + refPath(ref) + "/messages"
+	if len(req.Files) == 0 {
+		err := c.do(ctx, http.MethodPost, path, nil, req, &out, 0)
+		return out.Message, out.Thread, err
+	}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	field := func(k, v string) {
+		if v != "" {
+			_ = mw.WriteField(k, v)
+		}
+	}
+	field("body", req.Body)
+	field("format", req.Format)
+	field("importance", req.Importance)
+	field("sender", req.Sender)
+	field("title", req.Title)
+	field("agent", req.Agent)
+	if req.Notify != nil {
+		field("notify", strconv.FormatBool(*req.Notify))
+	}
+	if req.Meta != nil {
+		raw, _ := json.Marshal(req.Meta)
+		field("meta", string(raw))
+	}
+	for _, f := range req.Files {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, strings.ReplaceAll(f.Name, `"`, "'")))
+		if f.ContentType != "" {
+			h.Set("Content-Type", f.ContentType)
+		}
+		pw, err := mw.CreatePart(h)
+		if err != nil {
+			return Message{}, Thread{}, err
+		}
+		if _, err := pw.Write(f.Data); err != nil {
+			return Message{}, Thread{}, err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return Message{}, Thread{}, err
+	}
+	err := c.doRaw(ctx, http.MethodPost, path, nil, mw.FormDataContentType(), &buf, &out, 60)
 	return out.Message, out.Thread, err
+}
+
+// Download fetches an attachment by its relative URL (or id) into w and
+// returns the content type and filename the server sent.
+func (c *Client) Download(ctx context.Context, urlOrID string, w io.Writer) (contentType, filename string, err error) {
+	path := urlOrID
+	if !strings.HasPrefix(path, "/") {
+		path = "/api/v1/attachments/" + url.PathEscape(urlOrID)
+	}
+	if c.Token == "" {
+		return "", "", errors.New("finalechat: no token")
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("finalechat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", "", &Error{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
+	}
+	if _, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1)); err != nil {
+		return "", "", fmt.Errorf("finalechat: %w", err)
+	}
+	filename = ""
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			filename = params["filename"]
+		}
+	}
+	return resp.Header.Get("Content-Type"), filename, nil
 }
 
 // Ask poses a question without waiting for the answer.
@@ -318,9 +436,24 @@ func refPath(ref string) string {
 	return url.PathEscape(ref)
 }
 
-// do performs one request. wait is the long-poll length the server was
+// do performs one JSON request. wait is the long-poll length the server was
 // asked for, so the HTTP timeout can exceed it.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, out any, wait int) error {
+	var rdr io.Reader
+	contentType := ""
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rdr = bytes.NewReader(raw)
+		contentType = "application/json"
+	}
+	return c.doRaw(ctx, method, path, query, contentType, rdr, out, wait)
+}
+
+// doRaw performs one request with a prepared body.
+func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, contentType string, rdr io.Reader, out any, wait int) error {
 	if c.Token == "" {
 		return errors.New("finalechat: no token")
 	}
@@ -331,14 +464,6 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	u := strings.TrimRight(c.BaseURL, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
-	}
-	var rdr io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		rdr = bytes.NewReader(raw)
 	}
 	timeout := 30 * time.Second
 	if wait > 0 {
@@ -352,8 +477,8 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	ua := c.UserAgent
 	if ua == "" {

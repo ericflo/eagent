@@ -224,9 +224,16 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		if d.Important {
 			importance = "important"
 		}
-		text := d.Text
+		text, atts := d.Text, d.Attachments
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}})
+			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}, Files: attachmentFiles(atts)}
+			msg, _, err := p.client.Post(ctx, p.ref, req)
+			if err != nil && len(req.Files) > 0 {
+				// The files may be refused (storage off, too large); the words still matter.
+				req.Files = nil
+				req.Body = text + "\n\n(" + attachmentSummary(atts) + " could not be uploaded)"
+				msg, _, err = p.client.Post(ctx, p.ref, req)
+			}
 			if err == nil {
 				p.remember(msg.ID)
 			}
@@ -350,17 +357,30 @@ func (p *phone) poll(r *Runtime) {
 				continue
 			}
 			body := strings.TrimSpace(m.Body)
-			if body == "" {
+			var atts []event.Attachment
+			for _, a := range m.Attachments {
+				saved, err := r.downloadAttachment(p.client, a)
+				if err != nil {
+					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
+					continue
+				}
+				atts = append(atts, saved)
+			}
+			if body == "" && len(atts) == 0 {
 				continue
 			}
 			if fid, ok := m.IsAnswer(); ok {
 				p.mu.Lock()
 				qid := p.fromPhone[fid]
 				p.mu.Unlock()
-				r.post(func() { r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat"}) })
+				r.post(func() {
+					r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Attachments: atts})
+				})
 				continue
 			}
-			r.post(func() { r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat"}) })
+			r.post(func() {
+				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Attachments: atts})
+			})
 		}
 	}
 }

@@ -10,10 +10,12 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -84,6 +86,81 @@ type Message struct {
 
 	// CacheBreak marks the last stable message (Anthropic cache_control).
 	CacheBreak bool
+
+	// Images are pictures attached to a user message (screenshots the user
+	// sent). Adapters inline them as base64 for models that accept images;
+	// a model that rejects them gets the text alone.
+	Images []Image
+}
+
+// Image is a picture on disk to show the model.
+type Image struct {
+	Path      string
+	MediaType string // image/png, image/jpeg, image/gif, image/webp
+}
+
+// maxInlineImage caps what is inlined into a request.
+const maxInlineImage = 10 << 20
+
+// dataURL reads the image and returns a data: URL, or "" when unreadable.
+func (im Image) dataURL() string {
+	raw, mt := im.bytes()
+	if raw == nil {
+		return ""
+	}
+	return "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(raw)
+}
+
+// bytes reads the image, sniffing the media type when it was not given.
+func (im Image) bytes() ([]byte, string) {
+	raw, err := os.ReadFile(im.Path)
+	if err != nil || len(raw) == 0 || len(raw) > maxInlineImage {
+		return nil, ""
+	}
+	mt := im.MediaType
+	if mt == "" {
+		mt = http.DetectContentType(raw)
+	}
+	return raw, mt
+}
+
+// hasImages reports whether any message carries an image.
+func hasImages(req Request) bool {
+	for _, m := range req.Messages {
+		if len(m.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// withoutImages returns the request with images replaced by a note, for
+// models that only read text.
+func withoutImages(req Request) Request {
+	out := req
+	out.Messages = make([]Message, len(req.Messages))
+	for i, m := range req.Messages {
+		if len(m.Images) > 0 {
+			m.Text = strings.TrimSpace(m.Text + "\n[The attached images could not be shown to this model; the files are on disk at the paths above.]")
+			m.Images = nil
+		}
+		out.Messages[i] = m
+	}
+	return out
+}
+
+// RejectsImages reports a 4xx that means the model does not take pictures.
+func (e *APIError) RejectsImages() bool {
+	if e.Status != 400 && e.Status != 422 {
+		return false
+	}
+	b := strings.ToLower(e.Body)
+	for _, k := range []string{"image", "vision", "multimodal", "input_image", "content must be a string", "invalid content", "unsupported content"} {
+		if strings.Contains(b, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // ToolResult is the outcome of one tool call.
@@ -279,6 +356,18 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			defer cancel()
 		}
 		resp, err := c.once(callCtx, req, obs)
+		if err != nil && hasImages(req) {
+			var ae *APIError
+			if errors.As(err, &ae) && ae.RejectsImages() {
+				// A text-only model: say so once and go on without pictures.
+				if c.OnRetry != nil {
+					c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
+				}
+				req = withoutImages(req)
+				obs.reset()
+				resp, err = c.once(callCtx, req, obs)
+			}
+		}
 		if err == nil {
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol

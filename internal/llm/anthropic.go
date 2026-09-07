@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -286,7 +287,13 @@ func anthropicMessages(req Request) []map[string]any {
 			if text == "" {
 				text = "(empty)"
 			}
-			push("user", []map[string]any{{"type": "text", "text": text}})
+			blocks := []map[string]any{{"type": "text", "text": text}}
+			for _, im := range m.Images {
+				if raw, mt := im.bytes(); raw != nil {
+					blocks = append(blocks, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": mt, "data": base64.StdEncoding.EncodeToString(raw)}})
+				}
+			}
+			push("user", blocks)
 		case "assistant":
 			var content []map[string]any
 			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic {

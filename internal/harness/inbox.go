@@ -25,6 +25,8 @@ type InboxMessage struct {
 	Text       string `json:"text,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 	From       string `json:"from,omitempty"` // free-form origin, e.g. "web"
+	// Attachments are files already saved under the session directory.
+	Attachments []event.Attachment `json:"attachments,omitempty"`
 }
 
 // PostInbox writes a message for the session at sessionPath.
@@ -82,21 +84,21 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Attachments: msg.Attachments}))
 			return
 		}
-		if text != "" { // no matching question: treat as a message
+		if text != "" || len(msg.Attachments) > 0 { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Attachments: msg.Attachments}))
 		}
 	case "message", "":
-		if text == "" {
+		if text == "" && len(msg.Attachments) == 0 {
 			return
 		}
 		if strings.HasPrefix(text, "/") {
 			r.slashCommand(text)
 			return
 		}
-		r.onInputFrom(text, msg.From)
+		r.onInputFrom(text, msg.From, msg.Attachments...)
 	}
 }
