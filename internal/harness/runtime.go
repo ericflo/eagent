@@ -536,6 +536,16 @@ drain:
 			r.appendDirect(ev)
 		}
 	}
+	// Tasks that were queued or whose worker did not stop in time are closed
+	// here so the log is consistent at every session.end; resume re-checks
+	// anyway for hard crashes that never reach this point.
+	for _, t := range r.st.RunningTasks() {
+		summary := "the runner stopped before this task started; delegate it again if it is still needed"
+		if t.Status == "running" {
+			summary = "the runner stopped while this task was running; its partial work may be on disk. Check, then re-delegate what is missing."
+		}
+		r.appendDirect(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: t.ID, Status: "interrupted", Summary: summary, Turns: t.Turns, Usage: t.Usage}).WithTask(t.ID))
+	}
 	r.appendDirect(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: r.endReason}))
 	if err := r.sess.Close(); err != nil {
 		r.ui.Log("closing session: %v", err)

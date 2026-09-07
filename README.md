@@ -74,6 +74,22 @@ In an interactive session, type to talk to the agent (even while it is working; 
 
 Batch mode exits `0` when the orchestrator declares the work done, `2` when it stopped to ask you something (answer with `eagent -c --answer "..."`), `130` on Ctrl-C.
 
+## The web UI
+
+```
+eagent serve                 # http://127.0.0.1:7331 for this project
+eagent -p --serve :7331 "…"  # also serve while a terminal session runs
+```
+
+<p align="center">
+  <img src="docs/web-chat.png" width="49%" alt="Chat view">
+  <img src="docs/web-tasks.png" width="49%" alt="Tasks view">
+</p>
+
+The UI reads the same JSONL logs as everything else, so it shows every session in the project, including ones running in another terminal, live. **Chat** is the narrator conversation: messages, questions with their options as buttons, your replies; toggle *show activity* to see delegations, notes, and task results interleaved. **Tasks** lists every task with status, call count, tokens, and cache ratio; click one to read its description, its report, and every model turn with tool calls, arguments, and results. **Timeline** is the raw event log with actor filters and one-click JSON. **Config** shows the active models, which API keys are present, built-in presets and project bundles (each with a *New session* button), and the prompts with their sources.
+
+Writing to a session works from anywhere: the UI drops a JSON file into the session's `inbox/` directory and the running process folds it into the log, so you can answer a question from the browser while the session runs in your terminal. Writing to a finished session resumes it inside the server.
+
 ## How a session runs
 
 1. Your message wakes the **orchestrator**. It looks around, then either does something small itself or writes a self-contained task and calls `delegate`. Several tasks can run at once; `wait` blocks until one finishes.
@@ -152,7 +168,19 @@ File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) can read anywher
 
 ## Configuration
 
-`eagent config` prints the effective configuration; `eagent config --write` saves it to `.agents/eagent/config.json`. Any field can be overridden there, or with `EAGENT_*` environment variables.
+`eagent config` prints the effective configuration. Layers, each overriding the last: built-in defaults, a preset, the project's `.agents/eagent/config.json`, a named bundle, `EAGENT_*` environment variables.
+
+**Presets** are built in: `glm` (default), `astra`, `anthropic` (Claude Fable 5.1 orchestrating, Opus 5 working, Sonnet 5 narrating), `deepseek` (DeepSeek V4 Flash for all three actors), `qwen` (Qwen 3.8 27B via OpenRouter for all three; a dense model you could run locally). `eagent config list` describes them, and `eagent doctor --live --preset NAME` makes one tiny call per actor to prove a preset works before you rely on it.
+
+**Bundles** are named configurations checked into the project under `.agents/eagent/configs/NAME.json`, so a team can keep everyone's preferred setup side by side and borrow each other's:
+
+```
+eagent config save eric "Eric's setup: Anthropic, low effort workers" --preset anthropic
+eagent --config eric "…"          # or EAGENT_CONFIG=eric, or "default_config": "eric" in config.json
+eagent config show eric
+```
+
+A bundle is a partial override: it can name a preset and change one model, or spell out everything. The session log records which bundle ran.
 
 ```json
 {
@@ -186,6 +214,14 @@ Two failure modes seen in the wild get special treatment. A stream that closes b
 
 Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are added to the orchestrator's and worker's system prompts.
 
+### Prompts
+
+The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`, `TASK-WORKER.md`, `NARRATOR.md`, `PERSONA.md` (the narrator's voice), and `COMPACTION-DOSSIER.md` (the dossier task). `eagent prompts` lists them with their sources; `eagent prompts export` copies them into `.agents/eagent/prompts/` where any edited file overrides the built-in one for that project. They are Go templates with a handful of variables (`{{.Project}}`, `{{.Instructions}}`, `{{.Interactive}}`, `{{.Persona}}`, …).
+
+### Efficiency
+
+Every session reports per-actor input, output, and cached tokens; the web UI shows the cache ratio live and `eagent replay` prints it afterwards. Tool results are capped at 24k characters, keeping the head and the tail, but nothing is lost: the full text is saved under the session's `outputs/` directory and the notice tells the model the path and line count, so it can page through with `read_file(path, offset, limit)` or `grep` when the part it needs was cut. Command output is retained up to 4MB per process with cursor-based polling.
+
 ## What eagent will not do (yet)
 
 - **Sandboxing.** Commands run on your machine as you. Read the log before you trust a session that touched anything important.
@@ -207,4 +243,4 @@ make release        # dist/eagent-{linux,darwin}-{amd64,arm64} + SHA256SUMS
 
 CI runs the same checks on Woodpecker (`.woodpecker.yaml`).
 
-Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `harness` (runtime, actors, rollover, resume), `ui` (terminal). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, and interrupt-then-resume.
+Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `prompts` (embedded Markdown prompts), `config` (presets and bundles), `harness` (runtime, actors, rollover, resume, inbox), `ui` (terminal), `web` (HTTP API, SSE, embedded UI). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, interrupt-then-resume, interactive questions. Two chaos suites inject random provider faults (5xx, rate limits with Retry-After, streams cut mid tool call, malformed arguments, garbage frames, latency) and kill and resume the runner at random points, and check after every run that the log parses, sequence numbers are contiguous, no tool call is left without a result, and the work still finished.

@@ -26,9 +26,9 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
-| `session.start` | harness | `session`, `cwd`, `version`, `interactive`, `models{actor: model}` | First event of a session. |
+| `session.start` | harness | `session`, `cwd`, `version`, `interactive`, `models{actor: model}`, `config` | First event of a session. `config` names the bundle or preset. |
 | `session.resume` | harness | `interactive`, `closed[]` | Appended by `eagent -c`; `closed` lists what the replay had to mark interrupted. |
-| `session.end` | harness | `reason` | `done`, `awaiting-input`, `quit`, `interrupted`, `error`. A session can be resumed after any of these. |
+| `session.end` | harness | `reason` | `done`, `awaiting-input`, `quit`, `interrupted`, `error`. A session can be resumed after any of these. Before it is written, every still-running process gets a `proc.exit` and every queued or running task a `task.end` of status `interrupted`, so the log is consistent at every end. |
 | `subsession.start` | harness | `file`, `index`, `reason` (`new` or `rollover`) | First event in every file. |
 | `subsession.end` | harness | `reason`, `next_file`, `input_tokens` | Last event in a file that rolled over. |
 | `dossier` | harness | `task_id`, `text` | The briefing that opens a rolled-over subsession; rendered as the orchestrator's first message. |
