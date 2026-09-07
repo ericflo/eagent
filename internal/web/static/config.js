@@ -161,18 +161,21 @@ function draw() {
   const main = $('#main');
   const old = main.querySelector('.pane');
   const y = old ? old.scrollTop : 0;
-  const pane = h('div', {class: 'pane cfg'});
-  pane.append(header());
+  const pane = h('div', {class: 'pane cfgpage'});
+  const body = h('div', {class: 'cfg-body'});
+  body.append(header());
   const rz = E.c.resolution;
   const fileBroken = !!rz.file.parse_error || (rz.load_error && rz.file.path && rz.load_error.startsWith(rz.file.path));
-  if (fileBroken) pane.append(repairBanner());
-  else if (rz.load_error) pane.append(h('div', {class: 'banner warn'}, h('b', null, 'This configuration cannot start a session as it stands.'), h('div', {class: 'sub'}, rz.load_error)));
-  pane.append(quickStart());
-  pane.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
-  pane.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
-  pane.append(h('div', {class: 'grid2'}, phoneCard(), promptsCard()));
-  pane.append(advancedCard());
-  pane.append(saveBar());
+  if (fileBroken) body.append(repairBanner());
+  else if (rz.load_error) body.append(h('div', {class: 'banner warn'}, h('b', null, 'This configuration cannot start a session as it stands.'), h('div', {class: 'sub'}, rz.load_error)));
+  body.append(quickStart());
+  body.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
+  body.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
+  body.append(h('div', {class: 'grid2'}, phoneCard(), promptsCard()));
+  body.append(advancedCard());
+  // The bar is a direct child of the scroller with no padding between them,
+  // so sticky positioning can bring it right to the bottom edge.
+  pane.append(body, saveBar());
   main.replaceChildren(pane);
   pane.scrollTop = y;
 }
@@ -251,7 +254,7 @@ function routeCard(actor) {
 
   // Model
   const pickBtn = h('button', {class: 'pick', disabled: locked('model') || locked('base_url'), onclick: () => openPicker(card, a, actor.key, false)},
-    h('span', {class: 'pk'}, h('span', {class: 'd' + (keyPresent(a.api_key_env) ? ' on' : '')}), h('b', null, m ? m.label : a.model), h('span', {class: 'sub'}, prov ? prov.label : a.base_url.replace(/^https?:\/\//, ''))), h('span', {class: 'caret'}, '▾'));
+    h('span', {class: 'pk'}, h('span', {class: 'kdot' + (keyPresent(a.api_key_env) ? ' on' : '')}), h('b', null, m ? m.label : a.model), h('span', {class: 'sub'}, prov ? prov.label : a.base_url.replace(/^https?:\/\//, ''))), h('span', {class: 'caret'}, '▾'));
   const same = actor.key !== 'orchestrator' && !locked('model') ? h('button', {class: 'link', title: 'Copy the orchestrator\'s provider, model, and effort', onclick: () => { const o = E.cfg.orchestrator; Object.assign(a, {base_url: o.base_url, protocol: o.protocol, api_key_env: o.api_key_env, model: o.model, reasoning_effort: o.reasoning_effort, context_tokens: o.context_tokens}); rerender(); }}, 'same as orchestrator') : null;
   card.append(field('Model', [pickBtn], [h('span', {class: 'notes-row'}, srcNode(ptr('model')), same), ...problemNodes(ptr('model'))]));
   card.append(h('div', {class: 'sub price'}, priceLine(m), !keyPresent(a.api_key_env) ? h('span', {class: 'warn-text'}, ` · $${a.api_key_env} is not set in this shell`) : null));
@@ -268,7 +271,7 @@ function routeCard(actor) {
       h('span', {class: 'e'}, e), anyCheck ? h('span', {class: 'ann'}, chk ? checkText(chk) : '') : null));
   }
   const testing = E.tests[actor.key] && E.tests[actor.key].busy;
-  const tools = h('div', {class: 'row tools'},
+  const tools = h('div', {class: 'testrow'},
     h('button', {class: 'small', disabled: testing, onclick: () => runTest(actor.key, null)}, testing ? 'testing…' : 'Test this route'),
     h('button', {class: 'small', disabled: testing, title: 'Send one tiny tool call at each effort and note the latency and reasoning tokens. Costs a fraction of a cent.', onclick: () => runAll(actor.key)}, 'Try every effort'),
     h('span', {class: 'sub grow'}, checked ? '' : 'Efforts are not verified for this model; the annotations come from your tests.'));
@@ -325,7 +328,7 @@ function resultLine(r) {
   else parts.push(`failed${r.http_status ? ' (' + r.http_status + ')' : ''}: ${r.error}`);
   if (r.usage && r.usage.input) parts.push(`${k(r.usage.input)} in / ${k(r.usage.output)} out${r.usage.reasoning ? ' / ' + k(r.usage.reasoning) + ' reasoning' : ''}`);
   if (r.priced) parts.push(`~${money(r.est_cost_usd)}`);
-  return h('div', {class: 'result ' + (ok ? 'ok' : r.status === 'no_tool_call' ? 'warn' : 'bad')}, h('span', {class: 'mark'}, ok ? '✓' : r.status === 'no_tool_call' ? '△' : '✕'), h('span', null, `${r.route} · effort ${r.effort || 'default'} · ${parts.join(' · ')}`), r.text ? h('span', {class: 'sub'}, ` “${r.text}”`) : null);
+  return h('div', {class: 'testresult ' + (ok ? 'ok' : r.status === 'no_tool_call' ? 'warn' : 'bad')}, h('span', {class: 'mark'}, ok ? '✓' : r.status === 'no_tool_call' ? '△' : '✕'), h('span', null, `${r.route} · effort ${r.effort || 'default'} · ${parts.join(' · ')}`), r.text ? h('span', {class: 'sub'}, ` “${r.text}”`) : null);
 }
 async function runTest(key, effort, route) {
   const a = E.cfg[key];
@@ -372,7 +375,7 @@ function fallbackLine(card, a, key) {
   const sel = h('select', {class: 'mini', onchange: ev => { fb.reasoning_effort = ev.target.value === 'none' && fb.protocol === 'openai-chat' ? '' : ev.target.value; rerender(); }}, ...list.map(e => h('option', {value: e, selected: (fb.reasoning_effort || (fb.protocol === 'openai-chat' ? '' : 'none')) === e || (e === 'none' && !fb.reasoning_effort)}, e)));
   const t = E.tests[key + ':fb'];
   return h('div', {class: 'fb has'}, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'Fallback'),
-      h('button', {class: 'pick mini', onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'd' + (keyPresent(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
+      h('button', {class: 'pick mini', onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'kdot' + (keyPresent(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
       h('span', {class: 'sub'}, 'effort'), sel,
       h('button', {class: 'ghost small', disabled: t && t.busy, onclick: () => runTest(key, null, 'fallback').then(() => {})}, 'test'),
       h('button', {class: 'ghost small', onclick: () => { delete a.fallback; rerender(); }}, 'remove')),
@@ -419,7 +422,7 @@ function openPicker(card, a, key, forFallback) {
       if (m.family !== lastFam) { list.append(h('div', {class: 'pgroup'}, m.family)); lastFam = m.family; }
       const sel = trimSlash(p.base_url) === trimSlash(target.base_url) && m.id === target.model;
       list.append(h('button', {class: 'prow' + (sel ? ' on' : '') + (keyed ? '' : ' nokey'), onclick: () => choose(m)},
-        h('span', {class: 'd' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub note'}, m.note) : null),
+        h('span', {class: 'kdot' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub pnote'}, m.note) : null),
         h('span', {class: 'pr'}, m.price ? `$${trimNum(m.price.in)} / $${trimNum(m.price.out)}` : '—', h('span', {class: 'sub'}, ` · ${ctx(m.context)}${m.vision ? ' · vision' : ''}`))));
     }
     if (!rows.length) list.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No catalog model matches. Custom models are added by editing the project file.'));
@@ -493,7 +496,7 @@ function promptsCard() {
 function advancedCard() {
   const res = E.c.resolution;
   const open = !!E.open.adv;
-  const det = h('details', {class: 'card adv-card', open}, h('summary', {onclick: () => { E.open.adv = !open; }}, h('h3', null, 'Files and raw JSON')));
+  const det = h('details', {class: 'card adv-card', open}, h('summary', {onclick: () => { E.open.adv = !open; }}, 'Files and raw JSON'));
   const rawTa = h('textarea', {class: 'code', style: 'width:100%;min-height:200px', spellcheck: 'false'}, res.file.raw || '');
   const rawStatus = h('span', {class: 'sub'});
   det.append(h('div', {class: 'adv2'},
@@ -513,8 +516,8 @@ function saveBar() {
   const running = E.c.running.length;
   const bar = h('div', {class: 'savebar' + (dirty ? ' dirty' : '')});
   const groups = groupChanges(ch);
-  const summary = dirty ? h('div', {class: 'summary'}, h('b', null, `${groups.length} change${groups.length > 1 ? 's' : ''}`), h('span', {class: 'sub'}, ' · ' + groups.join(' · ')))
-    : h('div', {class: 'summary'}, h('b', null, E.c.resolution.file.exists ? 'Saved' : 'Not saved yet'), h('span', {class: 'sub'}, running ? ` · ${running} running session${running > 1 ? 's' : ''} keep${running > 1 ? '' : 's'} the configuration they started with` : ' · for new and resumed sessions'));
+  const summary = dirty ? h('div', {class: 'savesum'}, h('b', null, `${groups.length} change${groups.length > 1 ? 's' : ''}`), h('span', {class: 'sub'}, ' · ' + groups.join(' · ')))
+    : h('div', {class: 'savesum'}, h('b', null, E.c.resolution.file.exists ? 'Saved' : 'Not saved yet'), h('span', {class: 'sub'}, running ? ` · ${running} running session${running > 1 ? 's' : ''} keep${running > 1 ? '' : 's'} the configuration they started with` : ' · for new and resumed sessions'));
   const pin = h('label', {class: 'check sub', title: 'Write every value instead of only the differences from the base preset, so the file stands alone even if the preset changes in a future release.'}, h('input', {type: 'checkbox', checked: E.mode === 'pin', onchange: ev => { E.mode = ev.target.checked ? 'pin' : 'overlay'; }}), 'write every value');
   const baseSel = h('select', {class: 'mini', title: 'The preset the saved file builds on; only differences from it are written.', onchange: ev => { E.base = ev.target.value; rerender(); }}, h('option', {value: '', selected: !E.base}, 'no base preset'), ...E.c.presets.map(p => h('option', {value: p.name, selected: E.base === p.name}, `base: ${p.name}`)));
   const actions = h('div', {class: 'acts'},
@@ -545,8 +548,8 @@ async function save() {
   }
 }
 function undoToast(prevRaw, prevExists, newETag) {
-  document.querySelectorAll('.toast.wide').forEach(o => o.remove()); // only the latest save can be undone
-  const t = h('div', {class: 'toast show wide'}, 'Saved. ', h('button', {class: 'small', onclick: async () => {
+  document.querySelectorAll('.toast.undo').forEach(o => o.remove()); // only the latest save can be undone
+  const t = h('div', {class: 'toast show undo'}, 'Saved. ', h('button', {class: 'small', onclick: async () => {
     try { await api('/api/config/raw', {method: 'PUT', body: JSON.stringify({raw: prevExists ? prevRaw : '{\n}\n', if_match: newETag})}); t.remove(); toast('undone'); E = null; render(); } catch (e) { toast(e.message, 'bad'); }
   }}, 'Undo'));
   X.toastHost().append(t);
