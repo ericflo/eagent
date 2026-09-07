@@ -10,22 +10,25 @@ import (
 func TestResolveConfinement(t *testing.T) {
 	root := t.TempDir()
 	f := Files{Root: root}
-	if _, err := f.Resolve("src/a.go"); err != nil {
+	if _, err := f.Resolve("src/a.go", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Resolve(filepath.Join(root, "b")); err != nil {
+	if _, err := f.Resolve(filepath.Join(root, "b"), true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Resolve("../../../../../../etc/passwd"); err == nil {
-		t.Fatal("escape accepted")
+	if _, err := f.Resolve("../../../../../../etc/passwd", true); err == nil {
+		t.Fatal("write escape accepted")
 	}
-	if _, err := f.Resolve("/etc/passwd"); err == nil {
-		t.Fatal("absolute outside accepted")
+	if _, err := f.Resolve("/etc/passwd", true); err == nil {
+		t.Fatal("absolute write outside accepted")
 	}
-	if _, err := f.Resolve(filepath.Join(os.TempDir(), "x")); err != nil {
-		t.Fatal("temp dir should be allowed")
+	if _, err := f.Resolve("/etc/passwd", false); err != nil {
+		t.Fatal("reads may go anywhere")
 	}
-	if _, err := (Files{Root: root, AllowOutside: true}).Resolve("/etc/passwd"); err != nil {
+	if _, err := f.Resolve(filepath.Join(os.TempDir(), "x"), true); err != nil {
+		t.Fatal("temp dir should be writable")
+	}
+	if _, err := (Files{Root: root, AllowOutside: true}).Resolve("/etc/passwd", true); err != nil {
 		t.Fatal("AllowOutside should permit")
 	}
 }

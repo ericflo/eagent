@@ -19,9 +19,11 @@ type Files struct {
 	AllowOutside bool
 }
 
-// Resolve turns a model-supplied path into an absolute path inside the
-// project (or the OS temp dir). Escapes are rejected with a clear message.
-func (f Files) Resolve(p string) (string, error) {
+// Resolve turns a model-supplied path into an absolute path. Reads may go
+// anywhere the process can see; writes are confined to the project directory
+// (or the OS temp dir) so a mistyped path cannot clobber something outside
+// the project. Escapes are rejected with a clear message.
+func (f Files) Resolve(p string, write bool) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("path is required")
 	}
@@ -30,7 +32,7 @@ func (f Files) Resolve(p string) (string, error) {
 		abs = filepath.Join(f.Root, p)
 	}
 	abs = filepath.Clean(abs)
-	if f.AllowOutside {
+	if f.AllowOutside || !write {
 		return abs, nil
 	}
 	root := filepath.Clean(f.Root)
@@ -41,12 +43,12 @@ func (f Files) Resolve(p string) (string, error) {
 	if strings.HasPrefix(abs, tmp+string(filepath.Separator)) {
 		return abs, nil
 	}
-	return "", fmt.Errorf("%s is outside the project directory %s; use a path inside the project (or a shell command if you really mean it)", p, root)
+	return "", fmt.Errorf("refusing to write %s: it is outside the project directory %s. Write inside the project (or use a shell command if you really mean it)", p, root)
 }
 
 // ReadFile returns a file's contents, optionally a window of lines.
 func (f Files) ReadFile(p string, offset, limit int, maxBytes int) (string, error) {
-	abs, err := f.Resolve(p)
+	abs, err := f.Resolve(p, false)
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +95,7 @@ func (f Files) ReadFile(p string, offset, limit int, maxBytes int) (string, erro
 
 // WriteFile creates or replaces a file, making parent directories.
 func (f Files) WriteFile(p, content string) (string, error) {
-	abs, err := f.Resolve(p)
+	abs, err := f.Resolve(p, true)
 	if err != nil {
 		return "", err
 	}
@@ -123,7 +125,7 @@ func boolInt(b bool) int {
 
 // EditFile replaces one exact occurrence of old with new.
 func (f Files) EditFile(p, oldText, newText string, replaceAll bool) (string, error) {
-	abs, err := f.Resolve(p)
+	abs, err := f.Resolve(p, true)
 	if err != nil {
 		return "", err
 	}
@@ -166,7 +168,7 @@ func (f Files) ListDir(p string) (string, error) {
 	if p == "" {
 		p = "."
 	}
-	abs, err := f.Resolve(p)
+	abs, err := f.Resolve(p, false)
 	if err != nil {
 		return "", err
 	}

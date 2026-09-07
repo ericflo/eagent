@@ -122,7 +122,7 @@ The dossier is a briefing plus a **map**: `file:line` citations into the raw log
 
 `bash` starts every command in its own process group under a handle and returns within `wait_seconds` (20 by default) with either the finished output or the handle plus whatever was printed so far. The harness keeps managing it: `bash_poll` (with optional wait), `bash_write` for stdin, `bash_extend` for the deadline, `bash_kill`. Commands started with `timeout_seconds=0` are servers and are handed over when a task ends; everything else a task started is killed with it. A command that finishes after its owner moved on is reported as a notification. Output is captured in full (no 4KB pipe truncation) and capped at 4MB per process, keeping the head and the tail.
 
-File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) are confined to the project directory (and the OS temp dir). The spec calls for bash only; the file tools exist because mid-tier models writing 300-line files through heredocs was the single biggest source of broken output in earlier attempts.
+File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) can read anywhere but only write inside the project directory (and the OS temp dir), so a mistyped path cannot clobber something outside the project. The spec calls for bash only; the file tools exist because mid-tier models writing 300-line files through heredocs was the single biggest source of broken output in earlier attempts.
 
 ## Configuration
 
