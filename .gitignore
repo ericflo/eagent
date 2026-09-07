@@ -1,0 +1,6 @@
+/eagent
+/bin/
+/dist/
+*.test
+coverage.out
+.agents/eagent/sessions/*/.lock
