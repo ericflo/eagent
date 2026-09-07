@@ -30,14 +30,18 @@ type fakeUI struct {
 	input    chan string
 }
 
-func (u *fakeUI) Narrate(text string) { u.mu.Lock(); u.messages = append(u.messages, text); u.mu.Unlock() }
+func (u *fakeUI) Narrate(text string) {
+	u.mu.Lock()
+	u.messages = append(u.messages, text)
+	u.mu.Unlock()
+}
 func (u *fakeUI) Ask(id, text string, options []string) {
 	u.mu.Lock()
 	u.asked = append(u.asked, text)
 	u.mu.Unlock()
 }
-func (u *fakeUI) Status(Status)                           {}
-func (u *fakeUI) Trace(event.Event)                       {}
+func (u *fakeUI) Status(Status)                          {}
+func (u *fakeUI) Trace(event.Event)                      {}
 func (u *fakeUI) Stream(actor, task, kind, delta string) {}
 func (u *fakeUI) Log(format string, args ...any) {
 	u.mu.Lock()
