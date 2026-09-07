@@ -230,11 +230,11 @@ func (t *Terminal) statusText() string {
 	if s.Procs > 0 {
 		parts = append(parts, fmt.Sprintf("%d proc%s", s.Procs, plural(s.Procs)))
 	}
+	if len(parts) == 0 {
+		return "" // nothing is happening; no status line
+	}
 	if s.ContextTokens > 0 {
 		parts = append(parts, fmt.Sprintf("ctx %dk", s.ContextTokens/1000))
-	}
-	if len(parts) == 0 {
-		return ""
 	}
 	return strings.Join(parts, " · ")
 }

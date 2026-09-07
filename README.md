@@ -116,7 +116,33 @@ When the orchestrator's prompt passes `rollover_tokens` (150k by default), eagen
 3. gives the task worker a **dossier task** with the directory of every subsession so far and `session_list` / `session_read` / `session_search` tools;
 4. delivers the dossier as the first message of the new subsession.
 
-The dossier is a briefing plus a **map**: `file:line` citations into the raw logs for every important item. The orchestrator can `session_read` any cited range at full fidelity. Because each dossier is rebuilt from the original events, nothing decays into a summary of a summary; each one is written for the work at hand. A dossier without citations is rejected and retried once; if the worker still fails, a harness-built briefing keeps the session going. The narrator starts the new subsession from the same dossier.
+The dossier is a briefing plus a **map**: `file:line` citations into the raw logs for every important item. This is what one looked like in a real session that rolled over three times (threshold lowered to 20k tokens to force it; the orchestrator was reading a repository's documentation file by file):
+
+```
+# DOSSIER — Session 1788751572547 (now on subsession 4, 1788751741241.jsonl)
+
+## 1. USER'S GOAL
+Verbatim (1788751572547.jsonl:3): "The repository ../sequin is a Rust project. Personally
+(do NOT delegate any of this; use read_file yourself) read these files in full, one at a time: …"
+
+## 2. CURRENT STATE
+Verified on disk (ls/wc this session, handle p6):
+- summaries/README.md (1803 B, 29 lines) — done (source README.md, 177 lines, read fully in subsession 1).
+- summaries/arrival.md (3603 B, 20 lines) — done (source arrival.md, 866 lines, read in 3 chunks).
+- summaries/content.md (3023 B, 12 lines) — done …
+- scratch/founder-calls-notes.md — the orchestrator's OWN notes on founder-calls.md lines 1–710,
+  written as a durability measure at 1788751636035.jsonl:46. NOT the deliverable.
+Not yet read/summarized: … canon-evidence.md — 1728 lines, NOT READ (needs ~6 chunks) …
+
+## 3. DECISIONS AND CONSTRAINTS
+- read_file truncates ~24 KB per call; chunk big files (offset/limit ~200-300 lines). …
+
+## 5. MAP
+- founder-calls.md read part 1 (lines 1–480): 1788751636035.jsonl:42-43. Lines 481–710: …:44-45.
+- Prior dossier (covers subsession 1 only): 1788751587025.jsonl:26-29 — this dossier supersedes it.
+```
+
+The orchestrator, told in its steering message that it was at 19k of 20k tokens, wrote its reading notes to a scratch file *before* the reset so nothing was lost; the next dossier pointed at that file. Nobody programmed that. The orchestrator can `session_read` any cited range at full fidelity. Because each dossier is rebuilt from the original events, nothing decays into a summary of a summary; each one is written for the work at hand. A dossier without citations is rejected and retried once; if the worker still fails, a harness-built briefing keeps the session going. The narrator starts the new subsession from the same dossier.
 
 ### Shell commands never block the harness
 
