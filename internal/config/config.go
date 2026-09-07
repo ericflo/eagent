@@ -110,36 +110,76 @@ func Defaults() Config {
 	}
 }
 
-// Presets are named alternative routings.
+// Presets are named alternative routings. The provider-tier names
+// (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
+// within one provider; glm is the default and astra is the spec's hybrid.
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {
 		c.Description = "GPT-6 Astra orchestrating (OpenAI, OpenRouter fallback); GLM-5.3-Flash and DeepSeek V4 Flash on Together"
-		c.Orchestrator = Actor{
-			Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: "gpt-6-astra",
-			APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 1_000_000,
-			Fallback: &Actor{
-				Protocol: llm.ProtocolResponses, BaseURL: openrouterURL, Model: "openai/gpt-6-astra",
-				APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 1_000_000,
-			},
-		}
+		c.Orchestrator = openaiActor("gpt-6-astra", "medium", 32768)
 		c.RolloverTokens = 300_000
 	},
-	"anthropic": func(c *Config) {
-		c.Description = "Claude Fable 5.1 orchestrating, Opus 5 working, Sonnet 5 narrating"
-		c.Orchestrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-fable-5-1",
-			APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 200_000,
-		}
-		c.Task = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-opus-5",
-			APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "low", MaxTokens: 32768, ContextTokens: 200_000,
-		}
-		c.Narrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-sonnet-5",
-			APIKeyEnv: "ANTHROPIC_API_KEY", MaxTokens: 4096, ContextTokens: 200_000,
-		}
+
+	// OpenAI: direct API first, the same model through OpenRouter when the
+	// direct route is unroutable (no key, no access, no credits).
+	"openai-high": func(c *Config) {
+		c.Description = "GPT-6 Astra (high effort) orchestrating, GPT-5.6 Sol working, GPT-5.6 Luna narrating"
+		c.Orchestrator = openaiActor("gpt-6-astra", "high", 32768)
+		c.Task = openaiActor("gpt-5.6-sol", "medium", 32768)
+		c.Narrator = openaiActor("gpt-5.6-luna", "low", 4096)
+		c.RolloverTokens = 300_000
 	},
+	"openai-med": func(c *Config) {
+		c.Description = "GPT-6 Astra (medium effort) orchestrating, GPT-5.6 Terra working, GPT-5.6 Luna narrating"
+		c.Orchestrator = openaiActor("gpt-6-astra", "medium", 32768)
+		c.Task = openaiActor("gpt-5.6-terra", "medium", 32768)
+		c.Narrator = openaiActor("gpt-5.6-luna", "low", 4096)
+		c.RolloverTokens = 300_000
+	},
+	"openai-low": func(c *Config) {
+		c.Description = "GPT-5.6 Sol orchestrating, GPT-5.6 Luna working and narrating"
+		c.Orchestrator = openaiActor("gpt-5.6-sol", "medium", 32768)
+		c.Task = openaiActor("gpt-5.6-luna", "low", 32768)
+		c.Narrator = openaiActor("gpt-5.6-luna", "low", 4096)
+		c.RolloverTokens = 300_000
+	},
+
+	// OpenRouter: one key, many labs.
+	"openrouter-high": func(c *Config) {
+		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenRouter)"
+		c.Orchestrator = openrouterActor("moonshotai/kimi-k3", "medium", 32768, 1_000_000)
+		c.Task = openrouterActor("z-ai/glm-5.3", "medium", 32768, 200_000)
+		c.Narrator = openrouterActor("z-ai/glm-5.3-flash", "low", 4096, 200_000)
+	},
+	"openrouter-med": func(c *Config) {
+		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (OpenRouter)"
+		c.Orchestrator = openrouterActor("z-ai/glm-5.3", "medium", 32768, 200_000)
+		c.Task = openrouterActor("z-ai/glm-5.3-flash", "low", 32768, 200_000)
+		c.Narrator = openrouterActor("deepseek/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+	"openrouter-low": func(c *Config) {
+		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4 Flash working and narrating (OpenRouter; cheapest)"
+		c.Orchestrator = openrouterActor("z-ai/glm-5.3-flash", "low", 32768, 200_000)
+		c.Task = openrouterActor("deepseek/deepseek-v4-flash-0731", "low", 32768, 200_000)
+		c.Narrator = openrouterActor("deepseek/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+
+	// Anthropic.
+	"anthropic-high": func(c *Config) {
+		c.Description = "Claude Fable 5.1 orchestrating, Opus 5 working, Sonnet 5 narrating"
+		c.Orchestrator = anthropicActor("claude-fable-5-1", "medium", 32768)
+		c.Task = anthropicActor("claude-opus-5", "low", 32768)
+		c.Narrator = anthropicActor("claude-sonnet-5", "", 4096)
+	},
+	"anthropic-med": func(c *Config) {
+		c.Description = "Claude Opus 5 orchestrating, Sonnet 5 working, Haiku 4.5 narrating"
+		c.Orchestrator = anthropicActor("claude-opus-5", "medium", 32768)
+		c.Task = anthropicActor("claude-sonnet-5", "low", 32768)
+		c.Narrator = anthropicActor("claude-haiku-4-5-20251001", "", 4096)
+	},
+
+	// Single-model shapes: what you would get from one local model.
 	"deepseek": func(c *Config) {
 		c.Description = "DeepSeek V4 Flash for all three actors (cheap; the shape of a single local model)"
 		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
@@ -160,8 +200,23 @@ var Presets = map[string]func(*Config){
 	},
 }
 
+// presetAliases keeps older names working.
+var presetAliases = map[string]string{"anthropic": "anthropic-high"}
+
 // PresetNames lists presets in a stable order.
-func PresetNames() []string { return []string{"glm", "astra", "anthropic", "deepseek", "qwen"} }
+func PresetNames() []string {
+	return []string{"glm", "astra", "openai-high", "openai-med", "openai-low", "openrouter-high", "openrouter-med", "openrouter-low", "anthropic-high", "anthropic-med", "deepseek", "qwen"}
+}
+
+// ResolvePreset maps a preset name or alias to its canonical name; ok is
+// false for unknown names.
+func ResolvePreset(name string) (string, bool) {
+	if canon, ok := presetAliases[name]; ok {
+		name = canon
+	}
+	_, ok := Presets[name]
+	return name, ok
+}
 
 // PresetDescription returns the one-line description of a built-in preset.
 func PresetDescription(name string) string {
@@ -169,10 +224,35 @@ func PresetDescription(name string) string {
 	if name == "glm" {
 		return "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (Together AI)"
 	}
-	if apply, ok := Presets[name]; ok {
-		apply(&c)
+	if canon, ok := ResolvePreset(name); ok {
+		Presets[canon](&c)
 	}
 	return c.Description
+}
+
+func openaiActor(model, effort string, maxTokens int) Actor {
+	return Actor{
+		Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: model,
+		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_000_000,
+		Fallback: &Actor{
+			Protocol: llm.ProtocolResponses, BaseURL: openrouterURL, Model: "openai/" + model,
+			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_000_000,
+		},
+	}
+}
+
+func openrouterActor(model, effort string, maxTokens, contextTokens int) Actor {
+	return Actor{
+		Protocol: llm.ProtocolChat, BaseURL: openrouterURL, Model: model,
+		APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: contextTokens,
+	}
+}
+
+func anthropicActor(model, effort string, maxTokens int) Actor {
+	return Actor{
+		Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: model,
+		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 200_000,
+	}
 }
 
 // BundlesDir holds a project's named configurations.
@@ -265,9 +345,9 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 	var bundleCfg map[string]json.RawMessage
 	if bundle != "" {
 		// A bundle name may also be a built-in preset.
-		if _, isPreset := Presets[bundle]; isPreset {
+		if canon, isPreset := ResolvePreset(bundle); isPreset {
 			if preset == "" {
-				preset = bundle
+				preset = canon
 			}
 			bundle = ""
 		} else {
@@ -296,7 +376,11 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 		}
 	}
 	if preset != "" {
-		apply, ok := Presets[preset]
+		canon, ok := ResolvePreset(preset)
+		if ok {
+			preset = canon
+		}
+		apply := Presets[canon]
 		if !ok {
 			return cfg, fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 		}

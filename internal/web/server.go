@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -99,6 +100,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/config", s.getConfig)
 	s.mux.HandleFunc("POST /api/config/bundles", s.saveBundle)
 	s.mux.HandleFunc("GET /api/prompts/{name}", s.getPrompt)
+	s.mux.HandleFunc("PUT /api/prompts/{name}", s.putPrompt)
+	s.mux.HandleFunc("DELETE /api/prompts/{name}", s.deletePrompt)
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "project": s.Project})
 	})
@@ -142,6 +145,10 @@ func alive(sessionPath string) bool {
 // SessionSummary is what the list and detail endpoints return.
 type SessionSummary struct {
 	ID           string            `json:"id"`
+	Tokens       int               `json:"tokens"`   // input tokens across all actors
+	CostUSD      float64           `json:"cost_usd"` // estimate at list prices; 0 when a model is unknown
+	Priced       bool              `json:"priced"`
+	Duration     float64           `json:"duration_s"`
 	Started      time.Time         `json:"started"`
 	Modified     time.Time         `json:"modified"`
 	Status       string            `json:"status"` // running | idle | done | awaiting-input | interrupted | quit | error
@@ -207,6 +214,9 @@ type ScheduleView struct {
 
 type UsageView struct {
 	Actor      string  `json:"actor"`
+	Model      string  `json:"model,omitempty"`
+	CostUSD    float64 `json:"cost_usd"`
+	Priced     bool    `json:"priced"`
 	Calls      int     `json:"calls"`
 	Input      int     `json:"input"`
 	Output     int     `json:"output"`
@@ -253,6 +263,19 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 	s.mu.Unlock()
 	sum.Hosted = hosted
 	sum.Alive = hosted || alive(info.Path)
+	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+		sum.Tokens += st.Totals[a].Input
+	}
+	sum.CostUSD, sum.Priced = estimateCost(st)
+	if !st.Started.IsZero() {
+		end := info.Modified
+		if st.Ended {
+			if last := st.Events[len(st.Events)-1]; !last.Time.IsZero() {
+				end = last.Time
+			}
+		}
+		sum.Duration = end.Sub(st.Started).Seconds()
+	}
 	switch {
 	case sum.Alive && st.Idle() && st.Question != nil:
 		sum.Status = "awaiting-input"
@@ -310,6 +333,8 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
 		u := usageView(a, st.Calls[a], st.Totals[a])
 		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
+		u.Model = st.Models[a]
+		u.CostUSD, u.Priced = priceFor(st.Models[a], st.Totals[a])
 		d.Usage = append(d.Usage, u)
 	}
 	for _, ss := range st.Subsessions {
@@ -913,4 +938,113 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// ---- pricing ------------------------------------------------------------------
+
+// price is USD per million tokens. Cached is the cached-input rate.
+type price struct{ Input, Cached, Output float64 }
+
+// prices are list prices as of September 2026 for the models the presets
+// use. Unknown models produce no estimate rather than a wrong one.
+var prices = map[string]price{
+	// Together
+	"zai-org/GLM-5.3":                    {1.40, 0.26, 4.40},
+	"zai-org/GLM-5.3-Flash":              {0.15, 0.03, 0.50},
+	"deepseek-ai/DeepSeek-V4-Flash-0731": {0.14, 0.03, 0.28},
+	// OpenRouter
+	"qwen/qwen3.8-27b":                {0.42, 0.42, 3.00},
+	"z-ai/glm-5.3":                    {1.40, 0.26, 4.40},
+	"z-ai/glm-5.3-flash":              {0.07, 0.01, 0.25},
+	"deepseek/deepseek-v4-flash-0731": {0.14, 0.03, 0.28},
+	"moonshotai/kimi-k3":              {3.00, 0.30, 15.00},
+	// OpenAI, direct and via OpenRouter
+	"gpt-6-astra": {10.0, 1.0, 50.0}, "openai/gpt-6-astra": {10.0, 1.0, 50.0},
+	"gpt-5.6-sol": {2.00, 0.20, 10.0}, "openai/gpt-5.6-sol": {2.00, 0.20, 10.0},
+	"gpt-5.6-terra": {2.00, 0.20, 12.0}, "openai/gpt-5.6-terra": {2.00, 0.20, 12.0},
+	"gpt-5.6-luna": {0.20, 0.02, 1.20}, "openai/gpt-5.6-luna": {0.20, 0.02, 1.20},
+	// Anthropic (cache writes are billed above the input rate and are not
+	// tracked separately, so these run slightly low)
+	"claude-opus-5":             {5.00, 0.50, 25.0},
+	"claude-sonnet-5":           {2.00, 0.20, 10.0},
+	"claude-haiku-4-5-20251001": {1.00, 0.10, 5.00},
+}
+
+func priceFor(model string, u event.Usage) (float64, bool) {
+	p, ok := prices[model]
+	if !ok {
+		return 0, false
+	}
+	uncached := u.Input - u.Cached
+	if uncached < 0 {
+		uncached = 0
+	}
+	return (float64(uncached)*p.Input + float64(u.Cached)*p.Cached + float64(u.Output)*p.Output) / 1e6, true
+}
+
+// estimateCost sums per-actor estimates; Priced is false if any actor's
+// model is unknown so the UI can say so.
+func estimateCost(st *state.State) (float64, bool) {
+	total := 0.0
+	priced := true
+	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+		if st.Calls[a] == 0 {
+			continue
+		}
+		c, ok := priceFor(st.Models[a], st.Totals[a])
+		if !ok {
+			priced = false
+			continue
+		}
+		total += c
+	}
+	return total, priced
+}
+
+// ---- prompt overrides --------------------------------------------------------
+
+func (s *Server) putPrompt(w http.ResponseWriter, r *http.Request) {
+	name := strings.ToUpper(strings.TrimSuffix(r.PathValue("name"), ".md")) + ".md"
+	known := false
+	for _, n := range prompts.Names {
+		if n == name {
+			known = true
+		}
+	}
+	if !known {
+		writeErr(w, 404, fmt.Errorf("unknown prompt %s", name))
+		return
+	}
+	var b struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b); err != nil || strings.TrimSpace(b.Text) == "" {
+		writeErr(w, 400, errors.New("text is required"))
+		return
+	}
+	if _, err := template.New(name).Parse(b.Text); err != nil {
+		writeErr(w, 400, fmt.Errorf("template error: %w", err))
+		return
+	}
+	dir := prompts.Dir(s.Project)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(b.Text), 0o644); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]any{"name": name, "source": path})
+}
+
+func (s *Server) deletePrompt(w http.ResponseWriter, r *http.Request) {
+	name := strings.ToUpper(strings.TrimSuffix(r.PathValue("name"), ".md")) + ".md"
+	path := filepath.Join(prompts.Dir(s.Project), name)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]any{"name": name, "source": "built-in"})
 }

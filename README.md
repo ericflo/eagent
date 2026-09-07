@@ -88,7 +88,9 @@ eagent -p --serve :7331 "…"  # also serve while a terminal session runs
   <img src="docs/web-tasks.png" width="49%" alt="Tasks view">
 </p>
 
-The UI reads the same JSONL logs as everything else, so it shows every session in the project, including ones running in another terminal, live. **Chat** is the narrator conversation: messages, questions with their options as buttons, your replies; toggle *show activity* to see delegations, notes, and task results interleaved. **Tasks** lists every task with status, call count, tokens, and cache ratio; click one to read its description, its report, and every model turn with tool calls, arguments, and results. **Timeline** is the raw event log with actor filters and one-click JSON. **Config** shows the active models, which API keys are present, built-in presets and project bundles (each with a *New session* button), and the prompts with their sources.
+The UI reads the same JSONL logs as everything else, so it shows every session in the project, including ones running in another terminal, live. **Chat** is the narrator conversation: messages, questions with their options as buttons, your replies; toggle *show activity* to see delegations, notes, and task results interleaved. **Tasks** shows the cost and cache ratio per actor, a timeline of orchestrator turns and task bars with every fresh-context boundary marked, the orchestrator's prompt size per call, and every task with status, call count, tokens, and duration; click one to read its description, its report, and every model turn with tool calls rendered the way you would read them (a command and its output, a file and its content, an edit as old and new). **Timeline** is the raw event log with actor filters, text search, relative timestamps, and inline JSON. **Config** shows the active models, which API keys are present, built-in presets and project bundles (each with a *New session* button), and the prompts, which you can edit in place as project overrides.
+
+The session list shows duration, tokens, and an estimated cost at list prices for every session. The browser tab shows `?` when a question is waiting for you and `●` while the agent is working, and the page can notify you when the agent has something to say. Keyboard: `n` new session, `1` `2` `3` tabs, `/` message, `g` config. Light and dark follow the OS, and everything from the timeline down to the tool-call cards holds up on a phone.
 
 Writing to a session works from anywhere: the UI drops a JSON file into the session's `inbox/` directory and the running process folds it into the log, so you can answer a question from the browser while the session runs in your terminal. Writing to a finished session resumes it inside the server.
 
@@ -172,12 +174,12 @@ File tools (`read_file`, `write_file`, `edit_file`, `list_dir`) can read anywher
 
 `eagent config` prints the effective configuration. Layers, each overriding the last: built-in defaults, a preset, the project's `.agents/eagent/config.json`, a named bundle, `EAGENT_*` environment variables.
 
-**Presets** are built in: `glm` (default), `astra`, `anthropic` (Claude Fable 5.1 orchestrating, Opus 5 working, Sonnet 5 narrating), `deepseek` (DeepSeek V4 Flash for all three actors), `qwen` (Qwen 3.8 27B via OpenRouter for all three; a dense model you could run locally). `eagent config list` describes them, and `eagent doctor --live --preset NAME` makes one tiny call per actor to prove a preset works before you rely on it.
+**Presets** are built in, named by provider and tier so the trade-off is in the name. `glm` (default) is GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash on Together. `openai-high` is GPT-6 Astra at high effort orchestrating, GPT-5.6 Sol working, GPT-5.6 Luna narrating; `openai-med` drops Astra to medium effort with GPT-5.6 Terra working; `openai-low` is Sol orchestrating with Luna working and narrating. Each OpenAI route falls back to the same model through OpenRouter when the direct key is missing or out of credits. `openrouter-high` is Kimi K3 / GLM-5.3 / GLM-5.3-Flash; `openrouter-med` is the default routing through OpenRouter; `openrouter-low` is GLM-5.3-Flash / DeepSeek V4 Flash / DeepSeek V4 Flash and the cheapest way to run. `anthropic-high` is Claude Fable 5.1 / Opus 5 / Sonnet 5; `anthropic-med` is Opus 5 / Sonnet 5 / Haiku 4.5. `astra` is the spec's hybrid (Astra orchestrating, Together workers). `deepseek` and `qwen` run one model for all three actors, the shape you would get from a single local model. `eagent config list` describes them, and `eagent doctor --live --preset NAME` makes one tiny call per actor to prove a preset works before you rely on it.
 
 **Bundles** are named configurations checked into the project under `.agents/eagent/configs/NAME.json`, so a team can keep everyone's preferred setup side by side and borrow each other's:
 
 ```
-eagent config save eric "Eric's setup: Anthropic, low effort workers" --preset anthropic
+eagent config save eric "Eric's setup: Anthropic, low effort workers" --preset anthropic-med
 eagent --config eric "…"          # or EAGENT_CONFIG=eric, or "default_config": "eric" in config.json
 eagent config show eric
 ```
@@ -204,8 +206,9 @@ A bundle is a partial override: it can name a preset and change one model, or sp
 Protocols: `openai-chat` (Together, OpenRouter, any compatible server), `openai-responses` (OpenAI, OpenRouter), `anthropic`. Presets switch the whole routing:
 
 ```
-eagent --preset astra …       # GPT-6 Astra orchestrator via OpenAI, OpenRouter fallback; Together workers
-eagent --preset anthropic …   # Claude Opus / Sonnet / Haiku
+eagent --preset openai-high …     # GPT-6 Astra / GPT-5.6 Sol / GPT-5.6 Luna, OpenRouter fallback
+eagent --preset openrouter-low …  # GLM-5.3-Flash / DeepSeek V4 Flash / DeepSeek V4 Flash, cheapest
+eagent --preset anthropic-med …   # Claude Opus 5 / Sonnet 5 / Haiku 4.5
 ```
 
 A route with a `fallback` switches automatically when the primary is unroutable (bad key, no model access, exhausted credits); the switch is recorded in the log and sticks for the session. Transient failures (429 rate limits, 5xx, stalled streams) retry with backoff. All calls stream; a stream that goes silent for two minutes, or runs past fifteen, is aborted and retried instead of hanging.
