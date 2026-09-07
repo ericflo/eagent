@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -606,10 +607,24 @@ func (s *State) OrchestratorEdits() int {
 		var d event.AssistantData
 		_ = ev.Decode(&d)
 		for _, tc := range d.ToolCalls {
-			if tc.Name == "write_file" || tc.Name == "edit_file" {
+			switch tc.Name {
+			case "write_file", "edit_file":
 				n++
+			case "bash":
+				// Writing a file through the shell counts too: heredocs, cat >, tee.
+				var a struct {
+					Command string `json:"command"`
+				}
+				if json.Unmarshal(tc.Args, &a) == nil && writesFile(a.Command) {
+					n++
+				}
 			}
 		}
 	}
 	return n
+}
+
+// writesFile reports whether a shell command is really a file write.
+func writesFile(cmd string) bool {
+	return strings.Contains(cmd, "<<") || strings.Contains(cmd, "cat >") || strings.Contains(cmd, "cat>") || strings.Contains(cmd, " tee ") || strings.HasPrefix(strings.TrimSpace(cmd), "tee ")
 }

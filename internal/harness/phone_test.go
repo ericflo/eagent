@@ -981,6 +981,9 @@ func TestOrchestratorEditNudge(t *testing.T) {
 		defer mu.Unlock()
 		n++
 		if n <= orchestratorEditNudge {
+			if n%2 == 0 { // every other edit goes through the shell; it must count the same
+				return reply{calls: []event.ToolCall{tc("bash", fmt.Sprintf(`{"command":"cat > f%d.txt <<'EOF'\nx\nEOF"}`, n))}}
+			}
 			return reply{calls: []event.ToolCall{tc("write_file", fmt.Sprintf(`{"path":"f%d.txt","content":"x"}`, n))}}
 		}
 		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
