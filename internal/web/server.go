@@ -321,6 +321,22 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 		d.Live = &live
 	}
 	s.mu.Unlock()
+	if d.Live == nil && sum.Alive {
+		// Not hosted here: derive activity from open turns in the log.
+		live := harness.Status{OrchestratorBusy: st.Turns[event.ActorOrchestrator] > 0, NarratorBusy: st.Turns[event.ActorNarrator] > 0, ContextTokens: d.Context}
+		if live.OrchestratorBusy {
+			live.OrchestratorFor = time.Since(st.TurnSince[event.ActorOrchestrator]).Round(time.Second).String()
+		}
+		for _, t := range st.RunningTasks() {
+			if t.Status == "running" {
+				live.TasksRunning++
+			} else {
+				live.TasksQueued++
+			}
+		}
+		live.Procs = len(st.RunningProcs())
+		d.Live = &live
+	}
 	if d.Tasks == nil {
 		d.Tasks = []TaskView{}
 	}

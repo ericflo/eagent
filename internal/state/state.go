@@ -127,6 +127,10 @@ type State struct {
 	Ended     bool
 	EndReason string
 	Resumes   int
+	// Turns tracks open turns per actor (turn.start without turn.end), so a
+	// reader of the log can tell which actors are mid-call right now.
+	Turns     map[string]int
+	TurnSince map[string]time.Time
 
 	// LastUsage is the newest provider-reported usage per continuous actor;
 	// its Input is the current prompt size.
@@ -159,6 +163,8 @@ func New() *State {
 		Totals:    map[string]event.Usage{},
 		Calls:     map[string]int{},
 		Latencies: map[string][]int64{},
+		Turns:     map[string]int{},
+		TurnSince: map[string]time.Time{},
 	}
 }
 
@@ -230,6 +236,14 @@ func (s *State) Apply(ev event.Event) {
 		_ = ev.Decode(&d)
 		s.Ended = true
 		s.EndReason = d.Reason
+		s.Turns = map[string]int{}
+	case event.TurnStart:
+		s.Turns[ev.Actor]++
+		s.TurnSince[ev.Actor] = ev.Time
+	case event.TurnEnd:
+		if s.Turns[ev.Actor] > 0 {
+			s.Turns[ev.Actor]--
+		}
 	case event.SubsessionStart:
 		var d event.SubsessionStartData
 		_ = ev.Decode(&d)
