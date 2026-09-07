@@ -4,3 +4,6 @@
 *.test
 coverage.out
 .agents/eagent/sessions/*/.lock
+
+# Session logs of eagent runs made inside this repository (the docs run); never commit them.
+.agents/eagent/sessions/
