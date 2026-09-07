@@ -79,16 +79,16 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		var seenSeq int64
 		var steer string
 		r.sync(func() {
+			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls)
+			r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: steer}))
 			msgs = r.st.OrchestratorView()
 			seenSeq = r.st.LastSeq()
-			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls)
 			r.orchCallAt = time.Now()
 		})
 		if len(msgs) == 0 {
 			return "nothing to do"
 		}
 		reason = ""
-		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{
 			System:   r.orchestratorSystem(),
 			Messages: msgs, Tools: r.orchTools, CacheKey: r.sess.ID + "-orchestrator",

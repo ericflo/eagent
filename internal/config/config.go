@@ -24,7 +24,11 @@ type Actor struct {
 	Model           string `json:"model"`
 	APIKeyEnv       string `json:"api_key_env"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	MaxTokens       int    `json:"max_tokens,omitempty"`
+	// ReplayReasoning sends OpenAI Responses models their encrypted
+	// reasoning back on later calls, as OpenAI recommends for tool loops.
+	// On by default; false trades continuity for smaller prompts.
+	ReplayReasoning *bool `json:"replay_reasoning,omitempty"`
+	MaxTokens       int   `json:"max_tokens,omitempty"`
 	// ContextTokens is the model's usable window; the orchestrator rolls
 	// over to a new subsession when its prompt approaches RolloverTokens.
 	ContextTokens int `json:"context_tokens,omitempty"`
@@ -612,6 +616,14 @@ func applyEnv(cfg *Config) {
 		if v, err := strconv.Atoi(os.Getenv("EAGENT_" + name + "_MAX_TOKENS")); err == nil && v > 0 {
 			a.MaxTokens = v
 		}
+		switch strings.ToLower(os.Getenv("EAGENT_" + name + "_REPLAY_REASONING")) {
+		case "1", "true", "on", "yes":
+			on := true
+			a.ReplayReasoning = &on
+		case "0", "false", "off", "no":
+			off := false
+			a.ReplayReasoning = &off
+		}
 	}
 	if v, err := strconv.Atoi(os.Getenv("EAGENT_TASK_CONCURRENCY")); err == nil && v > 0 {
 		cfg.TaskConcurrency = v
@@ -698,6 +710,7 @@ func (a Actor) Endpoint() (llm.Endpoint, error) {
 		Model:           a.Model,
 		APIKey:          key,
 		ReasoningEffort: a.ReasoningEffort,
+		ReplayReasoning: a.ReplayReasoning == nil || *a.ReplayReasoning,
 		MaxTokens:       a.MaxTokens,
 	}
 	if strings.Contains(a.BaseURL, "openrouter.ai") {

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -27,6 +29,7 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 	if err != nil {
 		return nil, err
 	}
+	dumpRequest(c.Endpoint.Model, raw)
 	url := strings.TrimRight(c.Endpoint.BaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
@@ -176,3 +179,16 @@ func (c *Client) readSSE(ctx context.Context, resp *http.Response, fn func(ev ss
 
 // errStop lets an SSE handler end the stream early without error.
 var errStop = errors.New("stop")
+
+// dumpRequest writes each request body to $EAGENT_DUMP_REQUESTS when that
+// directory is set, for debugging prompt caching and provider quirks. Off
+// by default; bodies contain the whole prompt.
+func dumpRequest(model string, raw []byte) {
+	dir := os.Getenv("EAGENT_DUMP_REQUESTS")
+	if dir == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	name := fmt.Sprintf("%s-%s.json", time.Now().UTC().Format("150405.000000"), strings.NewReplacer("/", "_", ":", "_").Replace(model))
+	_ = os.WriteFile(filepath.Join(dir, name), raw, 0o600)
+}

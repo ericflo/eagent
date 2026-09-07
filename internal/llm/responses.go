@@ -15,11 +15,13 @@ import (
 func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	body := map[string]any{
 		"model":             c.Endpoint.Model,
-		"input":             responsesInput(req),
+		"input":             responsesInput(req, c.Endpoint.ReplayReasoning),
 		"stream":            true,
 		"store":             false,
 		"max_output_tokens": c.maxTokens(req),
-		"include":           []string{"reasoning.encrypted_content"},
+	}
+	if c.Endpoint.ReplayReasoning {
+		body["include"] = []string{"reasoning.encrypted_content"}
 	}
 	if req.System != "" {
 		body["instructions"] = req.System
@@ -229,6 +231,22 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 
 // dropDanglingReasoning removes reasoning items that are not followed by
 // another item in the same turn.
+// dropReasoning removes every reasoning item so the replayed history is a
+// stable, cacheable prefix.
+func dropReasoning(items []json.RawMessage) []json.RawMessage {
+	out := items[:0:0]
+	for _, it := range items {
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(it, &probe) == nil && probe.Type == "reasoning" {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
 func dropDanglingReasoning(items []json.RawMessage) []json.RawMessage {
 	for len(items) > 0 {
 		var it struct {
@@ -261,7 +279,7 @@ func stripStatus(raw json.RawMessage) json.RawMessage {
 }
 
 // responsesInput renders history as Responses API input items.
-func responsesInput(req Request) []any {
+func responsesInput(req Request, replayReasoning bool) []any {
 	var items []any
 	for _, m := range req.Messages {
 		switch m.Role {
@@ -281,7 +299,11 @@ func responsesInput(req Request) []any {
 			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses {
 				var native []json.RawMessage
 				if json.Unmarshal(m.Native, &native) == nil {
-					native = dropDanglingReasoning(native)
+					if replayReasoning {
+						native = dropDanglingReasoning(native)
+					} else {
+						native = dropReasoning(native)
+					}
 				}
 				if len(native) > 0 {
 					for _, it := range native {

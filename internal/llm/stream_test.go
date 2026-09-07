@@ -209,7 +209,7 @@ func TestResponsesStreaming(t *testing.T) {
 		{Role: "user", Text: "hi"},
 		{Role: "assistant", Native: resp.Native, NativeProtocol: ProtocolResponses, Text: "Hi", ToolCalls: resp.ToolCalls},
 		{Role: "tool", Results: []ToolResult{{CallID: "call_9", Output: "a b"}}},
-	}})
+	}}, true)
 	if len(items) != 5 {
 		t.Fatalf("replayed %d items: %v", len(items), items)
 	}
@@ -307,7 +307,7 @@ func TestMalformedArgsAreSanitisedOnReplay(t *testing.T) {
 	}
 	items := responsesInput(Request{Messages: []Message{
 		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "delegate", Args: normalizeArgs("{")}}},
-	}})
+	}}, false)
 	if it := items[0].(map[string]any); !json.Valid([]byte(it["arguments"].(string))) {
 		t.Fatalf("responses replay arguments invalid: %s", it["arguments"])
 	}
@@ -337,7 +337,7 @@ func TestResponsesDanglingReasoningDropped(t *testing.T) {
 		{Role: "user", Text: "hi"},
 		{Role: "assistant", Native: json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"ENC"}]`), NativeProtocol: ProtocolResponses, Text: ""},
 		{Role: "user", Text: "continue"},
-	}})
+	}}, true)
 	for _, it := range items {
 		if m, ok := it.(map[string]any); ok && m["type"] == "reasoning" {
 			t.Fatal("dangling reasoning item replayed")

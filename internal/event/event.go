@@ -59,6 +59,7 @@ const (
 	Yield          = "yield"
 	Route          = "route"
 	PhoneThread    = "phone.thread" // the session is mirrored to the user's phone
+	Steer          = "steer"        // the harness's per-call instruction to an actor, kept so every prompt extends the last
 	Error          = "error"
 )
 
@@ -337,6 +338,15 @@ type DossierData struct {
 
 // HarnessMessageData is text the harness injects into an actor's context.
 type HarnessMessageData struct {
+	Text string `json:"text"`
+}
+
+// SteerData is the short instruction the harness puts in front of a model
+// call (wake reason, context budget, what to do now). It is recorded in the
+// log, addressed by the event's actor and task, so the prompt an actor sees
+// is a strict extension of its previous prompt and provider prompt caches
+// keep hitting.
+type SteerData struct {
 	Text string `json:"text"`
 }
 

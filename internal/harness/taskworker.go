@@ -93,19 +93,19 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 		var steer string
 		missing := false
 		r.sync(func() {
-			msgs = r.st.TaskView(t.ID)
-			seenSeq = r.st.LastSeq()
 			cur := r.st.Tasks[t.ID]
 			if cur == nil {
 				missing = true
 				return
 			}
 			steer = steerTask(cur, turn, maxTurns, time.Now())
+			r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: steer}).WithTask(t.ID))
+			msgs = r.st.TaskView(t.ID)
+			seenSeq = r.st.LastSeq()
 		})
 		if missing {
 			return "failed", "task vanished from state"
 		}
-		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{
 			System:   r.taskSystem(),
 			Messages: msgs, Tools: r.taskTools, CacheKey: r.sess.ID + "-task-" + t.ID,

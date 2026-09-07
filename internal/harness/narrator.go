@@ -95,18 +95,18 @@ func (r *Runtime) narratorTurn(reason string) string {
 	var steer, phoneLine string
 	mustSpeak := false
 	r.sync(func() {
-		msgs = r.st.NarratorView(nil)
-		seenSeq = r.st.LastSeq()
 		mustSpeak = r.narrSaidSeq <= r.st.LastUserSeq
 		if r.phone != nil {
 			phoneLine = PhoneStatus(r.phone.isRemote())
 		}
 		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak)
+		r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
+		msgs = r.st.NarratorView(nil)
+		seenSeq = r.st.LastSeq()
 	})
 	if len(msgs) == 0 {
 		return "nothing to see"
 	}
-	msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 	req := llm.Request{
 		System: r.narratorSystem(phoneLine), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",

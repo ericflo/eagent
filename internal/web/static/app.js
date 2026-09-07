@@ -443,7 +443,7 @@ function summary(ev) {
   switch (ev.type) {
     case 'assistant': return [d.text, ...(d.tool_calls || []).map(t => `${t.name}(${clip(argPreview(t.args), 80)})`)].filter(Boolean).join(' | ');
     case 'tool.result': return `${d.name}${d.is_error ? ' ERROR' : ''} → ${clip(d.output, 200)}`;
-    case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': return clip(d.text, 240);
+    case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
     case 'task.create': return `${d.id} ${d.title}`;
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;

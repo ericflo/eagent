@@ -29,7 +29,7 @@ func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
 		t.Fatalf("chat content = %v", msgs[0]["content"])
 	}
 	// Responses: input_text + input_image.
-	items := responsesInput(req)
+	items := responsesInput(req, false)
 	rp := items[0].(map[string]any)["content"].([]map[string]any)
 	if len(rp) != 2 || rp[1]["type"] != "input_image" {
 		t.Fatalf("responses content = %v", rp)
@@ -72,5 +72,36 @@ func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
 	}
 	if !strings.Contains(noted, "does not accept images") {
 		t.Fatalf("retry note = %q", noted)
+	}
+}
+
+func TestReasoningItemsAreDroppedUnlessReplayed(t *testing.T) {
+	native := json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"xx","summary":[]},{"type":"function_call","id":"fc_1","call_id":"c1","name":"ping","arguments":"{}"}]`)
+	req := Request{Messages: []Message{
+		{Role: "user", Text: "go"},
+		{Role: "assistant", Native: native, NativeProtocol: ProtocolResponses},
+		{Role: "tool", Results: []ToolResult{{CallID: "c1", Name: "ping", Output: "pong"}}},
+	}}
+	types := func(items []any) []string {
+		var out []string
+		for _, it := range items {
+			raw, _ := json.Marshal(it)
+			var probe struct {
+				Type string `json:"type"`
+				Role string `json:"role"`
+			}
+			_ = json.Unmarshal(raw, &probe)
+			if probe.Type == "" {
+				probe.Type = probe.Role
+			}
+			out = append(out, probe.Type)
+		}
+		return out
+	}
+	if got := types(responsesInput(req, false)); strings.Join(got, ",") != "user,function_call,function_call_output" {
+		t.Fatalf("without replay: %v", got)
+	}
+	if got := types(responsesInput(req, true)); strings.Join(got, ",") != "user,reasoning,function_call,function_call_output" {
+		t.Fatalf("with replay: %v", got)
 	}
 }

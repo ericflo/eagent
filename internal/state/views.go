@@ -90,6 +90,13 @@ func (s *State) TaskView(taskID string) []llm.Message {
 			var d event.HarnessMessageData
 			_ = ev.Decode(&d)
 			return d.Text
+		case event.Steer:
+			if ev.Actor != event.ActorTask {
+				return ""
+			}
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			return d.Text
 		}
 		return ""
 	})...)
@@ -202,6 +209,13 @@ func orchestratorNotification(ev event.Event) string {
 		var d event.DossierData
 		_ = ev.Decode(&d)
 		return "[Dossier: your previous context filled up. The task worker prepared this briefing from the full session log. Read it, then continue the work. Use session_read to see any cited lines in full.]\n\n" + d.Text
+	case event.Steer:
+		if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			return ""
+		}
+		var d event.SteerData
+		_ = ev.Decode(&d)
+		return d.Text
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
@@ -324,6 +338,12 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 			batch = append(batch, held...)
 			held = nil
 			ti++
+			continue
+		}
+		if ev.Type == event.Steer && ev.Actor == event.ActorNarrator {
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			batch = append(batch, d.Text)
 			continue
 		}
 		if ev.Actor == event.ActorNarrator {

@@ -39,7 +39,11 @@ type Endpoint struct {
 	// ReasoningEffort is passed through where the provider supports it
 	// ("none", "low", "medium", "high"). Empty means provider default.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	MaxTokens       int    `json:"max_tokens,omitempty"`
+	// ReplayReasoning sends a Responses API model its own encrypted
+	// reasoning items back on later calls (OpenAI's recommendation for tool
+	// loops; the harness turns it on by default).
+	ReplayReasoning bool `json:"replay_reasoning,omitempty"`
+	MaxTokens       int  `json:"max_tokens,omitempty"`
 	// Headers are extra request headers (e.g. OpenRouter attribution).
 	Headers map[string]string `json:"-"`
 }
