@@ -460,3 +460,83 @@ func TestPhoneDisabledInConfig(t *testing.T) {
 		t.Fatal("phone thread recorded while disabled")
 	}
 }
+
+// A session interrupted while a question is open re-asks it on the phone
+// when resumed, and the phone answer then finishes the work.
+func TestPhoneReasksPendingQuestionOnResume(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "answered question") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"colour chosen"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("note", `{"text":"Pick a colour: red or blue."}`), tc("yield", `{"done":false,"reason":"waiting for the colour"}`)}}
+		default:
+			switch {
+			case strings.Contains(all, "Done."):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "colour chosen"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			case strings.Contains(all, "Pick a colour") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(true)
+	defer fp.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	cfg.Finalechat.BaseURL = fp.srv.URL
+	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the first phone question", func() bool { return fp.pendingQuestions() == 1 })
+	cancel() // interrupted with the question open
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("did not stop")
+	}
+	// The phone question outlives the process here (in reality it may have expired).
+	sessionPath := rt.sess.Path
+
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false}, ui, sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel2()
+	done2 := make(chan int)
+	go func() { done2 <- rt2.Run(ctx2) }()
+	waitFor(t, "the question to be asked again", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.asks) == 2 })
+	if !fp.answer("red", "") {
+		t.Fatal("no pending question")
+	}
+	select {
+	case code := <-done2:
+		if code != 0 {
+			_, _, logs := ui.snapshot()
+			t.Fatalf("exit %d logs=%v", code, logs)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("resumed session did not finish")
+	}
+	evs, _ := store.Read(sessionPath)
+	st := state.Replay(evs)
+	if st.EndReason != "done" || st.Question != nil {
+		t.Fatalf("end=%s question=%v", st.EndReason, st.Question)
+	}
+}

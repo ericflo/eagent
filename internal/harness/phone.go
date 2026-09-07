@@ -74,6 +74,10 @@ func (r *Runtime) startPhone() {
 	go p.worker()
 
 	resumed := r.st.Resumes > 0
+	var pending *event.NarratorQuestionData
+	if q := r.st.Question; q != nil {
+		pending = &event.NarratorQuestionData{ID: q.ID, Text: q.Text, Options: q.Options}
+	}
 	prompt := ""
 	if !resumed {
 		for _, ev := range r.st.Events {
@@ -126,6 +130,16 @@ func (r *Runtime) startPhone() {
 			r.append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: thread.ID, ExternalID: strings.TrimPrefix(p.ref, "ext:"), BaseURL: p.client.BaseURL, RemoteMode: remote}))
 		})
 		r.ui.Log("finalechat: mirroring to your phone (thread %s, token from %s)", strings.TrimPrefix(p.ref, "ext:"), p.client.Source)
+		if pending != nil {
+			// A resumed session still waiting on a question asks it again,
+			// since the earlier phone question expired or was never posted.
+			q := *pending
+			r.post(func() {
+				if r.phone == p && r.st.Question != nil && r.st.Question.ID == q.ID {
+					p.ask(r, q.ID, q.Text, q.Options)
+				}
+			})
+		}
 		p.wg.Add(1)
 		go p.poll(r)
 	})
@@ -215,30 +229,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 	case event.NarratorQuestion:
 		var d event.NarratorQuestionData
 		_ = ev.Decode(&d)
-		var opts []finalechat.Option
-		for _, o := range d.Options {
-			opts = append(opts, finalechat.Option{Label: clipLabel(o, 200)})
-		}
-		qid, text, timeout := d.ID, d.Text, p.timeout
-		p.mu.Lock()
-		p.questions[qid] = "" // asked; the phone's id arrives when the call returns
-		p.mu.Unlock()
-		p.enqueue(func(ctx context.Context) {
-			q, _, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}})
-			if err != nil {
-				p.mu.Lock()
-				p.gone[qid] = true
-				p.mu.Unlock()
-				r.post(func() {}) // let maybeEnd re-evaluate
-				return
-			}
-			p.mu.Lock()
-			p.questions[qid] = q.ID
-			p.fromPhone[q.ID] = qid
-			p.mu.Unlock()
-			p.wg.Add(1)
-			go p.watchQuestion(r, q.ID, qid)
-		})
+		p.ask(r, d.ID, d.Text, d.Options)
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
@@ -275,6 +266,34 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			}
 		})
 	}
+}
+
+// ask poses a narrator question on the phone. Loop goroutine only.
+func (p *phone) ask(r *Runtime, qid, text string, options []string) {
+	var opts []finalechat.Option
+	for _, o := range options {
+		opts = append(opts, finalechat.Option{Label: clipLabel(o, 200)})
+	}
+	timeout := p.timeout
+	p.mu.Lock()
+	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
+	p.mu.Unlock()
+	p.enqueue(func(ctx context.Context) {
+		q, _, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}})
+		if err != nil {
+			p.mu.Lock()
+			p.gone[qid] = true
+			p.mu.Unlock()
+			r.post(func() {}) // let maybeEnd re-evaluate
+			return
+		}
+		p.mu.Lock()
+		p.questions[qid] = q.ID
+		p.fromPhone[q.ID] = qid
+		p.mu.Unlock()
+		p.wg.Add(1)
+		go p.watchQuestion(r, q.ID, qid)
+	})
 }
 
 func (p *phone) remember(id string) {
