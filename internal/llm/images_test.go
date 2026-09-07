@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -103,5 +104,116 @@ func TestReasoningItemsAreDroppedUnlessReplayed(t *testing.T) {
 	}
 	if got := types(responsesInput(req, true)); strings.Join(got, ",") != "user,reasoning,function_call,function_call_output" {
 		t.Fatalf("with replay: %v", got)
+	}
+}
+
+// A model that refused pictures once is not shown them again: later calls
+// through the same client send the text alone, in one request.
+func TestImageRefusalIsRemembered(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(img, []byte("\x89PNG\r\n\x1a\nfake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	posts, withImage := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		posts++
+		if strings.Contains(string(raw), "image_url") {
+			withImage++
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"error":{"message":"This model does not support image input"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "text only"}}}})
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		fin, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", fin)
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "text-only", APIKey: "k"})
+	c.MaxAttempts = 1
+	notes := 0
+	c.OnRetry = func(int, error, time.Duration) { notes++ }
+	for i := 0; i < 3; i++ {
+		req := Request{Messages: []Message{{Role: "user", Text: "look", Images: []Image{{Path: img, MediaType: "image/png"}}}}}
+		if _, err := c.Complete(context.Background(), req, nil); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if posts != 4 || withImage != 1 || notes != 1 {
+		t.Fatalf("posts=%d withImage=%d notes=%d; want 4, 1, 1", posts, withImage, notes)
+	}
+}
+
+// anthropicSSE writes one complete streamed Anthropic reply.
+func anthropicSSE(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	frames := []string{
+		`{"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":5}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + text + `"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
+		`{"type":"message_stop"}`,
+	}
+	for _, f := range frames {
+		fmt.Fprintf(w, "data: %s\n\n", f)
+	}
+}
+
+// A model that rejects adaptive thinking is probed once per call, not once
+// per client: concurrent workers sharing the client all get their retry, and
+// the remembered flavour flips exactly once.
+func TestAnthropicThinkingProbeIsPerCall(t *testing.T) {
+	var mu sync.Mutex
+	posts, rejected := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		posts++
+		adaptive := strings.Contains(string(raw), `"adaptive"`)
+		if adaptive {
+			rejected++
+		}
+		mu.Unlock()
+		if adaptive {
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"thinking.type: adaptive is not supported by this model"}}`)
+			return
+		}
+		anthropicSSE(w, "ok")
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "claude-old", APIKey: "k", ReasoningEffort: "medium", MaxTokens: 4096})
+	c.MaxAttempts = 1
+	const workers = 6
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			_, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+			errs <- err
+		}()
+	}
+	for i := 0; i < workers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("a worker lost its retry: %v", err)
+		}
+	}
+	if !c.anthropicBudgeted.Load() {
+		t.Fatal("the budgeted flavour should be remembered")
+	}
+	// Once learned, later calls do not probe again.
+	mu.Lock()
+	before := posts
+	mu.Unlock()
+	if _, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "again"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != before+1 || rejected > workers {
+		t.Fatalf("posts=%d (before %d) rejected=%d", posts, before, rejected)
 	}
 }

@@ -82,7 +82,7 @@ Batch mode exits `0` when the orchestrator declares the work done, `2` when it s
 
 ```
 eagent serve                 # http://127.0.0.1:7331 for this project
-eagent -p --serve :7331 "…"  # also serve while a terminal session runs
+eagent -p --serve 127.0.0.1:7331 "…"  # also serve while a terminal session runs
 ```
 
 <p align="center">

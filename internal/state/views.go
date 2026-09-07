@@ -40,6 +40,13 @@ func (s *State) currentEvents() []event.Event {
 func (s *State) OrchestratorView() []llm.Message {
 	events := s.currentEvents()
 	msgs := renderActor(events, event.ActorOrchestrator, "", func(ev event.Event) string {
+		if ev.Type == event.TaskEnd {
+			var d event.TaskEndData
+			_ = ev.Decode(&d)
+			if t := s.Tasks[d.ID]; t != nil && t.Kind == "dossier" {
+				return "" // delivered once, as the dossier message that opens the subsession
+			}
+		}
 		return orchestratorNotification(ev)
 	})
 	// A subsession's dossier is always the opening message, even if other
@@ -228,9 +235,6 @@ func orchestratorNotification(ev event.Event) string {
 	case event.TaskEnd:
 		var d event.TaskEndData
 		_ = ev.Decode(&d)
-		if ev.Task == "" {
-			// Work tasks report as notifications; dossier tasks are delivered via Dossier.
-		}
 		return fmt.Sprintf("[Task %s %s]\n%s", d.ID, d.Status, strings.TrimSpace(d.Summary))
 	case event.ScheduleFire:
 		var d event.ScheduleFireData

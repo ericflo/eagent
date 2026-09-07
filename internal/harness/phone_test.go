@@ -42,6 +42,7 @@ type fakePhone struct {
 	keys      map[string]string   // client_key -> message id
 	dupes     int                 // posts answered from a known key
 	metas     []map[string]any    // PATCH thread meta bodies
+	latency   time.Duration       // added to every request, to imitate a real network
 }
 
 type fakeFile struct {
@@ -59,6 +60,9 @@ func newFakePhone(remote bool) *fakePhone {
 func (f *fakePhone) nextID() string { f.seq++; return fmt.Sprintf("id-%04d", f.seq) }
 
 func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
+	if f.latency > 0 {
+		time.Sleep(f.latency)
+	}
 	if r.Header.Get("Authorization") != "Bearer fc_test" {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"bad token"}}`))
@@ -1411,5 +1415,46 @@ func TestRedactSecrets(t *testing.T) {
 	}
 	if got := oneLine("  a\n\n b   c ", 3); got != "a …" {
 		t.Errorf("oneLine = %q", got)
+	}
+}
+
+// On a real network the closing note takes two round trips; shutting the
+// mirror down must wait for it rather than cancel it mid-flight.
+func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"nothing to do"}`)}}
+		}
+		if strings.Contains(all, "nothing to do") && !strings.Contains(all, "Nothing to do.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Nothing to do."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	fp.latency = 150 * time.Millisecond
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("exit %d logs=%v", code, logs)
+	}
+	if got := fp.postsWhere(func(p map[string]any) bool { return p["sender"] == "system" }); len(got) != 1 || !strings.Contains(got[0]["body"].(string), "finished") {
+		t.Fatalf("the closing note was lost: system posts = %v", got)
+	}
+	if fp.clearedCount() != 1 {
+		t.Fatalf("status cleared %d times", fp.clearedCount())
 	}
 }

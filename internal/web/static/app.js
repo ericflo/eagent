@@ -155,7 +155,7 @@ function openStream(id, after) {
 }
 function onEvent(ev) {
   if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const col = $('.chat .col'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; const w = $('#working'); if (w) col.insertBefore(node, w); else col.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
-  else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb && passesFilter(ev)) tb.append(tlRow(ev)); }
+  else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb) { if (passesFilter(ev)) tb.append(tlRow(ev)); tlUpdateCount(); } }
   if (ev.type === 'narrator.message' && document.hidden) notify('eagent: ' + clip(ev.data.text, 80));
 }
 function notify(text) {
@@ -235,7 +235,7 @@ function renderChat(pane) {
   scroll.scrollTop = scroll.scrollHeight;
   updateComposer();
   renderLive();
-  setTimeout(() => $('#input')?.focus(), 0);
+  // No autofocus: the single-key shortcuts must keep working on the default tab; "/" focuses the composer.
 }
 function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
@@ -423,10 +423,14 @@ function passesFilter(ev) {
   if (S.search) { const q = S.search.toLowerCase(); if (!(ev.type + ' ' + summary(ev) + ' ' + (ev.task || '')).toLowerCase().includes(q)) return false; }
   return true;
 }
+function tlUpdateCount() {
+  const tb = $('.tl tbody'), c = $('#tlcount');
+  if (tb && c) c.textContent = `${tb.querySelectorAll('tr.row').length} of ${S.events.length} events`;
+}
 function renderTimeline(pane) {
   pane.classList.remove('chat'); pane.style.padding = '';
   const chips = ACTORS.map(a => h('span', {class: 'chip' + (S.filters.has(a) ? ' on' : ''), onclick: () => { S.filters.has(a) ? S.filters.delete(a) : S.filters.add(a); renderTab(); }}, a));
-  const search = h('input', {class: 'search', placeholder: 'search events…', value: S.search, oninput: e => { S.search = e.target.value; const tb = $('.tl tbody'); tb.replaceChildren(...S.events.filter(passesFilter).map(tlRow)); $('#tlcount').textContent = `${tb.children.length} of ${S.events.length} events`; }});
+  const search = h('input', {class: 'search', placeholder: 'search events…', value: S.search, oninput: e => { S.search = e.target.value; const tb = $('.tl tbody'); tb.replaceChildren(...S.events.filter(passesFilter).map(tlRow)); tlUpdateCount(); }});
   const tbody = h('tbody', null, ...S.events.filter(passesFilter).map(tlRow));
   pane.replaceChildren(h('div', {class: 'filters'}, h('span', {class: 'sub'}, 'actor:'), ...chips, search, h('span', {class: 'sub', id: 'tlcount', style: 'margin-left:auto'}, `${tbody.children.length} of ${S.events.length} events`)),
     h('table', {class: 'tl'}, h('thead', null, h('tr', null, h('th', null, '#'), h('th', null, 'time'), h('th', null, 'actor'), h('th', null, 'type'), h('th', null, 'what happened'))), tbody));

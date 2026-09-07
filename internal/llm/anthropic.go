@@ -14,6 +14,13 @@ import (
 // anthropic implements the Anthropic Messages API with streaming and prompt
 // caching. Thinking blocks are kept in Native and replayed verbatim.
 func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Response, error) {
+	return c.anthropicTry(ctx, req, obs, true)
+}
+
+// anthropicTry makes one call; when mayProbe is set and the model rejects
+// the thinking flavour, it flips the flavour and tries once more (so every
+// call, not just one per client, gets its retry).
+func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
@@ -50,9 +57,10 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 		}
 	}
 	thinking := false
+	budgeted := c.anthropicBudgeted.Load() // the flavour this call sends
 	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" {
 		thinking = true
-		if c.anthropicBudgeted.Load() {
+		if budgeted {
 			// Older models: explicit budget.
 			budget, known := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
 			if !known {
@@ -79,16 +87,14 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 	})
 	if err != nil {
 		var ae *APIError
-		if thinking && errors.As(err, &ae) && ae.Status == 400 && strings.Contains(ae.Body, "thinking") {
-			// The model wants the other thinking flavour; remember and retry once.
-			c.anthropicBudgeted.Store(!c.anthropicBudgeted.Load())
-			if !c.anthropicRetried.Swap(true) {
-				return c.anthropic(ctx, req, obs)
-			}
+		if mayProbe && thinking && errors.As(err, &ae) && ae.Status == 400 && strings.Contains(ae.Body, "thinking") {
+			// The model wants the other thinking flavour: remember it (unless a
+			// concurrent call already changed it) and retry this call once.
+			c.anthropicBudgeted.CompareAndSwap(budgeted, !budgeted)
+			return c.anthropicTry(ctx, req, obs, false)
 		}
 		return nil, err
 	}
-	c.anthropicRetried.Store(false)
 
 	type block struct {
 		Type      string          `json:"type"`

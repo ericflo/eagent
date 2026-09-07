@@ -175,6 +175,16 @@ func TestSubsessionAndDossier(t *testing.T) {
 	if len(msgs) < 2 || !strings.Contains(msgs[0].Text, "Dossier") || !strings.Contains(msgs[0].Text, "the dossier") {
 		t.Fatalf("dossier must open the new subsession; got %+v", msgs)
 	}
+	joined := ""
+	for _, m := range msgs {
+		joined += m.Text + "\n"
+	}
+	if n := strings.Count(joined, "the dossier"); n != 1 {
+		t.Fatalf("the dossier must reach the orchestrator once, not %d times: %s", n, joined)
+	}
+	if strings.Contains(joined, "Task t9") {
+		t.Fatalf("the dossier task's end must not be reported as a task: %s", joined)
+	}
 	if !strings.Contains(msgs[1].Text, "Task t2 completed") {
 		t.Fatalf("work task result missing: %+v", msgs[1])
 	}

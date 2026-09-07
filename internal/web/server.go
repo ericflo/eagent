@@ -16,7 +16,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -924,7 +927,7 @@ func (u *webUI) status() harness.Status {
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	s.addr = addr
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	select {
@@ -976,6 +979,23 @@ func estimateCost(st *state.State) (float64, bool) {
 // ---- attachments ----------------------------------------------------------------
 
 // getAttachment serves a file from a session's attachments directory.
+// loopbackOnly refuses any request whose peer is not this machine. The page
+// hands its token to whoever asks for it, so the loopback boundary is what
+// actually gates session creation, and sessions run shell commands.
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || !ip.IsLoopback() {
+			http.Error(w, "eagent serves local clients only", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
 	info, err := s.resolve(r.PathValue("id"))
 	if err != nil {
@@ -999,9 +1019,20 @@ func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, errors.New("no such attachment"))
 		return
 	}
+	// Attachments are inert: pictures, PDFs, and plain text display inline,
+	// everything else downloads, and nothing may run as this origin. A file
+	// the agent wrote (or the phone sent) must never become a page here.
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, name, st.ModTime(), f)
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	ct, disp := "application/octet-stream", "attachment"
+	switch mt := strings.SplitN(mime.TypeByExtension(strings.ToLower(filepath.Ext(name))), ";", 2)[0]; mt {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain":
+		ct, disp = mt, "inline"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename*=UTF-8''%s", disp, url.PathEscape(name)))
+	http.ServeContent(w, r, "", st.ModTime(), f)
 }
 
 // ---- prompt overrides --------------------------------------------------------

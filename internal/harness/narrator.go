@@ -123,6 +123,10 @@ func (r *Runtime) narratorTurn(reason string) string {
 			}
 			r.ui.Log("narrator: model call failed: %v", shortErr(err))
 			r.sync(func() {
+				// The narrator looked at everything up to seenSeq even though
+				// the call failed; leaving the cursor behind would make the
+				// loop call it again every tick instead of showing the prompt.
+				r.narrLastSeen = seenSeq
 				r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "narrator", Text: err.Error()}))
 			})
 			if reason == wakeFinal && mustSpeak {

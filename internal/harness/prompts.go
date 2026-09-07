@@ -38,7 +38,7 @@ func (r *Runtime) narratorSystem(phone string) string {
 // orchestratorEditNudge is how many direct file edits earn the reminder.
 const orchestratorEditNudge = 8
 
-func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls int) string {
+func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls, maxCalls int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s]", now.Local().Format("15:04:05"))
 	if reason != "" {
@@ -76,7 +76,7 @@ func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens
 	if ctxTokens > 0 {
 		fmt.Fprintf(&b, " Context: %dk of %dk tokens before a dossier reset.", ctxTokens/1000, rolloverTokens/1000)
 	}
-	if calls >= 30 {
+	if maxCalls > 0 && calls >= maxCalls {
 		fmt.Fprintf(&b, " You have made %d consecutive calls this turn; if you are looping or polling, delegate or use wait/yield instead.", calls)
 	}
 	b.WriteString(" Continue. Respond with tool calls; your text is not shown to the user.")

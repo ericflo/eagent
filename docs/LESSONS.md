@@ -25,8 +25,8 @@ exited with nothing on disk.
 the work finished only with `yield(done=true)`. A tool-less response is
 answered with a steering message explaining that nothing happened and asking
 for either tools or a yield; only after two such nudges is a yield assumed.
-There is no per-turn call cap; a soft steer at 30 consecutive calls suggests
-delegating or waiting instead. The narrator's final report is triggered by
+There is no per-turn call cap; a soft steer after `max_orchestrator_calls_per_turn`
+consecutive calls (30 by default) suggests delegating or waiting instead. The narrator's final report is triggered by
 the yield, not by the process exiting, and it is told whether the session is
 actually ending.
 

@@ -255,7 +255,9 @@ type Client struct {
 	// anthropicBudgeted remembers whether this model wants the older
 	// budget-style thinking parameter instead of adaptive thinking.
 	anthropicBudgeted atomic.Bool
-	anthropicRetried  atomic.Bool
+	// rejectsImages remembers that this model refused pictures, so later
+	// calls send the text alone instead of re-uploading and re-failing.
+	rejectsImages atomic.Bool
 }
 
 // NewClient returns a client with sensible defaults.
@@ -363,12 +365,16 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			callCtx, cancel = context.WithTimeout(ctx, c.CallTimeout)
 			defer cancel()
 		}
+		if c.rejectsImages.Load() && hasImages(req) {
+			req = withoutImages(req)
+		}
 		resp, err := c.once(callCtx, req, obs)
 		if err != nil && hasImages(req) {
 			var ae *APIError
 			if errors.As(err, &ae) && ae.RejectsImages() {
-				// A text-only model: say so once and go on without pictures.
-				if c.OnRetry != nil {
+				// A text-only model: say so once and go on without pictures,
+				// on this call and every later one through this client.
+				if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
 					c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
 				}
 				req = withoutImages(req)
@@ -417,8 +423,10 @@ func retryable(err error) bool {
 		return true
 	}
 	// Network-level failures (reset, EOF mid-stream, DNS) are transient.
+	// Every *url.Error has a Timeout method, so ask it rather than match the
+	// type: a bad certificate or a redirect loop will not get better.
 	var se interface{ Timeout() bool }
-	if errors.As(err, &se) {
+	if errors.As(err, &se) && se.Timeout() {
 		return true
 	}
 	msg := err.Error()

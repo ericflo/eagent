@@ -2,6 +2,9 @@ package procs
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -176,5 +179,40 @@ func TestWaitAfterKillReturnsOnlyWhenReaped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if p.Duration() != d1 {
 		t.Fatal("duration kept ticking after exit")
+	}
+}
+
+// A `cmd &` whose shell has already exited is still the session's process:
+// KillAll must reach it through the process group.
+func TestKillAllReapsChildrenOfFinishedShells(t *testing.T) {
+	dir := t.TempDir()
+	alive := filepath.Join(dir, "alive.txt")
+	m := NewManager()
+	p, err := m.Start(Spec{Command: fmt.Sprintf("(for i in $(seq 1 300); do echo tick >> %s; sleep 0.1; done) & echo started", alive), Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-m.Exited()
+	if p.Status() == Running {
+		t.Fatal("the shell should have exited")
+	}
+	size := func() int64 {
+		fi, err := os.Stat(alive)
+		if err != nil {
+			return 0
+		}
+		return fi.Size()
+	}
+	before := size()
+	time.Sleep(400 * time.Millisecond)
+	if size() <= before {
+		t.Fatal("the background child should still be writing before KillAll")
+	}
+	m.KillAll()
+	time.Sleep(300 * time.Millisecond)
+	a := size()
+	time.Sleep(500 * time.Millisecond)
+	if b := size(); b != a {
+		t.Fatalf("the child survived KillAll: %d -> %d bytes", a, b)
 	}
 }

@@ -626,9 +626,10 @@ drain:
 		}
 	}
 	close(r.closed)
-	for _, p := range r.procs.Running() {
-		p.Kill()
-	}
+	// Everything the session started goes with it, including background
+	// children whose shell already exited; a finished session must not
+	// leave a dev server holding a port.
+	r.procs.KillAll()
 	for _, t := range r.timers {
 		t.Stop()
 	}

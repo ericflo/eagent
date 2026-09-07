@@ -22,9 +22,11 @@ func (r *Runtime) startQueuedTasks() {
 		if t.Status != "queued" {
 			continue
 		}
-		// Dossier tasks always run; work tasks respect the limit.
+		// Dossier tasks always run; work tasks respect the limit. Keep
+		// scanning: the dossier is queued last, and a full slate of work
+		// tasks must not keep it (and with it the orchestrator) waiting.
 		if t.Kind != "dossier" && running >= r.cfg.TaskConcurrency {
-			break
+			continue
 		}
 		running++
 		ctx, cancel := context.WithCancel(r.ctx)
@@ -54,7 +56,7 @@ func (r *Runtime) startQueuedTasks() {
 // killTaskProcs stops a finished task's leftover commands, except explicit
 // services (no timeout), which are handed over to the session.
 func (r *Runtime) killTaskProcs(taskID string) {
-	for _, p := range r.procs.Running() {
+	for _, p := range r.procs.All() {
 		o := r.procOwner[p.Handle]
 		if o.task != taskID {
 			continue
@@ -62,7 +64,9 @@ func (r *Runtime) killTaskProcs(taskID string) {
 		if sp := r.st.Procs[p.Handle]; sp != nil && sp.TimeoutS == 0 {
 			continue
 		}
-		p.Kill()
+		// The whole group: a `cmd &` whose shell already exited is still
+		// the task's, and must not outlive it.
+		p.KillGroup()
 	}
 }
 

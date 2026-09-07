@@ -1,7 +1,11 @@
 package llm
 
 import (
+	"crypto/x509"
 	"encoding/json"
+	"errors"
+	"net"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -98,5 +102,32 @@ func TestRepairLeakedArgs(t *testing.T) {
 	}
 	if arr, ok := obj["tasks"].([]any); !ok || len(arr) != 1 || arr[0] != "t1" {
 		t.Fatalf("tasks not recovered: %#v", obj["tasks"])
+	}
+}
+
+type fakeTimeoutErr struct{ timeout bool }
+
+func (e fakeTimeoutErr) Error() string { return "fake" }
+func (e fakeTimeoutErr) Timeout() bool { return e.timeout }
+
+// Only failures that can get better are retried: real timeouts and the
+// known transient network messages, not a bad certificate or a redirect
+// loop (every *url.Error has a Timeout method; its answer is what counts).
+func TestRetryableAsksTimeoutNotType(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{&url.Error{Op: "Get", URL: "https://x", Err: fakeTimeoutErr{true}}, true},
+		{&url.Error{Op: "Get", URL: "https://x", Err: x509.UnknownAuthorityError{}}, false},
+		{&url.Error{Op: "Get", URL: "https://x", Err: errors.New("stopped after 10 redirects")}, false},
+		{&url.Error{Op: "Get", URL: "https://x", Err: errors.New("http: server gave HTTP response to HTTPS client")}, false},
+		{&net.OpError{Op: "dial", Err: errors.New("connect: connection refused")}, true},
+		{errors.New("unexpected EOF"), true},
+	}
+	for _, c := range cases {
+		if got := retryable(c.err); got != c.want {
+			t.Errorf("retryable(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }

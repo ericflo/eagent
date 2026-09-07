@@ -454,7 +454,7 @@ function sessionCard() {
     h('div', {class: 'fields'},
       numField('task_concurrency', 'Task workers at once', 'how many delegated tasks run in parallel', {min: 1, max: 32}),
       numField('max_task_turns', 'Max calls per task', 'a worker that reaches this is stopped and reports what it has', {min: 1}),
-      numField('max_orchestrator_calls_per_turn', 'Max orchestrator calls per turn', 'guards against a planner that loops', {min: 1}),
+      numField('max_orchestrator_calls_per_turn', 'Nudge the planner after', 'consecutive calls in one turn before the harness suggests delegating, waiting, or yielding; a nudge, not a cap', {min: 1}),
       numField('rollover_tokens', 'Fresh-context threshold', 'the orchestrator writes a dossier and starts a fresh context past this many tokens', {min: 20000, step: 10000}),
       numField('bash_wait_seconds', 'Command wait', 'seconds a command may run before it becomes a background handle', {min: 0, max: 300}),
       numField('bash_timeout_seconds', 'Command timeout', 'seconds before a background command is killed', {min: 1}),

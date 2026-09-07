@@ -63,7 +63,7 @@ Flags (before positional arguments):
                 opencode-high|med|low, nous-high|med|low
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
-  --serve <a>   also serve the web UI at this address while a session runs (e.g. :7331)
+  --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
 OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* and astra presets, OpenRouter is the

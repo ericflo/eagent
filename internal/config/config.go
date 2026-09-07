@@ -56,8 +56,9 @@ type Config struct {
 	TaskConcurrency int `json:"task_concurrency"`
 	// MaxTaskTurns bounds model calls per task before it is failed.
 	MaxTaskTurns int `json:"max_task_turns"`
-	// MaxOrchestratorCallsPerTurn bounds consecutive tool-calling rounds
-	// before the harness inserts a checkpoint prompt.
+	// MaxOrchestratorCallsPerTurn is the consecutive tool-calling round count
+	// at which the harness steers the orchestrator to delegate, wait, or
+	// yield. A nudge, not a hard cap.
 	MaxOrchestratorCallsPerTurn int `json:"max_orchestrator_calls_per_turn"`
 	// NarratorTickSeconds is how often the narrator is woken while the
 	// orchestrator is busy and nothing else has woken it.
@@ -170,7 +171,7 @@ func Defaults() Config {
 		},
 		TaskConcurrency:             3,
 		MaxTaskTurns:                150,
-		MaxOrchestratorCallsPerTurn: 40,
+		MaxOrchestratorCallsPerTurn: 30,
 		NarratorTickSeconds:         30,
 		NarratorQuietSeconds:        180,
 		RolloverTokens:              150_000,

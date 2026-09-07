@@ -265,11 +265,20 @@ func (m *Manager) Running() []*Proc {
 // process groups of finished ones (a `cmd &` that outlived its shell).
 func (m *Manager) KillAll() {
 	for _, p := range m.All() {
-		if p.Status() == Running {
-			p.Kill()
-		} else if pid := p.PID(); pid > 0 {
-			_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH is fine
-		}
+		p.KillGroup()
+	}
+}
+
+// KillGroup terminates a running process's group, or SIGKILLs whatever is
+// left in the group of one that already finished (a `cmd &` that outlived
+// its shell).
+func (p *Proc) KillGroup() {
+	if p.Status() == Running {
+		p.Kill()
+		return
+	}
+	if pid := p.PID(); pid > 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH is fine
 	}
 }
 

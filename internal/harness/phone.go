@@ -200,9 +200,16 @@ func (p *phone) worker() {
 	}
 }
 
-// close posts the closing note and waits briefly for the queue to drain.
+// close clears the status line, posts the closing note, and waits for that
+// post before cancelling the mirror: it is the last thing the phone sees,
+// so the shutdown must not cut it off mid-flight.
 func (p *phone) close(reason string) {
-	p.enqueue(func(ctx context.Context) {
+	sent := make(chan struct{})
+	p.enqueue(func(context.Context) {
+		defer close(sent)
+		// Detached from p.ctx on purpose; bounded on its own.
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
 		if p.has("activity") {
 			_ = p.client.ClearActivity(ctx, p.ref)
 		}
@@ -217,26 +224,13 @@ func (p *phone) close(reason string) {
 		}
 		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "reason": reason}, ClientKey: p.key("end", reason, strconv.Itoa(p.resumes))})
 	})
-	done := make(chan struct{})
-	go func() {
-		// Let the worker get through what is queued, then stop.
-		deadline := time.After(8 * time.Second)
-		for {
-			select {
-			case <-deadline:
-				close(done)
-				return
-			default:
-			}
-			if len(p.queue) == 0 {
-				time.Sleep(150 * time.Millisecond) // the in-flight call
-				close(done)
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-	<-done
+	// One FIFO worker: when the closing note has run, everything queued
+	// before it has run too.
+	select {
+	case <-sent:
+	case <-p.ctx.Done(): // the mirror already gave up (startup failure)
+	case <-time.After(8 * time.Second):
+	}
 	p.cancel()
 	p.wg.Wait()
 }
@@ -304,11 +298,13 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			return
 		}
 		// Answered elsewhere: withdraw the phone question and show the choice.
-		p.mu.Lock()
-		fid := p.questions[d.QuestionID]
-		p.mu.Unlock()
-		text := d.Text
+		qid, text := d.QuestionID, d.Text
 		p.enqueue(func(ctx context.Context) {
+			// Read the phone's id here, not at enqueue time: the ask call that
+			// learns it runs on this same queue, just ahead of us.
+			p.mu.Lock()
+			fid := p.questions[qid]
+			p.mu.Unlock()
 			if fid != "" {
 				_ = p.client.Cancel(ctx, fid)
 			}
