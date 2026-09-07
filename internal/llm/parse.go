@@ -34,17 +34,20 @@ func ParseTextToolCalls(text string) ([]event.ToolCall, string) {
 	if len(matches) == 0 {
 		return nil, text
 	}
+	prefix := "text_call_" + nonce() + "_"
 	var rest strings.Builder
 	last := 0
 	for _, m := range matches {
 		rest.WriteString(text[last:m[0]])
 		last = m[1]
 		body := strings.TrimSpace(text[m[2]:m[3]])
-		if body == "" {
+		if body == "" || (!strings.Contains(body, "<arg_key>") && !strings.HasPrefix(body, "{") && strings.ContainsAny(body, " \n")) {
+			// Prose that merely mentions the tag, not a call.
+			rest.WriteString(text[m[0]:m[1]])
 			continue
 		}
 		if tc, ok := parseJSONToolCall(body); ok {
-			tc.ID = fmt.Sprintf("text_call_%d", len(calls)+1)
+			tc.ID = fmt.Sprintf("%s%d", prefix, len(calls)+1)
 			calls = append(calls, tc)
 			continue
 		}
@@ -65,7 +68,7 @@ func ParseTextToolCalls(text string) ([]event.ToolCall, string) {
 			args[k] = coerceValue(v)
 		}
 		raw, _ := json.Marshal(args)
-		calls = append(calls, event.ToolCall{ID: fmt.Sprintf("text_call_%d", len(calls)+1), Name: name, Args: raw})
+		calls = append(calls, event.ToolCall{ID: fmt.Sprintf("%s%d", prefix, len(calls)+1), Name: name, Args: raw})
 	}
 	rest.WriteString(text[last:])
 	return calls, strings.TrimSpace(rest.String())

@@ -63,7 +63,8 @@ type Proc struct {
 	ended    time.Time
 	deadline time.Time
 	timer    *time.Timer
-	done     chan struct{}
+	done     chan struct{} // output pipe drained
+	reaped   chan struct{} // cmd.Wait returned
 	waiters  []chan struct{}
 }
 
@@ -111,7 +112,7 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 	cmd.Dir = spec.Cwd
 	cmd.Env = append(os.Environ(), spec.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	p := &Proc{Spec: spec, cmd: cmd, status: Running, done: make(chan struct{})}
+	p := &Proc{Spec: spec, cmd: cmd, status: Running, done: make(chan struct{}), reaped: make(chan struct{})}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -153,6 +154,7 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 		p.exitCode = exitCode(err)
 		waiters := p.waiters
 		p.waiters = nil
+		close(p.reaped)
 		p.mu.Unlock()
 		// pump closes done once the pipe drains; give it a moment, but never
 		// block the exit notification on a grandchild holding the pipe open.
@@ -259,10 +261,15 @@ func (m *Manager) Running() []*Proc {
 	return out
 }
 
-// KillAll terminates every running process (used at shutdown).
+// KillAll terminates every running process and any stragglers left in the
+// process groups of finished ones (a `cmd &` that outlived its shell).
 func (m *Manager) KillAll() {
-	for _, p := range m.Running() {
-		p.Kill()
+	for _, p := range m.All() {
+		if p.Status() == Running {
+			p.Kill()
+		} else if pid := p.PID(); pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH is fine
+		}
 	}
 }
 
@@ -309,7 +316,7 @@ func (p *Proc) PID() int {
 // if the process finished.
 func (p *Proc) Wait(ctx context.Context, d time.Duration) bool {
 	p.mu.Lock()
-	if p.status != Running {
+	if !p.ended.IsZero() {
 		p.mu.Unlock()
 		return true
 	}
@@ -400,8 +407,8 @@ func (p *Proc) Extend(d time.Duration) {
 	if p.status != Running {
 		return
 	}
-	if p.timer != nil {
-		p.timer.Stop()
+	if p.timer != nil && !p.timer.Stop() {
+		return // the deadline already fired; the kill is under way
 	}
 	if d <= 0 {
 		p.deadline = time.Time{}

@@ -152,3 +152,29 @@ func TestOutputCursorAcrossDrop(t *testing.T) {
 	}
 	_ = first
 }
+
+func TestWaitAfterKillReturnsOnlyWhenReaped(t *testing.T) {
+	m := NewManager()
+	// Ignores TERM so the KILL escalation (3s) is what ends it.
+	p, err := m.Start(Spec{Command: "trap '' TERM; sleep 30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	p.Kill()
+	if !p.Wait(context.Background(), 10*time.Second) {
+		t.Fatal("wait timed out")
+	}
+	if time.Since(start) < 2*time.Second {
+		t.Fatalf("Wait returned after %s, before the process was actually reaped", time.Since(start))
+	}
+	if p.Status() != Killed || p.ExitCode() != 137 {
+		t.Fatalf("status=%s exit=%d", p.Status(), p.ExitCode())
+	}
+	d1 := p.Duration()
+	time.Sleep(50 * time.Millisecond)
+	if p.Duration() != d1 {
+		t.Fatal("duration kept ticking after exit")
+	}
+}

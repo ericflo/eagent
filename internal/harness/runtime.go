@@ -235,6 +235,9 @@ func (r *Runtime) State() *state.State { return r.st }
 // SessionID returns the session identifier.
 func (r *Runtime) SessionID() string { return r.sess.ID }
 
+// KillProcesses terminates every child process; used on a hard exit.
+func (r *Runtime) KillProcesses() { r.procs.KillAll() }
+
 // ---- loop plumbing --------------------------------------------------------
 
 // sync runs fn on the loop goroutine and waits for it. During shutdown the

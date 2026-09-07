@@ -135,7 +135,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 				return "final"
 			}
 			if attempt == 0 {
-				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text}, llm.Message{Role: "user", Text: "[harness] Respond with exactly one tool call: send_message, ask_user, or hold."})
+				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, Native: resp.Native, NativeProtocol: resp.Protocol}, llm.Message{Role: "user", Text: "[harness] Respond with exactly one tool call: send_message, ask_user, or hold."})
 				continue
 			}
 			return "held"
@@ -196,7 +196,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		}
 		if reason == wakeFinal && !spoke && mustSpeak {
 			if attempt == 0 {
-				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls}, llm.Message{Role: "tool", Results: []llm.ToolResult{{CallID: resp.ToolCalls[0].ID, Name: resp.ToolCalls[0].Name, Output: "holding is not allowed on the final wake"}}}, llm.Message{Role: "user", Text: "[harness] The session is ending. Send the final report now with send_message."})
+				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol}, llm.Message{Role: "tool", Results: []llm.ToolResult{{CallID: resp.ToolCalls[0].ID, Name: resp.ToolCalls[0].Name, Output: "holding is not allowed on the final wake"}}}, llm.Message{Role: "user", Text: "[harness] The session is ending. Send the final report now with send_message."})
 				continue
 			}
 			r.deliverFallbackFinal()

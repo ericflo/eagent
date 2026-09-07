@@ -180,9 +180,10 @@ func NewClient(ep Endpoint) *Client {
 
 // APIError is a non-2xx response.
 type APIError struct {
-	Status int
-	Body   string
-	Code   string // provider error code when parseable
+	Status     int
+	Body       string
+	Code       string // provider error code when parseable
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -322,6 +323,9 @@ func retryable(err error) bool {
 
 func backoff(attempt int, err error) time.Duration {
 	var ae *APIError
+	if errors.As(err, &ae) && ae.RetryAfter > 0 {
+		return min(ae.RetryAfter, 120*time.Second)
+	}
 	if errors.As(err, &ae) && ae.Status == 429 {
 		// Rate limits deserve a longer pause.
 		return time.Duration(min(60, 5*attempt*attempt)) * time.Second

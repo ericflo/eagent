@@ -282,6 +282,9 @@ func (s *Session) Append(ev event.Event) (event.Event, error) {
 	}
 	line = append(line, '\n')
 	if _, err := s.file.Write(line); err != nil {
+		// A partial line may be on disk; refuse further writes so the torn
+		// tail is repaired on the next open rather than glued to a new line.
+		s.closed = true
 		return ev, err
 	}
 	if err := s.file.Sync(); err != nil {
@@ -368,9 +371,10 @@ func (s *Session) Close() error {
 		s.file = nil
 	}
 	if s.lock != nil {
+		// The file stays; removing it would let a runner that opened the old
+		// inode lock it while another creates a fresh one.
 		_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
 		_ = s.lock.Close()
-		_ = os.Remove(filepath.Join(s.Path, ".lock"))
 		s.lock = nil
 	}
 	return err

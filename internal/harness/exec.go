@@ -34,8 +34,13 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		}
 	}()
 	str := func(k string) string {
-		if v, ok := args[k].(string); ok {
+		switch v := args[k].(type) {
+		case string:
 			return v
+		case nil:
+			return ""
+		case float64, int64, int, bool:
+			return fmt.Sprint(v) // models sometimes pass numbers for string fields
 		}
 		return ""
 	}

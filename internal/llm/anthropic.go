@@ -119,6 +119,7 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 				ID    string          `json:"id"`
 				Name  string          `json:"name"`
 				Text  string          `json:"text"`
+				Data  string          `json:"data"`
 				Input json.RawMessage `json:"input"`
 			} `json:"content_block"`
 			Delta *struct {
@@ -161,6 +162,9 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 			}
 			if b.Type == "text" && frame.ContentBlock.Text != "" {
 				b.partial.WriteString(frame.ContentBlock.Text)
+			}
+			if b.Type == "redacted_thinking" {
+				b.partial.WriteString(frame.ContentBlock.Data)
 			}
 		case "content_block_delta":
 			if frame.Delta == nil || frame.Index >= len(blocks) || blocks[frame.Index] == nil {
@@ -220,7 +224,9 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 		case "text":
 			b.Text = b.partial.String()
 			text.WriteString(b.Text)
-			native = append(native, map[string]any{"type": "text", "text": b.Text})
+			if strings.TrimSpace(b.Text) != "" { // the API rejects empty text blocks on input
+				native = append(native, map[string]any{"type": "text", "text": b.Text})
+			}
 		case "tool_use":
 			raw := strings.TrimSpace(b.partial.String())
 			if raw == "" {

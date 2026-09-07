@@ -205,8 +205,14 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 	}
 	out.Text = text.String()
 	out.Reasoning = reasoning.String()
-	if nat, err := json.Marshal(cleaned); err == nil {
-		out.Native = nat
+	// A reasoning item must be followed by the item it reasoned about; when
+	// output was cut off mid-thought the trailing reasoning item would be
+	// rejected on replay, so it is not kept.
+	cleaned = dropDanglingReasoning(cleaned)
+	if len(cleaned) > 0 {
+		if nat, err := json.Marshal(cleaned); err == nil {
+			out.Native = nat
+		}
 	}
 	switch {
 	case incomplete == "length":
@@ -219,6 +225,21 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 		out.Stop = "stop"
 	}
 	return out, nil
+}
+
+// dropDanglingReasoning removes reasoning items that are not followed by
+// another item in the same turn.
+func dropDanglingReasoning(items []json.RawMessage) []json.RawMessage {
+	for len(items) > 0 {
+		var it struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(items[len(items)-1], &it) != nil || it.Type != "reasoning" {
+			break
+		}
+		items = items[:len(items)-1]
+	}
+	return items
 }
 
 // stripStatus removes the transient "status" field from an output item so
@@ -249,7 +270,10 @@ func responsesInput(req Request) []any {
 		case "assistant":
 			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses {
 				var native []json.RawMessage
-				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
+				if json.Unmarshal(m.Native, &native) == nil {
+					native = dropDanglingReasoning(native)
+				}
+				if len(native) > 0 {
 					for _, it := range native {
 						items = append(items, it)
 					}

@@ -78,14 +78,14 @@ func run(args []string) int {
 		helpFlag = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	rest, err := parseInterleaved(fs, args)
+	if err != nil {
+		return 64 // EX_USAGE
 	}
 	if *helpFlag {
 		fmt.Fprint(os.Stdout, usage)
 		return 0
 	}
-	rest := fs.Args()
 	harness.Version = version
 
 	project, err := resolveProject(*dir)
@@ -98,11 +98,7 @@ func run(args []string) int {
 		switch rest[0] {
 		case "sessions", "show", "replay", "resume", "doctor", "config", "version", "help":
 			cmd = rest[0]
-			// Flags may also follow the subcommand.
-			if err := fs.Parse(rest[1:]); err != nil {
-				return 2
-			}
-			rest = fs.Args()
+			rest = rest[1:]
 		}
 	}
 	switch cmd {
@@ -191,6 +187,7 @@ func run(args []string) int {
 		term.Log("stopping (resume later with: eagent -c)")
 		cancel()
 		<-sigs
+		rt.KillProcesses() // do not leave children running on a hard exit
 		os.Exit(130)
 	}()
 	code := rt.Run(ctx)
@@ -201,6 +198,28 @@ func run(args []string) int {
 	}
 	term.Close(fmt.Sprintf("session %s ended (%s) · %s", rt.SessionID(), st.EndReason, st.UsageLine()))
 	return code
+}
+
+// parseInterleaved accepts flags anywhere on the command line, so
+// `eagent show <id> --raw` and `eagent resume <id> --answer yes` both work.
+// A literal `--` ends flag parsing.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for len(args) > 0 {
+		if args[0] == "--" {
+			positional = append(positional, args[1:]...)
+			break
+		}
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		args = fs.Args()
+		if len(args) > 0 {
+			positional = append(positional, args[0])
+			args = args[1:]
+		}
+	}
+	return positional, nil
 }
 
 func readAll(f *os.File) ([]byte, error) {

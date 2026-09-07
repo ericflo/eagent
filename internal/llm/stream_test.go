@@ -312,3 +312,70 @@ func TestMalformedArgsAreSanitisedOnReplay(t *testing.T) {
 		t.Fatalf("responses replay arguments invalid: %s", it["arguments"])
 	}
 }
+
+func TestResponsesDanglingReasoningDropped(t *testing.T) {
+	srv := sseServer(t, func(w http.ResponseWriter, body map[string]any) {
+		events := []string{
+			`{"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"encrypted_content":"ENC"}}`,
+			`{"type":"response.incomplete","response":{"model":"gpt-x","status":"incomplete","output":[{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"encrypted_content":"ENC"}],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":100}}}`,
+		}
+		for _, e := range events {
+			fmt.Fprintf(w, "data: %s\n\n", e)
+		}
+	})
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolResponses, BaseURL: srv.URL, Model: "gpt-x", APIKey: "k"})
+	resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Stop != "length" || len(resp.Native) != 0 {
+		t.Fatalf("stop=%s native=%s; a lone reasoning item must not be kept", resp.Stop, resp.Native)
+	}
+	// Even if an old log carries one, replay drops it.
+	items := responsesInput(Request{Messages: []Message{
+		{Role: "user", Text: "hi"},
+		{Role: "assistant", Native: json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"ENC"}]`), NativeProtocol: ProtocolResponses, Text: ""},
+		{Role: "user", Text: "continue"},
+	}})
+	for _, it := range items {
+		if m, ok := it.(map[string]any); ok && m["type"] == "reasoning" {
+			t.Fatal("dangling reasoning item replayed")
+		}
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %v", items)
+	}
+}
+
+func TestSyntheticIDsAreUniqueAcrossResponses(t *testing.T) {
+	a, _ := ParseTextToolCalls("<tool_call>bash\n<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>")
+	time.Sleep(2 * time.Millisecond)
+	b, _ := ParseTextToolCalls("<tool_call>bash\n<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>")
+	if len(a) != 1 || len(b) != 1 || a[0].ID == b[0].ID {
+		t.Fatalf("ids should differ: %v %v", a, b)
+	}
+}
+
+func TestTextToolCallMentionIsNotACall(t *testing.T) {
+	calls, rest := ParseTextToolCalls("Some models emit <tool_call> markup as text, which we recover.")
+	if len(calls) != 0 || !strings.Contains(rest, "<tool_call>") {
+		t.Fatalf("prose mentioning the tag was treated as a call: %v %q", calls, rest)
+	}
+}
+
+func TestNonStreamingJSONFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"m","choices":[{"message":{"content":null,"tool_calls":[{"id":"x1","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "x"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "bash" || resp.Usage.Input != 3 {
+		t.Fatalf("resp = %+v", resp)
+	}
+}

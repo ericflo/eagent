@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -64,6 +65,9 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 			}
 		}
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 {
+				ae.RetryAfter = time.Duration(secs) * time.Second
+			}
 			ae.Body += " (retry-after " + ra + ")"
 		}
 		return nil, ae

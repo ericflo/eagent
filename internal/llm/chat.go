@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 )
+
+// nonce makes synthetic ids unique across responses.
+func nonce() string { return fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFFF) }
 
 // chat implements OpenAI-style Chat Completions with streaming. This is the
 // route for Together AI (GLM, DeepSeek) and any OpenAI-compatible server.
@@ -48,6 +54,10 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 	})
 	if err != nil {
 		return nil, err
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		// The server ignored stream=true (some OpenAI-compatible servers do).
+		return c.chatNonStreaming(resp)
 	}
 
 	type partial struct {
@@ -143,7 +153,7 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 				if tc.ID != "" {
 					p.id = tc.ID
 				}
-				if tc.Function.Name != "" {
+				if tc.Function.Name != "" && !strings.HasSuffix(p.name, tc.Function.Name) {
 					p.name += tc.Function.Name
 					obs.toolCall(p.name)
 				}
@@ -176,7 +186,7 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 		}
 		id := p.id
 		if id == "" {
-			id = fmt.Sprintf("call_%d", n+1)
+			id = fmt.Sprintf("call_%s_%d", nonce(), n+1)
 		}
 		out.ToolCalls = append(out.ToolCalls, event.ToolCall{ID: id, Name: p.name, Args: normalizeArgs(p.args.String())})
 	}
@@ -297,4 +307,77 @@ func ArgsObject(raw json.RawMessage) (map[string]any, error) {
 		return nil, fmt.Errorf("arguments were not valid JSON (was the output cut off?): %s", s)
 	}
 	return nil, fmt.Errorf("arguments were not a JSON object")
+}
+
+// chatNonStreaming parses a plain chat-completions JSON body.
+func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
+	defer resp.Body.Close()
+	var body struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content          *string `json:"content"`
+				ReasoningContent string  `json:"reasoning_content"`
+				Reasoning        string  `json:"reasoning"`
+				ToolCalls        []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
+	}
+	if body.Error != nil {
+		return nil, &APIError{Status: 502, Body: body.Error.Message}
+	}
+	if len(body.Choices) == 0 {
+		return nil, ErrTruncatedStream
+	}
+	ch := body.Choices[0]
+	out := &Response{Model: body.Model}
+	if ch.Message.Content != nil {
+		out.Text = *ch.Message.Content
+	}
+	out.Reasoning = ch.Message.ReasoningContent
+	if out.Reasoning == "" {
+		out.Reasoning = ch.Message.Reasoning
+	}
+	for n, tc := range ch.Message.ToolCalls {
+		id := tc.ID
+		if id == "" {
+			id = fmt.Sprintf("call_%s_%d", nonce(), n+1)
+		}
+		out.ToolCalls = append(out.ToolCalls, event.ToolCall{ID: id, Name: tc.Function.Name, Args: normalizeArgs(tc.Function.Arguments)})
+	}
+	if body.Usage != nil {
+		out.Usage.Input, out.Usage.Output = body.Usage.PromptTokens, body.Usage.CompletionTokens
+	}
+	switch ch.FinishReason {
+	case "length":
+		out.Stop = "length"
+	default:
+		if len(out.ToolCalls) > 0 {
+			out.Stop = "tool_calls"
+		} else {
+			out.Stop = "stop"
+		}
+	}
+	return out, nil
 }

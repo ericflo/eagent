@@ -26,6 +26,7 @@ type Terminal struct {
 	jsonOut     bool
 	interactive bool
 	lastOutput  time.Time
+	lastBeat    time.Time
 	lastStatus  string
 
 	mu       sync.Mutex
@@ -96,13 +97,14 @@ func (t *Terminal) heartbeat() {
 			busy := t.status.OrchestratorBusy || t.status.NarratorBusy || t.status.Rollover || t.status.TasksRunning+t.status.TasksQueued > 0
 			line := t.statusText()
 			quiet := time.Since(t.lastOutput) >= 30*time.Second
-			changed := line != t.lastStatus
+			changed := line != t.lastStatus || time.Since(t.lastBeat) >= 60*time.Second
 			t.mu.Unlock()
 			if !busy || line == "" || !quiet || !changed {
 				continue
 			}
 			t.mu.Lock()
 			t.lastStatus = line
+			t.lastBeat = time.Now()
 			t.mu.Unlock()
 			t.write(t.err, t.dim("  … "+line)+"\n")
 		case <-t.stopSpin:
