@@ -142,9 +142,6 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 				r.recordToolResult(event.ActorTask, t.ID, tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 				continue
 			}
-			if r.opts.Verbose {
-				r.ui.Log("task %s -> %s %s", t.ID, tc.Name, jsonPreview(tc.Args, 160))
-			}
 			if tc.Name == "complete_task" {
 				args, err := llm.ArgsObject(tc.Args)
 				if err != nil {

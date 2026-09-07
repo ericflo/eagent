@@ -90,6 +90,7 @@ func (r *Runtime) closeInterrupted() {
 			var d event.NarratorMessageData
 			_ = ev.Decode(&d)
 			r.narrLastSaid = d.Text
+			r.narrSaidSeq = ev.Seq
 		}
 	}
 	// Continue process handles after replayed ones.

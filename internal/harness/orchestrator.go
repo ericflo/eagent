@@ -122,9 +122,6 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		r.ui.Stream(event.ActorOrchestrator, "", "", "")
 		ev := r.recordAssistant(event.ActorOrchestrator, "", resp, seenSeq)
 		_ = ev
-		if r.opts.Verbose && strings.TrimSpace(resp.Text) != "" {
-			r.ui.Log("orchestrator: %s", firstLine(strings.TrimSpace(resp.Text), 300))
-		}
 
 		if len(resp.ToolCalls) == 0 {
 			if resp.Truncated() {
@@ -152,9 +149,6 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 			if !r.allowed(event.ActorOrchestrator, tc.Name) {
 				r.recordToolResult(event.ActorOrchestrator, "", tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 				continue
-			}
-			if r.opts.Verbose {
-				r.ui.Log("orchestrator -> %s %s", tc.Name, jsonPreview(tc.Args, 160))
 			}
 			if tc.Name == "yield" {
 				args, err := llm.ArgsObject(tc.Args)

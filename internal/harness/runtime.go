@@ -76,7 +76,8 @@ type Runtime struct {
 	narrPending  string // reason for a wake requested during a turn
 	narrLastSeen int64  // seq the narrator saw on its latest call
 	narrLastSaid string
-	narrFinal    bool // final report delivered
+	narrSaidSeq  int64 // seq of the last narrator.message
+	narrFinal    bool  // final report delivered
 	narrTicker   *time.Timer
 	running      map[string]context.CancelFunc // task id -> cancel
 	waiters      []*waiter
@@ -172,14 +173,14 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runtime{
 		cfg: cfg, opts: opts, ui: ui, sess: sess, st: st,
-		procs:      procs.NewManager(),
-		files:      tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
-		archive:    tools.Archive{Path: sess.Path},
-		orchTools:  tools.OrchestratorTools(),
-		taskTools:  tools.TaskTools(),
-		narrTools:  tools.NarratorTools(),
-		loop:       make(chan func(), 1024),
-		ctx:        ctx, stop: cancel,
+		procs:     procs.NewManager(),
+		files:     tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
+		archive:   tools.Archive{Path: sess.Path},
+		orchTools: tools.OrchestratorTools(),
+		taskTools: tools.TaskTools(),
+		narrTools: tools.NarratorTools(),
+		loop:      make(chan func(), 1024),
+		ctx:       ctx, stop: cancel,
 		running:    map[string]context.CancelFunc{},
 		timers:     map[string]*time.Timer{},
 		procCursor: map[string]int{},
@@ -419,16 +420,29 @@ func (r *Runtime) maybeEnd() {
 	// Batch: give the narrator a final word, then end.
 	if !r.narrFinal {
 		r.narrFinal = true
+		if r.narrSaidSeq > r.st.LastYield.Seq {
+			// It already reported after the orchestrator finished.
+			r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
+			return
+		}
 		r.wakeNarrator(wakeFinal)
 		return
 	}
-	reason := "done"
-	code := 0
+	r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
+}
+
+func (r *Runtime) endReasonForIdle() string {
 	if !r.st.LastYield.Done || r.st.Question != nil {
-		reason = "awaiting-input"
-		code = 2
+		return "awaiting-input"
 	}
-	r.beginShutdown(reason, code)
+	return "done"
+}
+
+func (r *Runtime) endCodeForIdle() int {
+	if r.endReasonForIdle() == "awaiting-input" {
+		return 2
+	}
+	return 0
 }
 
 func narratorReasonForYield(st *state.State) string {

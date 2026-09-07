@@ -125,8 +125,8 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 
 	// Prefer the authoritative output list from the final response.
 	var fin struct {
-		Model  string `json:"model"`
-		Status string `json:"status"`
+		Model  string            `json:"model"`
+		Status string            `json:"status"`
 		Output []json.RawMessage `json:"output"`
 		Usage  *struct {
 			Input  int `json:"input_tokens"`

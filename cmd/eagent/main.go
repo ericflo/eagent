@@ -98,7 +98,11 @@ func run(args []string) int {
 		switch rest[0] {
 		case "sessions", "show", "replay", "resume", "doctor", "config", "version", "help":
 			cmd = rest[0]
-			rest = rest[1:]
+			// Flags may also follow the subcommand.
+			if err := fs.Parse(rest[1:]); err != nil {
+				return 2
+			}
+			rest = fs.Args()
 		}
 	}
 	switch cmd {

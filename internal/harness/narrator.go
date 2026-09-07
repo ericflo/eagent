@@ -94,16 +94,18 @@ func (r *Runtime) narratorTurn(reason string) string {
 	var seenSeq int64
 	var last string
 	var snapshot *state.State
+	mustSpeak := false
 	r.sync(func() {
 		msgs = r.st.NarratorView(nil)
 		seenSeq = r.st.LastSeq()
 		last = r.narrLastSaid
 		snapshot = r.st
+		mustSpeak = r.narrSaidSeq <= r.st.LastUserSeq
 	})
 	if len(msgs) == 0 {
 		return "nothing to see"
 	}
-	msgs = append(msgs, llm.Message{Role: "user", Text: steerNarrator(snapshot, time.Now(), reason, r.opts.Interactive, last)})
+	msgs = append(msgs, llm.Message{Role: "user", Text: steerNarrator(snapshot, time.Now(), reason, r.opts.Interactive, last, mustSpeak)})
 	req := llm.Request{
 		System: narratorSystem(r.cfg.Persona), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
@@ -118,7 +120,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 			r.sync(func() {
 				r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "narrator", Text: err.Error()}))
 			})
-			if reason == wakeFinal {
+			if reason == wakeFinal && mustSpeak {
 				// The user must still get something.
 				r.deliverFallbackFinal()
 			}
@@ -131,7 +133,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		if len(resp.ToolCalls) == 0 {
 			// Plain text: treat as a held thought unless this is the final
 			// report, in which case the text is the report.
-			if reason == wakeFinal && strings.TrimSpace(resp.Text) != "" {
+			if reason == wakeFinal && mustSpeak && strings.TrimSpace(resp.Text) != "" {
 				r.deliverMessage(resp.Text)
 				return "final"
 			}
@@ -190,16 +192,12 @@ func (r *Runtime) narratorTurn(reason string) string {
 				}
 				spoke = true
 			case "hold":
-				why, _ := args["reason"].(string)
 				r.recordToolResult(event.ActorNarrator, "", tc, "holding", false)
-				if r.opts.Verbose {
-					r.ui.Log("narrator holds: %s", firstLine(why, 120))
-				}
 			default:
 				r.recordToolResult(event.ActorNarrator, "", tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 			}
 		}
-		if reason == wakeFinal && !spoke {
+		if reason == wakeFinal && !spoke && mustSpeak {
 			if attempt == 0 {
 				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls}, llm.Message{Role: "tool", Results: []llm.ToolResult{{CallID: resp.ToolCalls[0].ID, Name: resp.ToolCalls[0].Name, Output: "holding is not allowed on the final wake"}}}, llm.Message{Role: "user", Text: "[harness] The session is ending. Send the final report now with send_message."})
 				continue
@@ -215,8 +213,9 @@ func (r *Runtime) narratorTurn(reason string) string {
 func (r *Runtime) deliverMessage(text string) {
 	text = strings.TrimSpace(text)
 	r.sync(func() {
-		r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text}))
+		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text}))
 		r.narrLastSaid = text
+		r.narrSaidSeq = ev.Seq
 	})
 	r.ui.Narrate(text)
 }

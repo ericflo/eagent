@@ -192,7 +192,7 @@ type AssistantData struct {
 	// SeenSeq is the last event sequence number that was rendered into the
 	// prompt for this call. Anything after it arrived while the model was
 	// thinking and must be delivered on the next turn.
-	SeenSeq int64 `json:"seen_seq"`
+	SeenSeq int64  `json:"seen_seq"`
 	Stop    string `json:"stop,omitempty"`
 }
 

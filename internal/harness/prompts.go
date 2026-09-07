@@ -171,14 +171,18 @@ const (
 	wakeFinal    = "final"
 )
 
-func steerNarrator(st *state.State, now time.Time, reason string, interactive bool, lastMessage string) string {
+func steerNarrator(st *state.State, now time.Time, reason string, interactive bool, lastMessage string, mustSpeak bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] You were woken because: %s.", now.Local().Format("15:04:05"), reason)
 	switch reason {
 	case wakeFinal:
-		b.WriteString(" The session is ending now. This is your last chance to speak: send the user a complete final report (what was built, where, how to run it, what was verified, what is missing). Do not hold.")
+		if mustSpeak {
+			b.WriteString(" The session is ending now and the user has heard nothing yet. Send a complete final report (what was built, where, how to run it, what was verified, what is missing). Do not hold.")
+		} else {
+			b.WriteString(" The session is ending now. If your last message already covers the final state (what was built, where, how to run it, what was verified, what is missing), hold; otherwise send one final report with what is missing from it. Never repeat yourself.")
+		}
 	case wakeDone:
-		b.WriteString(" Send the final report now unless you already sent one that covers everything.")
+		b.WriteString(" Send the final report now unless your last message already covers everything; in that case hold.")
 	case wakeYield:
 		if interactive {
 			b.WriteString(" The orchestrator is waiting. If it asked for a decision, ask the user (ask_user). Otherwise tell the user where things stand, briefly, if that has changed since your last message.")
