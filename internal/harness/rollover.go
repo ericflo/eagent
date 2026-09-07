@@ -44,7 +44,7 @@ func (r *Runtime) startRollover() {
 func (r *Runtime) createDossierTask(reason string) {
 	files, _ := r.sess.Files()
 	id := r.st.NextTaskID()
-	desc := dossierTask(r.sess.Path, files, r.st, reason)
+	desc := r.dossierTask(r.sess.Path, files, r.st, reason)
 	r.append(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: id, Title: "Dossier for the new subsession", Description: desc, Kind: "dossier"}))
 }
 
@@ -65,7 +65,7 @@ func (r *Runtime) finishRollover(taskID, status, summary string) {
 			r.ui.Log("dossier %s was unusable (%s, %d chars, %d citations); retrying", taskID, status, len(text), cites)
 			files, _ := r.sess.Files()
 			id := r.st.NextTaskID()
-			desc := "SECOND ATTEMPT. The previous dossier attempt was rejected: " + rejectReason(status, len(text), cites) + ".\n\n" + dossierTask(r.sess.Path, files, r.st, "")
+			desc := "SECOND ATTEMPT. The previous dossier attempt was rejected: " + rejectReason(status, len(text), cites) + ".\n\n" + r.dossierTask(r.sess.Path, files, r.st, "")
 			r.append(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: id, Title: "Dossier for the new subsession (retry)", Description: desc, Kind: "dossier"}))
 			return
 		}

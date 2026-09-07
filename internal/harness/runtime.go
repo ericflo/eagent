@@ -21,6 +21,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/procs"
+	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/sched"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -62,6 +63,7 @@ type Runtime struct {
 	orchTools []llm.Tool
 	taskTools []llm.Tool
 	narrTools []llm.Tool
+	prompts   *prompts.Set
 
 	loop chan func()
 	ctx  context.Context
@@ -192,6 +194,10 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		closed:       make(chan struct{}),
 	}
 	var err error
+	if r.prompts, err = prompts.Load(opts.Project); err != nil {
+		cancel()
+		return nil, fmt.Errorf("prompts: %w", err)
+	}
 	if r.orchRoutes, err = cfg.Orchestrator.Routes(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("orchestrator: %w", err)

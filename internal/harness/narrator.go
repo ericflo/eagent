@@ -104,7 +104,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 	}
 	msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 	req := llm.Request{
-		System: narratorSystem(r.cfg.Persona), Messages: msgs, Tools: r.narrTools,
+		System: r.narratorSystem(), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
 	}
 	for attempt := 0; attempt < 2; attempt++ {

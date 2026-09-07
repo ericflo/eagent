@@ -90,7 +90,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		reason = ""
 		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{
-			System:   orchestratorSystem(r.projectPath(), r.cfg.Instructions, r.opts.Interactive),
+			System:   r.orchestratorSystem(),
 			Messages: msgs, Tools: r.orchTools, CacheKey: r.sess.ID + "-orchestrator",
 		}
 		resp, err := r.completeOrchestrator(ctx, req)

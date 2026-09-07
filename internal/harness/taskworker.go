@@ -107,7 +107,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 		}
 		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{
-			System:   taskSystem(r.projectPath(), r.cfg.Instructions),
+			System:   r.taskSystem(),
 			Messages: msgs, Tools: r.taskTools, CacheKey: r.sess.ID + "-task-" + t.ID,
 		}
 		resp, err := r.taskClient.Complete(ctx, req, r.observer(event.ActorTask, t.ID))

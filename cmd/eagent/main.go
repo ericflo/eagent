@@ -18,6 +18,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
@@ -38,6 +39,7 @@ Usage:
   eagent replay <id>                 rebuild state from the log and print it
   eagent doctor [--live]             check configuration and credentials
   eagent config [--write]            print (or save) the effective configuration
+  eagent prompts [export|show NAME]  list, export, or print the actor prompts
   eagent version
 
 Flags (before positional arguments):
@@ -96,7 +98,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "version", "help":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "version", "help":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -124,6 +126,8 @@ func run(args []string) int {
 		return cmdDoctor(project, *preset, *live)
 	case "config":
 		return cmdConfig(project, *preset, *write)
+	case "prompts":
+		return cmdPrompts(project, rest)
 	}
 
 	cfg, err := config.Load(project, *preset)
@@ -589,4 +593,45 @@ func cmdConfig(project, preset string, write bool) int {
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	fmt.Println(string(raw))
 	return 0
+}
+
+func cmdPrompts(project string, args []string) int {
+	set, err := prompts.Load(project)
+	if err != nil {
+		return fail(err)
+	}
+	if len(args) == 0 || args[0] == "list" {
+		fmt.Printf("prompt overrides directory: %s\n\n", prompts.Dir(project))
+		for _, name := range prompts.Names {
+			fmt.Printf("  %-22s %s\n", name, set.Source[name])
+		}
+		fmt.Println("\n`eagent prompts export` copies the built-in defaults there for editing; `eagent prompts show NAME` prints one.")
+		return 0
+	}
+	switch args[0] {
+	case "export":
+		written, err := prompts.Export(project)
+		if err != nil {
+			return fail(err)
+		}
+		if len(written) == 0 {
+			fmt.Println("nothing to do: all prompt files already exist in", prompts.Dir(project))
+			return 0
+		}
+		for _, p := range written {
+			fmt.Println("wrote", p)
+		}
+		return 0
+	case "show":
+		if len(args) < 2 {
+			return fail(errors.New("usage: eagent prompts show NAME"))
+		}
+		name := strings.ToUpper(strings.TrimSuffix(args[1], ".md")) + ".md"
+		if set.Text(name) == "" {
+			return fail(fmt.Errorf("unknown prompt %q (have %s)", args[1], strings.Join(prompts.Names, ", ")))
+		}
+		fmt.Print(set.Text(name))
+		return 0
+	}
+	return fail(fmt.Errorf("unknown prompts command %q", args[0]))
 }
