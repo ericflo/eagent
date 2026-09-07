@@ -100,7 +100,7 @@ func Defaults() Config {
 			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "none", MaxTokens: 4096, ContextTokens: 200_000,
 		},
 		TaskConcurrency:             3,
-		MaxTaskTurns:                100,
+		MaxTaskTurns:                150,
 		MaxOrchestratorCallsPerTurn: 40,
 		NarratorTickSeconds:         90,
 		RolloverTokens:              150_000,

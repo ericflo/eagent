@@ -190,7 +190,7 @@ A bundle is a partial override: it can name a preset and change one model, or sp
   "task":         { "model": "zai-org/GLM-5.3-Flash", "reasoning_effort": "low", "…": "…" },
   "narrator":     { "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "reasoning_effort": "none", "…": "…" },
   "task_concurrency": 3,
-  "max_task_turns": 100,
+  "max_task_turns": 150,
   "narrator_tick_seconds": 90,
   "rollover_tokens": 150000,
   "bash_wait_seconds": 20,
