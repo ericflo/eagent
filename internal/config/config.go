@@ -267,7 +267,7 @@ func (a Actor) validate() error {
 func (a Actor) Endpoint() (llm.Endpoint, error) {
 	key := os.Getenv(a.APIKeyEnv)
 	if key == "" {
-		return llm.Endpoint{}, fmt.Errorf("%s is not set (needed for %s)", a.APIKeyEnv, a.Model)
+		return llm.Endpoint{}, fmt.Errorf("%s is not set (needed for %s); export it, or pick another route with --preset or .agents/eagent/config.json", a.APIKeyEnv, a.Model)
 	}
 	ep := llm.Endpoint{
 		Protocol:        a.Protocol,
