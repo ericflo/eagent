@@ -120,8 +120,9 @@ type SessionStartData struct {
 	Cwd         string            `json:"cwd"`
 	Version     string            `json:"version"`
 	Interactive bool              `json:"interactive"`
-	Models      map[string]string `json:"models"`           // actor -> model
-	Config      string            `json:"config,omitempty"` // bundle or preset name
+	Models      map[string]string `json:"models"`              // actor -> model
+	Endpoints   map[string]string `json:"endpoints,omitempty"` // actor -> base URL actually in use
+	Config      string            `json:"config,omitempty"`    // bundle or preset name
 }
 
 // SessionResumeData records a restart and what the replay had to close.

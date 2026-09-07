@@ -17,6 +17,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -339,7 +340,7 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 		u := usageView(a, st.Calls[a], st.Totals[a])
 		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
 		u.Model = st.Models[a]
-		u.CostUSD, u.Priced = priceFor(st.Models[a], st.Totals[a])
+		u.CostUSD, u.Priced = priceFor(st.Hosts[a], st.Models[a], st.Totals[a])
 		d.Usage = append(d.Usage, u)
 	}
 	for _, ss := range st.Subsessions {
@@ -950,8 +951,10 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 // price is USD per million tokens. Cached is the cached-input rate.
 type price struct{ Input, Cached, Output float64 }
 
-// prices are list prices as of September 2026 for the models the presets
-// use. Unknown models produce no estimate rather than a wrong one.
+// prices are list prices in USD per million tokens as of September 2026,
+// keyed by "host|model" for providers that price the same model differently,
+// with a plain model-name fallback. Unknown models produce no estimate rather
+// than a wrong one.
 var prices = map[string]price{
 	// Together
 	"zai-org/GLM-5.3":                    {1.40, 0.26, 4.40},
@@ -970,13 +973,49 @@ var prices = map[string]price{
 	"gpt-5.6-luna": {0.20, 0.02, 1.20}, "openai/gpt-5.6-luna": {0.20, 0.02, 1.20},
 	// Anthropic (cache writes are billed above the input rate and are not
 	// tracked separately, so these run slightly low)
+	"claude-fable-5-1":          {10.0, 1.00, 50.0},
 	"claude-opus-5":             {5.00, 0.50, 25.0},
 	"claude-sonnet-5":           {2.00, 0.20, 10.0},
 	"claude-haiku-4-5-20251001": {1.00, 0.10, 5.00},
+	// DeepInfra
+	"api.deepinfra.com|moonshotai/Kimi-K3":                 {2.85, 0.285, 14.25},
+	"api.deepinfra.com|zai-org/GLM-5.3":                    {1.20, 0.12, 4.00},
+	"api.deepinfra.com|zai-org/GLM-5.3-Flash":              {0.15, 0.03, 0.50},
+	"api.deepinfra.com|deepseek-ai/DeepSeek-V4-Flash-0731": {0.06, 0.015, 0.18},
+	// Fireworks
+	"accounts/fireworks/models/kimi-k3":                {3.00, 0.30, 15.00},
+	"accounts/fireworks/models/glm-5p3":                {1.40, 0.26, 4.40},
+	"accounts/fireworks/models/glm-5p3-flash":          {0.15, 0.03, 0.50},
+	"accounts/fireworks/models/deepseek-v4-flash-0731": {0.22, 0.007, 0.66},
+	// OpenCode Zen (sells at provider cost)
+	"opencode.ai|glm-5.3":           {1.40, 0.26, 4.40},
+	"opencode.ai|glm-5.3-flash":     {0.15, 0.03, 0.50},
+	"opencode.ai|kimi-k3":           {3.00, 0.30, 15.00},
+	"opencode.ai|deepseek-v4-flash": {0.14, 0.028, 0.28},
+	"opencode.ai|minimax-m3":        {0.30, 0.06, 1.20},
+	"opencode.ai|claude-fable-5-1":  {10.0, 0.25, 50.0},
+	"opencode.ai|gpt-6-astra":       {10.0, 1.00, 50.0},
+	// Nous Portal
+	"inference-api.nousresearch.com|moonshotai/kimi-k3":              {2.04, 0.20, 10.20},
+	"inference-api.nousresearch.com|z-ai/glm-5.3":                    {0.94, 0.19, 3.17},
+	"inference-api.nousresearch.com|z-ai/glm-5.3-flash":              {0.06, 0.01, 0.19},
+	"inference-api.nousresearch.com|deepseek/deepseek-v4-flash-0731": {0.04, 0.01, 0.13},
 }
 
-func priceFor(model string, u event.Usage) (float64, bool) {
-	p, ok := prices[model]
+// hostOf reduces a base URL to its host for price lookup.
+func hostOf(base string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return base
+	}
+	return u.Host
+}
+
+func priceFor(baseURL, model string, u event.Usage) (float64, bool) {
+	p, ok := prices[hostOf(baseURL)+"|"+model]
+	if !ok {
+		p, ok = prices[model]
+	}
 	if !ok {
 		return 0, false
 	}
@@ -996,7 +1035,7 @@ func estimateCost(st *state.State) (float64, bool) {
 		if st.Calls[a] == 0 {
 			continue
 		}
-		c, ok := priceFor(st.Models[a], st.Totals[a])
+		c, ok := priceFor(st.Hosts[a], st.Models[a], st.Totals[a])
 		if !ok {
 			priced = false
 			continue

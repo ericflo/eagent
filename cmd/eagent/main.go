@@ -56,15 +56,18 @@ Flags (before positional arguments):
   -v            verbose: show every tool call and model response
   --json        emit narrator output as JSON lines on stdout
   -C <dir>      project directory (default: current directory)
-  --preset <n>  built-in model preset: glm (default), astra, openai-high|med|low,
-                openrouter-high|med|low, anthropic-high|med, deepseek, qwen
+  --preset <n>  built-in model preset: glm (default), astra, deepseek, qwen, or a
+                provider tier: openai-high|med|low, openrouter-high|med|low,
+                anthropic-high|med, deepinfra-high|med|low, fireworks-high|med|low,
+                opencode-high|med|low, nous-high|med|low
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
   --serve <a>   also serve the web UI at this address while a session runs (e.g. :7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
 OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* and astra presets, OpenRouter is the
-fallback), OPENROUTER_API_KEY (openrouter-*, qwen), ANTHROPIC_API_KEY (anthropic-*).
+fallback), OPENROUTER_API_KEY (openrouter-*, qwen), ANTHROPIC_API_KEY (anthropic-*),
+DEEPINFRA_API_KEY, FIREWORKS_API_KEY, OPENCODE_ZEN_API_KEY, NOUS_API_KEY.
 Sessions are stored in <project>/.agents/eagent/sessions/.
 `
 

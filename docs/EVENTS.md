@@ -26,7 +26,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
-| `session.start` | harness | `session`, `cwd`, `version`, `interactive`, `models{actor: model}`, `config` | First event of a session. `config` names the bundle or preset. |
+| `session.start` | harness | `session`, `cwd`, `version`, `interactive`, `models{actor: model}`, `endpoints{actor: base_url}`, `config` | First event of a session. `models` and `endpoints` are the routes actually in use (a fallback may have taken over at startup); `config` names the bundle or preset. |
 | `session.resume` | harness | `interactive`, `closed[]` | Appended by `eagent -c`; `closed` lists what the replay had to mark interrupted. |
 | `session.end` | harness | `reason` | `done`, `awaiting-input`, `quit`, `interrupted`, `error`. A session can be resumed after any of these. Before it is written, every still-running process gets a `proc.exit` and every queued or running task a `task.end` of status `interrupted`, so the log is consistent at every end. |
 | `subsession.start` | harness | `file`, `index`, `reason` (`new` or `rollover`) | First event in every file. |
@@ -65,7 +65,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
-| `route` | harness | `actor`, `provider`, `base_url`, `model`, `reason` | A fallback route took over. |
+| `route` | harness | `actor`, `provider`, `base_url`, `model`, `reason` | A fallback route took over; the reducer updates the actor's model and endpoint. |
 | `error` | harness | `where`, `text` | A model call failed after retries; the narrator sees it. |
 
 ## Who sees what

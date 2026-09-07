@@ -81,6 +81,10 @@ const (
 	openaiURL     = "https://api.openai.com/v1"
 	openrouterURL = "https://openrouter.ai/api/v1"
 	anthropicURL  = "https://api.anthropic.com/v1"
+	deepinfraURL  = "https://api.deepinfra.com/v1/openai"
+	fireworksURL  = "https://api.fireworks.ai/inference/v1"
+	zenURL        = "https://opencode.ai/zen/v1"
+	nousURL       = "https://inference-api.nousresearch.com/v1"
 )
 
 // Defaults is the shipped configuration: GLM-5.3 orchestrating, GLM-5.3-Flash
@@ -179,6 +183,92 @@ var Presets = map[string]func(*Config){
 		c.Narrator = anthropicActor("claude-haiku-4-5-20251001", "", 4096)
 	},
 
+	// DeepInfra.
+	"deepinfra-high": func(c *Config) {
+		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (DeepInfra)"
+		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "moonshotai/Kimi-K3", "medium", 32768, 1_000_000)
+		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "medium", 32768, 200_000)
+		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "low", 4096, 200_000)
+	},
+	"deepinfra-med": func(c *Config) {
+		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (DeepInfra)"
+		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "medium", 32768, 200_000)
+		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "low", 32768, 200_000)
+		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4-Flash-0731", "none", 4096, 200_000)
+	},
+	"deepinfra-low": func(c *Config) {
+		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4 Flash working and narrating (DeepInfra; cheapest)"
+		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "low", 32768, 200_000)
+		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4-Flash-0731", "low", 32768, 200_000)
+		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4-Flash-0731", "none", 4096, 200_000)
+	},
+
+	// Fireworks.
+	"fireworks-high": func(c *Config) {
+		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Fireworks)"
+		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/kimi-k3", "medium", 32768, 1_000_000)
+		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "medium", 32768, 200_000)
+		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "low", 4096, 200_000)
+	},
+	"fireworks-med": func(c *Config) {
+		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (Fireworks)"
+		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "medium", 32768, 200_000)
+		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "low", 32768, 200_000)
+		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+	"fireworks-low": func(c *Config) {
+		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4 Flash working and narrating (Fireworks; cheapest)"
+		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "low", 32768, 200_000)
+		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4-flash-0731", "low", 32768, 200_000)
+		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+
+	// OpenCode Zen: one key for OpenAI, Anthropic, and open models at cost.
+	// (Zen's free-tier models only answer the OpenCode client, so there is
+	// no free preset.)
+	"opencode-high": func(c *Config) {
+		c.Description = "Claude Fable 5.1 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenCode Zen)"
+		c.Orchestrator = Actor{
+			Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1",
+			APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 1_000_000,
+		}
+		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "medium", 32768, 200_000)
+		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 4096, 200_000)
+		c.RolloverTokens = 300_000
+	},
+	"opencode-med": func(c *Config) {
+		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (OpenCode Zen)"
+		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "medium", 32768, 200_000)
+		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 32768, 200_000)
+		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4-flash", "none", 4096, 200_000)
+	},
+	"opencode-low": func(c *Config) {
+		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4 Flash working and narrating (OpenCode Zen; cheapest)"
+		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 32768, 200_000)
+		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4-flash", "low", 32768, 200_000)
+		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4-flash", "none", 4096, 200_000)
+	},
+
+	// Nous Portal.
+	"nous-high": func(c *Config) {
+		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Nous Portal)"
+		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "moonshotai/kimi-k3", "medium", 32768, 1_000_000)
+		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "medium", 32768, 200_000)
+		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "low", 4096, 200_000)
+	},
+	"nous-med": func(c *Config) {
+		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (Nous Portal)"
+		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "medium", 32768, 200_000)
+		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "low", 32768, 200_000)
+		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+	"nous-low": func(c *Config) {
+		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4 Flash working and narrating (Nous Portal; cheapest)"
+		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "low", 32768, 200_000)
+		c.Task = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4-flash-0731", "low", 32768, 200_000)
+		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4-flash-0731", "none", 4096, 200_000)
+	},
+
 	// Single-model shapes: what you would get from one local model.
 	"deepseek": func(c *Config) {
 		c.Description = "DeepSeek V4 Flash for all three actors (cheap; the shape of a single local model)"
@@ -205,7 +295,17 @@ var presetAliases = map[string]string{"anthropic": "anthropic-high"}
 
 // PresetNames lists presets in a stable order.
 func PresetNames() []string {
-	return []string{"glm", "astra", "openai-high", "openai-med", "openai-low", "openrouter-high", "openrouter-med", "openrouter-low", "anthropic-high", "anthropic-med", "deepseek", "qwen"}
+	return []string{
+		"glm", "astra",
+		"openai-high", "openai-med", "openai-low",
+		"openrouter-high", "openrouter-med", "openrouter-low",
+		"anthropic-high", "anthropic-med",
+		"deepinfra-high", "deepinfra-med", "deepinfra-low",
+		"fireworks-high", "fireworks-med", "fireworks-low",
+		"opencode-high", "opencode-med", "opencode-low",
+		"nous-high", "nous-med", "nous-low",
+		"deepseek", "qwen",
+	}
 }
 
 // ResolvePreset maps a preset name or alias to its canonical name; ok is
@@ -242,9 +342,14 @@ func openaiActor(model, effort string, maxTokens int) Actor {
 }
 
 func openrouterActor(model, effort string, maxTokens, contextTokens int) Actor {
+	return chatActor(openrouterURL, "OPENROUTER_API_KEY", model, effort, maxTokens, contextTokens)
+}
+
+// chatActor is an OpenAI-compatible chat route on any provider.
+func chatActor(baseURL, keyEnv, model, effort string, maxTokens, contextTokens int) Actor {
 	return Actor{
-		Protocol: llm.ProtocolChat, BaseURL: openrouterURL, Model: model,
-		APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: contextTokens,
+		Protocol: llm.ProtocolChat, BaseURL: baseURL, Model: model,
+		APIKeyEnv: keyEnv, ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: contextTokens,
 	}
 }
 

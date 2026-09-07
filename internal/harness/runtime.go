@@ -123,17 +123,24 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		sess.Close()
 		return nil, err
 	}
+	// Record the routes actually in use, which differ from the configured
+	// primaries when a fallback took over at startup.
 	models := map[string]string{
-		event.ActorOrchestrator: cfg.Orchestrator.Model,
-		event.ActorTask:         cfg.Task.Model,
-		event.ActorNarrator:     cfg.Narrator.Model,
+		event.ActorOrchestrator: r.orchClient.Endpoint.Model,
+		event.ActorTask:         r.taskClient.Endpoint.Model,
+		event.ActorNarrator:     r.narrClient.Endpoint.Model,
+	}
+	endpoints := map[string]string{
+		event.ActorOrchestrator: r.orchClient.Endpoint.BaseURL,
+		event.ActorTask:         r.taskClient.Endpoint.BaseURL,
+		event.ActorNarrator:     r.narrClient.Endpoint.BaseURL,
 	}
 	name := cfg.Name
 	if name == "" {
 		name = cfg.Preset
 	}
 	r.append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
-		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Config: name,
+		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Config: name,
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if strings.TrimSpace(opts.Prompt) != "" {

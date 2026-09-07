@@ -103,6 +103,7 @@ type State struct {
 	Version     string
 	Interactive bool
 	Models      map[string]string
+	Hosts       map[string]string // actor -> base URL in use
 	Started     time.Time
 
 	Events      []event.Event
@@ -156,6 +157,7 @@ type State struct {
 func New() *State {
 	return &State{
 		Models:    map[string]string{},
+		Hosts:     map[string]string{},
 		Tasks:     map[string]*Task{},
 		Procs:     map[string]*Proc{},
 		Schedules: map[string]*Schedule{},
@@ -223,7 +225,21 @@ func (s *State) Apply(ev event.Event) {
 		if d.Models != nil {
 			s.Models = d.Models
 		}
+		for a, u := range d.Endpoints {
+			s.Hosts[a] = u
+		}
 		s.Started = ev.Time
+	case event.Route:
+		var d event.RouteData
+		_ = ev.Decode(&d)
+		if d.Actor != "" {
+			if d.Model != "" {
+				s.Models[d.Actor] = d.Model
+			}
+			if d.BaseURL != "" {
+				s.Hosts[d.Actor] = d.BaseURL
+			}
+		}
 	case event.SessionResume:
 		var d event.SessionResumeData
 		_ = ev.Decode(&d)
