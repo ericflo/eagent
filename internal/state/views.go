@@ -593,3 +593,23 @@ func humanSize(n int64) string {
 	}
 	return fmt.Sprintf("%d B", n)
 }
+
+// OrchestratorEdits counts the files the orchestrator wrote or edited
+// itself in the current context. Implementation is the task worker's job;
+// the steer nudges an orchestrator that keeps doing it.
+func (s *State) OrchestratorEdits() int {
+	n := 0
+	for _, ev := range s.currentEvents() {
+		if ev.Type != event.Assistant || ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			continue
+		}
+		var d event.AssistantData
+		_ = ev.Decode(&d)
+		for _, tc := range d.ToolCalls {
+			if tc.Name == "write_file" || tc.Name == "edit_file" {
+				n++
+			}
+		}
+	}
+	return n
+}

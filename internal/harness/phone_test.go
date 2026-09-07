@@ -887,3 +887,131 @@ func TestWorkerAndNarratorRoutesFallBack(t *testing.T) {
 		t.Fatalf("narrator messages = %d", ui.messageCount())
 	}
 }
+
+// A second read of an unchanged file, or a second look at an unchanged
+// image, comes back as a note; a changed file or force=true reads again.
+func TestRepeatReadsAreShortCircuited(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	path := filepath.Join(project, "notes.txt")
+	if err := os.WriteFile(path, []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 'I', 'H', 'D', 'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 'I', 'D', 'A', 'T', 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xae, 0x42, 0x60, 0x82}
+	if err := os.WriteFile(filepath.Join(project, "shot.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	step := 0
+	var mu sync.Mutex
+	brain := func(model string, msgs []map[string]any) reply {
+		if model != "orch" {
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		step++
+		switch step {
+		case 1:
+			return reply{calls: []event.ToolCall{tc("read_file", `{"path":"notes.txt"}`)}}
+		case 2:
+			return reply{calls: []event.ToolCall{tc("read_file", `{"path":"notes.txt"}`)}} // unchanged
+		case 3:
+			_ = os.WriteFile(path, []byte("second\n"), 0o644)
+			// force a different mtime even on coarse filesystems
+			later := time.Now().Add(2 * time.Second)
+			_ = os.Chtimes(path, later, later)
+			return reply{calls: []event.ToolCall{tc("read_file", `{"path":"notes.txt"}`)}} // changed
+		case 4:
+			return reply{calls: []event.ToolCall{tc("read_file", `{"path":"notes.txt","force":true}`)}} // forced
+		case 5:
+			return reply{calls: []event.ToolCall{tc("view_image", `{"path":"shot.png"}`)}}
+		case 6:
+			return reply{calls: []event.ToolCall{tc("view_image", `{"path":"shot.png"}`)}} // unchanged
+		default:
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Interactive: false, Prompt: "read"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	var reads, views []event.ToolResultData
+	for _, ev := range evs {
+		if ev.Type == event.ToolResult {
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			switch d.Name {
+			case "read_file":
+				reads = append(reads, d)
+			case "view_image":
+				views = append(views, d)
+			}
+		}
+	}
+	if len(reads) != 4 {
+		t.Fatalf("reads = %d", len(reads))
+	}
+	if !strings.Contains(reads[0].Output, "first") || !strings.Contains(reads[1].Output, "unchanged since you read it") || !strings.Contains(reads[2].Output, "second") || !strings.Contains(reads[3].Output, "second") {
+		t.Fatalf("read outputs = %q %q %q %q", reads[0].Output, reads[1].Output, reads[2].Output, reads[3].Output)
+	}
+	if len(views) != 2 || len(views[0].Images) != 1 || len(views[1].Images) != 0 || !strings.Contains(views[1].Output, "unchanged since you looked at it") {
+		t.Fatalf("views = %+v", views)
+	}
+}
+
+// An orchestrator that keeps editing files itself gets told to delegate.
+func TestOrchestratorEditNudge(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	n := 0
+	var mu sync.Mutex
+	brain := func(model string, msgs []map[string]any) reply {
+		if model != "orch" {
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		if n <= orchestratorEditNudge {
+			return reply{calls: []event.ToolCall{tc("write_file", fmt.Sprintf(`{"path":"f%d.txt","content":"x"}`, n))}}
+		}
+		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Interactive: false, Prompt: "write"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	var steers []string
+	for _, ev := range evs {
+		if ev.Type == event.Steer && ev.Actor == event.ActorOrchestrator {
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			steers = append(steers, d.Text)
+		}
+	}
+	if len(steers) < orchestratorEditNudge+1 {
+		t.Fatalf("steers = %d", len(steers))
+	}
+	if strings.Contains(steers[1], "Delegate what remains") {
+		t.Fatal("nudged too early")
+	}
+	if !strings.Contains(steers[len(steers)-1], "Delegate what remains") {
+		t.Fatalf("no nudge in the last steer: %s", steers[len(steers)-1])
+	}
+}

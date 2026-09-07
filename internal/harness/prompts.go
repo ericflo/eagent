@@ -35,6 +35,9 @@ func (r *Runtime) narratorSystem(phone string) string {
 
 // steerOrchestrator is appended as the final user message and never
 // persisted, so the cached prefix stays intact.
+// orchestratorEditNudge is how many direct file edits earn the reminder.
+const orchestratorEditNudge = 8
+
 func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s]", now.Local().Format("15:04:05"))
@@ -59,6 +62,9 @@ func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens
 		if len(hs) > 0 {
 			fmt.Fprintf(&b, " Your processes still running: %s.", strings.Join(hs, ", "))
 		}
+	}
+	if edits := st.OrchestratorEdits(); edits >= orchestratorEditNudge {
+		fmt.Fprintf(&b, " You have written or edited files yourself %d times in this context; implementation is the task worker's job and costs far less there. Delegate what remains with `delegate` and keep to reading, verifying, and one-line fixes.", edits)
 	}
 	if sc := st.ActiveSchedules(); len(sc) > 0 {
 		var ss []string

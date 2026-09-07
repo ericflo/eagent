@@ -45,11 +45,12 @@ var shellTools = []llm.Tool{
 		"Look at an image file (png, jpeg, gif, webp): a screenshot the user sent, a picture you rendered, a page you captured. The image is shown to you right after this result. If your model cannot see images the result says so; then delegate the looking to a task worker or describe the file another way.",
 		`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
 	def("read_file",
-		"Read a text file. Reads the whole file by default (large files are truncated with a note); pass offset (1-based line) and limit to read a window.",
+		"Read a text file. Reads the whole file by default (large files are truncated with a note); pass offset (1-based line) and limit to read a window. A file you already read and that has not changed since comes back as a short note instead of its contents; pass force=true to read it again anyway.",
 		`{"type":"object","properties":{
 			"path":{"type":"string"},
 			"offset":{"type":"integer"},
-			"limit":{"type":"integer"}
+			"limit":{"type":"integer"},
+			"force":{"type":"boolean"}
 		},"required":["path"]}`),
 	def("write_file",
 		"Create or overwrite a file with the full content given. Parent directories are created. Prefer this over shell heredocs.",

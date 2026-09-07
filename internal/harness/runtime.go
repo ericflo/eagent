@@ -88,6 +88,8 @@ type Runtime struct {
 	narrTicker   *time.Timer
 	phone        *phone // Finalechat mirror; nil when off
 	toolImagesMu sync.Mutex
+	memoMu       sync.Mutex
+	memo         map[string]fileMark           // what each caller last read or viewed, to skip repeats
 	toolImages   map[string][]event.Attachment // call id -> pictures for the model (view_image)
 	running      map[string]context.CancelFunc // task id -> cancel
 	waiters      []*waiter

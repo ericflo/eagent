@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -158,10 +159,14 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 
 	// ---- files ----
 	case "view_image":
+		if note := r.unchangedSince(c, "view|"+str("path"), str("path")); note != "" {
+			return note, false
+		}
 		att, err := r.viewImage(str("path"))
 		if err != nil {
 			return err.Error(), true
 		}
+		r.remember(c, "view|"+str("path"), str("path"))
 		r.stashImage(tc.ID, att)
 		dims := ""
 		if att.Width > 0 {
@@ -169,10 +174,18 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		}
 		return fmt.Sprintf("%s (%s, %s%s) follows this result as an image.", att.Name, att.ContentType, humanBytes(att.Size), dims), false
 	case "read_file":
+		force, _ := args["force"].(bool)
+		key := fmt.Sprintf("read|%s|%d|%d", str("path"), num("offset", 0), num("limit", 0))
+		if !force {
+			if note := r.unchangedSince(c, key, str("path")); note != "" {
+				return note, false
+			}
+		}
 		out, err := r.files.ReadFile(str("path"), num("offset", 0), num("limit", 0), r.cfg.ToolOutputMaxChars)
 		if err != nil {
 			return err.Error(), true
 		}
+		r.remember(c, key, str("path"))
 		return out, false
 	case "write_file":
 		content, hasContent := args["content"].(string)
@@ -584,4 +597,71 @@ func (r *Runtime) spillAndTruncate(c caller, tc event.ToolCall, out string, max 
 	lines := strings.Count(out, "\n") + 1
 	notice := fmt.Sprintf("Full output (%d lines) saved to %s; page through it with read_file(path, offset, limit) or search it with bash grep", lines, path)
 	return tools.TruncateWithNotice(out, max, notice)
+}
+
+// ---- repeat reads -------------------------------------------------------------
+
+// Models re-read files and re-view screenshots they already have in
+// context. When the file has not changed since that caller last read it (in
+// the same context), the harness answers with a one-line note instead of
+// the contents. Keyed by caller, path and window; the orchestrator's memory
+// resets with each fresh context, since a new context has seen nothing.
+
+type fileMark struct {
+	size  int64
+	mtime time.Time
+	at    time.Time
+}
+
+func (r *Runtime) memoKey(c caller, key string) string {
+	gen := 0
+	if c.actor == event.ActorOrchestrator && c.task == "" {
+		r.sync(func() {
+			if cur := r.st.Current(); cur != nil {
+				gen = cur.Index
+			}
+		})
+	}
+	return fmt.Sprintf("%s|%s|%d|%s", c.actor, c.task, gen, key)
+}
+
+// unchangedSince returns a note when the caller already read this exact
+// thing and the file is the same size and modification time; "" otherwise.
+func (r *Runtime) unchangedSince(c caller, key, path string) string {
+	abs, err := r.locateFile(path)
+	if err != nil {
+		return ""
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return ""
+	}
+	r.memoMu.Lock()
+	m, ok := r.memo[r.memoKey(c, key)]
+	r.memoMu.Unlock()
+	if !ok || m.size != st.Size() || !m.mtime.Equal(st.ModTime()) {
+		return ""
+	}
+	what := "read it"
+	if strings.HasPrefix(key, "view|") {
+		what = "looked at it"
+	}
+	return fmt.Sprintf("%s is unchanged since you %s %s ago (%d bytes, same modification time); what you saw then still holds. Pass force=true to read it again anyway.", filepath.Base(abs), what, since(m.at, time.Now()), st.Size())
+}
+
+func (r *Runtime) remember(c caller, key, path string) {
+	abs, err := r.locateFile(path)
+	if err != nil {
+		return
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return
+	}
+	r.memoMu.Lock()
+	if r.memo == nil {
+		r.memo = map[string]fileMark{}
+	}
+	r.memo[r.memoKey(c, key)] = fileMark{size: st.Size(), mtime: st.ModTime(), at: time.Now()}
+	r.memoMu.Unlock()
 }
