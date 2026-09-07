@@ -404,3 +404,98 @@ func TestInterruptAndResume(t *testing.T) {
 		t.Fatalf("resumes = %d", st.Resumes)
 	}
 }
+
+func TestInteractiveQuestionAndAnswer(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "answered question") && strings.Contains(all, "blue"):
+				return reply{calls: []event.ToolCall{tc("note", `{"text":"Using blue as requested."}`), tc("yield", `{"done":true,"reason":"colour chosen: blue"}`)}}
+			case strings.Contains(all, "answered question"):
+				return reply{text: "unexpected answer"}
+			default:
+				return reply{calls: []event.ToolCall{
+					tc("note", `{"text":"I need the user to pick a colour: red or blue."}`),
+					tc("yield", `{"done":false,"reason":"waiting for the colour decision"}`),
+				}}
+			}
+		default: // narrator
+			switch {
+			case strings.Contains(all, "colour chosen"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Blue it is; done."}`)}}
+			case strings.Contains(all, "pick a colour") && !strings.Contains(all, "asked;"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Interactive: true, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+
+	// Wait for the question, answer by option number, then quit once done.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		ui.mu.Lock()
+		asked := len(ui.asked)
+		ui.mu.Unlock()
+		if asked > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(ui.asked) != 1 || !strings.Contains(ui.asked[0], "Which colour") {
+		t.Fatalf("asked = %v logs=%v", ui.asked, ui.logs)
+	}
+	ui.input <- "2"
+	for {
+		ui.mu.Lock()
+		got := len(ui.messages)
+		ui.mu.Unlock()
+		if got > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(ui.messages) == 0 || !strings.Contains(ui.messages[0], "Blue") {
+		t.Fatalf("messages = %v logs=%v", ui.messages, ui.logs)
+	}
+	ui.input <- "/quit"
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("did not quit")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.EndReason != "quit" || st.Question != nil {
+		t.Fatalf("end=%s question=%v", st.EndReason, st.Question)
+	}
+	var answered bool
+	for _, ev := range evs {
+		if ev.Type == event.UserAnswer {
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			answered = d.Text == "blue" && d.QuestionID == "q1"
+		}
+	}
+	if !answered {
+		t.Fatal("numbered option was not mapped to its text")
+	}
+}
