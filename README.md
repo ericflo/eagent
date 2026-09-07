@@ -70,7 +70,7 @@ eagent show 1788745982263                              # human transcript
 eagent replay 1788745982263                            # rebuild state from the log
 ```
 
-In an interactive session, type to talk to the agent, `/status` to see what is running, `/quit` to stop. Ctrl-C stops the session cleanly; everything is on disk and `eagent -c` resumes it.
+In an interactive session, type to talk to the agent (even while it is working; your message is delivered at the next model call), `/status` to see what is running, `/quit` to stop. Ctrl-C stops the session cleanly; everything is on disk and `eagent -c` resumes it. Resuming replays the log, closes whatever the crash left open (a tool call without a result, a running task, a process), tells the orchestrator what was lost, and continues.
 
 Batch mode exits `0` when the orchestrator declares the work done, `2` when it stopped to ask you something (answer with `eagent -c --answer "..."`), `130` on Ctrl-C.
 
@@ -152,7 +152,9 @@ eagent --preset astra …       # GPT-6 Astra orchestrator via OpenAI, OpenRoute
 eagent --preset anthropic …   # Claude Opus / Sonnet / Haiku
 ```
 
-A route with a `fallback` switches automatically when the primary is unroutable (bad key, no model access, exhausted credits); the switch is recorded in the log and sticks for the session. Transient failures (429 rate limits, 5xx, stalled streams) retry with backoff. All calls stream; a stream that goes silent for two minutes is aborted and retried instead of hanging.
+A route with a `fallback` switches automatically when the primary is unroutable (bad key, no model access, exhausted credits); the switch is recorded in the log and sticks for the session. Transient failures (429 rate limits, 5xx, stalled streams) retry with backoff. All calls stream; a stream that goes silent for two minutes, or runs past fifteen, is aborted and retried instead of hanging.
+
+Two failure modes seen in the wild get special treatment. A stream that closes before the provider signals completion is treated as a transport failure and retried, never accepted as a response (a 12-minute GLM call once ended with a tool call whose arguments were the single character `{`). And a malformed tool call that does make it into the log is sanitised when the history is replayed, so one bad turn cannot make every later request fail validation. If the orchestrator's call still fails after retries, it gets one recovery turn; if that fails too, the session pauses, the narrator tells you plainly, and `eagent -c` picks up exactly where it stopped.
 
 `reasoning_effort` matters for GLM on Together: with the default effort GLM-5.3-Flash spent 8,800 reasoning tokens and 69 seconds on a 120-line file; with `low` it spent 7 tokens and 14 seconds. The defaults reflect that.
 
