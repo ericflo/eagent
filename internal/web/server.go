@@ -17,7 +17,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,7 +29,6 @@ import (
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
-	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/state"
@@ -51,6 +49,10 @@ type Server struct {
 	running map[string]*hosted
 	mux     *http.ServeMux
 	logf    func(string, ...any)
+
+	token    string // per-process page token echoed on every mutating request
+	addr     string // the address the server listens on, for Host checks
+	checksMu sync.Mutex
 }
 
 type hosted struct {
@@ -66,7 +68,7 @@ func New(project string, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	s := &Server{Project: project, running: map[string]*hosted{}, logf: logf}
+	s := &Server{Project: project, running: map[string]*hosted{}, token: newToken(), logf: logf}
 	s.mux = http.NewServeMux()
 	s.routes()
 	return s
@@ -78,7 +80,8 @@ func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	sub, _ := fs.Sub(static, "static")
 	files := http.FileServer(http.FS(sub))
-	index, _ := static.ReadFile("static/index.html")
+	indexRaw, _ := static.ReadFile("static/index.html")
+	index := []byte(strings.Replace(string(indexRaw), "__EAGENT_TOKEN__", s.token, 1))
 	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		// Any path without an extension is the single-page app; FileServer
 		// would redirect /index.html to /, so serve it directly.
@@ -91,20 +94,25 @@ func (s *Server) routes() {
 		files.ServeHTTP(w, r)
 	})
 	s.mux.HandleFunc("GET /api/sessions", s.listSessions)
-	s.mux.HandleFunc("POST /api/sessions", s.startSession)
+	s.mux.HandleFunc("POST /api/sessions", s.guard(s.startSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.getSession)
 	s.mux.HandleFunc("GET /api/sessions/{id}/events", s.getEvents)
 	s.mux.HandleFunc("GET /api/sessions/{id}/stream", s.stream)
 	s.mux.HandleFunc("GET /api/sessions/{id}/attachments/{name}", s.getAttachment)
-	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.postMessage)
-	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.postAnswer)
-	s.mux.HandleFunc("POST /api/sessions/{id}/stop", s.postStop)
-	s.mux.HandleFunc("POST /api/sessions/{id}/resume", s.postResume)
+	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.guard(s.postMessage))
+	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.guard(s.postAnswer))
+	s.mux.HandleFunc("POST /api/sessions/{id}/stop", s.guard(s.postStop))
+	s.mux.HandleFunc("POST /api/sessions/{id}/resume", s.guard(s.postResume))
 	s.mux.HandleFunc("GET /api/config", s.getConfig)
-	s.mux.HandleFunc("POST /api/config/bundles", s.saveBundle)
+	s.mux.HandleFunc("PUT /api/config", s.guard(s.putConfig))
+	s.mux.HandleFunc("PUT /api/config/raw", s.guard(s.putConfigRaw))
+	s.mux.HandleFunc("POST /api/config/test", s.guard(s.testRoute))
+	s.mux.HandleFunc("GET /api/config/presets/{name}", s.getPresetConfig)
+	s.mux.HandleFunc("GET /api/catalog", s.getCatalog)
+	s.mux.HandleFunc("POST /api/config/bundles", s.guard(s.saveBundle))
 	s.mux.HandleFunc("GET /api/prompts/{name}", s.getPrompt)
-	s.mux.HandleFunc("PUT /api/prompts/{name}", s.putPrompt)
-	s.mux.HandleFunc("DELETE /api/prompts/{name}", s.deletePrompt)
+	s.mux.HandleFunc("PUT /api/prompts/{name}", s.guard(s.putPrompt))
+	s.mux.HandleFunc("DELETE /api/prompts/{name}", s.guard(s.deletePrompt))
 	s.mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "project": s.Project})
 	})
@@ -578,6 +586,7 @@ type messageBody struct {
 	Prompt     string `json:"prompt"`
 	Config     string `json:"config"`
 	Preset     string `json:"preset"`
+	UseProject bool   `json:"use_project"`
 }
 
 func readBody(r *http.Request) (messageBody, error) {
@@ -676,7 +685,11 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("prompt is required"))
 		return
 	}
-	id, err := s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, b.Config, b.Preset)
+	bundle, preset := b.Config, b.Preset
+	if b.UseProject {
+		bundle, preset = "-", "-" // the project's own configuration, ignoring the server's --preset/--config
+	}
+	id, err := s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, bundle, preset)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
@@ -692,10 +705,15 @@ func (s *Server) isHosted(id string) bool {
 }
 
 func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
-	if bundle == "" {
+	// "-" means the project's own configuration: no server-wide default.
+	if bundle == "-" {
+		bundle = ""
+	} else if bundle == "" {
 		bundle = s.Bundle
 	}
-	if preset == "" {
+	if preset == "-" {
+		preset = ""
+	} else if preset == "" {
 		preset = s.Preset
 	}
 	return config.LoadBundle(s.Project, preset, bundle)
@@ -771,24 +789,6 @@ func (s *Server) Shutdown(timeout time.Duration) {
 
 // ---- configuration ----------------------------------------------------------
 
-type configView struct {
-	Effective config.Config     `json:"effective"`
-	Presets   []bundleView      `json:"presets"`
-	Bundles   []bundleView      `json:"bundles"`
-	Prompts   []promptView      `json:"prompts"`
-	Keys      map[string]bool   `json:"keys"` // env var -> present
-	Project   string            `json:"project"`
-	Files     map[string]string `json:"files"`
-	Phone     phoneView         `json:"phone"`
-}
-
-// phoneView says whether new sessions will be mirrored to the user's phone.
-type phoneView struct {
-	State  string `json:"state"`  // on | off | disabled
-	Source string `json:"source"` // where the token came from
-	Detail string `json:"detail"`
-}
-
 type bundleView struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -812,59 +812,6 @@ func modelsLine(c config.Config) string {
 	return short(c.Orchestrator.Model) + " / " + short(c.Task.Model) + " / " + short(c.Narrator.Model)
 }
 
-func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
-	bundle := r.URL.Query().Get("bundle")
-	preset := r.URL.Query().Get("preset")
-	cfg, err := s.loadConfig(bundle, preset)
-	if err != nil {
-		writeErr(w, 400, err)
-		return
-	}
-	v := configView{Effective: cfg, Project: s.Project, Keys: map[string]bool{}, Files: map[string]string{}}
-	for _, name := range config.PresetNames() {
-		c := config.Defaults()
-		if apply, ok := config.Presets[name]; ok {
-			apply(&c)
-		}
-		v.Presets = append(v.Presets, bundleView{Name: name, Description: config.PresetDescription(name), Models: modelsLine(c), Active: cfg.Name == "" && (cfg.Preset == name || (cfg.Preset == "" && name == "glm"))})
-	}
-	names, _ := config.ListBundles(s.Project)
-	for _, name := range names {
-		bv := bundleView{Name: name, Active: cfg.Name == name}
-		if c, err := config.LoadBundle(s.Project, "", name); err != nil {
-			bv.Invalid = err.Error()
-		} else {
-			bv.Description, bv.Models = c.Description, modelsLine(c)
-		}
-		v.Bundles = append(v.Bundles, bv)
-	}
-	for _, env := range []string{"TOGETHER_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", cfg.Orchestrator.APIKeyEnv, cfg.Task.APIKeyEnv, cfg.Narrator.APIKeyEnv} {
-		v.Keys[env] = os.Getenv(env) != ""
-	}
-	if set, err := prompts.Load(s.Project); err == nil {
-		for _, name := range prompts.Names {
-			v.Prompts = append(v.Prompts, promptView{Name: name, Source: set.Source[name]})
-		}
-	}
-	fc := cfg.Finalechat
-	switch client, found := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL); {
-	case !fc.Wanted():
-		v.Phone = phoneView{State: "disabled", Detail: "turned off in the configuration"}
-	case !found:
-		v.Phone = phoneView{State: "off", Detail: "no token in $" + fc.TokenEnvName() + " or ~/.config/finalechat/config.json"}
-	default:
-		v.Phone = phoneView{State: "on", Source: client.Source, Detail: "new sessions are mirrored to your phone (token from " + client.Source + ")"}
-	}
-	v.Files["config"] = config.File(s.Project)
-	v.Files["bundles"] = config.BundlesDir(s.Project)
-	v.Files["prompts"] = prompts.Dir(s.Project)
-	if v.Bundles == nil {
-		v.Bundles = []bundleView{}
-	}
-	sort.Slice(v.Bundles, func(i, j int) bool { return v.Bundles[i].Name < v.Bundles[j].Name })
-	writeJSON(w, v)
-}
-
 // saveBundle writes a named configuration from the UI. The body carries the
 // name, a description, and either a full config object or a preset/bundle to
 // copy.
@@ -883,12 +830,19 @@ func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
 		cfg = config.Defaults()
-		if err = json.Unmarshal(b.Config, &cfg); err != nil {
+		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
+		dec.DisallowUnknownFields()
+		if err = dec.Decode(&cfg); err != nil {
 			writeErr(w, 400, fmt.Errorf("config: %w", err))
 			return
 		}
+		cfg.Name, cfg.Instructions = "", ""
 		if err = cfg.Validate(); err != nil {
-			writeErr(w, 400, err)
+			writeErr(w, 422, err)
+			return
+		}
+		if err = s.checkRoutes(cfg); err != nil {
+			writeErr(w, 422, err)
 			return
 		}
 	} else {
@@ -953,6 +907,7 @@ func (u *webUI) status() harness.Status {
 
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
+	s.addr = addr
 	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
@@ -969,74 +924,10 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 
 // ---- pricing ------------------------------------------------------------------
 
-// price is USD per million tokens. Cached is the cached-input rate.
-type price struct{ Input, Cached, Output float64 }
-
-// prices are list prices in USD per million tokens as of September 2026,
-// keyed by "host|model" for providers that price the same model differently,
-// with a plain model-name fallback. Unknown models produce no estimate rather
-// than a wrong one.
-var prices = map[string]price{
-	// Together
-	"zai-org/GLM-5.3":                    {1.40, 0.26, 4.40},
-	"zai-org/GLM-5.3-Flash":              {0.15, 0.03, 0.50},
-	"deepseek-ai/DeepSeek-V4-Flash-0731": {0.14, 0.03, 0.28},
-	// OpenRouter
-	"qwen/qwen3.8-27b":                {0.42, 0.42, 3.00},
-	"z-ai/glm-5.3":                    {1.40, 0.26, 4.40},
-	"z-ai/glm-5.3-flash":              {0.07, 0.01, 0.25},
-	"deepseek/deepseek-v4-flash-0731": {0.14, 0.03, 0.28},
-	"moonshotai/kimi-k3":              {3.00, 0.30, 15.00},
-	// OpenAI, direct and via OpenRouter
-	"gpt-6-astra": {10.0, 1.0, 50.0}, "openai/gpt-6-astra": {10.0, 1.0, 50.0},
-	"gpt-5.6-sol": {2.00, 0.20, 10.0}, "openai/gpt-5.6-sol": {2.00, 0.20, 10.0},
-	"gpt-5.6-terra": {2.00, 0.20, 12.0}, "openai/gpt-5.6-terra": {2.00, 0.20, 12.0},
-	"gpt-5.6-luna": {0.20, 0.02, 1.20}, "openai/gpt-5.6-luna": {0.20, 0.02, 1.20},
-	// Anthropic (cache writes are billed above the input rate and are not
-	// tracked separately, so these run slightly low)
-	"claude-fable-5-1":          {10.0, 1.00, 50.0},
-	"claude-opus-5":             {5.00, 0.50, 25.0},
-	"claude-sonnet-5":           {2.00, 0.20, 10.0},
-	"claude-haiku-4-5-20251001": {1.00, 0.10, 5.00},
-	// DeepInfra
-	"api.deepinfra.com|moonshotai/Kimi-K3":                 {2.85, 0.285, 14.25},
-	"api.deepinfra.com|zai-org/GLM-5.3":                    {1.20, 0.12, 4.00},
-	"api.deepinfra.com|zai-org/GLM-5.3-Flash":              {0.15, 0.03, 0.50},
-	"api.deepinfra.com|deepseek-ai/DeepSeek-V4-Flash-0731": {0.06, 0.015, 0.18},
-	// Fireworks
-	"accounts/fireworks/models/kimi-k3":                {3.00, 0.30, 15.00},
-	"accounts/fireworks/models/glm-5p3":                {1.40, 0.26, 4.40},
-	"accounts/fireworks/models/glm-5p3-flash":          {0.15, 0.03, 0.50},
-	"accounts/fireworks/models/deepseek-v4-flash-0731": {0.22, 0.007, 0.66},
-	// OpenCode Zen (sells at provider cost)
-	"opencode.ai|glm-5.3":           {1.40, 0.26, 4.40},
-	"opencode.ai|glm-5.3-flash":     {0.15, 0.03, 0.50},
-	"opencode.ai|kimi-k3":           {3.00, 0.30, 15.00},
-	"opencode.ai|deepseek-v4-flash": {0.14, 0.028, 0.28},
-	"opencode.ai|minimax-m3":        {0.30, 0.06, 1.20},
-	"opencode.ai|claude-fable-5-1":  {10.0, 0.25, 50.0},
-	"opencode.ai|gpt-6-astra":       {10.0, 1.00, 50.0},
-	// Nous Portal
-	"inference-api.nousresearch.com|moonshotai/kimi-k3":              {2.04, 0.20, 10.20},
-	"inference-api.nousresearch.com|z-ai/glm-5.3":                    {0.94, 0.19, 3.17},
-	"inference-api.nousresearch.com|z-ai/glm-5.3-flash":              {0.06, 0.01, 0.19},
-	"inference-api.nousresearch.com|deepseek/deepseek-v4-flash-0731": {0.04, 0.01, 0.13},
-}
-
-// hostOf reduces a base URL to its host for price lookup.
-func hostOf(base string) string {
-	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
-		return base
-	}
-	return u.Host
-}
-
+// priceFor prices a call at list rates from the catalog; ok is false for a
+// model the catalog does not know.
 func priceFor(baseURL, model string, u event.Usage) (float64, bool) {
-	p, ok := prices[hostOf(baseURL)+"|"+model]
-	if !ok {
-		p, ok = prices[model]
-	}
+	p, ok := config.PriceFor(baseURL, model)
 	if !ok {
 		return 0, false
 	}
@@ -1044,7 +935,7 @@ func priceFor(baseURL, model string, u event.Usage) (float64, bool) {
 	if uncached < 0 {
 		uncached = 0
 	}
-	return (float64(uncached)*p.Input + float64(u.Cached)*p.Cached + float64(u.Output)*p.Output) / 1e6, true
+	return (float64(uncached)*p.In + float64(u.Cached)*p.Cached + float64(u.Output)*p.Out) / 1e6, true
 }
 
 // estimateCost sums per-actor estimates; Priced is false if any actor's

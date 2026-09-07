@@ -30,10 +30,13 @@ const dur = ms => ms >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%36
 const money = usd => usd >= 1 ? '$' + usd.toFixed(2) : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '<$0.01' : '$0';
 const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) && d.getFullYear() > 1 ? d : null; };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
+const TOKEN = document.querySelector('meta[name="eagent-token"]')?.content || '';
 async function api(path, opts) {
-  const r = await fetch(path, Object.assign({headers: {'Content-Type': 'application/json'}}, opts));
+  const headers = {'Content-Type': 'application/json'};
+  if (opts && opts.method && opts.method !== 'GET') headers['X-Eagent-Token'] = TOKEN;
+  const r = await fetch(path, Object.assign({headers}, opts));
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || r.statusText);
+  if (!r.ok) { const err = new Error(body.error || r.statusText); err.status = r.status; err.body = body; throw err; }
   return body;
 }
 function toast(text, kind) {
@@ -71,7 +74,13 @@ document.addEventListener('click', e => {
 // ---- state ------------------------------------------------------------------
 const S = { sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: localStorage.getItem('eagent.activity') === '1', filters: new Set(), search: '', taskSel: null };
 
+let lastHash = location.hash;
 function route() {
+  if (window.EagentConfig && lastHash.startsWith('#/config') && !location.hash.startsWith('#/config') && window.EagentConfig.dirty()) {
+    if (!confirm('You have unsaved configuration changes. Leave and lose them?')) { history.replaceState(null, '', lastHash); return; }
+    window.EagentConfig.reset();
+  }
+  lastHash = location.hash;
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (parts[0] === 'config') { S.sid = null; S.tab = 'config'; }
@@ -455,41 +464,9 @@ function summary(ev) {
 
 // ---- config ---------------------------------------------------------------------------
 async function renderConfig() {
-  closeStream(); S.detail = null; renderLive();
-  let c;
-  try { c = await api('/api/config'); } catch (e) { $('#main').replaceChildren(h('div', {class: 'empty'}, h('h2', null, 'Configuration unavailable'), e.message)); return; }
-  const eff = c.effective;
-  const models = h('div', {class: 'card'}, h('h3', null, 'Active configuration', eff.name ? h('span', {class: 'badge', style: 'margin-left:8px'}, `bundle ${eff.name}`) : eff.preset ? h('span', {class: 'badge', style: 'margin-left:8px'}, `preset ${eff.preset}`) : null),
-    h('div', {class: 'kv'}, ...['orchestrator', 'task', 'narrator'].flatMap(a => { const x = eff[a]; return [h('span', {class: 'k'}, a), h('span', null, h('code', {class: 'inline'}, x.model), ` · ${x.protocol} · ${x.base_url.replace(/^https?:\/\//, '')}`, x.reasoning_effort ? ` · effort ${x.reasoning_effort}` : '', x.fallback ? ` · fallback ${x.fallback.model}` : '')]; }),
-      h('span', {class: 'k'}, 'phone'), h('span', null, h('span', {class: 'badge ' + (c.phone.state === 'on' ? 'completed' : c.phone.state === 'disabled' ? 'failed' : '')}, c.phone.state), ' ', c.phone.detail),
-      h('span', {class: 'k'}, 'task concurrency'), h('span', null, eff.task_concurrency), h('span', {class: 'k'}, 'fresh context at'), h('span', null, `${k(eff.rollover_tokens)} tokens`), h('span', {class: 'k'}, 'max task calls'), h('span', null, eff.max_task_turns)),
-    h('div', {style: 'margin-top:10px'}, ...Object.entries(c.keys).sort().map(([env, on]) => h('span', {class: 'key'}, h('span', {class: 'd' + (on ? ' on' : '')}), env))));
-  const GROUPS = {glm: 'Together AI', astra: 'Hybrid', openai: 'OpenAI', openrouter: 'OpenRouter', anthropic: 'Anthropic', deepinfra: 'DeepInfra', fireworks: 'Fireworks', opencode: 'OpenCode Zen', nous: 'Nous Portal', deepseek: 'Single model', qwen: 'Single model'};
-  const bundleRows = (list, kind) => { let last = null; return h('table', null, h('tbody', null, ...list.flatMap(b => { const g = kind === 'preset' ? (GROUPS[b.name.split('-')[0]] || '') : null; const rows = []; if (g && g !== last) { rows.push(h('tr', {class: 'group'}, h('td', {colspan: 4}, g))); last = g; } rows.push(h('tr', null, h('td', {class: 'nowrap'}, h('code', {class: 'inline'}, b.name), b.active ? h('span', {class: 'badge completed', style: 'margin-left:6px'}, 'active') : null), h('td', {class: 'wrap'}, b.models), h('td', {class: 'sub wrap'}, b.invalid ? 'invalid: ' + b.invalid : b.description),
-    h('td', null, h('button', {onclick: () => newSessionDialog(kind === 'preset' ? {preset: b.name} : {config: b.name})}, 'New session')))); return rows; }))); };
-  const presets = h('div', {class: 'card'}, h('h3', null, 'Built-in presets'), bundleRows(c.presets, 'preset'), h('div', {class: 'sub', style: 'margin-top:8px'}, 'Use one with ', h('code', {class: 'inline'}, 'eagent --preset NAME …'), ' or ', h('code', {class: 'inline'}, 'eagent doctor --live --preset NAME'), ' to prove it works first.'));
-  const bundles = h('div', {class: 'card'}, h('h3', null, 'Project bundles'), c.bundles.length ? bundleRows(c.bundles, 'bundle') : h('div', {class: 'sub'}, 'None yet.'),
-    h('div', {class: 'sub', style: 'margin-top:8px'}, 'Bundles live in ', h('code', {class: 'inline'}, c.files.bundles), ' and are meant to be committed, so teammates can pick each other\'s setups with ', h('code', {class: 'inline'}, '--config NAME'), ' or ', h('code', {class: 'inline'}, 'EAGENT_CONFIG=NAME'), '.'));
-  const nameIn = h('input', {class: 'search', placeholder: 'name (e.g. eric-fast)'});
-  const descIn = h('input', {class: 'search', placeholder: 'description', style: 'flex:1;min-width:200px'});
-  const fromSel = h('select', null, h('option', {value: ''}, 'copy: current configuration'), ...c.presets.map(p => h('option', {value: p.name}, `copy preset · ${p.name}`)), ...c.bundles.map(b => h('option', {value: b.name}, `copy bundle · ${b.name}`)));
-  const jsonTa = h('textarea', {class: 'code', style: 'width:100%;min-height:160px;margin-top:8px', placeholder: 'Optional: full configuration JSON to save instead of a copy.'});
-  const saveBtn = h('button', {class: 'primary', onclick: async () => {
-    try {
-      const body = {name: nameIn.value.trim(), description: descIn.value.trim(), from: fromSel.value};
-      if (jsonTa.value.trim()) body.config = JSON.parse(jsonTa.value);
-      const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify(body)});
-      toast(`saved ${r.name}`); renderConfig();
-    } catch (e) { toast(e.message, 'bad'); }
-  }}, 'Save bundle');
-  const saveCard = h('div', {class: 'card'}, h('h3', null, 'Save a bundle'),
-    h('div', {style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center'}, nameIn, descIn, fromSel, saveBtn),
-    h('details', null, h('summary', null, 'advanced: paste a full configuration'), jsonTa, h('div', {class: 'sub'}, 'Start from the effective configuration below; keys are never stored, only the environment variable names.')));
-  const promptsCard = h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('table', null, h('tbody', null, ...c.prompts.map(p => h('tr', {class: 'row', onclick: () => promptEditor(p.name)},
-    h('td', {class: 'nowrap'}, h('code', {class: 'inline'}, p.name)), h('td', {class: 'sub nowrap'}, p.source === 'built-in' ? 'built-in' : 'project override'), h('td', {class: 'sub'}, {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context'}[p.name] || ''))))),
-    h('div', {class: 'sub', style: 'margin-top:8px'}, 'Click a prompt to read or edit it. Edits are saved as project overrides in ', h('code', {class: 'inline'}, c.files.prompts), ' and apply to new sessions.'));
-  const raw = h('div', {class: 'card'}, h('h3', null, 'Effective configuration'), h('pre', {class: 'code'}, JSON.stringify(eff, null, 2)), h('div', {class: 'sub'}, 'Project file: ', h('code', {class: 'inline'}, c.files.config), ' · ', h('code', {class: 'inline'}, 'eagent config'), ' prints this.'));
-  $('#main').replaceChildren(h('div', {class: 'pane'}, models, presets, bundles, saveCard, promptsCard, raw));
+  // The editor lives in config.js and shares this file's helpers through window.__eagent.
+  if (!window.EagentConfig) { await new Promise(r => window.addEventListener('load', r, {once: true})); }
+  return window.EagentConfig.render();
 }
 async function promptEditor(name) {
   let r; try { r = await api(`/api/prompts/${name}`); } catch (e) { toast(e.message, 'bad'); return; }
@@ -508,12 +485,14 @@ async function newSessionDialog(pre = {}) {
   const options = [];
   if (c) { for (const p of c.presets) options.push(h('option', {value: 'preset:' + p.name, selected: pre.preset === p.name}, `preset · ${p.name} — ${p.models}`)); for (const b of c.bundles) options.push(h('option', {value: 'config:' + b.name, selected: pre.config === b.name}, `bundle · ${b.name} — ${b.models}`)); }
   const ta = h('textarea', {placeholder: 'What should the agent do? Be as specific as you like; it will ask if it needs a decision.'});
-  const sel = h('select', null, h('option', {value: ''}, 'default configuration'), ...options);
+  const srv = c && c.server && (c.server.preset || c.server.bundle);
+  const sel = h('select', null, h('option', {value: 'project:', selected: !!pre.project || !srv}, 'project configuration' + (c && c.resolution && c.resolution.active ? ` · ${c.resolution.active.kind === 'file' ? 'saved in the project' : c.resolution.active.kind + ' ' + c.resolution.active.name}` : '')),
+    srv ? h('option', {value: '', selected: !pre.project && !pre.preset && !pre.config}, `server default · ${c.server.bundle ? 'bundle ' + c.server.bundle : 'preset ' + c.server.preset}`) : null, ...options);
   const start = h('button', {class: 'primary', onclick: async () => {
     const prompt = ta.value.trim(); if (!prompt) return;
     start.disabled = true;
     const [kind, name] = sel.value.split(':');
-    try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify({prompt, preset: kind === 'preset' ? name : '', config: kind === 'config' ? name : ''})}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
+    try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify({prompt, preset: kind === 'preset' ? name : '', config: kind === 'config' ? name : '', use_project: kind === 'project'})}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
     catch (e) { toast(e.message, 'bad'); start.disabled = false; }
   }}, 'Start');
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) start.click(); });
@@ -549,6 +528,8 @@ function render() {
   if (S.detail && S.detail.id === S.sid) { renderSessionShell(); renderTab(); renderLive(); return; }
   openSession(S.sid);
 }
+
+window.__eagent = {$, h, api, toast, showModal, closeModal, newSessionDialog, promptEditor, k, money, dur, clip, S, renderLive, closeStream, loadSessions};
 
 // ---- boot --------------------------------------------------------------------------------
 $('#btn-new').onclick = () => newSessionDialog();

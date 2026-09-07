@@ -669,41 +669,16 @@ func loadInstructions(project string) string {
 
 // Validate checks structural sanity (not credentials).
 func (c Config) Validate() error {
-	for name, a := range map[string]Actor{"orchestrator": c.Orchestrator, "task": c.Task, "narrator": c.Narrator} {
-		if err := a.validate(); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+	var errs []string
+	for _, p := range c.Problems() {
+		if p.Severity == "error" {
+			errs = append(errs, strings.TrimPrefix(p.Path, "/")+": "+p.Message)
 		}
 	}
-	if c.TaskConcurrency < 1 {
-		return errors.New("task_concurrency must be >= 1")
+	if len(errs) == 0 {
+		return nil
 	}
-	if c.RolloverTokens < 20_000 {
-		return errors.New("rollover_tokens must be >= 20000")
-	}
-	return nil
-}
-
-func (a Actor) validate() error {
-	switch a.Protocol {
-	case llm.ProtocolChat, llm.ProtocolResponses, llm.ProtocolAnthropic:
-	default:
-		return fmt.Errorf("unknown protocol %q", a.Protocol)
-	}
-	if a.Model == "" {
-		return errors.New("model is required")
-	}
-	if a.BaseURL == "" {
-		return errors.New("base_url is required")
-	}
-	if a.APIKeyEnv == "" {
-		return errors.New("api_key_env is required")
-	}
-	if a.Fallback != nil {
-		if err := a.Fallback.validate(); err != nil {
-			return fmt.Errorf("fallback: %w", err)
-		}
-	}
-	return nil
+	return errors.New(strings.Join(errs, "; "))
 }
 
 // Endpoint builds the wire endpoint, reading the key from the environment.

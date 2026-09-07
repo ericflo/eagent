@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -53,9 +54,10 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 		thinking = true
 		if c.anthropicBudgeted.Load() {
 			// Older models: explicit budget.
-			budget := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
-			if budget == 0 {
-				budget = 8192
+			budget, known := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
+			if !known {
+				// Never quietly turn an unknown effort into medium.
+				return nil, fmt.Errorf("reasoning effort %q is not one this model accepts (none, low, medium, high)", e)
 			}
 			if budget >= maxTokens {
 				budget = maxTokens / 2
