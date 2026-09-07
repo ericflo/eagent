@@ -76,17 +76,16 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		calls++
 		var msgs []llm.Message
 		var seenSeq int64
-		var ctxTokens int
+		var steer string
 		r.sync(func() {
 			msgs = r.st.OrchestratorView()
 			seenSeq = r.st.LastSeq()
-			ctxTokens = r.st.ContextTokens(event.ActorOrchestrator)
+			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls)
 			r.orchCallAt = time.Now()
 		})
 		if len(msgs) == 0 {
 			return "nothing to do"
 		}
-		steer := steerOrchestrator(r.st, time.Now(), ctxTokens, r.cfg.RolloverTokens, reason, calls)
 		reason = ""
 		msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 		req := llm.Request{

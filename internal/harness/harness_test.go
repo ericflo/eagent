@@ -49,7 +49,14 @@ func (u *fakeUI) Log(format string, args ...any) {
 	u.mu.Unlock()
 }
 func (u *fakeUI) Input() <-chan string { return u.input }
-func (u *fakeUI) Idle(bool)            {}
+func (u *fakeUI) askedCount() int      { u.mu.Lock(); defer u.mu.Unlock(); return len(u.asked) }
+func (u *fakeUI) messageCount() int    { u.mu.Lock(); defer u.mu.Unlock(); return len(u.messages) }
+func (u *fakeUI) snapshot() ([]string, []string, []string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string{}, u.messages...), append([]string{}, u.asked...), append([]string{}, u.logs...)
+}
+func (u *fakeUI) Idle(bool) {}
 
 // scripted is a fake chat-completions server. brain decides each reply from
 // the model name and the messages sent so far.
@@ -448,30 +455,20 @@ func TestInteractiveQuestionAndAnswer(t *testing.T) {
 
 	// Wait for the question, answer by option number, then quit once done.
 	deadline := time.Now().Add(20 * time.Second)
-	for {
-		ui.mu.Lock()
-		asked := len(ui.asked)
-		ui.mu.Unlock()
-		if asked > 0 || time.Now().After(deadline) {
-			break
-		}
+	for ui.askedCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(ui.asked) != 1 || !strings.Contains(ui.asked[0], "Which colour") {
-		t.Fatalf("asked = %v logs=%v", ui.asked, ui.logs)
+	_, asked, logs := ui.snapshot()
+	if len(asked) != 1 || !strings.Contains(asked[0], "Which colour") {
+		t.Fatalf("asked = %v logs=%v", asked, logs)
 	}
 	ui.input <- "2"
-	for {
-		ui.mu.Lock()
-		got := len(ui.messages)
-		ui.mu.Unlock()
-		if got > 0 || time.Now().After(deadline) {
-			break
-		}
+	for ui.messageCount() == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(ui.messages) == 0 || !strings.Contains(ui.messages[0], "Blue") {
-		t.Fatalf("messages = %v logs=%v", ui.messages, ui.logs)
+	messages, _, logs := ui.snapshot()
+	if len(messages) == 0 || !strings.Contains(messages[0], "Blue") {
+		t.Fatalf("messages = %v logs=%v", messages, logs)
 	}
 	ui.input <- "/quit"
 	select {

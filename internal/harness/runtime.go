@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -360,7 +359,6 @@ func (r *Runtime) inputChan() <-chan string {
 // tick is the scheduler: it looks at state and starts whatever should run.
 func (r *Runtime) tick() {
 	if r.ending {
-		r.maybeFinish()
 		return
 	}
 	r.startQueuedTasks()
@@ -468,8 +466,6 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 		r.stop()
 	})
 }
-
-func (r *Runtime) maybeFinish() {}
 
 // finish runs after the loop exits: waits for actors, kills processes,
 // records session.end, closes the store.
@@ -623,8 +619,7 @@ func (r *Runtime) onProcExit(p *procs.Proc) {
 func (r *Runtime) rearmSchedules() {
 	now := time.Now()
 	for _, sc := range r.st.ActiveSchedules() {
-		s, err := sched.Parse(sc.Spec)
-		if err != nil {
+		if _, err := sched.Parse(sc.Spec); err != nil {
 			continue
 		}
 		next := sc.Next
@@ -632,7 +627,6 @@ func (r *Runtime) rearmSchedules() {
 			// Missed while we were away: fire soon, once.
 			next = now.Add(2 * time.Second)
 		}
-		_ = s
 		r.armSchedule(sc.ID, next)
 	}
 }
@@ -698,10 +692,4 @@ func (r *Runtime) projectPath() string {
 		return r.opts.Project
 	}
 	return abs
-}
-
-// fileExists is a small helper for prompts.
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }

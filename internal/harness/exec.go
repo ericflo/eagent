@@ -77,12 +77,9 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 			return "command is required", true
 		}
 		wait := clampInt(num("wait_seconds", r.cfg.BashWaitSeconds), 0, 300)
-		timeout := r.cfg.BashTimeoutSeconds
-		if v, ok := args["timeout_seconds"]; ok {
-			timeout = num("timeout_seconds", timeout)
-			if v == nil {
-				timeout = r.cfg.BashTimeoutSeconds
-			}
+		timeout := num("timeout_seconds", r.cfg.BashTimeoutSeconds)
+		if timeout < 0 {
+			timeout = 0
 		}
 		return r.startBash(c, cmd, wait, timeout)
 	case "bash_poll":

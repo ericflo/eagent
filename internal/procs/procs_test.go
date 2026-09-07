@@ -124,3 +124,31 @@ func TestBufferCapKeepsHeadAndTail(t *testing.T) {
 		t.Fatalf("buffer not capped: %d", len(out))
 	}
 }
+
+func TestOutputCursorAcrossDrop(t *testing.T) {
+	m := NewManager()
+	p, err := m.Start(Spec{Command: "seq 1 600000 | awk '{printf \"%09d\\n\", $1}'"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Wait(context.Background(), 20*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	first, cur := p.Output(0)
+	if cur != 6000000 {
+		t.Fatalf("logical total = %d", cur)
+	}
+	// A cursor taken before the drop that now falls in the hole yields the
+	// marker and the tail; a cursor in the tail yields exactly the remainder.
+	inHole, _ := p.Output(MaxBuffer/4 + 10)
+	if !strings.HasPrefix(inHole, "\n[...") {
+		t.Fatalf("hole read should start at the marker: %q", inHole[:30])
+	}
+	tail, next := p.Output(cur - 20)
+	if tail != "000599999\n000600000\n" || next != cur {
+		t.Fatalf("tail read = %q next=%d", tail, next)
+	}
+	if more, _ := p.Output(cur); more != "" {
+		t.Fatal("reading at the end should be empty")
+	}
+	_ = first
+}

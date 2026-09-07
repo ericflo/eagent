@@ -307,36 +307,35 @@ func (p *Proc) Wait(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// Output returns the retained output from byte offset cursor, and the new
-// cursor. Offsets are stable: dropped bytes are accounted for.
+// Output returns the retained output from logical byte offset cursor, and
+// the new cursor. Offsets count every byte the process ever wrote, so a
+// cursor stays valid after the middle of the buffer has been dropped.
 func (p *Proc) Output(cursor int) (string, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Logical length = dropped + len(buf). The buffer represents the logical
-	// range [0, dropped+len(buf)) with a hole in the middle; a cursor inside
-	// the hole is clamped to the tail.
 	total := p.dropped + len(p.buf)
-	if cursor >= total {
-		return "", total
-	}
 	if cursor < 0 {
 		cursor = 0
 	}
-	// Map logical cursor to buffer index. The head region occupies
-	// [0, head) logically and physically; the marker + tail follow.
+	if cursor >= total {
+		return "", total
+	}
 	if p.dropped == 0 {
 		return string(p.buf[cursor:]), total
 	}
-	head := MaxBuffer / 4
-	if cursor < head {
+	// Buffer layout after a drop: [head | marker | tail]. The head is the
+	// logical range [0, headLen); the tail is [total-tailLen, total).
+	headLen := MaxBuffer / 4
+	tailLen := MaxBuffer / 2
+	switch {
+	case cursor < headLen:
 		return string(p.buf[cursor:]), total
+	case cursor >= total-tailLen:
+		return string(p.buf[len(p.buf)-(total-cursor):]), total
+	default:
+		// Inside the hole: everything from the marker on.
+		return string(p.buf[headLen:]), total
 	}
-	// Anywhere past the head: everything after the marker that is newer than cursor.
-	physTailStart := len(p.buf) - (total - max(cursor, head+p.dropped))
-	if physTailStart < 0 || physTailStart > len(p.buf) {
-		physTailStart = len(p.buf) - min(len(p.buf), total-cursor)
-	}
-	return string(p.buf[physTailStart:]), total
 }
 
 // Tail returns up to n bytes from the end of the output.
