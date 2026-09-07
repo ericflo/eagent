@@ -33,9 +33,9 @@ let E = null;
 
 // ---- state -------------------------------------------------------------------------------
 const clone = v => JSON.parse(JSON.stringify(v));
-function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; return c; }
+function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; if (!c.finalechat) c.finalechat = {}; return c; }
 function flatten(v, prefix = '', out = {}) {
-  if (v && typeof v === 'object' && !Array.isArray(v)) { const keys = Object.keys(v); if (!keys.length) out[prefix || '/'] = '{}'; for (const key of keys) flatten(v[key], prefix + '/' + key, out); }
+  if (v && typeof v === 'object' && !Array.isArray(v)) { for (const key of Object.keys(v)) flatten(v[key], prefix + '/' + key, out); }
   else out[prefix] = JSON.stringify(v);
   return out;
 }
@@ -151,14 +151,22 @@ async function render() {
 async function load() {
   const [c, cat] = await Promise.all([api('/api/config'), api('/api/catalog')]);
   const res = c.resolution;
-  E = Object.assign(E || {}, {c, cat, sources: res.sources || {}, cfg: strip(res.effective), loaded: strip(res.effective), base: res.preset || '', loadedBase: res.preset || '', etag: res.file.etag || '', mode: E && E.mode || 'overlay', problems: [], tests: E && E.tests || {}, open: E && E.open || {}});
+  // The base is what the file itself builds on. A preset the server was
+  // started with (or EAGENT_PRESET) shapes the values shown, but saving must
+  // not silently rewrite the file's own preset to it.
+  const fileBase = res.file.exists && res.file.preset ? res.file.preset : (res.preset || '');
+  E = Object.assign(E || {}, {c, cat, sources: res.sources || {}, cfg: strip(res.effective), loaded: strip(res.effective), base: fileBase, loadedBase: fileBase, etag: res.file.etag || '', mode: E && E.mode || 'overlay', problems: [], tests: E && E.tests || {}, open: E && E.open || {}});
 }
 function draw() {
   const main = $('#main');
-  const y = main.scrollTop;
+  const old = main.querySelector('.pane');
+  const y = old ? old.scrollTop : 0;
   const pane = h('div', {class: 'pane cfg'});
   pane.append(header());
-  if (E.c.resolution.load_error) pane.append(repairBanner());
+  const rz = E.c.resolution;
+  const fileBroken = !!rz.file.parse_error || (rz.load_error && rz.file.path && rz.load_error.startsWith(rz.file.path));
+  if (fileBroken) pane.append(repairBanner());
+  else if (rz.load_error) pane.append(h('div', {class: 'banner warn'}, h('b', null, 'This configuration cannot start a session as it stands.'), h('div', {class: 'sub'}, rz.load_error)));
   pane.append(quickStart());
   pane.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
   pane.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
@@ -166,7 +174,7 @@ function draw() {
   pane.append(advancedCard());
   pane.append(saveBar());
   main.replaceChildren(pane);
-  main.scrollTop = y;
+  pane.scrollTop = y;
 }
 function rerender() { draw(); }
 
@@ -177,6 +185,7 @@ function header() {
   else bits.push(h('span', null, 'Nothing saved yet; the project uses ', E.base ? `preset ${E.base}` : 'the built-in defaults'));
   if (f.exists && E.loadedBase) bits.push(h('span', null, 'builds on preset ', h('code', {class: 'inline'}, E.loadedBase)));
   if (res.active.kind === 'bundle') bits.push(h('span', {class: 'warn-text'}, `the server was started with --config ${res.active.name}; this page edits the project file, which that bundle overrides`));
+  if (res.preset && res.preset !== E.loadedBase) bits.push(h('span', {class: 'warn-text'}, `the values shown come from preset ${res.preset}, which the server was started with; the file builds on ${E.loadedBase || 'the defaults'}`));
   const envs = Object.entries(E.sources).filter(([, s]) => s.startsWith('env:'));
   if (envs.length) bits.push(h('span', {class: 'warn-text', title: envs.map(([p, s]) => `${label(p)} ← $${s.slice(4)}`).join('\n')}, `${envs.length} value${envs.length > 1 ? 's' : ''} pinned by environment variables`));
   if (f.unknown_keys && f.unknown_keys.length) bits.push(h('span', {title: f.unknown_keys.join(', ')}, `${f.unknown_keys.length} hand-written key${f.unknown_keys.length > 1 ? 's' : ''} kept as is`));
@@ -210,9 +219,24 @@ async function loadInto(name, kind) {
   try {
     if (!name) { E.cfg = strip(E.c.defaults); E.base = ''; }
     else { const r = await api(`/api/config/presets/${encodeURIComponent(name)}`); E.cfg = strip(r.config); E.base = kind === 'preset' ? name : (r.config.preset || ''); }
+    keepPinned();
     E.problems = []; rerender();
     toast(name ? `loaded ${name} into the form` : 'defaults loaded into the form');
   } catch (e) { toast(e.message, 'bad'); }
+}
+
+// keepPinned copies every environment-pinned value from the loaded
+// configuration into the working copy: the file cannot change those, so a
+// loaded preset must not appear to.
+function keepPinned() {
+  for (const [ptr, s] of Object.entries(E.sources)) {
+    if (!s.startsWith('env:')) continue;
+    const segs = ptr.split('/').slice(1);
+    let from = E.loaded, to = E.cfg;
+    for (let i = 0; i < segs.length - 1; i++) { if (from == null) return; from = from[segs[i]]; if (to[segs[i]] == null || typeof to[segs[i]] !== 'object') to[segs[i]] = {}; to = to[segs[i]]; }
+    const last = segs[segs.length - 1];
+    if (from && from[last] !== undefined) to[last] = clone(from[last]); else if (to) delete to[last];
+  }
 }
 
 // ---- route cards ---------------------------------------------------------------------------
@@ -403,7 +427,16 @@ function openPicker(card, a, key, forFallback) {
   input.addEventListener('input', fill);
   input.addEventListener('keydown', ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } if (ev.key === 'Enter') { const first = list.querySelector('.prow'); if (first) first.click(); } });
   fill();
-  card.append(pop);
+  // Placed in the scrolling pane so it can be wider than its card, and
+  // pulled left when the card sits near the right edge.
+  const pane = card.closest('.pane');
+  const width = Math.min(560, pane.clientWidth - 28);
+  let left = card.offsetLeft + 14;
+  if (left + width > pane.clientWidth - 14) left = Math.max(14, pane.clientWidth - 14 - width);
+  const anchor = card.querySelector('.pick');
+  const top = card.offsetTop + (anchor ? anchor.offsetTop + anchor.offsetHeight + 6 : 110);
+  pop.style.left = left + 'px'; pop.style.top = top + 'px'; pop.style.width = width + 'px';
+  pane.append(pop);
   setTimeout(() => { document.addEventListener('mousedown', outside, true); input.focus(); }, 0);
 }
 
@@ -439,7 +472,7 @@ function phoneCard() {
   const locked = !!envVar('/finalechat/enabled');
   const mode = fc.enabled === undefined || fc.enabled === null ? 'auto' : fc.enabled ? 'always' : 'off';
   const seg = h('div', {class: 'seg tri'}, ...[['auto', 'Auto', 'On whenever a Finalechat token is found; silently off otherwise.'], ['always', 'Always', 'Sessions refuse to start without a token, so you never miss a question.'], ['off', 'Off', 'Never mirror, even with a token present.']].map(([v, t, tip]) =>
-    h('button', {class: mode === v ? 'on' : '', disabled: locked, title: tip, onclick: () => { if (v === 'auto') delete fc.enabled; else fc.enabled = v === 'always'; if (!Object.keys(fc).length) delete E.cfg.finalechat; rerender(); }}, t)));
+    h('button', {class: mode === v ? 'on' : '', disabled: locked, title: tip, onclick: () => { if (v === 'auto') delete fc.enabled; else fc.enabled = v === 'always'; rerender(); }}, t)));
   const state = h('div', {class: 'sub'}, h('span', {class: 'badge ' + (ph.state === 'on' ? 'completed' : ph.state === 'disabled' ? 'failed' : '')}, ph.state), ' ', ph.detail);
   const open = !!E.open.phone;
   const det = h('details', {open}, h('summary', {onclick: () => { E.open.phone = !open; }}, 'Advanced'),
@@ -488,21 +521,23 @@ function saveBar() {
     dirty ? h('button', {onclick: () => { E.cfg = clone(E.loaded); E.base = E.loadedBase; E.problems = []; rerender(); }}, 'Discard') : null,
     h('button', {onclick: saveBundleDialog, title: 'Save this setup under a name in .agents/eagent/bundles so it can be picked per session or shared'}, 'Save as bundle…'),
     dirty ? null : h('button', {onclick: () => X.newSessionDialog({project: true})}, 'New session with this'),
-    h('button', {class: 'primary', disabled: !dirty && E.c.resolution.file.exists, onclick: save}, E.c.resolution.file.exists ? 'Save to project' : 'Save to project file'));
+    h('button', {class: 'primary', disabled: !dirty && E.c.resolution.file.exists, onclick: () => save()}, E.c.resolution.file.exists ? 'Save to project' : 'Save to project file'));
   bar.append(summary, h('div', {class: 'opts'}, baseSel, pin), actions);
   return bar;
 }
-async function save(force) {
-  const body = {config: E.cfg, base_preset: E.base, mode: E.mode, if_match: force ? undefined : E.etag};
+async function save() {
+  // Always conditional: the etag the page loaded (or "" for no file yet).
+  // A conflict comes back as 409 and is resolved in conflictDialog.
+  const body = {config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag};
+  const changed = changes();
   try {
     const r = await api('/api/config', {method: 'PUT', body: JSON.stringify(body)});
     const prev = E.c.resolution.file.raw, prevExists = E.c.resolution.file.exists;
     E.problems = [];
-    const note = [];
-    if (r.skipped_by_env && r.skipped_by_env.length) note.push(`not written because the environment pins them: ${r.skipped_by_env.join(', ')}`);
+    const skipped = (r.skipped_by_env || []).filter(x => changed.includes(x.pointer));
     await load(); rerender();
     undoToast(prev, prevExists, r.saved.etag);
-    if (note.length) toast(note.join('; '), 'warn');
+    for (const x of skipped) toast(`${label(x.pointer)} was not written: $${x.env} pins it in this shell`, 'warn');
   } catch (e) {
     if (e.status === 409) { conflictDialog(e.body); return; }
     if (e.status === 422 && e.body && e.body.problems) { E.problems = e.body.problems; rerender(); toast('fix the highlighted fields', 'bad'); const first = $('#main .problem.error'); if (first) first.scrollIntoView({block: 'center'}); return; }
@@ -510,16 +545,17 @@ async function save(force) {
   }
 }
 function undoToast(prevRaw, prevExists, newETag) {
+  document.querySelectorAll('.toast.wide').forEach(o => o.remove()); // only the latest save can be undone
   const t = h('div', {class: 'toast show wide'}, 'Saved. ', h('button', {class: 'small', onclick: async () => {
     try { await api('/api/config/raw', {method: 'PUT', body: JSON.stringify({raw: prevExists ? prevRaw : '{\n}\n', if_match: newETag})}); t.remove(); toast('undone'); E = null; render(); } catch (e) { toast(e.message, 'bad'); }
   }}, 'Undo'));
-  document.body.append(t);
+  X.toastHost().append(t);
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 8000);
 }
 function conflictDialog(body) {
   showModal(h('div', null, h('h2', null, 'The file changed on disk'), h('p', {class: 'sub'}, 'Someone (or another eagent) wrote the project file since this page loaded. Reload to see it, or overwrite it with what you have here.'),
     h('pre', {class: 'code', style: 'max-height:40vh;overflow:auto'}, body && body.current || ''),
-    h('div', {class: 'foot'}, h('button', {onclick: () => { closeModal(); E = null; render(); }}, 'Reload'), h('button', {class: 'primary', onclick: () => { closeModal(); E.etag = body.etag; save(); }}, 'Overwrite'))));
+    h('div', {class: 'foot'}, h('button', {onclick: () => { closeModal(); E = null; render(); }}, 'Reload'), h('button', {class: 'primary', onclick: () => { closeModal(); E.etag = body.etag || ''; save(); }}, 'Overwrite'))));
 }
 function saveBundleDialog() {
   const name = h('input', {class: 'search', placeholder: 'name, e.g. eric-fast'});

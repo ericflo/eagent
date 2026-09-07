@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,12 +172,86 @@ func TestPutConfigSkipsFieldsTheEnvironmentOverrides(t *testing.T) {
 	}
 	var res putConfigResult
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "/task/reasoning_effort") {
+	if len(res.Skipped) != 1 || res.Skipped[0].Pointer != "/task/reasoning_effort" || res.Skipped[0].Env != "EAGENT_TASK_REASONING_EFFORT" {
 		t.Fatalf("skipped = %v", res.Skipped)
 	}
 	raw, _ := os.ReadFile(config.File(project))
 	if strings.Contains(string(raw), "reasoning_effort") || !strings.Contains(string(raw), `"task_concurrency": 6`) {
 		t.Fatalf("file = %s", raw)
+	}
+	// A value the file already holds for a pinned field survives a save of
+	// something else, even though the environment hides it right now.
+	if err := os.WriteFile(config.File(project), []byte(`{"task": {"reasoning_effort": "xhigh", "max_tokens": 9000}, "task_concurrency": 6}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg = config.Defaults()
+	cfg.Task.MaxTokens = 9000
+	cfg.Task.ReasoningEffort = "high" // what the env says; the file says xhigh
+	cfg.TaskConcurrency = 7
+	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
+	if w.Code != 200 {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body)
+	}
+	res = putConfigResult{}
+	_ = json.Unmarshal(w.Body.Bytes(), &res)
+	raw, _ = os.ReadFile(config.File(project))
+	if !strings.Contains(string(raw), `"reasoning_effort": "xhigh"`) || !strings.Contains(string(raw), `"task_concurrency": 7`) || len(res.Kept) != 1 {
+		t.Fatalf("pinned value not carried over: %s (kept=%v)", raw, res.Kept)
+	}
+}
+
+func TestPresetChipsAndPromptsAreClosedSets(t *testing.T) {
+	s, project := newTestServer(t)
+	// The project file must not leak into a preset's configuration.
+	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.File(project), []byte(`{"preset": "glm", "task_concurrency": 9}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/astra", nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	var pv presetConfigView
+	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 {
+		t.Fatalf("preset = %d %v", w.Code, err)
+	}
+	if pv.Config.TaskConcurrency == 9 || pv.Config.Preset != "astra" {
+		t.Fatalf("preset config carries the project file: %+v", pv.Config.TaskConcurrency)
+	}
+	// A bundle is shown on its own, over its own preset.
+	if err := os.WriteFile(config.BundlePath(project, "mine"), []byte(`{"preset": "anthropic-med", "narrator": {"reasoning_effort": "medium"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/mine", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	pv = presetConfigView{}
+	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 || pv.Config.Preset != "anthropic-med" || pv.Config.Orchestrator.Model != "claude-opus-5" || pv.Config.TaskConcurrency == 9 {
+		t.Fatalf("bundle = %d %v %+v", w.Code, err, pv.Config.Orchestrator.Model)
+	}
+	// Anything else is a 404 before any file is opened.
+	secret := filepath.Join(project, "secret.json")
+	if err := os.WriteFile(secret, []byte(`{"persona": "hidden"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/..%2Fsecret", nil)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != 404 || strings.Contains(w.Body.String(), "hidden") || strings.Contains(w.Body.String(), project) {
+		t.Fatalf("traversal = %d %s", w.Code, w.Body)
+	}
+	// Prompt deletion only ever names one of the known prompts.
+	victim := filepath.Join(project, "AGENTS.md")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w2 := do(s, "DELETE", "/api/prompts/..%2F..%2FAGENTS", nil, nil)
+	if w2.Code != 404 {
+		t.Fatalf("delete traversal = %d %s", w2.Code, w2.Body)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatal("a file outside the prompts directory was deleted")
 	}
 }
 

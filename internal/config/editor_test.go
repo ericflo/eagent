@@ -112,6 +112,9 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 	if len(res.File.UnknownKeys) != 1 || res.File.UnknownKeys[0] != "_note" {
 		t.Fatalf("unknown keys = %v", res.File.UnknownKeys)
 	}
+	if res.File.Preset != "anthropic-med" {
+		t.Fatalf("file preset = %q", res.File.Preset)
+	}
 	// A broken file is reported, not fatal.
 	if err := os.WriteFile(File(project), []byte(`{"preset": "glm",`), 0o644); err != nil {
 		t.Fatal(err)

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -206,9 +207,24 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 // loading into the editor.
 func (s *Server) getPresetConfig(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	cfg, err := config.LoadBundle(s.Project, "", name)
+	if canon, ok := config.ResolvePreset(name); ok {
+		cfg := config.Defaults()
+		config.Presets[canon](&cfg)
+		cfg.Preset = canon
+		writeJSON(w, presetConfigView{Name: canon, Config: cfg})
+		return
+	}
+	// Only a bundle the directory listing knows may be opened, and it is
+	// shown on its own: defaults, its own preset, its contents. Never the
+	// project file or the environment.
+	names, _ := config.ListBundles(s.Project)
+	if !slices.Contains(names, name) {
+		writeErr(w, 404, fmt.Errorf("no preset or bundle named %q", name))
+		return
+	}
+	cfg, err := config.BundleAlone(s.Project, name)
 	if err != nil {
-		writeErr(w, 404, err)
+		writeErr(w, 422, err)
 		return
 	}
 	writeJSON(w, presetConfigView{Name: name, Config: cfg})
@@ -317,10 +333,16 @@ type putConfigBody struct {
 	Default     *string         `json:"default_config"` // set or clear default_config in the file
 }
 
+type envField struct {
+	Pointer string `json:"pointer"`
+	Env     string `json:"env"`
+}
+
 type putConfigResult struct {
 	Saved      config.SaveResult `json:"saved"`
-	Shadowed   []string          `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
-	Skipped    []string          `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
+	Shadowed   []envField        `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
+	Skipped    []envField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
+	Kept       []envField        `json:"kept_from_file,omitempty"`  // pinned fields whose saved value was carried over unchanged
 	Resolution config.Resolution `json:"resolution"`
 }
 
@@ -369,13 +391,25 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		if *b.Default == "" {
 			edits["default_config"] = nil
 		} else {
+			names, _ := config.ListBundles(s.Project)
+			if !slices.Contains(names, *b.Default) {
+				writeErr(w, 422, fmt.Errorf("default_config: no bundle named %q", *b.Default))
+				return
+			}
 			edits["default_config"], _ = json.Marshal(*b.Default)
 		}
 	}
-	// Fields the environment overrides cannot take effect from the file.
-	var shadowed, skipped []string
+	// Fields the environment overrides cannot take effect from the file, so
+	// the editor's value for them is not written. Whatever the file already
+	// says for such a field is carried over unchanged: it is what will apply
+	// once the variable is unset, and a save of something else must not lose it.
+	var shadowed, skipped, kept []envField
 	env := config.EnvOverrides()
-	if len(env) > 0 {
+	if len(env) > 0 && !b.AllowShadow {
+		onDisk := map[string]json.RawMessage{}
+		if raw, err := os.ReadFile(config.File(s.Project)); err == nil {
+			_ = json.Unmarshal(raw, &onDisk)
+		}
 		var ptrs []string
 		for ptr := range env {
 			ptrs = append(ptrs, ptr)
@@ -383,28 +417,52 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(ptrs)
 		for _, ptr := range ptrs {
 			top := strings.SplitN(strings.TrimPrefix(ptr, "/"), "/", 2)
-			if _, present := edits[top[0]]; !present || edits[top[0]] == nil {
-				continue
-			}
-			if b.AllowShadow {
-				shadowed = append(shadowed, ptr+" ("+env[ptr]+")")
-				continue
-			}
+			fileVal, fileHas := pointerIn(onDisk, top)
+			touched := false
 			if len(top) == 1 {
-				delete(edits, top[0])
+				if v, present := edits[top[0]]; present && v != nil {
+					touched = true
+				}
+				if fileHas {
+					edits[top[0]] = fileVal
+				} else {
+					delete(edits, top[0])
+				}
 			} else {
 				var obj map[string]json.RawMessage
-				if json.Unmarshal(edits[top[0]], &obj) == nil {
-					delete(obj, top[1])
-					if len(obj) == 0 {
-						delete(edits, top[0])
-					} else {
-						edits[top[0]], _ = json.Marshal(obj)
+				if v, present := edits[top[0]]; present && v != nil {
+					_ = json.Unmarshal(v, &obj)
+				}
+				if _, in := obj[top[1]]; in {
+					touched = true
+				}
+				if obj == nil {
+					obj = map[string]json.RawMessage{}
+				}
+				delete(obj, top[1])
+				if fileHas {
+					obj[top[1]] = fileVal
+				}
+				if len(obj) == 0 {
+					if _, present := edits[top[0]]; present {
+						edits[top[0]] = nil
 					}
+				} else {
+					edits[top[0]], _ = json.Marshal(obj)
 				}
 			}
-			skipped = append(skipped, ptr+" ("+env[ptr]+")")
+			switch {
+			case fileHas:
+				kept = append(kept, envField{ptr, env[ptr]})
+			case touched:
+				skipped = append(skipped, envField{ptr, env[ptr]})
+			}
 		}
+	} else if len(env) > 0 {
+		for ptr, v := range env {
+			shadowed = append(shadowed, envField{ptr, v})
+		}
+		sort.Slice(shadowed, func(i, j int) bool { return shadowed[i].Pointer < shadowed[j].Pointer })
 	}
 	ifMatch := ""
 	if b.IfMatch != nil {
@@ -424,7 +482,24 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.AllowOutsideProject {
 		s.logf("web: allow_outside_project is on in the saved configuration")
 	}
-	writeJSON(w, putConfigResult{Saved: saved, Shadowed: shadowed, Skipped: skipped, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)})
+	writeJSON(w, putConfigResult{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)})
+}
+
+// pointerIn reads a one- or two-segment pointer out of a raw JSON object.
+func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bool) {
+	v, ok := m[segs[0]]
+	if !ok || v == nil {
+		return nil, false
+	}
+	if len(segs) == 1 {
+		return v, true
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(v, &obj) != nil {
+		return nil, false
+	}
+	f, ok := obj[segs[1]]
+	return f, ok && f != nil
 }
 
 func orDefault(v, d string) string {

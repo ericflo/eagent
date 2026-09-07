@@ -49,7 +49,8 @@ type FileState struct {
 	Path        string   `json:"path"`
 	Exists      bool     `json:"exists"`
 	Raw         string   `json:"raw,omitempty"`
-	ETag        string   `json:"etag"` // sha256 of the exact bytes; "" when absent
+	ETag        string   `json:"etag"`             // sha256 of the exact bytes; "" when absent
+	Preset      string   `json:"preset,omitempty"` // the preset the file itself names, if any
 	ParseError  string   `json:"parse_error,omitempty"`
 	UnknownKeys []string `json:"unknown_keys,omitempty"`
 }
@@ -90,6 +91,9 @@ func Resolve(project, preset, bundle string) Resolution {
 			fileMap = nil
 		} else {
 			res.File.UnknownKeys = unknownKeys(fileMap)
+			if raw, ok := fileMap["preset"]; ok {
+				_ = json.Unmarshal(raw, &res.File.Preset)
+			}
 		}
 	}
 	bundleMap := map[string]json.RawMessage{}
@@ -306,6 +310,37 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 		}
 	}
 	return out, nil
+}
+
+// BundleAlone loads a named bundle over the defaults and the preset the
+// bundle itself names, without the project file or the environment: what
+// the bundle says, for showing or copying it.
+func BundleAlone(project, name string) (Config, error) {
+	m, err := readJSONMap(BundlePath(project, name))
+	if err != nil {
+		return Config{}, err
+	}
+	if m == nil {
+		return Config{}, fmt.Errorf("no bundle named %q", name)
+	}
+	cfg := Defaults()
+	preset := ""
+	if raw, ok := m["preset"]; ok {
+		_ = json.Unmarshal(raw, &preset)
+	}
+	if preset != "" {
+		canon, ok := ResolvePreset(preset)
+		if !ok {
+			return Config{}, fmt.Errorf("bundle %s names unknown preset %q", name, preset)
+		}
+		Presets[canon](&cfg)
+		preset = canon
+	}
+	if err := overlay(&cfg, m, BundlePath(project, name)); err != nil {
+		return Config{}, err
+	}
+	cfg.Preset = preset
+	return cfg, nil
 }
 
 // Pin returns the JSON that spells every editor-owned value out in full.

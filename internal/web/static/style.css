@@ -228,8 +228,9 @@ svg .dot { fill: var(--muted); } svg .dot.cached { fill: var(--ok); }
 .modal textarea { width: 100%; min-height: 140px; padding: 10px 12px; border-radius: 10px; resize: vertical; background: var(--bg); }
 .modal .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
 .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; align-items: center; }
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translate(-50%, 20px); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; transition: all .25s; z-index: 50; max-width: 80vw; }
-.toast.show { opacity: 1; transform: translate(-50%, 0); }
+#toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column-reverse; align-items: center; gap: 8px; pointer-events: none; max-width: 80vw; }
+.toast { transform: translateY(20px); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; transition: all .25s; max-width: 80vw; pointer-events: auto; }
+.toast.show { opacity: 1; transform: none; }
 .toast.bad { background: var(--bad); color: white; }
 
 @media (max-width: 900px) { .sidebar { width: 220px; } .project { display: none; } .tabs .badge.mono { display: none; } }
@@ -295,6 +296,7 @@ select { max-width: 100%; }
 .cfg .card p.sub { margin: 0 0 10px; }
 .cfg h4 { margin: 0 0 4px; font-size: 13px; }
 .banner { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; background: var(--panel); }
+.banner.warn { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); background: var(--warn-soft); }
 .banner.bad { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); background: var(--bad-soft); }
 .banner .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 
@@ -382,7 +384,8 @@ select.mini { height: 28px; font-size: 12px; padding: 0 6px; }
 .adv2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 10px; }
 .adv2 pre { max-height: 420px; overflow: auto; }
 
-.picker { position: absolute; left: 14px; right: 14px; top: 110px; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(16, 24, 40, .18); display: flex; flex-direction: column; max-height: min(520px, 70vh); }
+.pane.cfg { position: relative; }
+.picker { position: absolute; z-index: 30; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(16, 24, 40, .18); display: flex; flex-direction: column; max-height: min(520px, 70vh); }
 .picker .phead { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
 .picker .phead input { flex: 1; min-width: 0; }
 .plist { overflow-y: auto; padding: 6px; }
@@ -416,10 +419,8 @@ select.mini { height: 28px; font-size: 12px; padding: 0 6px; }
   .savebar .summary { flex-basis: 100%; font-size: 12.5px; }
   .savebar .opts { flex: 1; }
   .savebar .opts select.mini { max-width: 46vw; }
-  .savebar .acts { margin-left: auto; }
-  .savebar .acts button:not(.primary) { display: none; }
-  .savebar .acts button.primary { height: 30px; }
+  .savebar .acts { flex-basis: 100%; margin-left: 0; justify-content: flex-end; }
+  .savebar .acts button { height: 30px; padding: 0 10px; font-size: 12px; }
   .quick h3 .sub { display: none; }
-  .picker { left: 6px; right: 6px; }
   .seg button { min-width: 0; flex: 1 1 auto; }
 }

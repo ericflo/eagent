@@ -860,13 +860,29 @@ func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"path": path, "name": b.Name})
 }
 
+// promptName resolves a URL segment to one of the known prompt files, so no
+// handler ever joins an arbitrary segment onto the prompts directory.
+func promptName(raw string) (string, error) {
+	name := strings.ToUpper(strings.TrimSuffix(raw, ".md")) + ".md"
+	for _, n := range prompts.Names {
+		if n == name {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("unknown prompt %s", raw)
+}
+
 func (s *Server) getPrompt(w http.ResponseWriter, r *http.Request) {
+	name, err := promptName(r.PathValue("name"))
+	if err != nil {
+		writeErr(w, 404, err)
+		return
+	}
 	set, err := prompts.Load(s.Project)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	name := strings.ToUpper(strings.TrimSuffix(r.PathValue("name"), ".md")) + ".md"
 	text := set.Text(name)
 	if text == "" {
 		writeErr(w, 404, fmt.Errorf("unknown prompt %s", name))
@@ -991,15 +1007,9 @@ func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
 // ---- prompt overrides --------------------------------------------------------
 
 func (s *Server) putPrompt(w http.ResponseWriter, r *http.Request) {
-	name := strings.ToUpper(strings.TrimSuffix(r.PathValue("name"), ".md")) + ".md"
-	known := false
-	for _, n := range prompts.Names {
-		if n == name {
-			known = true
-		}
-	}
-	if !known {
-		writeErr(w, 404, fmt.Errorf("unknown prompt %s", name))
+	name, err := promptName(r.PathValue("name"))
+	if err != nil {
+		writeErr(w, 404, err)
 		return
 	}
 	var b struct {
@@ -1027,7 +1037,11 @@ func (s *Server) putPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePrompt(w http.ResponseWriter, r *http.Request) {
-	name := strings.ToUpper(strings.TrimSuffix(r.PathValue("name"), ".md")) + ".md"
+	name, err := promptName(r.PathValue("name"))
+	if err != nil {
+		writeErr(w, 404, err)
+		return
+	}
 	path := filepath.Join(prompts.Dir(s.Project), name)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		writeErr(w, 500, err)

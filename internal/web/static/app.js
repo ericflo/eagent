@@ -39,9 +39,10 @@ async function api(path, opts) {
   if (!r.ok) { const err = new Error(body.error || r.statusText); err.status = r.status; err.body = body; throw err; }
   return body;
 }
+const toastHost = () => $('#toasts') || document.body;
 function toast(text, kind) {
   const t = h('div', {class: 'toast ' + (kind || '')}, text);
-  document.body.append(t);
+  toastHost().append(t);
   setTimeout(() => t.classList.add('show'), 10);
   setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 3200);
 }
@@ -529,7 +530,7 @@ function render() {
   openSession(S.sid);
 }
 
-window.__eagent = {$, h, api, toast, showModal, closeModal, newSessionDialog, promptEditor, k, money, dur, clip, S, renderLive, closeStream, loadSessions};
+window.__eagent = {$, h, api, toast, toastHost, showModal, closeModal, newSessionDialog, promptEditor, k, money, dur, clip, S, renderLive, closeStream, loadSessions};
 
 // ---- boot --------------------------------------------------------------------------------
 $('#btn-new').onclick = () => newSessionDialog();
