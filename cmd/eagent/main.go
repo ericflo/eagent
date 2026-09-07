@@ -196,6 +196,9 @@ func run(args []string) int {
 	code := rt.Run(ctx)
 	cancel()
 	st := rt.State()
+	if *jsonOut {
+		term.End(rt.SessionID(), st.EndReason, code, st.UsageLine())
+	}
 	term.Close(fmt.Sprintf("session %s ended (%s) · %s", rt.SessionID(), st.EndReason, st.UsageLine()))
 	return code
 }
@@ -326,23 +329,98 @@ func cmdShow(project, ref string, raw bool, actor, task string) int {
 			fmt.Printf("%s:%d %s\n", ev.Source.File, ev.Source.Line, line)
 			continue
 		}
-		if actor == "" && task == "" && !transcriptWorthy(ev) {
+		if actor != "" || task != "" {
+			fmt.Printf("%s:%d %s\n", ev.Source.File, ev.Source.Line, tools.Summarize(ev, 600))
 			continue
 		}
-		fmt.Printf("%s:%d %s\n", ev.Source.File, ev.Source.Line, tools.Summarize(ev, 600))
+		if line := transcriptLine(ev); line != "" {
+			fmt.Println(line)
+		}
 	}
 	return 0
 }
 
-// transcriptWorthy picks the events a human reads to follow a session.
-func transcriptWorthy(ev event.Event) bool {
-	switch ev.Type {
-	case event.UserMessage, event.UserAnswer, event.NarratorMessage, event.NarratorQuestion,
-		event.Note, event.TaskCreate, event.TaskEnd, event.Yield, event.Dossier, event.Error,
-		event.SessionStart, event.SessionResume, event.SessionEnd, event.SubsessionStart, event.Route:
-		return true
+// transcriptLine renders the events a human reads to follow a session.
+func transcriptLine(ev event.Event) string {
+	ts := ev.Time.Local().Format("15:04:05")
+	cite := fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line)
+	block := func(label, text string) string {
+		text = strings.TrimSpace(text)
+		if !strings.Contains(text, "\n") && len(text) < 100 {
+			return fmt.Sprintf("%s %-12s %s   (%s)", ts, label, text, cite)
+		}
+		return fmt.Sprintf("%s %-12s (%s)\n    %s\n", ts, label, cite, strings.ReplaceAll(text, "\n", "\n    "))
 	}
-	return false
+	switch ev.Type {
+	case event.SessionStart:
+		var d event.SessionStartData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s session      %s in %s (%s / %s / %s)", ts, d.Session, d.Cwd, d.Models["orchestrator"], d.Models["task"], d.Models["narrator"])
+	case event.SessionResume:
+		return fmt.Sprintf("%s session      resumed", ts)
+	case event.SessionEnd:
+		var d event.SessionEndData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s session      ended: %s", ts, d.Reason)
+	case event.SubsessionStart:
+		var d event.SubsessionStartData
+		_ = ev.Decode(&d)
+		if d.Reason == "rollover" {
+			return fmt.Sprintf("%s subsession   %d (%s) after context rollover", ts, d.Index+1, d.File)
+		}
+	case event.Dossier:
+		var d event.DossierData
+		_ = ev.Decode(&d)
+		return block("dossier", d.Text)
+	case event.UserMessage:
+		var d event.UserMessageData
+		_ = ev.Decode(&d)
+		return block("USER", d.Text)
+	case event.UserAnswer:
+		var d event.UserAnswerData
+		_ = ev.Decode(&d)
+		return block("USER answer", d.Text)
+	case event.NarratorMessage:
+		var d event.NarratorMessageData
+		_ = ev.Decode(&d)
+		return block("NARRATOR", d.Text)
+	case event.NarratorQuestion:
+		var d event.NarratorQuestionData
+		_ = ev.Decode(&d)
+		text := d.Text
+		for i, o := range d.Options {
+			text += fmt.Sprintf("\n  %d) %s", i+1, o)
+		}
+		return block("NARRATOR asks", text)
+	case event.Note:
+		var d event.NoteData
+		_ = ev.Decode(&d)
+		return block("note", d.Text)
+	case event.TaskCreate:
+		var d event.TaskCreateData
+		_ = ev.Decode(&d)
+		return block("delegate "+d.ID, d.Title+"\n"+d.Description)
+	case event.TaskEnd:
+		var d event.TaskEndData
+		_ = ev.Decode(&d)
+		return block(d.ID+" "+d.Status, d.Summary)
+	case event.Yield:
+		var d event.YieldData
+		_ = ev.Decode(&d)
+		if d.Done {
+			return block("DONE", d.Reason)
+		}
+		return block("waiting", d.Reason)
+	case event.Error:
+		var d event.ErrorData
+		_ = ev.Decode(&d)
+		return block("ERROR "+d.Where, d.Text)
+	case event.Route:
+		var d event.RouteData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s route        %s -> %s (%s)", ts, d.Actor, d.Model, d.Reason)
+	}
+	return ""
 }
 
 func cmdReplay(project, ref string) int {

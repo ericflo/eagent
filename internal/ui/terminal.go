@@ -511,6 +511,14 @@ func short(model string) string {
 	return model
 }
 
+// End emits the JSON end record (JSON mode only).
+func (t *Terminal) End(session, reason string, code int, usage string) {
+	if !t.jsonOut {
+		return
+	}
+	t.emitJSON(map[string]any{"type": "end", "session": session, "reason": reason, "exit_code": code, "usage": usage, "ts": time.Now().UTC().Format(time.RFC3339)})
+}
+
 // Close stops the spinner and prints a final line.
 func (t *Terminal) Close(summary string) {
 	select {
