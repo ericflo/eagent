@@ -93,11 +93,12 @@ func (t *Terminal) heartbeat() {
 		select {
 		case <-tick.C:
 			t.mu.Lock()
+			busy := t.status.OrchestratorBusy || t.status.NarratorBusy || t.status.Rollover || t.status.TasksRunning+t.status.TasksQueued > 0
 			line := t.statusText()
 			quiet := time.Since(t.lastOutput) >= 30*time.Second
 			changed := line != t.lastStatus
 			t.mu.Unlock()
-			if line == "" || !quiet || !changed {
+			if !busy || line == "" || !quiet || !changed {
 				continue
 			}
 			t.mu.Lock()
@@ -302,7 +303,7 @@ func (t *Terminal) write(w io.Writer, s string) {
 	defer t.mu.Unlock()
 	t.lastOutput = time.Now()
 	t.clearLocked()
-	if t.idle && t.input != nil {
+	if t.idle && t.input != nil && t.tty {
 		fmt.Fprint(t.err, "\r\033[K")
 	}
 	fmt.Fprint(w, s)
