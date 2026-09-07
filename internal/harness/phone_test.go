@@ -1502,3 +1502,38 @@ func TestTaskEvidenceReportsOnlyTheLog(t *testing.T) {
 		t.Fatalf("steer = %s", steer)
 	}
 }
+
+// A fresh interactive session that has not been given a prompt is waiting
+// for the user, and the phone must say so rather than "Working".
+func TestPhoneStatusOfFreshInteractiveSessionIsWaiting(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	s := newScripted(func(model string, msgs []map[string]any) reply {
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	})
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the first status", func() bool { return len(fp.statuses()) > 0 })
+	for _, a := range fp.statuses() {
+		if a["kind"] != "waiting" || a["text"] != "Waiting for your next message" {
+			t.Fatalf("a fresh session reported %v", a)
+		}
+	}
+	got := rt.currentActivity()
+	if got.Kind != "waiting" || got.TTLSeconds != statusWaitTTL {
+		t.Fatalf("currentActivity = %+v", got)
+	}
+	cancel()
+	<-done
+}

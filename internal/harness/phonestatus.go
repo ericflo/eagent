@@ -151,13 +151,15 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 	if queued > 0 {
 		return finalechat.Activity{Text: fmt.Sprintf("Waiting for a free worker (%d queued)", queued), Kind: "working", TTLSeconds: statusTTL}
 	}
-	if r.st.Idle() {
-		if r.opts.Interactive {
-			return finalechat.Activity{Text: "Waiting for your next message", Kind: "waiting", TTLSeconds: statusWaitTTL}
-		}
-		return finalechat.Activity{} // a batch session about to end
+	// Nothing is running, nobody is mid-call, no question is open: the
+	// session is waiting on the user, whether it has yielded (Idle) or has
+	// simply not started yet (a fresh interactive session before the first
+	// message). Idle() alone misses the second case and used to leave a
+	// phantom "Working" on the phone.
+	if r.opts.Interactive {
+		return finalechat.Activity{Text: "Waiting for your next message", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
-	return finalechat.Activity{Text: "Working", Kind: "working", TTLSeconds: statusTTL}
+	return finalechat.Activity{} // a batch session with nothing left is about to end
 }
 
 // phoneStats totals the session's tokens and, when every route is in the
