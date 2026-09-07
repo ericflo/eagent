@@ -6,6 +6,7 @@ package state
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -133,6 +134,8 @@ type State struct {
 	// Totals accumulate all usage per actor (task totals include every task).
 	Totals map[string]event.Usage
 	Calls  map[string]int
+	// Latencies holds every model call's wall time per actor, for percentiles.
+	Latencies map[string][]int64
 
 	// Counters continue id sequences across restarts.
 	taskSeq, procSeq, scheduleSeq, questionSeq int
@@ -155,6 +158,7 @@ func New() *State {
 		LastUsage: map[string]event.Usage{},
 		Totals:    map[string]event.Usage{},
 		Calls:     map[string]int{},
+		Latencies: map[string][]int64{},
 	}
 }
 
@@ -286,6 +290,7 @@ func (s *State) Apply(ev event.Event) {
 		tot.Reasoning += d.Usage.Reasoning
 		s.Totals[key] = tot
 		s.Calls[key]++
+		s.Latencies[key] = append(s.Latencies[key], d.ElapsedMS)
 	case event.TaskCreate:
 		var d event.TaskCreateData
 		_ = ev.Decode(&d)
@@ -490,6 +495,9 @@ func (s *State) Summary() string {
 	}
 	fmt.Fprintf(&b, "orchestrator context: %s tokens", humanInt(s.ContextTokens(event.ActorOrchestrator)))
 	fmt.Fprintf(&b, "\n%s", s.UsageLine())
+	if l := s.LatencyLine(); l != "" {
+		fmt.Fprintf(&b, "\n%s", l)
+	}
 	return b.String()
 }
 
@@ -511,6 +519,42 @@ func (s *State) UsageLine() string {
 		return "usage: none yet"
 	}
 	return "usage: " + strings.Join(parts, "; ")
+}
+
+// Percentile returns the p-th percentile (0-100) of an actor's call latency in ms.
+func (s *State) Percentile(actor string, p int) int64 {
+	xs := append([]int64{}, s.Latencies[actor]...)
+	if len(xs) == 0 {
+		return 0
+	}
+	sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+	idx := (len(xs) - 1) * p / 100
+	return xs[idx]
+}
+
+// LatencyLine renders per-actor call latency percentiles.
+func (s *State) LatencyLine() string {
+	var parts []string
+	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+		if len(s.Latencies[a]) == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s p50 %s / p95 %s / max %s", a, fmtMS(s.Percentile(a, 50)), fmtMS(s.Percentile(a, 95)), fmtMS(s.Percentile(a, 100))))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "latency: " + strings.Join(parts, "; ")
+}
+
+func fmtMS(ms int64) string {
+	switch {
+	case ms >= 60_000:
+		return fmt.Sprintf("%dm%ds", ms/60_000, (ms%60_000)/1000)
+	case ms >= 1000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	}
+	return fmt.Sprintf("%dms", ms)
 }
 
 func humanInt(n int) string {

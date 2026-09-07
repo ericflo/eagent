@@ -113,7 +113,7 @@ function openStream(id, after) {
   es.onerror = () => { /* the browser reconnects */ };
 }
 function onEvent(ev) {
-  if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; sc.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
+  if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; const w = $('#working'); if (w) sc.insertBefore(node, w); else sc.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
   else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb && passesFilter(ev)) tb.append(tlRow(ev)); }
 }
 
@@ -140,6 +140,8 @@ function renderTab() {
 // ---- live strip ---------------------------------------------------------------
 function renderLive() {
   const el = $('#live'); const d = S.detail;
+  const w = $('#working');
+  if (w && d) { const live = d.live || {}; const busy = d.alive && (live.OrchestratorBusy || live.Rollover || d.tasks.some(t => t.status === 'running' || t.status === 'queued')); w.classList.toggle('hidden', !busy); w.textContent = live.Rollover ? 'summarising the session for a fresh context…' : live.OrchestratorBusy ? 'orchestrator working' + (live.OrchestratorFor ? ' · ' + live.OrchestratorFor : '') + '…' : 'tasks running…'; }
   if (!d) { el.innerHTML = ''; return; }
   const parts = [];
   const live = d.live || {};
@@ -165,6 +167,7 @@ function renderChat(pane) {
   pane.classList.add('chat'); pane.style.padding = '0';
   const scroll = h('div', {class: 'scroll'});
   for (const ev of S.events) { const n = chatNode(ev); if (n) scroll.append(n); }
+  scroll.append(h('div', {class: 'notice working hidden', id: 'working'}));
   const composer = h('div', {class: 'composer'},
     h('div', {class: 'pending', id: 'pending'}),
     h('form', {onsubmit: e => { e.preventDefault(); send(); }},
@@ -240,7 +243,7 @@ function renderTasks(pane) {
       h('td', null, h('span', {class: 'badge ' + t.status}, t.status)), h('td', {class: 'num'}, t.turns),
       h('td', {class: 'num'}, `${k(t.usage.input)} in · ${k(t.usage.output)} out (${Math.round(t.usage.cache_ratio * 100)}%)`),
       h('td', {class: 'num'}, t.ended && t.created ? dur(new Date(t.ended) - new Date(t.created)) : t.created ? dur(Date.now() - new Date(t.created)) + '…' : '')))));
-  const stats = h('div', null, ...d.usage.map(u => h('div', {class: 'stat'}, h('span', {class: 'v'}, `${k(u.input)} in`), h('span', {class: 'l'}, `${u.actor} · ${u.calls} calls · ${k(u.output)} out · cache ${Math.round(u.cache_ratio * 100)}%`))));
+  const stats = h('div', null, ...d.usage.map(u => h('div', {class: 'stat'}, h('span', {class: 'v'}, `${k(u.input)} in`), h('span', {class: 'l'}, `${u.actor} · ${u.calls} calls · ${k(u.output)} out · cache ${Math.round(u.cache_ratio * 100)}%`), u.p50_ms ? h('span', {class: 'l'}, `latency p50 ${dur(u.p50_ms)} · p95 ${dur(u.p95_ms)}`) : null)));
   const parts = [stats, h('div', {class: 'card'}, h('h3', null, 'Tasks'), d.tasks.length ? table : h('div', {class: 'sub'}, 'Nothing delegated yet.'))];
   if (d.procs.length) parts.push(h('div', {class: 'card'}, h('h3', null, 'Processes'), h('table', null, h('tbody', null, ...d.procs.map(p => h('tr', null, h('td', {class: 'num'}, p.handle), h('td', null, h('span', {class: 'badge ' + p.status}, p.status + (p.status !== 'running' ? ` ${p.exit_code}` : ''))), h('td', null, p.task || p.actor), h('td', null, h('code', {class: 'inline'}, clip(p.command, 120)))))))));
   if (d.schedules.length) parts.push(h('div', {class: 'card'}, h('h3', null, 'Schedules'), ...d.schedules.map(s => h('div', null, h('code', {class: 'inline'}, `${s.id} ${s.kind} ${s.spec}`), ' ', s.note, h('span', {class: 'sub'}, ` · next ${fmtTime(s.next)} · fired ${s.fires}×`)))));

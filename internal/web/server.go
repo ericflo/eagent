@@ -213,6 +213,8 @@ type UsageView struct {
 	Cached     int     `json:"cached"`
 	Reasoning  int     `json:"reasoning"`
 	CacheRatio float64 `json:"cache_ratio"`
+	P50MS      int64   `json:"p50_ms,omitempty"`
+	P95MS      int64   `json:"p95_ms,omitempty"`
 }
 
 func usageView(actor string, calls int, u event.Usage) UsageView {
@@ -306,7 +308,9 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 		d.Schedules = append(d.Schedules, ScheduleView{ID: sc.ID, Kind: sc.Kind, Spec: sc.Spec, Note: sc.Note, Next: sc.Next, Fires: sc.Fires})
 	}
 	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		d.Usage = append(d.Usage, usageView(a, st.Calls[a], st.Totals[a]))
+		u := usageView(a, st.Calls[a], st.Totals[a])
+		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
+		d.Usage = append(d.Usage, u)
 	}
 	for _, ss := range st.Subsessions {
 		d.Files = append(d.Files, ss.File)

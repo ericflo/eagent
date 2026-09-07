@@ -734,3 +734,64 @@ func TestResumeRepairsTornLog(t *testing.T) {
 		t.Fatal("work did not finish after the repair")
 	}
 }
+
+func TestTwoSessionsInOneProject(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			name := "a"
+			if strings.Contains(all, "write b") {
+				name = "b"
+			}
+			if !strings.Contains(all, "created "+name+".txt") {
+				return reply{calls: []event.ToolCall{tc("write_file", fmt.Sprintf(`{"path":"%s.txt","content":"%s"}`, name, name))}}
+			}
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"written"}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"ok"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	rtA, err := New(cfg, Options{Project: project, Prompt: "write a"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rtB, err := New(cfg, Options{Project: project, Prompt: "write b"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rtA.SessionID() == rtB.SessionID() {
+		t.Fatal("two sessions got the same id")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	codes := make(chan int, 2)
+	go func() { codes <- rtA.Run(ctx) }()
+	go func() { codes <- rtB.Run(ctx) }()
+	if a, b := <-codes, <-codes; a != 0 || b != 0 {
+		t.Fatalf("exit codes %d %d", a, b)
+	}
+	for _, n := range []string{"a", "b"} {
+		if _, err := os.Stat(filepath.Join(project, n+".txt")); err != nil {
+			t.Fatalf("%s.txt missing", n)
+		}
+	}
+	infos, _ := store.List(store.Root(project))
+	if len(infos) != 2 {
+		t.Fatalf("expected 2 sessions, found %d", len(infos))
+	}
+	for _, info := range infos {
+		evs, err := store.Read(info.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := state.Replay(evs); st.EndReason != "done" {
+			t.Fatalf("session %s ended %s", info.ID, st.EndReason)
+		}
+	}
+}

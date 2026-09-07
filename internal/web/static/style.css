@@ -135,3 +135,5 @@ summary { cursor: pointer; color: var(--muted); }
 .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 @media (max-width: 900px) { .sidebar { width: 220px; } .project { display: none; } }
 @media (max-width: 640px) { .body { flex-direction: column; } .sidebar { width: 100%; max-height: 30vh; border-right: none; border-bottom: 1px solid var(--line); } }
+.notice.working { color: var(--accent); }
+.notice.working::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-right: 8px; animation: pulse 1.2s infinite; vertical-align: middle; }
