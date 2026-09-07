@@ -17,6 +17,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -538,6 +539,33 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	if cfg.Instructions != "" {
 		fmt.Printf("project instructions: %d chars loaded\n", len(cfg.Instructions))
 	}
+	fc := cfg.Finalechat
+	if !fc.Wanted() {
+		fmt.Println("finalechat: off (disabled in config)")
+	} else if c, found := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL); !found {
+		if fc.Required() {
+			ok = false
+			fmt.Printf("  ✗ finalechat: enabled in config but no token in $%s or ~/.config/finalechat/config.json\n", fc.TokenEnvName())
+		} else {
+			fmt.Printf("finalechat: off (no token in $%s or ~/.config/finalechat/config.json; create one under Settings → Agents at https://www.finalechat.com)\n", fc.TokenEnvName())
+		}
+	} else if live {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		me, err := c.Me(ctx)
+		cancel()
+		if err != nil {
+			ok = false
+			fmt.Printf("  ✗ finalechat: token from %s rejected: %v\n", c.Source, err)
+		} else {
+			mode := ""
+			if me.User.Settings.RemoteMode {
+				mode = ", remote mode on"
+			}
+			fmt.Printf("  ✓ finalechat: on, signed in as %s (token from %s%s)\n", me.User.DisplayName, c.Source, mode)
+		}
+	} else {
+		fmt.Printf("finalechat: on (token from %s; --live checks it)\n", c.Source)
+	}
 	check := func(name string, a config.Actor) {
 		routes, err := a.Routes()
 		if err != nil {
@@ -811,7 +839,11 @@ func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
 		if persona == "" {
 			persona = strings.TrimSpace(set.Render("PERSONA.md", nil))
 		}
-		system = set.Render("NARRATOR.md", prompts.NarratorData{Persona: persona})
+		phone := ""
+		if st.Phone != nil {
+			phone = harness.PhoneStatus(st.Phone.RemoteMode)
+		}
+		system = set.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone})
 		msgs = st.NarratorView(nil)
 	case event.ActorOrchestrator:
 		system = set.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: st.Cwd, Instructions: cfg.Instructions, Interactive: st.Interactive})

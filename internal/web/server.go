@@ -30,6 +30,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/state"
@@ -180,6 +181,8 @@ type SessionDetail struct {
 	Live        *harness.Status `json:"live,omitempty"`
 	LastSeq     int64           `json:"last_seq"`
 	Interactive bool            `json:"interactive"`
+	// Phone is set when the session is mirrored to the user's phone.
+	Phone *event.PhoneThreadData `json:"phone,omitempty"`
 }
 
 type TaskView struct {
@@ -314,7 +317,7 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &SessionDetail{SessionSummary: sum, Idle: st.Idle(), LastSeq: st.LastSeq(), Context: st.ContextTokens(event.ActorOrchestrator), Interactive: st.Interactive}
+	d := &SessionDetail{SessionSummary: sum, Idle: st.Idle(), LastSeq: st.LastSeq(), Context: st.ContextTokens(event.ActorOrchestrator), Interactive: st.Interactive, Phone: st.Phone}
 	if st.LastYield != nil {
 		d.Done = st.LastYield.Done
 		d.LastReason = st.LastYield.Reason
@@ -775,6 +778,14 @@ type configView struct {
 	Keys      map[string]bool   `json:"keys"` // env var -> present
 	Project   string            `json:"project"`
 	Files     map[string]string `json:"files"`
+	Phone     phoneView         `json:"phone"`
+}
+
+// phoneView says whether new sessions will be mirrored to the user's phone.
+type phoneView struct {
+	State  string `json:"state"`  // on | off | disabled
+	Source string `json:"source"` // where the token came from
+	Detail string `json:"detail"`
 }
 
 type bundleView struct {
@@ -833,6 +844,15 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		for _, name := range prompts.Names {
 			v.Prompts = append(v.Prompts, promptView{Name: name, Source: set.Source[name]})
 		}
+	}
+	fc := cfg.Finalechat
+	switch client, found := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL); {
+	case !fc.Wanted():
+		v.Phone = phoneView{State: "disabled", Detail: "turned off in the configuration"}
+	case !found:
+		v.Phone = phoneView{State: "off", Detail: "no token in $" + fc.TokenEnvName() + " or ~/.config/finalechat/config.json"}
+	default:
+		v.Phone = phoneView{State: "on", Source: client.Source, Detail: "new sessions are mirrored to your phone (token from " + client.Source + ")"}
 	}
 	v.Files["config"] = config.File(s.Project)
 	v.Files["bundles"] = config.BundlesDir(s.Project)

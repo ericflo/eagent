@@ -266,3 +266,5 @@ select { max-width: 100%; }
 @media (max-width: 640px) { .card td.nowrap { white-space: normal; overflow-wrap: anywhere; } }
 .card tr.group td { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px; padding: 14px 10px 4px; border-bottom: none; }
 .card tr.group:first-child td { padding-top: 4px; }
+.badge.buzz { color: var(--warn); background: var(--warn-soft); margin-left: 4px; }
+.badge.phone { color: var(--ok); background: var(--ok-soft); }

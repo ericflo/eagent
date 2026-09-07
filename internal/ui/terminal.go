@@ -342,9 +342,17 @@ func (t *Terminal) Ask(id, text string, options []string) {
 	for i, o := range options {
 		fmt.Fprintf(&b, "  %s %s\n", t.yell(fmt.Sprintf("%d)", i+1)), o)
 	}
-	if t.input != nil {
+	t.mu.Lock()
+	phone := t.status.Phone
+	t.mu.Unlock()
+	switch {
+	case t.input != nil && phone:
+		b.WriteString(t.dim("  (type a number or your answer, or tap it on your phone)") + "\n")
+	case t.input != nil:
 		b.WriteString(t.dim("  (type a number or your answer)") + "\n")
-	} else {
+	case phone:
+		b.WriteString(t.dim("  (waiting for your answer on your phone; or: eagent resume --answer \"...\")") + "\n")
+	default:
 		b.WriteString(t.dim("  (answer with: eagent resume --answer \"...\")") + "\n")
 	}
 	t.mu.Lock()

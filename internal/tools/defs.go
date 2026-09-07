@@ -127,7 +127,10 @@ var taskOnly = []llm.Tool{
 
 var narratorOnly = []llm.Tool{
 	def("send_message", "Send a message to the user. Markdown is fine.",
-		`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+		`{"type":"object","properties":{
+			"text":{"type":"string"},
+			"important":{"type":"boolean","description":"Buzz the user's phone for this one: the work is finished, something blocks you, or you found something they would want to know right now. Leave it off for progress."}
+		},"required":["text"]}`),
 	def("ask_user",
 		"Ask the user a question and wait for the answer. Offer options when there is a natural short list; free text is always accepted.",
 		`{"type":"object","properties":{

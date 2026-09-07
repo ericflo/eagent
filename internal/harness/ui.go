@@ -35,4 +35,5 @@ type Status struct {
 	ContextTokens    int
 	Rollover         bool
 	Waiting          bool // orchestrator waiting on user
+	Phone            bool // the session is mirrored to the user's phone
 }

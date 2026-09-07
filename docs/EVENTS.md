@@ -37,15 +37,15 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
-| `user.message` | user | `text` | Wakes the orchestrator. |
-| `user.answer` | user | `question_id`, `text` | Answers a `narrator.question`; wakes the orchestrator. |
+| `user.message` | user | `text`, `source` (`web`, `finalechat`, or absent for the terminal) | Wakes the orchestrator. |
+| `user.answer` | user | `question_id`, `text`, `source` | Answers a `narrator.question`; wakes the orchestrator. |
 | `turn.start` / `turn.end` | orchestrator, narrator | `reason` | Brackets one actor turn (one or more model calls). Informational. |
 | `assistant` | any model actor | `provider`, `model`, `text`, `reasoning`, `tool_calls[{id,name,args}]`, `native`, `usage{input,output,cached,reasoning}`, `elapsed_ms`, `seen_seq`, `stop` | One model response. `native` is the provider's own representation (Responses output items, Anthropic content blocks) replayed verbatim on later calls. `seen_seq` is the last event the prompt contained; anything after it is delivered on the next call. |
 | `tool.result` | same actor | `call_id`, `name`, `output`, `is_error` | Always rendered directly after the call that produced it. |
 | `harness.message` | orchestrator or task | `text` | Steering the harness chose to persist (resume notice, nudge after a tool-less reply, recovery after a provider error). |
 | `yield` | orchestrator | `done`, `reason`, `forced` | The orchestrator has nothing to do until something happens; `done=true` ends a batch session. `forced` yields are issued by the harness and always count. |
 | `note` | orchestrator | `text` | A hint for the narrator; wakes it. |
-| `narrator.message` | narrator | `text` | User-visible output. |
+| `narrator.message` | narrator | `text`, `important` (the phone was buzzed) | User-visible output. |
 | `narrator.question` | narrator | `id`, `text`, `options[]` | Blocks on the user in interactive sessions; ends a batch session with exit code 2. |
 
 ### Work
@@ -66,6 +66,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
 | `route` | harness | `actor`, `provider`, `base_url`, `model`, `reason` | A fallback route took over; the reducer updates the actor's model and endpoint. |
+| `phone.thread` | harness | `thread_id`, `external_id`, `base_url`, `remote_mode` | The session is mirrored to the user's phone through Finalechat; `external_id` is `eagent:<session>`. |
 | `error` | harness | `where`, `text` | A model call failed after retries; the narrator sees it. |
 
 ## Who sees what

@@ -7,7 +7,7 @@
 //
 //	ORCHESTRATOR.md        {{.Project}} {{.Instructions}} {{.Interactive}}
 //	TASK-WORKER.md         {{.Project}} {{.Instructions}}
-//	NARRATOR.md            {{.Persona}}
+//	NARRATOR.md            {{.Persona}} {{.Phone}}
 //	PERSONA.md             (plain text, inserted into NARRATOR.md)
 //	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}}
 package prompts
@@ -95,7 +95,7 @@ type TaskData struct {
 }
 
 // NarratorData feeds NARRATOR.md.
-type NarratorData struct{ Persona string }
+type NarratorData struct{ Persona, Phone string }
 
 // DossierData feeds COMPACTION-DOSSIER.md.
 type DossierData struct {

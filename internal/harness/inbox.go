@@ -82,12 +82,12 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From}))
 			return
 		}
 		if text != "" { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From}))
 		}
 	case "message", "":
 		if text == "" {
@@ -97,6 +97,6 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 			r.slashCommand(text)
 			return
 		}
-		r.onInput(text)
+		r.onInputFrom(text, msg.From)
 	}
 }

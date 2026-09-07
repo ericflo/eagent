@@ -70,11 +70,68 @@ type Config struct {
 	ToolOutputMaxChars int `json:"tool_output_max_chars"`
 	// Persona overrides the narrator's voice.
 	Persona string `json:"persona,omitempty"`
+	// Finalechat mirrors the conversation to the user's phone. It is on
+	// whenever a token is found unless enabled is explicitly false.
+	Finalechat Finalechat `json:"finalechat"`
 	// AllowOutsideProject lets file tools touch paths outside the project.
 	AllowOutsideProject bool `json:"allow_outside_project"`
 	// Instructions is loaded from AGENTS.md / .agents/eagent/INSTRUCTIONS.md.
 	Instructions string `json:"-"`
 }
+
+// Finalechat configures the phone mirror (https://www.finalechat.com).
+type Finalechat struct {
+	// Enabled: nil means "on when a token is found"; false turns it off even
+	// when a token is present; true makes a missing token an error at start.
+	Enabled *bool `json:"enabled,omitempty"`
+	// TokenEnv is the environment variable holding the fc_ token. The
+	// finalechat CLI's ~/.config/finalechat/config.json is the fallback.
+	TokenEnv string `json:"token_env,omitempty"`
+	// BaseURL overrides the service address (self-hosted or staging).
+	BaseURL string `json:"base_url,omitempty"`
+	// Agent is the name shown next to the thread in the app.
+	Agent string `json:"agent,omitempty"`
+	// QuestionTimeoutSeconds is how long a phone question stays open. A
+	// batch (-p) session with a pending question waits this long for the
+	// phone before ending as awaiting-input.
+	QuestionTimeoutSeconds int `json:"question_timeout_seconds,omitempty"`
+	// MirrorInput copies what the user types in the terminal or web UI into
+	// the thread so the phone shows the whole conversation. Default true.
+	MirrorInput *bool `json:"mirror_input,omitempty"`
+}
+
+// Wanted reports whether the mirror should be attempted: on unless disabled.
+func (f Finalechat) Wanted() bool { return f.Enabled == nil || *f.Enabled }
+
+// Required reports whether a missing token is an error (enabled: true).
+func (f Finalechat) Required() bool { return f.Enabled != nil && *f.Enabled }
+
+// TokenEnvName is the environment variable to read.
+func (f Finalechat) TokenEnvName() string {
+	if f.TokenEnv != "" {
+		return f.TokenEnv
+	}
+	return "FINALECHAT_TOKEN"
+}
+
+// AgentName is the name shown in the app.
+func (f Finalechat) AgentName() string {
+	if f.Agent != "" {
+		return f.Agent
+	}
+	return "eagent"
+}
+
+// QuestionTimeout is the question lifetime.
+func (f Finalechat) QuestionTimeout() int {
+	if f.QuestionTimeoutSeconds > 0 {
+		return f.QuestionTimeoutSeconds
+	}
+	return 3600
+}
+
+// Mirror reports whether terminal and web input is copied to the phone.
+func (f Finalechat) Mirror() bool { return f.MirrorInput == nil || *f.MirrorInput }
 
 const (
 	togetherURL   = "https://api.together.xyz/v1"
@@ -567,6 +624,14 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("EAGENT_PERSONA"); v != "" {
 		cfg.Persona = v
+	}
+	switch strings.ToLower(os.Getenv("EAGENT_FINALECHAT")) {
+	case "0", "off", "false", "no":
+		off := false
+		cfg.Finalechat.Enabled = &off
+	case "1", "on", "true", "yes":
+		on := true
+		cfg.Finalechat.Enabled = &on
 	}
 }
 

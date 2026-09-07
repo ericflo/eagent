@@ -163,6 +163,7 @@ function renderSessionShell() {
     h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), h('div', {class: 'tools'},
       d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
       cost,
+      d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
       h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
       h('span', {class: 'badge mono', title: 'session id'}, S.sid),
       d.alive ? stopBtn : resumeBtn)),
@@ -245,9 +246,10 @@ async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {
 function chatNode(ev) {
   const d = ev.data || {};
   switch (ev.type) {
-    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
-    case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
-    case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts))), h('div', {class: 'text', html: md(d.text)})));
+    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
+    case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble', html: md(d.text)}));
+    case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)})));
+    case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
       return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
@@ -273,6 +275,7 @@ function chatNode(ev) {
   }
   return null;
 }
+function srcLabel(src) { return src === 'finalechat' ? ' · from your phone' : src === 'web' ? ' · web' : ''; }
 function act(ev, cls, kind, text) { return h('div', {class: 'act ' + cls}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, kind), h('span', null, clip(text, 300))); }
 
 // ---- tasks ----------------------------------------------------------------------
@@ -448,6 +451,7 @@ async function renderConfig() {
   const eff = c.effective;
   const models = h('div', {class: 'card'}, h('h3', null, 'Active configuration', eff.name ? h('span', {class: 'badge', style: 'margin-left:8px'}, `bundle ${eff.name}`) : eff.preset ? h('span', {class: 'badge', style: 'margin-left:8px'}, `preset ${eff.preset}`) : null),
     h('div', {class: 'kv'}, ...['orchestrator', 'task', 'narrator'].flatMap(a => { const x = eff[a]; return [h('span', {class: 'k'}, a), h('span', null, h('code', {class: 'inline'}, x.model), ` · ${x.protocol} · ${x.base_url.replace(/^https?:\/\//, '')}`, x.reasoning_effort ? ` · effort ${x.reasoning_effort}` : '', x.fallback ? ` · fallback ${x.fallback.model}` : '')]; }),
+      h('span', {class: 'k'}, 'phone'), h('span', null, h('span', {class: 'badge ' + (c.phone.state === 'on' ? 'completed' : c.phone.state === 'disabled' ? 'failed' : '')}, c.phone.state), ' ', c.phone.detail),
       h('span', {class: 'k'}, 'task concurrency'), h('span', null, eff.task_concurrency), h('span', {class: 'k'}, 'fresh context at'), h('span', null, `${k(eff.rollover_tokens)} tokens`), h('span', {class: 'k'}, 'max task calls'), h('span', null, eff.max_task_turns)),
     h('div', {style: 'margin-top:10px'}, ...Object.entries(c.keys).sort().map(([env, on]) => h('span', {class: 'key'}, h('span', {class: 'd' + (on ? ' on' : '')}), env))));
   const GROUPS = {glm: 'Together AI', astra: 'Hybrid', openai: 'OpenAI', openrouter: 'OpenRouter', anthropic: 'Anthropic', deepinfra: 'DeepInfra', fireworks: 'Fireworks', opencode: 'OpenCode Zen', nous: 'Nous Portal', deepseek: 'Single model', qwen: 'Single model'};

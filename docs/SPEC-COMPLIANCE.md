@@ -105,6 +105,7 @@ attempted, as the specification says.
 
 - `eagent -c` / `eagent resume` reopen a session after a crash or Ctrl-C and close whatever was left open.
 - `eagent show`, `eagent replay`, `eagent sessions`, `eagent doctor --live`, `eagent config list/save/show`, `eagent prompts`.
+- Finalechat: when a token is present the narrator's conversation is mirrored to the user's phone (messages, questions with tappable options, replies and answers back into the session, batch sessions waiting on a phone answer), on by default and disabled per config.
 - `eagent serve`: a web UI over the same logs, with live chat and question answering through a per-session inbox, a session browser, task and tool-call drill-down, a timeline, and configuration (presets, bundles, prompts, key presence, bundle saving).
 - Named configuration bundles in `.agents/eagent/configs/`, built-in presets for GLM, Astra, OpenAI (high/med/low), OpenRouter (high/med/low), Anthropic (high: Fable 5.1 / Opus 5 / Sonnet 5; med: Opus 5 / Sonnet 5 / Haiku 4.5), DeepInfra, Fireworks, OpenCode Zen, and Nous Portal (high/med/low each), all-DeepSeek, and all-Qwen routings, each proven with `eagent doctor --live`.
 - Prompts as embedded Markdown templates with per-project overrides.

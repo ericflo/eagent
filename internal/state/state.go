@@ -103,7 +103,8 @@ type State struct {
 	Version     string
 	Interactive bool
 	Models      map[string]string
-	Hosts       map[string]string // actor -> base URL in use
+	Hosts       map[string]string      // actor -> base URL in use
+	Phone       *event.PhoneThreadData // Finalechat thread, when the session is mirrored
 	Started     time.Time
 
 	Events      []event.Event
@@ -229,6 +230,11 @@ func (s *State) Apply(ev event.Event) {
 			s.Hosts[a] = u
 		}
 		s.Started = ev.Time
+	case event.PhoneThread:
+		var d event.PhoneThreadData
+		if ev.Decode(&d) == nil {
+			s.Phone = &d
+		}
 	case event.Route:
 		var d event.RouteData
 		_ = ev.Decode(&d)

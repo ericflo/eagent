@@ -81,6 +81,7 @@ type Runtime struct {
 	narrSaidSeq  int64 // seq of the last narrator.message
 	narrFinal    bool  // final report delivered
 	narrTicker   *time.Timer
+	phone        *phone                        // Finalechat mirror; nil when off
 	running      map[string]context.CancelFunc // task id -> cancel
 	waiters      []*waiter
 	timers       map[string]*time.Timer // schedule id -> timer
@@ -146,6 +147,7 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 	if strings.TrimSpace(opts.Prompt) != "" {
 		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
 	}
+	r.startPhone()
 	return r, nil
 }
 
@@ -178,6 +180,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	if strings.TrimSpace(opts.Prompt) != "" {
 		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
 	}
+	r.startPhone()
 	return r, nil
 }
 
@@ -292,6 +295,9 @@ func (r *Runtime) append(ev event.Event) event.Event {
 	}
 	r.st.Apply(ev)
 	r.noteWake(ev)
+	if r.phone != nil {
+		r.phone.observe(r, ev)
+	}
 	r.ui.Trace(ev)
 	return ev
 }
@@ -429,6 +435,7 @@ func (r *Runtime) publishStatus() {
 			s.TasksQueued++
 		}
 	}
+	s.Phone = r.phone != nil
 	r.ui.Status(s)
 }
 
@@ -451,6 +458,11 @@ func (r *Runtime) maybeEnd() {
 			return
 		}
 		r.ui.Idle(true)
+		return
+	}
+	if r.waitingOnPhone() {
+		// A question is open on the user's phone: a batch session waits for
+		// the answer (or the question's expiry) instead of ending.
 		return
 	}
 	// Batch: give the narrator a final word, then end.
@@ -554,6 +566,9 @@ drain:
 		r.appendDirect(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: t.ID, Status: "interrupted", Summary: summary, Turns: t.Turns, Usage: t.Usage}).WithTask(t.ID))
 	}
 	r.appendDirect(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: r.endReason}))
+	if r.phone != nil {
+		r.phone.close(r.endReason)
+	}
 	if err := r.sess.Close(); err != nil {
 		r.ui.Log("closing session: %v", err)
 	}
@@ -572,7 +587,11 @@ func (r *Runtime) appendDirect(ev event.Event) {
 
 // ---- user input -----------------------------------------------------------
 
-func (r *Runtime) onInput(line string) {
+func (r *Runtime) onInput(line string) { r.onInputFrom(line, "") }
+
+// onInputFrom records a line from the user; source is "" for the terminal,
+// otherwise "web" or "finalechat".
+func (r *Runtime) onInputFrom(line, source string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
@@ -587,10 +606,10 @@ func (r *Runtime) onInput(line string) {
 		if n := optionIndex(line, q.Options); n >= 0 {
 			text = q.Options[n]
 		}
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text}))
+		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source}))
 		return
 	}
-	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line}))
+	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source}))
 }
 
 func optionIndex(line string, options []string) int {

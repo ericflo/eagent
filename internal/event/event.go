@@ -58,6 +58,7 @@ const (
 	HarnessMessage = "harness.message"
 	Yield          = "yield"
 	Route          = "route"
+	PhoneThread    = "phone.thread" // the session is mirrored to the user's phone
 	Error          = "error"
 )
 
@@ -153,12 +154,16 @@ type SubsessionEndData struct {
 // UserMessageData is text from the user.
 type UserMessageData struct {
 	Text string `json:"text"`
+	// Source says where the message came from when it was not the terminal:
+	// "web" or "finalechat" (the user's phone).
+	Source string `json:"source,omitempty"`
 }
 
 // UserAnswerData answers a narrator question.
 type UserAnswerData struct {
 	QuestionID string `json:"question_id"`
 	Text       string `json:"text"`
+	Source     string `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
 }
 
 // TurnData brackets one actor turn (one or more model calls).
@@ -231,6 +236,17 @@ type NoteData struct {
 // NarratorMessageData is user-visible output.
 type NarratorMessageData struct {
 	Text string `json:"text"`
+	// Important marks a message the narrator wanted to buzz the user's
+	// phone for (a finished job, a blocker, a finding).
+	Important bool `json:"important,omitempty"`
+}
+
+// PhoneThreadData records the Finalechat thread mirroring this session.
+type PhoneThreadData struct {
+	ThreadID   string `json:"thread_id"`
+	ExternalID string `json:"external_id"`
+	BaseURL    string `json:"base_url"`
+	RemoteMode bool   `json:"remote_mode"` // the user said they are away from the terminal
 }
 
 // NarratorQuestionData is a question that blocks on the user.

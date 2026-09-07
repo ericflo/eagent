@@ -94,6 +94,20 @@ The session list shows duration, tokens, and an estimated cost for every session
 
 Writing to a session works from anywhere: the UI drops a JSON file into the session's `inbox/` directory and the running process folds it into the log, so you can answer a question from the browser while the session runs in your terminal. Writing to a finished session resumes it inside the server.
 
+## Your phone
+
+If you use [Finalechat](https://www.finalechat.com), eagent talks to you there too. With a token in `FINALECHAT_TOKEN` (or a `finalechat login` on the machine) every session gets a thread on your phone: your prompt, everything the narrator says, and its questions with the options as buttons. Tap an answer or type a reply and it lands in the session exactly as if you had typed it in the terminal; answer in the terminal and the phone question is withdrawn. Most messages arrive quietly; the narrator marks a message important when it deserves a buzz (finished, blocked, needs you), and questions always notify.
+
+This turns `eagent -p "…"` into a headless run you can steer from anywhere: a batch session with a question open on your phone waits for the answer instead of ending. The wait is bounded by `question_timeout_seconds` (an hour by default), after which the session stops as awaiting-input and can be resumed.
+
+It is on whenever a token is found. Turn it off per project with
+
+```json
+{"finalechat": {"enabled": false}}
+```
+
+in `.agents/eagent/config.json` (or a bundle), or once with `EAGENT_FINALECHAT=off`. `enabled: true` makes a missing token an error, `mirror_input: false` keeps what you type in the terminal off the phone, `agent` renames the sender, and `eagent doctor --live` proves the token. Nothing is sent to Finalechat except what you would see in the chat; keys and tool output never leave the machine.
+
 ## How a session runs
 
 1. Your message wakes the **orchestrator**. It looks around, then either does something small itself or writes a self-contained task and calls `delegate`. Several tasks can run at once; `wait` blocks until one finishes.

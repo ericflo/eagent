@@ -21,12 +21,14 @@ func (r *Runtime) taskSystem() string {
 	return r.prompts.Render("TASK-WORKER.md", prompts.TaskData{Project: r.projectPath(), Instructions: r.cfg.Instructions})
 }
 
-func (r *Runtime) narratorSystem() string {
+// narratorSystem renders the narrator's system prompt; phone is a line about
+// the Finalechat mirror, or "" when the session is not mirrored.
+func (r *Runtime) narratorSystem(phone string) string {
 	persona := strings.TrimSpace(r.cfg.Persona)
 	if persona == "" {
 		persona = strings.TrimSpace(r.prompts.Render("PERSONA.md", nil))
 	}
-	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona})
+	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone})
 }
 
 // ---- steering ------------------------------------------------------------
@@ -101,7 +103,7 @@ const (
 	wakeFinal    = "final"
 )
 
-func steerNarrator(st *state.State, now time.Time, reason string, interactive bool, lastMessage string, mustSpeak bool) string {
+func steerNarrator(st *state.State, now time.Time, reason string, interactive, phone bool, lastMessage string, mustSpeak bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] You were woken because: %s.", now.Local().Format("15:04:05"), reason)
 	if !st.Started.IsZero() {
@@ -125,12 +127,16 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive bo
 	case wakeYield:
 		if interactive {
 			b.WriteString(" The orchestrator is waiting. If it asked for a decision, ask the user (ask_user). Otherwise tell the user where things stand, briefly, if that has changed since your last message.")
+		} else if phone {
+			b.WriteString(" The orchestrator is waiting. If it asked for a decision, ask the user (ask_user); they answer from their phone and the session waits for it. Otherwise tell the user where things stand and what is needed from them.")
 		} else {
 			b.WriteString(" The orchestrator is waiting and the user is not present to answer; the session will end so they can resume later. Tell the user exactly what is needed from them and what state the work is in.")
 		}
 	}
-	if !interactive {
+	if !interactive && !phone {
 		b.WriteString(" This is a non-interactive session: ask_user cannot receive an answer, so prefer send_message.")
+	} else if !interactive {
+		b.WriteString(" This session has no terminal, but the user reads you on their phone: ask_user works and the answer arrives as a user message.")
 	}
 	if running := st.RunningTasks(); len(running) > 0 {
 		fmt.Fprintf(&b, " %d task(s) are still running.", len(running))

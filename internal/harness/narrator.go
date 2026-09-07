@@ -92,20 +92,23 @@ func (r *Runtime) narratorTurn(reason string) string {
 	}
 	var msgs []llm.Message
 	var seenSeq int64
-	var steer string
+	var steer, phoneLine string
 	mustSpeak := false
 	r.sync(func() {
 		msgs = r.st.NarratorView(nil)
 		seenSeq = r.st.LastSeq()
 		mustSpeak = r.narrSaidSeq <= r.st.LastUserSeq
-		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.narrLastSaid, mustSpeak)
+		if r.phone != nil {
+			phoneLine = PhoneStatus(r.phone.isRemote())
+		}
+		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak)
 	})
 	if len(msgs) == 0 {
 		return "nothing to see"
 	}
 	msgs = append(msgs, llm.Message{Role: "user", Text: steer})
 	req := llm.Request{
-		System: r.narratorSystem(), Messages: msgs, Tools: r.narrTools,
+		System: r.narratorSystem(phoneLine), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
 	}
 	for attempt := 0; attempt < 2; attempt++ {
@@ -132,7 +135,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 			// Plain text: treat as a held thought unless this is the final
 			// report, in which case the text is the report.
 			if reason == wakeFinal && mustSpeak && strings.TrimSpace(resp.Text) != "" {
-				r.deliverMessage(resp.Text)
+				r.deliverMessage(resp.Text, true)
 				return "final"
 			}
 			if attempt == 0 {
@@ -159,7 +162,8 @@ func (r *Runtime) narratorTurn(reason string) string {
 					r.recordToolResult(event.ActorNarrator, "", tc, "one message per wake; combine them next time", true)
 					continue
 				}
-				r.deliverMessage(text)
+				important, _ := args["important"].(bool)
+				r.deliverMessage(text, important || reason == wakeFinal)
 				r.recordToolResult(event.ActorNarrator, "", tc, "delivered", false)
 				spoke = true
 			case "ask_user":
@@ -183,8 +187,12 @@ func (r *Runtime) narratorTurn(reason string) string {
 					r.narrLastSaid = text
 				})
 				r.ui.Ask(id, text, opts)
+				var onPhone bool
+				r.sync(func() { onPhone = r.phone != nil })
 				if r.opts.Interactive {
 					r.recordToolResult(event.ActorNarrator, "", tc, "asked; the answer will appear as a user message", false)
+				} else if onPhone {
+					r.recordToolResult(event.ActorNarrator, "", tc, "asked on the user's phone; the session waits for the answer, which will appear as a user message", false)
 				} else {
 					r.recordToolResult(event.ActorNarrator, "", tc, "shown to the user; this session is non-interactive so it ends now and they can answer with `eagent resume`", false)
 				}
@@ -218,10 +226,13 @@ func cleanNarration(text string) string {
 }
 
 // deliverMessage records and shows a narrator message.
-func (r *Runtime) deliverMessage(text string) {
+func (r *Runtime) deliverMessage(text string, important bool) {
 	text = cleanNarration(text)
 	r.sync(func() {
-		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text}))
+		if r.st.LastYield != nil && r.st.LastYield.Done {
+			important = true // the final report always earns the notification
+		}
+		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text, Important: important}))
 		r.narrLastSaid = text
 		r.narrSaidSeq = ev.Seq
 	})
@@ -246,5 +257,5 @@ func (r *Runtime) deliverFallbackFinal() {
 			b.WriteString("\n\nLast note from the orchestrator: " + r.st.Notes[n-1].Text)
 		}
 	})
-	r.deliverMessage(b.String())
+	r.deliverMessage(b.String(), true)
 }
