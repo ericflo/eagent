@@ -204,6 +204,12 @@ func (f Files) ListDir(p string) (string, error) {
 // Truncate bounds text to about max characters, keeping the head and the
 // tail, without splitting a UTF-8 sequence.
 func Truncate(s string, max int) string {
+	return TruncateWithNotice(s, max, "")
+}
+
+// TruncateWithNotice is Truncate with an extra sentence in the marker, used
+// to tell the model where the full text was saved.
+func TruncateWithNotice(s string, max int, notice string) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
@@ -217,5 +223,18 @@ func Truncate(s string, max int) string {
 		tailStart++
 	}
 	omitted := tailStart - head
-	return s[:head] + fmt.Sprintf("\n\n[... %d characters omitted; %d total ...]\n\n", omitted, len(s)) + s[tailStart:]
+	marker := fmt.Sprintf("[... %d characters omitted; %d total", omitted, len(s))
+	if notice != "" {
+		marker += ". " + notice
+	}
+	return s[:head] + "\n\n" + marker + " ...]\n\n" + s[tailStart:]
+}
+
+// Spill saves text under dir with the given base name and returns the path.
+func Spill(dir, base, text string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, base+".txt")
+	return path, os.WriteFile(path, []byte(text), 0o644)
 }

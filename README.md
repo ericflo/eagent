@@ -201,7 +201,10 @@ Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are adde
 ## Development
 
 ```
-go test -race ./...
+make check          # gofmt, go vet, go test -race
+make release        # dist/eagent-{linux,darwin}-{amd64,arm64} + SHA256SUMS
 ```
+
+CI runs the same checks on Woodpecker (`.woodpecker.yaml`).
 
 Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `harness` (runtime, actors, rollover, resume), `ui` (terminal). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, and interrupt-then-resume.

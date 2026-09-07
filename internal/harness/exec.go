@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,7 +31,7 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 	}
 	defer func() {
 		if max := r.cfg.ToolOutputMaxChars; max > 0 && len(out) > max {
-			out = tools.Truncate(out, max)
+			out = r.spillAndTruncate(c, tc, out, max)
 		}
 	}()
 	str := func(k string) string {
@@ -550,4 +551,25 @@ func jsonPreview(raw json.RawMessage, max int) string {
 		s = s[:max-3] + "..."
 	}
 	return s
+}
+
+// spillAndTruncate saves an oversized tool result in full under the session
+// directory and returns the truncated text with a notice that tells the
+// model how to read the rest, so nothing is ever out of reach.
+func (r *Runtime) spillAndTruncate(c caller, tc event.ToolCall, out string, max int) string {
+	dir := filepath.Join(r.sess.Path, "outputs")
+	base := tc.ID
+	if c.task != "" {
+		base = c.task + "-" + base
+	}
+	path, err := tools.Spill(dir, base, out)
+	if err != nil {
+		return tools.Truncate(out, max)
+	}
+	if rel, rerr := filepath.Rel(r.projectPath(), path); rerr == nil && !strings.HasPrefix(rel, "..") {
+		path = rel
+	}
+	lines := strings.Count(out, "\n") + 1
+	notice := fmt.Sprintf("Full output (%d lines) saved to %s; page through it with read_file(path, offset, limit) or search it with bash grep", lines, path)
+	return tools.TruncateWithNotice(out, max, notice)
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,14 @@ type Actor struct {
 
 // Config is the full effective configuration.
 type Config struct {
+	// Name is the bundle this configuration came from ("" for the project
+	// default). Description is free text shown by `eagent config list`.
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	// DefaultConfig, set in the project config.json, selects a bundle when
+	// neither --config nor EAGENT_CONFIG is given.
+	DefaultConfig string `json:"default_config,omitempty"`
+
 	Preset       string `json:"preset,omitempty"`
 	Orchestrator Actor  `json:"orchestrator"`
 	Task         Actor  `json:"task"`
@@ -105,6 +114,7 @@ func Defaults() Config {
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {
+		c.Description = "GPT-6 Astra orchestrating (OpenAI, OpenRouter fallback); GLM-5.3-Flash and DeepSeek V4 Flash on Together"
 		c.Orchestrator = Actor{
 			Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: "gpt-6-astra",
 			APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 1_000_000,
@@ -116,41 +126,169 @@ var Presets = map[string]func(*Config){
 		c.RolloverTokens = 300_000
 	},
 	"anthropic": func(c *Config) {
+		c.Description = "Claude Fable 5.1 orchestrating, Opus 5 working, Sonnet 5 narrating"
 		c.Orchestrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-opus-5",
+			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-fable-5-1",
 			APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 200_000,
 		}
 		c.Task = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-sonnet-5",
+			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-opus-5",
 			APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "low", MaxTokens: 32768, ContextTokens: 200_000,
 		}
 		c.Narrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-haiku-4-5-20251001",
+			Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: "claude-sonnet-5",
 			APIKeyEnv: "ANTHROPIC_API_KEY", MaxTokens: 4096, ContextTokens: 200_000,
 		}
+	},
+	"deepseek": func(c *Config) {
+		c.Description = "DeepSeek V4 Flash for all three actors (cheap; the shape of a single local model)"
+		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
+			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, togetherURL, "TOGETHER_API_KEY"
+			a.Model = "deepseek-ai/DeepSeek-V4-Flash-0731"
+			a.ContextTokens = 200_000
+		}
+		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "medium", "low", "none"
+	},
+	"qwen": func(c *Config) {
+		c.Description = "Qwen 3.8 27B (via OpenRouter) for all three actors; a dense model you could run locally"
+		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
+			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
+			a.Model = "qwen/qwen3.8-27b"
+			a.ContextTokens = 200_000
+		}
+		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "medium", "low", "low"
 	},
 }
 
 // PresetNames lists presets in a stable order.
-func PresetNames() []string { return []string{"glm", "astra", "anthropic"} }
+func PresetNames() []string { return []string{"glm", "astra", "anthropic", "deepseek", "qwen"} }
+
+// PresetDescription returns the one-line description of a built-in preset.
+func PresetDescription(name string) string {
+	c := Defaults()
+	if name == "glm" {
+		return "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4 Flash narrating (Together AI)"
+	}
+	if apply, ok := Presets[name]; ok {
+		apply(&c)
+	}
+	return c.Description
+}
+
+// BundlesDir holds a project's named configurations.
+func BundlesDir(project string) string { return filepath.Join(project, ".agents", "eagent", "configs") }
+
+// BundlePath is the file for a named configuration.
+func BundlePath(project, name string) string { return filepath.Join(BundlesDir(project), name+".json") }
+
+// ListBundles returns the named configurations in a project, sorted.
+func ListBundles(project string) ([]string, error) {
+	entries, err := os.ReadDir(BundlesDir(project))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// SaveBundle writes cfg as a named configuration, overwriting any existing one.
+func SaveBundle(project, name, description string, cfg Config) (string, error) {
+	if !validName(name) {
+		return "", fmt.Errorf("bundle names use letters, digits, '-', '_' and '.' only")
+	}
+	if err := os.MkdirAll(BundlesDir(project), 0o755); err != nil {
+		return "", err
+	}
+	cfg.Name = name
+	if description != "" {
+		cfg.Description = description
+	}
+	cfg.DefaultConfig = ""
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := BundlePath(project, name)
+	return path, os.WriteFile(path, append(raw, '\n'), 0o644)
+}
+
+func validName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
+}
 
 // File is the per-project override path.
 func File(project string) string { return filepath.Join(project, ".agents", "eagent", "config.json") }
 
 // Load resolves the configuration for a project directory.
+//
+// Layers, each overriding the previous: built-in defaults, a preset (from
+// --preset, EAGENT_PRESET, the bundle, or config.json), the project's
+// config.json, a named bundle from .agents/eagent/configs/<name>.json
+// (from --config, EAGENT_CONFIG, or config.json's default_config), and
+// EAGENT_* environment variables.
 func Load(project string, preset string) (Config, error) {
+	return LoadBundle(project, preset, "")
+}
+
+// LoadBundle is Load with an explicit bundle name ("" = none selected).
+func LoadBundle(project, preset, bundle string) (Config, error) {
 	cfg := Defaults()
-	fileCfg := map[string]json.RawMessage{}
-	if raw, err := os.ReadFile(File(project)); err == nil {
-		if err := json.Unmarshal(raw, &fileCfg); err != nil {
-			return cfg, fmt.Errorf("%s: %w", File(project), err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	fileCfg, err := readJSONMap(File(project))
+	if err != nil {
 		return cfg, err
 	}
-	// Preset precedence: flag > env > file.
+	if bundle == "" {
+		bundle = os.Getenv("EAGENT_CONFIG")
+	}
+	if bundle == "" {
+		if raw, ok := fileCfg["default_config"]; ok {
+			_ = json.Unmarshal(raw, &bundle)
+		}
+	}
+	var bundleCfg map[string]json.RawMessage
+	if bundle != "" {
+		// A bundle name may also be a built-in preset.
+		if _, isPreset := Presets[bundle]; isPreset {
+			if preset == "" {
+				preset = bundle
+			}
+			bundle = ""
+		} else {
+			bundleCfg, err = readJSONMap(BundlePath(project, bundle))
+			if err != nil {
+				return cfg, err
+			}
+			if bundleCfg == nil {
+				names, _ := ListBundles(project)
+				return cfg, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
+			}
+		}
+	}
+	// Preset precedence: flag > env > bundle > file.
 	if preset == "" {
 		preset = os.Getenv("EAGENT_PRESET")
+	}
+	if preset == "" {
+		if raw, ok := bundleCfg["preset"]; ok {
+			_ = json.Unmarshal(raw, &preset)
+		}
 	}
 	if preset == "" {
 		if raw, ok := fileCfg["preset"]; ok {
@@ -165,15 +303,46 @@ func Load(project string, preset string) (Config, error) {
 		apply(&cfg)
 		cfg.Preset = preset
 	}
-	if len(fileCfg) > 0 {
-		raw, _ := json.Marshal(fileCfg)
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return cfg, fmt.Errorf("%s: %w", File(project), err)
+	if err := overlay(&cfg, fileCfg, File(project)); err != nil {
+		return cfg, err
+	}
+	if bundle != "" {
+		if err := overlay(&cfg, bundleCfg, BundlePath(project, bundle)); err != nil {
+			return cfg, err
 		}
+		cfg.Name = bundle
 	}
 	applyEnv(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
+}
+
+func readJSONMap(path string) (map[string]json.RawMessage, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return m, nil
+}
+
+// overlay merges a JSON object into cfg. Actor objects merge field by field
+// so a bundle can change just a model name.
+func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
+	if len(m) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(m)
+	if err := json.Unmarshal(raw, cfg); err != nil {
+		return fmt.Errorf("%s: %w", source, err)
+	}
+	return nil
 }
 
 func applyEnv(cfg *Config) {

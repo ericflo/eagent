@@ -128,8 +128,12 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		event.ActorTask:         cfg.Task.Model,
 		event.ActorNarrator:     cfg.Narrator.Model,
 	}
+	name := cfg.Name
+	if name == "" {
+		name = cfg.Preset
+	}
 	r.append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
-		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models,
+		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Config: name,
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if strings.TrimSpace(opts.Prompt) != "" {

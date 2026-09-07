@@ -38,7 +38,10 @@ Usage:
   eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
   eagent replay <id>                 rebuild state from the log and print it
   eagent doctor [--live]             check configuration and credentials
-  eagent config [--write]            print (or save) the effective configuration
+  eagent config                      print the effective configuration
+  eagent config list                 built-in presets and the project's named bundles
+  eagent config save NAME [desc]     save the effective configuration as a named bundle
+  eagent config show NAME            print a bundle's effective configuration
   eagent prompts [export|show NAME]  list, export, or print the actor prompts
   eagent version
 
@@ -48,7 +51,8 @@ Flags (before positional arguments):
   -v            verbose: show every tool call and model response
   --json        emit narrator output as JSON lines on stdout
   -C <dir>      project directory (default: current directory)
-  --preset <n>  model preset: glm (default), astra, anthropic
+  --preset <n>  built-in model preset: glm (default), astra, anthropic, deepseek, qwen
+  --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
@@ -71,6 +75,7 @@ func run(args []string) int {
 		jsonOut  = fs.Bool("json", false, "json output")
 		dir      = fs.String("C", "", "project directory")
 		preset   = fs.String("preset", "", "model preset")
+		bundle   = fs.String("config", "", "named config bundle")
 		answer   = fs.String("answer", "", "answer to the pending question")
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
@@ -123,14 +128,14 @@ func run(args []string) int {
 		}
 		return cmdReplay(project, rest[0])
 	case "doctor":
-		return cmdDoctor(project, *preset, *live)
+		return cmdDoctor(project, *preset, *bundle, *live)
 	case "config":
-		return cmdConfig(project, *preset, *write)
+		return cmdConfig(project, *preset, *bundle, *write, rest)
 	case "prompts":
 		return cmdPrompts(project, rest)
 	}
 
-	cfg, err := config.Load(project, *preset)
+	cfg, err := config.LoadBundle(project, *preset, *bundle)
 	if err != nil {
 		return fail(err)
 	}
@@ -480,13 +485,16 @@ func cmdReplay(project, ref string) int {
 	return 0
 }
 
-func cmdDoctor(project, preset string, live bool) int {
-	cfg, err := config.Load(project, preset)
+func cmdDoctor(project, preset, bundle string, live bool) int {
+	cfg, err := config.LoadBundle(project, preset, bundle)
 	if err != nil {
 		return fail(err)
 	}
 	ok := true
 	fmt.Printf("project: %s\n", project)
+	if cfg.Name != "" {
+		fmt.Printf("config bundle: %s\n", cfg.Name)
+	}
 	if cfg.Preset != "" {
 		fmt.Printf("preset: %s\n", cfg.Preset)
 	}
@@ -577,8 +585,70 @@ func lookPath(name string) (string, error) {
 	return "", errors.New("not found")
 }
 
-func cmdConfig(project, preset string, write bool) int {
-	cfg, err := config.Load(project, preset)
+func cmdConfig(project, preset, bundle string, write bool, args []string) int {
+	sub := ""
+	if len(args) > 0 {
+		sub = args[0]
+		args = args[1:]
+	}
+	switch sub {
+	case "list":
+		cfg, _ := config.LoadBundle(project, preset, bundle)
+		fmt.Println("built-in presets:")
+		for _, name := range config.PresetNames() {
+			mark := "  "
+			if cfg.Preset == name && cfg.Name == "" || (cfg.Preset == "" && name == "glm" && cfg.Name == "") {
+				mark = "* "
+			}
+			fmt.Printf("  %s%-10s %s\n", mark, name, config.PresetDescription(name))
+		}
+		names, err := config.ListBundles(project)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("\nproject bundles in %s:\n", config.BundlesDir(project))
+		if len(names) == 0 {
+			fmt.Println("  (none yet; create one with: eagent config save NAME \"description\")")
+		}
+		for _, name := range names {
+			b, err := config.LoadBundle(project, "", name)
+			mark := "  "
+			if cfg.Name == name {
+				mark = "* "
+			}
+			if err != nil {
+				fmt.Printf("  %s%-10s (invalid: %v)\n", mark, name, err)
+				continue
+			}
+			fmt.Printf("  %s%-10s %s\n", mark, name, describe(b))
+		}
+		fmt.Println("\nselect with --config NAME, EAGENT_CONFIG=NAME, or \"default_config\" in .agents/eagent/config.json")
+		return 0
+	case "save":
+		if len(args) < 1 {
+			return fail(errors.New("usage: eagent config save NAME [description]"))
+		}
+		cfg, err := config.LoadBundle(project, preset, bundle)
+		if err != nil {
+			return fail(err)
+		}
+		path, err := config.SaveBundle(project, args[0], strings.Join(args[1:], " "), cfg)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Println("saved", path)
+		fmt.Printf("use it with: eagent --config %s ...   (or EAGENT_CONFIG=%s)\n", args[0], args[0])
+		return 0
+	case "show":
+		if len(args) < 1 {
+			return fail(errors.New("usage: eagent config show NAME"))
+		}
+		bundle = args[0]
+	case "":
+	default:
+		return fail(fmt.Errorf("unknown config command %q (list, save, show)", sub))
+	}
+	cfg, err := config.LoadBundle(project, preset, bundle)
 	if err != nil {
 		return fail(err)
 	}
@@ -593,6 +663,22 @@ func cmdConfig(project, preset string, write bool) int {
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	fmt.Println(string(raw))
 	return 0
+}
+
+// describe renders a bundle's models in one line.
+func describe(c config.Config) string {
+	s := fmt.Sprintf("%s / %s / %s", shortModel(c.Orchestrator.Model), shortModel(c.Task.Model), shortModel(c.Narrator.Model))
+	if c.Description != "" {
+		s += " — " + c.Description
+	}
+	return s
+}
+
+func shortModel(m string) string {
+	if i := strings.LastIndexByte(m, '/'); i >= 0 {
+		return m[i+1:]
+	}
+	return m
 }
 
 func cmdPrompts(project string, args []string) int {

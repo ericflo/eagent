@@ -58,3 +58,62 @@ func TestPresetsAndRoutes(t *testing.T) {
 		t.Fatal("unknown preset accepted")
 	}
 }
+
+func TestBundlesLayerOverProjectConfig(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(BundlesDir(dir), 0o755)
+	os.WriteFile(File(dir), []byte(`{"task_concurrency":2,"narrator":{"model":"project/narrator"}}`), 0o644)
+	os.WriteFile(BundlePath(dir, "mine"), []byte(`{"preset":"anthropic","description":"mine","orchestrator":{"model":"claude-x"}}`), 0o644)
+	cfg, err := LoadBundle(dir, "", "mine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "mine" || cfg.Preset != "anthropic" {
+		t.Fatalf("name=%q preset=%q", cfg.Name, cfg.Preset)
+	}
+	if cfg.Orchestrator.Model != "claude-x" || cfg.Orchestrator.Protocol != "anthropic" {
+		t.Fatalf("bundle should override the model but keep the preset's protocol: %+v", cfg.Orchestrator)
+	}
+	if cfg.Narrator.Model != "project/narrator" {
+		t.Fatalf("project config should still apply beneath the bundle: %s", cfg.Narrator.Model)
+	}
+	if cfg.TaskConcurrency != 2 {
+		t.Fatal("project scalar lost")
+	}
+	// EAGENT_CONFIG selects a bundle; a preset name is accepted as a bundle name too.
+	t.Setenv("EAGENT_CONFIG", "mine")
+	if cfg, _ = LoadBundle(dir, "", ""); cfg.Name != "mine" {
+		t.Fatal("EAGENT_CONFIG not honoured")
+	}
+	t.Setenv("EAGENT_CONFIG", "")
+	if cfg, err = LoadBundle(dir, "", "deepseek"); err != nil || cfg.Preset != "deepseek" || cfg.Task.Model != "deepseek-ai/DeepSeek-V4-Flash-0731" {
+		t.Fatalf("preset as bundle: %v %+v", err, cfg.Task)
+	}
+	if _, err := LoadBundle(dir, "", "nope"); err == nil {
+		t.Fatal("unknown bundle accepted")
+	}
+	// default_config in config.json.
+	os.WriteFile(File(dir), []byte(`{"default_config":"mine"}`), 0o644)
+	if cfg, _ = LoadBundle(dir, "", ""); cfg.Name != "mine" {
+		t.Fatal("default_config not honoured")
+	}
+	// Save round-trips.
+	path, err := SaveBundle(dir, "saved", "a copy", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "saved.json" {
+		t.Fatalf("path = %s", path)
+	}
+	names, _ := ListBundles(dir)
+	if len(names) != 2 || names[0] != "mine" || names[1] != "saved" {
+		t.Fatalf("names = %v", names)
+	}
+	again, err := LoadBundle(dir, "", "saved")
+	if err != nil || again.Orchestrator.Model != "claude-x" || again.Description != "a copy" {
+		t.Fatalf("round trip: %v %+v", err, again.Orchestrator)
+	}
+	if _, err := SaveBundle(dir, "../evil", "", cfg); err == nil {
+		t.Fatal("bad name accepted")
+	}
+}
