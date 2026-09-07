@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -52,6 +53,10 @@ func (r *Runtime) startPhone() {
 	fc := r.cfg.Finalechat
 	if !fc.Wanted() {
 		return
+	}
+	switch strings.ToLower(os.Getenv("EAGENT_FINALECHAT")) {
+	case "0", "off", "false", "no":
+		return // the environment kill switch wins over any configuration
 	}
 	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
 	if !ok {

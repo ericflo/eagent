@@ -106,7 +106,7 @@ It is on whenever a token is found. Turn it off per project with
 {"finalechat": {"enabled": false}}
 ```
 
-in `.agents/eagent/config.json` (or a bundle), or once with `EAGENT_FINALECHAT=off`. `enabled: true` makes a missing token an error, `mirror_input: false` keeps what you type in the terminal off the phone, `agent` renames the sender, and `eagent doctor --live` proves the token. Nothing is sent to Finalechat except what you would see in the chat; keys and tool output never leave the machine.
+in `.agents/eagent/config.json` (or a bundle), or once with `EAGENT_FINALECHAT=off`, which wins over any configuration (the test suite sets it so tests can never reach a real account). `enabled: true` makes a missing token an error, `mirror_input: false` keeps what you type in the terminal off the phone, `agent` renames the sender, and `eagent doctor --live` proves the token. Nothing is sent to Finalechat except what you would see in the chat; keys and tool output never leave the machine.
 
 ## How a session runs
 

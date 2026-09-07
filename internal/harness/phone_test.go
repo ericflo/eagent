@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -210,6 +211,19 @@ func (f *fakePhone) postsWhere(pred func(map[string]any) bool) []map[string]any 
 	return out
 }
 
+// fakePhoneConfig points the mirror at the fake service and lifts the
+// package-wide kill switch for this test only.
+func fakePhoneConfig(t *testing.T, modelURL string, fp *fakePhone) config.Config {
+	t.Helper()
+	t.Setenv("EAGENT_FINALECHAT", "on")
+	cfg := testConfig(modelURL)
+	on := true
+	cfg.Finalechat.Enabled = &on
+	cfg.Finalechat.BaseURL = fp.srv.URL
+	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	return cfg
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -258,9 +272,7 @@ func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(true)
 	defer fp.srv.Close()
-	cfg := testConfig(s.srv.URL)
-	cfg.Finalechat.BaseURL = fp.srv.URL
-	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
 	if err != nil {
@@ -367,9 +379,7 @@ func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := testConfig(s.srv.URL)
-	cfg.Finalechat.BaseURL = fp.srv.URL
-	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: true, Prompt: "hello"}, ui)
 	if err != nil {
@@ -437,9 +447,7 @@ func TestPhoneDisabledInConfig(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := testConfig(s.srv.URL)
-	cfg.Finalechat.BaseURL = fp.srv.URL
-	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
 	off := false
 	cfg.Finalechat.Enabled = &off
 	ui := &fakeUI{input: make(chan string)}
@@ -492,9 +500,7 @@ func TestPhoneReasksPendingQuestionOnResume(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(true)
 	defer fp.srv.Close()
-	cfg := testConfig(s.srv.URL)
-	cfg.Finalechat.BaseURL = fp.srv.URL
-	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
 	if err != nil {

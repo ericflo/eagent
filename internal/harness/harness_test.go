@@ -143,7 +143,17 @@ func testConfig(url string) config.Config {
 	cfg.Narrator.Model = "narr"
 	cfg.NarratorTickSeconds = 3600
 	cfg.RolloverTokens = 20000
+	off := false
+	cfg.Finalechat.Enabled = &off // never the real phone from a test
 	return cfg
+}
+
+// TestMain keeps every test in this package away from a real Finalechat
+// account: the kill switch wins over any token on the machine. Tests that
+// exercise the mirror point it at a fake server and flip the switch back.
+func TestMain(m *testing.M) {
+	os.Setenv("EAGENT_FINALECHAT", "off")
+	os.Exit(m.Run())
 }
 
 // lastUserText returns the text of the last user message in a request.
