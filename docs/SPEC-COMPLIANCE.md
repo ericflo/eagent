@@ -94,7 +94,7 @@ are exactly as specified: `zai-org/GLM-5.3-Flash` and
 | Anthropic Messages API | Met: `internal/llm/anthropic.go`, streaming, thinking blocks, cache breakpoints |
 | Together AI for worker and narrator | Met via OpenAI-style Chat Completions (`internal/llm/chat.go`), Together's supported protocol |
 | `OPENAI_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY` | Met: read from the environment only; `eagent doctor` reports which are set and can make a live call per route |
-| Astra via OpenAI, OpenRouter fallback | Met under `--preset astra`; the fallback fires on unroutable errors such as missing access or exhausted credits, and is recorded in the log |
+| Astra via OpenAI, OpenRouter fallback | Met under `--preset astra`; the fallback fires on unroutable errors such as missing access or exhausted credits, for every actor, and is recorded in the log |
 
 ## 8. Out of scope
 

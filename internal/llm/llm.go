@@ -282,12 +282,14 @@ func (e *APIError) Error() string {
 
 // Retryable reports whether the failure is plausibly transient.
 func (e *APIError) Retryable() bool {
+	if e.QuotaExhausted() {
+		return false // no credits: retrying cannot help, a fallback route can
+	}
 	switch e.Status {
 	case 408, 409, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529:
 		return true
 	case 429:
-		// Rate limits retry; exhausted quota does not.
-		return !e.QuotaExhausted()
+		return true
 	}
 	return false
 }

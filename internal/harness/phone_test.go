@@ -808,3 +808,82 @@ func TestViewImageShowsPictureAndFindsFilesByName(t *testing.T) {
 		t.Fatal("the model never received the image part")
 	}
 }
+
+// Workers and the narrator fall back like the orchestrator: a dead primary
+// route (bad key here) is abandoned for the next one, once, and the switch
+// is recorded so the log says which model really answered.
+func TestWorkerAndNarratorRoutesFallBack(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_DEAD_KEY", "dead")
+	project := t.TempDir()
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+	}))
+	defer dead.Close()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "t1 completed") || strings.Contains(all, "built it") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"built"}`)}}
+			}
+			if countRole(msgs, "assistant") == 0 {
+				return reply{calls: []event.ToolCall{tc("delegate", `{"title":"Build","description":"make hello.txt"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("wait", `{}`)}}
+		case "task":
+			return reply{calls: []event.ToolCall{tc("complete_task", `{"status":"completed","summary":"built it"}`)}}
+		default:
+			if strings.Contains(all, "built") && !strings.Contains(all, "Done.") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	// Task worker and narrator: primary at the dead server, fallback at the scripted one.
+	for _, a := range []*config.Actor{&cfg.Task, &cfg.Narrator} {
+		fb := *a
+		a.BaseURL, a.APIKeyEnv = dead.URL, "EAGENT_DEAD_KEY"
+		a.Fallback = &fb
+	}
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "go"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("exit %d logs=%v", code, logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.EndReason != "done" || st.Tasks["t1"] == nil || st.Tasks["t1"].Status != "completed" {
+		t.Fatalf("end=%s task=%+v", st.EndReason, st.Tasks["t1"])
+	}
+	routed := map[string]int{}
+	for _, ev := range evs {
+		if ev.Type == event.Route {
+			var d event.RouteData
+			_ = ev.Decode(&d)
+			routed[d.Actor]++
+			if d.BaseURL != s.srv.URL {
+				t.Fatalf("route event points at %s", d.BaseURL)
+			}
+		}
+	}
+	if routed[event.ActorTask] != 1 || routed[event.ActorNarrator] != 1 || routed[event.ActorOrchestrator] != 0 {
+		t.Fatalf("route events = %v", routed)
+	}
+	if st.Hosts[event.ActorTask] != s.srv.URL || st.Hosts[event.ActorNarrator] != s.srv.URL {
+		t.Fatalf("hosts after fallback = %v", st.Hosts)
+	}
+	if ui.messageCount() != 1 {
+		t.Fatalf("narrator messages = %d", ui.messageCount())
+	}
+}

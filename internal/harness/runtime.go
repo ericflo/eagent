@@ -55,7 +55,12 @@ type Runtime struct {
 	files   tools.Files
 	archive tools.Archive
 
+	// Each actor has an ordered list of routes (primary, then fallbacks)
+	// and a current client; completeActor advances the client when a route
+	// turns out to be unroutable. Clients are read and swapped under sync.
 	orchRoutes []llm.Endpoint
+	taskRoutes []llm.Endpoint
+	narrRoutes []llm.Endpoint
 	orchClient *llm.Client
 	taskClient *llm.Client
 	narrClient *llm.Client
@@ -219,19 +224,93 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		return nil, fmt.Errorf("orchestrator: %w", err)
 	}
 	r.orchClient = r.newClient(r.orchRoutes[0], event.ActorOrchestrator)
-	taskEP, err := cfg.Task.Endpoint()
-	if err != nil {
+	if r.taskRoutes, err = cfg.Task.Routes(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("task worker: %w", err)
 	}
-	r.taskClient = r.newClient(taskEP, event.ActorTask)
-	narrEP, err := cfg.Narrator.Endpoint()
-	if err != nil {
+	r.taskClient = r.newClient(r.taskRoutes[0], event.ActorTask)
+	if r.narrRoutes, err = cfg.Narrator.Routes(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("narrator: %w", err)
 	}
-	r.narrClient = r.newClient(narrEP, event.ActorNarrator)
+	r.narrClient = r.newClient(r.narrRoutes[0], event.ActorNarrator)
 	return r, nil
+}
+
+// clientFor returns an actor's current client. Loop goroutine only.
+func (r *Runtime) clientFor(actor string) *llm.Client {
+	switch actor {
+	case event.ActorTask:
+		return r.taskClient
+	case event.ActorNarrator:
+		return r.narrClient
+	}
+	return r.orchClient
+}
+
+// routesFor returns an actor's ordered routes.
+func (r *Runtime) routesFor(actor string) []llm.Endpoint {
+	switch actor {
+	case event.ActorTask:
+		return r.taskRoutes
+	case event.ActorNarrator:
+		return r.narrRoutes
+	}
+	return r.orchRoutes
+}
+
+// completeActor calls the actor's current route and, when that route
+// cannot serve the model at all (bad key, no access, no credits), moves to
+// the next configured route and tries again. Every switch is logged in the
+// session so replay and the UI know which model actually answered. Safe to
+// call from any goroutine; several task workers may hit the same dead
+// route at once and only the first switch counts.
+func (r *Runtime) completeActor(ctx context.Context, actor, task string, req llm.Request) (*llm.Response, error) {
+	for {
+		var client *llm.Client
+		r.sync(func() { client = r.clientFor(actor) })
+		resp, err := client.Complete(ctx, req, r.observer(actor, task))
+		if err == nil {
+			return resp, nil
+		}
+		var ae *llm.APIError
+		if !errors.As(err, &ae) || !ae.Unroutable() {
+			return nil, err
+		}
+		var switched bool
+		r.sync(func() {
+			cur := r.clientFor(actor)
+			if cur != client {
+				switched = true // another call already moved on; use its route
+				return
+			}
+			routes := r.routesFor(actor)
+			for i, ep := range routes {
+				if ep.BaseURL == cur.Endpoint.BaseURL && ep.Model == cur.Endpoint.Model && i+1 < len(routes) {
+					next := routes[i+1]
+					r.ui.Log("%s: %s is unavailable (%s); switching to %s", actor, cur.Endpoint, shortErr(err), next)
+					nc := r.newClient(next, actor)
+					switch actor {
+					case event.ActorTask:
+						r.taskClient = nc
+					case event.ActorNarrator:
+						r.narrClient = nc
+					default:
+						r.orchClient = nc
+					}
+					r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+						Actor: actor, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
+						Reason: "primary route unavailable: " + shortErr(err),
+					}))
+					switched = true
+					return
+				}
+			}
+		})
+		if !switched {
+			return nil, err
+		}
+	}
 }
 
 func (r *Runtime) newClient(ep llm.Endpoint, actor string) *llm.Client {

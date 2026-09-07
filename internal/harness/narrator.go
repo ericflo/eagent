@@ -112,7 +112,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := r.narrClient.Complete(ctx, req, r.observer(event.ActorNarrator, ""))
+		resp, err := r.completeActor(ctx, event.ActorNarrator, "", req)
 		if err != nil {
 			if ctx.Err() != nil && reason != wakeFinal {
 				return "interrupted"

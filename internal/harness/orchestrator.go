@@ -202,44 +202,9 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 	}
 }
 
-// completeOrchestrator calls the current orchestrator route, falling back to
-// the next configured route when the current one cannot serve the model.
+// completeOrchestrator calls the orchestrator through its routes.
 func (r *Runtime) completeOrchestrator(ctx context.Context, req llm.Request) (*llm.Response, error) {
-	obs := r.observer(event.ActorOrchestrator, "")
-	for {
-		resp, err := r.orchClient.Complete(ctx, req, obs)
-		if err == nil {
-			return resp, nil
-		}
-		var ae *llm.APIError
-		if !errors.As(err, &ae) || !ae.Unroutable() {
-			return nil, err
-		}
-		next := r.nextRoute()
-		if next == nil {
-			return nil, err
-		}
-		r.ui.Log("orchestrator: %s is unavailable (%s); switching to %s", r.orchClient.Endpoint, shortErr(err), *next)
-		r.orchClient = r.newClient(*next, event.ActorOrchestrator)
-		r.sync(func() {
-			r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-				Actor: event.ActorOrchestrator, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
-				Reason: "primary route unavailable: " + shortErr(err),
-			}))
-		})
-	}
-}
-
-func (r *Runtime) nextRoute() *llm.Endpoint {
-	for i, ep := range r.orchRoutes {
-		if ep.BaseURL == r.orchClient.Endpoint.BaseURL && ep.Model == r.orchClient.Endpoint.Model {
-			if i+1 < len(r.orchRoutes) {
-				return &r.orchRoutes[i+1]
-			}
-			return nil
-		}
-	}
-	return nil
+	return r.completeActor(ctx, event.ActorOrchestrator, "", req)
 }
 
 // observer forwards streaming deltas to the UI.

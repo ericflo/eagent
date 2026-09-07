@@ -110,7 +110,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 			System:   r.taskSystem(),
 			Messages: msgs, Tools: r.taskTools, CacheKey: r.sess.ID + "-task-" + t.ID,
 		}
-		resp, err := r.taskClient.Complete(ctx, req, r.observer(event.ActorTask, t.ID))
+		resp, err := r.completeActor(ctx, event.ActorTask, t.ID, req)
 		if err != nil {
 			if ctx.Err() != nil {
 				continue
