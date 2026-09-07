@@ -347,9 +347,15 @@ func (r *Runtime) Run(ctx context.Context) int {
 		q := r.st.Question
 		r.ui.Ask(q.ID, q.Text, q.Options)
 	}
+	inbox := time.NewTicker(500 * time.Millisecond)
+	defer inbox.Stop()
+	r.pollInbox()
 	r.tick()
 	for {
 		select {
+		case <-inbox.C:
+			r.pollInbox()
+			r.tick()
 		case fn := <-r.loop:
 			fn()
 			r.tick()

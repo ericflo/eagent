@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
 	"github.com/ericflo/eagent/internal/ui"
+	"github.com/ericflo/eagent/internal/web"
 )
 
 var version = "0.1.0"
@@ -37,6 +39,7 @@ Usage:
   eagent sessions                    list sessions in this project
   eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
   eagent replay <id>                 rebuild state from the log and print it
+  eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, tasks, tool calls, config
   eagent doctor [--live]             check configuration and credentials
   eagent config                      print the effective configuration
   eagent config list                 built-in presets and the project's named bundles
@@ -54,6 +57,7 @@ Flags (before positional arguments):
   --preset <n>  built-in model preset: glm (default), astra, anthropic, deepseek, qwen
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
+  --serve <a>   also serve the web UI at this address while a session runs (e.g. :7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
 OPENAI_API_KEY / OPENROUTER_API_KEY (astra preset), ANTHROPIC_API_KEY.
@@ -76,6 +80,8 @@ func run(args []string) int {
 		dir      = fs.String("C", "", "project directory")
 		preset   = fs.String("preset", "", "model preset")
 		bundle   = fs.String("config", "", "named config bundle")
+		addr     = fs.String("addr", "127.0.0.1:7331", "serve: listen address")
+		serveAt  = fs.String("serve", "", "serve the web UI while running")
 		answer   = fs.String("answer", "", "answer to the pending question")
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
@@ -103,7 +109,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "version", "help":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "version", "help":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -133,6 +139,8 @@ func run(args []string) int {
 		return cmdConfig(project, *preset, *bundle, *write, rest)
 	case "prompts":
 		return cmdPrompts(project, rest)
+	case "serve":
+		return cmdServe(project, *addr, *preset, *bundle, *verbose)
 	}
 
 	cfg, err := config.LoadBundle(project, *preset, *bundle)
@@ -189,6 +197,16 @@ func run(args []string) int {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	if *serveAt != "" {
+		ws := web.New(project, term.Log)
+		ws.Preset, ws.Bundle, ws.Verbose = *preset, *bundle, *verbose
+		go func() {
+			if err := web.ListenAndServe(ctx, *serveAt, ws); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				term.Log("web: %v", err)
+			}
+		}()
+		term.Log("web UI: http://%s/#/s/%s/chat", displayAddr(*serveAt), rt.SessionID())
+	}
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -720,4 +738,25 @@ func cmdPrompts(project string, args []string) int {
 		return 0
 	}
 	return fail(fmt.Errorf("unknown prompts command %q", args[0]))
+}
+
+func displayAddr(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "localhost" + addr
+	}
+	return addr
+}
+
+func cmdServe(project, addr, preset, bundle string, verbose bool) int {
+	ws := web.New(project, func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) })
+	ws.Preset, ws.Bundle, ws.Verbose = preset, bundle, verbose
+	ctx, cancel := context.WithCancel(context.Background())
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() { <-sigs; fmt.Fprintln(os.Stderr, "stopping"); cancel() }()
+	fmt.Fprintf(os.Stderr, "eagent web UI for %s\n  http://%s/\n", project, displayAddr(addr))
+	if err := web.ListenAndServe(ctx, addr, ws); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fail(err)
+	}
+	return 0
 }
