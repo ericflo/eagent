@@ -41,9 +41,9 @@ eagent connector pair
 eagent connector run
 ```
 
-Pair requests access to this specific project. The printed URL opens FinaleChat's trusted approval screen. The connector credential is stored privately in `.agents/eagent/finalechat-connector.json`. The browser can revoke it. Keep the connector command, an eagent session, or the web server running to receive commands while the model is idle; no inbound port or localhost proxy is needed.
+Your existing FinaleChat conversations gain project settings automatically while eagent or its server is running. Open **Settings in the thread header**, choose Models / Behavior / Prompts / Advanced, and tap Save once. There is no separate approval screen. `connector pair` can also connect explicitly. The connector credential is stored privately in `.agents/eagent/finalechat-connector.json`. The browser can revoke it. Keep the connector command, an eagent session, or the web server running to receive commands while the model is idle; no inbound port or localhost proxy is needed.
 
-A settings artifact is a captured view by default. Edit the current binding to stage typed changes and review them in FinaleChat's own Save controls. The iframe receives a bounded MessageChannel, never an account token or generic HTTP capability. The local connector validates the approved resource, operation, field classes, schema and current version before writing. Its shared project lock and conditional file writer also serve the local config web API. Stale settings produce a conflict instead of overwriting a newer local edit.
+The thread panel opens the current editor automatically. Settings-only publication stores the self-contained HTML and bounded settings context under the `agent-settings` artifact key, independently of transcript backup opt-in. The native JSONL is not uploaded by a settings connection. Archive browsing still opens captured settings read-only by default. The iframe receives a bounded MessageChannel, never an account token or generic HTTP capability. The local connector validates the approved resource, operation, field classes, schema and current version before writing. Its shared project lock and conditional file writer also serve the local config web API. Stale settings produce a conflict instead of overwriting a newer local edit.
 
 Command intents, acknowledgements and a settings audit survive process restarts. Redelivery reconciles an existing intent; an uncertain delivery with no local journal is reported as unknown and is not executed again. Saved settings and runtime adoption are separate: configuration, prompt and bundle changes are currently reported for new or resumed sessions, with no claim that an existing model turn adopted them.
 
@@ -59,7 +59,7 @@ Picker catalogs and named configuration content are captured with the archive. A
 
 ## Live session controls
 
-Run `eagent connector pair-session SESSION_ID` in the project, then approve the separate session grant in FinaleChat. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Live session settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.
+Run `eagent connector pair-session SESSION_ID` in the project, which connects the separate session controls to your account. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.
 
 These controls affect this process only:
 

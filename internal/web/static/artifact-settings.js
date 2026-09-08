@@ -53,9 +53,17 @@
   }
   const draftToken = () => canonical([window.EagentConfig?.draftToken(), inputEpoch]);
   async function clear() { proposalSeq++; active = false; activeKey = ''; if (editable) await finale.settings.clear().catch(() => {}); }
-  function formChanged() { if (active && activeDraft !== draftToken()) { void clear(); message('The form changed. Review its new changes before submitting in FinaleChat.'); } }
+  let stageTimer;
+  function formChanged() {
+    if (window.__eagent.threadControls) {
+      void clear(); clearTimeout(stageTimer);
+      stageTimer=setTimeout(()=>{ if(window.EagentConfig.dirty()) void window.EagentConfig.stageDraft().catch(error=>{message(error.message);toast(error.message,'bad');}); },180);
+    } else if (active && activeDraft !== draftToken()) { void clear(); message('The form changed. Review its new changes before submitting in FinaleChat.'); }
+  }
   async function stage(proposal, meta = {}) {
+    clearTimeout(stageTimer);
     if (!editable) throw new Error('This snapshot is read only. Open current settings in FinaleChat to edit.');
+    if(proposal.operation === 'settings.apply' && !proposal.edits?.length) { await clear(); return {staged:true}; }
     const p = { ...proposal, schema_version: resource.descriptor.schema_version, expected_version: meta.version || resource.snapshot.version, generation: resource.generation || '' };
     const key = canonical(p), seq = ++proposalSeq;
     meta.draftToken = draftToken();
@@ -63,7 +71,7 @@
     while (staged.size > 32) staged.delete(staged.keys().next().value);
     try { await finale.settings.propose(p); if (seq === proposalSeq) { active = true; activeKey = key; activeDraft = meta.draftToken; } }
     catch (error) { staged.delete(key); throw error; }
-    message('Ready for review in FinaleChat. No settings have changed yet.');
+    message(window.__eagent.threadControls ? 'Unsaved changes' : 'Ready for review in FinaleChat. No settings have changed yet.');
     return { staged: true };
   }
   function editsFor(values, current, skipLocked) {
@@ -144,12 +152,13 @@
     try {
       const prompt = await api('/api/prompts/' + encodeURIComponent(name));
       const text = h('textarea', { class: 'code', style: 'width:100%;min-height:45vh', disabled: !canAct('prompt.set') }, prompt.text);
-      const status = h('p', { class: 'sub' }, 'The connector validates the Go template before saving.');
-      const action = async method => { try { await api('/api/prompts/' + encodeURIComponent(name), { method, body: method === 'PUT' ? JSON.stringify({ text: text.value }) : undefined }); status.textContent = 'Ready for review in FinaleChat. The local prompt has not changed yet.'; } catch (error) { status.textContent = error.message; } };
-      showModal(h('div', null, h('h2', null, name), text, status, h('div', { class: 'foot' }, h('button', { disabled: !canAct('prompt.reset'), onclick: () => action('DELETE') }, 'Review reset to built-in'), h('button', { onclick: closeModal }, 'Close'), h('button', { class: 'primary', disabled: !canAct('prompt.set'), onclick: () => action('PUT') }, 'Review prompt change'))));
+      const status = h('p', { class: 'sub' }, window.__eagent.threadControls ? 'Edit these instructions, then tap Save below.' : 'The connector validates the Go template before saving.');
+      const action = async method => { try { await api('/api/prompts/' + encodeURIComponent(name), { method, body: method === 'PUT' ? JSON.stringify({ text: text.value }) : undefined }); status.textContent = window.__eagent.threadControls ? 'Ready to save. Tap Save below.' : 'Ready for review in FinaleChat. The local prompt has not changed yet.'; } catch (error) { status.textContent = error.message; } };
+      if(window.__eagent.threadControls) text.addEventListener('input',()=>{ void clear(); clearTimeout(stageTimer); stageTimer=setTimeout(()=>void action('PUT'),180); });
+      showModal(h('div', null, h('h2', null, name), text, status, h('div', { class: 'foot' }, h('button', { disabled: !canAct('prompt.reset'), onclick: () => action('DELETE') }, 'Review reset to built-in'), h('button', { onclick: closeModal }, 'Close'), window.__eagent.threadControls ? null : h('button', { class: 'primary', disabled: !canAct('prompt.set'), onclick: () => action('PUT') }, 'Review prompt change'))));
     } catch (error) { toast(error.message, 'bad'); }
   }
-  async function refresh() { const current = await finale.settings.read(); resource = current.resource; editable = !!current.editable; }
+  async function refresh() { const current = await finale.settings.read(); resource = current.resource; editable = !!current.editable; window.__eagent.threadControls = current.presentation === "thread"; document.body.classList.toggle("thread-controls",window.__eagent.threadControls); }
   async function load() {
     try {
       data = JSON.parse(await finale.text('settings/editor.json'));
@@ -189,7 +198,7 @@
     readOnly: () => !editable, field, S: {}, closeStream() {}, renderLive() {},
     k: n => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n ?? 0),
     money: value => value > 0 && value < 0.01 ? '<$0.01' : '$' + Number(value || 0).toFixed(2) };
-  document.addEventListener('input', () => { inputEpoch++; formChanged(); });
+  document.addEventListener('input', event => { inputEpoch++; if(window.__eagent.threadControls && event.target.closest('#modal')) return; formChanged(); });
   $('#artifact-local').onclick = () => finale.openLocalFiles().catch(error => message(error.message));
   $('#artifact-reload').onclick = () => {
     const reload = async () => { closeModal(); await clear(); await load(); };

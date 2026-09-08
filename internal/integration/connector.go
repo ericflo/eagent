@@ -78,7 +78,7 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Pair requests access; only the signed-in browser can approve it. The scoped
+// Pair connects this account’s own installation. The scoped
 // secret stays in a private project file and is excluded from every archive.
 func Pair(ctx context.Context, project, name string) (string, error) {
 	return pairResource(ctx, project, name, "", connectorPath(project), (&settings.Service{Project: project}).Grant())
@@ -91,7 +91,30 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 	var existing connectorConfig
 	if err := readConnectorFile(path, &existing); err == nil {
 		if existing.ID != "" && existing.Session == session {
-			return existing.ApprovalURL, nil
+			account, err := settingsAccount(project)
+			if err != nil {
+				return "", err
+			}
+			if strings.TrimRight(account.BaseURL, "/") != strings.TrimRight(existing.BaseURL, "/") {
+				return "", fmt.Errorf("connector belongs to a different FinaleChat server")
+			}
+			scoped := &finalechat.Client{BaseURL: existing.BaseURL, Token: existing.Secret}
+			var status struct {
+				Connector connectorInfo `json:"connector"`
+			}
+			if err = scoped.Request(ctx, "GET", "/api/v1/connectors/"+url.PathEscape(existing.ID), nil, nil, &status, 0); err != nil {
+				return "", err
+			}
+			if status.Connector.State == "pending" {
+				err = account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(existing.ID)+"/connect", nil, map[string]any{"secret": existing.Secret}, nil, 0)
+				if err != nil {
+					return "", err
+				}
+			}
+			if status.Connector.State == "revoked" {
+				return "", fmt.Errorf("this connector was disconnected in FinaleChat")
+			}
+			return strings.TrimRight(existing.BaseURL, "/") + "/", nil
 		}
 		return "", fmt.Errorf("repair or remove the invalid local connector file first")
 	} else if !os.IsNotExist(err) {
@@ -114,7 +137,7 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 		Secret      string        `json:"secret"`
 		ApprovalURL string        `json:"approval_url"`
 	}
-	if err := client.Request(ctx, "POST", "/api/v1/connectors", nil, map[string]any{"name": name, "provider": "eagent", "requested_grants": []control.Grant{grant}}, &response, 0); err != nil {
+	if err := client.Request(ctx, "POST", "/api/v1/connectors", nil, map[string]any{"name": name, "provider": "eagent", "requested_grants": []control.Grant{grant}, "connect": true}, &response, 0); err != nil {
 		return "", err
 	}
 	if response.Connector.ID == "" || !strings.HasPrefix(response.Secret, "fcc_") {
@@ -124,7 +147,7 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 	if err := writeJSONAtomic(path, local); err != nil {
 		return "", err
 	}
-	return local.ApprovalURL, nil
+	return strings.TrimRight(client.BaseURL, "/") + "/", nil
 }
 
 // startConnectorAt elects one process per explicitly paired resource.
@@ -140,11 +163,16 @@ func startConnectorAt(ctx context.Context, project, session, path, lockPath stri
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			if _, err := os.Stat(path); err == nil {
+			if _, err := os.Stat(path); err == nil || session == "" {
 				lockCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
 				unlock, err := filelock.Acquire(lockCtx, lockPath)
 				stop()
 				if err == nil {
+					if session == "" {
+						connectCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+						autoConnectProject(connectCtx, project)
+						stop()
+					}
 					err = runConnectorAt(ctx, project, session, path, logf)
 					unlock()
 					if err != nil && ctx.Err() == nil {
@@ -194,6 +222,10 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 	}
 	lastVersion := ""
 	resourceID := ""
+	var linked []settingsThread
+	var account *finalechat.Client
+	var discovered time.Time
+	sitesVersion := map[string]string{}
 	for ctx.Err() == nil {
 		var status struct {
 			Connector connectorInfo `json:"connector"`
@@ -233,6 +265,25 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 		if err != nil {
 			return err
 		}
+		if session == "" && time.Since(discovered) > time.Minute {
+			discovered = time.Now()
+			account, _ = settingsAccount(project)
+			if account != nil && strings.TrimRight(account.BaseURL, "/") == strings.TrimRight(local.BaseURL, "/") {
+				discoverCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+				linked = settingsThreads(discoverCtx, project, account)
+				stop()
+			} else {
+				account = nil
+				linked = nil
+			}
+		}
+		if session == "" {
+			ids := []string{}
+			for _, thread := range linked {
+				ids = append(ids, thread.External)
+			}
+			view.Snapshot.Details["thread_external_ids"] = ids
+		}
 		var published struct {
 			Resource resourceInfo `json:"resource"`
 		}
@@ -240,6 +291,8 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 		// changed. Snapshot timestamps are kept distinct from heartbeat liveness.
 		descriptorRaw, _ := json.Marshal(view.Descriptor)
 		publicationVersion := fmt.Sprintf("%s:%t:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptorRaw))
+		hints, _ := json.Marshal(linked)
+		publicationVersion += artifact.Digest(hints)
 		if publicationVersion != lastVersion {
 			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": view.Generation}, &published, 0); err != nil {
 				return err
@@ -248,6 +301,26 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 			resourceID = published.Resource.ID
 		}
 		if resourceID != "" && session == "" {
+			if account != nil {
+				// Bound each publication pass so command delivery stays responsive.
+				publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+				for _, thread := range linked {
+					if publishCtx.Err() != nil {
+						break
+					}
+					if sitesVersion[thread.External] == publicationVersion {
+						continue
+					}
+					err := publishSettingsSite(publishCtx, project, "thread-settings-v1", thread, view, account, client, base, resourceID)
+					if err == nil {
+						sitesVersion[thread.External] = publicationVersion
+					}
+					if err != nil && ctx.Err() == nil {
+						logf("settings website: %v", err)
+					}
+				}
+				stop()
+			}
 			if err := bindPublished(ctx, client, base, project, resourceID); err != nil && ctx.Err() == nil {
 				logf("settings artifact binding: %v", err)
 			}

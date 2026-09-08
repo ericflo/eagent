@@ -166,19 +166,29 @@ function draw() {
   const y = old ? old.scrollTop : 0;
   const pane = h('div', {class: 'pane cfgpage'});
   const body = h('div', {class: 'cfg-body'});
-  body.append(header());
+  if (!X.threadControls) body.append(header());
   const rz = E.c.resolution;
   const fileBroken = !!rz.file.parse_error || (rz.load_error && rz.file.path && rz.load_error.startsWith(rz.file.path));
   if (fileBroken) body.append(repairBanner());
   else if (rz.load_error) body.append(h('div', {class: 'banner warn'}, h('b', null, 'This configuration cannot start a session as it stands.'), h('div', {class: 'sub'}, rz.load_error)));
+  if (X.threadControls) {
+    const tab = E.tab || 'Models';
+    body.append(h('nav', {class:'settings-tabs', 'aria-label':'Settings categories'}, ...['Models','Behavior','Prompts','Advanced'].map(name => h('button', {'aria-pressed':String(tab===name), onclick:()=>{E.tab=name;draw();}}, name))));
+    body.append(h('div',{class:'settings-intro'},h('h2',null,tab==='Models'?'Choose how your agent thinks':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give your agent direction':'Fine-tune your setup'),h('p',null,tab==='Models'?'Pick a model and reasoning effort for each role.':tab==='Behavior'?'Adjust session limits, narration, and phone updates.':tab==='Prompts'?'Customize the instructions behind each role.':'Presets, saved configurations, and detailed overrides.')));
+    if(tab==='Models') body.append(h('div',{class:'routes'},...ACTORS.map(routeCard)));
+    if(tab==='Behavior') body.append(sessionCard(),narratorCard(),phoneCard());
+    if(tab==='Prompts') body.append(promptsCard());
+    if(tab==='Advanced') body.append(quickStart(),advancedCard());
+  } else {
   body.append(quickStart());
   body.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
   body.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
   body.append(h('div', {class: 'grid2'}, phoneCard(), promptsCard()));
   body.append(advancedCard());
+  }
   // The bar is a direct child of the scroller with no padding between them,
   // so sticky positioning can bring it right to the bottom edge.
-  pane.append(body, saveBar());
+  pane.append(body); if(!X.threadControls) pane.append(saveBar());
   main.replaceChildren(pane);
   pane.scrollTop = y;
 }
@@ -269,7 +279,7 @@ function routeCard(actor) {
   const prov = providerOf(a.base_url);
   const locked = f => lockedField(ptr(f));
   const card = h('div', {class: 'card route ' + actor.key});
-  card.append(h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), actor.name), h('p', {class: 'sub role'}, actor.role)));
+  card.append(h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), actor.name), h('p', {class: 'sub role'}, X.threadControls ? ({orchestrator:'Plans the work and coordinates the team.',task:'Handles individual tasks and tools.',narrator:'Keeps you informed as work progresses.'}[actor.key]) : actor.role)));
 
   // Model
   const pickBtn = h('button', {class: 'pick', disabled: locked('model') || locked('base_url'), onclick: () => openPicker(card, a, actor.key, false)},
@@ -299,12 +309,13 @@ function routeCard(actor) {
   if (t && t.result) card.append(resultLine(t.result));
 
   // Fallback
-  card.append(fallbackLine(card, a, actor.key));
+  if(!X.threadControls) card.append(fallbackLine(card, a, actor.key));
 
   // Advanced
   const open = !!E.open[actor.key];
   const det = h('details', {open}, h('summary', {onclick: () => { E.open[actor.key] = !open; }}, 'Advanced'));
   const num = (f, lbl, help, attrs) => field(lbl, [h('input', Object.assign({type: 'number', value: a[f] || '', disabled: locked(f), onchange: ev => { const v = parseInt(ev.target.value, 10); if (isNaN(v)) delete a[f]; else a[f] = v; rerender(); }}, attrs || {}))], [srcNode(ptr(f)), help ? h('span', {class: 'src'}, help) : null, ...problemNodes(ptr(f))]);
+  if(X.threadControls) det.append(fallbackLine(card, a, actor.key));
   det.append(h('div', {class: 'adv'},
     num('max_tokens', 'Max output tokens', 'per call; reasoning counts toward it on most providers'),
     num('context_tokens', 'Context window', 'what the harness assumes when deciding to start a fresh context'),
@@ -601,7 +612,7 @@ function saveBundleDialog() {
 }
 
 window.addEventListener('beforeunload', ev => { if (E && changes().length) { ev.preventDefault(); ev.returnValue = ''; } });
-window.EagentConfig = {render, dirty: () => !!(E && (changes().length || E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw)), reset: () => { E = null; },
+window.EagentConfig = {render, stageDraft: () => E && (E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw ? api('/api/config/raw',{method:'PUT',body:JSON.stringify({raw:E.rawDraft,if_match:E.etag})}) : api('/api/config', {method:'PUT',body:JSON.stringify({config:E.cfg,base_preset:E.base,mode:E.mode,if_match:E.etag})})), dirty: () => !!(E && (changes().length || E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw)), reset: () => { E = null; },
   draftToken: () => E ? X.canonical({config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag, raw: E.rawDraft}) : '',
   routeResult: (key, r) => { if (!E) return; E.tests[key + (r.route === 'fallback' ? ':fb' : '')] = {busy: false, result: r}; if (r.base_url && r.model) E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage?.output, reasoning: r.usage?.reasoning, error: r.error, at: r.at}; rerender(); }
 };

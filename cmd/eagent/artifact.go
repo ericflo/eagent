@@ -26,14 +26,14 @@ func cmdConnector(project string, args []string) int {
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Println("Review and approve this project's settings access:", url)
+		fmt.Println("Connected. Open Settings in your FinaleChat conversation:", url)
 		return 0
 	case "pair-session":
 		url, err := integration.PairSession(ctx, project, args[1])
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Println("Review and approve this session’s live settings access:", url)
+		fmt.Println("Connected. Open Settings in this session’s FinaleChat conversation:", url)
 		return 0
 	case "run":
 		fmt.Println("Settings connector running. Press Ctrl-C to stop.")
