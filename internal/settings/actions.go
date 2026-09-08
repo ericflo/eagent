@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
@@ -118,7 +119,7 @@ func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, gra
 	if err != nil {
 		return change, err
 	}
-	change.Before, err = os.ReadFile(path)
+	change.Before, err = boundedfile.Read(path, 1<<20)
 	if err != nil && !os.IsNotExist(err) {
 		return change, err
 	}
@@ -134,7 +135,7 @@ func (change ResourceChange) State(editor *config.Editor) (before, after bool, e
 	if err != nil {
 		return false, false, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := boundedfile.Read(path, 1<<20)
 	if err != nil && !os.IsNotExist(err) {
 		return false, false, err
 	}

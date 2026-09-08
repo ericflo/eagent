@@ -6,8 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
-	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -202,7 +202,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	env := config.EnvOverrides()
 	if len(env) > 0 && !b.AllowShadow {
 		onDisk := map[string]json.RawMessage{}
-		if raw, err := os.ReadFile(config.File(s.Project)); err == nil {
+		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
 			_ = json.Unmarshal(raw, &onDisk)
 		}
 		var ptrs []string

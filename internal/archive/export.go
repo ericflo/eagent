@@ -216,19 +216,28 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 	}
 	defer editor.Close()
 	view, err := service.RemoteSnapshot(service.Grant())
+	var editorData map[string]any
+	if err == nil {
+		editorData, err = service.EditorData()
+	}
 	if err != nil {
-		return nil, err
-	}
-	out.Manifest.Dataset["settings_version"] = view.Snapshot.Version
-	if err := out.addJSON("settings/state.json", "context", view); err != nil {
-		return nil, err
-	}
-	editorData, err := service.EditorData()
-	if err != nil {
-		return nil, err
-	}
-	if err := out.addJSON("settings/editor.json", "context", editorData); err != nil {
-		return nil, err
+		// Configuration is optional context. Preserve the native history even
+		// when defaults cannot be resolved, without publishing partial values
+		// or an error string that might contain raw configuration secrets.
+		out.Manifest.SettingsEntrypoint = ""
+		out.Manifest.Dataset["settings_availability"] = "unavailable"
+		if err := out.addJSON("context/settings-unavailable.json", "context", map[string]any{"available": false, "message": "Project settings could not be captured. Repair the local configuration to include settings in a future archive. Native session files remain recoverable."}); err != nil {
+			return nil, err
+		}
+	} else {
+		out.Manifest.Dataset["settings_availability"] = "captured"
+		out.Manifest.Dataset["settings_version"] = view.Snapshot.Version
+		if err := out.addJSON("settings/state.json", "context", view); err != nil {
+			return nil, err
+		}
+		if err := out.addJSON("settings/editor.json", "context", editorData); err != nil {
+			return nil, err
+		}
 	}
 	if status, err := runtimecontrol.ReadStatus(project, info.ID); err == nil {
 		live, err := runtimecontrol.View(project, info.ID, status.Generation, status.Values, status.AvailableUntil.After(time.Now()))
@@ -254,6 +263,9 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 		return nil, err
 	}
 	for _, surface := range []struct{ asset, path string }{{"viewer.html", "index.html"}, {"settings.html", "settings/index.html"}} {
+		if surface.path == "settings/index.html" && out.Manifest.SettingsEntrypoint == "" {
+			continue
+		}
 		page, err := assets.ReadFile("assets/" + surface.asset)
 		if err != nil {
 			return nil, err

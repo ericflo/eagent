@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/llm"
 )
@@ -596,7 +597,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 }
 
 func readJSONMap(path string) (map[string]json.RawMessage, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := boundedfile.Read(path, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -686,7 +687,7 @@ func loadInstructions(project string) string {
 		filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md"),
 		filepath.Join(project, "AGENTS.md"),
 	} {
-		if raw, err := os.ReadFile(name); err == nil && strings.TrimSpace(string(raw)) != "" {
+		if raw, err := boundedfile.Read(name, 1<<20); err == nil && strings.TrimSpace(string(raw)) != "" {
 			return strings.TrimSpace(string(raw))
 		}
 	}
@@ -765,6 +766,9 @@ func Write(project string, cfg Config) (string, error) {
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return path, err
+	}
+	if len(raw)+1 > 1<<20 {
+		return path, fmt.Errorf("configuration exceeds 1 MiB")
 	}
 	return path, filelock.CreateFile(path, append(raw, '\n'), 0o644)
 }

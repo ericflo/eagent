@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
@@ -146,7 +147,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	names, _ := config.ListBundles(s.Project)
 	for _, name := range names {
-		if b, err := os.ReadFile(config.BundlePath(s.Project, name)); err == nil {
+		if b, err := boundedfile.Read(config.BundlePath(s.Project, name), 1<<20); err == nil {
 			contextFiles["bundle:"+name] = artifact.Digest(b)
 		}
 	}

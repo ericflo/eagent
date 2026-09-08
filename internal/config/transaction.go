@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/filelock"
 )
 
@@ -99,7 +100,7 @@ func (e *Editor) WriteRelated(kind, name string, raw []byte, remove bool) (strin
 		}
 		return path, nil
 	}
-	previous, err := os.ReadFile(path)
+	previous, err := boundedfile.Read(path, 1<<20)
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}

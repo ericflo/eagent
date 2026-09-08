@@ -3,10 +3,10 @@ package settings
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
@@ -40,23 +40,7 @@ func (s *Service) EditorData() (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			f, err := root.Open(rel)
-			if err != nil {
-				return nil, err
-			}
-			defer f.Close()
-			info, err := f.Stat()
-			if err != nil {
-				return nil, err
-			}
-			if !info.Mode().IsRegular() || info.Size() > 1<<20 {
-				return nil, fmt.Errorf("bundle is not a bounded regular file")
-			}
-			raw, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
-			if len(raw) > 1<<20 {
-				return nil, fmt.Errorf("bundle exceeds 1 MiB")
-			}
-			return raw, err
+			return boundedfile.ReadRoot(root, rel, 1<<20)
 		}()
 		cfg, loadErr := config.BundleFromBytes(name, raw)
 		if readErr != nil || loadErr != nil {

@@ -455,8 +455,13 @@ func IsArtifactEnabled(project string) bool {
 func sourceSignature(project string, info store.Info, version string) (string, error) {
 	service := &settings.Service{Project: project}
 	view, err := service.RemoteSnapshot(service.Grant())
-	if err != nil {
-		return "", err
+	settingsVersion := "unavailable"
+	var editorData map[string]any
+	if err == nil {
+		editorData, err = service.EditorData()
+		if err == nil {
+			settingsVersion = view.Snapshot.Version
+		}
 	}
 	files := map[string]any{}
 	if status, err := runtimecontrol.ReadStatus(project, info.ID); err == nil {
@@ -492,10 +497,6 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 	if err != nil {
 		return "", err
 	}
-	editorData, err := service.EditorData()
-	if err != nil {
-		return "", err
-	}
-	raw, _ := json.Marshal(map[string]any{"files": files, "settings": view.Snapshot.Version, "producer": version, "viewer": archive.ViewerFingerprint(), "editor": editorData})
+	raw, _ := json.Marshal(map[string]any{"files": files, "settings": settingsVersion, "producer": version, "viewer": archive.ViewerFingerprint(), "editor": editorData})
 	return artifact.Digest(raw), nil
 }

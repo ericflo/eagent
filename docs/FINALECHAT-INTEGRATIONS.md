@@ -81,6 +81,8 @@ Setting only `finalechat.enabled: false` disables ordinary chat mirroring. It do
 
 ## Development checkpoint
 
+Local export preserves native session files even when project defaults are malformed or unavailable. Such archives omit the settings editor and include `context/settings-unavailable.json`; they do not present partially resolved defaults as known values. Configuration, bundle, prompt and instruction reads are limited to regular files of at most 1 MiB. Exporting is independent of credentials. Network publication still requires a valid configuration so the publisher can resolve its opt-in, token reference and destination without guessing; repair that configuration before retrying publication.
+
 Run `EAGENT_FINALECHAT=off go test ./...` and `EAGENT_FINALECHAT=off go vet ./...`. The new integration tests use only loopback HTTP fixtures. `make build`, `make test`, `make install`, and `make release` rebuild the matching embedded reducer first. `python3 scripts/build-replay.py --check` verifies it against the current source and Go toolchain. Viewer content hashes also participate in publication, so updated renderer assets are published even for development builds.
 
 `make test-browser` generates a synthetic archive and opens its actual settings website in Chromium, both in an opaque iframe and directly from disk. It tests typed changes, prompts/bundles, saved-route actions, grants, stale proposals and delayed acknowledgements. It uses a temporary loopback fixture with no account, provider calls, or native user settings. Set `FINALECHAT_PLAYWRIGHT_MODULE` to an installed Playwright module, for example `/path/to/tools/node_modules/playwright/index.mjs`.

@@ -183,6 +183,43 @@ func publicationRecord(t *testing.T, project, id string) publication {
 	return record
 }
 
+func TestSourceSignatureTracksRecoveryOfUnavailableSettings(t *testing.T) {
+	project := t.TempDir()
+	session, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.Resolve(store.Root(project), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := config.File(project)
+	if err := os.WriteFile(path, []byte(`{"broken":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	unavailable, err := sourceSignature(project, info, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := sourceSignature(project, info, "test")
+	if err != nil || again != unavailable {
+		t.Fatalf("unstable unavailable capture: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := sourceSignature(project, info, "test")
+	if err != nil || repaired == unavailable {
+		t.Fatalf("repair not detected: %v", err)
+	}
+}
+
 func TestPublisherReconcilesLostAcknowledgementBeforeNewCapture(t *testing.T) {
 	f, project, session := newPublicationFixture(t)
 	f.failAfter = true

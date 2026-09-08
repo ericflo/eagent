@@ -17,6 +17,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/filelock"
 	"os"
@@ -54,7 +55,7 @@ func Load(project string) (*Set, error) {
 		s.Source[name] = "built-in"
 		if project != "" {
 			p := filepath.Join(Dir(project), name)
-			if over, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(over)) != "" {
+			if over, err := boundedfile.Read(p, 1<<20); err == nil && strings.TrimSpace(string(over)) != "" {
 				s.text[name] = string(over)
 				s.Source[name] = p
 			}

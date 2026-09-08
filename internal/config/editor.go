@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/ericflo/eagent/internal/boundedfile"
 )
 
 // This file is what the web configuration editor stands on: an explanation
@@ -83,7 +85,7 @@ func Resolve(project, preset, bundle string) Resolution {
 	path := File(project)
 	res.File.Path = path
 	fileMap := map[string]json.RawMessage{}
-	if raw, err := os.ReadFile(path); err == nil {
+	if raw, err := boundedfile.Read(path, 1<<20); err == nil {
 		res.File.Exists = true
 		res.File.Raw = string(raw)
 		res.File.ETag = etag(raw)
@@ -96,6 +98,8 @@ func Resolve(project, preset, bundle string) Resolution {
 				_ = json.Unmarshal(raw, &res.File.Preset)
 			}
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		res.LoadError = err.Error()
 	}
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
@@ -323,7 +327,7 @@ func BundleAlone(project, name string) (Config, error) {
 	if !validName(name) {
 		return Config{}, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
 	}
-	raw, err := os.ReadFile(BundlePath(project, name))
+	raw, err := boundedfile.Read(BundlePath(project, name), 1<<20)
 	if err != nil {
 		return Config{}, err
 	}
@@ -457,7 +461,7 @@ func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 	var res SaveResult
 	res.Path = path
 	existing := map[string]json.RawMessage{}
-	prev, err := os.ReadFile(path)
+	prev, err := boundedfile.Read(path, 1<<20)
 	switch {
 	case err == nil:
 		res.Previous = string(prev)
@@ -505,7 +509,7 @@ func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) 
 	path := File(project)
 	var res SaveResult
 	res.Path = path
-	prev, err := os.ReadFile(path)
+	prev, err := boundedfile.Read(path, 1<<20)
 	if err == nil {
 		res.Previous = string(prev)
 		res.PrevETag = etag(prev)
@@ -531,6 +535,9 @@ func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) 
 }
 
 func writeAtomic(path string, raw, prev []byte) error {
+	if len(raw) > 1<<20 {
+		return fmt.Errorf("configuration exceeds 1 MiB")
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
