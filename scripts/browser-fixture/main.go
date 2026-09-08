@@ -53,6 +53,22 @@ func main() {
 	message.Time = start.Time.Add(10 * time.Second)
 	_, err = session.Append(message)
 	must(err)
+	// A task changes state after the selected chat message; historical views
+	// must never show its later report or tool output before they happened.
+	for i, ev := range []event.Event{
+		event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "Inspect saved workflow", Description: "Read the archived task details", Kind: "work"}),
+		event.New(event.ProcStart, event.ActorTask, event.ProcStartData{Handle: "p1", Command: "echo fixture"}),
+		event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "Reading saved evidence", ToolCalls: []event.ToolCall{{ID: "call1", Name: "shell", Args: []byte(`{"command":"echo fixture"}`)}}}),
+		event.New(event.ToolResult, event.ActorTask, event.ToolResultData{CallID: "call1", Name: "shell", Output: "Archived tool output"}),
+		event.New(event.TaskEnd, event.ActorTask, event.TaskEndData{ID: "t1", Status: "completed", Summary: "Archived task result", Turns: 1}),
+	} {
+		ev.Time = start.Time.Add(time.Duration(15+i*2) * time.Second)
+		if ev.Actor == event.ActorTask {
+			ev.Task = "t1"
+		}
+		_, err = session.Append(ev)
+		must(err)
+	}
 	response := event.New(event.Assistant, event.ActorNarrator, event.AssistantData{Model: cfg.Narrator.Model, Host: cfg.Narrator.BaseURL, Text: "Synthetic response", Usage: event.Usage{Input: 1000000, Output: 100000, Cached: 200000}})
 	response.Time = start.Time.Add(30 * time.Second)
 	_, err = session.Append(response)

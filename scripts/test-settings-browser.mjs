@@ -162,13 +162,13 @@ try {
 
   await page.evaluate(() => { document.querySelector('iframe').src = '/viewer'; });
   await frame.locator('#until:not([disabled])').waitFor();
-  await frame.getByRole('button', { name: 'All events', exact: true }).click();
+  await frame.getByRole('button', { name: 'Timeline', exact: true }).click();
   await frame.getByRole('searchbox', { name: 'Search session' }).fill('Synthetic');
   await page.waitForFunction(() => window.inspection?.search === 'Synthetic' && window.inspection?.view === 'events');
   const savedInspection = await page.evaluate(() => window.inspection);
   await page.evaluate(() => { document.querySelector('iframe').src = '/viewer?refresh=1'; });
   await frame.locator('#until:not([disabled])').waitFor();
-  await frame.getByRole('button', { name: 'All events', exact: true, pressed: true }).waitFor();
+  await frame.getByRole('button', { name: 'Timeline', exact: true, pressed: true }).waitFor();
   assert.equal(await frame.getByRole('searchbox', { name: 'Search session' }).inputValue(), savedInspection.search);
   await frame.getByText('2 matching events', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
@@ -181,7 +181,37 @@ try {
   await page.waitForFunction(() => window.revealed?.seq === 2);
   await frame.getByRole('button', { name: 'Show all events', exact: true }).click();
   assert.equal(await frame.locator('#focus-notice').isHidden(), true);
+  assert.equal(await frame.locator('#until').inputValue(), '2', 'clearing the event focus jumped forward in time');
+  await frame.getByRole('button', { name: 'Latest', exact: true }).click();
   console.log('PASS actual eagent viewer focuses a native sequence and requests its matching chat message');
+  // The archive uses the local admin's actual task chart, table and drilldown.
+  await frame.getByRole('button', { name: 'Tasks', exact: true }).click();
+  await frame.locator('table.tasks tr.row').first().click();
+  await frame.locator('#taskdetail').getByText('Archived task result', { exact: true }).waitFor();
+  await frame.locator('#taskdetail').getByText('Archived tool output', { exact: true }).waitFor();
+  assert.equal(await frame.locator('svg.gantt').count(), 1);
+  await page.waitForFunction(() => window.inspection?.admin?.task === 't1');
+  await page.evaluate(() => { window.anchor=null; document.querySelector('iframe').src='/viewer?task-refresh=1'; });
+  await frame.locator('#taskdetail').getByText('Archived task result', { exact: true }).waitFor();
+  await frame.getByRole('heading', { name: /Processes/ }).waitFor();
+  assert.equal(await frame.getByRole('button', { name: 'Resume', exact: true }).count(), 0);
+  await frame.locator('#until').evaluate(el => { el.value = '3'; el.dispatchEvent(new Event('change', { bubbles:true })); });
+  await frame.locator('table.tasks').getByText('queued', { exact: true }).waitFor();
+  assert.equal(await frame.getByText('Archived task result', { exact: true }).count(), 0);
+  assert.equal(await frame.getByText('Archived tool output', { exact: true }).count(), 0);
+  await frame.locator('#until').evaluate(el => { el.value = '2'; el.dispatchEvent(new Event('change', { bubbles:true })); });
+  await frame.getByText('Nothing delegated yet.', { exact: true }).waitFor();
+  const atMessage = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 2)).result);
+  const atLatest = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 0)).result);
+  assert.ok(!JSON.stringify(atMessage).includes('Synthetic response'));
+  assert.ok(JSON.stringify(atLatest).includes('Synthetic response'));
+  await frame.getByRole('button', { name: 'Chat', exact: true }).click();
+  await frame.locator('#pane .msg.user').getByText('Synthetic browser fixture', { exact: true }).waitFor();
+  assert.equal(await frame.getByRole('textbox', { name: /Message the agent/ }).count(), 0);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(outbound, []);
+  console.log('PASS shared admin charts, task drilldown and tool output; earlier states exclude future tasks, reports and model conversation');
+
 
   // The exact same exported page opens from disk with verified captured data.
   await page.unroute('**/*');

@@ -1,6 +1,8 @@
 /* eagent web UI — vanilla JS, no build step. */
 (() => {
 'use strict';
+const ARCHIVE = window.EagentArchive || null;
+const now = () => ARCHIVE ? ARCHIVE.now() : Date.now();
 
 // ---- tiny helpers ---------------------------------------------------------
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -32,6 +34,7 @@ const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) &
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
 const TOKEN = document.querySelector('meta[name="eagent-token"]')?.content || '';
 async function api(path, opts) {
+  if (ARCHIVE) throw new Error('This saved session is read only.');
   const headers = {'Content-Type': 'application/json'};
   if (opts && opts.method && opts.method !== 'GET') headers['X-Eagent-Token'] = TOKEN;
   const r = await fetch(path, Object.assign({headers}, opts));
@@ -73,10 +76,11 @@ document.addEventListener('click', e => {
 });
 
 // ---- state ------------------------------------------------------------------
-const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: localStorage.getItem('eagent.activity') === '1', filters: new Set(), search: '', taskSel: null };
+const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: !ARCHIVE && localStorage.getItem('eagent.activity') === '1', filters: new Set(), search: '', taskSel: null };
 
 let lastHash = location.hash;
 function route() {
+  if (ARCHIVE) return;
   if (window.EagentConfig && lastHash.startsWith('#/config') && !location.hash.startsWith('#/config') && window.EagentConfig.dirty()) {
     if (!confirm('You have unsaved configuration changes. Leave and lose them?')) { history.replaceState(null, '', lastHash); return; }
     window.EagentConfig.reset();
@@ -192,10 +196,12 @@ function renderTab() {
   if (S.tab === 'chat') renderChat(pane);
   else if (S.tab === 'tasks') renderTasks(pane);
   else if (S.tab === 'timeline') renderTimeline(pane);
+  if (ARCHIVE) ARCHIVE.changed?.();
 }
 
 // ---- live strip + title -------------------------------------------------------
 function renderLive() {
+  if (ARCHIVE) return;
   const el = $('#live'); const d = S.detail;
   const w = $('#working');
   let busy = false;
@@ -228,6 +234,7 @@ function renderChat(pane) {
   for (const ev of S.events) { const n = chatNode(ev); if (n) col.append(n); }
   col.append(h('div', {class: 'working hidden', id: 'working'}, h('span', {class: 'dots'}, h('i'), h('i'), h('i')), h('span', {class: 'wtext'})));
   const scroll = h('div', {class: 'scroll'}, col);
+  if (ARCHIVE) { pane.replaceChildren(scroll); scroll.scrollTop = scroll.scrollHeight; return; }
   const composer = h('div', {class: 'composer'}, h('div', {class: 'col'},
     h('div', {class: 'pending', id: 'pending'}),
     h('form', {onsubmit: e => { e.preventDefault(); send(); }},
@@ -247,7 +254,7 @@ function renderChat(pane) {
 function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
   pend.innerHTML = '';
-  if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {onclick: () => answer(o)}, o)));
+  if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o)));
   hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer.' : 'Delivered to the running session; the agent reads it at its next step.') : 'The session is not running; sending a message resumes it here.';
 }
 async function send() {
@@ -271,7 +278,7 @@ function chatNode(ev) {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
       return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
         h('div', {class: 'qcard'}, h('div', {class: 'text', html: md(d.text)}),
-          answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {onclick: () => answer(o)}, o))))));
+          answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o))))));
     }
     case 'session.start': { const m = d.models || {}; return h('div', {class: 'notice'}, `session started ${fmtDate(ev.ts)} · ${['orchestrator', 'task', 'narrator'].map(a => (m[a] || '?').split('/').pop()).join(' / ')}` + (d.config ? ` · ${d.config}` : '')); }
     case 'session.resume': return h('div', {class: 'notice'}, 'session resumed ' + fmtDate(ev.ts) + (d.closed && d.closed.length ? ' · ' + d.closed.join('; ') : ''));
@@ -294,6 +301,7 @@ function chatNode(ev) {
 }
 function attachmentsNode(atts) {
   if (!atts || !atts.length) return null;
+  if (ARCHIVE) return ARCHIVE.attachments(atts);
   const base = (a) => a.path.split('/').pop();
   const url = (a) => `/api/sessions/${S.sid}/attachments/${encodeURIComponent(base(a))}`;
   return h('div', {class: 'atts'}, ...atts.map(a => a.kind === 'image' || /^image\//.test(a.content_type)
@@ -313,7 +321,7 @@ function tasksDigest(d) {
 // re-render (every status frame while work runs) does not fold it back.
 function det(key, defaultOpen, ...children) {
   const open = S.open.has(key) ? true : S.closed.has(key) ? false : !!defaultOpen;
-  return h('details', {open, ontoggle: e => { if (e.target.open) { S.open.add(key); S.closed.delete(key); } else { S.closed.add(key); S.open.delete(key); } }}, ...children);
+  return h('details', {open, ontoggle: e => { if (e.target.open) { S.open.add(key); S.closed.delete(key); } else { S.closed.add(key); S.open.delete(key); } if (ARCHIVE) ARCHIVE.changed?.(); }}, ...children);
 }
 function renderTasks(pane) {
   pane.classList.remove('chat'); pane.style.padding = '';
@@ -331,7 +339,7 @@ function renderTasks(pane) {
       h('td', {class: 'num'}, t.id), h('td', {class: 'wrap'}, t.title || '(untitled)', t.kind === 'dossier' ? h('span', {class: 'badge', style: 'margin-left:6px'}, 'notes') : null),
       h('td', null, h('span', {class: 'badge ' + t.status}, t.status)), h('td', {class: 'num'}, t.turns),
       h('td', {class: 'num'}, `${k(t.usage.input)} · ${k(t.usage.output)} (${Math.round(t.usage.cache_ratio * 100)}%)`),
-      h('td', {class: 'num'}, when(t.ended) && when(t.created) ? dur(when(t.ended) - when(t.created)) : when(t.created) ? dur(Date.now() - when(t.created)) + '…' : '')))));
+      h('td', {class: 'num'}, when(t.ended) && when(t.created) ? dur(when(t.ended) - when(t.created)) : when(t.created) ? dur(Math.max(0, now() - when(t.created))) + (ARCHIVE ? '' : '…') : '')))));
   const parts = [usage, chartsCard(d, pane.clientWidth)];
   parts.push(h('div', {class: 'card'}, h('h3', null, 'Tasks'), d.tasks.length ? table : h('div', {class: 'sub'}, 'Nothing delegated yet.')));
   if (d.procs.length) { const procs = S.allProcs ? d.procs : d.procs.slice(-25); parts.push(h('div', {class: 'card'}, h('h3', null, 'Processes', h('span', {class: 'sub'}, `${d.procs.length}`), d.procs.length > 25 ? h('button', {class: 'ghost small', style: 'margin-left:auto', onclick: () => { S.allProcs = !S.allProcs; renderTab(); }}, S.allProcs ? 'show recent' : 'show all') : null), h('table', null, h('tbody', null, ...procs.map(p => h('tr', null, h('td', {class: 'num'}, p.handle), h('td', null, h('span', {class: 'badge ' + p.status + (p.status !== 'running' && p.exit_code !== 0 ? ' failed' : '')}, p.status + (p.status !== 'running' ? ` ${p.exit_code}` : ''))), h('td', {class: 'nowrap'}, p.task || p.actor), h('td', {class: 'wrap'}, h('code', {class: 'inline'}, clip(p.command, 120))))))))); }
@@ -531,6 +539,7 @@ function closeModal() { $('#modal').classList.add('hidden'); }
 
 // ---- keyboard --------------------------------------------------------------------------------
 document.addEventListener('keydown', e => {
+  if (ARCHIVE) return;
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
   if (e.key === 'Escape') { closeModal(); return; }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -560,6 +569,27 @@ window.__eagent = {$, h, api, toast, toastHost, showModal, closeModal, newSessio
 
 let resizeTimer = null;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (S.sid && S.tab === 'tasks') renderTab(); }, 150); });
+
+// The portable archive uses these exact session renderers and stylesheet.
+// It supplies replayed data directly; no local server or browser storage is used.
+if (ARCHIVE) {
+  window.EagentSessionView = {
+    state: () => ({task: S.taskSel, open: [...S.open].slice(-200), closed: [...S.closed].slice(-200)}),
+    restore(saved) {
+      S.taskSel = typeof saved?.task === 'string' ? saved.task : null;
+      for (const key of ['open', 'closed']) S[key] = new Set(Array.isArray(saved?.[key]) ? saved[key].filter(v => typeof v === 'string' && v.length < 200).slice(-200) : []);
+    },
+    render(pane, detail, events, tab) {
+      S.sid = detail.id; S.detail = {...detail, alive: false}; S.events = events;
+      S.tab = tab; S.search = ''; S.filters.clear();
+      if (!detail.tasks.some(t => t.id === S.taskSel)) S.taskSel = null;
+      if (tab === 'chat') renderChat(pane);
+      else if (tab === 'tasks') renderTasks(pane);
+      else renderTimeline(pane);
+    },
+  };
+  return;
+}
 
 // ---- boot --------------------------------------------------------------------------------
 $('#btn-new').onclick = () => newSessionDialog();

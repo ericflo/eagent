@@ -82,16 +82,27 @@ func main() {
 		return projection.Detail(captured, current), nil
 	})
 	register("eagentReplayConversation", func(args []js.Value) (any, error) {
-		if len(args) != 2 {
-			return nil, fmt.Errorf("actor and task required")
+		if len(args) < 2 || len(args) > 3 {
+			return nil, fmt.Errorf("actor, task and optional event sequence required")
+		}
+		current := st
+		if len(args) == 3 && args[2].Type() == js.TypeNumber && args[2].Int() > 0 {
+			var prefix []event.Event
+			for _, ev := range st.Events {
+				if ev.Seq > int64(args[2].Int()) {
+					break
+				}
+				prefix = append(prefix, ev)
+			}
+			current = state.Replay(prefix)
 		}
 		switch args[0].String() {
 		case "orchestrator":
-			return st.OrchestratorView(), nil
+			return current.OrchestratorView(), nil
 		case "task":
-			return st.TaskView(args[1].String()), nil
+			return current.TaskView(args[1].String()), nil
 		case "narrator":
-			return st.NarratorView(nil), nil
+			return current.NarratorView(nil), nil
 		}
 		return nil, fmt.Errorf("unknown actor")
 	})

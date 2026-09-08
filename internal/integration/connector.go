@@ -194,6 +194,8 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 	return runConnectorAt(ctx, project, "", connectorPath(project), logf)
 }
 
+var errConnectorOccupied = errors.New("another settings connection is still active; waiting for it to disconnect")
+
 func runConnectorAt(ctx context.Context, project, session, path string, logf func(string, ...any)) error {
 	if finalechat.Disabled() {
 		return finalechat.ErrDisabled
@@ -211,6 +213,44 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 	client := &finalechat.Client{BaseURL: local.BaseURL, Token: local.Secret, UserAgent: "eagent-settings/1"}
 	base := "/api/v1/connectors/" + url.PathEscape(local.ID)
 	instance := randomID()
+	heartbeatAttempted := false
+	// Retain the same identity and local election lock across network retries.
+	// Otherwise a dropped response makes us conflict with our own live lease.
+	defer func() {
+		if !heartbeatAttempted {
+			return
+		}
+		releaseCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		_ = client.Request(releaseCtx, "POST", base+"/release", nil, map[string]any{"instance": instance}, nil, 0)
+	}()
+	lastError := ""
+	for ctx.Err() == nil {
+		err := runConnectorConnection(ctx, project, session, local, client, base, instance, &heartbeatAttempted, logf)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, finalechat.ErrDisabled) {
+			return err
+		}
+		var apiErr *finalechat.Error
+		if errors.As(err, &apiErr) && !apiErr.Temporary() && apiErr.Status != 409 {
+			return err
+		}
+		if err != nil && err.Error() != lastError {
+			lastError = err.Error()
+			logf("settings connector: %v (will retry)", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+	return ctx.Err()
+}
+
+func runConnectorConnection(ctx context.Context, project, session string, local connectorConfig, client *finalechat.Client, base, instance string, heartbeatAttempted *bool, logf func(string, ...any)) error {
 	service := &settings.Service{Project: project}
 	expectedGrant := service.Grant()
 	if session != "" {
@@ -252,7 +292,12 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 		if grant == nil {
 			return fmt.Errorf("this connector has no grant for this project")
 		}
+		*heartbeatAttempted = true
 		if err := client.Request(ctx, "POST", base+"/heartbeat", nil, map[string]any{"instance": instance}, nil, 0); err != nil {
+			var apiErr *finalechat.Error
+			if errors.As(err, &apiErr) && apiErr.Status == 409 {
+				return errConnectorOccupied
+			}
 			return err
 		}
 		var view settings.RemoteView

@@ -84,8 +84,10 @@ func TestKillSwitchOverridesArtifactOptInAndStoredPairing(t *testing.T) {
 	if !IsArtifactEnabled(project) {
 		t.Fatal("chat mirroring preference disabled artifacts")
 	}
-	if err := RunConnector(context.Background(), project, nil); err == nil || errors.Is(err, finalechat.ErrDisabled) {
-		t.Fatalf("expected the fixture server's response, got %v", err)
+	ctx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer stop()
+	if err := RunConnector(ctx, project, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected cancellation during transient retry, got %v", err)
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("expected one settings request with mirroring disabled, got %d", n)

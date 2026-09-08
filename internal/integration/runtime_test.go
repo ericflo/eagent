@@ -77,7 +77,7 @@ func TestRuntimeConnectorPublishesDeliversAndReconciles(t *testing.T) {
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/api/v1/connectors/connector":
 			response = map[string]any{"connector": connectorInfo{ID: "connector", State: "active", Grants: []control.Grant{grant}}}
-		case strings.HasSuffix(r.URL.Path, "/heartbeat"), strings.HasSuffix(r.URL.Path, "/renew"):
+		case strings.HasSuffix(r.URL.Path, "/heartbeat"), strings.HasSuffix(r.URL.Path, "/renew"), strings.HasSuffix(r.URL.Path, "/release"):
 		case strings.Contains(r.URL.Path, "/resources/"):
 			var body struct {
 				Descriptor control.Descriptor `json:"descriptor"`

@@ -271,7 +271,7 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 			return nil, err
 		}
 		page = bytes.Replace(page, []byte("/* FINALE_ARTIFACT_SDK */"), js, 1)
-		for marker, name := range map[string]string{"/* EAGENT_EDITOR_STYLE */": "style.css", "/* EAGENT_CONFIG_EDITOR */": "config.js", "/* EAGENT_SETTINGS_TRANSPORT */": "artifact-settings.js"} {
+		for marker, name := range map[string]string{"/* EAGENT_EDITOR_STYLE */": "style.css", "/* EAGENT_SESSION_APP */": "app.js", "/* EAGENT_CONFIG_EDITOR */": "config.js", "/* EAGENT_SETTINGS_TRANSPORT */": "artifact-settings.js"} {
 			if bytes.Contains(page, []byte(marker)) {
 				data, err := webstatic.Files.ReadFile(name)
 				if err != nil {
