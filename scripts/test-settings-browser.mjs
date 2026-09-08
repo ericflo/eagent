@@ -201,6 +201,7 @@ try {
   assert.equal(await frame.getByText('Archived tool output', { exact: true }).count(), 0);
   await frame.locator('#until').evaluate(el => { el.value = '2'; el.dispatchEvent(new Event('change', { bubbles:true })); });
   await frame.getByText('Nothing delegated yet.', { exact: true }).waitFor();
+  assert.equal(await frame.getByRole('combobox', { name: 'Task', exact: true }).locator('option').count(), 1, 'task filter exposed future tasks');
   const atMessage = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 2)).result);
   const atLatest = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 0)).result);
   assert.ok(!JSON.stringify(atMessage).includes('Synthetic response'));
