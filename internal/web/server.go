@@ -27,13 +27,15 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/projection"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -158,99 +160,19 @@ func alive(sessionPath string) bool {
 
 // ---- sessions ---------------------------------------------------------------
 
-// SessionSummary is what the list and detail endpoints return.
-type SessionSummary struct {
-	ID           string            `json:"id"`
-	Tokens       int               `json:"tokens"`   // input tokens across all actors
-	CostUSD      float64           `json:"cost_usd"` // estimate at list prices; 0 when a model is unknown
-	Priced       bool              `json:"priced"`
-	Duration     float64           `json:"duration_s"`
-	Started      time.Time         `json:"started"`
-	Modified     time.Time         `json:"modified"`
-	Status       string            `json:"status"` // running | idle | done | awaiting-input | interrupted | quit | error
-	Alive        bool              `json:"alive"`
-	Hosted       bool              `json:"hosted"` // running inside this server
-	FirstMessage string            `json:"first_message"`
-	Models       map[string]string `json:"models"`
-	Config       string            `json:"config,omitempty"`
-	Subsessions  int               `json:"subsessions"`
-	Size         int64             `json:"size"`
-	Events       int               `json:"events"`
-	Cwd          string            `json:"cwd,omitempty"`
-}
+// Session views are shared with the portable artifact exporter.
+type SessionSummary = projection.SessionSummary
+type SessionDetail = projection.SessionDetail
+type TaskView = projection.TaskView
+type ProcView = projection.ProcView
+type ScheduleView = projection.ScheduleView
+type UsageView = projection.UsageView
 
-// SessionDetail adds the derived runtime picture.
-type SessionDetail struct {
-	SessionSummary
-	Tasks       []TaskView      `json:"tasks"`
-	Procs       []ProcView      `json:"procs"`
-	Schedules   []ScheduleView  `json:"schedules"`
-	Question    *state.Question `json:"question,omitempty"`
-	Idle        bool            `json:"idle"`
-	Done        bool            `json:"done"`
-	LastReason  string          `json:"last_reason,omitempty"`
-	Usage       []UsageView     `json:"usage"`
-	Context     int             `json:"context_tokens"`
-	Files       []string        `json:"files"`
-	Live        *harness.Status `json:"live,omitempty"`
-	LastSeq     int64           `json:"last_seq"`
-	Interactive bool            `json:"interactive"`
-	// Phone is set when the session is mirrored to the user's phone.
-	Phone *event.PhoneThreadData `json:"phone,omitempty"`
-}
+var priceFor = projection.PriceFor
+var estimateCost = projection.EstimateCost
 
-type TaskView struct {
-	ID      string     `json:"id"`
-	Title   string     `json:"title"`
-	Kind    string     `json:"kind"`
-	Status  string     `json:"status"`
-	Summary string     `json:"summary"`
-	Turns   int        `json:"turns"`
-	Created time.Time  `json:"created"`
-	Ended   *time.Time `json:"ended,omitempty"` // nil while the task is running
-	Usage   UsageView  `json:"usage"`
-}
-
-type ProcView struct {
-	Handle   string    `json:"handle"`
-	Actor    string    `json:"actor"`
-	Task     string    `json:"task,omitempty"`
-	Command  string    `json:"command"`
-	Status   string    `json:"status"`
-	ExitCode int       `json:"exit_code"`
-	Started  time.Time `json:"started"`
-}
-
-type ScheduleView struct {
-	ID    string    `json:"id"`
-	Kind  string    `json:"kind"`
-	Spec  string    `json:"spec"`
-	Note  string    `json:"note"`
-	Next  time.Time `json:"next"`
-	Fires int       `json:"fires"`
-}
-
-type UsageView struct {
-	Actor      string  `json:"actor"`
-	Model      string  `json:"model,omitempty"`
-	CostUSD    float64 `json:"cost_usd"`
-	Priced     bool    `json:"priced"`
-	Calls      int     `json:"calls"`
-	Input      int     `json:"input"`
-	Output     int     `json:"output"`
-	Cached     int     `json:"cached"`
-	Reasoning  int     `json:"reasoning"`
-	CacheRatio float64 `json:"cache_ratio"`
-	P50MS      int64   `json:"p50_ms,omitempty"`
-	P95MS      int64   `json:"p95_ms,omitempty"`
-}
-
-func usageView(actor string, calls int, u event.Usage) UsageView {
-	v := UsageView{Actor: actor, Calls: calls, Input: u.Input, Output: u.Output, Cached: u.Cached, Reasoning: u.Reasoning}
-	if u.Input > 0 {
-		v.CacheRatio = float64(u.Cached) / float64(u.Input)
-	}
-	return v
+func projectionInfo(info store.Info) projection.Metadata {
+	return projection.Metadata{ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size}
 }
 
 func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error) {
@@ -264,42 +186,11 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 
 // summarizeState summarizes an already-folded log.
 func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary {
-	evs := st.Events
-	sum := SessionSummary{
-		ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size,
-		Models: st.Models, Cwd: st.Cwd, Events: len(evs),
-	}
-	if len(evs) > 0 {
-		var d event.SessionStartData
-		_ = evs[0].Decode(&d)
-		sum.Config = d.Config
-	}
-	for _, ev := range evs {
-		if ev.Type == event.UserMessage {
-			var d event.UserMessageData
-			_ = ev.Decode(&d)
-			sum.FirstMessage = d.Text
-			break
-		}
-	}
+	sum := projection.Summary(projectionInfo(info), st)
 	s.mu.Lock()
-	_, hosted := s.running[info.ID]
+	_, sum.Hosted = s.running[info.ID]
 	s.mu.Unlock()
-	sum.Hosted = hosted
-	sum.Alive = hosted || alive(info.Path)
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		sum.Tokens += st.Totals[a].Input
-	}
-	sum.CostUSD, sum.Priced = estimateCost(st)
-	if !st.Started.IsZero() {
-		end := info.Modified
-		if st.Ended {
-			if last := st.Events[len(st.Events)-1]; !last.Time.IsZero() {
-				end = last.Time
-			}
-		}
-		sum.Duration = end.Sub(st.Started).Seconds()
-	}
+	sum.Alive = sum.Hosted || alive(info.Path)
 	switch {
 	case sum.Alive && st.Idle() && st.Question != nil:
 		sum.Status = "awaiting-input"
@@ -307,9 +198,7 @@ func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary
 		sum.Status = "idle"
 	case sum.Alive:
 		sum.Status = "running"
-	case st.Ended:
-		sum.Status = st.EndReason
-	default:
+	case !st.Ended:
 		sum.Status = "interrupted"
 	}
 	return sum
@@ -342,39 +231,9 @@ func (s *Server) detail(info store.Info) (*SessionDetail, error) {
 
 // detailState renders the detail of an already-folded log.
 func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
+	d := projection.Detail(projectionInfo(info), st)
 	sum := s.summarizeState(info, st)
-	d := &SessionDetail{SessionSummary: sum, Idle: st.Idle(), LastSeq: st.LastSeq(), Context: st.ContextTokens(event.ActorOrchestrator), Interactive: st.Interactive, Phone: st.Phone}
-	if st.LastYield != nil {
-		d.Done = st.LastYield.Done
-		d.LastReason = st.LastYield.Reason
-	}
-	d.Question = st.Question
-	for _, id := range st.TaskOrder {
-		t := st.Tasks[id]
-		var ended *time.Time
-		if !t.Ended.IsZero() {
-			e := t.Ended
-			ended = &e
-		}
-		d.Tasks = append(d.Tasks, TaskView{ID: t.ID, Title: t.Title, Kind: t.Kind, Status: t.Status, Summary: t.Summary, Turns: t.Turns, Created: t.Created, Ended: ended, Usage: usageView(event.ActorTask, t.Turns, t.Usage)})
-	}
-	for _, h := range st.ProcOrder {
-		p := st.Procs[h]
-		d.Procs = append(d.Procs, ProcView{Handle: p.Handle, Actor: p.Actor, Task: p.Task, Command: p.Command, Status: p.Status, ExitCode: p.ExitCode, Started: p.Started})
-	}
-	for _, sc := range st.ActiveSchedules() {
-		d.Schedules = append(d.Schedules, ScheduleView{ID: sc.ID, Kind: sc.Kind, Spec: sc.Spec, Note: sc.Note, Next: sc.Next, Fires: sc.Fires})
-	}
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		u := usageView(a, st.Calls[a], st.Totals[a])
-		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
-		u.Model = st.Models[a]
-		u.CostUSD, u.Priced = costOfRoutes(st, a)
-		d.Usage = append(d.Usage, u)
-	}
-	for _, ss := range st.Subsessions {
-		d.Files = append(d.Files, ss.File)
-	}
+	d.SessionSummary = sum
 	s.mu.Lock()
 	if h := s.running[info.ID]; h != nil {
 		live := h.ui.status()
@@ -396,15 +255,6 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 		}
 		live.Procs = len(st.RunningProcs())
 		d.Live = &live
-	}
-	if d.Tasks == nil {
-		d.Tasks = []TaskView{}
-	}
-	if d.Procs == nil {
-		d.Procs = []ProcView{}
-	}
-	if d.Schedules == nil {
-		d.Schedules = []ScheduleView{}
 	}
 	return d
 }
@@ -849,45 +699,14 @@ func modelsLine(c config.Config) string {
 // name, a description, and either a full config object or a preset/bundle to
 // copy.
 func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
-	var b struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		From        string          `json:"from"` // preset or bundle name to copy, optional
-		Config      json.RawMessage `json:"config"`
-	}
+	var b settings.BundleRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b); err != nil || strings.TrimSpace(b.Name) == "" {
 		writeErr(w, 400, errors.New("name is required"))
 		return
 	}
-	var cfg config.Config
-	var err error
-	if len(b.Config) > 0 && string(b.Config) != "null" {
-		cfg = config.Defaults()
-		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
-		dec.DisallowUnknownFields()
-		if err = dec.Decode(&cfg); err != nil {
-			writeErr(w, 400, fmt.Errorf("config: %w", err))
-			return
-		}
-		cfg.Name, cfg.Instructions = "", ""
-		if err = cfg.Validate(); err != nil {
-			writeErr(w, 422, err)
-			return
-		}
-		if err = s.checkRoutes(cfg); err != nil {
-			writeErr(w, 422, err)
-			return
-		}
-	} else {
-		cfg, err = config.LoadBundle(s.Project, "", b.From)
-		if err != nil {
-			writeErr(w, 400, err)
-			return
-		}
-	}
-	path, err := config.SaveBundle(s.Project, strings.TrimSpace(b.Name), strings.TrimSpace(b.Description), cfg)
+	path, err := s.settingsService().SaveBundle(r.Context(), b)
 	if err != nil {
-		writeErr(w, 400, err)
+		writeSettingsError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"path": path, "name": b.Name})
@@ -895,15 +714,7 @@ func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
 
 // promptName resolves a URL segment to one of the known prompt files, so no
 // handler ever joins an arbitrary segment onto the prompts directory.
-func promptName(raw string) (string, error) {
-	name := strings.ToUpper(strings.TrimSuffix(raw, ".md")) + ".md"
-	for _, n := range prompts.Names {
-		if n == name {
-			return name, nil
-		}
-	}
-	return "", fmt.Errorf("unknown prompt %s", raw)
-}
+func promptName(raw string) (string, error) { return settings.PromptName(raw) }
 
 func (s *Server) getPrompt(w http.ResponseWriter, r *http.Request) {
 	name, err := promptName(r.PathValue("name"))
@@ -956,6 +767,10 @@ func (u *webUI) status() harness.Status {
 
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
+	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
+	defer stopPublisher()
+	stopConnector := integration.StartConnector(ctx, s.Project, s.logf)
+	defer stopConnector()
 	s.addr = addr
 	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
@@ -969,50 +784,6 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
-}
-
-// ---- pricing ------------------------------------------------------------------
-
-// priceFor prices a call at list rates from the catalog; ok is false for a
-// model the catalog does not know.
-func priceFor(baseURL, model string, u event.Usage) (float64, bool) {
-	p, ok := config.PriceFor(baseURL, model)
-	if !ok {
-		return 0, false
-	}
-	uncached := u.Input - u.Cached
-	if uncached < 0 {
-		uncached = 0
-	}
-	return (float64(uncached)*p.In + float64(u.Cached)*p.Cached + float64(u.Output)*p.Out) / 1e6, true
-}
-
-// estimateCost sums per-actor estimates; Priced is false if any actor's
-// model is unknown so the UI can say so.
-func estimateCost(st *state.State) (float64, bool) {
-	return costOfRoutes(st, "")
-}
-
-// costOfRoutes prices every route that served a call (for one actor, or all
-// when actor is ""), so a mid-session fallback does not reprice tokens
-// already spent at the previous provider.
-func costOfRoutes(st *state.State, actor string) (float64, bool) {
-	total := 0.0
-	priced := true
-	any := false
-	for rk, u := range st.ByRoute {
-		if actor != "" && rk.Actor != actor {
-			continue
-		}
-		any = true
-		c, ok := priceFor(rk.Host, rk.Model, u)
-		if !ok {
-			priced = false
-			continue
-		}
-		total += c
-	}
-	return total, priced && any
 }
 
 // ---- attachments ----------------------------------------------------------------
@@ -1096,18 +867,9 @@ func (s *Server) putPrompt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	if _, err := template.New(name).Parse(b.Text); err != nil {
-		writeErr(w, 400, fmt.Errorf("template error: %w", err))
-		return
-	}
-	dir := prompts.Dir(s.Project)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(b.Text), 0o644); err != nil {
-		writeErr(w, 500, err)
+	path, err := s.settingsService().SavePrompt(r.Context(), name, b.Text, false)
+	if err != nil {
+		writeSettingsError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"name": name, "source": path})
@@ -1119,9 +881,8 @@ func (s *Server) deletePrompt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
-	path := filepath.Join(prompts.Dir(s.Project), name)
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		writeErr(w, 500, err)
+	if _, err := s.settingsService().SavePrompt(r.Context(), name, "", true); err != nil {
+		writeSettingsError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"name": name, "source": "built-in"})

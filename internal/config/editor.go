@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -211,7 +212,7 @@ func EnvOverrides() map[string]string {
 			}
 		}
 	}
-	for v, ptr := range map[string]string{"EAGENT_TASK_CONCURRENCY": "/task_concurrency", "EAGENT_ROLLOVER_TOKENS": "/rollover_tokens", "EAGENT_NARRATOR_TICK_SECONDS": "/narrator_tick_seconds", "EAGENT_NARRATOR_QUIET_SECONDS": "/narrator_quiet_seconds", "EAGENT_PERSONA": "/persona", "EAGENT_FINALECHAT": "/finalechat/enabled"} {
+	for v, ptr := range map[string]string{"EAGENT_TASK_CONCURRENCY": "/task_concurrency", "EAGENT_ROLLOVER_TOKENS": "/rollover_tokens", "EAGENT_NARRATOR_TICK_SECONDS": "/narrator_tick_seconds", "EAGENT_NARRATOR_QUIET_SECONDS": "/narrator_quiet_seconds", "EAGENT_PERSONA": "/persona", "EAGENT_FINALECHAT": "/finalechat/enabled", "EAGENT_FINALECHAT_ARTIFACTS": "/finalechat/artifacts"} {
 		if os.Getenv(v) != "" {
 			out[ptr] = v
 		}
@@ -424,6 +425,15 @@ type SaveResult struct {
 // ifMatch is given the write is refused unless the file still has that etag
 // ("" meaning "there was no file").
 func SaveFile(project string, edits map[string]json.RawMessage, ifMatch string, checkMatch bool) (SaveResult, error) {
+	editor, err := LockEditor(context.Background(), project)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	defer editor.Close()
+	return editor.SaveFile(edits, ifMatch, checkMatch)
+}
+
+func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, checkMatch bool) (SaveResult, error) {
 	path := File(project)
 	var res SaveResult
 	res.Path = path
@@ -464,6 +474,15 @@ func SaveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 // SaveRaw writes the file exactly as given after checking it parses and
 // loads; for repairs and undo.
 func SaveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) {
+	editor, err := LockEditor(context.Background(), project)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	defer editor.Close()
+	return editor.SaveRaw(raw, ifMatch, checkMatch)
+}
+
+func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) {
 	path := File(project)
 	var res SaveResult
 	res.Path = path

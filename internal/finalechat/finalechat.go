@@ -29,6 +29,20 @@ const DefaultBaseURL = "https://www.finalechat.com"
 // DefaultTokenEnv is where the token usually arrives.
 const DefaultTokenEnv = "FINALECHAT_TOKEN"
 
+// ErrDisabled reports the process-wide outbound kill switch. This is separate
+// from the chat mirroring preference: artifacts and settings can be enabled
+// independently, but none may override EAGENT_FINALECHAT=off.
+var ErrDisabled = errors.New("FinaleChat is disabled by EAGENT_FINALECHAT")
+
+func Disabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EAGENT_FINALECHAT"))) {
+	case "0", "off", "false", "no":
+		return true
+	default:
+		return false
+	}
+}
+
 // Client talks to one Finalechat account.
 type Client struct {
 	BaseURL string

@@ -68,8 +68,7 @@ func (r *Runtime) startPhone() {
 	if !fc.Wanted() {
 		return
 	}
-	switch strings.ToLower(os.Getenv("EAGENT_FINALECHAT")) {
-	case "0", "off", "false", "no":
+	if finalechat.Disabled() {
 		return // the environment kill switch wins over any configuration
 	}
 	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)

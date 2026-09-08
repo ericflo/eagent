@@ -19,6 +19,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/procs"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -456,6 +457,10 @@ func (r *Runtime) orchestratorHasWork() bool {
 // Run drives the session until it ends or ctx is cancelled. It returns the
 // process exit code.
 func (r *Runtime) Run(ctx context.Context) int {
+	stopPublisher := integration.StartPublisher(ctx, r.opts.Project, Version, r.ui.Log, r.sess.ID)
+	defer stopPublisher()
+	stopConnector := integration.StartConnector(ctx, r.opts.Project, r.ui.Log)
+	defer stopConnector()
 	go func() {
 		<-ctx.Done()
 		r.post(func() { r.beginShutdown("interrupted", 130) })

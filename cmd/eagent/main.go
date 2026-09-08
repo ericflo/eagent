@@ -41,6 +41,15 @@ Usage:
   eagent sessions                    list sessions in this project
   eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
   eagent replay <id>                 rebuild state from the log and print it
+  eagent artifact export <id> --output DIR
+                                     export a portable website and native source logs
+  eagent artifact publish <id>       publish a saved session to FinaleChat
+  eagent artifact verify DIR         verify a downloaded archive without executing it
+  eagent artifact restore DIR --output NEW_DIR
+                                    recover native sources into a new directory
+  eagent artifact enable|disable     opt this project into/out of proactive archives
+  eagent connector pair             request remote settings access in FinaleChat
+  eagent connector run              keep remote settings available without a session
   eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, tasks, tool calls, config
   eagent doctor [--live]             check configuration and credentials
   eagent config                      print the effective configuration
@@ -99,6 +108,7 @@ func run(args []string) int {
 		asJSON   = fs.Bool("as-json", false, "view: machine-readable output")
 		live     = fs.Bool("live", false, "doctor: make a small live call per actor")
 		write    = fs.Bool("write", false, "config: write config.json")
+		output   = fs.String("output", "", "artifact export/restore: new destination directory")
 		helpFlag = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
@@ -120,7 +130,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -152,6 +162,10 @@ func run(args []string) int {
 		return cmdPrompts(project, rest)
 	case "serve":
 		return cmdServe(project, *addr, *preset, *bundle, *verbose)
+	case "artifact":
+		return cmdArtifact(project, rest, *output)
+	case "connector":
+		return cmdConnector(project, rest)
 	case "view":
 		if len(rest) < 1 {
 			return fail(errors.New("usage: eagent view <session-id> [--actor narrator] [--until SEQ]"))

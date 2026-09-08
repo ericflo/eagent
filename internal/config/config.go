@@ -5,6 +5,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +91,9 @@ type Config struct {
 
 // Finalechat configures the phone mirror (https://www.finalechat.com).
 type Finalechat struct {
+	// Artifacts opts into proactive upload of native session logs and portable
+	// viewers, independently of conversation mirroring. Off by default.
+	Artifacts bool `json:"artifacts,omitempty"`
 	// Enabled: nil means "on when a token is found"; false turns it off even
 	// when a token is present; true makes a missing token an error at start.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -454,11 +458,19 @@ func ListBundles(project string) ([]string, error) {
 
 // SaveBundle writes cfg as a named configuration, overwriting any existing one.
 func SaveBundle(project, name, description string, cfg Config) (string, error) {
-	if !validName(name) {
-		return "", fmt.Errorf("bundle names use letters, digits, '-', '_' and '.' only")
-	}
-	if err := os.MkdirAll(BundlesDir(project), 0o755); err != nil {
+	editor, err := LockEditor(context.Background(), project)
+	if err != nil {
 		return "", err
+	}
+	defer editor.Close()
+	return editor.SaveBundle(name, description, cfg)
+}
+
+// BundleBytes prepares a named configuration without writing it. Remote
+// connectors can journal this exact intent before crossing the writer boundary.
+func BundleBytes(name, description string, cfg Config) ([]byte, error) {
+	if !validName(name) {
+		return nil, fmt.Errorf("bundle names use letters, digits, '-', '_' and '.' only")
 	}
 	cfg.Name = name
 	if description != "" {
@@ -467,10 +479,9 @@ func SaveBundle(project, name, description string, cfg Config) (string, error) {
 	cfg.DefaultConfig = ""
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	path := BundlePath(project, name)
-	return path, os.WriteFile(path, append(raw, '\n'), 0o644)
+	return append(raw, '\n'), nil
 }
 
 func validName(name string) bool {
@@ -501,11 +512,18 @@ func Load(project string, preset string) (Config, error) {
 
 // LoadBundle is Load with an explicit bundle name ("" = none selected).
 func LoadBundle(project, preset, bundle string) (Config, error) {
-	cfg := Defaults()
 	fileCfg, err := readJSONMap(File(project))
 	if err != nil {
-		return cfg, err
+		return Defaults(), err
 	}
+	return LoadBundleWithFile(project, preset, bundle, fileCfg)
+}
+
+// LoadBundleWithFile resolves proposed file contents through the actual
+// resolver without writing them or changing process environment variables.
+func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
+	cfg := Defaults()
+	var err error
 	if bundle == "" {
 		bundle = os.Getenv("EAGENT_CONFIG")
 	}
@@ -605,6 +623,9 @@ func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
 }
 
 func applyEnv(cfg *Config) {
+	if value, err := strconv.ParseBool(os.Getenv("EAGENT_FINALECHAT_ARTIFACTS")); err == nil {
+		cfg.Finalechat.Artifacts = value
+	}
 	actors := map[string]*Actor{"ORCHESTRATOR": &cfg.Orchestrator, "TASK": &cfg.Task, "NARRATOR": &cfg.Narrator}
 	for name, a := range actors {
 		if v := os.Getenv("EAGENT_" + name + "_MODEL"); v != "" {
