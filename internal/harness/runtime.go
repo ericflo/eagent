@@ -104,6 +104,12 @@ type Runtime struct {
 	awaitingUser bool
 	lastOrchSeen int64
 	lastWake     int64 // seq of the newest event that should wake the orchestrator
+	// lastArrival is the newest wake that came from outside the harness (a
+	// user message or answer, a schedule firing, a task or notified process
+	// ending). Harness-made wakes (recovery messages, the dossier) advance
+	// lastWake but not this, so the futile-rollover pause cannot be stood
+	// aside by the harness's own nudges.
+	lastArrival int64
 	// futileSkipped is the newest unseen arrival for which the futile-rollover
 	// pause already stood aside once (see futileStandAside).
 	futileSkipped int64
@@ -423,6 +429,9 @@ func (r *Runtime) noteWake(ev event.Event) {
 		r.yieldSeenSeq = ev.Seq // a forced yield has no call of its own; the orchestrator overrides this for its own
 	case event.UserMessage, event.UserAnswer, event.ScheduleFire, event.Dossier:
 		r.lastWake = ev.Seq
+		if ev.Type != event.Dossier {
+			r.lastArrival = ev.Seq
+		}
 		r.narrFinal = false
 		if ev.Type == event.UserMessage || ev.Type == event.UserAnswer {
 			r.wakeNarrator(wakeUser) // acknowledge at once; do not wait for results
@@ -432,12 +441,14 @@ func (r *Runtime) noteWake(ev event.Event) {
 		_ = ev.Decode(&d)
 		if t := r.st.Tasks[d.ID]; t != nil && t.Kind != "dossier" {
 			r.lastWake = ev.Seq
+			r.lastArrival = ev.Seq
 		}
 	case event.ProcExit:
 		var d event.ProcExitData
 		_ = ev.Decode(&d)
 		if d.Notify && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
 			r.lastWake = ev.Seq
+			r.lastArrival = ev.Seq
 		}
 	case event.HarnessMessage:
 		if ev.Actor == event.ActorOrchestrator && ev.Task == "" {
