@@ -15,8 +15,8 @@ import (
 )
 
 func cmdConnector(project string, args []string) int {
-	if len(args) != 1 {
-		return fail(fmt.Errorf("usage: eagent connector pair|run"))
+	if len(args) == 0 || (args[0] != "pair-session" && len(args) != 1) || (args[0] == "pair-session" && len(args) != 2) {
+		return fail(fmt.Errorf("usage: eagent connector pair|run, or pair-session SESSION"))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -27,6 +27,13 @@ func cmdConnector(project string, args []string) int {
 			return fail(err)
 		}
 		fmt.Println("Review and approve this project's settings access:", url)
+		return 0
+	case "pair-session":
+		url, err := integration.PairSession(ctx, project, args[1])
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Println("Review and approve this session’s live settings access:", url)
 		return 0
 	case "run":
 		fmt.Println("Settings connector running. Press Ctrl-C to stop.")

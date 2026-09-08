@@ -57,6 +57,22 @@ The settings website embeds the same `config.js` and stylesheet as the local con
 
 Picker catalogs and named configuration content are captured with the archive. A bundle whose current hash no longer matches the captured content cannot be loaded into the form; reopen the latest archive. Granted field locks and environment overrides are visible in the shared editor. New edits clear the pending host proposal, and delayed acknowledgements preserve newer form or raw-JSON drafts. Opening `settings/index.html` from an extracted archive provides the same read-only editor without a running server.
 
+## Live session controls
+
+Run `eagent connector pair-session SESSION_ID` in the project, then approve the separate session grant in FinaleChat. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Live session settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.
+
+These controls affect this process only:
+
+| Setting | When it takes effect |
+| --- | --- |
+| Task workers at once | Admission of the next queued task; reducing the limit preserves current workers. |
+| Narrator check interval | Reschedules its next check immediately; a current model turn continues. |
+| Narrator quiet limit | The next check and next narrator turn; zero disables quiet-limit wakes. |
+
+The trusted Save sends an expiring, versioned command for the displayed runtime generation. The connector hands it to the harness's bounded local queue; the normal scheduler records `settings.changed` and applies it before acknowledging success. No connector writes directly to an active event log. Expired or uncertain requests are never blindly repeated, and an old generation cannot target a replacement process. Session controls have no offline drafts or send-later option. Resuming loads project defaults and starts a fresh generation.
+
+Each run records `settings.runtime_started`. Archives retain these native events and capture `context/runtime-settings.json` when local status exists, explicitly distinguishing the captured observation from the native source prefix. Project defaults remain in their separate settings artifact. Credentials, control queues and runtime acknowledgements stay in private local state and are excluded from archives. Session pairing files live under `.agents/eagent/finalechat-state/runtime-connectors/`; the kill switch also gates these workers.
+
 ## Disable all outbound integration traffic
 
 `EAGENT_FINALECHAT=off` is the process-wide kill switch. `0`, `false`, and `no` also disable it, case-insensitively. It overrides artifact opt-in, forced publish, pairing, and stored connector credentials, including the publisher's final shutdown sweep. Local export, verification and recovery remain available.

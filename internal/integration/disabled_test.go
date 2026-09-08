@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,9 @@ func TestKillSwitchOverridesArtifactOptInAndStoredPairing(t *testing.T) {
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeJSONAtomic(filepath.Join(runtimeConnectorDir(project), session.ID+".json"), connectorConfig{ID: "live-fixture", Secret: "fcc_fixture", BaseURL: server.URL, Session: session.ID}); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	for _, value := range []string{"off", "0", "false", "no", "OFF", " False "} {
 		t.Run(value, func(t *testing.T) {
@@ -59,6 +63,12 @@ func TestKillSwitchOverridesArtifactOptInAndStoredPairing(t *testing.T) {
 			}
 			if _, err := Pair(ctx, project, "fixture"); !errors.Is(err, finalechat.ErrDisabled) {
 				t.Fatalf("Pair: %v", err)
+			}
+			if _, err := PairSession(ctx, project, session.ID); !errors.Is(err, finalechat.ErrDisabled) {
+				t.Fatalf("PairSession: %v", err)
+			}
+			if err := runConnectorAt(ctx, project, session.ID, filepath.Join(runtimeConnectorDir(project), session.ID+".json"), nil); !errors.Is(err, finalechat.ErrDisabled) {
+				t.Fatalf("runtime connector: %v", err)
 			}
 			if err := RunConnector(ctx, project, nil); !errors.Is(err, finalechat.ErrDisabled) {
 				t.Fatalf("RunConnector: %v", err)

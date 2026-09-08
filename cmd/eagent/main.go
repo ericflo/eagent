@@ -50,6 +50,7 @@ Usage:
                                     recover native sources into a new directory
   eagent artifact enable|disable     opt this project into/out of proactive archives
   eagent connector pair             request remote settings access in FinaleChat
+  eagent connector pair-session ID  request live settings for one session
   eagent connector run              keep remote settings available without a session
   eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, tasks, tool calls, config
   eagent doctor [--live]             check configuration and credentials

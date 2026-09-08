@@ -25,7 +25,7 @@ func (r *Runtime) startQueuedTasks() {
 		// Dossier tasks always run; work tasks respect the limit. Keep
 		// scanning: the dossier is queued last, and a full slate of work
 		// tasks must not keep it (and with it the orchestrator) waiting.
-		if t.Kind != "dossier" && running >= r.cfg.TaskConcurrency {
+		if t.Kind != "dossier" && running >= r.activeSettings.TaskConcurrency {
 			continue
 		}
 		running++

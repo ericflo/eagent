@@ -23,6 +23,7 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/procs"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/sched"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -77,33 +78,36 @@ type Runtime struct {
 	wg   sync.WaitGroup
 
 	// Loop-owned scheduling state.
-	orchBusy     bool
-	orchCallAt   time.Time
-	narrBusy     bool
-	narrPending  string // reason for a wake requested during a turn
-	narrLastSeen int64  // seq the narrator saw on its latest call
-	narrWorthy   int64  // seq of the newest event the narrator can observe
-	narrLastSaid string
-	narrSaidSeq  int64     // seq of the last narrator.message
-	narrSaidAt   time.Time // when the user last heard from the narrator (message or question)
-	narrFinal    bool      // final report delivered
-	narrTicker   *time.Timer
-	phone        *phone // Finalechat mirror; nil when off
-	toolImagesMu sync.Mutex
-	memoMu       sync.Mutex
-	memo         map[string]fileMark           // what each caller last read or viewed, to skip repeats
-	toolImages   map[string][]event.Attachment // call id -> pictures for the model (view_image)
-	running      map[string]context.CancelFunc // task id -> cancel
-	waiters      []*waiter
-	timers       map[string]*time.Timer // schedule id -> timer
-	rolling      bool
-	ending       bool
-	endReason    string
-	shutdownOnce sync.Once
-	exitCode     int
-	awaitingUser bool
-	lastOrchSeen int64
-	lastWake     int64 // seq of the newest event that should wake the orchestrator
+	orchBusy            bool
+	orchCallAt          time.Time
+	narrBusy            bool
+	narrPending         string // reason for a wake requested during a turn
+	narrLastSeen        int64  // seq the narrator saw on its latest call
+	narrWorthy          int64  // seq of the newest event the narrator can observe
+	narrLastSaid        string
+	narrSaidSeq         int64     // seq of the last narrator.message
+	narrSaidAt          time.Time // when the user last heard from the narrator (message or question)
+	narrFinal           bool      // final report delivered
+	narrTicker          *time.Timer
+	narrTimerGeneration uint64
+	activeSettings      runtimecontrol.Values // loop-owned; cfg remains immutable
+	runtimeControl      *runtimecontrol.Controller
+	phone               *phone // Finalechat mirror; nil when off
+	toolImagesMu        sync.Mutex
+	memoMu              sync.Mutex
+	memo                map[string]fileMark           // what each caller last read or viewed, to skip repeats
+	toolImages          map[string][]event.Attachment // call id -> pictures for the model (view_image)
+	running             map[string]context.CancelFunc // task id -> cancel
+	waiters             []*waiter
+	timers              map[string]*time.Timer // schedule id -> timer
+	rolling             bool
+	ending              bool
+	endReason           string
+	shutdownOnce        sync.Once
+	exitCode            int
+	awaitingUser        bool
+	lastOrchSeen        int64
+	lastWake            int64 // seq of the newest event that should wake the orchestrator
 	// lastArrival is the newest wake that came from outside the harness (a
 	// user message or answer, a schedule firing, a task or notified process
 	// ending). Harness-made wakes (recovery messages, the dossier) advance
@@ -232,14 +236,15 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runtime{
 		cfg: cfg, opts: opts, ui: ui, sess: sess, st: st,
-		procs:     procs.NewManager(),
-		files:     tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
-		archive:   tools.Archive{Path: sess.Path},
-		orchTools: tools.OrchestratorTools(),
-		taskTools: tools.TaskTools(),
-		narrTools: tools.NarratorTools(),
-		loop:      make(chan func(), 1024),
-		ctx:       ctx, stop: cancel,
+		activeSettings: runtimecontrol.FromConfig(cfg),
+		procs:          procs.NewManager(),
+		files:          tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
+		archive:        tools.Archive{Path: sess.Path},
+		orchTools:      tools.OrchestratorTools(),
+		taskTools:      tools.TaskTools(),
+		narrTools:      tools.NarratorTools(),
+		loop:           make(chan func(), 1024),
+		ctx:            ctx, stop: cancel,
 		running:      map[string]context.CancelFunc{},
 		timers:       map[string]*time.Timer{},
 		procCursor:   map[string]int{},
@@ -477,6 +482,8 @@ func (r *Runtime) orchestratorHasWork() bool {
 // Run drives the session until it ends or ctx is cancelled. It returns the
 // process exit code.
 func (r *Runtime) Run(ctx context.Context) int {
+	r.startRuntimeSettings()
+	defer r.stopRuntimeSettings()
 	stopPublisher := integration.StartPublisher(ctx, r.opts.Project, Version, r.ui.Log, r.sess.ID)
 	defer stopPublisher()
 	stopConnector := integration.StartConnector(ctx, r.opts.Project, r.ui.Log)
@@ -486,7 +493,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 		r.post(func() { r.beginShutdown("interrupted", 130) })
 	}()
 	r.rearmSchedules()
-	r.narrTicker = time.AfterFunc(time.Duration(r.cfg.NarratorTickSeconds)*time.Second, r.narratorTick)
+	r.armNarratorTimer()
 	if r.st.Question != nil && r.opts.Interactive {
 		q := r.st.Question
 		r.ui.Ask(q.ID, q.Text, q.Options)
@@ -494,11 +501,13 @@ func (r *Runtime) Run(ctx context.Context) int {
 	inbox := time.NewTicker(500 * time.Millisecond)
 	defer inbox.Stop()
 	r.pollInbox()
+	r.pollRuntimeSettings()
 	r.tick()
 	for {
 		select {
 		case <-inbox.C:
 			r.pollInbox()
+			r.pollRuntimeSettings()
 			r.tick()
 		case fn := <-r.loop:
 			fn()
@@ -639,6 +648,7 @@ func narratorReasonForYield(st *state.State) string {
 func (r *Runtime) beginShutdown(reason string, code int) {
 	r.shutdownOnce.Do(func() {
 		r.ending = true
+		r.stopRuntimeSettings()
 		r.endReason = reason
 		r.exitCode = code
 		for _, cancel := range r.running {

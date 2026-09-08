@@ -6,11 +6,78 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
+	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/store"
 )
+
+func TestArchiveCapturesRuntimeContextWithoutControlState(t *testing.T) {
+	project := t.TempDir()
+	session, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	values := runtimecontrol.FromConfig(config.Defaults())
+	values.TaskConcurrency, values.Revision = 7, 3
+	c, err := runtimecontrol.New(project, session.ID, values, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousHash := ""
+	for _, available := range []bool{true, true, false} {
+		if !available {
+			if err := c.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		exported, err := Snapshot(context.Background(), project, session.ID, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer exported.Close()
+		raw, err := os.ReadFile(filepath.Join(exported.Dir, "context/runtime-settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if available {
+			hash := artifact.Digest(raw)
+			if previousHash != "" && previousHash != hash {
+				t.Fatal("unchanged runtime status introduced a capture-time-only revision")
+			}
+			previousHash = hash
+		}
+		var captured struct {
+			View settings.RemoteView `json:"view"`
+		}
+		if err := json.Unmarshal(raw, &captured); err != nil {
+			t.Fatal(err)
+		}
+		if captured.View.Generation != c.Generation || captured.View.Snapshot.RuntimeKnown != available || captured.View.Snapshot.Saved["/task_concurrency"] != float64(7) {
+			t.Fatalf("lost runtime context: %+v", captured.View)
+		}
+		if exported.Manifest.Dataset["runtime_settings_version"] != captured.View.Snapshot.Version {
+			t.Fatal("missing runtime version")
+		}
+		for _, file := range exported.Manifest.Files {
+			if strings.Contains(file.Path, "runtime-control/") || strings.Contains(file.Path, "runtime-connectors/") {
+				t.Fatal("private control state was archived")
+			}
+		}
+	}
+}
 
 func TestCaptureAuditPreservesCompletePrefixAndRejectsUnboundedOrEscapingFiles(t *testing.T) {
 	project := t.TempDir()

@@ -18,6 +18,7 @@ import (
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
 )
 
@@ -26,6 +27,7 @@ type connectorConfig struct {
 	Secret      string `json:"secret"`
 	BaseURL     string `json:"base_url"`
 	ApprovalURL string `json:"approval_url"`
+	Session     string `json:"session_id,omitempty"`
 }
 type connectorInfo struct {
 	ID     string          `json:"id"`
@@ -79,15 +81,21 @@ func randomID() string {
 // Pair requests access; only the signed-in browser can approve it. The scoped
 // secret stays in a private project file and is excluded from every archive.
 func Pair(ctx context.Context, project, name string) (string, error) {
+	return pairResource(ctx, project, name, "", connectorPath(project), (&settings.Service{Project: project}).Grant())
+}
+
+func pairResource(ctx context.Context, project, name, session, path string, grant control.Grant) (string, error) {
 	if finalechat.Disabled() {
 		return "", finalechat.ErrDisabled
 	}
-	if raw, err := os.ReadFile(connectorPath(project)); err == nil {
-		var existing connectorConfig
-		if json.Unmarshal(raw, &existing) == nil && existing.ID != "" {
+	var existing connectorConfig
+	if err := readConnectorFile(path, &existing); err == nil {
+		if existing.ID != "" && existing.Session == session {
 			return existing.ApprovalURL, nil
 		}
 		return "", fmt.Errorf("repair or remove the invalid local connector file first")
+	} else if !os.IsNotExist(err) {
+		return "", err
 	}
 	cfg, err := config.Load(project, "")
 	if err != nil {
@@ -101,28 +109,26 @@ func Pair(ctx context.Context, project, name string) (string, error) {
 		host, _ := os.Hostname()
 		name = "eagent · " + host + " · " + filepath.Base(project)
 	}
-	service := &settings.Service{Project: project}
 	var response struct {
 		Connector   connectorInfo `json:"connector"`
 		Secret      string        `json:"secret"`
 		ApprovalURL string        `json:"approval_url"`
 	}
-	if err := client.Request(ctx, "POST", "/api/v1/connectors", nil, map[string]any{"name": name, "provider": "eagent", "requested_grants": []control.Grant{service.Grant()}}, &response, 0); err != nil {
+	if err := client.Request(ctx, "POST", "/api/v1/connectors", nil, map[string]any{"name": name, "provider": "eagent", "requested_grants": []control.Grant{grant}}, &response, 0); err != nil {
 		return "", err
 	}
 	if response.Connector.ID == "" || !strings.HasPrefix(response.Secret, "fcc_") {
 		return "", fmt.Errorf("invalid pairing response")
 	}
-	local := connectorConfig{ID: response.Connector.ID, Secret: response.Secret, BaseURL: client.BaseURL, ApprovalURL: response.ApprovalURL}
-	if err := writeJSONAtomic(connectorPath(project), local); err != nil {
+	local := connectorConfig{ID: response.Connector.ID, Secret: response.Secret, BaseURL: client.BaseURL, ApprovalURL: response.ApprovalURL, Session: session}
+	if err := writeJSONAtomic(path, local); err != nil {
 		return "", err
 	}
 	return local.ApprovalURL, nil
 }
 
-// StartConnector elects one process per project. It keeps outbound commands
-// available while a serve process or session is running, including model idle.
-func StartConnector(ctx context.Context, project string, logf func(string, ...any)) func() {
+// startConnectorAt elects one process per explicitly paired resource.
+func startConnectorAt(ctx context.Context, project, session, path, lockPath string, logf func(string, ...any)) func() {
 	if finalechat.Disabled() {
 		return func() {}
 	}
@@ -134,12 +140,12 @@ func StartConnector(ctx context.Context, project string, logf func(string, ...an
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			if _, err := os.Stat(connectorPath(project)); err == nil {
+			if _, err := os.Stat(path); err == nil {
 				lockCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
-				unlock, err := filelock.Acquire(lockCtx, filepath.Join(stateDir(project), "connector.lock"))
+				unlock, err := filelock.Acquire(lockCtx, lockPath)
 				stop()
 				if err == nil {
-					err = RunConnector(ctx, project, logf)
+					err = runConnectorAt(ctx, project, session, path, logf)
 					unlock()
 					if err != nil && ctx.Err() == nil {
 						logf("settings connector: %v (will retry)", err)
@@ -157,18 +163,21 @@ func StartConnector(ctx context.Context, project string, logf func(string, ...an
 }
 
 func RunConnector(ctx context.Context, project string, logf func(string, ...any)) error {
+	return runConnectorAt(ctx, project, "", connectorPath(project), logf)
+}
+
+func runConnectorAt(ctx context.Context, project, session, path string, logf func(string, ...any)) error {
 	if finalechat.Disabled() {
 		return finalechat.ErrDisabled
 	}
-	raw, err := os.ReadFile(connectorPath(project))
-	if err != nil {
-		return err
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
 	var local connectorConfig
-	if err := json.Unmarshal(raw, &local); err != nil {
+	if err := readConnectorFile(path, &local); err != nil {
 		return err
 	}
-	if local.ID == "" || !strings.HasPrefix(local.Secret, "fcc_") {
+	if local.ID == "" || !strings.HasPrefix(local.Secret, "fcc_") || local.Session != session {
 		return fmt.Errorf("invalid connector configuration")
 	}
 	client := &finalechat.Client{BaseURL: local.BaseURL, Token: local.Secret, UserAgent: "eagent-settings/1"}
@@ -176,6 +185,13 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 	instance := randomID()
 	service := &settings.Service{Project: project}
 	expectedGrant := service.Grant()
+	if session != "" {
+		var err error
+		expectedGrant, err = runtimecontrol.Grant(project, session)
+		if err != nil {
+			return err
+		}
+	}
 	lastVersion := ""
 	resourceID := ""
 	for ctx.Err() == nil {
@@ -195,7 +211,7 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 		}
 		var grant *control.Grant
 		for _, g := range status.Connector.Grants {
-			if g.Key == expectedGrant.Key && g.Scope == "project" {
+			if g.Key == expectedGrant.Key && g.Scope == expectedGrant.Scope {
 				copy := g
 				grant = &copy
 				break
@@ -207,7 +223,13 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 		if err := client.Request(ctx, "POST", base+"/heartbeat", nil, map[string]any{"instance": instance}, nil, 0); err != nil {
 			return err
 		}
-		view, err := service.RemoteSnapshot(*grant)
+		var view settings.RemoteView
+		var err error
+		if session == "" {
+			view, err = service.RemoteSnapshot(*grant)
+		} else {
+			view, err = runtimeSnapshot(project, session, *grant)
+		}
 		if err != nil {
 			return err
 		}
@@ -217,15 +239,15 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 		// Refresh bindings with current artifact revisions even when no settings
 		// changed. Snapshot timestamps are kept distinct from heartbeat liveness.
 		descriptorRaw, _ := json.Marshal(view.Descriptor)
-		publicationVersion := view.Snapshot.Version + ":" + artifact.Digest(descriptorRaw)
+		publicationVersion := fmt.Sprintf("%s:%t:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptorRaw))
 		if publicationVersion != lastVersion {
-			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": ""}, &published, 0); err != nil {
+			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": view.Generation}, &published, 0); err != nil {
 				return err
 			}
 			lastVersion = publicationVersion
 			resourceID = published.Resource.ID
 		}
-		if resourceID != "" {
+		if resourceID != "" && session == "" {
 			if err := bindPublished(ctx, client, base, project, resourceID); err != nil && ctx.Err() == nil {
 				logf("settings artifact binding: %v", err)
 			}
@@ -269,7 +291,13 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 				}
 			}
 		}()
-		journal, executeErr := executeCommand(execCtx, service, *grant, q, claimed.Reconcile)
+		var journal commandJournal
+		var executeErr error
+		if session == "" {
+			journal, executeErr = executeCommand(execCtx, service, *grant, q, claimed.Reconcile)
+		} else {
+			journal, executeErr = executeRuntimeCommand(execCtx, project, session, *grant, q, claimed.Reconcile)
+		}
 		stop()
 		<-keepDone
 		if executeErr != nil {

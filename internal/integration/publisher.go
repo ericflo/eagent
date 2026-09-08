@@ -20,6 +20,7 @@ import (
 	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -458,6 +459,9 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 		return "", err
 	}
 	files := map[string]any{}
+	if status, err := runtimecontrol.ReadStatus(project, info.ID); err == nil {
+		files["runtime_settings"] = []any{status.Generation, status.Values, status.AvailableUntil.After(time.Now())}
+	}
 	if stat, err := os.Stat(filepath.Join(project, ".agents/eagent/settings-audit.jsonl")); err == nil {
 		files["settings_audit"] = []any{stat.Size(), stat.ModTime().UnixNano()}
 	}

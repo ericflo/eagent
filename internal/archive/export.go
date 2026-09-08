@@ -24,6 +24,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/projection"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -228,6 +229,16 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 	}
 	if err := out.addJSON("settings/editor.json", "context", editorData); err != nil {
 		return nil, err
+	}
+	if status, err := runtimecontrol.ReadStatus(project, info.ID); err == nil {
+		live, err := runtimecontrol.View(project, info.ID, status.Generation, status.Values, status.AvailableUntil.After(time.Now()))
+		if err != nil {
+			return nil, err
+		}
+		out.Manifest.Dataset["runtime_settings_version"] = live.Snapshot.Version
+		if err := out.addJSON("context/runtime-settings.json", "context", map[string]any{"view": live, "meaning": "Runtime status at capture time. settings.runtime_started and settings.changed in the native log record its history; the source prefix may end before this observation."}); err != nil {
+			return nil, err
+		}
 	}
 	if err := out.captureAudit(ctx, project); err != nil {
 		return nil, err

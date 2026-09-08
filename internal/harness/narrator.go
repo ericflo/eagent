@@ -52,33 +52,49 @@ func (r *Runtime) narratorCoveredYield() bool {
 	return y != nil && r.yieldSeenSeq > 0 && r.narrLastSeen >= r.yieldSeenSeq && r.narrSaidSeq > r.yieldSeenSeq
 }
 
-// narratorTick wakes the narrator periodically while work is happening.
-func (r *Runtime) narratorTick() {
-	r.post(func() {
-		defer func() {
-			if !r.ending {
-				r.narrTicker = time.AfterFunc(time.Duration(r.cfg.NarratorTickSeconds)*time.Second, r.narratorTick)
-			}
-		}()
-		if r.narrBusy || r.ending {
-			return
-		}
-		busy := r.orchBusy || len(r.st.RunningTasks()) > 0
-		if !busy {
-			return
-		}
-		// Wake when the orchestrator's world moved since the narrator looked,
-		// or when the user has waited past the quiet limit even though nothing
-		// new landed (a long command, a long think): that is when they most
-		// want to hear which step is taking its time.
-		limit := time.Duration(r.cfg.NarratorQuietSeconds) * time.Second
-		if r.narrWorthy <= r.narrLastSeen && !(limit > 0 && r.quietFor() >= limit) {
-			return
-		}
-		if r.narrPending == "" {
-			r.narrPending = wakePeriodic
-		}
+// armNarratorTimer runs on the owner loop. A generation rejects an expired
+// callback already queued when a live settings change reschedules the timer.
+func (r *Runtime) armNarratorTimer() {
+	r.narrTimerGeneration++
+	generation := r.narrTimerGeneration
+	if r.narrTicker != nil {
+		r.narrTicker.Stop()
+	}
+	if r.ending {
+		return
+	}
+	r.narrTicker = time.AfterFunc(time.Duration(r.activeSettings.NarratorTickSeconds)*time.Second, func() {
+		r.post(func() { r.narratorTimerFired(generation) })
 	})
+}
+
+func (r *Runtime) narratorTimerFired(generation uint64) {
+	if generation != r.narrTimerGeneration {
+		return
+	}
+	defer func() {
+		if !r.ending {
+			r.armNarratorTimer()
+		}
+	}()
+	if r.narrBusy || r.ending {
+		return
+	}
+	busy := r.orchBusy || len(r.st.RunningTasks()) > 0
+	if !busy {
+		return
+	}
+	// Wake when the orchestrator's world moved since the narrator looked,
+	// or when the user has waited past the quiet limit even though nothing
+	// new landed (a long command, a long think): that is when they most
+	// want to hear which step is taking its time.
+	limit := time.Duration(r.activeSettings.NarratorQuietSeconds) * time.Second
+	if r.narrWorthy <= r.narrLastSeen && !(limit > 0 && r.quietFor() >= limit) {
+		return
+	}
+	if r.narrPending == "" {
+		r.narrPending = wakePeriodic
+	}
 }
 
 func (r *Runtime) startNarratorTurn(reason string) {
@@ -116,7 +132,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		if r.phone != nil {
 			phoneLine = PhoneStatus(r.phone.isRemote())
 		}
-		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), time.Duration(r.cfg.NarratorQuietSeconds)*time.Second, r.inflightLines(time.Now()))
+		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), time.Duration(r.activeSettings.NarratorQuietSeconds)*time.Second, r.inflightLines(time.Now()))
 		r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
 		msgs = r.st.NarratorView(nil)
 		seenSeq = r.st.LastSeq()
