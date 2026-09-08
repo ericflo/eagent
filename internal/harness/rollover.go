@@ -76,15 +76,11 @@ func (r *Runtime) futileAlreadyPaused() bool {
 // with the prompt as it is.
 func (r *Runtime) startRollover() bool {
 	if r.rolloverFutile() {
-		if r.futileAlreadyPaused() {
-			return false
-		}
-		// A second rollover cannot reclaim the context: the fresh prompt is
-		// already over the line. Pause once instead of spending forever.
-		r.ui.Log("rollover: a fresh context is already at %dk tokens; the prompt cannot be shrunk by another rollover, pausing", r.cfg.RolloverTokens/1000)
-		r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: futileYieldReason}))
-		r.wakeNarrator(wakeError)
-		return true
+		// A second rollover cannot reclaim the context. The pause is armed
+		// where a turn ends on a full context (pauseFutileRollover); here the
+		// orchestrator takes its turn with the prompt as it is, so a message
+		// that arrives while paused is answered rather than eaten.
+		return false
 	}
 	r.rolling = true
 	tokens := r.st.ContextTokens(event.ActorOrchestrator)
@@ -111,6 +107,19 @@ func (r *Runtime) startRollover() bool {
 	r.ui.Log("orchestrator context reached %dk tokens; starting subsession %d with a dossier", tokens/1000, idx+1)
 	r.createDossierTask(fmt.Sprintf("the orchestrator's prompt reached %d tokens", tokens))
 	return true
+}
+
+// pauseFutileRollover records, once, that the context is full and another
+// rollover cannot help: a forced yield the user sees explained. Called
+// when an orchestrator turn ends on a full context in a subsession that a
+// rollover created.
+func (r *Runtime) pauseFutileRollover() {
+	if r.futileAlreadyPaused() {
+		return
+	}
+	r.ui.Log("rollover: a fresh context is already at %dk tokens; the prompt cannot be shrunk by another rollover, pausing", r.cfg.RolloverTokens/1000)
+	r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: futileYieldReason}))
+	r.wakeNarrator(wakeError)
 }
 
 // carriedOver names the user's answers the orchestrator has not seen yet

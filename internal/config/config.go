@@ -523,6 +523,9 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 			}
 			bundle = ""
 		} else {
+			if !validName(bundle) {
+				return cfg, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+			}
 			bundleCfg, err = readJSONMap(BundlePath(project, bundle))
 			if err != nil {
 				return cfg, err

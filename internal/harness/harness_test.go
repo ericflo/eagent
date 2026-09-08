@@ -24,6 +24,7 @@ import (
 // fakeUI records what the user would see.
 type fakeUI struct {
 	mu       sync.Mutex
+	idles    int
 	messages []string
 	asked    []string
 	logs     []string
@@ -56,7 +57,14 @@ func (u *fakeUI) snapshot() ([]string, []string, []string) {
 	defer u.mu.Unlock()
 	return append([]string{}, u.messages...), append([]string{}, u.asked...), append([]string{}, u.logs...)
 }
-func (u *fakeUI) Idle(bool) {}
+func (u *fakeUI) Idle(on bool) {
+	if on {
+		u.mu.Lock()
+		u.idles++
+		u.mu.Unlock()
+	}
+}
+func (u *fakeUI) idleCount() int { u.mu.Lock(); defer u.mu.Unlock(); return u.idles }
 
 // scripted is a fake chat-completions server. brain decides each reply from
 // the model name and the messages sent so far.

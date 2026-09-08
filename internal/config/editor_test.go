@@ -247,3 +247,22 @@ func asConflict(err error, target **ErrConflict) bool {
 	}
 	return ok
 }
+
+// A bundle name is a file name, never a path: LoadBundle refuses traversal
+// before any file is opened.
+func TestLoadBundleRefusesPathNames(t *testing.T) {
+	project := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "evil.json")
+	if err := os.WriteFile(outside, []byte(`{"task_concurrency": 9}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, _ := filepath.Rel(BundlesDir(project), strings.TrimSuffix(outside, ".json"))
+	for _, name := range []string{rel, "../x", "/etc/passwd", "a/b"} {
+		if _, err := LoadBundle(project, "", name); err == nil || !strings.Contains(err.Error(), "bundle names") {
+			t.Errorf("%q: %v", name, err)
+		}
+	}
+	if _, err := LoadBundle(project, "", "glm"); err != nil {
+		t.Fatalf("a preset name is still accepted as a bundle: %v", err)
+	}
+}

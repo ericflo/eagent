@@ -325,3 +325,48 @@ func TestCostIsPricedPerRouteAcrossFallback(t *testing.T) {
 		t.Fatalf("a fallback repriced the past: before %.6f after %.6f", before, after)
 	}
 }
+
+// Stopping a session nobody runs is refused instead of leaving a stop in
+// its inbox, and a request whose Host is not this server is refused on
+// every route by the network wrapper.
+func TestStopNeedsARunningSessionAndHostIsChecked(t *testing.T) {
+	s, project := newTestServer(t)
+	dir := filepath.Join(project, ".agents", "eagent", "sessions", "1788700000001")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ev := `{"seq":1,"ts":"2026-09-07T00:00:00Z","actor":"harness","type":"session.start","data":{"session":"1788700000001","cwd":"` + project + `","interactive":true,"models":{}}}` + "\n" +
+		`{"seq":2,"ts":"2026-09-07T00:00:01Z","actor":"harness","type":"session.end","data":{"reason":"done"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "1788700000001.jsonl"), []byte(ev), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := do(s, "POST", "/api/sessions/1788700000001/stop", map[string]any{}, nil)
+	if w.Code != 409 {
+		t.Fatalf("stop on a finished session = %d %s", w.Code, w.Body)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dir, "inbox")); len(entries) != 0 {
+		t.Fatalf("a stop was written for a session nobody runs: %v", entries)
+	}
+	wrapped := s.loopbackOnly(s.Handler())
+	for _, c := range []struct {
+		host string
+		want int
+	}{{"evil.example", 403}, {"127.0.0.1:7331", 200}, {"localhost:7331", 200}} {
+		r := httptest.NewRequest("GET", "http://x/api/health", nil)
+		r.Host = c.host
+		r.RemoteAddr = "127.0.0.1:40000"
+		rec := httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, r)
+		if rec.Code != c.want {
+			t.Errorf("Host %s: %d want %d", c.host, rec.Code, c.want)
+		}
+	}
+	r := httptest.NewRequest("GET", "http://x/api/health", nil)
+	r.Host = "127.0.0.1:7331"
+	r.RemoteAddr = "10.0.0.5:40000"
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, r)
+	if rec.Code != 403 {
+		t.Fatalf("a LAN peer got %d", rec.Code)
+	}
+}

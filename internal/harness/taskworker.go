@@ -78,7 +78,8 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 		maxTurns = max(maxTurns, 40)
 	}
 	textOnly := 0
-	lastText := ""
+	lastText := ""   // the worker's last words, for the out-of-turns messages
+	streakText := "" // words within the current run of tool-less replies
 	for turn := 1; ; turn++ {
 		if ctx.Err() != nil {
 			if r.ctx.Err() != nil {
@@ -142,16 +143,19 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 				continue
 			}
 			textOnly++
+			if txt := strings.TrimSpace(resp.Text); txt != "" {
+				streakText = txt
+			}
 			if textOnly >= 2 {
-				if lastText == "" {
-					return "failed", "the worker stopped without producing output or calling complete_task"
+				if streakText == "" {
+					return "failed", "the worker went silent: two replies with no output and no tool call, and it never called complete_task"
 				}
-				return "completed", "(the worker did not call complete_task; its last message follows)\n" + lastText
+				return "completed", "(the worker did not call complete_task; its last message follows)\n" + streakText
 			}
 			r.recordHarnessMessage(event.ActorTask, t.ID, "Your reply contained no tool call. Continue the work with tools, or call complete_task with your report if you are done.")
 			continue
 		}
-		textOnly = 0
+		textOnly, streakText = 0, ""
 		if turn >= maxTurns && !hasTool(resp.ToolCalls, "complete_task") {
 			return "failed", fmt.Sprintf("used all %d model calls without calling complete_task. Last message from the worker: %s", maxTurns, lastText)
 		}

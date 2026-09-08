@@ -259,3 +259,97 @@ func TestPydanticContentTypeRefusalIsRemembered(t *testing.T) {
 		t.Fatal("an oversized picture must not be remembered as a blind model")
 	}
 }
+
+// A 400 about a thinking block in the history is not a request for the
+// other thinking flavour; and a flavour flip that does not help is undone.
+func TestAnthropicFlavourFlipsOnlyForTheParameter(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	mode := "history" // history: the 400 is about messages; both: every flavour is refused
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		m := mode
+		mu.Unlock()
+		switch m {
+		case "history":
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.3: a final assistant message must start with a thinking block"}}`)
+		case "both":
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"thinking.type: not supported"}}`)
+		default:
+			anthropicSSE(w, "ok")
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "claude-x", APIKey: "k", ReasoningEffort: "high", MaxTokens: 8192})
+	c.MaxAttempts = 1
+	req := Request{Messages: []Message{{Role: "user", Text: "hi"}}}
+	if _, err := c.Complete(context.Background(), req, nil); err == nil {
+		t.Fatal("the history error should surface")
+	}
+	if c.anthropicBudgeted.Load() {
+		t.Fatal("a complaint about the history flipped the thinking flavour")
+	}
+	mu.Lock()
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"adaptive"`) {
+		t.Fatalf("posts = %d %q", len(bodies), bodies)
+	}
+	mode = "both"
+	bodies = nil
+	mu.Unlock()
+	if _, err := c.Complete(context.Background(), req, nil); err == nil {
+		t.Fatal("both flavours refused should surface")
+	}
+	mu.Lock()
+	n := len(bodies)
+	mu.Unlock()
+	if n != 2 || c.anthropicBudgeted.Load() {
+		t.Fatalf("a flip that did not help must be undone: posts=%d budgeted=%v", n, c.anthropicBudgeted.Load())
+	}
+}
+
+// A thinking budget fits under max_tokens; when there is no room, no
+// thinking block is sent rather than one the API rejects.
+func TestAnthropicBudgetFitsUnderMaxTokens(t *testing.T) {
+	var mu sync.Mutex
+	var last string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		last = string(raw)
+		mu.Unlock()
+		anthropicSSE(w, "ok")
+	}))
+	defer srv.Close()
+	for _, tc := range []struct {
+		maxTokens int
+		wantBlock bool
+		budget    int
+	}{{200, false, 0}, {1024, false, 0}, {1500, true, 1024}, {4096, true, 2048}, {60000, true, 24576}} {
+		c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "claude-old", APIKey: "k", ReasoningEffort: "high", MaxTokens: tc.maxTokens})
+		c.anthropicBudgeted.Store(true)
+		c.MaxAttempts = 1
+		req := Request{Messages: []Message{{Role: "user", Text: "hi"}}, ToolChoice: "required", Tools: []Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}}}
+		if _, err := c.Complete(context.Background(), req, nil); err != nil {
+			t.Fatalf("max_tokens %d: %v", tc.maxTokens, err)
+		}
+		mu.Lock()
+		body := last
+		mu.Unlock()
+		var parsed map[string]any
+		_ = json.Unmarshal([]byte(body), &parsed)
+		th, has := parsed["thinking"].(map[string]any)
+		if has != tc.wantBlock {
+			t.Fatalf("max_tokens %d: thinking block present=%v want %v", tc.maxTokens, has, tc.wantBlock)
+		}
+		if has && int(th["budget_tokens"].(float64)) != tc.budget {
+			t.Fatalf("max_tokens %d: budget %v want %d", tc.maxTokens, th["budget_tokens"], tc.budget)
+		}
+		if _, forced := parsed["tool_choice"]; forced == has {
+			t.Fatalf("max_tokens %d: tool_choice must be dropped exactly when thinking is sent", tc.maxTokens)
+		}
+	}
+}

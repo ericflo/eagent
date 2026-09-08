@@ -91,10 +91,14 @@ func (r *Runtime) narratorAttachments(raw any) ([]event.Attachment, error) {
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s: %v", p, err)
 		}
-		// This is the one path that sends bytes off the machine, so it
-		// follows the write rule (project only, unless allow_outside_project),
-		// not the read rule.
-		if _, err := r.files.Resolve(abs, true); err != nil {
+		// This is the one path that sends bytes off the machine, so the file
+		// must really be in the project, not merely named as if it were:
+		// symlinks are followed before the check, and the write rule's
+		// temp-dir exemption does not apply here.
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = real
+		}
+		if !r.insideProject(abs) {
 			return nil, fmt.Errorf("attachment %s is outside the project directory; copy it into the project first", p)
 		}
 		st, err := os.Stat(abs)
@@ -349,4 +353,17 @@ func findByName(root, name string, maxDepth int) string {
 		return nil
 	})
 	return best
+}
+
+// insideProject reports whether an already-resolved absolute path lies in
+// the project (or anywhere, when edits outside the project are allowed).
+func (r *Runtime) insideProject(abs string) bool {
+	if r.files.AllowOutside {
+		return true
+	}
+	root := filepath.Clean(r.opts.Project)
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		root = real
+	}
+	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
 }

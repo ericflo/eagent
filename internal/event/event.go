@@ -59,8 +59,9 @@ const (
 	HarnessMessage = "harness.message"
 	Yield          = "yield"
 	Route          = "route"
-	PhoneThread    = "phone.thread" // the session is mirrored to the user's phone
-	Steer          = "steer"        // the harness's per-call instruction to an actor, kept so every prompt extends the last
+	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
+	PhoneQuestion  = "phone.question" // a narrator question was posted to the phone as a card
+	Steer          = "steer"          // the harness's per-call instruction to an actor, kept so every prompt extends the last
 	Error          = "error"
 )
 
@@ -272,6 +273,13 @@ type NarratorMessageData struct {
 	Important bool `json:"important,omitempty"`
 	// Attachments are files sent with the message (screenshots, logs).
 	Attachments []Attachment `json:"attachments,omitempty"`
+}
+
+// PhoneQuestionData records which phone card carries a narrator question,
+// so a later run can withdraw it when the question is answered elsewhere.
+type PhoneQuestionData struct {
+	QuestionID string `json:"question_id"`
+	CardID     string `json:"card_id"`
 }
 
 // PhoneThreadData records the Finalechat thread mirroring this session.

@@ -24,27 +24,27 @@ import (
 // fakePhone is a minimal Finalechat: one thread, messages, questions, and
 // the long-poll shape the runtime relies on.
 type fakePhone struct {
-	srv       *httptest.Server
-	mu        sync.Mutex
-	messages  []map[string]any
-	questions map[string]map[string]any
-	posts     []map[string]any // bodies of POST …/messages
-	asks      []map[string]any // bodies of POST …/questions
-	cancelled []string
-	seq       int
-	remote    bool
-	cond      *sync.Cond
-	files     map[string]fakeFile // attachment id -> bytes served to the agent
-	uploaded  []fakeFile          // files the agent posted
-	features  []string            // what /me advertises
-	activity  []map[string]any    // bodies of POST …/activity
-	cleared   int                 // DELETE …/activity calls
-	keys      map[string]string   // client_key -> message id
-	dupes     int                 // posts answered from a known key
-	metas     []map[string]any    // PATCH thread meta bodies
-	latency   time.Duration       // added to every request, to imitate a real network
-	anchorUnknown bool           // every GET …/messages answers at once with an unknown anchor
-	gets          int            // GET …/messages calls
+	srv           *httptest.Server
+	mu            sync.Mutex
+	messages      []map[string]any
+	questions     map[string]map[string]any
+	posts         []map[string]any // bodies of POST …/messages
+	asks          []map[string]any // bodies of POST …/questions
+	cancelled     []string
+	seq           int
+	remote        bool
+	cond          *sync.Cond
+	files         map[string]fakeFile // attachment id -> bytes served to the agent
+	uploaded      []fakeFile          // files the agent posted
+	features      []string            // what /me advertises
+	activity      []map[string]any    // bodies of POST …/activity
+	cleared       int                 // DELETE …/activity calls
+	keys          map[string]string   // client_key -> message id
+	dupes         int                 // posts answered from a known key
+	metas         []map[string]any    // PATCH thread meta bodies
+	latency       time.Duration       // added to every request, to imitate a real network
+	anchorUnknown bool                // every GET …/messages answers at once with an unknown anchor
+	gets          int                 // GET …/messages calls
 }
 
 type fakeFile struct {
@@ -1859,7 +1859,9 @@ func TestPhonePollPacesItselfWhenTheServerDoesNotHold(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	t.Setenv("EAGENT_TEST_FC", "fc_test")
 	project := t.TempDir()
-	s := newScripted(func(model string, msgs []map[string]any) reply { return reply{calls: []event.ToolCall{tc("hold", `{}`)}} })
+	s := newScripted(func(model string, msgs []map[string]any) reply {
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	})
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	fp.anchorUnknown = true
@@ -1984,5 +1986,192 @@ func TestResumePromptAnswersThePendingQuestion(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("an --answer with no question open was dropped")
+	}
+}
+
+// A stop left in the inbox by a run that has already ended does not quit
+// the next resume before its first tick.
+func TestStaleStopDoesNotQuitTheNextResume(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"nothing to do"}`)}}
+		}
+		if strings.Contains(all, "nothing to do") && !strings.Contains(all, "Nothing to do.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Nothing to do."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "first"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("first run exit %d", code)
+	}
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "stop", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false, Prompt: "please write the report"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rt2.Run(ctx); code != 0 {
+		t.Fatalf("resumed exit %d", code)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.EndReason != "done" {
+		t.Fatalf("a stale stop ended the resume as %q", st.EndReason)
+	}
+}
+
+// A worker that goes silent after an earlier chatty turn is failed, not
+// reported complete on the strength of the old sentence.
+func TestSilentWorkerIsFailed(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	workerTurn := 0
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "Task t1") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"saw the task end"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("delegate", `{"title":"Implement billing","description":"do it"}`)}}
+		case "task":
+			workerTurn++
+			if workerTurn == 1 {
+				return reply{text: "Let me start by reading billing.go.", calls: []event.ToolCall{tc("list_dir", `{"path":"."}`)}}
+			}
+			return reply{} // silence
+		default:
+			if strings.Contains(all, "saw the task end") && !strings.Contains(all, "Done.") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "build billing"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	rt.Run(ctx)
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	task := st.Tasks["t1"]
+	if task == nil || task.Status != "failed" || !strings.Contains(task.Summary, "silent") {
+		t.Fatalf("task = %+v", task)
+	}
+}
+
+// An interactive session with a schedule armed still shows its prompt.
+func TestScheduleDoesNotHideThePrompt(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			if !strings.Contains(all, "created (loop)") {
+				return reply{calls: []event.ToolCall{tc("schedule", `{"spec":"every 45s","note":"check the build"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"checking every 45 seconds"}`)}}
+		}
+		if strings.Contains(all, "every 45 seconds") && !strings.Contains(all, "Will check") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Will check every 45 seconds."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: true, Prompt: "watch the build"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	deadline := time.Now().Add(20 * time.Second)
+	for ui.idleCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if ui.idleCount() == 0 {
+		evs, _ := store.Read(rt.sess.Path)
+		for _, ev := range evs {
+			t.Logf("%d %-12s %s %s", ev.Seq, ev.Actor, ev.Type, clipTail(string(ev.Data), 110))
+		}
+		t.Fatal("no prompt was shown with a schedule armed")
+	}
+}
+
+// A message that arrives while a futile rollover is paused is answered by
+// an orchestrator turn, not eaten by re-arming the pause.
+func TestFutilePauseDoesNotEatTheNextMessage(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	orchCalls := 0
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			orchCalls++
+			if strings.Contains(all, "second request") {
+				return reply{prompt: 25000, calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"handled the second request"}`)}}
+			}
+			return reply{prompt: 25000, calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"handled the first request"}`)}}
+		case "task": // the dossier worker
+			return reply{calls: []event.ToolCall{tc("complete_task", `{"status":"completed","summary":"`+strings.Repeat("dossier text with a citation 1788700000000.jsonl:1 ", 6)+`"}`)}}
+		default:
+			if (strings.Contains(all, "handled the") || strings.Contains(all, "rollover")) && !strings.Contains(all, "Noted.") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Noted."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	cfg.RolloverTokens = 20000
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "first request"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rt.Run(ctx)
+	before := orchCalls
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false, Prompt: "second request"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := rt2.Run(ctx)
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if orchCalls-before < 1 {
+		t.Fatalf("the resume's message was eaten: %d orchestrator calls, end %s exit %d", orchCalls-before, st.EndReason, code)
+	}
+	if orchCalls-before > 4 {
+		t.Fatalf("the rollover spun: %d orchestrator calls during the resume", orchCalls-before)
 	}
 }

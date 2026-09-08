@@ -67,17 +67,22 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 				// Never quietly turn an unknown effort into medium.
 				return nil, fmt.Errorf("reasoning effort %q is not one this model accepts (none, low, medium, high)", e)
 			}
+			// The budget must be at least 1024 and strictly below max_tokens;
+			// when the ceiling leaves no room, send no thinking at all rather
+			// than a request the API rejects.
+			budget = max(min(budget, maxTokens/2), 1024)
 			if budget >= maxTokens {
-				budget = maxTokens / 2
+				thinking = false
+			} else {
+				body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
 			}
-			body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": max(budget, 1024)}
 		} else {
 			// Current models: adaptive thinking steered by effort.
 			body["thinking"] = map[string]any{"type": "adaptive"}
 			body["output_config"] = map[string]any{"effort": e}
 		}
 		// Thinking is incompatible with forced tool use.
-		if req.ToolChoice == "required" {
+		if thinking && req.ToolChoice == "required" {
 			delete(body, "tool_choice")
 		}
 	}
@@ -87,11 +92,16 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	})
 	if err != nil {
 		var ae *APIError
-		if mayProbe && thinking && errors.As(err, &ae) && ae.Status == 400 && strings.Contains(ae.Body, "thinking") {
-			// The model wants the other thinking flavour: remember it (unless a
-			// concurrent call already changed it) and retry this call once.
+		if mayProbe && thinking && errors.As(err, &ae) && ae.Status == 400 && anthropicFlavourRejected(ae.Body, budgeted) {
+			// The model may want the other thinking flavour: try it once, and
+			// keep the new flavour only when it actually worked.
 			c.anthropicBudgeted.CompareAndSwap(budgeted, !budgeted)
-			return c.anthropicTry(ctx, req, obs, false)
+			out, rerr := c.anthropicTry(ctx, req, obs, false)
+			if rerr != nil {
+				c.anthropicBudgeted.CompareAndSwap(!budgeted, budgeted)
+				return nil, err // the flavour was not the problem
+			}
+			return out, nil
 		}
 		return nil, err
 	}
@@ -351,4 +361,17 @@ func anthropicMessages(req Request) []map[string]any {
 		}
 	}
 	return msgs
+}
+
+// anthropicFlavourRejected reports a 400 that is about the thinking
+// parameter itself (the model wants the other flavour), as opposed to one
+// about a content block in the history that merely mentions thinking.
+func anthropicFlavourRejected(body string, budgeted bool) bool {
+	if strings.Contains(body, "messages.") || strings.Contains(body, "redacted_thinking") {
+		return false
+	}
+	if budgeted {
+		return strings.Contains(body, "thinking.type") || strings.Contains(body, "thinking.budget_tokens")
+	}
+	return strings.Contains(body, "thinking.type") || strings.Contains(body, "adaptive") || strings.Contains(body, "output_config")
 }

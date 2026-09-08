@@ -101,6 +101,7 @@ type Runtime struct {
 	shutdownOnce sync.Once
 	exitCode     int
 	awaitingUser bool
+	inboxSince   time.Time // a stop file older than this run is a leftover, not an order
 	lastOrchSeen int64
 	lastWake     int64 // seq of the newest event that should wake the orchestrator
 	lastOrchText string
@@ -467,6 +468,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 	}
 	inbox := time.NewTicker(500 * time.Millisecond)
 	defer inbox.Stop()
+	r.inboxSince = time.Now()
 	r.pollInbox()
 	r.tick()
 	for {
@@ -552,18 +554,22 @@ func (r *Runtime) maybeEnd() {
 	if !r.st.Idle() || r.orchestratorHasWork() {
 		return
 	}
-	if len(r.st.RunningTasks()) > 0 || len(r.st.ActiveSchedules()) > 0 {
+	if len(r.st.RunningTasks()) > 0 {
 		return
 	}
 	if r.opts.Interactive {
-		// Interactive sessions wait for the user. Make sure the narrator had
-		// its say about the idle state, then show the prompt.
+		// Interactive sessions wait for the user (a schedule means "do not
+		// end", not "do not accept input"). Make sure the narrator had its
+		// say about the idle state, then show the prompt.
 		if !r.narrFinal && r.narrLastSeen < r.st.LastYield.Seq {
 			r.wakeNarrator(narratorReasonForYield(r.st))
 			return
 		}
 		r.ui.Idle(true)
 		return
+	}
+	if len(r.st.ActiveSchedules()) > 0 {
+		return // a batch session with a schedule keeps running
 	}
 	if r.waitingOnPhone() {
 		// A question is open on the user's phone: a batch session waits for

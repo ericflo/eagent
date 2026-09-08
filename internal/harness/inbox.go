@@ -67,9 +67,15 @@ func (r *Runtime) pollInbox() {
 		if err != nil {
 			continue
 		}
+		st, statErr := os.Stat(path)
 		_ = os.Remove(path)
 		var msg InboxMessage
 		if json.Unmarshal(raw, &msg) != nil {
+			continue
+		}
+		if msg.Type == "stop" && statErr == nil && st.ModTime().Before(r.inboxSince) {
+			// A stop meant for a run that has already ended must not quit
+			// this one before its first tick. Messages and answers are kept.
 			continue
 		}
 		r.handleInbox(msg)

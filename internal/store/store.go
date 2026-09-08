@@ -225,7 +225,16 @@ func (s *Session) acquireLock() error {
 	if err != nil {
 		return err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// A liveness probe holds a shared lock for a moment; wait it out before
+	// declaring the session taken.
+	var lerr error
+	for i := 0; i < 50; i++ {
+		if lerr = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr == nil {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if lerr != nil {
 		f.Close()
 		pid, _ := os.ReadFile(lockPath)
 		return fmt.Errorf("session %s is already being run (pid %s); stop that runner first or read it with `eagent show`", s.ID, strings.TrimSpace(string(pid)))

@@ -25,6 +25,9 @@ func (r *Runtime) startOrchestratorTurn() {
 			r.orchBusy = false
 			r.orchCallAt = time.Time{}
 			r.append(event.New(event.TurnEnd, event.ActorOrchestrator, event.TurnData{Reason: endReason}))
+			if endReason == "context" && r.rolloverFutile() {
+				r.pauseFutileRollover()
+			}
 			if endReason == "yield" || endReason == "done" || endReason == "context" {
 				r.wakeNarrator(narratorReasonForYield(r.st))
 			}

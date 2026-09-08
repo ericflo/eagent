@@ -665,7 +665,7 @@ func (s *Server) testRoute(w http.ResponseWriter, r *http.Request) {
 		System:    "Reply with a single tool call.",
 		Messages:  []llm.Message{{Role: "user", Text: "Call ping with message=\"pong\"."}},
 		Tools:     []llm.Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`)}},
-		MaxTokens: 200,
+		MaxTokens: 4096, // a ceiling, not a spend: room for a thinking budget under it
 	}, nil)
 	res.MS = time.Since(start).Milliseconds()
 	switch {

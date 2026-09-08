@@ -14,9 +14,10 @@ var argKeyValue = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>
 // toolCallBlocks finds every <tool_call> block and returns, per block, the
 // indices {start, end, bodyStart, bodyEnd}. A block ends at its
 // </tool_call>, at the next <tool_call> (an unterminated block must not
-// swallow the one after it), or at the end of the text.
+// swallow the one after it), or at the end of the text. A tag quoted inside
+// a closed <arg_value> span is argument text, not markup.
 func toolCallBlocks(text string) [][]int {
-	const open, close = "<tool_call>", "</tool_call>"
+	const open = "<tool_call>"
 	var out [][]int
 	pos := 0
 	for pos < len(text) {
@@ -26,21 +27,49 @@ func toolCallBlocks(text string) [][]int {
 		}
 		start := pos + i
 		bodyStart := start + len(open)
-		rest := text[bodyStart:]
-		ci, ni := strings.Index(rest, close), strings.Index(rest, open)
-		switch {
-		case ci >= 0 && (ni < 0 || ci < ni):
-			out = append(out, []int{start, bodyStart + ci + len(close), bodyStart, bodyStart + ci})
-			pos = bodyStart + ci + len(close)
-		case ni >= 0:
-			out = append(out, []int{start, bodyStart + ni, bodyStart, bodyStart + ni})
-			pos = bodyStart + ni
-		default:
-			out = append(out, []int{start, len(text), bodyStart, len(text)})
-			pos = len(text)
-		}
+		bodyEnd, next := scanBlock(text[bodyStart:])
+		out = append(out, []int{start, bodyStart + next, bodyStart, bodyStart + bodyEnd})
+		pos = bodyStart + next
 	}
 	return out
+}
+
+func indexFrom(s, sub string, from int) int {
+	i := strings.Index(s[from:], sub)
+	if i < 0 {
+		return -1
+	}
+	return from + i
+}
+
+// scanBlock returns the end of a block body and the offset just past the
+// block. A closed <arg_value>…</arg_value> span is skipped whole, so a tag
+// inside it neither ends the block nor starts a new one; a truncated value
+// shields nothing.
+func scanBlock(rest string) (bodyEnd, next int) {
+	const open, closeTag, av, ave = "<tool_call>", "</tool_call>", "<arg_value>", "</arg_value>"
+	for pos := 0; pos < len(rest); {
+		c := indexFrom(rest, closeTag, pos)
+		n := indexFrom(rest, open, pos)
+		a := indexFrom(rest, av, pos)
+		if a >= 0 && (c < 0 || a < c) && (n < 0 || a < n) {
+			e := indexFrom(rest, ave, a+len(av))
+			if e >= 0 && !strings.Contains(rest[a:e], "<arg_key>") {
+				pos = e + len(ave)
+			} else {
+				pos = a + len(av)
+			}
+			continue
+		}
+		if c >= 0 && (n < 0 || c < n) {
+			return c, c + len(closeTag)
+		}
+		if n >= 0 {
+			return n, n
+		}
+		break
+	}
+	return len(rest), len(rest)
 }
 
 // ParseTextToolCalls recovers tool calls that a model emitted as text instead

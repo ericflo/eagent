@@ -102,6 +102,17 @@ func (r *Runtime) startPhone() {
 	// before the mirror existed, so observe() never saw it; it is posted
 	// here, as the user, so the phone shows the conversation whole.
 	prompt, promptSeq := "", int64(0)
+	// Cards of questions the resume itself answered (its prompt was the
+	// answer) must be withdrawn: the mirror did not exist to do it then.
+	cards := map[string]string{}
+	var closedCards []string
+	for _, ev := range r.st.Events {
+		if ev.Type == event.PhoneQuestion {
+			var d event.PhoneQuestionData
+			_ = ev.Decode(&d)
+			cards[d.QuestionID] = d.CardID
+		}
+	}
 	if !resumed {
 		for _, ev := range r.st.Events {
 			if ev.Type == event.UserMessage {
@@ -132,6 +143,9 @@ func (r *Runtime) startPhone() {
 					_ = ev.Decode(&d)
 					if d.Source != "finalechat" {
 						prompt, promptSeq = d.Text, ev.Seq
+					}
+					if fid := cards[d.QuestionID]; fid != "" {
+						closedCards = append(closedCards, fid)
 					}
 				}
 			}
@@ -200,6 +214,9 @@ func (r *Runtime) startPhone() {
 			r.append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: thread.ID, ExternalID: strings.TrimPrefix(p.ref, "ext:"), BaseURL: p.client.BaseURL, RemoteMode: remote}))
 		})
 		r.ui.Log("finalechat: mirroring to your phone (thread %s, token from %s)", strings.TrimPrefix(p.ref, "ext:"), p.client.Source)
+		for _, fid := range closedCards {
+			_ = p.client.Cancel(ctx, fid) // already resolved is fine
+		}
 		if pending != nil {
 			// A resumed session still waiting on a question asks it again,
 			// since the earlier phone question expired or was never posted.
@@ -405,6 +422,13 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.questions[qid] = q.ID
 		p.fromPhone[q.ID] = qid
 		p.mu.Unlock()
+		cardID := q.ID
+		r.post(func() {
+			if r.ending {
+				return
+			}
+			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID}))
+		})
 		p.markSent(act)
 		// A question is when remote mode matters most: re-read it now.
 		p.refreshMe(r)

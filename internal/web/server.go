@@ -147,7 +147,9 @@ func alive(sessionPath string) bool {
 		return false
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// A shared lock answers the question without contending with another
+	// probe or with a runner trying to take the exclusive lock.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		return true
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
@@ -679,6 +681,12 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
+	if !alive(info.Path) && !s.isHosted(info.ID) {
+		// A stop for a session nobody runs would sit in the inbox and quit
+		// the next resume before its first tick.
+		writeErr(w, 409, errors.New("session is not running"))
+		return
+	}
 	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
 		writeErr(w, 500, err)
 		return
@@ -949,7 +957,7 @@ func (u *webUI) status() harness.Status {
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	s.addr = addr
-	srv := &http.Server{Addr: addr, Handler: loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	select {
@@ -1013,7 +1021,7 @@ func costOfRoutes(st *state.State, actor string) (float64, bool) {
 // loopbackOnly refuses any request whose peer is not this machine. The page
 // hands its token to whoever asks for it, so the loopback boundary is what
 // actually gates session creation, and sessions run shell commands.
-func loopbackOnly(next http.Handler) http.Handler {
+func (s *Server) loopbackOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
@@ -1021,6 +1029,13 @@ func loopbackOnly(next http.Handler) http.Handler {
 		}
 		if ip := net.ParseIP(strings.Trim(host, "[]")); ip == nil || !ip.IsLoopback() {
 			http.Error(w, "eagent serves local clients only", http.StatusForbidden)
+			return
+		}
+		// A rebound DNS name resolves to 127.0.0.1, so the peer check alone
+		// would let a remote page read the whole log; the Host must be ours
+		// on reads too, not only on the mutating routes the guard covers.
+		if !s.hostAllowed(r.Host) {
+			http.Error(w, "request Host is not this server", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

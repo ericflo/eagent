@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -137,5 +139,77 @@ func TestSpillNeverLeavesItsDirectory(t *testing.T) {
 	}
 	if safeBase("call_ok-1") != "call_ok-1" || safeBase("...") == "" || strings.ContainsAny(safeBase("a/b\\c"), "/\\") {
 		t.Fatal("safeBase")
+	}
+}
+
+// Concurrent edits to one file never lose one another: the mutation is
+// serialised, so every caller's replacement lands.
+func TestConcurrentEditsAreSerialised(t *testing.T) {
+	root := t.TempDir()
+	f := Files{Root: root}
+	var body strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&body, "line %04d\n", i)
+	}
+	if _, err := f.WriteFile("data.txt", body.String()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			old := fmt.Sprintf("line %04d\n", i*100)
+			if _, err := f.EditFile("data.txt", old, fmt.Sprintf("edited %d\n", i), false); err != nil {
+				t.Errorf("edit %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	got, _ := f.ReadFile("data.txt", 0, 0, 0)
+	for i := 0; i < 8; i++ {
+		if !strings.Contains(got, fmt.Sprintf("edited %d\n", i)) {
+			t.Fatalf("edit %d was lost", i)
+		}
+	}
+}
+
+// A symlink inside the project that points outside does not carry a write
+// with it: containment is judged on the real path.
+func TestWriteThroughSymlinkIsRefused(t *testing.T) {
+	// The write rule exempts the system temp dir, so the victim must live
+	// outside it: point TMPDIR inside the project for the duration.
+	outside, err := os.MkdirTemp("", "eagent-outside-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outside)
+	root := t.TempDir()
+	t.Setenv("TMPDIR", filepath.Join(root, "tmp"))
+	target := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "link.txt")); err != nil {
+		t.Skip("no symlinks here")
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	f := Files{Root: root}
+	if _, err := f.WriteFile("link.txt", "clobbered"); err == nil {
+		t.Fatal("a write through a symlink to outside the project was allowed")
+	}
+	if _, err := f.WriteFile("dirlink/new.txt", "x"); err == nil {
+		t.Fatal("a write into a symlinked outside directory was allowed")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "keep" {
+		t.Fatal("the outside file was changed")
+	}
+	if _, err := f.WriteFile("sub/ok.txt", "fine"); err != nil {
+		t.Fatalf("an ordinary nested write must still work: %v", err)
+	}
+	if _, err := f.ReadFile("link.txt", 0, 0, 0); err != nil {
+		t.Fatalf("reads through symlinks are still allowed: %v", err)
 	}
 }

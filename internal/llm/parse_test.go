@@ -158,3 +158,22 @@ func TestTwoLeakedBlocksDoNotMerge(t *testing.T) {
 		t.Fatalf("a stray argument crossed blocks: %+v", calls)
 	}
 }
+
+// A <tool_call> quoted inside an argument is text, not a new block.
+func TestNestedTagInArgValue(t *testing.T) {
+	text := "<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>grep -n \"<tool_call>\" internal/llm/parse.go</arg_value>\n</tool_call>"
+	calls, rest := ParseTextToolCalls(text)
+	if len(calls) != 1 || calls[0].Name != "bash" {
+		t.Fatalf("calls = %+v", calls)
+	}
+	args, _ := ArgsObject(calls[0].Args)
+	if args["command"] != "grep -n \"<tool_call>\" internal/llm/parse.go" || strings.TrimSpace(rest) != "" {
+		t.Fatalf("args = %v rest = %q", args, rest)
+	}
+	// A truncated value shields nothing: the next block is still its own call.
+	text = "<tool_call>write_file\n<arg_key>path</arg_key>\n<arg_value>a.txt</arg_value>\n<arg_key>content</arg_key>\n<arg_value>unfinished <tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>ls</arg_value>\n</tool_call>"
+	calls, _ = ParseTextToolCalls(text)
+	if len(calls) != 2 || calls[1].Name != "bash" {
+		t.Fatalf("truncated value: %+v", calls)
+	}
+}

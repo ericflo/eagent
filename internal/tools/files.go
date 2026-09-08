@@ -11,8 +11,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
+
+// writeMu serialises the file tools' mutations: EditFile is a
+// read-modify-write and concurrent actors share one project tree.
+var writeMu sync.Mutex
 
 // Files gives actors project-relative file access.
 type Files struct {
@@ -36,15 +41,33 @@ func (f Files) Resolve(p string, write bool) (string, error) {
 	if f.AllowOutside || !write {
 		return abs, nil
 	}
+	// Containment is judged on the real path: a symlink inside the project
+	// that points outside must not carry a write with it.
 	root := filepath.Clean(f.Root)
-	if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+	real := realPath(abs)
+	realRoot := realPath(root)
+	if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
 		return abs, nil
 	}
-	tmp := filepath.Clean(os.TempDir())
-	if strings.HasPrefix(abs, tmp+string(filepath.Separator)) {
+	tmp := realPath(filepath.Clean(os.TempDir()))
+	if strings.HasPrefix(real, tmp+string(filepath.Separator)) {
 		return abs, nil
 	}
 	return "", fmt.Errorf("refusing to write %s: it is outside the project directory %s. Write inside the project (or use a shell command if you really mean it)", p, root)
+}
+
+// realPath resolves symlinks in a path that may not exist yet: the deepest
+// existing ancestor is resolved and the rest appended.
+func realPath(abs string) string {
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r
+	}
+	dir, base := filepath.Split(abs)
+	dir = filepath.Clean(dir)
+	if dir == abs || dir == "." || dir == string(filepath.Separator) {
+		return abs
+	}
+	return filepath.Join(realPath(dir), base)
 }
 
 // ReadFile returns a file's contents, optionally a window of lines.
@@ -109,6 +132,8 @@ func (f Files) WriteFile(p, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return "", err
 	}
@@ -139,6 +164,8 @@ func (f Files) EditFile(p, oldText, newText string, replaceAll bool) (string, er
 	if err != nil {
 		return "", err
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
 	if st, err := os.Stat(abs); err == nil {
 		if err := readable(p, st); err != nil {
 			return "", err
