@@ -75,7 +75,11 @@ func main() {
 			}
 			current = state.Replay(evs)
 		}
-		return projection.Detail(meta, current), nil
+		captured := meta
+		if len(current.Events) > 0 {
+			captured.Modified = current.Events[len(current.Events)-1].Time
+		}
+		return projection.Detail(captured, current), nil
 	})
 	register("eagentReplayConversation", func(args []js.Value) (any, error) {
 		if len(args) != 2 {

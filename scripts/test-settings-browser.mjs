@@ -22,15 +22,18 @@ try {
   resource.id = 'fixture-resource'; resource.generation = '';
   const files = Object.fromEntries(await Promise.all(manifest.files.filter(f => ['settings/state.json', 'settings/editor.json'].includes(f.path)).map(async f => [f.path, [...await readFile(path.join(archive, f.path))]])));
   const website = await readFile(path.join(archive, 'settings/index.html'));
+  const viewer = await readFile(path.join(archive, 'index.html'));
   const parent = `<!doctype html><iframe title="Settings" sandbox="allow-scripts" style="width:100%;height:96vh" src="/settings"></iframe><script>
     window.fixture=${JSON.stringify({resource, manifest, files}).replaceAll('<', '\\u003c')};
-    window.calls=[]; window.proposals=[]; window.proposal=null; window.editable=true;
+    window.calls=[]; window.proposals=[]; window.proposal=null; window.editable=true; window.inspection=null;
     document.querySelector('iframe').onload=()=>{
       const channel=new MessageChannel(); window.bridge=channel.port1; const nonce='fixture-nonce';
-      bridge.onmessage=event=>{
+      bridge.onmessage=async event=>{
         const m=event.data; calls.push(m.method); let result, error;
         if(m.method==='artifact.manifest') result=fixture.manifest;
-        else if(m.method==='artifact.read') result=new Uint8Array(fixture.files[m.params.path].slice(m.params.offset,m.params.offset+m.params.length)).buffer;
+        else if(m.method==='artifact.read') { const bytes=fixture.files[m.params.path] || new Uint8Array(await (await fetch('/file?path='+encodeURIComponent(m.params.path))).arrayBuffer()); result=new Uint8Array(bytes.slice(m.params.offset,m.params.offset+m.params.length)).buffer; }
+        else if(m.method==='artifact.view-state.read') result=window.inspection;
+        else if(m.method==='artifact.view-state.write') { window.inspection=m.params; result={saved:true}; }
         else if(m.method==='settings.read') result={resource:fixture.resource,editable};
         else if(m.method==='settings.propose') { if(!editable) error='Read only'; else {proposal=m.params; if(proposal) proposals.push(proposal); result={staged:!!proposal};} }
         else error='Unsupported method: '+m.method;
@@ -40,11 +43,15 @@ try {
     };
     window.complete=(p, result={})=>{bridge.postMessage({nonce:'fixture-nonce',event:'settings.result',detail:{proposal:p,status:'succeeded',result}})};
   </script>`;
-  server = createServer((req, res) => {
-    if (!['/', '/settings'].includes(req.url)) { res.writeHead(404); res.end(); return; }
+  server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://fixture');
+    if (url.pathname === '/file' && manifest.files.some(f => f.path === url.searchParams.get('path'))) {
+      res.setHeader('Content-Type', 'application/octet-stream'); res.end(await readFile(path.join(archive, url.searchParams.get('path')))); return;
+    }
+    if (!['/', '/settings', '/viewer'].includes(url.pathname)) { res.writeHead(404); res.end(); return; }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    if (req.url === '/settings') res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'");
-    res.end(req.url === '/settings' ? website : parent);
+    if (url.pathname !== '/') res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'");
+    res.end(url.pathname === '/settings' ? website : url.pathname === '/viewer' ? viewer : parent);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -150,6 +157,21 @@ try {
   assert.ok((await page.evaluate(() => window.calls)).every(method => ['settings.read', 'settings.propose', 'artifact.manifest', 'artifact.read'].includes(method)));
   console.log('PASS exported shared editor, typed proposals, raw/prompt/bundle controls, read-only grants, route results, late acknowledgements, no external requests');
 
+  await page.evaluate(() => { document.querySelector('iframe').src = '/viewer'; });
+  await frame.locator('#until:not([disabled])').waitFor();
+  await frame.getByRole('button', { name: 'All events', exact: true }).click();
+  await frame.getByRole('searchbox', { name: 'Search session' }).fill('Synthetic');
+  await page.waitForFunction(() => window.inspection?.search === 'Synthetic' && window.inspection?.view === 'events');
+  const savedInspection = await page.evaluate(() => window.inspection);
+  await page.evaluate(() => { document.querySelector('iframe').src = '/viewer?refresh=1'; });
+  await frame.locator('#until:not([disabled])').waitFor();
+  await frame.getByRole('button', { name: 'All events', exact: true, pressed: true }).waitFor();
+  assert.equal(await frame.getByRole('searchbox', { name: 'Search session' }).inputValue(), savedInspection.search);
+  await frame.getByText('2 matching events', { exact: true }).waitFor();
+  assert.deepEqual(errors, []);
+  assert.deepEqual(outbound, []);
+  console.log('PASS actual connected Go WebAssembly viewer retains section and search across iframe replacement');
+
   // The exact same exported page opens from disk with verified captured data.
   await page.unroute('**/*');
   await page.goto(pathToFileURL(path.join(archive, 'settings/index.html')).href);
@@ -173,6 +195,9 @@ try {
   assert.ok(expected.cost_usd > 0, 'pricing fixture did not exercise a known model');
   assert.equal(replayed.cost_usd, expected.cost_usd, 'new viewer repriced saved usage with its own catalog');
   assert.equal(replayed.events, expected.events);
+  assert.equal(replayed.duration_s, 30);
+  const earlier = await page.evaluate(() => JSON.parse(window.eagentReplayView(2)).result);
+  assert.equal(earlier.duration_s, 10, 'historical replay included elapsed time after the selected event');
   assert.deepEqual(errors, []);
   console.log('PASS actual offline Go WebAssembly replay preserves captured pricing across a changed viewer catalog');
 } finally {
