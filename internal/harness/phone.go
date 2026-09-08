@@ -134,7 +134,7 @@ func (r *Runtime) startPhone() {
 		if strings.TrimSpace(prompt) != "" {
 			body = prompt
 		}
-		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
+		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "kind": "session_start", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
 		if strings.TrimSpace(prompt) != "" {
 			req.Sender, req.Format = "user", "markdown"
 		}
@@ -222,7 +222,7 @@ func (p *phone) close(reason string) {
 		case "interrupted":
 			body = "eagent was interrupted. Resume the session to continue."
 		}
-		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "reason": reason}, ClientKey: p.key("end", reason, strconv.Itoa(p.resumes))})
+		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "kind": "session_end", "reason": reason}, ClientKey: p.key("end", reason, strconv.Itoa(p.resumes))})
 	})
 	// One FIFO worker: when the closing note has run, everything queued
 	// before it has run too.
@@ -274,16 +274,16 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			// it does not blink off while the orchestrator keeps going.
 			act := p.attach()
 			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
-			msg, _, err := p.client.Post(ctx, p.ref, req)
+			msg, thread, err := p.client.Post(ctx, p.ref, req)
 			if err != nil && len(req.Files) > 0 {
 				// The files may be refused (storage off, too large); the words still matter.
 				req.Files = nil
 				req.Body = text + "\n\n(" + attachmentSummary(atts) + " could not be uploaded)"
 				req.ClientKey = p.key("m", seq, "text")
-				msg, _, err = p.client.Post(ctx, p.ref, req)
+				msg, thread, err = p.client.Post(ctx, p.ref, req)
 			}
 			if err == nil {
-				p.remember(msg.ID)
+				p.rememberIn(r, msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -372,10 +372,29 @@ func (p *phone) remember(id string) {
 	p.mu.Unlock()
 }
 
+// rememberIn records a post and, when the thread that answered is not the
+// one we knew (the user deleted it from the app and this post recreated it
+// under the same id), moves the reply anchor to this post so the poll does
+// not wait forever on an id the new thread never had.
+func (p *phone) rememberIn(r *Runtime, msg finalechat.Message, thread finalechat.Thread) {
+	p.mu.Lock()
+	p.posted[msg.ID] = true
+	if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
+		p.threadID = thread.ID
+		p.lastID = msg.ID
+		p.mu.Unlock()
+		r.ui.Log("finalechat: the thread was recreated; replies are read from here on")
+		return
+	}
+	p.mu.Unlock()
+}
+
+// clipLabel trims a label to n characters (runes, as the server counts them),
+// never ending mid-character.
 func clipLabel(s string, n int) string {
 	s = strings.TrimSpace(s)
-	if len(s) > n {
-		return s[:n-1] + "…"
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
 	}
 	return s
 }
@@ -390,7 +409,13 @@ func (p *phone) poll(r *Runtime) {
 		p.mu.Lock()
 		after := p.lastID
 		p.mu.Unlock()
-		msgs, _, err := p.client.Messages(p.ctx, p.ref, after, "user", 600, 100)
+		msgs, _, anchorUnknown, err := p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		if anchorUnknown {
+			// The thread was deleted from the app and recreated under the same
+			// id; the page restarts from its first message, and our own posts
+			// are still skipped by id.
+			r.ui.Log("finalechat: the thread was recreated; catching up from its first message")
+		}
 		if err != nil {
 			if p.ctx.Err() != nil {
 				return

@@ -84,10 +84,12 @@ func (p *phone) attach() *finalechat.Activity {
 	p.mu.Lock()
 	w := p.want
 	p.mu.Unlock()
-	if w.Text == "" {
-		return nil
-	}
 	w.Seq = time.Now().UnixNano()
+	if w.Text == "" {
+		// Nothing in flight: the post clears the line, with a watermark so a
+		// slower status write from before it cannot bring the line back.
+		return &finalechat.Activity{Text: "", Seq: w.Seq}
+	}
 	return &w
 }
 

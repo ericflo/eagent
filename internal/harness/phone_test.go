@@ -1610,3 +1610,71 @@ func TestRolloverFutility(t *testing.T) {
 		t.Fatal("an idle session must not roll over")
 	}
 }
+
+func TestClipLabelIsRuneSafe(t *testing.T) {
+	long := strings.Repeat("é", 250)
+	got := clipLabel(long, 200)
+	if r := []rune(got); len(r) != 200 || r[199] != '…' || !strings.HasPrefix(got, "éé") {
+		t.Fatalf("clip = %d runes, ends %q", len(r), string(r[len(r)-1]))
+	}
+	if clipLabel("  short  ", 200) != "short" {
+		t.Fatal("short labels are only trimmed")
+	}
+}
+
+// The opening and closing system posts carry the kinds the app reads to show
+// "this session has ended", and a post with no status in flight clears the
+// line with a watermark.
+func TestPhoneSessionKindsAndSequencedClear(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"nothing to do"}`)}}
+		}
+		if strings.Contains(all, "nothing to do") && !strings.Contains(all, "Nothing to do.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Nothing to do."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("exit %d logs=%v", code, logs)
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	var kinds []string
+	for _, p := range fp.posts {
+		if meta, ok := p["meta"].(map[string]any); ok {
+			if k, ok := meta["kind"].(string); ok {
+				kinds = append(kinds, k)
+			}
+		}
+		if p["sender"] == nil || p["sender"] == "agent" {
+			act, ok := p["activity"].(map[string]any)
+			if !ok {
+				t.Fatalf("an agent post without an activity object: %v", p)
+			}
+			if act["seq"] == nil {
+				t.Fatalf("an activity without a seq: %v", act)
+			}
+		}
+	}
+	if len(kinds) < 1 || kinds[0] != "session_start" || kinds[len(kinds)-1] != "session_end" {
+		t.Fatalf("kinds = %v", kinds)
+	}
+}

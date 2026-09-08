@@ -549,6 +549,10 @@ func (c *Client) Messages(ctx context.Context, ref, after, sender string, wait, 
 		Messages []Message `json:"messages"`
 		HasMore  bool      `json:"has_more"`
 		TimedOut bool      `json:"timed_out"`
+		// AnchorUnknown: the after= id is not in the thread (it was deleted
+		// and recreated under the same external id); the page starts from
+		// the thread's first message.
+		AnchorUnknown bool `json:"anchor_unknown"`
 	}
 	q := url.Values{}
 	if after != "" {
@@ -564,7 +568,33 @@ func (c *Client) Messages(ctx context.Context, ref, after, sender string, wait, 
 		q.Set("limit", strconv.Itoa(limit))
 	}
 	err := c.do(ctx, http.MethodGet, "/api/v1/threads/"+refPath(ref)+"/messages", q, nil, &out, wait)
-	return out.Messages, out.TimedOut, err
+	return out.Messages, out.TimedOut || out.AnchorUnknown, err
+}
+
+// MessagesPage is Messages with the page's own flags: timedOut when the
+// long poll ended without news, anchorUnknown when the after= id is gone.
+func (c *Client) MessagesPage(ctx context.Context, ref, after, sender string, wait, limit int) (msgs []Message, timedOut, anchorUnknown bool, err error) {
+	var out struct {
+		Messages      []Message `json:"messages"`
+		HasMore       bool      `json:"has_more"`
+		TimedOut      bool      `json:"timed_out"`
+		AnchorUnknown bool      `json:"anchor_unknown"`
+	}
+	q := url.Values{}
+	if after != "" {
+		q.Set("after", after)
+	}
+	if sender != "" {
+		q.Set("sender", sender)
+	}
+	if wait > 0 && after != "" {
+		q.Set("wait", strconv.Itoa(wait))
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	err = c.do(ctx, http.MethodGet, "/api/v1/threads/"+refPath(ref)+"/messages", q, nil, &out, wait)
+	return out.Messages, out.TimedOut, out.AnchorUnknown, err
 }
 
 // Patch updates a thread's title, agent, archived, or muted state.
