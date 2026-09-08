@@ -61,6 +61,8 @@ type commandJournal struct {
 	BeforeRaw     *string                    `json:"before_raw,omitempty"`
 	Route         *settings.RouteTestRequest `json:"route,omitempty"`
 	RouteStarted  bool                       `json:"route_started,omitempty"`
+	Applied       *control.Proposal          `json:"applied,omitempty"`
+	Undoes        string                     `json:"undoes,omitempty"`
 }
 
 func connectorPath(project string) string {
@@ -214,11 +216,13 @@ func RunConnector(ctx context.Context, project string, logf func(string, ...any)
 		}
 		// Refresh bindings with current artifact revisions even when no settings
 		// changed. Snapshot timestamps are kept distinct from heartbeat liveness.
-		if view.Snapshot.Version != lastVersion {
+		descriptorRaw, _ := json.Marshal(view.Descriptor)
+		publicationVersion := view.Snapshot.Version + ":" + artifact.Digest(descriptorRaw)
+		if publicationVersion != lastVersion {
 			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": ""}, &published, 0); err != nil {
 				return err
 			}
-			lastVersion = view.Snapshot.Version
+			lastVersion = publicationVersion
 			resourceID = published.Resource.ID
 		}
 		if resourceID != "" {
@@ -343,6 +347,14 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		return journal, err
 	}
 	finish := func(status string, result map[string]any) (commandJournal, error) {
+		if status == "succeeded" {
+			if offer := undoOffer(journal); offer != nil {
+				result["undo"] = offer
+			}
+			if journal.Undoes != "" {
+				result["undoes"] = journal.Undoes
+			}
+		}
 		journal.Status = status
 		journal.Result = result
 		if err := writeJSONAtomic(path, journal); err != nil {
@@ -371,6 +383,8 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		}
 		var prepareErr error
 		switch q.Proposal.Operation {
+		case "settings.undo":
+			prepareErr = prepareUndo(s, editor, grant, q.Proposal, &journal)
 		case "route.test":
 			route, err := s.PrepareRoute(q.Proposal, grant)
 			prepareErr = err
@@ -380,6 +394,8 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			prepareErr = err
 			journal.Resource = &change
 		default:
+			applied := q.Proposal
+			journal.Applied = &applied
 			desired, etag, _, err := s.Prepare(q.Proposal, grant)
 			prepareErr = err
 			journal.BeforeETag = etag
@@ -468,7 +484,11 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		return finish("unknown", map[string]any{"message": "File saved, but its effective defaults could not be resolved."})
 	}
 	effects := []map[string]any{}
-	for _, edit := range q.Proposal.Edits {
+	applied := q.Proposal
+	if journal.Applied != nil {
+		applied = *journal.Applied
+	}
+	for _, edit := range applied.Edits {
 		effects = append(effects, map[string]any{"key": edit.Key, "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"})
 	}
 	return finish("succeeded", map[string]any{"previous_version": q.Proposal.ExpectedVersion, "version": after.Snapshot.Version, "effects": effects, "snapshot_publication": "pending"})

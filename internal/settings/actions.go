@@ -26,6 +26,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		return control.Shape{Type: "object", Properties: properties, Required: required}
 	}
 	actions := []control.Action{
+		{Operation: "settings.undo", Label: "Undo reviewed settings change", Class: "preference", Parameters: object(map[string]control.Shape{"command_id": text(80), "restore_sha256": text(64)}, "command_id", "restore_sha256")},
 		{Operation: "route.test", Label: "Test saved model route", Class: "cost", Parameters: object(map[string]control.Shape{"actor": choices([]string{"orchestrator", "task", "narrator"}), "route": choices([]string{"primary", "fallback"}), "effort": text(32)}, "actor")},
 		{Operation: "prompt.set", Label: "Save prompt override", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names), "text": text(32768)}, "name", "text")},
 		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names)}, "name")},

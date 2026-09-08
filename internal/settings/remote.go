@@ -93,13 +93,10 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		if prefix == "/allow_outside_project" || prefix == "/default_config" {
 			class = "permissions"
 		}
-		field := control.Field{Key: prefix, Label: strings.ReplaceAll(strings.TrimPrefix(prefix, "/"), "_", " "), Shape: shape, Writable: slices.Contains(grant.Classes, class) && slices.Contains(grant.Operations, "settings.apply"), Unset: true, Class: class, EffectiveWhen: "new_or_resumed_session", Source: res.Sources[prefix]}
+		field := control.Field{Key: prefix, Label: strings.ReplaceAll(strings.TrimPrefix(prefix, "/"), "_", " "), Shape: shape, Writable: true, Unset: true, Class: class, EffectiveWhen: "new_or_resumed_session", Source: res.Sources[prefix]}
 		if strings.HasPrefix(field.Source, "env:") || strings.HasPrefix(field.Source, "bundle:") {
 			field.Writable = false
 			field.LockedReason = "Overridden by " + field.Source
-		}
-		if !field.Writable && field.LockedReason == "" {
-			field.LockedReason = "This connector has no grant for " + class
 		}
 		if strings.HasSuffix(prefix, "/protocol") {
 			field.Shape.Enum = []any{"openai-chat", "openai-responses", "anthropic"}
@@ -134,7 +131,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	visit(reflect.TypeOf(config.Config{}), "", 0)
-	out.Descriptor.Actions = s.Actions(grant)
+	out.Descriptor.Actions = s.Actions(s.Grant())
 	contextFiles := map[string]string{}
 	promptViews := map[string]any{}
 	if set, err := prompts.Load(s.Project); err == nil {
@@ -162,6 +159,18 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		keys[key] = os.Getenv(key) != ""
 	}
 	out.Snapshot.Details = map[string]any{"project": s.Project, "file_etag": res.File.ETag, "sources": res.Sources, "active": res.Active, "keys_present": keys, "context_digests": contextFiles, "prompts": promptViews, "bundles": names}
+	// One configuration version is shared by its archive and every reader.
+	// Per-connector write permissions are applied after hashing capabilities.
+	for i := range out.Descriptor.Fields {
+		field := &out.Descriptor.Fields[i]
+		if !slices.Contains(grant.Classes, field.Class) || !slices.Contains(grant.Operations, "settings.apply") {
+			field.Writable = false
+			if field.LockedReason == "" {
+				field.LockedReason = "This connector has no grant for " + field.Class
+			}
+		}
+	}
+	out.Descriptor.Actions = s.Actions(grant)
 	if err := out.Descriptor.Validate(grant); err != nil {
 		return out, err
 	}

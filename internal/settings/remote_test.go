@@ -13,7 +13,7 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
-func TestRemoteCapabilityChangesInvalidateReviewedVersion(t *testing.T) {
+func TestArchiveAndRestrictedConnectorShareConfigurationVersion(t *testing.T) {
 	s := &Service{Project: t.TempDir()}
 	grant := s.Grant()
 	before, err := s.RemoteSnapshot(grant)
@@ -25,12 +25,16 @@ func TestRemoteCapabilityChangesInvalidateReviewedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.Snapshot.Version == after.Snapshot.Version {
-		t.Fatal("changed capabilities retained the old reviewed version")
+	if before.Snapshot.Version != after.Snapshot.Version {
+		t.Fatal("the same configuration has different archive and connector versions")
 	}
 	p := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: before.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: float64(4)}}}
+	if _, _, _, err := s.Prepare(p, grant); err != nil {
+		t.Fatal("permitted edit could not use the captured configuration version", err)
+	}
+	p.Edits = []control.Edit{{Op: "set", Key: "/allow_outside_project", Value: true}}
 	if _, _, _, err := s.Prepare(p, grant); err == nil {
-		t.Fatal("proposal reviewed against older capabilities was accepted")
+		t.Fatal("shared configuration version bypassed the narrower grant")
 	}
 }
 
