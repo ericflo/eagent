@@ -28,7 +28,9 @@ target.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, GOOS="js", GOARCH="wasm")
 with tempfile.TemporaryDirectory(prefix="eagent-wasm-build-") as temporary:
     wasm = pathlib.Path(temporary) / "replay.wasm"
-    subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w -buildid=", "-o", str(wasm), "./cmd/eagent-replay-wasm"], cwd=root, env=env, check=True)
+    # Git revision/dirty metadata would make the generated binary change just
+    # because it was committed. Viewer provenance uses its content fingerprint.
+    subprocess.run(["go", "build", "-buildvcs=false", "-trimpath", "-ldflags=-s -w -buildid=", "-o", str(wasm), "./cmd/eagent-replay-wasm"], cwd=root, env=env, check=True)
     update(target / "replay.wasm.gz", gzip.compress(wasm.read_bytes(), compresslevel=9, mtime=0))
 goroot = pathlib.Path(subprocess.check_output(["go", "env", "GOROOT"], text=True).strip())
 runtime = goroot / "lib/wasm/wasm_exec.js"
