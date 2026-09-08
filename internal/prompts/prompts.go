@@ -14,8 +14,11 @@ package prompts
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"fmt"
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/filelock"
 	"os"
 	"path/filepath"
 	"sort"
@@ -109,6 +112,11 @@ type DossierData struct {
 // so they can be edited. Existing files are left alone. It returns the paths
 // written.
 func Export(project string) ([]string, error) {
+	editor, err := config.LockEditor(context.Background(), project)
+	if err != nil {
+		return nil, err
+	}
+	defer editor.Close()
 	dir := Dir(project)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -116,11 +124,10 @@ func Export(project string) ([]string, error) {
 	var written []string
 	for _, name := range Names {
 		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil {
-			continue
-		}
 		raw, _ := builtin.ReadFile(name)
-		if err := os.WriteFile(p, raw, 0o644); err != nil {
+		if err := filelock.CreateFile(p, raw, 0o644); os.IsExist(err) {
+			continue
+		} else if err != nil {
 			return written, err
 		}
 		written = append(written, p)

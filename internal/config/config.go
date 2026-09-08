@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/llm"
 )
 
@@ -756,15 +757,14 @@ func (c Config) Redacted() Config { return c }
 // Write saves the configuration file without overwriting an existing one.
 func Write(project string, cfg Config) (string, error) {
 	path := File(project)
-	if _, err := os.Stat(path); err == nil {
-		return path, fmt.Errorf("%s already exists", path)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	editor, err := LockEditor(context.Background(), project)
+	if err != nil {
 		return path, err
 	}
+	defer editor.Close()
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return path, err
 	}
-	return path, os.WriteFile(path, append(raw, '\n'), 0o644)
+	return path, filelock.CreateFile(path, append(raw, '\n'), 0o644)
 }
