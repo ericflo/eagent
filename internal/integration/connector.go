@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -63,8 +64,16 @@ type commandJournal struct {
 	BeforeRaw     *string                    `json:"before_raw,omitempty"`
 	Route         *settings.RouteTestRequest `json:"route,omitempty"`
 	RouteStarted  bool                       `json:"route_started,omitempty"`
-	Applied       *control.Proposal          `json:"applied,omitempty"`
-	Undoes        string                     `json:"undoes,omitempty"`
+	// Session is the first message of a session this command starts; once
+	// SessionStarted is set the start is never repeated, only reconciled.
+	Session        *sessionStartIntent `json:"session,omitempty"`
+	SessionStarted bool                `json:"session_started,omitempty"`
+	Applied        *control.Proposal   `json:"applied,omitempty"`
+	Undoes         string              `json:"undoes,omitempty"`
+}
+
+type sessionStartIntent struct {
+	Prompt string `json:"prompt"`
 }
 
 func connectorPath(project string) string {
@@ -105,14 +114,23 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 			if err = scoped.Request(ctx, "GET", "/api/v1/connectors/"+url.PathEscape(existing.ID), nil, nil, &status, 0); err != nil {
 				return "", err
 			}
-			if status.Connector.State == "pending" {
-				err = account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(existing.ID)+"/connect", nil, map[string]any{"secret": existing.Secret}, nil, 0)
-				if err != nil {
-					return "", err
-				}
-			}
 			if status.Connector.State == "revoked" {
 				return "", fmt.Errorf("this connector was disconnected in FinaleChat")
+			}
+			connect := map[string]any{"secret": existing.Secret}
+			if status.Connector.State == "pending" {
+				connect["requested_grants"] = []control.Grant{grant}
+			} else if wider, changed := widenGrant(status.Connector.Grants, grant); changed {
+				// A capability this eagent learned since pairing (such as
+				// starting sessions from the phone) is added to the grant it
+				// already holds. The account token and the local secret
+				// together prove this is the owner's own installation.
+				connect["requested_grants"] = replaceGrant(status.Connector.Grants, wider)
+			} else {
+				return strings.TrimRight(existing.BaseURL, "/") + "/", nil
+			}
+			if err := account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(existing.ID)+"/connect", nil, connect, nil, 0); err != nil {
+				return "", err
 			}
 			return strings.TrimRight(existing.BaseURL, "/") + "/", nil
 		}
@@ -148,6 +166,54 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 		return "", err
 	}
 	return strings.TrimRight(client.BaseURL, "/") + "/", nil
+}
+
+// widenGrant returns the stored grant for want's resource with every
+// operation and class of want added, and whether that changed anything.
+// Nothing the server already grants is removed.
+func widenGrant(stored []control.Grant, want control.Grant) (control.Grant, bool) {
+	for _, g := range stored {
+		if g.Key != want.Key || g.Scope != want.Scope {
+			continue
+		}
+		out := g
+		out.Operations = append([]string{}, g.Operations...)
+		out.Classes = append([]string{}, g.Classes...)
+		changed := false
+		for _, op := range want.Operations {
+			if !slices.Contains(out.Operations, op) {
+				out.Operations = append(out.Operations, op)
+				changed = true
+			}
+		}
+		for _, class := range want.Classes {
+			if !slices.Contains(out.Classes, class) {
+				out.Classes = append(out.Classes, class)
+				changed = true
+			}
+		}
+		return out, changed
+	}
+	return want, true
+}
+
+// replaceGrant returns stored with the grant for wider's resource replaced
+// (or appended), keeping grants for other resources untouched.
+func replaceGrant(stored []control.Grant, wider control.Grant) []control.Grant {
+	out := make([]control.Grant, 0, len(stored)+1)
+	replaced := false
+	for _, g := range stored {
+		if g.Key == wider.Key && g.Scope == wider.Scope {
+			out = append(out, wider)
+			replaced = true
+			continue
+		}
+		out = append(out, g)
+	}
+	if !replaced {
+		out = append(out, wider)
+	}
+	return out
 }
 
 // startConnectorAt elects one process per explicitly paired resource.
@@ -535,6 +601,15 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			route, err := s.PrepareRoute(q.Proposal, grant)
 			prepareErr = err
 			journal.Route = &route
+		case "session.start":
+			prompt, _ := q.Proposal.Parameters["prompt"].(string)
+			if _, err := s.ValidateAction(q.Proposal, grant); err != nil {
+				prepareErr = err
+			} else if strings.TrimSpace(prompt) == "" {
+				prepareErr = fmt.Errorf("the first message is required")
+			} else {
+				journal.Session = &sessionStartIntent{Prompt: prompt}
+			}
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
 			prepareErr = err
@@ -566,6 +641,26 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 	}
 	if err := ctx.Err(); err != nil {
 		return journal, err
+	}
+	if journal.Session != nil {
+		if reconcile || journal.SessionStarted {
+			return finish("unknown", map[string]any{"message": "The earlier request may already have started a session. It was not repeated; check the session list."})
+		}
+		journal.SessionStarted = true
+		if err := writeJSONAtomic(path, journal); err != nil {
+			return journal, err
+		}
+		// Starting a session must not hold the settings writer: the new
+		// session reads the configuration through the same lock.
+		editor.Close()
+		started, err := startSession(ctx, s.Project, journal.Session.Prompt)
+		if err != nil {
+			if ctx.Err() != nil {
+				return finish("unknown", map[string]any{"message": "Starting the session was interrupted. It was not repeated; check the session list."})
+			}
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
+		return finish("succeeded", map[string]any{"version": q.Proposal.ExpectedVersion, "session_id": started.ID, "thread": "ext:eagent:" + started.ID, "host": started.Host, "interactive": started.Interactive, "message": started.Message, "effects": []any{}, "snapshot_publication": "pending"})
 	}
 	if journal.Route != nil {
 		if reconcile || journal.RouteStarted {

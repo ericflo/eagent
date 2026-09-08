@@ -33,6 +33,9 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names)}, "name")},
 		{Operation: "bundle.save", Label: "Save named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64), "description": text(1024), "from": text(64), "config_json": text(32768)}, "name")},
 		{Operation: "bundle.delete", Label: "Delete named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64)}, "name")},
+		// Starting a session spends model credit and runs commands on the
+		// machine, so it is a cost-class action like a route test.
+		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768)}, "prompt")},
 	}
 	var out []control.Action
 	for _, action := range actions {
@@ -62,7 +65,13 @@ func (s *Service) ValidateAction(p control.Proposal, grant control.Grant) (Remot
 	if err := p.Validate(view.Descriptor, grant); err != nil {
 		return view, err
 	}
-	if p.ExpectedVersion != view.Snapshot.Version || p.Generation != "" {
+	if p.Generation != "" {
+		return view, &config.ErrConflict{ETag: view.Snapshot.Version}
+	}
+	// Starting a session reads the configuration but does not change it, so
+	// a settings save that landed after the phone loaded its page is no
+	// reason to refuse; every other action targets the exact reviewed version.
+	if p.Operation != "session.start" && p.ExpectedVersion != view.Snapshot.Version {
 		return view, &config.ErrConflict{ETag: view.Snapshot.Version}
 	}
 	return view, nil

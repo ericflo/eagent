@@ -57,6 +57,20 @@ The settings website embeds the same `config.js` and stylesheet as the local con
 
 Picker catalogs and named configuration content are captured with the archive. A bundle whose current hash no longer matches the captured content cannot be loaded into the form; reopen the latest archive. Granted field locks and environment overrides are visible in the shared editor. New edits clear the pending host proposal, and delayed acknowledgements preserve newer form or raw-JSON drafts. Opening `settings/index.html` from an extracted archive provides the same read-only editor without a running server.
 
+## Starting a session from your phone
+
+Every process that holds the project's settings connector advertises a `session.start` action, so Finalechat's inbox offers **New session** for the project whenever an eagent is running in it. The first message is the only parameter. The connector executes each request at most once: a redelivered command returns the original result, and a claim whose local journal is missing is reported as unknown rather than started again. A settings save that landed after the phone loaded its page does not block the start; a replaced runtime generation does.
+
+Where the session runs depends on which process holds the connector:
+
+| Host | What happens |
+| --- | --- |
+| `eagent serve`, or a session started with `--serve` | The session is hosted in that process, interactive, with the server's default preset or bundle; the web UI shows it and it keeps taking messages from the thread. |
+| `eagent connector run` | The same in-process hosting, without the web UI. |
+| A plain terminal session | A separate `eagent -p` process is started in its own session group with the project's configuration; it runs until the work is done (or until a question waits too long), survives the terminal session ending, and can be resumed with `eagent -c` or from the web UI. Its output goes to `.agents/eagent/finalechat-state/spawned/`. |
+
+The result reports `session_id`, the thread reference, the host and whether the session is interactive. Existing connectors gain the capability on their next reconnect without a second pairing: eagent asks Finalechat to extend its own grants, which requires the account token and the local connector secret. `EAGENT_FINALECHAT=off` disables this along with the rest of the connector.
+
 ## Live session controls
 
 Run `eagent connector pair-session SESSION_ID` in the project, which connects the separate session controls to your account. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.

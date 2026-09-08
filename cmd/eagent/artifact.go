@@ -12,6 +12,7 @@ import (
 	"github.com/ericflo/eagent/internal/archive"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/web"
 )
 
 func cmdConnector(project string, args []string) int {
@@ -36,13 +37,19 @@ func cmdConnector(project string, args []string) int {
 		fmt.Println("Connected. Open Settings in this session’s FinaleChat conversation:", url)
 		return 0
 	case "run":
-		fmt.Println("Settings connector running. Press Ctrl-C to stop.")
+		fmt.Println("Settings connector running. Sessions started from your phone run in this process. Press Ctrl-C to stop.")
 		logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
+		// The connector hosts phone-started sessions the way the web server
+		// does, so they stay interactive for as long as it runs.
+		host := web.New(project, logf)
+		restoreStarter := host.RegisterSessionStarter()
 		stopConnector := integration.StartConnector(ctx, project, logf)
 		stopPublisher := integration.StartPublisher(ctx, project, version, logf)
 		<-ctx.Done()
 		stopConnector()
 		stopPublisher()
+		restoreStarter()
+		host.Shutdown(10 * time.Second)
 		return 0
 	default:
 		return fail(fmt.Errorf("unknown connector command %q", args[0]))

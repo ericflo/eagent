@@ -21,6 +21,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/state"
@@ -232,6 +233,16 @@ func run(args []string) int {
 	if err != nil {
 		term.Close("")
 		return fail(err)
+	}
+	if announce := os.Getenv(integration.AnnounceEnv); announce != "" {
+		// Started on behalf of a phone request: tell the spawning process
+		// which session this is, then keep the variable out of tool shells.
+		if sessionPath == "" {
+			if err := os.WriteFile(announce+".tmp", []byte(rt.SessionID()+"\n"), 0o644); err == nil {
+				_ = os.Rename(announce+".tmp", announce)
+			}
+		}
+		_ = os.Unsetenv(integration.AnnounceEnv)
 	}
 	term.Banner(rt.SessionID(), map[string]string{
 		"orchestrator": cfg.Orchestrator.Model, "task": cfg.Task.Model, "narrator": cfg.Narrator.Model,

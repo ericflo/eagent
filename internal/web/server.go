@@ -612,6 +612,28 @@ func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, e
 	return rt.SessionID(), nil
 }
 
+// HostSession starts a new interactive session in this process with the
+// server's default configuration, the way the browser's "new session" does.
+func (s *Server) HostSession(prompt string) (string, error) {
+	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt}, "", "")
+}
+
+// RegisterSessionStarter makes sessions requested from the phone run in this
+// process, where they stay interactive and the UI shows them. It returns a
+// function that restores the previous starter.
+func (s *Server) RegisterSessionStarter() func() {
+	return integration.SetSessionStarter(func(ctx context.Context, project, prompt string) (integration.SessionStart, error) {
+		if project != s.Project {
+			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
+		}
+		id, err := s.HostSession(prompt)
+		if err != nil {
+			return integration.SessionStart{}, err
+		}
+		return integration.SessionStart{ID: id, Host: "in_process", Interactive: true, Message: "Running in the eagent server; keep talking to it from this thread."}, nil
+	})
+}
+
 // host resumes an existing session in this process.
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
 	cfg, err := s.loadConfig(bundle, preset)
@@ -764,6 +786,8 @@ func (u *webUI) status() harness.Status {
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
 	defer stopPublisher()
+	restoreStarter := s.RegisterSessionStarter()
+	defer restoreStarter()
 	stopConnector := integration.StartConnector(ctx, s.Project, s.logf)
 	defer stopConnector()
 	s.addr = addr

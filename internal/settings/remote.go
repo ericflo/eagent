@@ -33,7 +33,7 @@ func (s *Service) Grant() control.Grant {
 	if real, err := filepath.EvalSymlinks(project); err == nil {
 		project = real
 	}
-	return control.Grant{Key: "project-" + artifact.Digest([]byte(project))[:24], Label: filepath.Base(project), Scope: "project", Operations: []string{"settings.apply", "settings.refresh", "prompt.set", "prompt.reset", "bundle.save", "bundle.delete", "settings.undo", "route.test"}, Classes: []string{"preference", "credential_reference", "permissions", "cost"}}
+	return control.Grant{Key: "project-" + artifact.Digest([]byte(project))[:24], Label: filepath.Base(project), Scope: "project", Operations: []string{"settings.apply", "settings.refresh", "prompt.set", "prompt.reset", "bundle.save", "bundle.delete", "settings.undo", "route.test", "session.start"}, Classes: []string{"preference", "credential_reference", "permissions", "cost"}}
 }
 
 // RemoteSnapshot includes only known configuration fields. Raw unknown keys,
