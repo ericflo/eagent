@@ -34,7 +34,9 @@ A settings artifact is a captured view by default. Edit the current binding to s
 
 Command intents, acknowledgements and a settings audit survive process restarts. Redelivery reconciles an existing intent; an uncertain delivery with no local journal is reported as unknown and is not executed again. Saved settings and runtime adoption are separate: configuration, prompt and bundle changes are currently reported for new or resumed sessions, with no claim that an existing model turn adopted them.
 
-The current implementation exposes typed project settings plus prompt/bundle operations. Work remaining in this implementation includes the richer local-editor presentation, conditional undo and explicit route-test actions. These are not yet exposed as callable actions in the published descriptor.
+The current implementation exposes typed project settings, prompt/bundle operations, and tests of saved primary or fallback model routes. A route test requires the approved cost class and makes one provider attempt, capped at 4096 output tokens and two minutes. It shares the local editor's probe implementation and reports usage, known pricing, and provider errors. Retrying an acknowledgement returns the original result; an interrupted test with an uncertain outcome is never repeated automatically. Capability changes invalidate the reviewed settings version and publish an updated form.
+
+Work remaining in this implementation includes the richer local-editor presentation and conditional undo. Undo is not yet exposed as a callable action in the published descriptor.
 
 ## Disable all outbound integration traffic
 

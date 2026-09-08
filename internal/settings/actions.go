@@ -26,6 +26,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		return control.Shape{Type: "object", Properties: properties, Required: required}
 	}
 	actions := []control.Action{
+		{Operation: "route.test", Label: "Test saved model route", Class: "cost", Parameters: object(map[string]control.Shape{"actor": choices([]string{"orchestrator", "task", "narrator"}), "route": choices([]string{"primary", "fallback"}), "effort": text(32)}, "actor")},
 		{Operation: "prompt.set", Label: "Save prompt override", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names), "text": text(32768)}, "name", "text")},
 		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names)}, "name")},
 		{Operation: "bundle.save", Label: "Save named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64), "description": text(1024), "from": text(64), "config_json": text(32768)}, "name")},

@@ -13,6 +13,27 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
+func TestRemoteCapabilityChangesInvalidateReviewedVersion(t *testing.T) {
+	s := &Service{Project: t.TempDir()}
+	grant := s.Grant()
+	before, err := s.RemoteSnapshot(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant.Classes = []string{"preference"}
+	after, err := s.RemoteSnapshot(grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Snapshot.Version == after.Snapshot.Version {
+		t.Fatal("changed capabilities retained the old reviewed version")
+	}
+	p := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: before.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: float64(4)}}}
+	if _, _, _, err := s.Prepare(p, grant); err == nil {
+		t.Fatal("proposal reviewed against older capabilities was accepted")
+	}
+}
+
 func TestRemoteAndLocalEditorsShareVersionLock(t *testing.T) {
 	s := &Service{Project: t.TempDir()}
 	g := s.Grant()

@@ -153,7 +153,9 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			contextFiles["bundle:"+name] = artifact.Digest(b)
 		}
 	}
-	versionRaw, _ := json.Marshal(map[string]any{"file": res.File.ETag, "effective": effective, "preset": s.Preset, "bundle": s.Bundle, "schema": SchemaVersion, "context": contextFiles})
+	// Capability changes must trigger publication even when config bytes stay
+	// unchanged, and must invalidate proposals reviewed against an older form.
+	versionRaw, _ := json.Marshal(map[string]any{"file": res.File.ETag, "effective": effective, "preset": s.Preset, "bundle": s.Bundle, "descriptor": out.Descriptor, "context": contextFiles})
 	out.Snapshot.Version = artifact.Digest(versionRaw)
 	keys := map[string]bool{}
 	for _, key := range s.KnownKeyEnvs() {

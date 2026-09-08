@@ -1,7 +1,6 @@
 package web
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +14,9 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
-	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -290,178 +287,22 @@ func orDefault(v, d string) string {
 
 // ---- live route test -------------------------------------------------------------------
 
-type testBody struct {
-	Actor  config.Actor `json:"actor"`
-	Effort *string      `json:"effort"` // override the actor's effort for this one call
-	Route  string       `json:"route"`  // primary (default) | fallback
-}
+type testBody = settings.RouteTestRequest
+type TestResult = settings.RouteTestResult
 
-// TestResult is one live call through one route.
-type TestResult struct {
-	Route      string         `json:"route"`
-	BaseURL    string         `json:"base_url"`
-	Model      string         `json:"model"`
-	Protocol   string         `json:"protocol"`
-	Effort     string         `json:"effort"`
-	Status     string         `json:"status"` // tool_call | no_tool_call | failed | timeout | no_key
-	MS         int64          `json:"ms"`
-	Usage      event.Usage    `json:"usage"`
-	CostUSD    float64        `json:"est_cost_usd"`
-	Priced     bool           `json:"priced"`
-	Sent       map[string]any `json:"sent"`
-	Text       string         `json:"text,omitempty"`
-	Error      string         `json:"error,omitempty"`
-	HTTPStatus int            `json:"http_status,omitempty"`
-	At         time.Time      `json:"at"`
-}
-
-var (
-	testSem   = make(chan struct{}, 4)
-	testMu    sync.Mutex
-	testTimes []time.Time
-)
-
-// testRoute makes one tiny tool call through the given actor route so the
-// editor can show whether a provider, model, and effort work together, how
-// long they take, and how much they reason. Serialized to four at a time
-// and forty a minute; each call is capped at 200 output tokens.
 func (s *Server) testRoute(w http.ResponseWriter, r *http.Request) {
 	var b testBody
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b); err != nil {
 		writeErr(w, 400, fmt.Errorf("bad request: %w", err))
 		return
 	}
-	a := b.Actor
-	route := "primary"
-	if b.Route == "fallback" {
-		if a.Fallback == nil {
-			writeErr(w, 400, errors.New("this route has no fallback"))
-			return
-		}
-		a = *a.Fallback
-		route = "fallback"
-	}
-	a.Fallback = nil
-	if b.Effort != nil {
-		a.ReasoningEffort = *b.Effort
-	}
-	probe := config.Defaults()
-	probe.Orchestrator, probe.Task, probe.Narrator = a, a, a
-	if err := s.checkRoutes(probe); err != nil {
-		writeErr(w, 422, err)
-		return
-	}
-	for _, p := range probe.Problems() {
-		if p.Severity == "error" && strings.HasPrefix(p.Path, "/orchestrator") {
-			writeErr(w, 422, errors.New(strings.TrimPrefix(p.Path, "/orchestrator/")+": "+p.Message))
-			return
-		}
-	}
-	testMu.Lock()
-	cutoff := time.Now().Add(-time.Minute)
-	kept := testTimes[:0]
-	for _, t := range testTimes {
-		if t.After(cutoff) {
-			kept = append(kept, t)
-		}
-	}
-	testTimes = kept
-	if len(testTimes) >= 40 {
-		testMu.Unlock()
-		writeErr(w, 429, errors.New("more than forty route tests in a minute; wait a little"))
-		return
-	}
-	testTimes = append(testTimes, time.Now())
-	testMu.Unlock()
-
-	res := TestResult{Route: route, BaseURL: a.BaseURL, Model: a.Model, Protocol: a.Protocol, Effort: a.ReasoningEffort, At: time.Now(), Sent: sentFor(a)}
-	ep, err := a.Endpoint()
+	result, err := s.settingsService().TestRoute(r.Context(), b)
 	if err != nil {
-		res.Status = "no_key"
-		res.Error = err.Error()
-		writeJSON(w, res)
+		writeSettingsError(w, err)
 		return
 	}
-	select {
-	case testSem <- struct{}{}:
-	case <-r.Context().Done():
-		return
-	}
-	defer func() { <-testSem }()
-	c := llm.NewClient(ep)
-	c.MaxAttempts = 1
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-	defer cancel()
-	start := time.Now()
-	resp, err := c.Complete(ctx, llm.Request{
-		System:    "Reply with a single tool call.",
-		Messages:  []llm.Message{{Role: "user", Text: "Call ping with message=\"pong\"."}},
-		Tools:     []llm.Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`)}},
-		MaxTokens: 4096, // a ceiling, not a spend: room for a thinking budget under it
-	}, nil)
-	res.MS = time.Since(start).Milliseconds()
-	switch {
-	case err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)):
-		res.Status = "timeout"
-		res.Error = "no answer within two minutes"
-	case err != nil:
-		res.Status = "failed"
-		res.Error = shortError(err)
-		var ae *llm.APIError
-		if errors.As(err, &ae) {
-			res.HTTPStatus = ae.Status
-		}
-	case len(resp.ToolCalls) == 0:
-		res.Status = "no_tool_call"
-		res.Text = clipText(resp.Text, 200)
-		res.Usage = resp.Usage
-	default:
-		res.Status = "tool_call"
-		res.Usage = resp.Usage
-	}
-	if res.Usage.Input > 0 {
-		res.CostUSD, res.Priced = priceFor(a.BaseURL, a.Model, res.Usage)
-	}
-	s.recordCheck(res)
-	writeJSON(w, res)
-}
-
-// sentFor says how the effort reaches the wire for this route.
-func sentFor(a config.Actor) map[string]any {
-	e := a.ReasoningEffort
-	switch a.Protocol {
-	case llm.ProtocolResponses:
-		if e == "" || e == "none" {
-			return map[string]any{"reasoning": nil, "note": "no reasoning parameter is sent; the model uses its default"}
-		}
-		return map[string]any{"reasoning": map[string]any{"effort": e}}
-	case llm.ProtocolAnthropic:
-		if e == "" || e == "none" {
-			return map[string]any{"thinking": nil, "note": "no thinking block is requested"}
-		}
-		return map[string]any{"thinking": map[string]any{"type": "adaptive"}, "output_config": map[string]any{"effort": e}, "note": "older models get a budget instead: low 2048, medium 8192, high 24576"}
-	default:
-		if e == "" {
-			return map[string]any{"note": "no reasoning_effort is sent; the provider default applies"}
-		}
-		return map[string]any{"reasoning_effort": e}
-	}
-}
-
-func shortError(err error) string {
-	s := err.Error()
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > 400 {
-		s = s[:400] + "…"
-	}
-	return s
-}
-
-func clipText(s string, n int) string {
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
+	s.recordCheck(result)
+	writeJSON(w, result)
 }
 
 // ---- remembered checks -------------------------------------------------------------------

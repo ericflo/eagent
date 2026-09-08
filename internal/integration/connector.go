@@ -48,17 +48,19 @@ type command struct {
 	Attempts   int              `json:"attempts"`
 }
 type commandJournal struct {
-	CommandID     string                   `json:"command_id"`
-	Digest        string                   `json:"proposal_sha256"`
-	ResourceKey   string                   `json:"resource_key"`
-	BeforeETag    string                   `json:"before_etag"`
-	Desired       string                   `json:"desired,omitempty"`
-	DesiredETag   string                   `json:"desired_etag,omitempty"`
-	Status        string                   `json:"status"`
-	Result        map[string]any           `json:"result"`
-	AuditRecorded bool                     `json:"audit_recorded"`
-	Resource      *settings.ResourceChange `json:"resource,omitempty"`
-	BeforeRaw     *string                  `json:"before_raw,omitempty"`
+	CommandID     string                     `json:"command_id"`
+	Digest        string                     `json:"proposal_sha256"`
+	ResourceKey   string                     `json:"resource_key"`
+	BeforeETag    string                     `json:"before_etag"`
+	Desired       string                     `json:"desired,omitempty"`
+	DesiredETag   string                     `json:"desired_etag,omitempty"`
+	Status        string                     `json:"status"`
+	Result        map[string]any             `json:"result"`
+	AuditRecorded bool                       `json:"audit_recorded"`
+	Resource      *settings.ResourceChange   `json:"resource,omitempty"`
+	BeforeRaw     *string                    `json:"before_raw,omitempty"`
+	Route         *settings.RouteTestRequest `json:"route,omitempty"`
+	RouteStarted  bool                       `json:"route_started,omitempty"`
 }
 
 func connectorPath(project string) string {
@@ -369,6 +371,10 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		}
 		var prepareErr error
 		switch q.Proposal.Operation {
+		case "route.test":
+			route, err := s.PrepareRoute(q.Proposal, grant)
+			prepareErr = err
+			journal.Route = &route
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
 			prepareErr = err
@@ -398,6 +404,29 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 	}
 	if err := ctx.Err(); err != nil {
 		return journal, err
+	}
+	if journal.Route != nil {
+		if reconcile || journal.RouteStarted {
+			return finish("unknown", map[string]any{"message": "The earlier route test has no confirmed result. A potentially paid request was not repeated."})
+		}
+		if _, err := s.ValidateAction(q.Proposal, grant); err != nil {
+			return finish("conflicted", map[string]any{"message": "The route settings changed before the test started."})
+		}
+		journal.RouteStarted = true
+		if err := writeJSONAtomic(path, journal); err != nil {
+			return journal, err
+		}
+		// Freeze the reviewed route, then release the settings writer while the
+		// network call runs. A slow probe must not block ordinary config saves.
+		editor.Close()
+		result, err := s.TestRoute(ctx, *journal.Route)
+		if err != nil {
+			if ctx.Err() != nil {
+				return finish("unknown", map[string]any{"message": "The route test was interrupted. It will not be repeated automatically."})
+			}
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
+		return finish("succeeded", map[string]any{"version": q.Proposal.ExpectedVersion, "tested_settings_version": q.Proposal.ExpectedVersion, "route_test": result, "effects": []any{}, "snapshot_publication": "pending"})
 	}
 	if journal.Resource != nil {
 		before, after, err := journal.Resource.State(editor)
