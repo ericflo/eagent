@@ -43,16 +43,48 @@ func (r *Runtime) rolloverFutile() bool {
 	return true
 }
 
+// futileYieldReason marks the forced yield a futile rollover records.
+const futileYieldReason = "a fresh context's prompt is already at the rollover threshold; the context cannot be reclaimed by another rollover. Raise rollover_tokens or shorten the standing instructions, then resume."
+
+// futileAlreadyPaused reports that the most recent orchestrator event is the
+// forced yield of a futile rollover: the pause is on the record and nothing
+// the orchestrator did since has changed the picture. A later call of its
+// own (which may succeed: the provider's window is larger than the
+// threshold) re-arms the pause.
+func (r *Runtime) futileAlreadyPaused() bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Actor != event.ActorOrchestrator {
+			continue
+		}
+		switch ev.Type {
+		case event.Yield:
+			var d event.YieldData
+			_ = ev.Decode(&d)
+			return d.Forced && d.Reason == futileYieldReason
+		case event.Assistant, event.TurnStart:
+			return false
+		}
+	}
+	return false
+}
+
 // startRollover closes the current subsession, opens the next, and asks the
 // task worker for a dossier. The orchestrator stays paused until it lands.
-func (r *Runtime) startRollover() {
+// It returns false when nothing was started because a futile rollover is
+// already paused on the record: the orchestrator may then take its turn
+// with the prompt as it is.
+func (r *Runtime) startRollover() bool {
 	if r.rolloverFutile() {
+		if r.futileAlreadyPaused() {
+			return false
+		}
 		// A second rollover cannot reclaim the context: the fresh prompt is
-		// already over the line. Stop instead of spending forever.
+		// already over the line. Pause once instead of spending forever.
 		r.ui.Log("rollover: a fresh context is already at %dk tokens; the prompt cannot be shrunk by another rollover, pausing", r.cfg.RolloverTokens/1000)
-		r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "a fresh context's prompt is already at the rollover threshold; the context cannot be reclaimed by another rollover. Raise rollover_tokens or shorten the standing instructions, then resume."}))
+		r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: futileYieldReason}))
 		r.wakeNarrator(wakeError)
-		return
+		return true
 	}
 	r.rolling = true
 	tokens := r.st.ContextTokens(event.ActorOrchestrator)
@@ -60,18 +92,46 @@ func (r *Runtime) startRollover() {
 	if err != nil {
 		r.ui.Log("rollover: %v", err)
 		r.rolling = false
-		return
+		return true
 	}
 	r.append(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: next, InputTokens: tokens}))
 	if _, err := r.sess.OpenSubsession(next); err != nil {
 		r.ui.Log("rollover: %v", err)
 		r.rolling = false
-		return
+		return true
 	}
 	idx := len(r.st.Subsessions)
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: next, Index: idx, Reason: "rollover"}))
+	// What the closed subsession still owed the orchestrator: an open
+	// question, and answers it never got to read. The fresh view starts at
+	// the dossier, so they are restated here.
+	if msg := r.carriedOver(); msg != "" {
+		r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: msg}))
+	}
 	r.ui.Log("orchestrator context reached %dk tokens; starting subsession %d with a dossier", tokens/1000, idx+1)
 	r.createDossierTask(fmt.Sprintf("the orchestrator's prompt reached %d tokens", tokens))
+	return true
+}
+
+// carriedOver names the user's answers the orchestrator has not seen yet
+// and any question still open, for the first message of a new context.
+func (r *Runtime) carriedOver() string {
+	var parts []string
+	for _, ev := range r.st.Events {
+		if ev.Type != event.UserAnswer || ev.Seq <= r.lastOrchSeen {
+			continue
+		}
+		var d event.UserAnswerData
+		_ = ev.Decode(&d)
+		parts = append(parts, fmt.Sprintf("The user answered question %s (%q): %s", d.QuestionID, firstLine(r.st.QuestionText(d.QuestionID), 200), d.Text))
+	}
+	if q := r.st.Question; q != nil {
+		parts = append(parts, "A question to the user is still pending: "+firstLine(q.Text, 200))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Carried over from before the context reset. " + strings.Join(parts, " ")
 }
 
 func (r *Runtime) createDossierTask(reason string) {

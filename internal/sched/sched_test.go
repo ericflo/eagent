@@ -105,9 +105,32 @@ func TestCronNextAcrossDST(t *testing.T) {
 	}
 	havana, err := time.LoadLocation("America/Havana")
 	if err == nil {
-		daily, _ := Parse("@daily") // local midnight does not exist on Havana's spring-forward day
-		if got := daily.Next(time.Date(2026, 3, 7, 12, 0, 0, 0, havana)); got.IsZero() {
-			t.Fatal("@daily in Havana never fires")
+		// Local midnight does not exist on Havana's spring-forward day: the
+		// job must never fire twice on one day, never fire early, and never
+		// stall; the missing midnight itself is skipped.
+		daily, _ := Parse("@daily")
+		at := time.Date(2026, 3, 5, 12, 0, 0, 0, havana)
+		lastDay := 0
+		for i := 0; i < 5; i++ {
+			next := daily.Next(at)
+			if next.IsZero() || !next.After(at) {
+				t.Fatalf("@daily in Havana stalled at %v", at)
+			}
+			if next.Hour() != 0 || next.Minute() != 0 {
+				t.Fatalf("@daily in Havana fired at %v, not at a local midnight", next)
+			}
+			if next.YearDay() == lastDay {
+				t.Fatalf("@daily in Havana fired twice on day %d (%v)", lastDay, next)
+			}
+			if gap := next.Sub(at); gap > 49*time.Hour {
+				t.Fatalf("@daily in Havana gap of %v ending %v", gap, next)
+			}
+			lastDay = next.YearDay()
+			at = next
+		}
+		ny2, _ := Parse("0 2 * * *")
+		if got := ny2.Next(time.Date(2026, 3, 8, 0, 30, 0, 0, ny)); got.Day() != 9 || got.Hour() != 2 {
+			t.Fatalf("02:00 does not exist on 8 March in New York; fired at %v", got)
 		}
 	}
 }

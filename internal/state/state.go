@@ -47,6 +47,10 @@ type Proc struct {
 	StartSeq int64
 	ExitSeq  int64
 	Started  time.Time
+	// PID and StartedAt identify the live process (from proc.pid); zero for
+	// logs written before that event existed.
+	PID       int
+	StartedAt time.Time
 }
 
 // Schedule is a loop, cron, or one-shot wake.
@@ -413,6 +417,12 @@ func (s *State) Apply(ev event.Event) {
 		bump(&s.procSeq, d.Handle, "p")
 		s.Procs[d.Handle] = &Proc{Handle: d.Handle, Actor: ev.Actor, Task: ev.Task, Command: d.Command, Cwd: d.Cwd, TimeoutS: d.TimeoutS, Status: "running", StartSeq: ev.Seq, Started: ev.Time}
 		s.ProcOrder = append(s.ProcOrder, d.Handle)
+	case event.ProcPID:
+		var d event.ProcPIDData
+		_ = ev.Decode(&d)
+		if p := s.Procs[d.Handle]; p != nil && p.Status == "running" {
+			p.PID, p.StartedAt = d.PID, d.StartedAt
+		}
 	case event.ProcExit:
 		var d event.ProcExitData
 		_ = ev.Decode(&d)

@@ -254,7 +254,12 @@ func (c *cronExpr) next(from time.Time) time.Time {
 			w = w.Add(time.Minute)
 			continue
 		}
-		if t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, loc); t.After(from) {
+		t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, loc)
+		// A wall-clock minute that does not exist locally (spring forward)
+		// normalises to some other instant; it is skipped, not fired early.
+		ty, tm, td := t.Date()
+		exists := ty == w.Year() && tm == w.Month() && td == w.Day() && t.Hour() == w.Hour() && t.Minute() == w.Minute()
+		if exists && t.After(from) {
 			return t
 		}
 		w = w.Add(time.Minute) // a wall-clock minute a DST jump skipped or repeated

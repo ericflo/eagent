@@ -180,7 +180,8 @@ func (e *APIError) badImage() bool {
 	if strings.Contains(b, "expected tags") || strings.Contains(b, "union_tag_invalid") {
 		return false
 	}
-	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match"} {
+	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match",
+		"unsupported image", "invalid_image_format", "image format", "media_type", "could not decode", "unable to decode", "not a valid image"} {
 		if strings.Contains(b, k) {
 			return true
 		}

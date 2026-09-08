@@ -257,3 +257,39 @@ func TestKillGroupReachesChildrenForkedAfterTheShellExited(t *testing.T) {
 		t.Fatalf("%d group member(s) survived KillGroup", n)
 	}
 }
+
+// After a hard kill of the harness, a resume can stop what a command left
+// running by pid and start instant; a wrong instant (a recycled pid) is
+// left alone.
+func TestReapOrphanGroupChecksIdentity(t *testing.T) {
+	m := NewManager()
+	p, err := m.Start(Spec{Command: "sh -c 'sleep 300; :' >/dev/null 2>&1 & echo started", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-m.Exited()
+	time.Sleep(300 * time.Millisecond)
+	if len(groupMembers(p.PID(), 1)) == 0 {
+		t.Skip("cannot observe process groups here")
+	}
+	started := p.StartedAt()
+	if started.IsZero() {
+		t.Fatal("no start instant recorded")
+	}
+	if ReapOrphanGroup(p.PID(), started.Add(time.Hour)) {
+		t.Fatal("a mismatched start instant must not kill anything")
+	}
+	if n := len(groupMembers(p.PID(), 1)); n == 0 {
+		t.Fatal("the group vanished after a refused reap")
+	}
+	if !ReapOrphanGroup(p.PID(), started) {
+		t.Fatal("the matching start instant should reap the group")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := len(groupMembers(p.PID(), 1)); n != 0 {
+		t.Fatalf("%d member(s) survived the reap", n)
+	}
+	if ReapOrphanGroup(0, started) || ReapOrphanGroup(p.PID(), time.Time{}) {
+		t.Fatal("nothing to reap without a pid and an instant")
+	}
+}

@@ -379,3 +379,51 @@ func TestNonStreamingJSONFallback(t *testing.T) {
 		t.Fatalf("resp = %+v", resp)
 	}
 }
+
+// chatSSE serves one streamed chat completion made of the given chunks.
+func chatSSE(chunks ...string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+}
+
+// Deltas without an index continue the last call; a new call is only
+// opened when a delta announces one.
+func TestChatToolCallDeltasWithoutIndex(t *testing.T) {
+	srv := chatSSE(
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":""}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"command\":"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"\"ls\"}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	c.MaxAttempts = 1
+	resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "bash" {
+		t.Fatalf("calls = %+v", resp.ToolCalls)
+	}
+	if args, err := ArgsObject(resp.ToolCalls[0].Args); err != nil || args["command"] != "ls" {
+		t.Fatalf("args = %s (%v)", resp.ToolCalls[0].Args, err)
+	}
+	// Two complete calls announced by name, still without an index, stay separate.
+	srv2 := chatSSE(
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"a","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"b","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv2.Close()
+	c2 := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv2.URL, Model: "m", APIKey: "k"})
+	c2.MaxAttempts = 1
+	resp, err = c2.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+	if err != nil || len(resp.ToolCalls) != 2 || resp.ToolCalls[0].Name != "bash" || resp.ToolCalls[1].Name != "read_file" {
+		t.Fatalf("two index-less calls: %+v %v", resp.ToolCalls, err)
+	}
+}

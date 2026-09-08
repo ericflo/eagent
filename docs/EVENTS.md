@@ -56,6 +56,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 | `task.start` | harness | `id` | A worker picked it up. |
 | `task.end` | harness | `id`, `status`, `summary`, `turns`, `usage` | `completed`, `failed`, `cancelled`, `interrupted`. Rendered into the orchestrator's history as a message. |
 | `proc.start` | orchestrator or task | `handle`, `command`, `cwd`, `timeout_s` | A shell command began. `timeout_s` of 0 means a service. |
+| `proc.pid` | same | `handle`, `pid`, `started_at` | The command's process id and start instant, recorded right after it started, so a resume after a hard kill can find and stop what it left running. |
 | `proc.exit` | same | `handle`, `exit_code`, `reason`, `duration_ms`, `tail`, `notify` | `reason`: `exited`, `killed`, `timeout`, `lost`, `failed`. `notify` is true when the owner had moved on and is told on its next call. |
 | `schedule.create` | orchestrator | `id`, `kind` (`loop`, `cron`, `once`), `spec`, `note`, `next` | Keeps the session alive while active. |
 | `schedule.fire` | harness | `id`, `note`, `next` | Wakes the orchestrator. `next` empty means the schedule is finished. |

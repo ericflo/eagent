@@ -70,6 +70,7 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 		calls     = map[int]*partial{}
 		out       = &Response{}
 		finish    string
+		lastIdx   int // for deltas that carry no index: continue the last call unless a new one is announced
 	)
 	err = c.readSSE(ctx, resp, func(ev sseEvent) error {
 		data := strings.TrimSpace(string(ev.Data))
@@ -141,10 +142,21 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 				obs.reasoning(*r)
 			}
 			for _, tc := range ch.Delta.ToolCalls {
-				idx := len(calls)
-				if tc.Index != nil {
+				idx := lastIdx
+				switch {
+				case tc.Index != nil:
 					idx = *tc.Index
+				case len(calls) == 0:
+					idx = 0
+				default:
+					// No index: a continuation of the last call, unless this
+					// delta announces a different one (a new id, or a new
+					// name when the last one is already named).
+					if prev := calls[lastIdx]; prev == nil || (tc.ID != "" && prev.id != "" && tc.ID != prev.id) || (tc.ID == "" && tc.Function.Name != "" && prev.name != "") {
+						idx = len(calls)
+					}
 				}
+				lastIdx = idx
 				p, ok := calls[idx]
 				if !ok {
 					p = &partial{}

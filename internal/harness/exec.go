@@ -182,7 +182,10 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 				return note, false
 			}
 		}
-		out, err := r.files.ReadFile(str("path"), num("offset", 0), num("limit", 0), r.cfg.ToolOutputMaxChars)
+		// No in-tool cap: the deferred spill keeps the whole text on disk and
+		// truncates once, so "full output saved" is true. Memory is bounded
+		// by the file tool's read cap.
+		out, err := r.files.ReadFile(str("path"), num("offset", 0), num("limit", 0), 0)
 		if err != nil {
 			return err.Error(), true
 		}
@@ -219,7 +222,7 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		}
 		return out, false
 	case "session_read":
-		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), boolean("raw"), r.cfg.ToolOutputMaxChars)
+		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), boolean("raw"), 0)
 		if err != nil {
 			return err.Error(), true
 		}
@@ -388,6 +391,11 @@ func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSecond
 		})
 		return "could not start command: " + err.Error(), true
 	}
+	// The pid and its start instant let a resume after a crash find and stop
+	// what this command left running.
+	r.sync(func() {
+		r.append(event.New(event.ProcPID, c.actor, event.ProcPIDData{Handle: handle, PID: p.PID(), StartedAt: p.StartedAt()}).WithTask(c.task))
+	})
 	if waitSeconds > 0 {
 		p.Wait(c.ctx, time.Duration(waitSeconds)*time.Second)
 	}

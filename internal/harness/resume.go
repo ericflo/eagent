@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/procs"
 	"github.com/ericflo/eagent/internal/state"
 )
 
@@ -15,13 +16,19 @@ func (r *Runtime) closeInterrupted() {
 	var closed []string
 	now := time.Now()
 
-	// Processes cannot survive a restart.
+	// A command started under the previous run may still be alive after a
+	// hard kill (its own process group). Stop it when it can be found and
+	// proved ours; otherwise it is lost to us.
 	for _, p := range r.st.RunningProcs() {
+		reason, what := "lost", "was lost"
+		if p.PID > 0 && procs.ReapOrphanGroup(p.PID, p.StartedAt) {
+			reason, what = "killed", "was still running after the crash and has been stopped"
+		}
 		r.append(event.New(event.ProcExit, p.Actor, event.ProcExitData{
-			Handle: p.Handle, ExitCode: -1, Reason: "lost",
+			Handle: p.Handle, ExitCode: -1, Reason: reason,
 			DurationMS: now.Sub(p.Started).Milliseconds(), Notify: p.Actor == event.ActorOrchestrator && p.Task == "",
 		}).WithTask(p.Task))
-		closed = append(closed, fmt.Sprintf("process %s (%s) was lost", p.Handle, firstLine(p.Command, 60)))
+		closed = append(closed, fmt.Sprintf("process %s (%s) %s", p.Handle, firstLine(p.Command, 60), what))
 	}
 	// Orchestrator tool calls without results.
 	for _, tc := range r.st.DanglingCalls(event.ActorOrchestrator, "") {

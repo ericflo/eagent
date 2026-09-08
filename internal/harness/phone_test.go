@@ -43,6 +43,8 @@ type fakePhone struct {
 	dupes     int                 // posts answered from a known key
 	metas     []map[string]any    // PATCH thread meta bodies
 	latency   time.Duration       // added to every request, to imitate a real network
+	anchorUnknown bool           // every GET …/messages answers at once with an unknown anchor
+	gets          int            // GET …/messages calls
 }
 
 type fakeFile struct {
@@ -160,6 +162,14 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(map[string]any{"message": m, "thread": map[string]any{"id": "t1", "external_id": "eagent:x", "title": body["title"], "agent": body["agent"]}})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodGet:
+		f.mu.Lock()
+		f.gets++
+		unknown := f.anchorUnknown
+		f.mu.Unlock()
+		if unknown {
+			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{}, "has_more": false, "thread_id": "t1", "timed_out": false, "anchor_unknown": true})
+			return
+		}
 		after := r.URL.Query().Get("after")
 		sender := r.URL.Query().Get("sender")
 		wait := 0
@@ -1734,5 +1744,245 @@ func TestPhoneMirrorsTheResumePrompt(t *testing.T) {
 	}
 	if resumedAt < 0 || promptAt != resumedAt+1 {
 		t.Fatalf("the resume prompt must follow the resume note: note at %d, prompt at %d", resumedAt, promptAt)
+	}
+}
+
+// injectQuestion plants a pending question the running mirror never asked
+// (from an earlier run, say), tagged with the eagent question id it was
+// about; answerQuestion answers that one specifically.
+func (f *fakePhone) injectQuestion(fid, eagentQID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.questions[fid] = map[string]any{"id": fid, "thread_id": "t1", "prompt": "old question", "options": []any{}, "allow_freeform": true, "multi_select": false, "status": "pending", "answer": nil, "meta": map[string]any{"eagent": "question", "question_id": eagentQID}, "created_at": time.Now().UTC().Format(time.RFC3339Nano), "expires_at": nil}
+}
+
+func (f *fakePhone) answerQuestion(fid, label string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	q := f.questions[fid]
+	q["status"] = "answered"
+	q["answer"] = map[string]any{"selected": []string{label}}
+	f.messages = append(f.messages, map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "origin": "session", "body": label, "format": "text", "importance": "normal", "meta": map[string]any{"kind": "answer", "question_id": fid}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	f.cond.Broadcast()
+}
+
+func (f *fakePhone) getCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.gets }
+
+// An answer to a phone question the mirror does not know is bound to the
+// eagent question named in the card's own meta, and to nothing when there is
+// none: it must never land on whatever question happens to be open.
+func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "answered question") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"decided"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("note", `{"text":"Wipe the branch? yes or no."}`), tc("yield", `{"done":false,"reason":"waiting for the decision"}`)}}
+		default:
+			switch {
+			case strings.Contains(all, "Done."):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "decided"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			case strings.Contains(all, "Wipe the branch") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Wipe the branch?","options":["yes","no"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "clean up"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	// A stale card from another run, about an unrelated question: the tap
+	// must not become "yes" to wiping the branch.
+	fp.injectQuestion("old-card", "q-from-another-run")
+	fp.answerQuestion("old-card", "blue")
+	select {
+	case code := <-done:
+		t.Fatalf("session ended (%d) on a stale card's answer", code)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	for _, ev := range evs {
+		if ev.Type == event.UserAnswer {
+			t.Fatalf("a stale card's answer was bound to the open question: %s", ev.Data)
+		}
+	}
+	// A card the mirror does not know but whose meta names the open question
+	// (an ask whose reply was lost) is applied to it.
+	fp.injectQuestion("lost-reply-card", "q1")
+	fp.answerQuestion("lost-reply-card", "no")
+	select {
+	case code := <-done:
+		if code != 0 {
+			_, _, logs := ui.snapshot()
+			t.Fatalf("exit %d logs=%v", code, logs)
+		}
+	case <-time.After(25 * time.Second):
+		t.Fatal("the session did not finish after the answer")
+	}
+	evs, _ = store.Read(rt.sess.Path)
+	var answers []event.UserAnswerData
+	for _, ev := range evs {
+		if ev.Type == event.UserAnswer {
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			answers = append(answers, d)
+		}
+	}
+	if len(answers) != 1 || answers[0].QuestionID != "q1" || answers[0].Text != "no" {
+		t.Fatalf("answers = %+v", answers)
+	}
+}
+
+// A server that answers the long poll at once with nothing (an unknown
+// anchor) is not asked again at once: the poll paces itself.
+func TestPhonePollPacesItselfWhenTheServerDoesNotHold(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	s := newScripted(func(model string, msgs []map[string]any) reply { return reply{calls: []event.ToolCall{tc("hold", `{}`)}} })
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	fp.anchorUnknown = true
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the first poll", func() bool { return fp.getCount() >= 1 })
+	time.Sleep(3 * time.Second)
+	n := fp.getCount()
+	cancel()
+	<-done
+	if n > 5 {
+		t.Fatalf("%d polls in three seconds against a server that does not hold requests", n)
+	}
+	_, _, logs := ui.snapshot()
+	said := 0
+	for _, l := range logs {
+		if strings.Contains(l, "recreated") {
+			said++
+		}
+	}
+	if said != 1 {
+		t.Fatalf("the recreated-thread note was logged %d times", said)
+	}
+}
+
+// A session that stopped on a question and is resumed with a prompt takes
+// the prompt as the answer; an --answer with no question open is kept as a
+// message instead of vanishing.
+func TestResumePromptAnswersThePendingQuestion(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "answered question") && strings.Contains(all, "blue"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"painted blue"}`)}}
+			case strings.Contains(all, "and also"):
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"noted the extra"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("note", `{"text":"Pick a colour: red or blue."}`), tc("yield", `{"done":false,"reason":"waiting for the colour"}`)}}
+			}
+		default:
+			switch {
+			case strings.Contains(all, "Done."):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "painted blue") || strings.Contains(all, "noted the extra"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			case strings.Contains(all, "Pick a colour") && !strings.Contains(all, "Which colour?"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 2 {
+		t.Fatalf("a batch session with a question open should stop awaiting input; exit %d", code)
+	}
+	// "2" is the second option.
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false, Prompt: "2"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rt2.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		evs, _ := store.Read(rt.sess.Path)
+		for _, ev := range evs {
+			t.Logf("%d %-12s %s %s", ev.Seq, ev.Actor, ev.Type, clipTail(string(ev.Data), 120))
+		}
+		t.Fatalf("resumed exit %d logs=%v", code, logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	var answers []event.UserAnswerData
+	for _, ev := range evs {
+		if ev.Type == event.UserAnswer {
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			answers = append(answers, d)
+		}
+	}
+	if len(answers) != 1 || answers[0].Text != "blue" || st.EndReason != "done" {
+		t.Fatalf("answers = %+v end=%s", answers, st.EndReason)
+	}
+	// No question is open now: an --answer becomes a message, not nothing.
+	rt3, err := Resume(cfg, Options{Project: project, Interactive: false, Answer: "and also this"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rt3.Run(ctx); code != 0 {
+		t.Fatalf("third run exit %d", code)
+	}
+	evs, _ = store.Read(rt.sess.Path)
+	found := false
+	for _, ev := range evs {
+		if ev.Type == event.UserMessage {
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if d.Text == "and also this" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("an --answer with no question open was dropped")
 	}
 }

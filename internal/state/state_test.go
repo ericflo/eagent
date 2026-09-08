@@ -240,3 +240,47 @@ func TestForcedYieldAlwaysIdles(t *testing.T) {
 		t.Fatal("forced yield must idle the session")
 	}
 }
+
+// An answer to a question asked in an earlier context restates the question
+// in the orchestrator's view, so a terse option stays readable.
+func TestAnswerAcrossRolloverCarriesTheQuestion(t *testing.T) {
+	st := New()
+	seq := int64(0)
+	add := func(ev event.Event) {
+		seq++
+		ev.Seq = seq
+		st.Apply(ev)
+	}
+	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
+	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
+	add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
+	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
+	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
+	add(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: "t9", Kind: "dossier", Title: "Dossier"}))
+	add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t9", Status: "completed", Summary: "the dossier"}).WithTask("t9"))
+	add(event.New(event.Dossier, event.ActorHarness, event.DossierData{TaskID: "t9", Text: "the dossier"}))
+	add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "SQLite"}))
+	joined := ""
+	for _, m := range st.OrchestratorView() {
+		joined += m.Text + "\n"
+	}
+	if !strings.Contains(joined, "Which database?") || !strings.Contains(joined, "SQLite | Postgres") || !strings.Contains(joined, "SQLite") {
+		t.Fatalf("the answer lost its question across the rollover: %s", joined)
+	}
+	if st.QuestionText("nope") != "" {
+		t.Fatal("unknown question ids have no text")
+	}
+}
+
+// Only picture formats every vision model accepts are inlined; a phone's
+// HEIC stays a file the note mentions.
+func TestImagesOfSkipsUnsupportedTypes(t *testing.T) {
+	ev := event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "look", Attachments: []event.Attachment{
+		{Name: "a.heic", Path: "/x/a.heic", ContentType: "image/heic", Kind: "image"},
+		{Name: "b.png", Path: "/x/b.png", ContentType: "image/png", Kind: "image"},
+	}})
+	imgs := imagesOf(ev)
+	if len(imgs) != 1 || imgs[0].Path != "/x/b.png" {
+		t.Fatalf("images = %+v", imgs)
+	}
+}

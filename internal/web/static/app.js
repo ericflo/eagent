@@ -346,7 +346,8 @@ function renderTasks(pane) {
 function chartsCard(d, paneW) {
   const evs = S.events;
   const start = evs.length ? new Date(evs[0].ts).getTime() : Date.now();
-  const end = Math.max(start + 1000, d.alive ? Date.now() : new Date(evs[evs.length-1].ts).getTime());
+  const last = evs.length ? new Date(evs[evs.length-1].ts).getTime() : start;
+  const end = Math.max(start + 1000, d.alive ? Date.now() : last);
   const span = end - start;
   // Drawn at the pane's width so text stays 10px on a phone instead of scaling down with the viewBox.
   const W = Math.max(340, Math.round((paneW || 900) - 34)), narrow = W < 560;

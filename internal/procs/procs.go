@@ -306,6 +306,54 @@ func (p *Proc) KillGroup() {
 	}
 }
 
+// StartedAt is the absolute instant the shell started, derived from its
+// start ticks and the boot time, so a resume after a reboot cannot mistake
+// a recycled pid for it. Zero when unknown.
+func (p *Proc) StartedAt() time.Time {
+	p.mu.Lock()
+	ticks := p.startTicks
+	p.mu.Unlock()
+	if ticks == 0 {
+		return time.Time{}
+	}
+	return bootTime().Add(time.Duration(ticks) * 10 * time.Millisecond)
+}
+
+// bootTime is now minus the system uptime; zero when unavailable.
+func bootTime() time.Time {
+	up := clockTicks()
+	if up == 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(-time.Duration(up) * 10 * time.Millisecond)
+}
+
+// ReapOrphanGroup stops what is left of the process group led by pid, a
+// command a previous run of the harness started at startedAt and never got
+// to kill. It reports whether anything was signalled. The leader, if still
+// present, must have that start time (within a tick or two); otherwise the
+// pid was recycled and the group is a stranger's.
+func ReapOrphanGroup(pid int, startedAt time.Time) bool {
+	if pid <= 0 || startedAt.IsZero() {
+		return false
+	}
+	boot := bootTime()
+	if boot.IsZero() || startedAt.Before(boot) {
+		return false // a different boot: nothing of it survives
+	}
+	from := int64(startedAt.Sub(boot) / (10 * time.Millisecond))
+	if live := startTicksOf(pid); live != 0 && (live < from-2 || live > from+2) {
+		return false
+	}
+	killed := false
+	for _, member := range groupMembers(pid, from-2) {
+		if syscall.Kill(member, syscall.SIGKILL) == nil {
+			killed = true
+		}
+	}
+	return killed
+}
+
 // groupMembers lists the pids in process group pgid that started no earlier
 // than the shell itself (in clock ticks), by reading /proc: our descendants
 // cannot predate the shell, and they may well postdate its exit (a

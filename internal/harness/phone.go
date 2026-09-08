@@ -126,6 +126,14 @@ func (r *Runtime) startPhone() {
 						prompt, promptSeq = d.Text, ev.Seq
 					}
 				}
+			case event.UserAnswer:
+				if ev.Seq > resumeSeq && resumeSeq > 0 {
+					var d event.UserAnswerData
+					_ = ev.Decode(&d)
+					if d.Source != "finalechat" {
+						prompt, promptSeq = d.Text, ev.Seq
+					}
+				}
 			}
 		}
 	}
@@ -376,7 +384,16 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		if p.has("activity") {
 			act = &finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL, Seq: time.Now().UnixNano()}
 		}
-		q, _, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid), Activity: act})
+		q, thread, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid), Activity: act})
+		if err == nil {
+			p.mu.Lock()
+			if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
+				// The question recreated a deleted thread; the poll's anchor
+				// belongs to the old one and the next page says so.
+				p.threadID = thread.ID
+			}
+			p.mu.Unlock()
+		}
 		if err != nil {
 			p.mu.Lock()
 			p.gone[qid] = true
@@ -429,22 +446,48 @@ func clipLabel(s string, n int) string {
 	return s
 }
 
+// pollFloorAfter is how quickly a long poll must return, with nothing, to
+// count as "the server is not holding requests"; faster than this and the
+// loop paces itself rather than asking again at once.
+const pollFloorAfter = 30 * time.Second
+
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
 func (p *phone) poll(r *Runtime) {
 	defer p.wg.Done()
 	backoff := time.Second
+	var floor time.Duration // pacing when the server answers at once with nothing
+	saidRecreated := false
 	for p.ctx.Err() == nil {
 		p.mu.Lock()
 		after := p.lastID
 		p.mu.Unlock()
+		start := time.Now()
 		msgs, _, anchorUnknown, err := p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
-		if anchorUnknown {
+		if anchorUnknown && !saidRecreated {
 			// The thread was deleted from the app and recreated under the same
 			// id; the page restarts from its first message, and our own posts
 			// are still skipped by id.
 			r.ui.Log("finalechat: the thread was recreated; catching up from its first message")
+		}
+		saidRecreated = anchorUnknown
+		if err == nil && len(msgs) == 0 && time.Since(start) < pollFloorAfter {
+			// The long poll came straight back empty: the server did not hold
+			// the request (an unknown anchor, or no wait support). Pace
+			// ourselves instead of hammering the user's own account.
+			if floor == 0 {
+				floor = time.Second
+			} else if floor < 30*time.Second {
+				floor *= 2
+			}
+			select {
+			case <-time.After(floor):
+			case <-p.ctx.Done():
+				return
+			}
+		} else if err == nil {
+			floor = 0
 		}
 		if err != nil {
 			if p.ctx.Err() != nil {
@@ -487,8 +530,21 @@ func (p *phone) poll(r *Runtime) {
 			}
 			if fid, ok := m.IsAnswer(); ok {
 				p.mu.Lock()
-				qid := p.fromPhone[fid]
+				qid, known := p.fromPhone[fid]
 				p.mu.Unlock()
+				if !known {
+					// A card from before this run (the thread outlives the
+					// session id) or from an ask whose reply was lost. Recover
+					// the eagent question id from the question's own meta; if
+					// that fails, the answer must not bind to whatever question
+					// happens to be open now.
+					qid = "finalechat:" + fid
+					if q, err := p.client.Question(p.ctx, fid, 0); err == nil {
+						if id, _ := q.Meta["question_id"].(string); id != "" {
+							qid = id
+						}
+					}
+				}
 				r.post(func() {
 					r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Attachments: atts})
 				})
@@ -506,8 +562,26 @@ func (p *phone) poll(r *Runtime) {
 // message poll.
 func (p *phone) watchQuestion(r *Runtime, fid, qid string) {
 	defer p.wg.Done()
+	var floor time.Duration
 	for p.ctx.Err() == nil {
+		start := time.Now()
 		q, err := p.client.Question(p.ctx, fid, 600)
+		if err == nil && q.Status == "pending" && time.Since(start) < pollFloorAfter {
+			// Answered at once and still pending: the server is not holding
+			// the request. Pace the loop.
+			if floor == 0 {
+				floor = time.Second
+			} else if floor < 30*time.Second {
+				floor *= 2
+			}
+			select {
+			case <-time.After(floor):
+			case <-p.ctx.Done():
+				return
+			}
+		} else if err == nil {
+			floor = 0
+		}
 		if err != nil {
 			if p.ctx.Err() != nil {
 				return

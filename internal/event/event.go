@@ -52,6 +52,7 @@ const (
 	ScheduleCancel = "schedule.cancel"
 
 	ProcStart = "proc.start"
+	ProcPID   = "proc.pid"
 	ProcExit  = "proc.exit"
 
 	Dossier        = "dossier"
@@ -316,6 +317,14 @@ type ProcStartData struct {
 	Command  string `json:"command"`
 	Cwd      string `json:"cwd,omitempty"`
 	TimeoutS int    `json:"timeout_s"`
+}
+
+// ProcPIDData records a started command's pid and start instant, so a
+// resume after a hard kill can find and stop what it left running.
+type ProcPIDData struct {
+	Handle    string    `json:"handle"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // ProcExitData records how a command ended.

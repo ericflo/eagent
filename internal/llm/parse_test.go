@@ -134,3 +134,27 @@ func TestRetryableAsksTimeoutNotType(t *testing.T) {
 		}
 	}
 }
+
+// An unterminated leaked block must not swallow the block after it: two
+// calls come out as two calls, each with its own arguments.
+func TestTwoLeakedBlocksDoNotMerge(t *testing.T) {
+	text := "<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>make build</arg_value>\n<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>rm -rf dist</arg_value>\n</tool_call>"
+	calls, rest := ParseTextToolCalls(text)
+	if len(calls) != 2 || calls[0].Name != "bash" || calls[1].Name != "bash" {
+		t.Fatalf("calls = %+v", calls)
+	}
+	a, _ := ArgsObject(calls[0].Args)
+	b, _ := ArgsObject(calls[1].Args)
+	if a["command"] != "make build" || b["command"] != "rm -rf dist" {
+		t.Fatalf("args merged: %v %v", a, b)
+	}
+	if strings.TrimSpace(rest) != "" {
+		t.Fatalf("rest = %q", rest)
+	}
+	text = "<tool_call>write_file\n<arg_key>path</arg_key>\n<arg_value>a.txt</arg_value>\n<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>ls</arg_value>\n</tool_call>"
+	calls, _ = ParseTextToolCalls(text)
+	w, _ := ArgsObject(calls[0].Args)
+	if len(calls) != 2 || calls[0].Name != "write_file" || w["command"] != nil {
+		t.Fatalf("a stray argument crossed blocks: %+v", calls)
+	}
+}

@@ -9,10 +9,39 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-var (
-	toolCallBlock = regexp.MustCompile(`(?s)<tool_call>(.*?)(?:</tool_call>|$)`)
-	argKeyValue   = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
-)
+var argKeyValue = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+
+// toolCallBlocks finds every <tool_call> block and returns, per block, the
+// indices {start, end, bodyStart, bodyEnd}. A block ends at its
+// </tool_call>, at the next <tool_call> (an unterminated block must not
+// swallow the one after it), or at the end of the text.
+func toolCallBlocks(text string) [][]int {
+	const open, close = "<tool_call>", "</tool_call>"
+	var out [][]int
+	pos := 0
+	for pos < len(text) {
+		i := strings.Index(text[pos:], open)
+		if i < 0 {
+			break
+		}
+		start := pos + i
+		bodyStart := start + len(open)
+		rest := text[bodyStart:]
+		ci, ni := strings.Index(rest, close), strings.Index(rest, open)
+		switch {
+		case ci >= 0 && (ni < 0 || ci < ni):
+			out = append(out, []int{start, bodyStart + ci + len(close), bodyStart, bodyStart + ci})
+			pos = bodyStart + ci + len(close)
+		case ni >= 0:
+			out = append(out, []int{start, bodyStart + ni, bodyStart, bodyStart + ni})
+			pos = bodyStart + ni
+		default:
+			out = append(out, []int{start, len(text), bodyStart, len(text)})
+			pos = len(text)
+		}
+	}
+	return out
+}
 
 // ParseTextToolCalls recovers tool calls that a model emitted as text instead
 // of through the structured channel. GLM models occasionally leak their
@@ -30,7 +59,7 @@ func ParseTextToolCalls(text string) ([]event.ToolCall, string) {
 		return nil, text
 	}
 	var calls []event.ToolCall
-	matches := toolCallBlock.FindAllStringSubmatchIndex(text, -1)
+	matches := toolCallBlocks(text)
 	if len(matches) == 0 {
 		return nil, text
 	}

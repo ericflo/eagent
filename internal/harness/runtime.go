@@ -185,11 +185,26 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
-	if strings.TrimSpace(opts.Answer) != "" && st.Question != nil {
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: opts.Answer}))
+	if a := strings.TrimSpace(opts.Answer); a != "" {
+		if st.Question != nil {
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a}))
+		} else {
+			// Answered elsewhere first (the phone, another resume): the words
+			// still count, as a message, rather than vanishing with exit 0.
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a}))
+		}
 	}
-	if strings.TrimSpace(opts.Prompt) != "" {
-		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
+	if text := strings.TrimSpace(opts.Prompt); text != "" {
+		if q := st.Question; q != nil {
+			// The natural reply to a session that stopped on a question is
+			// the answer, exactly as it would be from the terminal or the web.
+			if n := optionIndex(text, q.Options); n >= 0 {
+				text = q.Options[n]
+			}
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text}))
+		} else {
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
+		}
 	}
 	r.startPhone()
 	return r, nil
@@ -495,8 +510,8 @@ func (r *Runtime) tick() {
 	if r.rolling {
 		// Waiting for the dossier; nothing else for the orchestrator to do.
 	} else if !r.orchBusy {
-		if r.needsRollover() {
-			r.startRollover()
+		if r.needsRollover() && r.startRollover() {
+			// rolling, or paused once for a futile rollover
 		} else if r.orchestratorHasWork() {
 			r.startOrchestratorTurn()
 		}

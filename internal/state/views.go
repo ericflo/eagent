@@ -18,6 +18,27 @@ type ViewOptions struct {
 // DefaultViewOptions are used when nil is passed.
 var DefaultViewOptions = ViewOptions{ObservationChars: 1500}
 
+// QuestionText returns the text of a narrator question by id, with its
+// options, searching every subsession; "" when unknown.
+func (s *State) QuestionText(id string) string {
+	for i := len(s.Events) - 1; i >= 0; i-- {
+		ev := s.Events[i]
+		if ev.Type != event.NarratorQuestion {
+			continue
+		}
+		var d event.NarratorQuestionData
+		_ = ev.Decode(&d)
+		if d.ID != id {
+			continue
+		}
+		if len(d.Options) > 0 {
+			return d.Text + " (options: " + strings.Join(d.Options, " | ") + ")"
+		}
+		return d.Text
+	}
+	return ""
+}
+
 // currentEvents returns the events of the open subsession.
 func (s *State) currentEvents() []event.Event {
 	cur := s.Current()
@@ -39,7 +60,24 @@ func (s *State) currentEvents() []event.Event {
 // results, matching what the model actually saw.
 func (s *State) OrchestratorView() []llm.Message {
 	events := s.currentEvents()
+	asked := map[string]bool{}
+	for _, ev := range events {
+		if ev.Type == event.NarratorQuestion {
+			var d event.NarratorQuestionData
+			_ = ev.Decode(&d)
+			asked[d.ID] = true
+		}
+	}
 	msgs := renderActor(events, event.ActorOrchestrator, "", func(ev event.Event) string {
+		if ev.Type == event.UserAnswer {
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			if !asked[d.QuestionID] {
+				// The question was asked in an earlier context; restate it so
+				// a terse answer stays readable.
+				return fmt.Sprintf("[The user answered question %s, %q]\n%s", d.QuestionID, s.QuestionText(d.QuestionID), d.Text) + attachmentNotes(d.Attachments)
+			}
+		}
 		if ev.Type == event.TaskEnd {
 			var d event.TaskEndData
 			_ = ev.Decode(&d)
@@ -592,6 +630,14 @@ func imagesOf(ev event.Event) []llm.Image {
 	}
 	var out []llm.Image
 	for _, a := range atts {
+		// Only formats every vision model accepts are inlined; a HEIC photo
+		// from a phone stays a file the note mentions, so one undecodable
+		// picture cannot get the model's pictures switched off.
+		switch a.ContentType {
+		case "", "image/png", "image/jpeg", "image/gif", "image/webp":
+		default:
+			continue
+		}
 		if a.IsImage() {
 			out = append(out, llm.Image{Path: a.Path, MediaType: a.ContentType})
 		}
