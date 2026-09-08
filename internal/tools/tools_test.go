@@ -227,6 +227,22 @@ func TestWriteThroughSymlinkIsRefused(t *testing.T) {
 	if got, _ := os.ReadFile(filepath.Join(root, "sub", "inside.txt")); string(got) != "fine" {
 		t.Fatal("the in-project link's target was not written")
 	}
+	// A chain longer than the resolver's hop bound must fail closed, not
+	// pass as "inside" because the last unresolved link sits in the project.
+	prev := filepath.Join(outside, "chain-end")
+	for i := 0; i < 36; i++ {
+		link := filepath.Join(root, fmt.Sprintf("l%d", i))
+		if err := os.Symlink(prev, link); err != nil {
+			t.Fatal(err)
+		}
+		prev = link
+	}
+	if _, err := f.WriteFile("l35", "through the chain"); err == nil {
+		t.Fatal("a 36-link chain to outside the project was allowed")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "chain-end")); err == nil {
+		t.Fatal("the chain's outside target was created")
+	}
 	if got, _ := os.ReadFile(target); string(got) != "keep" {
 		t.Fatal("the outside file was changed")
 	}

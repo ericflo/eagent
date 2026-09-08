@@ -44,46 +44,57 @@ func (f Files) Resolve(p string, write bool) (string, error) {
 	// Containment is judged on the real path: a symlink inside the project
 	// that points outside must not carry a write with it.
 	root := filepath.Clean(f.Root)
-	real := realPath(abs)
+	real, resolved := realPathHops(abs, 32)
 	realRoot := realPath(root)
-	if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
-		return abs, nil
-	}
-	tmp := realPath(filepath.Clean(os.TempDir()))
-	if strings.HasPrefix(real, tmp+string(filepath.Separator)) {
-		return abs, nil
+	if resolved {
+		// A path whose links could not all be followed is not proved to be
+		// anywhere in particular, so it fails the containment test.
+		if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
+			return abs, nil
+		}
+		tmp := realPath(filepath.Clean(os.TempDir()))
+		if strings.HasPrefix(real, tmp+string(filepath.Separator)) {
+			return abs, nil
+		}
 	}
 	return "", fmt.Errorf("refusing to write %s: it is outside the project directory %s. Write inside the project (or use a shell command if you really mean it)", p, root)
 }
 
 // realPath resolves symlinks in a path that may not exist yet: the deepest
 // existing ancestor is resolved and the rest appended.
-func realPath(abs string) string { return realPathHops(abs, 32) }
+func realPath(abs string) string { r, _ := realPathHops(abs, 32); return r }
 
 // realPathHops is realPath with a bound on symlink hops. EvalSymlinks
 // refuses a link whose target does not exist, so a dangling link is read
-// by hand: the write would create the target, wherever it points.
-func realPathHops(abs string, hops int) string {
+// by hand: the write would create the target, wherever it points. The
+// second result is false when a link was left unresolved (the bound ran
+// out, or the link could not be read): the path is then not proved to be
+// anywhere, and a containment check must fail closed.
+func realPathHops(abs string, hops int) (string, bool) {
 	if r, err := filepath.EvalSymlinks(abs); err == nil {
-		return r
+		return r, true
 	}
 	dir, base := filepath.Split(abs)
 	dir = filepath.Clean(dir)
 	if dir == abs || dir == "." || dir == string(filepath.Separator) {
-		return abs
+		return abs, true
 	}
-	real := filepath.Join(realPathHops(dir, hops), base)
-	if hops > 0 {
-		if fi, err := os.Lstat(real); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			if target, err := os.Readlink(real); err == nil {
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(filepath.Dir(real), target)
-				}
-				return realPathHops(filepath.Clean(target), hops-1)
-			}
+	parent, ok := realPathHops(dir, hops)
+	real := filepath.Join(parent, base)
+	if !ok {
+		return real, false
+	}
+	if fi, err := os.Lstat(real); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(real)
+		if err != nil || hops <= 0 {
+			return real, false
 		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(real), target)
+		}
+		return realPathHops(filepath.Clean(target), hops-1)
 	}
-	return real
+	return real, true
 }
 
 // ReadFile returns a file's contents, optionally a window of lines.

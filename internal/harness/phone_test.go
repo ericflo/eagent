@@ -2229,4 +2229,20 @@ func TestFutileStandAsideIsOncePerArrival(t *testing.T) {
 	if !r.futileStandAside() {
 		t.Fatal("a new arrival stands the pause aside again, once")
 	}
+	// The harness's own wakes (a recovery message, the dossier) are not
+	// arrivals: they must not keep standing the pause aside, or a context
+	// that stays full would loop the provider forever.
+	r.lastOrchSeen = 15
+	r.noteWake(event.Event{Seq: 20, Type: event.HarnessMessage, Actor: event.ActorOrchestrator})
+	r.noteWake(event.Event{Seq: 21, Type: event.Dossier, Actor: event.ActorHarness})
+	if r.lastWake != 21 {
+		t.Fatalf("harness wakes must still wake the orchestrator: lastWake=%d", r.lastWake)
+	}
+	if r.futileStandAside() {
+		t.Fatal("a harness-made wake stood the pause aside")
+	}
+	r.noteWake(event.Event{Seq: 22, Type: event.ScheduleFire, Actor: event.ActorHarness})
+	if !r.futileStandAside() {
+		t.Fatal("a schedule firing is an arrival")
+	}
 }

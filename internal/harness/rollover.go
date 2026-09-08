@@ -132,7 +132,9 @@ func (r *Runtime) pauseFutileRollover() {
 // context is still full after that turn, the pause lands. Bounded: one turn
 // per arrival, never a loop.
 func (r *Runtime) futileStandAside() bool {
-	unseen := r.lastWake
+	// Only arrivals from outside count: the harness's own recovery message,
+	// nudge, or dossier must not keep standing the pause aside.
+	unseen := r.lastArrival
 	if r.st.LastUserSeq > unseen {
 		unseen = r.st.LastUserSeq
 	}
