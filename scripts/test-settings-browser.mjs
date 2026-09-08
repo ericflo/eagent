@@ -177,6 +177,10 @@ try {
   await page.evaluate(() => { window.anchor={dataset_format:fixture.manifest.dataset.format,session_id:fixture.manifest.dataset.session_id,seq:2}; document.querySelector('iframe').src='/viewer?anchor=2'; });
   await frame.getByText('Selected event #2.', { exact: true }).waitFor();
   await frame.getByText('1 matching events', { exact: true }).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await frame.locator('.tl tr.detail td').isVisible(), true, 'mobile table hid the expanded event');
+  assert.equal(await frame.locator('.tl tr.row td:nth-child(2)').innerText(), '+0:10.0', 'focused event lost its session-relative time');
+  await page.setViewportSize({width:1280,height:900});
   await frame.getByRole('button', { name: 'Find chat message', exact: true }).click();
   await page.waitForFunction(() => window.revealed?.seq === 2);
   await frame.getByRole('button', { name: 'Show all events', exact: true }).click();

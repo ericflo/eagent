@@ -252,7 +252,7 @@ svg.gantt text.label { font-family: var(--mono); }
 select { max-width: 100%; }
 .modal .row select { flex: 1; min-width: 0; }
 @media (max-width: 640px) {
-  .tl th:nth-child(1), .tl td:nth-child(1) { display: none; }
+  .tl th:nth-child(1), .tl td:nth-child(1):not([colspan]) { display: none; }
   .tl th:nth-child(2) { width: 64px; } .tl th:nth-child(3) { width: 96px; } .tl th:nth-child(4) { width: 96px; }
   .tl td { padding: 5px 6px; }
   .tl tr.detail td { padding-left: 6px; }

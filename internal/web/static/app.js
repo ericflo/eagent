@@ -466,7 +466,7 @@ function renderTimeline(pane) {
     h('table', {class: 'tl'}, h('thead', null, h('tr', null, h('th', null, '#'), h('th', null, 'time'), h('th', null, 'actor'), h('th', null, 'type'), h('th', null, 'what happened'))), tbody));
 }
 function tlRow(ev) {
-  const start = S.events.length ? new Date(S.events[0].ts) : new Date(ev.ts);
+  const start = (ARCHIVE && when(S.detail?.started)) || (S.events.length ? new Date(S.events[0].ts) : new Date(ev.ts));
   const tr = h('tr', {class: 'row', onclick: () => {
       const open = tr.classList.toggle('open');
       if (open) tr.after(h('tr', {class: 'detail'}, h('td', {colspan: 5}, h('div', {class: 'where'}, `${ev.file}:${ev.line} · ${fmtDate(ev.ts)}`), h('pre', {class: 'code'}, JSON.stringify(ev.data, null, 2)))));
