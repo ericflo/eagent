@@ -485,10 +485,7 @@ func (c *Client) Download(ctx context.Context, urlOrID string, w io.Writer) (con
 	if c.Token == "" {
 		return "", "", errors.New("finalechat: no token")
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = http.DefaultClient
-	}
+	hc := credentialHTTPClient(c.HTTP)
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
@@ -656,14 +653,22 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 }
 
 // doRaw performs one request with a prepared body.
+// API credentials belong to the configured service, including its port. Never
+// forward them through a redirect (Go otherwise forwards to another local port).
+func credentialHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	copy := *client
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copy
+}
+
 func (c *Client) doRaw(ctx context.Context, method, path string, query url.Values, contentType string, rdr io.Reader, out any, wait int) error {
 	if c.Token == "" {
 		return errors.New("finalechat: no token")
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = http.DefaultClient
-	}
+	hc := credentialHTTPClient(c.HTTP)
 	u := strings.TrimRight(c.BaseURL, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()

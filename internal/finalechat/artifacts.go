@@ -21,6 +21,20 @@ type ArtifactRevision struct {
 	Manifest artifact.Manifest `json:"manifest"`
 }
 
+type ArtifactHead struct {
+	Artifact Artifact          `json:"artifact"`
+	Revision *ArtifactRevision `json:"revision"`
+}
+
+func (c *Client) ArtifactHead(ctx context.Context, id string) (ArtifactHead, error) {
+	var head ArtifactHead
+	err := c.Request(ctx, http.MethodGet, "/api/v1/artifacts/"+url.PathEscape(id), nil, nil, &head, 0)
+	if err == nil && (head.Artifact.ID != id || head.Artifact.CurrentRevisionID != nil && (head.Revision == nil || head.Revision.ID != *head.Artifact.CurrentRevisionID)) {
+		err = fmt.Errorf("inconsistent artifact head response")
+	}
+	return head, err
+}
+
 func (c *Client) Artifact(ctx context.Context, ref, key, title string) (Artifact, error) {
 	var out struct {
 		Artifact Artifact `json:"artifact"`

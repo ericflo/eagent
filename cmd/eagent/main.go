@@ -43,7 +43,8 @@ Usage:
   eagent replay <id>                 rebuild state from the log and print it
   eagent artifact export <id> --output DIR
                                      export a portable website and native source logs
-  eagent artifact publish <id>       publish a saved session to FinaleChat
+  eagent artifact publish <id> [--recreate]
+                                    publish; recreate only a previously deleted archive
   eagent artifact verify DIR         verify a downloaded archive without executing it
   eagent artifact restore DIR --output NEW_DIR
                                     recover native sources into a new directory
@@ -109,6 +110,7 @@ func run(args []string) int {
 		live     = fs.Bool("live", false, "doctor: make a small live call per actor")
 		write    = fs.Bool("write", false, "config: write config.json")
 		output   = fs.String("output", "", "artifact export/restore: new destination directory")
+		recreate = fs.Bool("recreate", false, "artifact publish: explicitly recreate a deleted archive")
 		helpFlag = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
@@ -163,7 +165,7 @@ func run(args []string) int {
 	case "serve":
 		return cmdServe(project, *addr, *preset, *bundle, *verbose)
 	case "artifact":
-		return cmdArtifact(project, rest, *output)
+		return cmdArtifact(project, rest, *output, *recreate)
 	case "connector":
 		return cmdConnector(project, rest)
 	case "view":

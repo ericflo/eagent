@@ -33,6 +33,9 @@ type publication struct {
 	Fingerprint string            `json:"fingerprint"`
 	Signature   string            `json:"signature"`
 	Completed   bool              `json:"completed"`
+	Endpoint    string            `json:"endpoint,omitempty"`
+	Deleted     bool              `json:"remote_deleted,omitempty"`
+	Recapture   bool              `json:"needs_recapture,omitempty"`
 }
 
 func stateDir(project string) string {
@@ -90,6 +93,16 @@ func fingerprint(m artifact.Manifest) string {
 // Publish resumes pending uploads before taking a fresh snapshot. force is
 // for the explicit CLI command; it does not enable future publication.
 func Publish(ctx context.Context, project, session, version string, force bool) (string, error) {
+	return publish(ctx, project, session, version, force, false)
+}
+
+// RecreatePublication is only called for one explicitly named deleted archive.
+// Ordinary forced publication is never permission to bypass deletion/history.
+func RecreatePublication(ctx context.Context, project, session, version string) (string, error) {
+	return publish(ctx, project, session, version, true, true)
+}
+
+func publish(ctx context.Context, project, session, version string, force, recreate bool) (_ string, resultErr error) {
 	if finalechat.Disabled() {
 		return "", finalechat.ErrDisabled
 	}
@@ -114,6 +127,20 @@ func Publish(ctx context.Context, project, session, version string, force bool) 
 		return "", err
 	}
 	defer unlock()
+	defer func() {
+		status := "published"
+		message := "Archive publication is current."
+		if resultErr != nil {
+			status, message = "pending", "Publication did not complete; its captured intent is retained for retry."
+			if errors.Is(resultErr, ErrPublicationDeleted) {
+				status, message = "remote_deleted", ErrPublicationDeleted.Error()
+			}
+			if errors.Is(resultErr, ErrPublicationConflict) {
+				status, message = "conflicted", "Local source history must preserve both pending and published native records before publication can continue."
+			}
+		}
+		_ = writeJSONAtomic(filepath.Join(directory, "status.json"), map[string]any{"state": status, "message": message, "at": time.Now().UTC()})
+	}()
 	path := filepath.Join(directory, "publication.json")
 	var pending publication
 	if raw, err := os.ReadFile(path); err == nil {
@@ -123,7 +150,53 @@ func Publish(ctx context.Context, project, session, version string, force bool) 
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
+	endpoint := strings.TrimRight(client.BaseURL, "/")
+	if pending.Endpoint != "" && pending.Endpoint != endpoint {
+		return "", fmt.Errorf("publisher journal belongs to a different FinaleChat service; export the session and publish it as a separate artifact")
+	}
+	pending.Endpoint = endpoint
+	getHead := func() (finalechat.ArtifactHead, error) {
+		head, err := publicationHead(ctx, client, pending.ArtifactID)
+		if errors.Is(err, ErrPublicationDeleted) {
+			pending.Deleted = true
+			if saveErr := writeJSONAtomic(path, pending); saveErr != nil {
+				return head, saveErr
+			}
+		}
+		return head, err
+	}
+	if recreate {
+		if pending.ArtifactID == "" {
+			return "", fmt.Errorf("this session has no deleted publication to recreate")
+		}
+		if _, err := getHead(); !errors.Is(err, ErrPublicationDeleted) {
+			if err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("the artifact still exists; recreation cannot bypass a history conflict")
+		}
+		if err := writeJSONAtomic(filepath.Join(directory, "retired-"+artifact.Digest([]byte(pending.ArtifactID))+".json"), pending); err != nil {
+			return "", err
+		}
+		pending = publication{Endpoint: endpoint}
+		if err := writeJSONAtomic(path, pending); err != nil {
+			return "", err
+		}
+	}
+	if pending.Deleted {
+		return "", ErrPublicationDeleted
+	}
+	var capabilities finalechat.Me
+	if err := client.Request(ctx, "GET", "/api/v1/me", nil, nil, &capabilities, 0); err != nil {
+		return "", err
+	}
+	if !capabilities.Has("artifacts.v1") {
+		return "", ErrArtifactsUnsupported
+	}
 	complete := func() error {
+		if err := publicationStage(directory, pending.Directory); err != nil {
+			return err
+		}
 		root, err := os.OpenRoot(pending.Directory)
 		if err != nil {
 			return err
@@ -131,18 +204,47 @@ func Publish(ctx context.Context, project, session, version string, force bool) 
 		defer root.Close()
 		revision, err := client.CommitArtifact(ctx, pending.ArtifactID, pending.RevisionID, pending.ClientKey, pending.Manifest, func(name string) (io.ReadCloser, error) { return root.Open(filepath.FromSlash(name)) })
 		if err != nil {
+			var apiError *finalechat.Error
+			if errors.As(err, &apiError) && (apiError.Status == 404 || apiError.Status == 409) {
+				head, headErr := getHead()
+				if headErr != nil {
+					return headErr
+				}
+				if apiError.Status == 409 && !sameRevision(head.Artifact.CurrentRevisionID, pending.RevisionID) {
+					return fmt.Errorf("%w: another publisher advanced the artifact; a fresh capture is required", ErrPublicationConflict)
+				}
+			}
 			return err
 		}
+		if revision.ID == "" {
+			return fmt.Errorf("artifact commit returned no revision identity; retained pending capture for retry")
+		}
+		oldDirectory := pending.Directory
 		pending.RevisionID = &revision.ID
 		pending.Completed = true
+		pending.Recapture = false
+		pending.Directory = ""
 		if err := writeJSONAtomic(path, pending); err != nil {
 			return err
 		}
-		_ = os.RemoveAll(pending.Directory)
+		_ = os.RemoveAll(oldDirectory)
 		return nil
 	}
-	if pending.ArtifactID != "" && !pending.Completed {
+	if pending.ArtifactID != "" && !pending.Completed && pending.Directory != "" && !pending.Recapture {
 		if err := complete(); err != nil {
+			if !errors.Is(err, ErrPublicationConflict) {
+				return "", err
+			}
+			pending.Recapture = true
+			if err := writeJSONAtomic(path, pending); err != nil {
+				return "", err
+			}
+		}
+	}
+	var head finalechat.ArtifactHead
+	if pending.ArtifactID != "" {
+		head, err = getHead()
+		if err != nil {
 			return "", err
 		}
 	}
@@ -150,33 +252,69 @@ func Publish(ctx context.Context, project, session, version string, force bool) 
 	if err != nil {
 		return "", err
 	}
-	if pending.Completed && pending.Signature == signature {
+	if pending.Completed && sameRevision(head.Artifact.CurrentRevisionID, pending.RevisionID) && pending.Signature == signature {
 		return pending.ArtifactID, nil
 	}
 	snapshot, err := archive.SnapshotIn(ctx, project, info.ID, version, directory)
 	if err != nil {
 		return "", err
 	}
+	keepSnapshot := false
+	defer func() {
+		if !keepSnapshot {
+			snapshot.Close()
+		}
+	}()
+	if pending.Recapture {
+		if err := publicationStage(directory, pending.Directory); err != nil {
+			return "", err
+		}
+		if err := requireSourceExtension(ctx, snapshot.Dir, snapshot.Manifest, pending.Manifest); err != nil {
+			return "", err
+		}
+	}
+	if pending.ArtifactID == "" {
+		a, err := client.Artifact(ctx, "ext:eagent:"+info.ID, "session", "Session explorer")
+		if err != nil {
+			return "", err
+		}
+		if a.ID == "" {
+			return "", fmt.Errorf("artifact registration returned no identity")
+		}
+		pending.ArtifactID = a.ID
+		// Persist identity before upload or source comparison. Once registered,
+		// deletion can never make a retry silently create a replacement record.
+		if err := writeJSONAtomic(path, pending); err != nil {
+			return "", err
+		}
+		head, err = getHead()
+		if err != nil {
+			return "", err
+		}
+	}
+	if head.Revision != nil {
+		if err := requireSourceExtension(ctx, snapshot.Dir, snapshot.Manifest, head.Revision.Manifest); err != nil {
+			return "", err
+		}
+	}
 	nextFingerprint := fingerprint(snapshot.Manifest)
-	if pending.Completed && pending.Fingerprint == nextFingerprint {
-		snapshot.Close()
+	if pending.Completed && sameRevision(head.Artifact.CurrentRevisionID, pending.RevisionID) && pending.Fingerprint == nextFingerprint {
 		pending.Signature = signature
 		if err := writeJSONAtomic(path, pending); err != nil {
 			return "", err
 		}
 		return pending.ArtifactID, nil
 	}
-	a, err := client.Artifact(ctx, "ext:eagent:"+info.ID, "session", "Session explorer")
-	if err != nil {
-		snapshot.Close()
-		return "", err
-	}
 	// A distinct publisher may have advanced current. Only a newly captured
 	// snapshot may adopt that parent; retries keep their recorded parent.
-	pending = publication{ArtifactID: a.ID, RevisionID: a.CurrentRevisionID, ClientKey: artifact.Digest([]byte(snapshot.Dir + snapshot.Manifest.CapturedAt.String())), Directory: snapshot.Dir, Manifest: snapshot.Manifest, Fingerprint: nextFingerprint, Signature: signature}
+	oldDirectory := pending.Directory
+	pending = publication{ArtifactID: head.Artifact.ID, RevisionID: head.Artifact.CurrentRevisionID, ClientKey: artifact.Digest([]byte(snapshot.Dir + snapshot.Manifest.CapturedAt.String())), Directory: snapshot.Dir, Manifest: snapshot.Manifest, Fingerprint: nextFingerprint, Signature: signature, Endpoint: endpoint}
 	if err := writeJSONAtomic(path, pending); err != nil {
-		snapshot.Close()
 		return "", err
+	}
+	keepSnapshot = true
+	if oldDirectory != "" && oldDirectory != snapshot.Dir && publicationStage(directory, oldDirectory) == nil {
+		_ = os.RemoveAll(oldDirectory)
 	}
 	if err := complete(); err != nil {
 		return "", err
@@ -238,7 +376,11 @@ func StartPublisher(ctx context.Context, project, version string, logf func(stri
 			}
 			if _, err := Publish(ctx, project, info.ID, version, false); err != nil {
 				if ctx.Err() == nil {
-					logf("artifact %s: %v (will retry)", info.ID, err)
+					if errors.Is(err, ErrPublicationDeleted) {
+						logf("artifact %s: %v", info.ID, err)
+					} else {
+						logf("artifact %s: %v (will retry)", info.ID, err)
+					}
 				}
 				if ctx.Err() != nil {
 					return

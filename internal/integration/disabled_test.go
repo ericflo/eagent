@@ -54,6 +54,9 @@ func TestKillSwitchOverridesArtifactOptInAndStoredPairing(t *testing.T) {
 					t.Fatalf("Publish(force=%v): %v", force, err)
 				}
 			}
+			if _, err := RecreatePublication(ctx, project, session.ID, "test"); !errors.Is(err, finalechat.ErrDisabled) {
+				t.Fatalf("RecreatePublication: %v", err)
+			}
 			if _, err := Pair(ctx, project, "fixture"); !errors.Is(err, finalechat.ErrDisabled) {
 				t.Fatalf("Pair: %v", err)
 			}

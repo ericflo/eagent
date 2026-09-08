@@ -42,9 +42,12 @@ func cmdConnector(project string, args []string) int {
 	}
 }
 
-func cmdArtifact(project string, args []string, output string) int {
+func cmdArtifact(project string, args []string, output string, recreate bool) int {
 	if len(args) == 0 {
 		return fail(fmt.Errorf("usage: eagent artifact export|publish SESSION, verify|restore DIRECTORY, or enable|disable"))
+	}
+	if recreate && (len(args) != 2 || args[0] != "publish") {
+		return fail(fmt.Errorf("--recreate requires artifact publish with one explicit session ID"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -80,9 +83,15 @@ func cmdArtifact(project string, args []string, output string) int {
 		return 0
 	case "publish":
 		if len(args) != 2 {
-			return fail(fmt.Errorf("usage: eagent artifact publish SESSION"))
+			return fail(fmt.Errorf("usage: eagent artifact publish SESSION [--recreate]"))
 		}
-		id, err := integration.Publish(ctx, project, args[1], version, true)
+		var id string
+		var err error
+		if recreate {
+			id, err = integration.RecreatePublication(ctx, project, args[1], version)
+		} else {
+			id, err = integration.Publish(ctx, project, args[1], version, true)
+		}
 		if err != nil {
 			return fail(err)
 		}

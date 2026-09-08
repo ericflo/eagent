@@ -9,6 +9,7 @@ eagent artifact export SESSION_ID --output ./new-archive
 eagent artifact verify ./new-archive
 eagent artifact restore ./new-archive --output ./new-recovery
 eagent artifact publish SESSION_ID
+eagent artifact publish SESSION_ID --recreate
 eagent artifact enable
 eagent artifact disable
 ```
@@ -18,6 +19,10 @@ Export and verify run locally. Restore verifies every manifest file and copies n
 The archive includes the native complete JSONL record prefix, session attachments and outputs, captured settings/provenance, the local settings audit, and a self-contained HTML/JavaScript/Go WebAssembly explorer. The portable and local viewers use the same Go state projection. Download a revision's ZIP, extract it, open `index.html`, and choose the extracted directory to read it offline. The SDK verifies accessed file chunks; `artifact verify` checks the complete archive.
 
 Publish performs one upload without enabling future publication. Enable saves `finalechat.artifacts: true` in the project configuration. Sessions running in this project and previously published sessions are checked approximately every 30 seconds while eagent, its web server, or the connector companion runs. Publication takes a complete snapshot before uploading, persists its intent, and reuses unchanged content-addressed chunks. Each committed manifest is an immutable revision; updating a website does not delete its prior source records.
+
+Lost acknowledgements reuse the recorded capture, parent and client key. If another publisher advances the artifact, a new capture must preserve every native source file from both the pending capture and the published revision as an exact byte prefix. Truncated or divergent history leaves the remote revision unchanged and retains the pending capture for recovery. The private publication `status.json` distinguishes pending uploads, history conflicts and remote deletion.
+
+Deleting an artifact pauses even an unchanged publisher. Ordinary `publish`, including its manual opt-in bypass, cannot recreate it. `publish SESSION_ID --recreate` verifies that the old record is absent, retains its identity and pending evidence in a retired journal, and creates a distinct record. It cannot bypass a conflict while the old artifact still exists. Journals bind to their configured FinaleChat service; API and connector credentials never follow redirects to another endpoint.
 
 Archiving uploads native tool arguments/results and session files as well as chat. Source bytes are preserved for recovery, so secrets present in a transcript are preserved too. Configuration snapshots exclude unknown raw keys and credential values; connector credentials and process-control files are not archived. Account tokens are resolved using the existing FinaleChat CLI/environment mechanism.
 
