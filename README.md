@@ -266,7 +266,8 @@ Every session reports per-actor input, output, and cached tokens; the web UI sho
 - [docs/LESSONS.md](docs/LESSONS.md): what broke in four earlier implementations of this design, and what eagent does about each failure.
 - [docs/breakout-grid.md](docs/breakout-grid.md): six presets building the same game in parallel, measured, played and judged side by side.
 - [docs/EVENTS.md](docs/EVENTS.md): the event log schema and which actor sees which events.
-- [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): the design specification, requirement by requirement, with the two deliberate deviations.
+- [docs/DESIGN-SPEC.md](docs/DESIGN-SPEC.md): the design specification eagent was built from.
+- [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): that specification, requirement by requirement, with the two deliberate deviations.
 
 ## Development
 
@@ -275,6 +276,10 @@ make check          # gofmt, go vet, go test -race
 make release        # dist/eagent-{linux,darwin}-{amd64,arm64} + SHA256SUMS
 ```
 
-CI runs the same checks on Woodpecker (`.woodpecker.yaml`).
+CI runs the same checks on every push and pull request
+(`.github/workflows/ci.yml`); pushing a `v*` tag builds the four binaries and
+publishes them as a GitHub release (`.github/workflows/release.yml`). Bug
+reports and pull requests are welcome; see `CONTRIBUTING.md`, and
+`SECURITY.md` for how to report a vulnerability privately.
 
 Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `prompts` (embedded Markdown prompts), `config` (presets and bundles), `harness` (runtime, actors, rollover, resume, inbox), `ui` (terminal), `web` (HTTP API, SSE, embedded UI). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, interrupt-then-resume, interactive questions. Two chaos suites inject random provider faults (5xx, rate limits with Retry-After, streams cut mid tool call, malformed arguments, garbage frames, latency) and kill and resume the runner at random points, and check after every run that the log parses, sequence numbers are contiguous, no tool call is left without a result, and the work still finished.

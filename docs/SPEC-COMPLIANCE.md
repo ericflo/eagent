@@ -1,7 +1,7 @@
 # Spec compliance
 
-A section-by-section reading of the design specification (`CLEANED_SPEC.md`
-in the parent project) against what eagent does. "Met" means implemented and
+A section-by-section reading of the design specification
+([`docs/DESIGN-SPEC.md`](DESIGN-SPEC.md)) against what eagent does. "Met" means implemented and
 covered by a test or a real run; "Deviates" means a deliberate difference with
 the reason.
 

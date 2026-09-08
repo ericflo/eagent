@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: gofmt, vet, test, build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'Go files require gofmt:\n%s\n' "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race ./...
+        env:
+          EAGENT_FINALECHAT: "off"
+      - run: go build -o eagent ./cmd/eagent
+      - run: ./eagent version

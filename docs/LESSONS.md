@@ -1,6 +1,7 @@
 # What broke before, and what eagent does about it
 
-eagent is the fifth implementation of the same design document. Four earlier
+eagent is the fifth implementation of the same design document
+([`docs/DESIGN-SPEC.md`](DESIGN-SPEC.md)). Four earlier
 attempts (written by four different coding agents) were run on the same two
 real tasks: build a modern breakout game from a dictated brief, and clone a
 Rust repository and build an explainer website for it. None of the four

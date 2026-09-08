@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -29,7 +30,9 @@ import (
 	"github.com/ericflo/eagent/internal/web"
 )
 
-var version = "0.1.0"
+// version is stamped by the Makefile and the release workflow; a plain
+// `go install` build falls back to the module version Go recorded.
+var version = "dev"
 
 const usage = `eagent — a three-actor, event-sourced coding agent in one binary
 
@@ -85,6 +88,11 @@ Sessions are stored in <project>/.agents/eagent/sessions/.
 `
 
 func main() {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = strings.TrimPrefix(info.Main.Version, "v")
+		}
+	}
 	os.Exit(run(os.Args[1:]))
 }
 
