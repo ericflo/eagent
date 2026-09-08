@@ -216,3 +216,44 @@ func TestKillAllReapsChildrenOfFinishedShells(t *testing.T) {
 		t.Fatalf("the child survived KillAll: %d -> %d bytes", a, b)
 	}
 }
+
+// The harness's own credentials are stripped from a command's environment;
+// everything else is inherited.
+func TestEnvDenyStripsNamedVariables(t *testing.T) {
+	t.Setenv("EAGENT_TEST_SECRET", "marker-secret")
+	t.Setenv("EAGENT_TEST_KEEP", "marker-keep")
+	m := NewManager()
+	p, err := m.Start(Spec{Command: "env", Cwd: t.TempDir(), EnvDeny: []string{"EAGENT_TEST_SECRET"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-m.Exited()
+	out, _ := p.Output(0)
+	if strings.Contains(out, "marker-secret") {
+		t.Fatal("a denied variable reached the command")
+	}
+	if !strings.Contains(out, "EAGENT_TEST_KEEP=marker-keep") {
+		t.Fatalf("an ordinary variable was lost: %s", out)
+	}
+}
+
+// A child forked after its shell has exited (the usual shape of `server &`)
+// is still the session's, and KillGroup reaches it.
+func TestKillGroupReachesChildrenForkedAfterTheShellExited(t *testing.T) {
+	m := NewManager()
+	p, err := m.Start(Spec{Command: "sh -c 'sleep 0.4; sleep 300; :' >/dev/null 2>&1 & echo started", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-m.Exited()
+	time.Sleep(900 * time.Millisecond) // the second sleep is forked after the reap
+	members := func() int { return len(groupMembers(p.PID(), 1)) }
+	if members() == 0 {
+		t.Skip("cannot observe process groups here")
+	}
+	p.KillGroup()
+	time.Sleep(200 * time.Millisecond)
+	if n := members(); n != 0 {
+		t.Fatalf("%d group member(s) survived KillGroup", n)
+	}
+}

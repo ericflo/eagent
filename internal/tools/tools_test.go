@@ -83,3 +83,59 @@ func TestTruncateKeepsHeadAndTailRuneSafe(t *testing.T) {
 		t.Fatal("short text changed")
 	}
 }
+
+// read_file never pulls a device, a pipe, or a huge file into memory.
+func TestReadFileRefusesDevicesAndHugeFiles(t *testing.T) {
+	root := t.TempDir()
+	f := Files{Root: root, AllowOutside: true}
+	if _, err := f.ReadFile("/dev/zero", 0, 0, 1<<20); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("/dev/zero: %v", err)
+	}
+	big := filepath.Join(root, "big.bin")
+	fh, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Truncate(readCap + 1); err != nil { // sparse: costs no disk
+		t.Fatal(err)
+	}
+	fh.Close()
+	if _, err := f.ReadFile("big.bin", 0, 0, 1<<20); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("huge file: %v", err)
+	}
+	if _, err := f.EditFile("big.bin", "a", "b", false); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("huge edit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("fine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.ReadFile("ok.txt", 0, 0, 1<<20); err != nil || !strings.Contains(got, "fine") {
+		t.Fatalf("ordinary file: %q %v", got, err)
+	}
+}
+
+// A tool-call id from the endpoint is not a path: spilled output stays in
+// the outputs directory whatever the id contains.
+func TestSpillNeverLeavesItsDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "outputs")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{strings.Repeat("../", 6) + strings.TrimPrefix(outside, "/") + "/planted", "..", ".", "/etc/x", "call_ok-1"} {
+		path, err := Spill(dir, id, "text")
+		if err != nil {
+			t.Fatalf("%q: %v", id, err)
+		}
+		if filepath.Dir(path) != dir {
+			t.Fatalf("%q spilled to %s", id, path)
+		}
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("something was written outside: %v", entries)
+	}
+	if safeBase("call_ok-1") != "call_ok-1" || safeBase("...") == "" || strings.ContainsAny(safeBase("a/b\\c"), "/\\") {
+		t.Fatal("safeBase")
+	}
+}

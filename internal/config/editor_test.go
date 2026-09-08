@@ -67,7 +67,26 @@ func TestCatalogIsConsistent(t *testing.T) {
 		}
 	}
 	if _, ok := PriceFor("https://proxy.example/v1", "claude-opus-5"); !ok {
-		t.Error("a known model id behind an unknown host should still price by id")
+		t.Error("a known model id behind an unknown host should still price by id when every provider charges the same")
+	}
+	// The same id at different prices behind an unknown host is a guess, and
+	// a guess must not wear a dollar sign.
+	ambiguous := ""
+	rates := map[string]Price{}
+	for _, m := range Models {
+		if m.Price == nil {
+			continue
+		}
+		if p, ok := rates[m.ID]; ok && (p.In != m.Price.In || p.Out != m.Price.Out) {
+			ambiguous = m.ID
+			break
+		}
+		rates[m.ID] = *m.Price
+	}
+	if ambiguous != "" {
+		if _, ok := PriceFor("http://gpu-box.lan:8000/v1", ambiguous); ok {
+			t.Errorf("%s costs different amounts at different providers; behind an unknown host it must be unpriced", ambiguous)
+		}
 	}
 }
 

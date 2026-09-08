@@ -26,6 +26,7 @@ type Spec struct {
 	Command string
 	Cwd     string
 	Env     []string
+	EnvDeny []string      // names stripped from the inherited environment before Env is applied
 	Timeout time.Duration // zero means no deadline
 	Owner   string        // actor or task id that started it; informational
 }
@@ -113,7 +114,7 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 	}
 	cmd := exec.Command("bash", "-c", spec.Command)
 	cmd.Dir = spec.Cwd
-	cmd.Env = append(os.Environ(), spec.Env...)
+	cmd.Env = append(withoutEnv(os.Environ(), spec.EnvDeny), spec.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	p := &Proc{Spec: spec, cmd: cmd, status: Running, done: make(chan struct{}), reaped: make(chan struct{})}
 	stdin, err := cmd.StdinPipe()
@@ -278,10 +279,10 @@ func (m *Manager) KillAll() {
 
 // KillGroup terminates a running process's group, or kills what is left of
 // the group of one that already finished (a `cmd &` that outlived its
-// shell). A reaped pid may have been recycled, so the leftovers are found
-// one by one: processes whose group is ours and which started before the
-// shell was reaped. Where that cannot be checked (no /proc), nothing is
-// killed: a straggler is better than a stranger.
+// shell). A reaped pid may have been recycled, so the leader's start time is
+// checked against the one recorded at launch, and members are found one by
+// one in /proc. Where that cannot be checked, nothing is killed: a straggler
+// is better than a stranger.
 func (p *Proc) KillGroup() {
 	if p.Status() == Running {
 		p.Kill()
@@ -292,20 +293,26 @@ func (p *Proc) KillGroup() {
 		return
 	}
 	p.mu.Lock()
-	from, to := p.startTicks, p.reapTicks
+	from := p.startTicks
 	p.mu.Unlock()
-	for _, member := range groupMembers(pid, from, to) {
+	if from == 0 {
+		return // nothing can be proved about the group; leave it alone
+	}
+	if live := startTicksOf(pid); live != 0 && live != from {
+		return // the pid was recycled; that group is a stranger's
+	}
+	for _, member := range groupMembers(pid, from) {
 		_ = syscall.Kill(member, syscall.SIGKILL) // ESRCH is fine
 	}
 }
 
-// groupMembers lists the pids in process group pgid that started between
-// the shell's own start and its reap (inclusive, in clock ticks), by reading
-// /proc: our descendants cannot predate the shell, and a group started by a
-// recycled pid postdates the reap. Empty when /proc is unavailable.
-func groupMembers(pgid int, fromTicks, toTicks int64) []int {
+// groupMembers lists the pids in process group pgid that started no earlier
+// than the shell itself (in clock ticks), by reading /proc: our descendants
+// cannot predate the shell, and they may well postdate its exit (a
+// `server &` forks after bash has gone). Empty when /proc is unavailable.
+func groupMembers(pgid int, fromTicks int64) []int {
 	entries, err := os.ReadDir("/proc")
-	if err != nil || toTicks == 0 {
+	if err != nil || fromTicks == 0 {
 		return nil
 	}
 	var out []int
@@ -330,7 +337,7 @@ func groupMembers(pgid int, fromTicks, toTicks int64) []int {
 		}
 		pgrp, _ := strconv.Atoi(f[2])
 		start, _ := strconv.ParseInt(f[19], 10, 64)
-		if pgrp == pgid && start > 0 && start >= fromTicks && start <= toTicks {
+		if pgrp == pgid && start > 0 && start >= fromTicks {
 			out = append(out, n)
 		}
 	}
@@ -559,4 +566,25 @@ func (p *Proc) Describe() string {
 		return fmt.Sprintf("%s  running %s  %s", p.Handle, p.Duration().Round(time.Second), cmd)
 	}
 	return fmt.Sprintf("%s  %s exit=%d %s  %s", p.Handle, st, p.ExitCode(), p.Duration().Round(time.Millisecond), cmd)
+}
+
+// withoutEnv returns env without the named variables.
+func withoutEnv(env, deny []string) []string {
+	if len(deny) == 0 {
+		return env
+	}
+	drop := make(map[string]bool, len(deny))
+	for _, n := range deny {
+		if n != "" {
+			drop[n] = true
+		}
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 && drop[kv[:i]] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

@@ -798,6 +798,13 @@ func (r *Runtime) rearmSchedules() {
 	}
 }
 
+// maxTimerHop bounds one time.AfterFunc. Go timers run on the monotonic
+// clock, which stops while the machine sleeps, so a single long hop would
+// hold a deadline that no longer matches the schedule's wall-clock time.
+// Hopping re-reads the wall clock every minute, so the error after a resume
+// or a clock step is at most one hop.
+const maxTimerHop = time.Minute
+
 func (r *Runtime) armSchedule(id string, at time.Time) {
 	if t := r.timers[id]; t != nil {
 		t.Stop()
@@ -805,6 +812,18 @@ func (r *Runtime) armSchedule(id string, at time.Time) {
 	d := time.Until(at)
 	if d < 0 {
 		d = 0
+	}
+	if d > maxTimerHop {
+		var t *time.Timer
+		t = time.AfterFunc(maxTimerHop, func() {
+			r.post(func() {
+				if r.timers[id] == t { // still ours: not cancelled or re-armed meanwhile
+					r.armSchedule(id, at)
+				}
+			})
+		})
+		r.timers[id] = t
+		return
 	}
 	r.timers[id] = time.AfterFunc(d, func() {
 		r.post(func() { r.fireSchedule(id) })

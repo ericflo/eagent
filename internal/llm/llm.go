@@ -174,7 +174,13 @@ func (e *APIError) RejectsImages() bool {
 // Such a refusal must not be remembered: the next picture may be fine.
 func (e *APIError) badImage() bool {
 	b := strings.ToLower(e.Body)
-	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "does not match"} {
+	// A complaint about the content type itself ("input tag 'image_url' ...
+	// does not match any of the expected tags: 'text'") is a model that
+	// cannot see at all, not a picture it disliked: let it be remembered.
+	if strings.Contains(b, "expected tags") || strings.Contains(b, "union_tag_invalid") {
+		return false
+	}
+	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match"} {
 		if strings.Contains(b, k) {
 			return true
 		}

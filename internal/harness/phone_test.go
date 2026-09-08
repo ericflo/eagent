@@ -1489,12 +1489,21 @@ func TestTaskEvidenceReportsOnlyTheLog(t *testing.T) {
 			t.Errorf("evidence leaks the plan (%q): %s", never, got)
 		}
 	}
-	// Once the worker writes a file, the line says which.
-	add(event.New(event.Assistant, event.ActorTask, event.AssistantData{ToolCalls: []event.ToolCall{tc("write_file", `{"path":"index.html","content":"<html>"}`)}}).WithTask("t1"), base.Add(9*time.Minute))
+	// A write the model asked for is not a file written until its result is
+	// back without error; a failed edit changed nothing.
+	write := tc("write_file", `{"path":"index.html","content":"<html>"}`)
+	bad := tc("edit_file", `{"path":"game.js","old_text":"x","new_text":"y"}`)
+	add(event.New(event.Assistant, event.ActorTask, event.AssistantData{ToolCalls: []event.ToolCall{write, bad}}).WithTask("t1"), base.Add(9*time.Minute))
 	add(event.New(event.TurnEnd, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(9*time.Minute))
 	got = taskEvidence(st, st.Tasks["t1"], base.Add(10*time.Minute))
-	if !strings.Contains(got, "1 file(s) written (index.html)") || strings.Contains(got, "nothing visible yet") || !strings.Contains(got, "latest visible step, 1m") {
-		t.Fatalf("evidence after a write: %s", got)
+	if strings.Contains(got, "file(s) written") || !strings.Contains(got, "2 tool call(s) have not returned yet") || !strings.Contains(got, "(no result yet)") {
+		t.Fatalf("evidence before results: %s", got)
+	}
+	add(event.New(event.ToolResult, event.ActorTask, event.ToolResultData{CallID: write.ID, Name: "write_file", Output: "wrote index.html"}).WithTask("t1"), base.Add(9*time.Minute+time.Second))
+	add(event.New(event.ToolResult, event.ActorTask, event.ToolResultData{CallID: bad.ID, Name: "edit_file", Output: "old_text not found", IsError: true}).WithTask("t1"), base.Add(9*time.Minute+time.Second))
+	got = taskEvidence(st, st.Tasks["t1"], base.Add(10*time.Minute))
+	if !strings.Contains(got, "1 file(s) written (index.html)") || !strings.Contains(got, "1 tool call(s) came back as errors and changed nothing") || !strings.Contains(got, "edit_file game.js (failed)") || strings.Contains(got, "nothing visible yet") {
+		t.Fatalf("evidence after results: %s", got)
 	}
 	// The steer tells the narrator these lines are all it knows.
 	steer := steerNarrator(st, now, wakePeriodic, true, false, "", false, 4*time.Minute, 3*time.Minute, []string{got})
@@ -1536,4 +1545,68 @@ func TestPhoneStatusOfFreshInteractiveSessionIsWaiting(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// Every configured key variable (primaries, fallbacks, the phone token) is
+// kept out of the commands the model runs.
+func TestSecretEnvNamesCoverEveryRoute(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Task.APIKeyEnv = "MY_CUSTOM_KEY"
+	cfg.Narrator.Fallback = &config.Actor{Protocol: "openai-chat", BaseURL: "https://x.example/v1", Model: "m", APIKeyEnv: "FALLBACK_KEY"}
+	cfg.Finalechat.TokenEnv = "PHONE_TOKEN"
+	r := &Runtime{cfg: cfg}
+	got := map[string]bool{}
+	for _, n := range r.secretEnvNames() {
+		got[n] = true
+	}
+	for _, want := range []string{"TOGETHER_API_KEY", "ANTHROPIC_API_KEY", "MY_CUSTOM_KEY", "FALLBACK_KEY", "PHONE_TOKEN", "FINALECHAT_TOKEN"} {
+		if !got[want] {
+			t.Errorf("%s is not stripped from command environments", want)
+		}
+	}
+	if got["PATH"] || got["HOME"] {
+		t.Fatal("ordinary variables must stay")
+	}
+}
+
+// A rollover whose fresh context is already over the threshold is futile,
+// and the harness must recognise it instead of rolling forever.
+func TestRolloverFutility(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.RolloverTokens = 20000
+	st := state.New()
+	base := time.Date(2026, 9, 7, 16, 0, 0, 0, time.UTC)
+	seq := int64(0)
+	add := func(ev event.Event) {
+		seq++
+		ev.Seq, ev.Time = seq, base.Add(time.Duration(seq)*time.Second)
+		st.Apply(ev)
+	}
+	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
+	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
+	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "hi", Usage: event.Usage{Input: 25000}}))
+	r := &Runtime{cfg: cfg, st: st}
+	if r.rolloverFutile() {
+		t.Fatal("the first rollover is never futile")
+	}
+	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
+	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
+	if !r.rolloverFutile() {
+		t.Fatal("a fresh context with no orchestrator call yet (the provider rejected the prompt) is futile to roll again")
+	}
+	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "ok", Usage: event.Usage{Input: 9000}}))
+	if r.rolloverFutile() {
+		t.Fatal("a fresh context that fits is not futile")
+	}
+	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "3.jsonl"}))
+	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "3.jsonl", Index: 2, Reason: "rollover"}))
+	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "still huge", Usage: event.Usage{Input: 25000}}))
+	if !r.rolloverFutile() {
+		t.Fatal("a fresh context already over the threshold on its first call is futile to roll again")
+	}
+	// Idle sessions do not roll: there is nothing to carry over.
+	add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "paused"}))
+	if r.needsRollover() {
+		t.Fatal("an idle session must not roll over")
+	}
 }

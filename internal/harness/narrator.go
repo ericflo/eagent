@@ -324,7 +324,28 @@ func (r *Runtime) inflightLines(now time.Time) []string {
 // step. The narrator learns nothing else about the task, on purpose: a step
 // that is not here has not happened, however plausible it sounds.
 func taskEvidence(st *state.State, t *state.Task, now time.Time) string {
-	calls, cmds := 0, 0
+	// A tool call is work only once its result is back and is not an error:
+	// the model asking to write a file is not the file being written.
+	results := map[string]event.ToolResultData{}
+	for _, ev := range st.Events {
+		if ev.Task != t.ID || ev.Actor != event.ActorTask || ev.Type != event.ToolResult {
+			continue
+		}
+		var d event.ToolResultData
+		if ev.Decode(&d) == nil {
+			results[d.CallID] = d
+		}
+	}
+	outcome := func(have, done bool) string {
+		switch {
+		case !have:
+			return " (no result yet)"
+		case !done:
+			return " (failed)"
+		}
+		return ""
+	}
+	calls, cmds, failed, pending := 0, 0, 0, 0
 	var files []string
 	seen := map[string]bool{}
 	inCall := false
@@ -346,28 +367,38 @@ func taskEvidence(st *state.State, t *state.Task, now time.Time) string {
 			_ = ev.Decode(&d)
 			var parts []string
 			for _, tc := range d.ToolCalls {
+				res, have := results[tc.ID]
+				done := have && !res.IsError
+				switch {
+				case !have:
+					pending++
+				case res.IsError:
+					failed++
+				}
 				args, err := llm.ArgsObject(tc.Args)
 				if err != nil {
-					parts = append(parts, tc.Name)
+					parts = append(parts, tc.Name+outcome(have, done))
 					continue
 				}
 				switch tc.Name {
 				case "bash":
-					cmds++
+					if done {
+						cmds++
+					}
 					cmd, _ := args["command"].(string)
-					parts = append(parts, "`"+shortCommand(cmd)+"`")
+					parts = append(parts, "`"+shortCommand(cmd)+"`"+outcome(have, done))
 				case "write_file", "edit_file":
 					p, _ := args["path"].(string)
-					if p != "" && !seen[p] {
+					if done && p != "" && !seen[p] {
 						seen[p] = true
 						files = append(files, p)
 					}
-					parts = append(parts, tc.Name+" "+p)
+					parts = append(parts, tc.Name+" "+p+outcome(have, done))
 				case "read_file", "view_image", "list_dir":
 					p, _ := args["path"].(string)
-					parts = append(parts, tc.Name+" "+p)
+					parts = append(parts, tc.Name+" "+p+outcome(have, done))
 				default:
-					parts = append(parts, tc.Name)
+					parts = append(parts, tc.Name+outcome(have, done))
 				}
 			}
 			if len(parts) == 0 && strings.TrimSpace(d.Text) != "" {
@@ -400,6 +431,12 @@ func taskEvidence(st *state.State, t *state.Task, now time.Time) string {
 			}
 			fmt.Fprintf(&b, " (%s)", strings.Join(shown, ", "))
 		}
+	}
+	if failed > 0 {
+		fmt.Fprintf(&b, "; %d tool call(s) came back as errors and changed nothing", failed)
+	}
+	if pending > 0 {
+		fmt.Fprintf(&b, "; %d tool call(s) have not returned yet", pending)
 	}
 	if step != "" {
 		fmt.Fprintf(&b, "; latest visible step, %s ago: %s", since(stepAt, now), step)

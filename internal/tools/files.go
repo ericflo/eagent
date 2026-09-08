@@ -6,6 +6,7 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,7 +60,16 @@ func (f Files) ReadFile(p string, offset, limit int, maxBytes int) (string, erro
 	if st.IsDir() {
 		return f.ListDir(p)
 	}
-	raw, err := os.ReadFile(abs)
+	if err := readable(p, st); err != nil {
+		return "", err
+	}
+	fh, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+	// Bounded even if the file grows while it is read (an active log).
+	raw, err := io.ReadAll(io.LimitReader(fh, readCap))
 	if err != nil {
 		return "", err
 	}
@@ -128,6 +138,11 @@ func (f Files) EditFile(p, oldText, newText string, replaceAll bool) (string, er
 	abs, err := f.Resolve(p, true)
 	if err != nil {
 		return "", err
+	}
+	if st, err := os.Stat(abs); err == nil {
+		if err := readable(p, st); err != nil {
+			return "", err
+		}
 	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
@@ -235,6 +250,52 @@ func Spill(dir, base, text string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, base+".txt")
+	// The base comes from a tool-call id, which the endpoint chose and which
+	// can hold anything; it is reduced to one harmless file name first.
+	path := filepath.Join(dir, safeBase(base)+".txt")
 	return path, os.WriteFile(path, []byte(text), 0o644)
+}
+
+// safeBase keeps [A-Za-z0-9._-] and folds everything else to "_", so the
+// result is a single path element with no separator and no traversal.
+func safeBase(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.TrimLeft(b.String(), ".")
+	if len(out) > 96 {
+		out = out[:96]
+	}
+	if out == "" {
+		var h uint64 = 14695981039346656037
+		for i := 0; i < len(s); i++ {
+			h = (h ^ uint64(s[i])) * 1099511628211
+		}
+		out = fmt.Sprintf("out-%x", h)
+	}
+	return out
+}
+
+// readCap is the most bytes a file tool pulls into memory. Larger files are
+// read in parts with shell tools; a device or a pipe is never read at all.
+const readCap = 64 << 20
+
+// readable refuses what must not be read whole: anything that is not a
+// regular file (a device would never end, a pipe with no writer would hang
+// the actor forever) and anything over readCap (one os.ReadFile of a
+// multi-gigabyte artifact took the whole process down).
+func readable(p string, st os.FileInfo) error {
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("refusing to read %s: it is not a regular file (%s); use a shell command if you really mean it", p, st.Mode().Type())
+	}
+	if st.Size() > readCap {
+		return fmt.Errorf("%s is %d bytes, too large to read into memory (limit %d); use bash (head, tail, sed, grep) to look at parts of it", p, st.Size(), readCap)
+	}
+	return nil
 }

@@ -367,7 +367,7 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 		u := usageView(a, st.Calls[a], st.Totals[a])
 		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
 		u.Model = st.Models[a]
-		u.CostUSD, u.Priced = priceFor(st.Hosts[a], st.Models[a], st.Totals[a])
+		u.CostUSD, u.Priced = costOfRoutes(st, a)
 		d.Usage = append(d.Usage, u)
 	}
 	for _, ss := range st.Subsessions {
@@ -982,20 +982,29 @@ func priceFor(baseURL, model string, u event.Usage) (float64, bool) {
 // estimateCost sums per-actor estimates; Priced is false if any actor's
 // model is unknown so the UI can say so.
 func estimateCost(st *state.State) (float64, bool) {
+	return costOfRoutes(st, "")
+}
+
+// costOfRoutes prices every route that served a call (for one actor, or all
+// when actor is ""), so a mid-session fallback does not reprice tokens
+// already spent at the previous provider.
+func costOfRoutes(st *state.State, actor string) (float64, bool) {
 	total := 0.0
 	priced := true
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		if st.Calls[a] == 0 {
+	any := false
+	for rk, u := range st.ByRoute {
+		if actor != "" && rk.Actor != actor {
 			continue
 		}
-		c, ok := priceFor(st.Hosts[a], st.Models[a], st.Totals[a])
+		any = true
+		c, ok := priceFor(rk.Host, rk.Model, u)
 		if !ok {
 			priced = false
 			continue
 		}
 		total += c
 	}
-	return total, priced
+	return total, priced && any
 }
 
 // ---- attachments ----------------------------------------------------------------

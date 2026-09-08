@@ -228,26 +228,36 @@ func (c *cronExpr) matchesDay(t time.Time) bool {
 }
 
 func (c *cronExpr) next(from time.Time) time.Time {
-	t := from.Truncate(time.Minute).Add(time.Minute)
-	limit := t.AddDate(5, 0, 0)
-	for t.Before(limit) {
-		if c.month&(1<<uint(t.Month())) == 0 {
-			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
+	// Walk wall-clock ("civil") time in UTC, where every minute exists
+	// exactly once and arithmetic always advances. Walking local time either
+	// repeats a wall-clock hour (DST fall-back: a daily job fired twice) or
+	// fails to advance at all (spring-forward: time.Date normalises the
+	// missing hour backwards, and this loop used to spin forever). The
+	// matching minute is turned back into a local instant only at the end.
+	loc := from.Location()
+	w := time.Date(from.Year(), from.Month(), from.Day(), from.Hour(), from.Minute(), 0, 0, time.UTC).Add(time.Minute)
+	limit := w.AddDate(5, 0, 0)
+	for w.Before(limit) {
+		if c.month&(1<<uint(w.Month())) == 0 {
+			w = time.Date(w.Year(), w.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 			continue
 		}
-		if !c.matchesDay(t) {
-			t = time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, t.Location())
+		if !c.matchesDay(w) {
+			w = time.Date(w.Year(), w.Month(), w.Day()+1, 0, 0, 0, 0, time.UTC)
 			continue
 		}
-		if c.hour&(1<<uint(t.Hour())) == 0 {
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, t.Location())
+		if c.hour&(1<<uint(w.Hour())) == 0 {
+			w = time.Date(w.Year(), w.Month(), w.Day(), w.Hour()+1, 0, 0, 0, time.UTC)
 			continue
 		}
-		if c.minute&(1<<uint(t.Minute())) == 0 {
-			t = t.Add(time.Minute)
+		if c.minute&(1<<uint(w.Minute())) == 0 {
+			w = w.Add(time.Minute)
 			continue
 		}
-		return t
+		if t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), 0, 0, loc); t.After(from) {
+			return t
+		}
+		w = w.Add(time.Minute) // a wall-clock minute a DST jump skipped or repeated
 	}
 	return time.Time{}
 }

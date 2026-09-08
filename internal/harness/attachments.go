@@ -91,6 +91,12 @@ func (r *Runtime) narratorAttachments(raw any) ([]event.Attachment, error) {
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s: %v", p, err)
 		}
+		// This is the one path that sends bytes off the machine, so it
+		// follows the write rule (project only, unless allow_outside_project),
+		// not the read rule.
+		if _, err := r.files.Resolve(abs, true); err != nil {
+			return nil, fmt.Errorf("attachment %s is outside the project directory; copy it into the project first", p)
+		}
 		st, err := os.Stat(abs)
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s: %v", p, shortErr(err))

@@ -15,12 +15,45 @@ func (r *Runtime) needsRollover() bool {
 	if r.rolling {
 		return false
 	}
+	if r.st.Idle() {
+		// Nothing to carry into a fresh context; roll when work arrives.
+		return false
+	}
 	return r.st.ContextTokens(event.ActorOrchestrator) >= r.cfg.RolloverTokens
+}
+
+// rolloverFutile reports that the current subsession itself came from a
+// rollover and its prompt was already at the threshold on the first
+// orchestrator call (or the orchestrator never got a call in at all, as
+// when the provider rejects the prompt as too long). Rolling again would
+// rebuild the same oversized prompt, forever.
+func (r *Runtime) rolloverFutile() bool {
+	cur := r.st.Current()
+	if cur == nil || cur.Reason != "rollover" {
+		return false
+	}
+	for _, ev := range r.st.Events {
+		if ev.Seq < cur.StartSeq || ev.Type != event.Assistant || ev.Actor != event.ActorOrchestrator {
+			continue
+		}
+		var d event.AssistantData
+		_ = ev.Decode(&d)
+		return d.Usage.Input >= r.cfg.RolloverTokens
+	}
+	return true
 }
 
 // startRollover closes the current subsession, opens the next, and asks the
 // task worker for a dossier. The orchestrator stays paused until it lands.
 func (r *Runtime) startRollover() {
+	if r.rolloverFutile() {
+		// A second rollover cannot reclaim the context: the fresh prompt is
+		// already over the line. Stop instead of spending forever.
+		r.ui.Log("rollover: a fresh context is already at %dk tokens; the prompt cannot be shrunk by another rollover, pausing", r.cfg.RolloverTokens/1000)
+		r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "a fresh context's prompt is already at the rollover threshold; the context cannot be reclaimed by another rollover. Raise rollover_tokens or shorten the standing instructions, then resume."}))
+		r.wakeNarrator(wakeError)
+		return
+	}
 	r.rolling = true
 	tokens := r.st.ContextTokens(event.ActorOrchestrator)
 	next, err := r.sess.NewSubsessionName(time.Now())

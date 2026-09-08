@@ -166,15 +166,19 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 // catalog, its estimated cost. Loop goroutine only.
 func (r *Runtime) phoneStats() phoneStats {
 	var s phoneStats
-	priced := len(r.st.Totals) > 0
-	for actor, u := range r.st.Totals {
+	for _, u := range r.st.Totals {
 		s.Tokens += u.Input + u.Output
-		pr, ok := config.PriceFor(r.st.Hosts[actor], r.st.Models[actor])
+	}
+	// Priced per route that served the calls, so a mid-session fallback does
+	// not reprice what was already spent elsewhere.
+	priced := len(r.st.ByRoute) > 0
+	for rk, u := range r.st.ByRoute {
+		pr, ok := config.PriceFor(rk.Host, rk.Model)
 		if !ok {
 			priced = false
 			continue
 		}
-		s.CostUSD += (float64(u.Input-u.Cached)*pr.In + float64(u.Cached)*pr.Cached + float64(u.Output)*pr.Out) / 1e6
+		s.CostUSD += (float64(max(u.Input-u.Cached, 0))*pr.In + float64(u.Cached)*pr.Cached + float64(u.Output)*pr.Out) / 1e6
 	}
 	s.Priced = priced
 	return s

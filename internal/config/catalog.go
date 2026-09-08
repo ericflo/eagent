@@ -226,10 +226,22 @@ func PriceFor(baseURL, model string) (Price, bool) {
 	if m, ok := Lookup(baseURL, model); ok && m.Price != nil {
 		return *m.Price, true
 	}
+	// Behind an unknown host (a proxy, a self-hosted box) the id alone must
+	// decide. That is safe only when every provider charges the same for it;
+	// otherwise the figure would be a guess wearing a dollar sign.
+	var found *Price
 	for _, m := range Models {
-		if m.ID == model && m.Price != nil {
-			return *m.Price, true
+		if m.ID != model || m.Price == nil {
+			continue
 		}
+		if found == nil {
+			found = m.Price
+		} else if m.Price.In != found.In || m.Price.Cached != found.Cached || m.Price.Out != found.Out {
+			return Price{}, false
+		}
+	}
+	if found != nil {
+		return *found, true
 	}
 	return Price{}, false
 }

@@ -139,7 +139,10 @@ type State struct {
 	LastUsage map[string]event.Usage
 	// Totals accumulate all usage per actor (task totals include every task).
 	Totals map[string]event.Usage
-	Calls  map[string]int
+	// ByRoute accumulates usage under the route that actually served each
+	// call, so a mid-session fallback does not reprice tokens already spent.
+	ByRoute map[RouteKey]event.Usage
+	Calls   map[string]int
 	// Latencies holds every model call's wall time per actor, for percentiles.
 	Latencies map[string][]int64
 
@@ -154,6 +157,9 @@ type State struct {
 	lastOrchSeen int64
 }
 
+// RouteKey identifies the endpoint that served a set of calls, for pricing.
+type RouteKey struct{ Actor, Host, Model string }
+
 // New returns an empty state.
 func New() *State {
 	return &State{
@@ -164,6 +170,7 @@ func New() *State {
 		Schedules: map[string]*Schedule{},
 		LastUsage: map[string]event.Usage{},
 		Totals:    map[string]event.Usage{},
+		ByRoute:   map[RouteKey]event.Usage{},
 		Calls:     map[string]int{},
 		Latencies: map[string][]int64{},
 		Turns:     map[string]int{},
@@ -325,6 +332,13 @@ func (s *State) Apply(ev event.Event) {
 		tot.Cached += d.Usage.Cached
 		tot.Reasoning += d.Usage.Reasoning
 		s.Totals[key] = tot
+		rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
+		ru := s.ByRoute[rk]
+		ru.Input += d.Usage.Input
+		ru.Output += d.Usage.Output
+		ru.Cached += d.Usage.Cached
+		ru.Reasoning += d.Usage.Reasoning
+		s.ByRoute[rk] = ru
 		s.Calls[key]++
 		s.Latencies[key] = append(s.Latencies[key], d.ElapsedMS)
 	case event.TaskCreate:

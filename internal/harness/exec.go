@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/procs"
@@ -376,7 +377,7 @@ func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSecond
 		r.procAttended[handle] = waitSeconds > 0
 		r.append(event.New(event.ProcStart, c.actor, event.ProcStartData{Handle: handle, Command: command, Cwd: cwd, TimeoutS: timeoutSeconds}).WithTask(c.task))
 	})
-	spec := procs.Spec{Handle: handle, Command: command, Cwd: cwd, Owner: c.actor + "/" + c.task}
+	spec := procs.Spec{Handle: handle, Command: command, Cwd: cwd, Owner: c.actor + "/" + c.task, EnvDeny: r.secretEnvNames()}
 	if timeoutSeconds > 0 {
 		spec.Timeout = time.Duration(timeoutSeconds) * time.Second
 	}
@@ -668,4 +669,26 @@ func (r *Runtime) remember(c caller, key, path string) {
 	}
 	r.memo[r.memoKey(c, key)] = fileMark{size: st.Size(), mtime: st.ModTime(), at: time.Now()}
 	r.memoMu.Unlock()
+}
+
+// secretEnvNames lists the harness's own credentials: every model API key
+// the catalog or the configuration names, and the phone token. No command
+// the model runs needs them, and through `env` or `set -x` they would land
+// in the session log and then in every later prompt to every provider.
+func (r *Runtime) secretEnvNames() []string {
+	names := append([]string{}, config.KeyEnvs()...)
+	names = append(names, r.cfg.Finalechat.TokenEnvName(), "FINALECHAT_TOKEN")
+	var walk func(a config.Actor)
+	walk = func(a config.Actor) {
+		if a.APIKeyEnv != "" {
+			names = append(names, a.APIKeyEnv)
+		}
+		if a.Fallback != nil {
+			walk(*a.Fallback)
+		}
+	}
+	walk(r.cfg.Orchestrator)
+	walk(r.cfg.Task)
+	walk(r.cfg.Narrator)
+	return names
 }

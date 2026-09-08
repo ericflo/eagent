@@ -71,3 +71,43 @@ func TestCronRejects(t *testing.T) {
 		}
 	}
 }
+
+// Daylight-saving transitions: the walk must terminate across a missing hour
+// and fire a daily job once, not twice, across a repeated one.
+func TestCronNextAcrossDST(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("no tz database")
+	}
+	daily6, _ := Parse("0 6 * * *")
+	got := daily6.Next(time.Date(2026, 3, 7, 23, 0, 0, 0, ny)) // the night the clocks go forward
+	if want := time.Date(2026, 3, 8, 6, 0, 0, 0, ny); !got.Equal(want) {
+		t.Fatalf("spring forward: got %v want %v", got, want)
+	}
+	daily3, _ := Parse("0 3 * * *")
+	if got := daily3.Next(time.Date(2026, 3, 8, 0, 30, 0, 0, ny)); !got.Equal(time.Date(2026, 3, 8, 3, 0, 0, 0, ny)) {
+		t.Fatalf("03:00 after the gap: %v", got)
+	}
+	daily1, _ := Parse("0 1 * * *")
+	first := daily1.Next(time.Date(2026, 11, 1, 0, 0, 0, 0, ny)) // the night the clocks go back: 01:00 happens twice
+	second := daily1.Next(first)
+	if first.Day() != 1 || second.Day() != 2 || second.Sub(first) < 24*time.Hour {
+		t.Fatalf("fall back: fired at %v then %v; a daily job must fire once a day", first, second)
+	}
+	hourly, _ := Parse("0 * * * *")
+	a := hourly.Next(time.Date(2026, 11, 1, 0, 30, 0, 0, ny))
+	b := hourly.Next(a)
+	c := hourly.Next(b)
+	// Civil hours advance monotonically; the repeated 01:00 is visited once,
+	// so an hourly job skips one fire on fall-back rather than firing twice.
+	if !(b.After(a) && c.After(b)) || c.Sub(a) > 3*time.Hour || b.Hour() != 2 || c.Hour() != 3 {
+		t.Fatalf("hourly across fall back: %v %v %v", a, b, c)
+	}
+	havana, err := time.LoadLocation("America/Havana")
+	if err == nil {
+		daily, _ := Parse("@daily") // local midnight does not exist on Havana's spring-forward day
+		if got := daily.Next(time.Date(2026, 3, 7, 12, 0, 0, 0, havana)); got.IsZero() {
+			t.Fatal("@daily in Havana never fires")
+		}
+	}
+}

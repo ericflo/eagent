@@ -217,3 +217,45 @@ func TestAnthropicThinkingProbeIsPerCall(t *testing.T) {
 		t.Fatalf("posts=%d (before %d) rejected=%d", posts, before, rejected)
 	}
 }
+
+// A pydantic-style "does not match any of the expected tags: 'text'" is a
+// text-only model, and is remembered as one after the first refusal.
+func TestPydanticContentTypeRefusalIsRemembered(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(img, []byte("\x89PNG\r\n\x1a\nfake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	posts, withImage := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		posts++
+		if strings.Contains(string(raw), "image_url") {
+			withImage++
+			w.WriteHeader(400)
+			fmt.Fprint(w, `{"object":"error","message":"[{'type': 'union_tag_invalid', 'loc': ('body', 'messages', 0, 'content'), 'msg': \"Input tag 'image_url' found using 'type' does not match any of the expected tags: 'text'\"}]"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": "text only"}}}})
+		fmt.Fprintf(w, "data: %s\n\n", chunk)
+		fin, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", fin)
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "vllm-text", APIKey: "k"})
+	c.MaxAttempts = 1
+	for i := 0; i < 3; i++ {
+		req := Request{Messages: []Message{{Role: "user", Text: "look", Images: []Image{{Path: img, MediaType: "image/png"}}}}}
+		if _, err := c.Complete(context.Background(), req, nil); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if posts != 4 || withImage != 1 || !c.rejectsImages.Load() {
+		t.Fatalf("posts=%d withImage=%d latched=%v; want 4, 1, true", posts, withImage, c.rejectsImages.Load())
+	}
+	// Anthropic's "image exceeds 5 MB maximum" is about the picture, not the model.
+	if (&APIError{Status: 400, Body: `{"error":{"message":"messages.0.content.1.image.source.base64.data: image exceeds 5 MB maximum"}}`}).badImage() != true {
+		t.Fatal("an oversized picture must not be remembered as a blind model")
+	}
+}

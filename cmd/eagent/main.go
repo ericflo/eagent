@@ -2,12 +2,12 @@
 package main
 
 import (
-	"io"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -577,11 +577,25 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 			fmt.Printf("  ✗ %-12s %s: %v\n", name, a.Model, err)
 			return
 		}
-		anyLive := false
-		for i, ep := range routes {
+		// Label by position in the configured chain and say why a hop is
+		// missing, so a fallback that took over is never shown as the primary.
+		var labels []string
+		for cur, i := &a, 0; cur != nil; cur, i = cur.Fallback, i+1 {
 			label := "  ✓"
 			if i > 0 {
 				label = "    fallback"
+			}
+			if _, e := cur.Endpoint(); e != nil {
+				fmt.Printf("  ! %-12s %s: %v\n", name, cur.Model, e)
+				continue
+			}
+			labels = append(labels, label)
+		}
+		anyLive := false
+		for i, ep := range routes {
+			label := "  ✓"
+			if i < len(labels) {
+				label = labels[i]
 			}
 			line := fmt.Sprintf("%s %-12s %s (%s", label, name, ep, ep.Protocol)
 			if ep.ReasoningEffort != "" {

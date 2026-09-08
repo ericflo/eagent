@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -296,5 +298,30 @@ func TestRawRepairAndCatalog(t *testing.T) {
 		if !config.KnownKeyEnv(k) {
 			t.Errorf("catalog reveals key presence for %s, which the catalog does not know", k)
 		}
+	}
+}
+
+// Tokens spent at one provider stay priced at that provider after a
+// fallback switches the actor to another route.
+func TestCostIsPricedPerRouteAcrossFallback(t *testing.T) {
+	st := state.New()
+	seq := int64(0)
+	add := func(ev event.Event) {
+		seq++
+		ev.Seq = seq
+		st.Apply(ev)
+	}
+	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
+	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorOrchestrator, Model: "zai-org/GLM-5.3", BaseURL: "https://api.together.xyz/v1"}))
+	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "a", Usage: event.Usage{Input: 1_000_000, Cached: 400_000, Output: 20_000}}))
+	before, ok := estimateCost(st)
+	if !ok || before <= 0 {
+		t.Fatalf("before = %v %v", before, ok)
+	}
+	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorOrchestrator, Model: "zai-org/GLM-5.3-Flash", BaseURL: "https://api.together.xyz/v1"}))
+	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "b", Usage: event.Usage{Input: 1000, Output: 10}}))
+	after, ok := estimateCost(st)
+	if !ok || after < before || after-before > 0.01 {
+		t.Fatalf("a fallback repriced the past: before %.6f after %.6f", before, after)
 	}
 }
