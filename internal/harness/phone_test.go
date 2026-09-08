@@ -1678,3 +1678,61 @@ func TestPhoneSessionKindsAndSequencedClear(t *testing.T) {
 		t.Fatalf("kinds = %v", kinds)
 	}
 }
+
+// The message a session is resumed with was appended before the mirror
+// existed; it must still reach the phone, as the user, after the resume note.
+func TestPhoneMirrorsTheResumePrompt(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"nothing to do"}`)}}
+		}
+		if strings.Contains(all, "nothing to do") && !strings.Contains(all, "Nothing to do.") {
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Nothing to do."}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "first ask"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("first run exit %d", code)
+	}
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false, Prompt: "and now this"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rt2.Run(ctx); code != 0 {
+		t.Fatalf("resumed run exit %d", code)
+	}
+	users := fp.postsWhere(func(p map[string]any) bool { return p["sender"] == "user" })
+	if len(users) != 2 || users[0]["body"] != "first ask" || users[1]["body"] != "and now this" {
+		t.Fatalf("user posts on the phone = %v", users)
+	}
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	resumedAt, promptAt := -1, -1
+	for i, p := range fp.posts {
+		if b, _ := p["body"].(string); strings.Contains(b, "resumed here") {
+			resumedAt = i
+		}
+		if p["body"] == "and now this" {
+			promptAt = i
+		}
+	}
+	if resumedAt < 0 || promptAt != resumedAt+1 {
+		t.Fatalf("the resume prompt must follow the resume note: note at %d, prompt at %d", resumedAt, promptAt)
+	}
+}

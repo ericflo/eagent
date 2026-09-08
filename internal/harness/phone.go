@@ -98,14 +98,34 @@ func (r *Runtime) startPhone() {
 	if q := r.st.Question; q != nil {
 		pending = &event.NarratorQuestionData{ID: q.ID, Text: q.Text, Options: q.Options}
 	}
-	prompt := ""
+	// The message the session was started or resumed with. It was appended
+	// before the mirror existed, so observe() never saw it; it is posted
+	// here, as the user, so the phone shows the conversation whole.
+	prompt, promptSeq := "", int64(0)
 	if !resumed {
 		for _, ev := range r.st.Events {
 			if ev.Type == event.UserMessage {
 				var d event.UserMessageData
 				_ = ev.Decode(&d)
-				prompt = d.Text
+				prompt, promptSeq = d.Text, ev.Seq
 				break
+			}
+		}
+	} else {
+		var resumeSeq int64
+		for _, ev := range r.st.Events {
+			switch ev.Type {
+			case event.SessionResume:
+				resumeSeq = ev.Seq
+				prompt, promptSeq = "", 0
+			case event.UserMessage:
+				if ev.Seq > resumeSeq && resumeSeq > 0 {
+					var d event.UserMessageData
+					_ = ev.Decode(&d)
+					if d.Source != "finalechat" {
+						prompt, promptSeq = d.Text, ev.Seq
+					}
+				}
 			}
 		}
 	}
@@ -131,11 +151,11 @@ func (r *Runtime) startPhone() {
 		if resumed {
 			body = "eagent session resumed here."
 		}
-		if strings.TrimSpace(prompt) != "" {
+		if !resumed && strings.TrimSpace(prompt) != "" {
 			body = prompt
 		}
 		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "kind": "session_start", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
-		if strings.TrimSpace(prompt) != "" {
+		if !resumed && strings.TrimSpace(prompt) != "" {
 			req.Sender, req.Format = "user", "markdown"
 		}
 		msg, thread, err := p.client.Post(ctx, p.ref, req)
@@ -150,6 +170,16 @@ func (r *Runtime) startPhone() {
 		p.lastID = msg.ID
 		p.threadID = thread.ID
 		p.mu.Unlock()
+		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
+			// The message the session was resumed with, as the user wrote it.
+			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
+			if err == nil {
+				p.mu.Lock()
+				p.posted[m2.ID] = true
+				p.lastID = m2.ID
+				p.mu.Unlock()
+			}
+		}
 		// Thread meta the app renders as chips: where the session runs and on what.
 		host, _ := os.Hostname()
 		meta := map[string]any{"cwd": r.opts.Project, "host": host, "model": models["orchestrator"]}
