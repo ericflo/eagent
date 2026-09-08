@@ -323,8 +323,21 @@ func BundleAlone(project, name string) (Config, error) {
 	if !validName(name) {
 		return Config{}, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
 	}
-	m, err := readJSONMap(BundlePath(project, name))
+	raw, err := os.ReadFile(BundlePath(project, name))
 	if err != nil {
+		return Config{}, err
+	}
+	return BundleFromBytes(name, raw)
+}
+
+// BundleFromBytes resolves a captured bundle without re-reading a changing file.
+// It does not load the project configuration or process environment.
+func BundleFromBytes(name string, raw []byte) (Config, error) {
+	if !validName(name) {
+		return Config{}, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
 		return Config{}, err
 	}
 	if m == nil {
@@ -343,7 +356,7 @@ func BundleAlone(project, name string) (Config, error) {
 		Presets[canon](&cfg)
 		preset = canon
 	}
-	if err := overlay(&cfg, m, BundlePath(project, name)); err != nil {
+	if err := overlay(&cfg, m, "bundle "+name); err != nil {
 		return Config{}, err
 	}
 	cfg.Preset = preset

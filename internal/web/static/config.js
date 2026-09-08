@@ -92,10 +92,13 @@ function sourceText(s) {
   return s;
 }
 function envVar(ptr) { const s = source(ptr); return s.startsWith('env:') ? s.slice(4) : ''; }
+function lockedField(ptr) { return X.canEdit ? !X.canEdit(ptr) : !!envVar(ptr); }
+function canAction(operation) { return X.canAct ? X.canAct(operation) : true; }
 function edited(ptr) { const a = flatten(E.loaded), b = flatten(E.cfg); return a[ptr] !== b[ptr]; }
 function srcNode(ptr) {
   const env = envVar(ptr);
   if (env) return h('span', {class: 'src env', title: 'Set by an environment variable in the shell that started eagent. The file cannot override it.'}, `set by $${env}`);
+  if (X.field && lockedField(ptr)) return h('span', {class: 'src'}, X.field(ptr)?.locked_reason || 'Read only in this snapshot');
   if (edited(ptr)) return h('span', {class: 'src edited'}, 'edited');
   const s = sourceText(source(ptr));
   return s ? h('span', {class: 'src', title: 'Where the current value comes from'}, s) : null;
@@ -155,7 +158,7 @@ async function load() {
   // started with (or EAGENT_PRESET) shapes the values shown, but saving must
   // not silently rewrite the file's own preset to it.
   const fileBase = res.file.exists && res.file.preset ? res.file.preset : (res.preset || '');
-  E = Object.assign(E || {}, {c, cat, sources: res.sources || {}, cfg: strip(res.effective), loaded: strip(res.effective), base: fileBase, loadedBase: fileBase, etag: res.file.etag || '', mode: E && E.mode || 'overlay', problems: [], tests: E && E.tests || {}, open: E && E.open || {}});
+  E = Object.assign(E || {}, {c, cat, sources: res.sources || {}, cfg: strip(res.effective), loaded: strip(res.effective), base: fileBase, loadedBase: fileBase, etag: res.file.etag || '', rawDraft: undefined, mode: E && E.mode || 'overlay', problems: [], tests: E && E.tests || {}, open: E && E.open || {}});
 }
 function draw() {
   const main = $('#main');
@@ -179,7 +182,7 @@ function draw() {
   main.replaceChildren(pane);
   pane.scrollTop = y;
 }
-function rerender() { draw(); }
+function rerender() { if (X.remote) keepPinned(); X.formChanged?.(); draw(); }
 
 function header() {
   const res = E.c.resolution, f = res.file;
@@ -212,7 +215,18 @@ function quickStart() {
   const bchips = E.c.bundles.map(b => chip(b, 'bundle'));
   return h('div', {class: 'card quick'}, h('h3', null, 'Start from', h('span', {class: 'grow'}), h('span', {class: 'sub'}, 'Loads a setup into the form; nothing is saved until you press Save.')),
     h('div', {class: 'chips'}, ...chips, h('button', {class: 'chip-btn', title: 'The built-in defaults, before any preset', onclick: () => loadInto('', null)}, 'defaults')),
-    bchips.length ? h('div', {class: 'chips bundles'}, h('span', {class: 'sub'}, 'bundles'), ...bchips) : null);
+    bchips.length ? h('div', {class: 'chips bundles'}, h('span', {class: 'sub'}, 'bundles'), ...bchips) : null,
+    X.remote ? bundleActions() : null);
+}
+function bundleActions() {
+  const current = E.c.resolution.file.default_config || '';
+  const selected = h('select', {'aria-label': 'Default named configuration', disabled: lockedField('/default_config')}, h('option', {value: '', selected: !current}, 'project defaults'), ...E.c.bundles.map(b => h('option', {value: b.name, selected: b.name === current}, b.name)));
+  const removal = h('select', {'aria-label': 'Named configuration to delete'}, ...E.c.bundles.map(b => h('option', {value: b.name}, b.name)));
+  const review = async (path, body) => { try { await api(path, {method: 'POST', body: JSON.stringify(body)}); toast('Ready for review in FinaleChat. No configuration has changed yet.'); } catch (error) { toast(error.message, 'bad'); } };
+  return h('details', null, h('summary', null, 'Named configuration actions'),
+    h('p', {class: 'sub'}, 'Selecting a default can change model routes and permissions for future sessions. Deleting a configuration never restarts a running session.'),
+    h('div', {class: 'row'}, selected, h('button', {disabled: lockedField('/default_config'), onclick: () => review('/api/config/default-bundle', {name: selected.value})}, 'Review default configuration')),
+    h('div', {class: 'row'}, removal, h('button', {disabled: !canAction('bundle.delete') || !E.c.bundles.length, onclick: () => review('/api/config/delete-bundle', {name: removal.value})}, 'Review configuration deletion')));
 }
 function chip(b, kind) {
   const active = kind === 'preset' ? E.base === b.name && !changes().filter(p => p !== '/preset').length : false;
@@ -221,7 +235,7 @@ function chip(b, kind) {
 async function loadInto(name, kind) {
   try {
     if (!name) { E.cfg = strip(E.c.defaults); E.base = ''; }
-    else { const r = await api(`/api/config/presets/${encodeURIComponent(name)}`); E.cfg = strip(r.config); E.base = kind === 'preset' ? name : (r.config.preset || ''); }
+    else { const r = await api(`/api/config/presets/${encodeURIComponent(name)}?kind=${kind || ''}`); E.cfg = strip(r.config); E.base = kind === 'preset' ? name : (r.config.preset || ''); }
     keepPinned();
     E.problems = []; rerender();
     toast(name ? `loaded ${name} into the form` : 'defaults loaded into the form');
@@ -232,14 +246,19 @@ async function loadInto(name, kind) {
 // configuration into the working copy: the file cannot change those, so a
 // loaded preset must not appear to.
 function keepPinned() {
-  for (const [ptr, s] of Object.entries(E.sources)) {
-    if (!s.startsWith('env:')) continue;
+  const candidates = new Set([...Object.keys(E.sources), ...Object.keys(flatten(E.loaded)), ...Object.keys(flatten(E.cfg))]);
+  for (const ptr of candidates) {
+    const s = source(ptr);
+    if (!s.startsWith('env:') && !(X.canEdit && !X.canEdit(ptr))) continue;
     const segs = ptr.split('/').slice(1);
     let from = E.loaded, to = E.cfg;
-    for (let i = 0; i < segs.length - 1; i++) { if (from == null) return; from = from[segs[i]]; if (to[segs[i]] == null || typeof to[segs[i]] !== 'object') to[segs[i]] = {}; to = to[segs[i]]; }
+    for (let i = 0; i < segs.length - 1; i++) { from = from?.[segs[i]]; if (to[segs[i]] == null || typeof to[segs[i]] !== 'object') to[segs[i]] = {}; to = to[segs[i]]; }
     const last = segs[segs.length - 1];
     if (from && from[last] !== undefined) to[last] = clone(from[last]); else if (to) delete to[last];
   }
+  // Restoring absent locked fallback fields must not create an empty route.
+  for (const actor of ACTORS) if (E.cfg[actor.key]?.fallback && !Object.keys(E.cfg[actor.key].fallback).length) delete E.cfg[actor.key].fallback;
+  if (X.canEdit && !X.canEdit('/preset')) E.base = E.loadedBase;
 }
 
 // ---- route cards ---------------------------------------------------------------------------
@@ -248,7 +267,7 @@ function routeCard(actor) {
   const ptr = f => `/${actor.key}/${f}`;
   const m = lookup(a);
   const prov = providerOf(a.base_url);
-  const locked = f => !!envVar(ptr(f));
+  const locked = f => lockedField(ptr(f));
   const card = h('div', {class: 'card route ' + actor.key});
   card.append(h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), actor.name), h('p', {class: 'sub role'}, actor.role)));
 
@@ -272,8 +291,8 @@ function routeCard(actor) {
   }
   const testing = E.tests[actor.key] && E.tests[actor.key].busy;
   const tools = h('div', {class: 'testrow'},
-    h('button', {class: 'small', disabled: testing, onclick: () => runTest(actor.key, null)}, testing ? 'testing…' : 'Test this route'),
-    h('button', {class: 'small', disabled: testing, title: 'Send one tiny tool call at each effort and note the latency and reasoning tokens. Costs a fraction of a cent.', onclick: () => runAll(actor.key)}, 'Try every effort'),
+    h('button', {class: 'small', disabled: testing || !canAction('route.test'), onclick: () => runTest(actor.key, null)}, testing ? 'testing…' : X.remote ? 'Review route test' : 'Test this route'),
+    X.remote ? null : h('button', {class: 'small', disabled: testing, title: 'Send one tool call at each effort and note the latency and reasoning tokens. Each call uses provider billing.', onclick: () => runAll(actor.key)}, 'Try every effort'),
     h('span', {class: 'sub grow'}, checked ? '' : 'Efforts are not verified for this model; the annotations come from your tests.'));
   card.append(field('Reasoning effort', [seg, tools], [srcNode(ptr('reasoning_effort')), h('span', {class: 'src'}, 'sends ', h('code', {class: 'inline'}, sentFor(a))), ...problemNodes(ptr('reasoning_effort'))]));
   const t = E.tests[actor.key];
@@ -319,8 +338,10 @@ function checkText(c, long) {
   return long ? `failed: ${c.error || ''}` : 'failed';
 }
 function resultLine(r) {
+  if (r.staged) return h('p', {class: 'sub'}, 'Route test staged for review. Submit it in FinaleChat to make the provider call.');
   const ok = r.status === 'tool_call';
   const parts = [];
+  if (X.remote && r.model) parts.push(`${r.model} · ${r.route || 'primary'} · ${r.effort || 'provider default'}`);
   if (ok) parts.push(`tool call in ${(r.ms / 1000).toFixed(1)}s`);
   else if (r.status === 'no_tool_call') parts.push(`answered with text instead of a tool call in ${(r.ms / 1000).toFixed(1)}s`);
   else if (r.status === 'timeout') parts.push('no answer within two minutes');
@@ -332,15 +353,17 @@ function resultLine(r) {
 }
 async function runTest(key, effort, route) {
   const a = E.cfg[key];
-  E.tests[key] = {busy: true, result: null}; rerender();
+  const testKey = route === 'fallback' ? key + ':fb' : key;
+  E.tests[testKey] = {busy: true, result: null}; rerender();
   try {
-    const body = {actor: a, route: route || 'primary'};
+    const body = {actor: a, actor_key: key, route: route || 'primary'};
     if (effort !== null && effort !== undefined) body.effort = effort;
     const r = await api('/api/config/test', {method: 'POST', body: JSON.stringify(body)});
+    if (r.staged) { E.tests[testKey] = {busy: false, result: r}; return r; }
     E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage.output, reasoning: r.usage.reasoning, error: r.error, at: r.at};
-    E.tests[key] = {busy: false, result: r};
+    E.tests[testKey] = {busy: false, result: r};
     return r;
-  } catch (e) { E.tests[key] = {busy: false, result: {route: route || 'primary', effort: effort ?? a.reasoning_effort, status: 'failed', error: e.message, usage: {}}}; }
+  } catch (e) { E.tests[testKey] = {busy: false, result: {route: route || 'primary', effort: effort ?? a.reasoning_effort, status: 'failed', error: e.message, usage: {}}}; }
   finally { rerender(); }
 }
 async function runAll(key) {
@@ -361,7 +384,7 @@ async function runAll(key) {
 
 function fallbackLine(card, a, key) {
   const fb = a.fallback;
-  const locked = !!envVar(`/${key}/model`);
+  const locked = lockedField(`/${key}/fallback/model`) || lockedField(`/${key}/fallback/base_url`);
   if (!fb) {
     const alt = suggestFallback(a);
     return h('div', {class: 'fb'}, h('span', {class: 'sub'}, 'Fallback: none. If this route fails, the call fails.'),
@@ -372,13 +395,14 @@ function fallbackLine(card, a, key) {
   const inert = trimSlash(fb.base_url) === trimSlash(a.base_url) && fb.model === a.model;
   const sameProv = !inert && trimSlash(fb.base_url) === trimSlash(a.base_url);
   const {list} = effortsFor(fb);
-  const sel = h('select', {class: 'mini', onchange: ev => { fb.reasoning_effort = ev.target.value === 'none' && fb.protocol === 'openai-chat' ? '' : ev.target.value; rerender(); }}, ...list.map(e => h('option', {value: e, selected: (fb.reasoning_effort || (fb.protocol === 'openai-chat' ? '' : 'none')) === e || (e === 'none' && !fb.reasoning_effort)}, e)));
+  const sel = h('select', {class: 'mini', disabled: lockedField(`/${key}/fallback/reasoning_effort`), onchange: ev => { fb.reasoning_effort = ev.target.value === 'none' && fb.protocol === 'openai-chat' ? '' : ev.target.value; rerender(); }}, ...list.map(e => h('option', {value: e, selected: (fb.reasoning_effort || (fb.protocol === 'openai-chat' ? '' : 'none')) === e || (e === 'none' && !fb.reasoning_effort)}, e)));
   const t = E.tests[key + ':fb'];
   return h('div', {class: 'fb has'}, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'Fallback'),
-      h('button', {class: 'pick mini', onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'kdot' + (keyPresent(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
+      h('button', {class: 'pick mini', disabled: locked, onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'kdot' + (keyPresent(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
       h('span', {class: 'sub'}, 'effort'), sel,
-      h('button', {class: 'ghost small', disabled: t && t.busy, onclick: () => runTest(key, null, 'fallback').then(() => {})}, 'test'),
-      h('button', {class: 'ghost small', onclick: () => { delete a.fallback; rerender(); }}, 'remove')),
+      h('button', {class: 'ghost small', disabled: t && t.busy || !canAction('route.test'), onclick: () => runTest(key, null, 'fallback').then(() => {})}, X.remote ? 'review test' : 'test'),
+      h('button', {class: 'ghost small', disabled: locked, onclick: () => { delete a.fallback; rerender(); }}, 'remove')),
+    t && t.result ? resultLine(t.result) : null,
     inert ? h('div', {class: 'problem error'}, 'This fallback is the same route as the primary, so it cannot help. Pick another provider or model.') : null,
     sameProv ? h('div', {class: 'problem warning'}, 'Same provider as the primary: this covers a model outage, not a provider outage.') : null,
     ...problemNodes(`/${key}/fallback/model`), ...problemNodes(`/${key}/fallback/base_url`), ...problemNodes(`/${key}/fallback/reasoning_effort`), ...problemNodes(`/${key}/fallback/fallback`));
@@ -446,7 +470,7 @@ function openPicker(card, a, key, forFallback) {
 // ---- session, narrator, phone, prompts, advanced -------------------------------------------------
 function numField(f, lbl, help, attrs) {
   const ptr = '/' + f;
-  const locked = !!envVar(ptr);
+  const locked = lockedField(ptr);
   return field(lbl, [h('input', Object.assign({type: 'number', value: E.cfg[f] ?? '', disabled: locked, onchange: ev => { const v = parseInt(ev.target.value, 10); if (!isNaN(v)) E.cfg[f] = v; rerender(); }}, attrs || {}))], [srcNode(ptr), help ? h('span', {class: 'src'}, help) : null, ...problemNodes(ptr)]);
 }
 function sessionCard() {
@@ -459,10 +483,10 @@ function sessionCard() {
       numField('bash_wait_seconds', 'Command wait', 'seconds a command may run before it becomes a background handle', {min: 0, max: 300}),
       numField('bash_timeout_seconds', 'Command timeout', 'seconds before a background command is killed', {min: 1}),
       numField('tool_output_max_chars', 'Tool output limit', 'characters of tool output kept per call', {min: 1000, step: 1000}),
-      field('Edits outside the project', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: !!E.cfg.allow_outside_project, onchange: ev => { E.cfg.allow_outside_project = ev.target.checked; rerender(); }}), 'allow the agent to read and write files outside the project directory')], [srcNode('/allow_outside_project'), E.cfg.allow_outside_project ? h('span', {class: 'problem warning'}, 'The agent can then change anything your user can. Turn it off when you do not need it.') : null])));
+      field('Edits outside the project', [h('label', {class: 'check'}, h('input', {type: 'checkbox', disabled: lockedField('/allow_outside_project'), checked: !!E.cfg.allow_outside_project, onchange: ev => { E.cfg.allow_outside_project = ev.target.checked; rerender(); }}), 'allow the agent to read and write files outside the project directory')], [srcNode('/allow_outside_project'), E.cfg.allow_outside_project ? h('span', {class: 'problem warning'}, 'The agent can then change anything your user can. Turn it off when you do not need it.') : null])));
 }
 function narratorCard() {
-  const locked = !!envVar('/persona');
+  const locked = lockedField('/persona');
   return h('div', {class: 'card'}, h('h3', null, 'Narrator cadence and voice'),
     h('div', {class: 'fields'},
       numField('narrator_tick_seconds', 'Check in every', 'seconds between narrator wake-ups while work runs; it also wakes when you write', {min: 5}),
@@ -472,7 +496,7 @@ function narratorCard() {
 function phoneCard() {
   const fc = E.cfg.finalechat || (E.cfg.finalechat = {});
   const ph = E.c.phone;
-  const locked = !!envVar('/finalechat/enabled');
+  const locked = lockedField('/finalechat/enabled');
   const mode = fc.enabled === undefined || fc.enabled === null ? 'auto' : fc.enabled ? 'always' : 'off';
   const seg = h('div', {class: 'seg tri'}, ...[['auto', 'Auto', 'On whenever a Finalechat token is found; silently off otherwise.'], ['always', 'Always', 'Sessions refuse to start without a token, so you never miss a question.'], ['off', 'Off', 'Never mirror, even with a token present.']].map(([v, t, tip]) =>
     h('button', {class: mode === v ? 'on' : '', disabled: locked, title: tip, onclick: () => { if (v === 'auto') delete fc.enabled; else fc.enabled = v === 'always'; rerender(); }}, t)));
@@ -480,10 +504,12 @@ function phoneCard() {
   const open = !!E.open.phone;
   const det = h('details', {open}, h('summary', {onclick: () => { E.open.phone = !open; }}, 'Advanced'),
     h('div', {class: 'adv'},
-      field('Question timeout', [h('input', {type: 'number', min: 30, value: fc.question_timeout_seconds || '', placeholder: '3600', onchange: ev => { const v = parseInt(ev.target.value, 10); if (isNaN(v) || v <= 0) delete fc.question_timeout_seconds; else fc.question_timeout_seconds = v; rerender(); }})], [srcNode('/finalechat/question_timeout_seconds'), h('span', {class: 'src'}, 'seconds a phone question stays open; a batch session waits this long for an answer'), ...problemNodes('/finalechat/question_timeout_seconds')]),
-      field('Mirror what you type', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: fc.mirror_input !== false, onchange: ev => { if (ev.target.checked) delete fc.mirror_input; else fc.mirror_input = false; rerender(); }}), 'copy your terminal and web messages into the phone thread')], [srcNode('/finalechat/mirror_input')]),
-      field('Agent name', [h('input', {class: 'search', value: fc.agent || '', placeholder: 'eagent', onchange: ev => { fc.agent = ev.target.value.trim(); if (!fc.agent) delete fc.agent; rerender(); }})], [srcNode('/finalechat/agent'), h('span', {class: 'src'}, 'shown next to the thread in the app')]),
-      field('Token variable', [h('input', {class: 'search', value: fc.token_env || '', placeholder: 'FINALECHAT_TOKEN', onchange: ev => { fc.token_env = ev.target.value.trim(); if (!fc.token_env) delete fc.token_env; rerender(); }})], [srcNode('/finalechat/token_env'), h('span', {class: 'src'}, 'falls back to ~/.config/finalechat/config.json'), ...problemNodes('/finalechat/token_env')])));
+      field('Question timeout', [h('input', {type: 'number', disabled: lockedField('/finalechat/question_timeout_seconds'), min: 30, value: fc.question_timeout_seconds || '', placeholder: '3600', onchange: ev => { const v = parseInt(ev.target.value, 10); if (isNaN(v) || v <= 0) delete fc.question_timeout_seconds; else fc.question_timeout_seconds = v; rerender(); }})], [srcNode('/finalechat/question_timeout_seconds'), h('span', {class: 'src'}, 'seconds a phone question stays open; a batch session waits this long for an answer'), ...problemNodes('/finalechat/question_timeout_seconds')]),
+      field('Mirror what you type', [h('label', {class: 'check'}, h('input', {type: 'checkbox', disabled: lockedField('/finalechat/mirror_input'), checked: fc.mirror_input !== false, onchange: ev => { if (ev.target.checked) delete fc.mirror_input; else fc.mirror_input = false; rerender(); }}), 'copy your terminal and web messages into the phone thread')], [srcNode('/finalechat/mirror_input')]),
+      field('Agent name', [h('input', {class: 'search', disabled: lockedField('/finalechat/agent'), value: fc.agent || '', placeholder: 'eagent', onchange: ev => { fc.agent = ev.target.value.trim(); if (!fc.agent) delete fc.agent; rerender(); }})], [srcNode('/finalechat/agent'), h('span', {class: 'src'}, 'shown next to the thread in the app')]),
+      field('Token variable', [h('input', {class: 'search', disabled: lockedField('/finalechat/token_env'), value: fc.token_env || '', placeholder: 'FINALECHAT_TOKEN', onchange: ev => { fc.token_env = ev.target.value.trim(); if (!fc.token_env) delete fc.token_env; rerender(); }})], [srcNode('/finalechat/token_env'), h('span', {class: 'src'}, 'falls back to ~/.config/finalechat/config.json'), ...problemNodes('/finalechat/token_env')]),
+      field('Service address', [h('input', {class: 'search', disabled: lockedField('/finalechat/base_url'), value: fc.base_url || '', placeholder: 'https://www.finalechat.com', onchange: ev => { fc.base_url = ev.target.value.trim(); if (!fc.base_url) delete fc.base_url; rerender(); }})], [srcNode('/finalechat/base_url'), h('span', {class: 'src'}, 'New custom service addresses must first be established locally.'), ...problemNodes('/finalechat/base_url')]),
+      field('Session archives', [h('label', {class: 'check'}, h('input', {type: 'checkbox', disabled: lockedField('/finalechat/artifacts'), checked: !!fc.artifacts, onchange: ev => { fc.artifacts = ev.target.checked; rerender(); }}), 'publish permanent session websites, including native logs and attachments')], [srcNode('/finalechat/artifacts'), h('span', {class: 'src'}, 'Separate opt-in from chat mirroring. The EAGENT_FINALECHAT=off kill switch disables all outbound integration traffic.')])));
   return h('div', {class: 'card'}, h('h3', null, 'Phone mirror'), h('p', {class: 'sub'}, 'Mirrors the conversation to Finalechat on your phone: every narrator message, every question, and the pictures the agent takes.'),
     field('Mirror', [seg], [srcNode('/finalechat/enabled'), ...problemNodes('/finalechat/enabled')]), state, det);
 }
@@ -497,12 +523,12 @@ function advancedCard() {
   const res = E.c.resolution;
   const open = !!E.open.adv;
   const det = h('details', {class: 'card adv-card', open}, h('summary', {onclick: () => { E.open.adv = !open; }}, 'Files and raw JSON'));
-  const rawTa = h('textarea', {class: 'code', style: 'width:100%;min-height:200px', spellcheck: 'false'}, res.file.raw || '');
+  const rawTa = h('textarea', {class: 'code', 'aria-label': X.remote ? 'Known saved overrides' : 'Project file JSON', disabled: X.readOnly?.(), style: 'width:100%;min-height:200px', spellcheck: 'false', oninput: ev => { E.rawDraft = ev.target.value; }}, E.rawDraft ?? res.file.raw ?? '');
   const rawStatus = h('span', {class: 'sub'});
   det.append(h('div', {class: 'adv2'},
     h('div', null, h('h4', null, 'Project file'), h('p', {class: 'sub'}, h('code', {class: 'inline'}, res.file.path), res.file.exists ? '' : ' (not written yet)'),
-      h('p', {class: 'sub'}, 'What Save writes. Hand edits are fine; keys the editor does not know are kept.'), rawTa,
-      h('div', {class: 'row'}, rawStatus, h('span', {style: 'flex:1'}), h('button', {class: 'small', onclick: async () => { try { await api('/api/config/raw', {method: 'PUT', body: JSON.stringify({raw: rawTa.value, if_match: E.etag})}); toast('file written'); E = null; render(); } catch (e) { rawStatus.textContent = e.message; } }}, 'Write file as typed'))),
+      h('p', {class: 'sub'}, X.remote ? 'Known saved overrides only. Editing this JSON proposes typed changes; unknown local keys and credentials are excluded and preserved by the connector.' : 'What Save writes. Hand edits are fine; keys the editor does not know are kept.'), rawTa,
+      h('div', {class: 'row'}, rawStatus, h('span', {style: 'flex:1'}), h('button', {class: 'small', disabled: X.readOnly?.(), onclick: async () => { try { const r = await api('/api/config/raw', {method: 'PUT', body: JSON.stringify({raw: rawTa.value, if_match: E.etag})}); if (r.staged) { rawStatus.textContent = 'Ready for review in FinaleChat. Nothing has been saved yet.'; return; } toast('file written'); E = null; render(); } catch (e) { rawStatus.textContent = e.message; } }}, X.remote ? 'Review override changes' : 'Write file as typed'))),
     h('div', null, h('h4', null, 'Effective configuration'), h('p', {class: 'sub'}, 'What a new session gets right now, after presets, the project file, and environment variables. ', h('code', {class: 'inline'}, 'eagent config'), ' prints the same.'),
       h('pre', {class: 'code'}, JSON.stringify(res.effective, null, 2)),
       h('p', {class: 'sub'}, 'Bundles live in ', h('code', {class: 'inline'}, E.c.files.bundles), ' and are meant to be committed; start one with ', h('code', {class: 'inline'}, 'eagent --config NAME'), '.'))));
@@ -518,13 +544,13 @@ function saveBar() {
   const groups = groupChanges(ch);
   const summary = dirty ? h('div', {class: 'savesum'}, h('b', null, `${groups.length} change${groups.length > 1 ? 's' : ''}`), h('span', {class: 'sub'}, ' · ' + groups.join(' · ')))
     : h('div', {class: 'savesum'}, h('b', null, E.c.resolution.file.exists ? 'Saved' : 'Not saved yet'), h('span', {class: 'sub'}, running ? ` · ${running} running session${running > 1 ? 's' : ''} keep${running > 1 ? '' : 's'} the configuration they started with` : ' · for new and resumed sessions'));
-  const pin = h('label', {class: 'check sub', title: 'Write every value instead of only the differences from the base preset, so the file stands alone even if the preset changes in a future release.'}, h('input', {type: 'checkbox', checked: E.mode === 'pin', onchange: ev => { E.mode = ev.target.checked ? 'pin' : 'overlay'; }}), 'write every value');
-  const baseSel = h('select', {class: 'mini', title: 'The preset the saved file builds on; only differences from it are written.', onchange: ev => { E.base = ev.target.value; rerender(); }}, h('option', {value: '', selected: !E.base}, 'no base preset'), ...E.c.presets.map(p => h('option', {value: p.name, selected: E.base === p.name}, `base: ${p.name}`)));
+  const pin = h('label', {class: 'check sub', title: 'Write every value instead of only the differences from the base preset, so the file stands alone even if the preset changes in a future release.'}, h('input', {type: 'checkbox', disabled: X.readOnly?.(), checked: E.mode === 'pin', onchange: ev => { E.mode = ev.target.checked ? 'pin' : 'overlay'; rerender(); }}), 'write every value');
+  const baseSel = h('select', {class: 'mini', disabled: lockedField('/preset'), title: 'The preset the saved file builds on; only differences from it are written.', onchange: ev => { E.base = ev.target.value; rerender(); }}, h('option', {value: '', selected: !E.base}, 'no base preset'), ...E.c.presets.map(p => h('option', {value: p.name, selected: E.base === p.name}, `base: ${p.name}`)));
   const actions = h('div', {class: 'acts'},
     dirty ? h('button', {onclick: () => { E.cfg = clone(E.loaded); E.base = E.loadedBase; E.problems = []; rerender(); }}, 'Discard') : null,
-    h('button', {onclick: saveBundleDialog, title: 'Save this setup under a name in .agents/eagent/bundles so it can be picked per session or shared'}, 'Save as bundle…'),
-    dirty ? null : h('button', {onclick: () => X.newSessionDialog({project: true})}, 'New session with this'),
-    h('button', {class: 'primary', disabled: !dirty && E.c.resolution.file.exists, onclick: () => save()}, E.c.resolution.file.exists ? 'Save to project' : 'Save to project file'));
+    h('button', {disabled: !canAction('bundle.save'), onclick: saveBundleDialog, title: 'Save this setup as a named configuration so it can be picked per session or shared'}, 'Save as bundle…'),
+    dirty || X.remote ? null : h('button', {onclick: () => X.newSessionDialog({project: true})}, 'New session with this'),
+    h('button', {class: 'primary', disabled: X.readOnly?.() || !dirty && E.mode !== 'pin' && E.c.resolution.file.exists, onclick: () => save()}, X.remote ? 'Review project changes' : E.c.resolution.file.exists ? 'Save to project' : 'Save to project file'));
   bar.append(summary, h('div', {class: 'opts'}, baseSel, pin), actions);
   return bar;
 }
@@ -535,6 +561,7 @@ async function save() {
   const changed = changes();
   try {
     const r = await api('/api/config', {method: 'PUT', body: JSON.stringify(body)});
+    if (r.staged) { toast('Ready for review in FinaleChat. Nothing has been saved yet.'); return; }
     const prev = E.c.resolution.file.raw, prevExists = E.c.resolution.file.exists;
     E.problems = [];
     const skipped = (r.skipped_by_env || []).filter(x => changed.includes(x.pointer));
@@ -542,7 +569,7 @@ async function save() {
     undoToast(prev, prevExists, r.saved.etag);
     for (const x of skipped) toast(`${label(x.pointer)} was not written: $${x.env} pins it in this shell`, 'warn');
   } catch (e) {
-    if (e.status === 409) { conflictDialog(e.body); return; }
+    if (e.status === 409 && !X.remote) { conflictDialog(e.body); return; }
     if (e.status === 422 && e.body && e.body.problems) { E.problems = e.body.problems; rerender(); toast('fix the highlighted fields', 'bad'); const first = $('#main .problem.error'); if (first) first.scrollIntoView({block: 'center'}); return; }
     toast(e.message, 'bad');
   }
@@ -565,14 +592,17 @@ function saveBundleDialog() {
   const desc = h('input', {class: 'search', placeholder: 'what it is for', style: 'flex:1;min-width:200px'});
   const status = h('span', {class: 'sub'});
   const go = h('button', {class: 'primary', onclick: async () => {
-    try { const cfg = clone(E.cfg); cfg.preset = E.base || undefined; const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify({name: name.value.trim(), description: desc.value.trim(), config: cfg})}); closeModal(); toast(`bundle ${r.name} saved`); await load(); rerender(); }
+    try { const cfg = clone(E.cfg); cfg.preset = E.base || undefined; const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify({name: name.value.trim(), description: desc.value.trim(), config: cfg})}); if (r.staged) { status.textContent = 'Ready for review in FinaleChat. The bundle has not changed yet.'; return; } closeModal(); toast(`bundle ${r.name} saved`); await load(); rerender(); }
     catch (e) { status.textContent = e.message; }
-  }}, 'Save bundle');
+  }}, X.remote ? 'Review bundle change' : 'Save bundle');
   showModal(h('div', null, h('h2', null, 'Save as bundle'), h('p', {class: 'sub'}, 'A bundle is a named copy of this setup in ', h('code', {class: 'inline'}, shortPath(E.c.files.bundles)), '. Commit it so teammates can start sessions with it; pick it per session with ', h('code', {class: 'inline'}, '--config NAME'), '.'),
     h('div', {class: 'row'}, name, desc), h('div', {class: 'foot'}, status, h('span', {style: 'flex:1'}), h('button', {onclick: closeModal}, 'Cancel'), go)));
   name.focus();
 }
 
 window.addEventListener('beforeunload', ev => { if (E && changes().length) { ev.preventDefault(); ev.returnValue = ''; } });
-window.EagentConfig = {render, dirty: () => !!(E && changes().length), reset: () => { E = null; }};
+window.EagentConfig = {render, dirty: () => !!(E && (changes().length || E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw)), reset: () => { E = null; },
+  draftToken: () => E ? X.canonical({config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag, raw: E.rawDraft}) : '',
+  routeResult: (key, r) => { if (!E) return; E.tests[key + (r.route === 'fallback' ? ':fb' : '')] = {busy: false, result: r}; if (r.base_url && r.model) E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage?.output, reasoning: r.usage?.reasoning, error: r.error, at: r.at}; rerender(); }
+};
 })();

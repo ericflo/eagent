@@ -205,7 +205,7 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 // loading into the editor.
 func (s *Server) getPresetConfig(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if canon, ok := config.ResolvePreset(name); ok {
+	if canon, ok := config.ResolvePreset(name); ok && r.URL.Query().Get("kind") != "bundle" {
 		cfg := config.Defaults()
 		config.Presets[canon](&cfg)
 		cfg.Preset = canon

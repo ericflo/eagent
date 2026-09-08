@@ -20,12 +20,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/projection"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
+	webstatic "github.com/ericflo/eagent/internal/web/static"
 )
 
 //go:embed assets/*
@@ -203,12 +205,24 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 		}
 	}
 	service := &settings.Service{Project: project}
+	editor, err := config.LockEditor(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	defer editor.Close()
 	view, err := service.RemoteSnapshot(service.Grant())
 	if err != nil {
 		return nil, err
 	}
 	out.Manifest.Dataset["settings_version"] = view.Snapshot.Version
 	if err := out.addJSON("settings/state.json", "context", view); err != nil {
+		return nil, err
+	}
+	editorData, err := service.EditorData()
+	if err != nil {
+		return nil, err
+	}
+	if err := out.addJSON("settings/editor.json", "context", editorData); err != nil {
 		return nil, err
 	}
 	if raw, err := os.ReadFile(filepath.Join(project, ".agents/eagent/settings-audit.jsonl")); err == nil {
@@ -233,6 +247,15 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 			return nil, err
 		}
 		page = bytes.Replace(page, []byte("/* FINALE_ARTIFACT_SDK */"), js, 1)
+		for marker, name := range map[string]string{"/* EAGENT_EDITOR_STYLE */": "style.css", "/* EAGENT_CONFIG_EDITOR */": "config.js", "/* EAGENT_SETTINGS_TRANSPORT */": "artifact-settings.js"} {
+			if bytes.Contains(page, []byte(marker)) {
+				data, err := webstatic.Files.ReadFile(name)
+				if err != nil {
+					return nil, err
+				}
+				page = bytes.Replace(page, []byte(marker), data, 1)
+			}
+		}
 		if bytes.Contains(page, []byte("/* GO_WASM_RUNTIME */")) {
 			runtime, err := assets.ReadFile("assets/wasm_exec.js")
 			if err != nil {

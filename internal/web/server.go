@@ -10,12 +10,10 @@ package web
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"mime"
 	"net"
 	"net/http"
@@ -38,10 +36,8 @@ import (
 	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
+	webstatic "github.com/ericflo/eagent/internal/web/static"
 )
-
-//go:embed static/*
-var static embed.FS
 
 // Server is one project's UI.
 type Server struct {
@@ -83,9 +79,8 @@ func New(project string, logf func(string, ...any)) *Server {
 func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
-	sub, _ := fs.Sub(static, "static")
-	files := http.FileServer(http.FS(sub))
-	indexRaw, _ := static.ReadFile("static/index.html")
+	files := http.FileServer(http.FS(webstatic.Files))
+	indexRaw, _ := webstatic.Files.ReadFile("index.html")
 	index := []byte(strings.Replace(string(indexRaw), "__EAGENT_TOKEN__", s.token, 1))
 	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		// Any path without an extension is the single-page app; FileServer

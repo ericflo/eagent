@@ -284,6 +284,11 @@ func (p Proposal) Validate(d Descriptor, g Grant) error {
 			if !ok || !f.Writable || seen[e.Key] || !slices.Contains(g.Classes, f.Class) {
 				return fmt.Errorf("field %s is not writable", e.Key)
 			}
+			for key := range seen {
+				if strings.HasPrefix(e.Key, key+"/") || strings.HasPrefix(key, e.Key+"/") {
+					return fmt.Errorf("settings edits must not overlap")
+				}
+			}
 			seen[e.Key] = true
 			switch e.Op {
 			case "unset":

@@ -346,6 +346,10 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 	if err != nil {
 		return "", err
 	}
-	raw, _ := json.Marshal(map[string]any{"files": files, "settings": view.Snapshot.Version, "producer": version})
+	editorData, err := service.EditorData()
+	if err != nil {
+		return "", err
+	}
+	raw, _ := json.Marshal(map[string]any{"files": files, "settings": view.Snapshot.Version, "producer": version, "viewer": archive.ViewerFingerprint(), "editor": editorData})
 	return artifact.Digest(raw), nil
 }
