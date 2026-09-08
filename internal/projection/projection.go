@@ -7,6 +7,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,29 @@ type Metadata struct {
 	Started, Modified time.Time
 	Subsessions       int
 	Size              int64
+	Pricing           *PricingSnapshot `json:"pricing,omitempty"`
+}
+
+// PricingSnapshot freezes the exporter's rate catalog, including unknown
+// routes. These are estimates at capture time, not historical invoice rates.
+type PricingSnapshot struct {
+	Basis string                   `json:"basis"`
+	Rates map[string]*config.Price `json:"rates"`
+}
+
+func pricingKey(host, model string) string { return strings.TrimRight(host, "/") + "\x00" + model }
+
+func CapturePricing(st *state.State) *PricingSnapshot {
+	out := &PricingSnapshot{Basis: "catalog_at_capture", Rates: map[string]*config.Price{}}
+	for route := range st.ByRoute {
+		key := pricingKey(route.Host, route.Model)
+		if price, ok := config.PriceFor(route.Host, route.Model); ok {
+			out.Rates[key] = &price
+		} else {
+			out.Rates[key] = nil
+		}
+	}
+	return out
 }
 
 // SessionSummary is what the list and detail endpoints return.
@@ -23,6 +47,7 @@ type SessionSummary struct {
 	Tokens       int               `json:"tokens"`   // input tokens across all actors
 	CostUSD      float64           `json:"cost_usd"` // estimate at list prices; 0 when a model is unknown
 	Priced       bool              `json:"priced"`
+	PriceBasis   string            `json:"price_basis"`
 	Duration     float64           `json:"duration_s"`
 	Started      time.Time         `json:"started"`
 	Modified     time.Time         `json:"modified"`
@@ -134,7 +159,11 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
 		sum.Tokens += st.Totals[a].Input
 	}
-	sum.CostUSD, sum.Priced = estimateCost(st)
+	sum.CostUSD, sum.Priced = costOfRoutesWithPrices(st, "", info.Pricing)
+	sum.PriceBasis = "viewer_catalog"
+	if info.Pricing != nil {
+		sum.PriceBasis = info.Pricing.Basis
+	}
 	if !st.Started.IsZero() {
 		end := info.Modified
 		if st.Ended {
@@ -187,7 +216,7 @@ func Detail(info Metadata, st *state.State) *SessionDetail {
 		u := usageView(a, st.Calls[a], st.Totals[a])
 		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
 		u.Model = st.Models[a]
-		u.CostUSD, u.Priced = costOfRoutes(st, a)
+		u.CostUSD, u.Priced = costOfRoutesWithPrices(st, a, info.Pricing)
 		d.Usage = append(d.Usage, u)
 	}
 	for _, ss := range st.Subsessions {
@@ -212,11 +241,15 @@ func PriceFor(baseURL, model string, u event.Usage) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
+	return pricedUsage(p, u), true
+}
+
+func pricedUsage(p config.Price, u event.Usage) float64 {
 	uncached := u.Input - u.Cached
 	if uncached < 0 {
 		uncached = 0
 	}
-	return (float64(uncached)*p.In + float64(u.Cached)*p.Cached + float64(u.Output)*p.Out) / 1e6, true
+	return (float64(uncached)*p.In + float64(u.Cached)*p.Cached + float64(u.Output)*p.Out) / 1e6
 }
 
 // estimateCost sums per-actor estimates; Priced is false if any actor's
@@ -231,6 +264,10 @@ func EstimateCost(st *state.State) (float64, bool) { return estimateCost(st) }
 // when actor is ""), so a mid-session fallback does not reprice tokens
 // already spent at the previous provider.
 func costOfRoutes(st *state.State, actor string) (float64, bool) {
+	return costOfRoutesWithPrices(st, actor, nil)
+}
+
+func costOfRoutesWithPrices(st *state.State, actor string, pricing *PricingSnapshot) (float64, bool) {
 	total := 0.0
 	priced := true
 	any := false
@@ -239,7 +276,13 @@ func costOfRoutes(st *state.State, actor string) (float64, bool) {
 			continue
 		}
 		any = true
-		c, ok := PriceFor(rk.Host, rk.Model, u)
+		var c float64
+		var ok bool
+		if pricing == nil {
+			c, ok = PriceFor(rk.Host, rk.Model, u)
+		} else if p := pricing.Rates[pricingKey(rk.Host, rk.Model)]; p != nil {
+			c, ok = pricedUsage(*p, u), true
+		}
 		if !ok {
 			priced = false
 			continue

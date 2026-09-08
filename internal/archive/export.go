@@ -65,6 +65,7 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 		}
 	}()
 	out.Manifest = artifact.Manifest{Format: artifact.Format, Producer: artifact.Producer{Name: "eagent", Version: version}, Entrypoint: "index.html", SettingsEntrypoint: "settings/index.html", CapturedAt: time.Now().UTC(), Dataset: map[string]any{"format": "eagent.session-jsonl/v1", "session_id": info.ID, "source_policy": "original committed JSONL; no credential or process-control files"}, Files: []artifact.File{}}
+	out.Manifest.Viewer = map[string]any{"id": "eagent-session-explorer", "version": version, "fingerprint": ViewerFingerprint()}
 	root, err := os.OpenRoot(info.Path)
 	if err != nil {
 		return nil, err
@@ -141,12 +142,15 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 	out.Manifest.Dataset["files"] = logs
 	out.Manifest.Dataset["last_seq"] = st.LastSeq()
 	out.Manifest.Dataset["committed_bytes"] = sourceBytes
-	meta := projection.Metadata{ID: info.ID, Started: info.Started, Modified: st.Events[len(st.Events)-1].Time, Subsessions: len(logs), Size: sourceBytes}
+	meta := projection.Metadata{ID: info.ID, Started: info.Started, Modified: st.Events[len(st.Events)-1].Time, Subsessions: len(logs), Size: sourceBytes, Pricing: projection.CapturePricing(st)}
 	out.Detail = projection.Detail(meta, st)
 	if err := out.addJSON("derived/summary.json", "derived", out.Detail); err != nil {
 		return nil, err
 	}
 	if err := out.addJSON("context/replay.json", "context", meta); err != nil {
+		return nil, err
+	}
+	if err := out.addJSON("context/pricing.json", "context", meta.Pricing); err != nil {
 		return nil, err
 	}
 	// These directories contain native tool outputs and session attachments.
@@ -225,13 +229,10 @@ func SnapshotIn(ctx context.Context, project, ref, version, parent string) (*Exp
 	if err := out.addJSON("settings/editor.json", "context", editorData); err != nil {
 		return nil, err
 	}
-	if raw, err := os.ReadFile(filepath.Join(project, ".agents/eagent/settings-audit.jsonl")); err == nil {
-		if end := bytes.LastIndexByte(raw, '\n'); end >= 0 {
-			if err := out.addBytes("context/settings-audit.jsonl", "source", "application/x-ndjson", raw[:end+1]); err != nil {
-				return nil, err
-			}
-		}
-	} else if !os.IsNotExist(err) {
+	if err := out.captureAudit(ctx, project); err != nil {
+		return nil, err
+	}
+	if err := out.captureReferences(info.Path, st.Events); err != nil {
 		return nil, err
 	}
 	if err := out.addJSON("context/provenance.json", "context", map[string]any{"captured_at": out.Manifest.CapturedAt, "project": project, "runtime_settings": "Unknown unless explicitly recorded in session events. This settings snapshot describes defaults at capture time.", "restore": "Inspect this archive before restoring. Restoring does not run tools or reconnect old process IDs.", "source_root": info.Path}); err != nil {

@@ -161,6 +161,20 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Review project changes', exact: true }).isDisabled(), true);
   assert.deepEqual(errors, []);
   console.log('PASS extracted settings website opens directly from disk with verified data and read-only controls');
+
+  await page.goto(pathToFileURL(path.join(archive, 'index.html')).href);
+  const viewerChooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Open extracted archive', exact: true }).click();
+  await (await viewerChooser).setFiles(archive);
+  await page.waitForFunction(() => !document.querySelector('#until').disabled);
+  const expected = JSON.parse(await readFile(path.join(archive, 'derived/summary.json'), 'utf8'));
+  const replayed = await page.evaluate(() => JSON.parse(window.eagentReplayView(0)).result);
+  assert.equal(replayed.price_basis, 'catalog_at_capture');
+  assert.ok(expected.cost_usd > 0, 'pricing fixture did not exercise a known model');
+  assert.equal(replayed.cost_usd, expected.cost_usd, 'new viewer repriced saved usage with its own catalog');
+  assert.equal(replayed.events, expected.events);
+  assert.deepEqual(errors, []);
+  console.log('PASS actual offline Go WebAssembly replay preserves captured pricing across a changed viewer catalog');
 } finally {
   await browser?.close();
   if (server) await new Promise(resolve => server.close(resolve));
