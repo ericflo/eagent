@@ -57,7 +57,11 @@ The settings website embeds the same `config.js` and stylesheet as the local con
 
 Picker catalogs and named configuration content are captured with the archive. A bundle whose current hash no longer matches the captured content cannot be loaded into the form; reopen the latest archive. Granted field locks and environment overrides are visible in the shared editor. New edits clear the pending host proposal, and delayed acknowledgements preserve newer form or raw-JSON drafts. Opening `settings/index.html` from an extracted archive provides the same read-only editor without a running server.
 
-## Starting a session from your phone
+## Starting and reviving sessions from your phone
+
+**Reviving a finished session.** `eagent serve` and `eagent connector run` watch the account's event stream for replies to threads of sessions that are not running. A reply from the app to such a thread (text, files, or an answer to the question the session stopped on) resumes that session in the host process with the reply as its next turn; the mirror does not echo it back. A running session, wherever it runs, keeps its own poller and is left alone. On connect, and every few minutes, the watcher also sweeps threads whose latest message is a user message newer than the session's last log write, so a reply sent while no eagent was running is picked up when one starts. The watcher is elected per project, like the connector, and `EAGENT_FINALECHAT=off` disables it.
+
+**Starting a new session.**
 
 Every process that holds the project's settings connector advertises a `session.start` action, so Finalechat's inbox offers **New session** for the project whenever an eagent is running in it. The first message is the only parameter. The connector executes each request at most once: a redelivered command returns the original result, and a claim whose local journal is missing is reported as unknown rather than started again. A settings save that landed after the phone loaded its page does not block the start; a replaced runtime generation does.
 

@@ -5,6 +5,7 @@
 package finalechat
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -650,6 +651,106 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		contentType = "application/json"
 	}
 	return c.doRaw(ctx, method, path, query, contentType, rdr, out, wait)
+}
+
+// Events streams the account's server-sent events until ctx ends, the server
+// asks for a reconnect (returns nil), or the connection drops (returns an
+// error). fn receives each event's name and data; returning an error stops
+// the stream. A stream that goes 45 seconds without any event is dropped,
+// since the server pings every 20.
+func (c *Client) Events(ctx context.Context, fn func(name string, data []byte) error) error {
+	if c.Token == "" {
+		return errors.New("finalechat: no token")
+	}
+	hc := credentialHTTPClient(c.HTTP)
+	hc.Timeout = 0 // a stream has no overall deadline; the watchdog below has
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/api/v1/events", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "text/event-stream")
+	ua := c.UserAgent
+	if ua == "" {
+		ua = "eagent"
+	}
+	req.Header.Set("User-Agent", ua)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("finalechat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		e := &Error{Status: resp.StatusCode, RequestID: resp.Header.Get("X-Request-Id")}
+		var env struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(raw, &env) == nil {
+			e.Code, e.Message = env.Error.Code, env.Error.Message
+		}
+		return e
+	}
+	activity := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-activity:
+			case <-time.After(45 * time.Second):
+				cancel()
+				return
+			}
+		}
+	}()
+	reader := bufio.NewReaderSize(resp.Body, 64<<10)
+	name := ""
+	var data bytes.Buffer
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("finalechat: event stream ended: %w", err)
+		}
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case line == "":
+			if name == "" && data.Len() == 0 {
+				continue
+			}
+			if name == "reconnect" {
+				return nil
+			}
+			if err := fn(name, data.Bytes()); err != nil {
+				return err
+			}
+			name = ""
+			data.Reset()
+		case strings.HasPrefix(line, ":"):
+		case strings.HasPrefix(line, "event:"):
+			name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			if data.Len() > 4<<20 {
+				return errors.New("finalechat: event too large")
+			}
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
 }
 
 // doRaw performs one request with a prepared body.

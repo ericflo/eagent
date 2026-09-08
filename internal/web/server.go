@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -138,19 +137,27 @@ func (s *Server) resolve(ref string) (store.Info, error) {
 }
 
 // alive reports whether some process holds the session lock.
-func alive(sessionPath string) bool {
-	f, err := os.OpenFile(filepath.Join(sessionPath, ".lock"), os.O_RDWR, 0o644)
+func alive(sessionPath string) bool { return store.Alive(sessionPath) }
+
+// Hosted reports whether this process is running the session.
+func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
+
+// Resume reopens a session nobody is running with a reply the user sent to
+// its thread from the phone, the way postMessage resumes one from the
+// browser. The reply is the session's next turn (or the answer to the
+// question it stopped on); its source keeps the mirror from echoing it.
+func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
+	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
-		return false
+		return err
 	}
-	defer f.Close()
-	// A shared lock answers the question without contending with another
-	// probe or with a runner trying to take the exclusive lock.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
-		return true
+	if info.ID != sessionID {
+		return fmt.Errorf("session %s not found", sessionID)
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return false
+	if s.isHosted(info.ID) || alive(info.Path) {
+		return errors.New("the session is running; its own mirror reads the thread")
+	}
+	return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments}, "", "", true)
 }
 
 // ---- sessions ---------------------------------------------------------------
@@ -790,6 +797,8 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	defer restoreStarter()
 	stopConnector := integration.StartConnector(ctx, s.Project, s.logf)
 	defer stopConnector()
+	stopWatcher := integration.StartResumeWatcher(ctx, s.Project, s, s.logf)
+	defer stopWatcher()
 	s.addr = addr
 	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 1)

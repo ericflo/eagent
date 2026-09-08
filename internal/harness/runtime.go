@@ -43,6 +43,14 @@ type Options struct {
 	Prompt string
 	// Answer answers the pending question on resume.
 	Answer string
+	// PromptSource says where Prompt or Answer came from when it was not the
+	// terminal: "web", or "finalechat" for a reply the user sent from the
+	// phone to a session that had finished (the mirror then does not echo
+	// it back to the phone).
+	PromptSource string
+	// PromptAttachments are files already saved under the session directory
+	// that arrived with Prompt.
+	PromptAttachments []event.Attachment
 }
 
 // Runtime is one live session.
@@ -175,7 +183,7 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if strings.TrimSpace(opts.Prompt) != "" {
-		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
+		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 	}
 	r.startPhone()
 	return r, nil
@@ -206,23 +214,23 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	r.closeInterrupted()
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil {
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 		} else {
 			// Answered elsewhere first (the phone, another resume): the words
 			// still count, as a message, rather than vanishing with exit 0.
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 		}
 	}
-	if text := strings.TrimSpace(opts.Prompt); text != "" {
+	if text := strings.TrimSpace(opts.Prompt); text != "" || len(opts.PromptAttachments) > 0 {
 		if q := st.Question; q != nil {
 			// The natural reply to a session that stopped on a question is
 			// the answer, exactly as it would be from the terminal or the web.
 			if n := optionIndex(text, q.Options); n >= 0 {
 				text = q.Options[n]
 			}
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 		} else {
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 		}
 	}
 	r.startPhone()
