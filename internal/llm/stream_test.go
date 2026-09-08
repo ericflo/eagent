@@ -209,7 +209,7 @@ func TestResponsesStreaming(t *testing.T) {
 		{Role: "user", Text: "hi"},
 		{Role: "assistant", Native: resp.Native, NativeProtocol: ProtocolResponses, Text: "Hi", ToolCalls: resp.ToolCalls},
 		{Role: "tool", Results: []ToolResult{{CallID: "call_9", Output: "a b"}}},
-	}}, true)
+	}}, true, "")
 	if len(items) != 5 {
 		t.Fatalf("replayed %d items: %v", len(items), items)
 	}
@@ -307,7 +307,7 @@ func TestMalformedArgsAreSanitisedOnReplay(t *testing.T) {
 	}
 	items := responsesInput(Request{Messages: []Message{
 		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "delegate", Args: normalizeArgs("{")}}},
-	}}, false)
+	}}, false, "")
 	if it := items[0].(map[string]any); !json.Valid([]byte(it["arguments"].(string))) {
 		t.Fatalf("responses replay arguments invalid: %s", it["arguments"])
 	}
@@ -337,7 +337,7 @@ func TestResponsesDanglingReasoningDropped(t *testing.T) {
 		{Role: "user", Text: "hi"},
 		{Role: "assistant", Native: json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"ENC"}]`), NativeProtocol: ProtocolResponses, Text: ""},
 		{Role: "user", Text: "continue"},
-	}}, true)
+	}}, true, "")
 	for _, it := range items {
 		if m, ok := it.(map[string]any); ok && m["type"] == "reasoning" {
 			t.Fatal("dangling reasoning item replayed")
@@ -425,5 +425,40 @@ func TestChatToolCallDeltasWithoutIndex(t *testing.T) {
 	resp, err = c2.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
 	if err != nil || len(resp.ToolCalls) != 2 || resp.ToolCalls[0].Name != "bash" || resp.ToolCalls[1].Name != "read_file" {
 		t.Fatalf("two index-less calls: %+v %v", resp.ToolCalls, err)
+	}
+}
+
+// A stored function_call whose arguments were cut off is sanitised on
+// replay, and native items replay only at the host that minted them.
+func TestNativeReplayIsSanitisedAndHostBound(t *testing.T) {
+	native, _ := json.Marshal([]map[string]any{
+		{"type": "reasoning", "id": "rs_1", "summary": []any{}, "encrypted_content": "ENC"},
+		{"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "bash", "arguments": `{"command": "ls`},
+	})
+	msg := Message{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "bash", Args: normalizeArgs(`{"command": "ls`)}}, Native: native, NativeProtocol: ProtocolResponses, NativeHost: "https://api.openai.com/v1"}
+	items := responsesInput(Request{Messages: []Message{msg}}, true, "https://api.openai.com/v1")
+	if len(items) != 2 {
+		t.Fatalf("same host should replay both native items: %v", items)
+	}
+	fc := items[1].(json.RawMessage)
+	var it map[string]any
+	_ = json.Unmarshal(fc, &it)
+	if args, _ := it["arguments"].(string); !json.Valid([]byte(args)) || !strings.Contains(args, "_malformed") {
+		t.Fatalf("replayed native arguments not sanitised: %s", fc)
+	}
+	// Another host (a fallback route): the turn is rebuilt from text and
+	// tool calls, and the encrypted reasoning stays home.
+	items = responsesInput(Request{Messages: []Message{msg}}, true, "https://openrouter.ai/api/v1")
+	raw, _ := json.Marshal(items)
+	if strings.Contains(string(raw), "ENC") || strings.Contains(string(raw), "rs_1") {
+		t.Fatalf("native items replayed at a different host: %s", raw)
+	}
+	if len(items) != 1 || items[0].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("rebuilt turn = %s", raw)
+	}
+	// Logs from before the host was recorded keep replaying as before.
+	msg.NativeHost = ""
+	if items = responsesInput(Request{Messages: []Message{msg}}, true, "https://openrouter.ai/api/v1"); len(items) != 2 {
+		t.Fatalf("an unrecorded host must not stop replay: %v", items)
 	}
 }

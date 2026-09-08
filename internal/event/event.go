@@ -219,6 +219,7 @@ type Usage struct {
 type AssistantData struct {
 	Provider  string          `json:"provider"`
 	Model     string          `json:"model"`
+	Host      string          `json:"host,omitempty"` // the base URL that served the call; Native replays only there
 	Text      string          `json:"text,omitempty"`
 	Reasoning string          `json:"reasoning,omitempty"` // summary, for humans
 	ToolCalls []ToolCall      `json:"tool_calls,omitempty"`

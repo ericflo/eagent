@@ -206,7 +206,7 @@ func renderActor(events []event.Event, actor, task string, notify func(event.Eve
 			_ = ev.Decode(&d)
 			msgs = append(msgs, llm.Message{
 				Role: "assistant", Text: d.Text, ToolCalls: d.ToolCalls,
-				Native: d.Native, NativeProtocol: d.Provider,
+				Native: d.Native, NativeProtocol: d.Provider, NativeHost: d.Host,
 			})
 			if len(d.ToolCalls) > 0 {
 				tm := llm.Message{Role: "tool"}
@@ -376,7 +376,7 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 			flush()
 			var d event.AssistantData
 			_ = ev.Decode(&d)
-			msgs = append(msgs, llm.Message{Role: "assistant", Text: d.Text, ToolCalls: d.ToolCalls, Native: d.Native, NativeProtocol: d.Provider})
+			msgs = append(msgs, llm.Message{Role: "assistant", Text: d.Text, ToolCalls: d.ToolCalls, Native: d.Native, NativeProtocol: d.Provider, NativeHost: d.Host})
 			if len(d.ToolCalls) > 0 {
 				tm := llm.Message{Role: "tool"}
 				for _, tc := range d.ToolCalls {

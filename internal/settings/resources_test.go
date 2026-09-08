@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -103,5 +104,29 @@ func TestBundleResourceAndActiveDeletionGuard(t *testing.T) {
 	p.Parameters = map[string]any{"name": "unsafe", "config_json": `{"task":{"base_url":"https://unregistered.invalid","api_key_env":"SECRET"}}`}
 	if _, err := s.PrepareResource(editor, p, s.Grant()); err == nil {
 		t.Fatal("accepted unregistered endpoint/key through bundle action")
+	}
+}
+
+// default_config may only name a bundle the loader accepts: a listed file
+// with a name the loader rejects would make every later load fail.
+func TestDefaultConfigMustBeLoadable(t *testing.T) {
+	s := &Service{Project: t.TempDir()}
+	if err := os.MkdirAll(config.BundlesDir(s.Project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.BundlesDir(s.Project), "prod v2.json"), []byte(`{"preset":"glm"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(config.Defaults())
+	bad := "prod v2"
+	if _, err := s.Save(context.Background(), Request{Config: cfg, Default: &bad}); err == nil || !strings.Contains(err.Error(), "bundle names") {
+		t.Fatalf("an unloadable default_config was accepted: %v", err)
+	}
+	if _, err := s.SaveBundle(context.Background(), BundleRequest{Name: "fine", From: "glm"}); err != nil {
+		t.Fatal(err)
+	}
+	good := "fine"
+	if _, err := s.Save(context.Background(), Request{Config: cfg, Default: &good}); err != nil {
+		t.Fatalf("a loadable default_config was refused: %v", err)
 	}
 }

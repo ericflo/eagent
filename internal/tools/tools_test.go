@@ -203,6 +203,30 @@ func TestWriteThroughSymlinkIsRefused(t *testing.T) {
 	if _, err := f.WriteFile("dirlink/new.txt", "x"); err == nil {
 		t.Fatal("a write into a symlinked outside directory was allowed")
 	}
+	// A dangling link: the target does not exist yet, and the write would
+	// create it wherever the link points.
+	dangling := filepath.Join(outside, "not-yet.txt")
+	if err := os.Symlink(dangling, filepath.Join(root, "dangling.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteFile("dangling.txt", "created outside"); err == nil {
+		t.Fatal("a write through a dangling symlink to outside the project was allowed")
+	}
+	if _, err := os.Stat(dangling); err == nil {
+		t.Fatal("the dangling link's outside target was created")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub/inside.txt", filepath.Join(root, "inside-link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteFile("inside-link.txt", "fine"); err != nil {
+		t.Fatalf("a dangling link that stays inside the project must still work: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "sub", "inside.txt")); string(got) != "fine" {
+		t.Fatal("the in-project link's target was not written")
+	}
 	if got, _ := os.ReadFile(target); string(got) != "keep" {
 		t.Fatal("the outside file was changed")
 	}

@@ -30,7 +30,7 @@ func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
 		t.Fatalf("chat content = %v", msgs[0]["content"])
 	}
 	// Responses: input_text + input_image.
-	items := responsesInput(req, false)
+	items := responsesInput(req, false, "")
 	rp := items[0].(map[string]any)["content"].([]map[string]any)
 	if len(rp) != 2 || rp[1]["type"] != "input_image" {
 		t.Fatalf("responses content = %v", rp)
@@ -99,10 +99,10 @@ func TestReasoningItemsAreDroppedUnlessReplayed(t *testing.T) {
 		}
 		return out
 	}
-	if got := types(responsesInput(req, false)); strings.Join(got, ",") != "user,function_call,function_call_output" {
+	if got := types(responsesInput(req, false, "")); strings.Join(got, ",") != "user,function_call,function_call_output" {
 		t.Fatalf("without replay: %v", got)
 	}
-	if got := types(responsesInput(req, true)); strings.Join(got, ",") != "user,reasoning,function_call,function_call_output" {
+	if got := types(responsesInput(req, true, "")); strings.Join(got, ",") != "user,reasoning,function_call,function_call_output" {
 		t.Fatalf("with replay: %v", got)
 	}
 }

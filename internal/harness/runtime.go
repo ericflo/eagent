@@ -102,9 +102,16 @@ type Runtime struct {
 	shutdownOnce sync.Once
 	exitCode     int
 	awaitingUser bool
-	inboxSince   time.Time // a stop file older than this run is a leftover, not an order
 	lastOrchSeen int64
 	lastWake     int64 // seq of the newest event that should wake the orchestrator
+	// futileSkipped is the newest unseen arrival for which the futile-rollover
+	// pause already stood aside once (see futileStandAside).
+	futileSkipped int64
+	// yieldSeenSeq is the seq at which the latest yield first became visible
+	// to the narrator (the assistant call that made it, or the yield event
+	// itself for a forced one), so a narrator that already reported it is
+	// not woken again by the yield event's own, later, seq.
+	yieldSeenSeq int64
 	lastOrchText string
 
 	procCursor   map[string]int // handle -> bytes already shown
@@ -412,6 +419,8 @@ func (r *Runtime) noteWake(ev event.Event) {
 		r.narrWorthy = ev.Seq
 	}
 	switch ev.Type {
+	case event.Yield:
+		r.yieldSeenSeq = ev.Seq // a forced yield has no call of its own; the orchestrator overrides this for its own
 	case event.UserMessage, event.UserAnswer, event.ScheduleFire, event.Dossier:
 		r.lastWake = ev.Seq
 		r.narrFinal = false
@@ -473,7 +482,6 @@ func (r *Runtime) Run(ctx context.Context) int {
 	}
 	inbox := time.NewTicker(500 * time.Millisecond)
 	defer inbox.Stop()
-	r.inboxSince = time.Now()
 	r.pollInbox()
 	r.tick()
 	for {
@@ -566,7 +574,7 @@ func (r *Runtime) maybeEnd() {
 		// Interactive sessions wait for the user (a schedule means "do not
 		// end", not "do not accept input"). Make sure the narrator had its
 		// say about the idle state, then show the prompt.
-		if !r.narrFinal && r.narrLastSeen < r.st.LastYield.Seq {
+		if !r.narrFinal && r.narrLastSeen < r.st.LastYield.Seq && !r.narratorCoveredYield() {
 			r.wakeNarrator(narratorReasonForYield(r.st))
 			return
 		}
@@ -584,7 +592,7 @@ func (r *Runtime) maybeEnd() {
 	// Batch: give the narrator a final word, then end.
 	if !r.narrFinal {
 		r.narrFinal = true
-		if r.narrSaidSeq > r.st.LastYield.Seq {
+		if r.narrSaidSeq > r.st.LastYield.Seq || r.narratorCoveredYield() {
 			// It already reported after the orchestrator finished.
 			r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
 			return

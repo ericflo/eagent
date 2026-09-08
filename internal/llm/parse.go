@@ -47,17 +47,33 @@ func indexFrom(s, sub string, from int) int {
 // inside it neither ends the block nor starts a new one; a truncated value
 // shields nothing.
 func scanBlock(rest string) (bodyEnd, next int) {
-	const open, closeTag, av, ave = "<tool_call>", "</tool_call>", "<arg_value>", "</arg_value>"
+	const open, closeTag, av, ave, ak = "<tool_call>", "</tool_call>", "<arg_value>", "</arg_value>", "<arg_key>"
+	// Every search is cached and refreshed only once the cursor has passed
+	// its result: the cursor only moves forward, so each tag is searched for
+	// once per occurrence and the scan is linear in the text.
+	const unknown = -2
+	cC, cN, cA, cE, cK := unknown, unknown, unknown, unknown, unknown
+	seek := func(cur *int, sub string, from int) int {
+		switch {
+		case *cur == -1:
+			return -1 // nothing ahead of an earlier position; nothing ahead of a later one
+		case *cur >= from:
+			return *cur
+		}
+		*cur = indexFrom(rest, sub, from)
+		return *cur
+	}
 	for pos := 0; pos < len(rest); {
-		c := indexFrom(rest, closeTag, pos)
-		n := indexFrom(rest, open, pos)
-		a := indexFrom(rest, av, pos)
+		c := seek(&cC, closeTag, pos)
+		n := seek(&cN, open, pos)
+		a := seek(&cA, av, pos)
 		if a >= 0 && (c < 0 || a < c) && (n < 0 || a < n) {
-			e := indexFrom(rest, ave, a+len(av))
-			if e >= 0 && !strings.Contains(rest[a:e], "<arg_key>") {
-				pos = e + len(ave)
+			e := seek(&cE, ave, a+len(av))
+			k := seek(&cK, ak, a+len(av))
+			if e >= 0 && !(k >= 0 && k < e) {
+				pos = e + len(ave) // a closed value: its content is text
 			} else {
-				pos = a + len(av)
+				pos = a + len(av) // a truncated value shields nothing
 			}
 			continue
 		}

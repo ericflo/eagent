@@ -181,9 +181,15 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		if *b.Default == "" {
 			edits["default_config"] = nil
 		} else {
+			// Validate the way the resolver will: a listed file with a name
+			// the loader rejects, or unloadable contents, would make every
+			// later load fail.
 			names, _ := config.ListBundles(s.Project)
 			if !slices.Contains(names, *b.Default) {
 				return Result{}, &Error{Status: 422, Message: (fmt.Errorf("default_config: no bundle named %q", *b.Default)).Error()}
+			}
+			if _, err := config.LoadBundle(s.Project, "", *b.Default); err != nil {
+				return Result{}, &Error{Status: 422, Message: (fmt.Errorf("default_config %q: %w", *b.Default, err)).Error()}
 			}
 			edits["default_config"], _ = json.Marshal(*b.Default)
 		}

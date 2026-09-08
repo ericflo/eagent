@@ -133,7 +133,6 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		failures = 0
 		r.ui.Stream(event.ActorOrchestrator, "", "", "")
 		ev := r.recordAssistant(event.ActorOrchestrator, "", resp, seenSeq)
-		_ = ev
 
 		if len(resp.ToolCalls) == 0 {
 			if resp.Truncated() {
@@ -177,6 +176,9 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 						return
 					}
 					r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: done, Reason: reason}))
+					// The yield was visible from the assistant call that made it:
+					// a narrator that reported on that call has covered it.
+					r.yieldSeenSeq = ev.Seq
 				})
 				if blocked != "" {
 					r.recordToolResult(event.ActorOrchestrator, "", tc, blocked, true)

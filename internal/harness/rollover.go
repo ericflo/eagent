@@ -114,6 +114,9 @@ func (r *Runtime) startRollover() bool {
 // when an orchestrator turn ends on a full context in a subsession that a
 // rollover created.
 func (r *Runtime) pauseFutileRollover() {
+	if r.futileStandAside() {
+		return
+	}
 	if r.futileAlreadyPaused() {
 		return
 	}
@@ -122,17 +125,55 @@ func (r *Runtime) pauseFutileRollover() {
 	r.wakeNarrator(wakeError)
 }
 
+// futileStandAside reports that something arrived which the orchestrator
+// has not seen (a message posted mid-turn, say). Pausing now would record a
+// forced yield that swallows it, so the pause stands aside once per such
+// arrival and the orchestrator takes a turn with the prompt as it is; if the
+// context is still full after that turn, the pause lands. Bounded: one turn
+// per arrival, never a loop.
+func (r *Runtime) futileStandAside() bool {
+	unseen := r.lastWake
+	if r.st.LastUserSeq > unseen {
+		unseen = r.st.LastUserSeq
+	}
+	if unseen > r.lastOrchSeen && unseen > r.futileSkipped {
+		r.futileSkipped = unseen
+		return true
+	}
+	return false
+}
+
 // carriedOver names the user's answers the orchestrator has not seen yet
 // and any question still open, for the first message of a new context.
 func (r *Runtime) carriedOver() string {
 	var parts []string
 	for _, ev := range r.st.Events {
-		if ev.Type != event.UserAnswer || ev.Seq <= r.lastOrchSeen {
+		if ev.Seq <= r.lastOrchSeen {
 			continue
 		}
-		var d event.UserAnswerData
-		_ = ev.Decode(&d)
-		parts = append(parts, fmt.Sprintf("The user answered question %s (%q): %s", d.QuestionID, firstLine(r.st.QuestionText(d.QuestionID), 200), d.Text))
+		switch ev.Type {
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			parts = append(parts, fmt.Sprintf("The user answered question %s (%q): %s", d.QuestionID, firstLine(r.st.QuestionText(d.QuestionID), 200), d.Text))
+		case event.UserMessage:
+			// The message that woke the orchestrator may be the very thing
+			// that tipped the context over; it must not vanish into the
+			// closed subsession.
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			part := "The user wrote: " + d.Text
+			for _, a := range d.Attachments {
+				part += fmt.Sprintf("\n[attached %s: %s]", a.Name, a.Path)
+			}
+			parts = append(parts, strings.TrimSpace(part))
+		case event.TaskEnd:
+			var d event.TaskEndData
+			_ = ev.Decode(&d)
+			if t := r.st.Tasks[d.ID]; t != nil && t.Kind != "dossier" {
+				parts = append(parts, fmt.Sprintf("Task %s (%q) ended %s: %s", d.ID, t.Title, d.Status, firstLine(strings.TrimSpace(d.Summary), 300)))
+			}
+		}
 	}
 	if q := r.st.Question; q != nil {
 		parts = append(parts, "A question to the user is still pending: "+firstLine(q.Text, 200))

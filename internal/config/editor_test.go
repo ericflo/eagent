@@ -266,3 +266,21 @@ func TestLoadBundleRefusesPathNames(t *testing.T) {
 		t.Fatalf("a preset name is still accepted as a bundle: %v", err)
 	}
 }
+
+// The web config page passes a bundle name straight from the query string;
+// Resolve must confine it like LoadBundle does.
+func TestResolveRefusesPathBundleNames(t *testing.T) {
+	project := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "leak.json")
+	if err := os.WriteFile(outside, []byte(`{"persona": "LEAKED", "task_concurrency": 42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, _ := filepath.Rel(BundlesDir(project), strings.TrimSuffix(outside, ".json"))
+	res := Resolve(project, "", rel)
+	if res.Effective.Persona == "LEAKED" || res.Effective.TaskConcurrency == 42 || !strings.Contains(res.LoadError, "bundle names") || res.Active.Kind == "bundle" {
+		t.Fatalf("a path was accepted as a bundle name: %+v %q", res.Active, res.LoadError)
+	}
+	if _, err := BundleAlone(project, "../leak"); err == nil || !strings.Contains(err.Error(), "bundle names") {
+		t.Fatalf("BundleAlone: %v", err)
+	}
+}

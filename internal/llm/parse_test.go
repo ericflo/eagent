@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseGLMTextToolCall(t *testing.T) {
@@ -175,5 +176,24 @@ func TestNestedTagInArgValue(t *testing.T) {
 	calls, _ = ParseTextToolCalls(text)
 	if len(calls) != 2 || calls[1].Name != "bash" {
 		t.Fatalf("truncated value: %+v", calls)
+	}
+}
+
+// Scanning stays linear in the text however many argument tags it quotes.
+func TestToolCallScanIsLinear(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>")
+	for i := 0; i < 20000; i++ {
+		b.WriteString("<arg_value>x</arg_value> ")
+	}
+	b.WriteString("</arg_value>\n</tool_call>")
+	text := b.String()
+	start := time.Now()
+	calls, _ := ParseTextToolCalls(text)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("scan took %v on %d bytes", d, len(text))
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
 	}
 }

@@ -87,6 +87,10 @@ type Message struct {
 	// ToolCalls.
 	Native         json.RawMessage
 	NativeProtocol string
+	// NativeHost is the base URL that produced Native. Encrypted reasoning
+	// and item ids are bound to the account that minted them, so a fallback
+	// route at another host must rebuild the turn instead of replaying.
+	NativeHost string
 
 	// CacheBreak marks the last stable message (Anthropic cache_control).
 	CacheBreak bool
@@ -215,6 +219,7 @@ type Response struct {
 	ToolCalls []event.ToolCall
 	Native    json.RawMessage
 	Protocol  string
+	BaseURL   string // the endpoint that produced this response
 	Model     string
 	Usage     event.Usage
 	Stop      string // "stop" | "tool_calls" | "length" | other provider value
@@ -411,6 +416,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if err == nil {
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
+			resp.BaseURL = c.Endpoint.BaseURL
 			if resp.Model == "" {
 				resp.Model = c.Endpoint.Model
 			}

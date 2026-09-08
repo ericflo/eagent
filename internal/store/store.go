@@ -152,6 +152,9 @@ type Session struct {
 	lock    *os.File
 	closed  bool
 	nextSeq func() int64
+	// Stale names the inbox files that already existed when this run took
+	// the lock: orders meant for an earlier run, not this one.
+	Stale map[string]bool
 }
 
 // Create makes a new session directory and its first subsession file.
@@ -242,6 +245,12 @@ func (s *Session) acquireLock() error {
 	_ = f.Truncate(0)
 	_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
 	s.lock = f
+	s.Stale = map[string]bool{}
+	if entries, err := os.ReadDir(filepath.Join(s.Path, "inbox")); err == nil {
+		for _, e := range entries {
+			s.Stale[e.Name()] = true
+		}
+	}
 	return nil
 }
 

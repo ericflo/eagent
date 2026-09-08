@@ -24,7 +24,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	maxTokens := c.maxTokens(req)
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
-		"messages":   anthropicMessages(req),
+		"messages":   anthropicMessages(req, c.Endpoint.BaseURL),
 		"stream":     true,
 		"max_tokens": maxTokens,
 	}
@@ -288,7 +288,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 
 // anthropicMessages renders history with strict user/assistant alternation
 // and a cache breakpoint on the last stable message.
-func anthropicMessages(req Request) []map[string]any {
+func anthropicMessages(req Request, host string) []map[string]any {
 	var msgs []map[string]any
 	push := func(role string, content []map[string]any) {
 		if len(msgs) > 0 && msgs[len(msgs)-1]["role"] == role {
@@ -314,7 +314,9 @@ func anthropicMessages(req Request) []map[string]any {
 			push("user", blocks)
 		case "assistant":
 			var content []map[string]any
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic {
+			// Signed thinking blocks are bound to the account that produced
+			// them; replay them only at the host that did.
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
 				var native []map[string]any
 				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
 					content = native

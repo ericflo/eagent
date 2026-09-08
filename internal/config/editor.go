@@ -104,6 +104,9 @@ func Resolve(project, preset, bundle string) Resolution {
 				preset = canon
 			}
 			bundle = ""
+		} else if !validName(bundle) {
+			res.LoadError = "config bundle names use letters, digits, '-', '_' and '.' only"
+			bundle = ""
 		} else if m, err := readJSONMap(BundlePath(project, bundle)); err != nil {
 			res.LoadError = err.Error()
 		} else if m == nil {
@@ -317,6 +320,9 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 // bundle itself names, without the project file or the environment: what
 // the bundle says, for showing or copying it.
 func BundleAlone(project, name string) (Config, error) {
+	if !validName(name) {
+		return Config{}, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+	}
 	m, err := readJSONMap(BundlePath(project, name))
 	if err != nil {
 		return Config{}, err

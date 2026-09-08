@@ -15,7 +15,7 @@ import (
 func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	body := map[string]any{
 		"model":             c.Endpoint.Model,
-		"input":             responsesInput(req, c.Endpoint.ReplayReasoning),
+		"input":             responsesInput(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL),
 		"stream":            true,
 		"store":             false,
 		"max_output_tokens": c.maxTokens(req),
@@ -203,7 +203,7 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 				reasoning.WriteString(s.Text)
 			}
 		}
-		cleaned = append(cleaned, stripStatus(raw))
+		cleaned = append(cleaned, sanitizeNativeArgs(stripStatus(raw)))
 	}
 	out.Text = text.String()
 	out.Reasoning = reasoning.String()
@@ -279,7 +279,35 @@ func stripStatus(raw json.RawMessage) json.RawMessage {
 }
 
 // responsesInput renders history as Responses API input items.
-func responsesInput(req Request, replayReasoning bool) []any {
+// sanitizeNativeArgs makes a stored function_call item safe to replay: a
+// call cut off mid-arguments has an unparseable arguments string, and the
+// API would reject it on every later turn (the log is append-only, so this
+// also heals items already on disk).
+func sanitizeNativeArgs(raw json.RawMessage) json.RawMessage {
+	var probe struct {
+		Type      string `json:"type"`
+		Arguments string `json:"arguments"`
+	}
+	if json.Unmarshal(raw, &probe) != nil || probe.Type != "function_call" {
+		return raw
+	}
+	fixed := argsString(normalizeArgs(probe.Arguments))
+	if fixed == probe.Arguments {
+		return raw
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		return raw
+	}
+	m["arguments"] = fixed
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func responsesInput(req Request, replayReasoning bool, host string) []any {
 	var items []any
 	for _, m := range req.Messages {
 		switch m.Role {
@@ -296,7 +324,10 @@ func responsesInput(req Request, replayReasoning bool) []any {
 			}
 			items = append(items, map[string]any{"role": "user", "content": parts})
 		case "assistant":
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses {
+			// Native items replay only at the host that minted them: encrypted
+			// reasoning and rs_/fc_ ids belong to that account, and a fallback
+			// route elsewhere would be rejected on every turn.
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
 				var native []json.RawMessage
 				if json.Unmarshal(m.Native, &native) == nil {
 					if replayReasoning {
@@ -307,7 +338,7 @@ func responsesInput(req Request, replayReasoning bool) []any {
 				}
 				if len(native) > 0 {
 					for _, it := range native {
-						items = append(items, it)
+						items = append(items, sanitizeNativeArgs(it))
 					}
 					continue
 				}
@@ -334,4 +365,9 @@ func responsesInput(req Request, replayReasoning bool) []any {
 		}
 	}
 	return items
+}
+
+// sameHost compares two base URLs ignoring a trailing slash.
+func sameHost(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
 }

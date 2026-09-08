@@ -37,7 +37,19 @@ func (r *Runtime) maybeWakeNarrator() {
 	if reason != wakeFinal && reason != wakePeriodic && r.narrWorthy <= r.narrLastSeen {
 		return // nothing new since it last looked (the tick decides for itself)
 	}
+	if (reason == wakeDone || reason == wakeYield) && r.narratorCoveredYield() {
+		return // it saw the yield in the call that made it, and spoke; the yield event's own seq is not news
+	}
 	r.startNarratorTurn(reason)
+}
+
+// narratorCoveredYield reports that the narrator has both seen the latest
+// yield (its cursor is at or past the seq where the yield became visible)
+// and spoken since, so waking it for the same yield would only produce a
+// duplicate report.
+func (r *Runtime) narratorCoveredYield() bool {
+	y := r.st.LastYield
+	return y != nil && r.yieldSeenSeq > 0 && r.narrLastSeen >= r.yieldSeenSeq && r.narrSaidSeq > r.yieldSeenSeq
 }
 
 // narratorTick wakes the narrator periodically while work is happening.

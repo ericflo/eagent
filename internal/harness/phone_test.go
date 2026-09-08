@@ -531,12 +531,16 @@ func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 	}
 	ui.input <- "1" // answered in the terminal
 	waitFor(t, "the phone question to be withdrawn", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.cancelled) == 1 })
-	waitFor(t, "the final message", func() bool { return ui.messageCount() == 1 })
+	waitFor(t, "the final message", func() bool { return ui.messageCount() >= 1 })
 	ui.input <- "/quit"
 	select {
 	case <-done:
 	case <-time.After(15 * time.Second):
 		t.Fatal("did not quit")
+	}
+	if n := ui.messageCount(); n != 1 {
+		msgs, _, _ := ui.snapshot()
+		t.Fatalf("the narrator delivered the final report %d times: %q", n, msgs)
 	}
 	evs, _ := store.Read(rt.sess.Path)
 	var fromPhone, mirroredAnswer bool
@@ -2173,5 +2177,56 @@ func TestFutilePauseDoesNotEatTheNextMessage(t *testing.T) {
 	}
 	if orchCalls-before > 4 {
 		t.Fatalf("the rollover spun: %d orchestrator calls during the resume", orchCalls-before)
+	}
+}
+
+// A rollover restates, for the fresh context, the user message that woke
+// the orchestrator and any task that ended unseen, not only answers.
+func TestCarriedOverIncludesMessagesAndTaskEnds(t *testing.T) {
+	st := state.New()
+	seq := int64(0)
+	add := func(ev event.Event) {
+		seq++
+		ev.Seq = seq
+		st.Apply(ev)
+	}
+	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
+	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "old, already seen"}))
+	seen := seq
+	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "please also add tests", Attachments: []event.Attachment{{Name: "spec.md", Path: "/p/spec.md"}}}))
+	add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "Build it"}))
+	add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t1", Status: "completed", Summary: "built and verified"}).WithTask("t1"))
+	r := &Runtime{st: st, lastOrchSeen: seen}
+	got := r.carriedOver()
+	for _, want := range []string{"The user wrote: please also add tests", "[attached spec.md: /p/spec.md]", `Task t1 ("Build it") ended completed: built and verified`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("carried over lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "old, already seen") {
+		t.Fatalf("a message the orchestrator already read was restated: %s", got)
+	}
+}
+
+// The futile-rollover pause stands aside exactly once per unseen arrival,
+// so a message posted mid-turn gets a turn instead of being swallowed, and
+// a context that stays full still pauses afterwards.
+func TestFutileStandAsideIsOncePerArrival(t *testing.T) {
+	st := state.New()
+	st.LastUserSeq = 10
+	r := &Runtime{st: st, lastOrchSeen: 5, lastWake: 8}
+	if !r.futileStandAside() {
+		t.Fatal("an unseen message must make the pause stand aside")
+	}
+	if r.futileStandAside() {
+		t.Fatal("the same arrival must not make it stand aside twice")
+	}
+	r.lastOrchSeen = 12 // the orchestrator took its turn and saw everything
+	if r.futileStandAside() {
+		t.Fatal("nothing unseen: the pause may land")
+	}
+	st.LastUserSeq = 15 // a new arrival
+	if !r.futileStandAside() {
+		t.Fatal("a new arrival stands the pause aside again, once")
 	}
 }

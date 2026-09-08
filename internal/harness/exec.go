@@ -547,7 +547,7 @@ func (r *Runtime) toolListFor(actor string) []llm.Tool {
 // recordAssistant appends the model response as an event and returns it.
 func (r *Runtime) recordAssistant(actor, task string, resp *llm.Response, seenSeq int64) event.Event {
 	data := event.AssistantData{
-		Provider: resp.Protocol, Model: resp.Model, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+		Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 		ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
 		ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: seenSeq, Stop: resp.Stop,
 	}
