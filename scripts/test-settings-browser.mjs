@@ -26,6 +26,7 @@ try {
   const parent = `<!doctype html><iframe title="Settings" sandbox="allow-scripts" style="width:100%;height:96vh" src="/settings"></iframe><script>
     window.fixture=${JSON.stringify({resource, manifest, files}).replaceAll('<', '\\u003c')};
     window.calls=[]; window.proposals=[]; window.proposal=null; window.editable=true; window.inspection=null;
+    window.anchor=null; window.revealed=null;
     document.querySelector('iframe').onload=()=>{
       const channel=new MessageChannel(); window.bridge=channel.port1; const nonce='fixture-nonce';
       bridge.onmessage=async event=>{
@@ -34,6 +35,8 @@ try {
         else if(m.method==='artifact.read') { const bytes=fixture.files[m.params.path] || new Uint8Array(await (await fetch('/file?path='+encodeURIComponent(m.params.path))).arrayBuffer()); result=new Uint8Array(bytes.slice(m.params.offset,m.params.offset+m.params.length)).buffer; }
         else if(m.method==='artifact.view-state.read') result=window.inspection;
         else if(m.method==='artifact.view-state.write') { window.inspection=m.params; result={saved:true}; }
+        else if(m.method==='artifact.anchor') result=window.anchor;
+        else if(m.method==='thread.reveal') { window.revealed=m.params; result={available:true}; }
         else if(m.method==='settings.read') result={resource:fixture.resource,editable};
         else if(m.method==='settings.propose') { if(!editable) error='Read only'; else {proposal=m.params; if(proposal) proposals.push(proposal); result={staged:!!proposal};} }
         else error='Unsupported method: '+m.method;
@@ -171,6 +174,14 @@ try {
   assert.deepEqual(errors, []);
   assert.deepEqual(outbound, []);
   console.log('PASS actual connected Go WebAssembly viewer retains section and search across iframe replacement');
+  await page.evaluate(() => { window.anchor={dataset_format:fixture.manifest.dataset.format,session_id:fixture.manifest.dataset.session_id,seq:2}; document.querySelector('iframe').src='/viewer?anchor=2'; });
+  await frame.getByText('Selected event #2.', { exact: true }).waitFor();
+  await frame.getByText('1 matching events', { exact: true }).waitFor();
+  await frame.getByRole('button', { name: 'Find chat message', exact: true }).click();
+  await page.waitForFunction(() => window.revealed?.seq === 2);
+  await frame.getByRole('button', { name: 'Show all events', exact: true }).click();
+  assert.equal(await frame.locator('#focus-notice').isHidden(), true);
+  console.log('PASS actual eagent viewer focuses a native sequence and requests its matching chat message');
 
   // The exact same exported page opens from disk with verified captured data.
   await page.unroute('**/*');

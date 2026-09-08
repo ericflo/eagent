@@ -193,7 +193,7 @@ func (r *Runtime) startPhone() {
 		p.mu.Unlock()
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
-			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
+			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
 			if err == nil {
 				p.mu.Lock()
 				p.posted[m2.ID] = true
@@ -327,7 +327,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			// The status the work is in right now rides on the message, so
 			// it does not blink off while the orchestrator keeps going.
 			act := p.attach()
-			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
+			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
 			msg, thread, err := p.client.Post(ctx, p.ref, req)
 			if err != nil && len(req.Files) > 0 {
 				// The files may be refused (storage off, too large); the words still matter.
@@ -363,7 +363,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				_ = p.client.Cancel(ctx, fid)
 			}
 			if p.mirror {
-				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq}, ClientKey: p.key("a", seq)})
+				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
 				if err == nil {
 					p.remember(msg.ID)
 				}
@@ -377,7 +377,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		text := d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq}, ClientKey: p.key("u", seq)})
+			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
 			if err == nil {
 				p.remember(msg.ID)
 			}
@@ -676,3 +676,9 @@ func PhoneStatus(remote bool) string {
 }
 
 var _ = fmt.Sprintf
+
+// sourceAnchor links a mirrored message to its immutable native event. The
+// server treats this as a navigation hint, never settings authority.
+func (p *phone) sourceAnchor(seq int64) map[string]any {
+	return map[string]any{"dataset_format": "eagent.session-jsonl/v1", "session_id": p.sid, "seq": seq}
+}
