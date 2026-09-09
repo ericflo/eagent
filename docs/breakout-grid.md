@@ -1,6 +1,6 @@
-# The Breakout grid: six presets, one brief
+# The Breakout grid v2: fourteen presets, one brief
 
-On 2026-09-07 six eagent presets each built the same game from the same one-paragraph spec, in parallel, unattended. A seventh eagent session then measured all six: it parsed their event logs, served each build, played it with scripted Chromium, took screenshots, and scored it against a nine-item rubric. This page is the record: what ran, what it cost, what each build shipped, and what the exercise changed in the harness.
+On 2026-09-08/09 fourteen eagent presets each built the same game from the same one-paragraph spec, in parallel, unattended, on binary v0.8.0-1-g59ce5c7 (with all four cache/fallback fixes from the first grid). A measuring run then compiled all fourteen: it parsed their event logs, served each build, played it with scripted Chromium, took screenshots, and scored it against the same nine-item rubric as v1. This page is the record: what ran, what it cost, what each build shipped, and what the exercise changed in the harness. It replaces the six-preset grid of 2026-09-07, which is archived as [`docs/grid/results-2026-09-07.json`](grid/results-2026-09-07.json).
 
 ## What was run
 
@@ -10,244 +10,312 @@ Every build got the same prompt:
 
 > Read INSTRUCTIONS.md and relentlessly build it until you're confident that it's fully and completely implemented to the highest possible standard you can manage.
 
-The six presets, with the model each actor ran:
+The fourteen presets, with the model each actor ran (orchestrator / task worker / narrator):
 
 | Preset | Orchestrator | Task worker | Narrator |
 |---|---|---|---|
-| `glm` | GLM-5.3 | GLM-5.3-Flash | DeepSeek V4 Flash (Together AI) |
-| `openrouter-high` | Kimi K3 | GLM-5.3 | GLM-5.3-Flash (OpenRouter) |
+| `glm` | GLM-5.3 | GLM-5.3-Flash | DeepSeek V4 Flash |
+| `openrouter-high` | Kimi K3 | GLM-5.3 | GLM-5.3-Flash |
+| `openrouter-med` | GLM-5.3 | GLM-5.3-Flash | DeepSeek V4 Flash |
 | `anthropic-high` | Claude Fable 5.1 | Claude Opus 5 | Claude Sonnet 5 |
 | `anthropic-med` | Claude Opus 5 | Claude Sonnet 5 | Claude Haiku 4.5 |
 | `openai-high` | GPT-6 Astra (high effort) | GPT-5.6 Sol | GPT-5.6 Luna |
+| `openai-med` | GPT-6 Astra | GPT-5.6 Terra | GPT-5.6 Luna |
 | `openai-low` | GPT-5.6 Sol | GPT-5.6 Luna | GPT-5.6 Luna |
+| `astra` | GPT-6 Astra | GLM-5.3-Flash | DeepSeek V4 Flash |
+| `deepseek` | DeepSeek V4 Flash | DeepSeek V4 Flash | DeepSeek V4 Flash |
+| `qwen` | Qwen 3.8 27B | Qwen 3.8 27B | Qwen 3.8 27B |
+| `muse` | Muse Spark 1.3 | Muse Spark 1.3 | Muse Spark 1.3 |
+| `opencode-med` | GLM-5.3 | GLM-5.3-Flash | DeepSeek V4 Flash |
+| `nous-med` | GLM-5.3 | GLM-5.3-Flash | DeepSeek V4 Flash |
 
-Each run started in its own directory holding nothing but `INSTRUCTIONS.md`, with the phone mirror off (`EAGENT_FINALECHAT=off`). All six ended by declaring the work done. None rolled its context over, and no narrator asked a question.
+Each run started in its own directory holding nothing but `INSTRUCTIONS.md`, with the phone mirror off (`EAGENT_FINALECHAT=off`). Nine runs ended by declaring the work done (`muse`, `openrouter-high`, `openrouter-med`, `openai-low`, `openai-med`, `openai-high`, `glm`, `deepseek`, `qwen`). Two were stopped by budget SIGTERM after passing verification (`anthropic-high` $24.31, `anthropic-med` $23.17). One was halted by its provider (`nous-med` $0.13 — Nous 404s, ended awaiting-input). Two were killed by caps mid-verification (`opencode-med` $1.11, `astra` $7.40 on the global $90 brake). No run rolled its context over, and no narrator asked a question.
 
-The measuring run was itself an eagent session on the `openrouter-high` preset, following a written brief. It parsed each run's JSONL event logs for duration, tokens, cache hits, tasks, narrator messages and errors; computed cost at September 2026 list prices; served each build statically and played it with scripted Chromium (Playwright) at a 1280×800 desktop viewport and a 390×844 touch phone viewport; captured console and page errors; and scored the nine spec items from code reading plus that play. It took 16 minutes. Its brief and the raw per-build reports live with the run directories outside this repository; [`docs/grid/results.json`](grid/results.json) is the compiled data.
+The measuring run parsed each run's JSONL event logs for duration, tokens, cache hits, tasks, narrator messages and errors; computed cost at September 2026 list prices; served each build statically (Vite builds from `dist/`) and played it with scripted Chromium (Playwright) at a 1280×800 desktop viewport and a 390×844 touch phone viewport with a multi-step start; captured console and page errors; and scored the nine spec items from code reading plus that play. Run spend totalled $91.54. Its raw per-build reports live with the run directories outside this repository; [`docs/grid/results.json`](grid/results.json) is the compiled data.
 
 ## Results
 
-All numbers are from `results.json`. Models are listed as orchestrator / task worker / narrator.
+All numbers are from `results.json`. Status is `done` (declared done itself), `stopped-budget` (SIGTERM after passing verification), `stopped-capped` (killed by a cost cap), or `halted-provider` (provider errors ended it).
 
-| Preset | Models | Duration | Cost | Tokens in | Tokens out | Cache | Tasks | Rollovers | Narrator messages | Errors | Lines of code | Tests | Console errors in play |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `glm` | GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash | 38 min | $2.19 | 4.3M | 163k | 78% | 6/6 | 0 | 3 | 0 | 3,335 | yes, pass | 0 |
-| `openrouter-high` | Kimi K3 / GLM-5.3 / GLM-5.3-Flash | 19 min | $1.23 | 1.9M | 83k | 88% | 1/2 | 0 | 2 | 1 | 1,071 | none | 0 |
-| `anthropic-high` | Fable 5.1 / Opus 5 / Sonnet 5 | 1 h 11 min | $15.54 | 12.0M | 175k | 93% | 3/3 | 0 | 3 | 0 | 3,195 | yes, pass | 0 |
-| `anthropic-med` | Opus 5 / Sonnet 5 / Haiku 4.5 | 3 h 6 min | $24.80 | 54.1M | 539k | 95% | 15/15 | 0 | 19 | 0 | 5,896 | none | 0 |
-| `openai-high` | GPT-6 Astra / GPT-5.6 Sol / GPT-5.6 Luna | 24 min | $31.59 | 6.9M | 114k | 6% | 9/9 | 0 | 17 | 0 | 1,504 | yes, pass | 0 |
-| `openai-low` | GPT-5.6 Sol / GPT-5.6 Luna / GPT-5.6 Luna | 5 min | $0.71 | 813k | 24k | 15% | 4/4 | 0 | 6 | 0 | 34 | none | 0 |
+| Preset | Status | Duration | Cost | Tokens in / out | Cache | Tasks done | Narr msgs | Errors | Files / LOC | Tests | Play errors |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `opencode-med` | stopped-capped | 100 min | $1.11 | 17.9M / 232k | 95% | 5/8 | 38 | 13 | 15 / 3,054 | none | 0 / 0 |
+| `astra` | stopped-capped | 110 min | $7.40 | 48.3M / 972k | 87% | 5/8 | 47 | 36 | 245 / 976* | yes (vitest) | 0 / 0 |
+| `openai-med` | done | 27 min | $12.12 | 17.4M / 209k | 95% | 14/14 | 41 | 3 | 30 / 2,229* | yes (node --test) | 0 / 0 |
+| `openai-high` | done | 42 min | $13.69 | 24.5M / 182k | 97% | 5/8 | 50 | 26 | 77 / 3,044* | yes (tsx --test) | 0 / 0 |
+| `anthropic-med` | stopped-budget | 60 min | $23.17 | 57.6M / 608k | 96% | 7/9 | 33 | 7 | 21 / 7,806 | per-file node runners | 0 / 0 |
+| `anthropic-high` | stopped-budget | 60 min | $24.31 | 18.8M / 387k | 94% | 2/4 | 21 | 5 | 42 / 6,010 | per-file node runners | 0 / 2 |
+| `muse` | done | 11 min | $0.04 | 2.4M / 73k | 92% | 2/2 | 7 | 2 | 10 / 1,907 | none | 0 / 0 |
+| `glm` | done | 88 min | $1.22 | 9.3M / 258k | 79% | 2/3 | 36 | 11 | 3 / 2,035 | none | 0 / 0 |
+| `openrouter-high` | done | 23 min | $1.44 | 2.5M / 124k | 88% | 2/2 | 16 | 2 | 3 / 1,577 | none | 0 / 0 |
+| `deepseek` | done | 101 min | $0.53 | 8.4M / 404k | 82% | 1/3 | 54 | 13 | 23 / 1,581 | yes (qa/smoke) | 0 / 0 |
+| `openai-low` | done | 37 min | $1.13 | 18.2M / 153k | 97% | 5/5 | 27 | 4 | 12 / 616 | yes (physics.test.js) | 0 / 0 |
+| `openrouter-med` | done | 23 min | $0.66 | 3.4M / 65k | 73% | 2/2 | 14 | 4 | 17 / 1,459 | none | 0 / 0 |
+| `qwen` | done | 113 min | $4.61 | 9.6M / 192k | 57% | 1/3 | 46 | 7 | 15 / 3,556 | none | 0 / 0 |
+| `nous-med` | halted-provider | 34 min | $0.13 | 2.7M / 37k | 90% | 1/1 | 10 | 2 | 16 / 1,375 | none | 0 / 0 |
 
-Model calls, as orchestrator / task worker / narrator: `glm` 130 (68/36/26), `openrouter-high` 101 (31/57/13), `anthropic-high` 177 (30/131/16), `anthropic-med` 836 (61/733/42), `openai-high` 273 (60/183/30), `openai-low` 76 (23/44/9).
+\* `astra`, `openai-high` and `openai-med` are Vite builds: the judged entry is `dist/index.html`, so file counts include `dist/` output and LOC counts understate hand-written source.
+
+Model calls, as orchestrator / task worker / narrator: `opencode-med` 434 (48/333/53), `astra` 753 (64/624/65), `openai-med` 448 (78/317/53), `openai-high` 487 (65/371/51), `anthropic-med` 620 (35/542/43), `anthropic-high` 231 (12/190/29), `muse` 77 (20/45/12), `glm` 286 (55/178/53), `openrouter-high` 110 (33/56/21), `deepseek` 231 (92/77/62), `openai-low` 301 (31/240/30), `openrouter-med` 133 (27/83/23), `qwen` 226 (78/76/72), `nous-med` 112 (15/70/27).
+
+Leaderboard (rubric, then tests, then cost — see Verdict for the rule):
+
+| # | Preset | Rubric | Tests | Cost |
+|---|---|---|---|---|
+| 1 | `opencode-med` | 27 | none | $1.11 |
+| 2 | `astra` | 26 | vitest | $7.40 |
+| 3 | `openai-med` | 26 | node --test | $12.12 |
+| 4 | `openai-high` | 26 | tsx --test | $13.69 |
+| 5 | `anthropic-med` | 26 | per-file runners | $23.17 |
+| 6 | `anthropic-high` | 26 | per-file runners | $24.31 |
+| 7 | `muse` | 26 | none | $0.04 |
+| 8 | `glm` | 25 | none | $1.22 |
+| 9 | `openrouter-high` | 25 | none | $1.44 |
+| 10 | `deepseek` | 24 | qa / smoke | $0.53 |
+| 11 | `openai-low` | 24 | physics.test.js | $1.13 |
+| 12 | `openrouter-med` | 24 | none | $0.66 |
+| 13 | `qwen` | 24 | none | $4.61 |
+| 14 | `nous-med` | 22 | none | $0.13 |
 
 Notes on the table:
 
-- Every build loaded and played with zero console errors and zero page errors under automation, desktop and phone.
-- The one error is `openrouter-high`'s first task, which died on an API 404 from OpenRouter ("No endpoints found that support image input"); the second task completed the game anyway. See commit `4b8e277` below.
-- Tests: `glm` shipped a playwright-core headless harness (`node test/full.js`, all checks passing, reporting about 61 FPS); `anthropic-high` shipped browser tests (`node test/verify.mjs`, `node test/tiers.mjs`, both passing); `openai-high` shipped 9 unit tests, all passing, plus a Playwright e2e suite it did not run. `anthropic-med`, `openrouter-high` and `openai-low` shipped no test suite.
-- `openai-low`'s line count is not comparable: its source is minified, about 34 physical lines and 10 KB of `game.js`.
+- Overall prompt-cache hit rate was 91.2%. The cache fix from v1 is verified: `openai-high` went from 6% cached ($31.59 on 6.9M input tokens) to 96.6% cached ($13.69 on 24.5M input tokens) — roughly 3× the tokens for less than half the money.
+- Thirteen of fourteen builds played clean: zero console errors everywhere, zero page errors except `anthropic-high` (2 × `nebula is not defined`, desktop and mobile — a genuine bug, see Verdict).
+- The OpenAI-direct key ran out of credits mid-grid (502s onward); affected runs survived on their OpenRouter fallbacks by preset design. The `astra` log also shows Together 402 credit-limit failures on three late tasks.
+- Caps overshot between ticks: `openai-med` finished at $12.12 against an $8.40 cap, `deepseek` at $0.53 vs $0.50, `qwen` at $4.59 vs a raised $3.50 cap. Enforcement only checks between model calls, so a run in flight sails past.
+- `qwen` was cap-killed once at $0.88, resumed with a raised cap, then briefly ran 4 read-only calls against the wrong preset (no files written — killed before it could do anything), and resumed correctly on `qwen` to finish at $4.61.
+- External dependencies are rare: only `deepseek` and `openai-med` load Google Fonts; everything else is dependency-free at runtime.
 
 ## Rubric
 
-Each spec item scored 0 to 3: 3 means present, working and genuinely well done; 2 present and working; 1 token effort; 0 absent.
+Each spec item scored 0 to 3: 3 means present, working and genuinely well done; 2 present and working; 1 token effort; 0 absent. Fourteen columns will not fit a readable table, so presets are rows.
 
-| Spec item | `glm` | `openrouter-high` | `anthropic-high` | `anthropic-med` | `openai-high` | `openai-low` |
-|---|---|---|---|---|---|---|
-| Breakthrough | 3 | 3 | 3 | 3 | 3 | 2 |
-| Juice | 3 | 3 | 3 | 3 | 3 | 2 |
-| Power-up balls | 3 | 3 | 3 | 3 | 3 | 2 |
-| Special bricks | 3 | 3 | 3 | 3 | 3 | 2 |
-| 2-D paddle | 3 | 3 | 3 | 3 | 3 | 2 |
-| Mouse | 3 | 3 | 3 | 3 | 3 | 2 |
-| Mobile | 2 | 2 | 3 | 3 | 3 | 3 |
-| Polish | 3 | 3 | 3 | 3 | 3 | 2 |
-| Audio | 3 | 3 | 3 | 3 | 2 | 1 |
-| **Total (of 27)** | **26** | **26** | **27** | **27** | **26** | **18** |
+| Preset | Breakthrough | Juice | Power-balls | Special bricks | 2-D paddle | Mouse | Mobile | Polish | Audio | **Total** |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `opencode-med` | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | **27** |
+| `astra` | 3 | 2 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | **26** |
+| `openai-med` | 3 | 2 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | **26** |
+| `openai-high` | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 2 | **26** |
+| `anthropic-med` | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 2 | 3 | **26** |
+| `anthropic-high` | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 2 | 3 | **26** |
+| `muse` | 3 | 2 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | **26** |
+| `glm` | 3 | 3 | 2 | 3 | 3 | 3 | 3 | 2 | 3 | **25** |
+| `openrouter-high` | 3 | 3 | 3 | 3 | 3 | 3 | 2 | 3 | 2 | **25** |
+| `deepseek` | 3 | 2 | 2 | 3 | 3 | 3 | 3 | 3 | 2 | **24** |
+| `openai-low` | 3 | 2 | 3 | 3 | 3 | 3 | 3 | 2 | 2 | **24** |
+| `openrouter-med` | 2 | 2 | 3 | 3 | 3 | 3 | 2 | 3 | 3 | **24** |
+| `qwen` | 3 | 3 | 2 | 3 | 3 | 3 | 1 | 3 | 3 | **24** |
+| `nous-med` | 3 | 2 | 2 | 3 | 3 | 2 | 2 | 2 | 3 | **22** |
 
 The evidence behind each score, per build, quoted from the measuring run's reports:
 
-### glm — Neon Breakout Breach Edition (26/27)
+### opencode-med — BREAKTOP (27/27)
 
-- **Breakthrough:** `js/game.js:248-306` full breach system — ball above bricks triggers a 'BREACH!' banner, breachBounces raise breachTier to x64 (`CFG.BREACH_TIER_MAX:6`), `totalMult()=comboMult()*breachMult()`; `levels.js` designs each level with a 'breach path' into the attic.
-- **Juice:** `js/game.js:188-193` 'const tierBoost = 1 + G.breachTier * 0.22; FX.burst(...10 + G.breachTier*2...*tierBoost); FX.flash; FX.shake(3 + G.breachTier * 1.2)' — particles/flash/shake all scale with breach tier; audio pitch scales with combo (`audio.js:465` 'var pitch = 1 + Math.min(c,24)/18; // brighter with combo').
-- **Power-up balls:** `js/game.js:334-361` + `config.js` POWERUPS: piercer ('Ball pierces bricks'), inferno ('Burning ball, chains powder', fire splash at `game.js:715`), split/triple (`splitBalls()` `game.js:361`) — three distinct ball power-ups, weighted drop pool.
-- **Special bricks:** `config.js` `FAST_GATE:640` ('fast' needs ball speed; `game.js:750` 'if (br.t==="fast" && speed < CFG.FAST_GATE) // rejected: too slow'), ward bricks gated by approach-direction cone (WARD_CONE, 'SHIELD' reflect), anchor (indestructible), powder (chain-explodes) — four non-hit-count mechanics.
-- **2-D paddle:** `config.js` `BAND_TOP:900`/`BAND_H:190` paddle vertical band; `game.js:654-673` 'slamActive = paddle.slamT>0 || paddle.vy < CFG.SLAM_VY ... newSpeed = sp*CFG.SLAM_BOOST(1.45); else if (paddle.vy < -140) sp*1.12; b.vy += paddle.vy*0.16' — up-motion thrust plus slam mechanic.
-- **Mouse:** `js/game.js:395` 'window.addEventListener("mousemove", ... input.mouseX/Y, mouseActive)' with input priority 'touch > mouse > keys > gamepad' (`game.js:496`).
-- **Mobile:** `game.js:423-453` touchstart/touchmove with preventDefault, multi-touch identifier tracking, fast-upward-swipe slam; DOM SLAM button shown only on touch devices (`isTouchDevice()`, touchUI) — first-class touch but drag-anywhere rather than a literal thumbstick.
-- **Polish:** Pause screen/visibilitychange auto-pause (`game.js:1591`), DOM menu/help/over/pause screens, canvas HUD, gamepad support; loop is rAF with capped dt (`Math.min(dt,1/20)`) plus ball sub-stepping rather than fixed timestep; no TODO/FIXME found; dead code minimal.
-- **Audio:** `audio.js` is a 712-line fully synthesized engine: setBreach(level) 'drives music layers, drone, arp rate', setMultiplier 'opens master filter, raises arp rate', setCombo raises impact pitch, breachEnter/Exit sweeps, 25ms lookahead music scheduler — intensity explicitly scales with breach/multiplier.
+- **Breakthrough:** `js/game.js:863-884` overdrive entry on ball-above-rim while rising (banner + flash + shake + music lift), `:885-900` rim exit pays out; charge past 55% drops a reward capsule.
+- **Juice:** pooled particles + score popups (`js/particles.js:2`), slow-mo timeScale (`:344-358`), lift-scaled shake, overdrive heat vignette; desktop shot shows +136/+124 popups and COMBO x3 live.
+- **Power-up balls:** `js/powerups.js:11-18` FIRE/GIANT/SLOW/MAGNET/STICKY/WIDE/BURST with a weighted drop table; a falling WIDE capsule photographed mid-game.
+- **Special bricks:** `js/bricks.js:54-78` steep-only / speed-gate / speed+steep gates with STEEP ONLY / NEED SPEED fail reasons, plus armored, chain-explosive and spinner codes on the title screen.
+- **2-D paddle:** vertical band clamp, vy lerp, squash-and-stretch (`:463-472`); rising lift adds up to +150 ball speed (`:675-680`).
+- **Mouse:** pointer maps to paddle target in the lower zone (`js/input.js:51-57`); richest title screen in the grid (run status, controls, 6 brick codes, overdrive rules).
+- **Mobile:** drag + sliding-stick touch origin (`:12, :68-73`); mobile shot is a clean stacked layout with DRAG badge and tap-to-launch. PLAY-OK both viewports, 0 errors.
+- **Polish:** side panels, charge/lives/combo/multiplier HUD, pause/sound, localStorage best; live desktop shot (score 483, best combo x3).
+- **Audio:** procedural 8th-note music stepper with layers 0–3 plus overdrive heat (`js/audio.js:16-17, :181-214`); combo and lift drive the layers. The only 3-for-audio without qualification issues — and the only 27 overall, with no test suite.
 
-### openrouter-high — Neon Breakout Frenzy Edition (26/27)
+### astra — OVERDRIVE (26/27, cap-killed mid-verification)
 
-- **Breakthrough:** `index.html` boardStep: 'frenzy: any ball above topmost alive brick row ... frenzy=Math.min(1, frenzy + dt*0.24)' with FRENZY_CAP tiers x2^lvl up to x32, score ticks 'gain=Math.pow(2,frenzyLvl)*5', HUD prompt 'GET THE BALL ABOVE THE BRICKS → FRENZY', levels 'deliberately include gaps/channels'.
-- **Juice:** 'spark(br.x+br.w/2,..., 10+frenzyLvl*4, hue, 240+frenzyLvl*40); shakeIt(1.2 + frenzyLvl*0.6)' in destroyBrick; arpTick 'tempo = 0.42 - frenzyLvl*0.05' and pitch 'root = 220 * Math.pow(1.12, frenzyLvl)' — particle count, shake, and music tempo/pitch all scale with frenzy/combo.
-- **Power-up balls:** P_KINDS: MULTI (adds 2 balls), LASER (laserTimer, pierce: 'const pierce = laserTimer>0 || b.fire'), FIRE (fireball pierce with neighbor splash in destroyBrick) — three working ball power-ups plus WIDE/SLOW paddle effects.
-- **Special bricks:** T_ANGLE requires near-vertical approach ('brickAngleOK: Math.abs(b.vx) < Math.abs(b.vy)*0.62' else 'ANGLE LOCKED' repel), T_SPEED 'sp > 480 + level*12' else 'TOO SLOW' repel; only CORE uses multiple hits and is rare/late-level — angle and speed mechanics dominate.
-- **2-D paddle:** PADDLE_MIN_Y/MAX_Y (about 120px band); 'paddle.y += (ty-paddle.y)*...' follows pointerY; collidePaddle 'THRUST: if(paddle.vy < -60){ sp=clamp(sp*1.22+paddle.vy*-0.06,...); thrustFlash=1; ...THRUST!' — upward paddle motion accelerates ball.
-- **Mouse:** 'canvas.addEventListener("mousemove", e=>{ const p=toBoard(e); pointerX=p.x; pointerY=p.y; })' drives both paddle axes; mousedown launches / routes on-screen buttons.
-- **Mobile:** touchstart/touchmove/touchend with preventDefault {passive:false}, touch-action:none CSS, touch-friendly 52x32 pause/mute buttons and large overlay buttons — solid direct-touch control but no thumbstick widget.
-- **Polish:** Fixed timestep: 'const STEP=1/120 ... while(acc>=STEP){ acc-=STEP; update(STEP,...) }' with delta cap; pause scene + visibilitychange auto-pause, mute with localStorage persistence, HUD with frenzy meter/effect timers, help screen, endless mode, high score; hitButton/drawButton system; no TODO/FIXME.
-- **Audio:** AudioContext with distinct SFX per brick type (sBreak branches: sawtooth sweep for angle, noise+sub thud for speed), noise-buffer hits, and an arp music loop whose tempo, pitch, and waveform escalate with frenzy level (arpTick).
+- **Breakthrough:** genuine above-the-roof breach detection (`src/engine/Game.ts:576-590`), breakthrough heat that decays slowly, tiered overdrive meter until "the arena burns".
+- **Juice (2):** particles + floating text, screen flash, ball trails, camera shake — present and working, modest next to peers.
+- **Power-up balls:** plasma/split/chain/wide/slow/life (`src/engine/types.ts:5`); split is multiball, chain is lightning.
+- **Special bricks:** standard/angular/speed/steel with rejection-flash feedback and a gate legend.
+- **2-D paddle:** clamped vertical zone with rising-feed / dipping-soften (`Game.ts:330-348`, lift boost in `physics.ts:109-114`).
+- **Mouse / mobile:** single pointer surface for mouse + touch; left-half thumbstick (r62), right-half drag; title offers CADET/PILOT/ACE with a live demo behind the modal. PLAY-OK both viewports, 0 errors — mobile shot caught a real `BALL LOST - 1 left` toast.
+- **Polish:** 3 difficulties, how-to, field guide, sound/music/thumbstick/calm toggles, prefs + best persisted. Vite build (`dist/index.html`), vitest suite (`npm test`).
+- **Audio:** separate sfx + music gains, minor-pentatonic sequencer driven by overdrive energy. Killed by the global $90 brake at $7.40 mid-verification — the game was already verified playable.
 
-### anthropic-high — TOPSIDE (27/27)
+### openai-med — OVERDRIVE (26/27, $12.12 vs $8.40 cap)
 
-- **Breakthrough:** `game.js` updateOnTop(): hysteretic column-aware on-top detection ('A ball starts riding when it is above the top of the highest intact brick in its own column band'), multiplier ramps to 60 while riding, 4 escalation tiers with callouts ('ON TOP!', 'TOPSIDE GOD') and topBonus() escalation rewards.
-- **Juice:** breakBrick(): 'this.fx.burst(brick.cx, brick.cy, color, (this.onTop ? 14 : 9) + tier * 6, 220 + tier * 45 ...)' plus shake '(this.onTop ? 3.5 : 2) + tier * 0.7', fx.js tier palettes, chromatic aberration, hitstop, and adaptive fps-driven particle budget.
-- **Power-up balls:** `balls.js` POWERUPS: MULTIBALL, FIRE ('FIREBALL', fireTime=8, passes through bricks), HEAVY, GHOST, ROCKET ball powers applied via Ball.applyPower(), plus paddle powers (WIDE/STICKY/MAGNET) — ball power-ups are the majority and fully wired into physics.
-- **Special bricks:** brickResponse(): PRISM needs a steep angle ('STEEP!'), STEEL needs speed >= STEEL_SPEED ('FASTER!'), ANVIL must be hit 'from above', plus PORTAL_A/B teleport bricks, indestructible WALL, pass-through GLASS, BOOM chain explosions — all non-multi-hit mechanics.
-- **2-D paddle:** `paddle.js` BAND_TOP/BAND_BOTTOM vertical band; `physics.js` paddleBounce(): 'const up = -p.vy; let newSpeed = speed + up * 0.30' with smash when up > 620 ('SMASH!' + hitstop + fx.addShake(11)).
-- **Mouse:** `game.js` updatePaddleControl(): 'mouse: absolute follow — p.moveTo(inp.absolute.x, Math.max(BAND_TOP, Math.min(BAND_BOTTOM, inp.absolute.y)) ...)', input.js sets this.absolute on pointermove for non-touch.
-- **Mobile:** input.js: 'Virtual thumbstick anchored where the thumb landed' (this.stick = { baseX, baseY, ... }), relative-drag delta for paddle, tap-to-launch, document touchmove/touchstart preventDefault, pointer capture, releaseAll on blur/visibilitychange.
-- **Polish:** `main.js` fixed timestep 'STEP = 1/120' accumulator loop with fps watchdog + adaptive render scale; pause on visibilitychange/blur; high-score persistence; test/soak.mjs autoplay harness; no TODO/FIXME/dead code found in src/.
-- **Audio:** `audio.js` full Web Audio graph (compressor, convolution reverb, drone): 'update(dt, {multiplier, onTop, playing})' ramps musicBus/drone/filter with intensity, and while on-top runs a tier-layered arpeggio with 'bpm = 110 + tier * 40 + this.intensity * 90'.
+- **Breakthrough:** per-ball overdrive breach check (`src/game.js:574`), upperBreach event with multiplier + ball count (`:645-661`), OVERDRIVE CASCADE banner.
+- **Juice (2):** particle/trail pools, overdrive trails, impact sparks and shake — tasteful neon rather than maximal.
+- **Power-up balls:** fire/split/magnet/wide drops with timed clears and a current-power HUD slot.
+- **Special bricks:** steep angle gate (<0.82 verticality) and 465+ speed gate (`:551-553`), documented in a field-intelligence codex.
+- **2-D paddle:** vertical lane clamp with vy tracking; rising boost `clamp(-vy*0.22, …, 135)` added to ball speed.
+- **Mouse / mobile:** direct mouse steer; thumbstick element with pointer capture plus LAUNCH button; desktop shot shows the aim phase, mobile a live ball. Vite build, `npm test` (game, audio, responsive, terminal).
+- **Polish:** mission brief, flight manual, best/multiplier/lives/charge HUD, reduced-motion; cohesive art direction on both viewports.
+- **Audio:** adaptive music + sfx with intensity state driving register, fullness and timbre. Overshot its $8.40 cap between ticks and finished at $12.12 with 14/14 tasks complete.
 
-### anthropic-med — ROOFTOP (27/27)
+### openai-high — OVERDRIVE, Evolved (26/27)
 
-- **Breakthrough:** `game.js` _updateRooftopState(): ball above bricks.topY => 'ROOFTOP!' banner, flash/shake/shockwave/slowmo, 'this._multTimer >= 1.6 -> _bumpMultiplier()' stepping through MULT_STEPS [1,2,4,8,16,32] with debounce grace.
-- **Juice:** ParticleSystem(2200) with trails/shockwaves/confetti, Juice (shake/flash/slowmo/tint), onBrickDestroyed(): 'HIGH-MULTIPLIER ESCALATION: at 8x+ every break gets extra particle emission', background.update driven by intensity + (multiplier-8)/24 escalation, rooftopAura particles while riding.
-- **Power-up balls:** `powerups.js` POWERUP_TYPES includes 'multi' (spawns 2 balls), 'fire' and 'heavy' set b.mode on all balls (entities.js BALL_MODE_COLORS fire/heavy/ghost with fire flicker glow), 'nova' arms the ball (_triggerNova 220px blast on next paddle hit); 'laser' fires paddle bolts.
-- **Special bricks:** `bricks.js` canBreak(): 'angle' requires incoming direction within 35deg of stored angle, 'speed' needs speed >= threshold, 'slow' needs speed <= threshold, 'phase' bricks turn intangible on a sine cycle ('time your shot'), 'mirror' never breaks and deflects 90deg — all non-multi-hit.
-- **2-D paddle:** `entities.js` Paddle.update clamps ty to 'yMin = H - 320 + h/2 ... yMax = H - 90'; _reflectPaddle(): 'if (pvy < 0) { const boost = 1 + Math.min(0.35, |pvy|/2600); speed *= boost' with smash sfx/particles when |pvy|>700.
-- **Mouse:** `core/input.js` window mousemove/mousedown handlers set 'this.target.x = p.x; this.target.y = p.y' via toLogical view transform; note: target only updates while _mouseActive (after first mousedown).
-- **Mobile:** `core/input.js` touchstart/touchmove/touchend handlers with first touch becoming the stick ('_stickTouchId'), second finger = tap action, deadzone + 130px radius, drawn thumbstick (drawThumbstick with pulsing ring), stick re-promotion on touch end.
-- **Polish:** `main.js` 'FIXED_STEP = 1/120' accumulator with MAX_SUBSTEPS and slowmo timeScale; `game.js` full state machine (title/ready/playing/paused/dead/gameover/levelclear), restart(), results screen, tutorial hints, anti-stall PRESSURE system, no TODO/FIXME found.
-- **Audio:** `core/audio.js` (712 lines) procedural engine: setIntensity() ramps filter cutoff '400 + intensity*(6000-400)' and '_bpm = 110 + intensity*40'; setRooftop(true) opens a shimmer high-arp layer and 7kHz cutoff; extensive sfx set (brick, clang, mirror, laser, explosion, rooftop, riser).
+- **Breakthrough:** overdrive charges above the field and decays below (`src/game/engine.ts:446-450`); MAXIMUM OVERDRIVE event takes the multiplier to 12 and opens charged speed-gate access.
+- **Juice:** particles, shake/flash, topside trails, impact shake with toasts; mobile shot shows a MULTIBALL banner with pickup toasts — the strongest live-play evidence in the grid.
+- **Power-up balls:** fire/split/wide/magnet (8–12s durations); energy bricks cycle Fireball/Multiball/Wide/Magnetic.
+- **Special bricks:** angle cone (side-hit or >0.72 verticality) and 555+ speed gate with NEED CHARGE / CHANGE ANGLE toasts.
+- **2-D paddle:** 2D follow with vy tracking; upward velocity boosts launches.
+- **Mouse / mobile:** pointer-to-target mapping; VECTOR CONTROL joystick with PUSH-UP-BOOST hint on mobile. Desktop: 6/64 cleared, score 001116. Vite build, `npm test` (engine, physics, audio).
+- **Polish:** sector HUD, intro/restart, field-notes codex, reduced-motion, personal best.
+- **Audio (2):** 8 named SFX voices with intensity-scaled pitch — SFX only, no music engine; the one non-3. $13.69 (was $31.59 at 6% cache in v1) on 24.5M input tokens at 96.6% cached.
 
-### openai-high — APOGEE (26/27)
+### anthropic-med — Attic Breaker (26/27, budget-SIGTERM)
 
-- **Breakthrough:** updateBall(): 'if (!ball.overdrive && ball.y < top - ball.r) { ball.overdrive = true; callout(ABOVE THE LINE - OVERDRIVE)'; `mechanics.js` multiplier() grows 1.8*1.105^hits + time*0.035 capped 16, and hitBrick() gives 'BREAKTHROUGH · ECHO REWARD' extra ball at 8 overdrive hits.
-- **Juice:** hitBrick(): 'shake = Math.min(18, shake + 2 + mult * 0.3); flash = Math.min(0.3, flash + 0.035); burst(..., 10 + Math.floor(mult / 2), 180 + mult * 10)' plus mult-scaled ring particle, overdrive chamber radial glow 'tier = (mult-1)/10', and ball shadowBlur '30 + overdriveHits' — all scaling with the multiplier, with a reduced-effects mode.
-- **Power-up balls:** spawnDrop()/activate(): 'split' spawns echo multiballs up to 6, 'phase' gives core.phaseTimer=8 (pass through gates), 'nova' arms ball.novaTimer=10 causing explodeNova() 125px chain blast; echo balls get promoted to core if the core is lost.
-- **Special bricks:** `mechanics.js` canBreak(): 'speed' needs speed >= brick.gate (570), 'angle' needs |vx|/|vy| ratio in 0.38..2.65, 'direction' only breaks when ball.vy < 0 ('ASCEND ONLY'); hitBrick shows matching feedback texts ('MORE SPEED', 'DIAGONAL').
-- **2-D paddle:** updateInput()/update(): paddle.ty clamped to 865..1015 (150px vertical band); `mechanics.js` paddleBounce(): 'const lift = clamp(-paddle.vy / 400, 0, 0.7); speed *= 1 + lift * 0.3' with 'KINETIC BOOST' callout when lift > 0.2.
-- **Mouse:** pointermove handler: 'if (event.pointerType === mouse || pen) { ... paddle.tx = point.x; paddle.ty = point.y; clampPaddleTarget(); }' with canvasPoint() client->logical transform.
-- **Mobile:** Dedicated DOM thumbstick (#touchZone/#stick) with pointer capture: moveStick() clamps dx/dy to +/-38px and transforms the stick knob; plus canvas touch drag fallback ('paddle.tx = canvasDrag.targetX + (event.clientX - startX) * 1.45') and preventDefault on touch.
-- **Polish:** loop(): 'accumulator += dt; while (accumulator >= 1/120) { update(1/120) }' fixed timestep; togglePause with pausedFrom restore, pause on blur AND visibilitychange, restart button, full HUD sync (score/lives/level/multi/altitude/heatbar), aria labels, localStorage guards, dev-gated debug API; no TODO/FIXME found.
-- **Audio:** `game.js` AudioFX uses window.AudioContext with try/catch ('Audio is enhancement-only') for tone/chord beeps and an overdrive pulse 'overdrivePulseTimer = clamp(0.72 - mult * 0.018, ...)' whose tempo/pitch scale with the multiplier — but no continuous music layers or reverb, just one-shot tones.
+- **Breakthrough:** get-a-ball-above-the-field fantasy (`src/game/attic.js:2`), attic-break scoring with a time-dilation pulse (`:152-167`).
+- **Juice:** pooled particles + ribbon trails, screen shake, beat-synced attic pulse ring.
+- **Power-up balls:** 11 kinds — multiball, fire/super/heavy/ghost balls, wide, sticky, lasers, magnet, slowmo, attictime.
+- **Special bricks:** angle + speed defs with per-brick required direction and a 1050 speed threshold.
+- **2-D paddle:** targetY clamp with vy tracking; rising uppercuts add up to +900 speed, downward dips soften.
+- **Mouse / mobile:** pointer handlers on desktop; STICK_MAX_PX=70 thumbstick with touch routing and width-fit portrait on mobile. PLAY-OK both, 0 errors.
+- **Polish (2):** letterbox/portrait renderer, tap-to-start gate, functional but spare — plain title, monochrome field; the docked point.
+- **Audio:** synthesized SFX + adaptive music with per-name rate limiting for 40-brick bursts and music that ducks under sfx. 7,806 LOC, the largest build; SIGTERM'd at $23.17 after passing verification.
 
-### openai-low — NEON ASCENT (18/27)
+### anthropic-high — OVERTOP (26/27, budget-SIGTERM — canvas is black)
 
-- **Breakthrough:** `game.js`: 'const wasOver=b.over; b.over=b.y<42; if(b.over&&!wasOver){say("OVERDRIVE // CEILING BREACHED")}' + overdrive builds while over, brick kills above bricks score 'Math.round(180*(1+overdrive)*combo)' and bricks score x2.5 in overdrive — real mechanic, but 'above bricks' is a fixed y=42 ceiling line, not relative to remaining bricks, and escalation is a single ramp.
-- **Juice:** burst() adds shake 'shake=Math.min(12,shake+2)' on every hit and beep pitch rises with combo ('beep(320+combo*35)'); trails, OVERDRIVE HUD text — present but shake/particles are constant-size, not scaled by score/multiplier.
-- **Power-up balls:** Drops ['WIDE','MULTI','FIRE']: 'if(d.type==="MULTI"){newBall(d.x,d.y);newBall(d.x,d.y)}' and FIRE sets b.hot/b.pierce for 10s (pierce skips bounce) — multiball and fireball work, minimal variety.
-- **Special bricks:** 'if(q.type==="angle"&&!side){say("ANGLE LOCK · SIDE HIT")...}' and 'if(q.type==="speed"&&speed<410){"VELOCITY LOCK · GO FASTER"}' — both mechanics present and enforced, but simple (angle test is just |vx|>|vy|, no special feedback beyond a toast and 0.12s hit cooldown).
-- **2-D paddle:** Paddle targetY from pointer/arrow keys clamped to [H*.62, H-35]; on paddle hit 'speed=Math.min(780, Math.hypot(...)*1.04+Math.max(0,-paddle.vy)*.45)' — upward motion adds ball speed, but the band is shallow and paddle.vy is a smoothed follow so thrust is modest.
-- **Mouse:** Uses unified pointer events: 'canvas.addEventListener("pointermove", setPointer)' mapping normalized pointer.x/y to paddle position — mouse works (pointer events cover it) but there is no dedicated mousemove handler and no mouse-only niceties.
-- **Mobile:** `index.html` has '<div id="stick"><i></i></div> ... THUMBSTICK MOVE / AIM' and `game.js` implements moveStick() with pointer capture, clamped knob translation, and stick deltas feeding pointer.x/.y — a genuine first-class thumbstick plus viewport/touch-action meta.
-- **Polish:** Pause panel with resume/restart, game-over panel with final score, HUD spans (score/combo/level), rAF loop 'frame(t){const dt=Math.min(.033,(t-last)/1000)...}' — variable dt, no fixed timestep, no auto-pause on hidden; no TODO/FIXME but the whole game is about 30 dense lines.
-- **Audio:** Single beep() helper (triangle osc + exp decay) reused for every event; no music, and intensity does not scale (beep pitch does rise with combo for brick hits, but there is no AudioContext layering, filtering, or dynamics).
+- **Breakthrough:** overtop hysteresis — climb above brick tops in one continuous run (`src/game.js:17-19`), multiplier `1 + overtopTime/2 + streak/3`.
+- **Juice:** particles, shards, rings, shake/zoom, flashes, floating text; sky tint warms with intensity.
+- **Power-up balls:** multiball/fireball/ghostball/magnet/wide/slowmo/laser + heavy with timed ball mods.
+- **Special bricks:** steep-only and horizontal angle gates plus a speed gate, with slow/ghost/topOnly condition kinds.
+- **2-D paddle:** lowest-22% vertical band; smashVel remembers upward speed so late smashes count.
+- **Mouse / mobile:** pointer capture with mouse target mode; thumbstick-or-drag touch routing with `viewport-fit=cover`. Designed well — never seen running.
+- **Polish (2):** persistence, settings, mute; play-unverified because the canvas never renders.
+- **Audio:** adaptive procedural music with a lookahead scheduler and intensity-gated layers. The honest caveat, stated plainly: `src/render.js:214` calls `nebula = buildNebula()` with no such binding, so the first frame throws and every screenshot is pure black with 2 page errors. This is best-code-that-doesn't-run, not a fraudulent 26 — every point is earned in the code, and none of it is playable. SIGTERM'd at $24.31 after passing verification (verification evidently did not include looking at the screen).
 
-## Screenshots
+### muse — OVERDRIVE BREAKOUT (26/27, $0.04 in 11 minutes)
 
-Two frames per build: the desktop shot the play script captured during its run, and the phone build after a scripted touch drag. Where the automation never got the ball launched, the caption says so.
+- **Breakthrough:** topside detect with 1.2s grace, banner + jingle (`js/game.js:602-623`); multiplier grows ×1.015/frame to ×12 while topside; audio intensity forced to 1.
+- **Juice (2):** power-hit sparks + floatText, velocity-brick bursts, paddle/ball trails; screen-shake not evidenced.
+- **Power-up balls:** multiball ×3, fire plow-through, ghost phase, heavy 1.6× radius, all timed with banner + HUD.
+- **Special bricks:** steep/flat/velocity gates with hints, blink timing, drifters; velocity needs 560+ with a flick hint.
+- **2-D paddle:** 2D zone below 0.72H across mouse/keys/touch; upward vy<−140 is a power hit (1.18× speed, steeper angle), downward softens.
+- **Mouse / mobile:** mouse steers both axes; touch drag with Y offset so the finger never covers the paddle, plus a thumbstick visual. Full-bleed portrait, BREAK THROUGH! marker, 0 errors.
+- **Polish:** 120Hz fixed timestep, pause overlay, localStorage best, stale-launch discard, visibility auto-pause.
+- **Audio:** intensity drives tempo (132+40), arp octave and density; overdrive enter/exit jingles, brick pitch by combo. The value result of the grid: 26/27, plays clean on both viewports, $0.04 in 11 minutes — no test suite, which is what the ranking rule docks it for.
 
-### glm — Neon Breakout Breach Edition
+### glm — NEON BREAKER (25/27)
 
-<p align="center">
-  <img src="grid/glm-desktop.jpg" width="400" alt="Neon Breakout Breach Edition mid-play on desktop">
-  <img src="grid/glm-mobile.jpg" width="200" alt="Neon Breakout Breach Edition on a phone with a SLAM button">
-</p>
+- **Breakthrough:** detect/toggle with growing btBonus, zone glow above the bricks, ambient ripples while hot — all in one self-contained `index.html`.
+- **Juice:** brick-shard particles, shake + flash on brick/bomb, background pulse reacting to multiplier/breakthrough.
+- **Power-up balls (2):** multi (splits into 3) and fire (plow-through, 12s) from a POWER_BAG; a thin bench next to peers.
+- **Special bricks:** speed-locked (560), directional shield, mover, regenerator, chained bombs, steel, armored, with a level legend.
+- **2-D paddle:** 2D band (VIEW.h−170…−44), WASD + arrows; upward-vy boost with BOOST! text, downward damp.
+- **Mouse / mobile:** critically-damped pointer chase; floating thumbstick on hold/second finger; full-bleed portrait, 0 errors.
+- **Polish (2):** pause, hiscore persistence; rAF with clamped delta rather than a fixed timestep.
+- **Audio:** WebAudio synth with combo-pitched bricks and a breakthrough arpeggio. 25/27 for $1.22 in 88 minutes.
 
-Desktop mid-play (score 20, level 1 of 10). On the phone, in play with a dedicated SLAM button for the swipe-slam gesture.
+### openrouter-high — OVERDRIVE (25/27)
 
-### openrouter-high — Neon Breakout Frenzy Edition
+- **Breakthrough:** ball-above-top-row check with banner, double confetti rain, jet particles and shake; ×2 score multiplier in overdrive; six levels with a level select.
+- **Juice:** burst/confetti/jet/rise particles; burst size and shake scale with overdrive and combo; comet trail sparkle.
+- **Power-up balls:** comet (fast, swept collision so it never tunnels), heavy (smashes through), SPLIT/GROW/life pickups; bonus balls cost no life.
+- **Special bricks:** four-direction angle bricks (break only from the arrow direction), SPEED bricks needing boost, bombs, SPLIT LANE level.
+- **2-D paddle:** 0.70VH vertical range, WASD/arrows X+Y, vx/vy tracked; upward boost-hit (+250 speed) smashes SPEED bricks.
+- **Mouse / mobile (2):** absolute mouse mapping; relative-drag touch with preventDefault — solid, no thumbstick widget; desktop renders letterboxed by design.
+- **Polish:** 120Hz fixed timestep, pause, P/Esc, localStorage best, endless mode, no TODOs.
+- **Audio (2):** procedural tone/noise/drone with combo-escalating brick pitch and an overdrive jingle; no adaptive layers. Single-file, no dependencies, $1.44 in 23 minutes.
 
-<p align="center">
-  <img src="grid/openrouter-high-desktop.jpg" width="400" alt="Neon Breakout Frenzy Edition pre-launch on desktop">
-  <img src="grid/openrouter-high-mobile.jpg" width="200" alt="Neon Breakout Frenzy Edition pre-launch on a phone">
-</p>
+### deepseek — ROOFTOP (24/27, $0.53 vs $0.50 cap)
 
-Desktop and phone both show the pre-launch state: the ball never launched under automation (tap, click and Space all failed), so its desktop score is 0. Whether launch is broken or the script missed the gesture is unresolved; see Methods and caveats.
+- **Breakthrough:** rooftop detect with banner + fanfare; multiplier steps to ×10 every 2s, bonus ball every 3.5s (cap 6), 40/s speed ramp.
+- **Juice (2):** particle system, ball trails, score floaters, fire glow; screen-shake not evidenced.
+- **Power-up balls (2):** fire-bullet balls and multiball (+ rooftop bonus balls); lasers are projectiles, not balls.
+- **Special bricks:** steep gate (1.15), 700+ speed gate, fire-only steel, angle/speed gates, nested-chain explosives, golden, core.
+- **2-D paddle:** tracked/clamped vy with 0.55 vertical transfer; "move up when hitting the ball to boost it".
+- **Mouse / mobile:** pointer steering; left-side thumbstick + right-side direct touch; mobile shot shows full-bleed BALL LOST state — real play progressed (desktop score 100, mobile 310).
+- **Polish:** 240Hz fixed substeps, pause + auto-pause on blur, persisted rooftop best; qa + smoke probes (`node test/qa.js`).
+- **Audio (2):** tone engine with bandpass filter and per-event jingles; intensity scaling not evidenced. Overshot its $0.50 cap between ticks to $0.53.
 
-### anthropic-high — TOPSIDE
+### openai-low — Orbit Breaker (24/27, $1.13)
 
-<p align="center">
-  <img src="grid/anthropic-high-desktop.jpg" width="400" alt="TOPSIDE between balls on desktop at score 104">
-  <img src="grid/anthropic-high-mobile.jpg" width="200" alt="TOPSIDE mid-play on a phone">
-</p>
+- **Breakthrough:** triggerOrbit with BREAKTHROUGH! banner, cascade online, shake + flash; wall-contact + rising-above-brickTop gating per ball.
+- **Juice (2):** bursts + rings + floating score per break; per-type brick glyphs; mid-tier volume.
+- **Power-up balls:** split/plasma/magnet/overdrive drops with 12s telegraphs, coexisting timed powers in the HUD.
+- **Special bricks:** angle (|vy|>|vx|×0.72), 600+ speed, phased windows, with NEED STEEP ANGLE / NEED SPEED reject feedback and wave-scaled angle rows.
+- **2-D paddle:** 2D critically-damped follow with tracked vy; UPDRAFT — rising hits gain speed, bonus points and a toast.
+- **Mouse / mobile:** pointer drives both axes; rendered thumbstick + knob with pointer capture and a touch pause button.
+- **Polish (2):** full menu with brick/orb codex, best run, waves, toasts, portrait tuning — docked because the blind sweep kept dying (read as difficulty/autopilot signal at 616 LOC with 600-speed gates, not breakage; both viewports STARTED clean with 0 errors and menu/HUD/game-over flows all render).
+- **Audio (2):** SFX-only tone() voices with combo pitch and orbit/cascade stingers; no music engine. Has a real physics test (`node physics.test.js`: sweeps, solvability, gating, stacking, precedence).
 
-Desktop between balls at score 104, the automation's play score, with the launch prompt showing. On the phone, mid-play with the ball trailing.
+### openrouter-med — OVERDRIVE/frenzy (24/27)
 
-### anthropic-med — ROOFTOP
+- **Breakthrough (2):** 1.4s-above-bricks frenzy threshold with OVERDRIVE popup, frenzy audio and HUD meter; the threshold mechanic reads slightly arbitrary next to peers.
+- **Juice (2):** SMASH popup + shake + ripple, shatter particles, frenzy-scaled glow and trails, hitStop, slowmo.
+- **Power-up balls:** fire/split/giant/laser/sticky kinds with random + guaranteed drops and multiball().
+- **Special bricks:** 25° angle/graze gate, 640 shock-velocity gate, movers, chain booms, steel; an OVERDRIVE ARENA level built for breakthrough.
+- **2-D paddle:** lower-22% 2D zone, arrows + WASD + gamepad; upward smashes earn SMASH! + shake + sound.
+- **Mouse / mobile (2):** unified pointer events; viewport-fit with preventDefault — full-bleed with brick-face art, but no thumbstick and a bare black boot overlay title.
+- **Polish:** 120Hz fixed timestep, hitStop, pause, persisted best, no TODOs.
+- **Audio:** tone/noise/drone oscillators with a beat scheduler; drone gain/filter and beat period follow frenzy, brick pitch by row + combo, frenzy riser.
 
-<p align="center">
-  <img src="grid/anthropic-med-desktop.jpg" width="400" alt="ROOFTOP ready overlay on desktop">
-  <img src="grid/anthropic-med-mobile.jpg" width="200" alt="ROOFTOP mid-play on a phone at combo x7">
-</p>
+### qwen — Overdrive Breakout (24/27, the resume saga)
 
-Desktop shows the READY overlay before the first launch. The phone shot is the most active frame the automation captured of any build: mid-play, combo x7, +100 score popups.
+- **Breakthrough:** Overdrive meter with 5 bands and multipliers (`js/overdrive.js`), TOP-260 zone, MAX bonus text/audio, zone glow.
+- **Juice:** 430-line fx module — hue-shifting nebula background, sparks, popups, flashScreen; thicker trails in overdrive.
+- **Power-up balls (2):** MULTI pickup only (+2 balls, cap 6); WIDE/SLOW/LASER/MAGNET/BOOST are paddle effects, not balls — the docked point.
+- **Special bricks:** the widest menagerie in the grid — glass, angle, speed, ramp, magnet, mirror, mover, bomb, mini, key/lock (±35° tolerance, movers, gate clinks).
+- **2-D paddle:** accel keys both axes; slam (upward vy → −260, downward weakens); "Slam UP to launch!".
+- **Mouse / mobile (1):** smooth pointer-follow lerp; thumb model keeps the finger off the paddle — but the mobile shot confirms a viewport-scaling bug: the game squeezed into a middle band with big black bars and awkward buttons.
+- **Polish:** 240Hz substeps, persisted best, pause incl. gamepad, attract demo; no TODOs; dinged for the scaling bug.
+- **Audio:** band-scaled loudness/brightness with stereo pan, overdrive ticks, ambient hum, per-brick voices. Most-engineered build (3,556 LOC, 113 min); cap-killed at $0.88, resumed on a raised $3.50 cap, overshot to $4.61 between ticks.
 
-### openai-high — APOGEE
+### nous-med — BREAKTHROUGH (22/27, provider-halted)
 
-<p align="center">
-  <img src="grid/openai-high-desktop.jpg" width="400" alt="APOGEE mid-play on desktop at score 200">
-  <img src="grid/openai-high-mobile.jpg" width="200" alt="APOGEE title screen with pilot thumbstick on a phone">
-</p>
-
-Desktop mid-play at score 200 with two balls, altitude and overdrive in the HUD. The phone shows the title screen with its 2-axis pilot thumbstick drawn.
-
-### openai-low — NEON ASCENT
-
-<p align="center">
-  <img src="grid/openai-low-desktop.jpg" width="400" alt="NEON ASCENT paused on desktop">
-  <img src="grid/openai-low-mobile.jpg" width="200" alt="NEON ASCENT mid-play on a phone with thumbstick">
-</p>
-
-Desktop shows the pause screen: the script's own Space press paused the game mid-run. On the phone, mid-play at score 200 with the thumbstick widget visible.
-
-## Cost versus quality
-
-The cost spread across the six runs is 44 times, from `openai-low`'s $0.71 (5 minutes) to `openai-high`'s $31.59 (24 minutes). Quality on the rubric is nearly flat across most of that range: five of the six builds scored 26 or 27 of 27. The three builds under $2.50 all delivered working games, and `glm` landed 26 of 27 with a 13-file architecture, ten levels and a passing test harness for less than a tenth of `anthropic-med`'s bill. The $15-$32 builds are more polished — both Anthropic presets scored a perfect 27 — but not proportionally better. What the extra spend buys is the last point or two of polish and, for `anthropic-med`, a much longer wall-clock run.
-
-Cost per actor, at list prices:
-
-| Preset | Orchestrator | Task worker | Narrator | Total |
-|---|---|---|---|---|
-| `glm` | $2.10 | $0.06 | $0.03 | $2.19 |
-| `openrouter-high` | $0.51 | $0.72 | $0.01 | $1.23 |
-| `anthropic-high` | $3.59 | $11.69 | $0.26 | $15.54 |
-| `anthropic-med` | $6.29 | $18.11 | $0.40 | $24.80 |
-| `openai-high` | $23.01 | $8.47 | $0.11 | $31.59 |
-| `openai-low` | $0.61 | $0.09 | $0.01 | $0.71 |
-
-The narrator never costs anything worth counting. In three of six runs the worker cost more than the orchestrator, because the orchestrator delegates and verifies while the worker writes the code; `anthropic-med`'s worker made 733 calls and cost $18.11 of its $24.80.
-
-Prompt-cache economics dominate these bills. The Anthropic presets ran at 93-95% cached input, `openrouter-high` at 88%, `glm` at 78%. `openai-high` sat at 6% because of a harness bug, not the provider: the per-call steering message was appended to the prompt on the fly and never recorded, so no prompt was ever an exact prefix of the next one, and OpenAI's cache only reuses exact prefixes. Commit `fb9bd9d` records steers as events so each prompt extends the last, and measured hit rates recovered to all but the new tail. The $31.59 in the table is what the run actually paid; a rerun on the fixed harness would pay materially less, so read it as the price of the bug rather than of the preset.
+- **Breakthrough:** chaos mode — onTop detect with doubling multiplier to CHAOS_CAP, intensity follows; breakthrough channel + titan pocket in the levels; BREAKTHROUGH banner.
+- **Juice (2):** hitStop slowmo, score popups, vortexBoom with shockwave push; mobile shot shows a fire-ring ball in a full magenta chaos wash; screen-shake not evidenced.
+- **Power-up balls (2):** multiball split, 8s fireball plow-through, 6s phase; paddle timers are effects, not balls.
+- **Special bricks:** speed-gated armored, angle-gated prism, phase-through ghost, volt chain, vortex boom, gel catch, fire-immune titan.
+- **2-D paddle:** both-axes pointer with 260 upward-smash velocity; "move vertically, paddle SMASHES upward".
+- **Mouse (2):** mousemove absolute + relative-drag model; title says DRAG to move — mouse works but is not the primary citizen.
+- **Mobile (2):** relative touch drag anywhere, viewport-fit; playable with mild letterbox; no thumbstick.
+- **Polish (2):** pause + auto-pause, persisted best/mute/reduced-motion, substeps for fast balls but no full fixed timestep.
+- **Audio:** chaos beat that layers up with intensity, paddle pitch by vy, per-brick/volt/fanfare voices, persisted mute. Complete despite its halted session: the provider returned 404s ("Couldn't find that, sorry") on the orchestrator route, the session parked as awaiting-input at $0.13, and the game on disk played clean on both viewports with 0 errors.
 
 ## Verdict
 
-The measuring run ranked the builds as follows.
+The ranking rule is stated up front so it can be argued with: rubric total first, then whether the build ships a test suite, then cost ascending. Ties on the rubric are where judgement lives, and the notes below say where the rule produces an order worth disagreeing with.
 
-1. **`anthropic-high` — TOPSIDE (27/27).** The best overall. Every rubric item scored 3, it is one of only two builds with a real passing test suite, and touch was designed in: the phone build opens on a tap-to-start screen with drag-thumbstick instructions. It reached score 104 in scripted play, which was modest, and its profile is polished rather than flashy. 3,195 lines across 10 files in 1 h 11 min for $15.54 at a 93% cache ratio.
-2. **`anthropic-med` — ROOFTOP (27/27).** Tied on the rubric and the most fun build observed in play: the highest score of the six (7,114 points) with combo x7 and +100 popups flying, and a tutorial hint that sells the core mechanic in one line. It is also the largest build (5,896 lines, 17 files), the slowest (3 h 6 min) and the second most expensive ($24.80), and it shipped no test suite. It ranks below TOPSIDE on tests and breadth at the same rubric total.
-3. **`glm` — Neon Breakout Breach Edition (26/27).** The value result of the grid. For $2.19 in 38 minutes it produced 13 files and 3,335 lines: ten levels designed with breach paths into the attic, four special-brick mechanics, a 712-line adaptive music engine, and a passing headless Playwright harness that reported about 61 FPS. Its one miss is mobile: drag-anywhere rather than a literal thumbstick, the only non-3 on its board.
-4. **`openai-high` — APOGEE (26/27).** The build that took the spec most seriously on screen: named break protocols (VECTOR, VELOCITY, ASCENT), named powerballs (ECHO, PHASE, NOVA), a 2-axis pilot thumbstick on mobile, and the richest HUD in the field. It completed 9 of 9 tasks in 24 minutes, the fastest of the premium presets, and its 9 unit tests pass. It was also the most expensive run at $31.59 with a 6% cache ratio, its e2e suite shipped but was never run, and its audio is the simplest of the large builds — one-shot tones, no continuous layers — which is the one non-3 that separates it from the 27s.
-5. **`openrouter-high` — Neon Breakout Frenzy Edition (26/27).** The best code per dollar in the grid: a 1,071-line self-contained HTML file with no dependencies, a proper 1/120 fixed-timestep loop, three ball power-ups, angle- and speed-gated bricks, an endless mode, and an arp music loop that escalates with the frenzy level — $1.23 in 19 minutes. It ranks this low for two reasons outside the code: it is the only run with an error (the first task died on the image-input 404, leaving 1 of 2 tasks completed), and its ball never launched in automated play, which loses the tie-break whether or not that is an automation artifact. No test suite.
-6. **`openai-low` — NEON ASCENT (18/27).** The cost floor of the exercise. $0.71 and 5 minutes bought about 34 physical lines of minified JavaScript that attempt all nine spec features, land a genuine first-class thumbstick on mobile (3 of 3, better than builds costing 30 times more), and scored 200 points in phone play. The floor shows through elsewhere: overdrive is a fixed y=42 ceiling check, the audio is a single beep() function, the timestep is variable, and there is no auto-pause.
+1. **`opencode-med` — BREAKTOP (27/27, $1.11, stopped-capped).** The only perfect rubric in the grid, and the only build whose screenshots show a live combo (×3) with score popups and a falling capsule mid-game. The asterisk: no test suite (its README cites headless-Chromium Playwright verification only), and it was cap-killed mid-verification — finished on quality, stopped on budget. Ranked first because 27 is 27.
+2. **`astra` — OVERDRIVE (26/27, $7.40, stopped-capped).** Best of the 26s by the rule: a real vitest suite plus the most complete play evidence among the capped runs (title with 3 difficulties and live demo, mid-run desktop, BALL LOST toast on mobile proving progression). Killed by the global $90 brake after the game was already verified.
+3. **`openai-med` — OVERDRIVE (26/27, $12.12, done).** The art-directed pick: mission brief, field-intelligence codex, flight manual, the most cohesive layout on both viewports, and 14/14 tasks complete. Costs more than its cap said it would ($8.40 → $12.12 between ticks), which is a harness fact, not a build demerit.
+4. **`openai-high` — OVERDRIVE, Evolved (26/27, $13.69, done).** The strongest live-play evidence in the grid (multiball banner with pickup toasts on mobile, 6/64 cleared on desktop) with engine/physics/audio unit tests. Docked one rubric point for SFX-only audio and priced highest among the done runs — though less than half of what the same preset paid in v1.
+5. **`anthropic-med` — Attic Breaker (26/27, $23.17, stopped-budget).** Largest build (7,806 LOC), chained-break multiplier under time-dilation, 11 power-up kinds, PLAY-OK both viewports. Ranks below the builds above it on cost at equal rubric-with-tests; its polish point was docked for a spare monochrome presentation.
+6. **`anthropic-high` — OVERTOP (26/27, $24.31, stopped-budget).** The honest disappointment: by the code it is superb — overtop hysteresis, smashVel memory, adaptive procedural music — but the canvas is black in play (`nebula is not defined`, `src/render.js:214`) and every screenshot is a black rectangle. A fraudulent 26? No — an honest one: best code that doesn't run. Every point is earned in the source; none of it is playable. It ranks here by the rule and belongs lower by any rule that weights play; read it as a warning about verification that never looks at the screen.
+7. **`muse` — OVERDRIVE BREAKOUT (26/27, $0.04, done in 11 minutes).** The value result of the grid, by distance. Full-bleed portrait, power-hit smashes, adaptive tempo, clean play on both viewports — for four cents in eleven minutes. It ranks last among the 26s only because the stated rule prefers a test suite to a price tag; if your rule is code-per-dollar that plays, it wins the whole grid.
+8. **`glm` — NEON BREAKER (25/27, $1.22, done).** A single self-contained `index.html` with a floating thumbstick, chained bombs and a breakthrough arpeggio. Thin power-ball bench and no fixed timestep keep it at 25.
+9. **`openrouter-high` — OVERDRIVE (25/27, $1.44, done).** Six levels, swept comet collision, endless mode, no dependencies — the best single-file engineering per dollar. No thumbstick and SFX-simple audio hold it at 25.
+10. **`deepseek` — ROOFTOP (24/27, $0.53, done).** Real play progression photographed on both viewports (score 100 desktop, BALL LOST at 310 mobile) with a left-side thumbstick — fifty-three cents that plays. Lasers-as-projectiles and unscaled audio keep it at 24.
+11. **`openai-low` — Orbit Breaker (24/27, $1.13, done).** The small-model surprise: a rendered thumbstick, UPDRAFT paddle boosts, reject-feedback gates and a real physics test at 616 LOC. The blind sweep kept dying — read as a difficulty signal, not breakage.
+12. **`openrouter-med` — OVERDRIVE/frenzy (24/27, $0.66, done).** Solid systems (frenzy meter, hitStop, 120Hz loop) under a bare boot-overlay presentation with no thumbstick.
+13. **`qwen` — Overdrive Breakout (24/27, $4.61, done).** The most-engineered build (3,556 LOC, 5-band overdrive meter, key/lock bricks, attract demo) sunk by one viewport-scaling bug on mobile and a power-ball bench that is really paddle effects. Plus the saga below.
+14. **`nous-med` — BREAKTHROUGH (22/27, $0.13, halted-provider).** Last on the rubric, first on grit-per-cent: its orchestrator route 404'd twice, the session parked as awaiting-input, and the game on disk still played clean on both viewports. Mouse-as-second-citizen and effect-not-ball powers are the real docks.
 
 ## What the grid taught the harness
 
-Profiling the six event logs found real waste, and the fixes are in this repository's history.
+v1's fixes survived contact with a bigger grid; v2's failures propose the next ones. All four v1 fixes shipped in this binary, and all four held:
 
-- **`fb9bd9d` — steers are recorded, so every prompt extends the last.** OpenAI's prompt cache only reuses a previous prompt that is an exact prefix of the new one. The harness appended its per-call instruction (the steer) to the prompt on the fly and never recorded it, so consecutive prompts were not prefixes of each other, and the Astra run cached only 6 percent of its input. Steers are now recorded as `steer` events, so each prompt extends the last; measured hit rates recovered to all but the new tail. Reasoning items are replayed by default, as OpenAI recommends.
-- **`95b364a` — route fallback for every actor.** Only the orchestrator had a fallback route; task workers and the narrator used their primary route only, so an out-of-credits OpenAI key would fail every task. All three actors now fall back, and a billing failure is never retried.
-- **`d08c0d4` — three curbs on wasted turns.** A re-read of an unchanged file returns a one-line note (`force: true` reads anyway). A second look at an unchanged screenshot does not resend the image. And an orchestrator that has edited files itself eight times in one context is told to delegate — the GLM-5.3 run made 33 direct edits against 6 delegations, while the Kimi K3 run delegated properly.
-- **`4b8e277` — image rejections fall back to text.** Some OpenRouter models answer `view_image` with a 404, "no endpoints support image input". That response is now treated as an image rejection and the actor falls back to text. The Kimi K3 build lost its first task to it, which is the single error in the results table.
+- **Cache fix verified.** Recorded steers kept every prompt a strict extension of the last across all fourteen runs; overall cache hit was 91.2%, and `openai-high` went from 6% cached ($31.59 on 6.9M input tokens in v1) to 96.6% cached ($13.69 on 24.5M input tokens now) — ~3× the tokens for less than half the money. Read any remaining cost as the price of the model, not the harness.
+- **Fallbacks survived a real outage.** The OpenAI-direct key ran out of credits mid-grid (502s onward) and affected runs continued on their OpenRouter fallbacks by preset design — the exact failure mode `95b364a` was built for. The `astra` log shows the same story on Together (402 credit-limit failures absorbed on late tasks).
+- **Image-rejection and read-curb fixes held.** No run lost a task to an image-input 404 this time, and re-read curbs kept the long_session token profiles sane.
 
-One open question, not a fix: the `anthropic-med` run had a playable game after about 15 minutes and spent the remaining 2 hours 50 minutes on polish passes, because the prompt said "relentlessly" and nothing in the harness signals diminishing returns. When to stop is still unanswered.
+New lessons, all about money and stopping:
+
+- **Caps need a floor — propose $2.** The `qwen` cap killed a healthy run at $0.88; the resume cost operator attention plus three restarts to land at $4.61. Caps under ~$2 don't buy control, they buy churn. Set $2 as the minimum cap and let cheap runs simply be cheap.
+- **Enforcement happens between ticks, so caps overshoot.** `openai-med` ($12.12 vs $8.40), `deepseek` ($0.53 vs $0.50) and `qwen` ($4.59 vs raised $3.50) all sailed past their caps while a model call was in flight. A cap is closer to a suggestion with a SIGTERM attached; size caps assuming ~50% overshoot on agentic presets.
+- **SIGTERM works as a budget tool when the game is already verified.** Both Anthropic runs were SIGTERM'd after passing verification and both left complete, playable, high-scoring games. Stopping spend is not the same as stopping work — verify first, kill freely.
+- **The global brake works.** `astra` died on the $90 global brake at $7.40 mid-verification with a verified-playable game on disk. Total run spend $91.54; measuring overhead ~$0.50; grand total $92.04 against the $100 budget.
+- **Provider halts park, they don't burn.** `nous-med`'s Nous 404s ended the session as awaiting-input at $0.13 with a complete game on disk — the cheapest lesson in the grid: a halted run is resumable, not lost.
+- **Resumes need preset hygiene.** The `qwen` saga's ugly middle — 4 read-only calls against the wrong preset, killed before writing anything — argues for pinning the preset visibly in the resume path so a misdirected resume is impossible, not just killable.
+
+One open question, carried over from v1 and now louder: nothing signals diminishing returns. `qwen` (113 min) and `astra` (110 min) both ran an order of magnitude longer than `muse` (11 min) for rubric scores within two points of it. When to stop is still unanswered.
 
 ## Methods and caveats
 
-- Play was scripted Chromium (Playwright), not a human: mouse sweeps on desktop, scripted touch drags on the phone, about 20 seconds per build per viewport.
+- Play was scripted Chromium (Playwright), not a human: a multi-step start per build (title → launch → sweeps), mouse sweeps on desktop, scripted touch drags on the phone, at 1280×800 and 390×844 (touch).
+- Entries include build output: `openai-high`, `openai-med` and `astra` were judged and played from `dist/index.html` (Vite builds); the rest from `index.html` (or their game root).
 - Sound was never heard; the play harness was headless. Audio scores come from the code.
 - Rubric scores came from code reading plus that scripted play, not from a blind review.
-- The Kimi build's ball never launched under automation (tap, click and Space all failed). That may be an automation artifact or a real input bug; its desktop screenshots show the pre-launch state.
-- The `openai-low` desktop game was paused by the script's own Space press, so part of its desktop session is the pause screen.
-- Costs are at September 2026 list prices and are heavily influenced by each provider's cache economics, so cross-provider comparisons are not apples to apples.
-- `openai-low`'s source is minified (34 physical lines, about 10 KB of `game.js`); its line count is real code, just compressed, and not comparable with the others.
-- Frame rate was not measured except where a build's own test suite reported it (`glm`'s harness reported about 61 FPS).
-- Every number on this page is in [`docs/grid/results.json`](grid/results.json); the spec is [`docs/grid/SPEC.md`](grid/SPEC.md).
+- Costs are September 2026 list-price estimates and are heavily influenced by each provider's cache economics, so cross-provider comparisons are not apples to apples.
+- `anthropic-high`'s 26 is code-only: the canvas is black in every screenshot (stale `nebula=buildNebula()` in `src/render.js:214`). All its scores credit structure that reads as complete and is play-unverified.
+- `openai-low`'s blind sweep died during play on both viewports; read as a difficulty/autopilot signal (600-speed gates at 616 LOC), not breakage — menu, HUD and game-over flows all render.
+- `qwen`'s mobile score reflects a confirmed viewport-scaling bug (squeezed middle band, black bars), not the desktop game.
+- All interventions are listed here, none hidden: `qwen` cap-killed at $0.88 then resumed on a raised $3.50 cap (with 4 read-only wrong-preset calls killed before any write, then a correct resume); `anthropic-high`/`anthropic-med` budget-SIGTERM'd after passing verification; `opencode-med` cap-killed at $1.11; `astra` killed by the global $90 brake at $7.40; `openai-med`/`deepseek`/`qwen` overshot caps between ticks; the OpenAI-direct key ran dry mid-grid with OpenRouter fallbacks absorbing it; `nous-med` halted on Nous 404s as awaiting-input.
+- Frame rate was not measured; several builds ship timestep claims (120–240Hz fixed/substepped) that were not independently verified.
+- Every number on this page is in [`docs/grid/results.json`](grid/results.json); the v1 dataset is archived at [`docs/grid/results-2026-09-07.json`](grid/results-2026-09-07.json); the spec is [`docs/grid/SPEC.md`](grid/SPEC.md).
 
 ## How to reproduce
 
@@ -257,4 +325,6 @@ Put the spec in a fresh directory as `INSTRUCTIONS.md` and run the same prompt o
 EAGENT_FINALECHAT=off eagent --preset NAME -p "Read INSTRUCTIONS.md and relentlessly build it until you're confident that it's fully and completely implemented to the highest possible standard you can manage."
 ```
 
-`EAGENT_FINALECHAT=off` keeps the phone mirror out of the way for a grid of unattended runs. Six directories, six presets (`glm`, `openrouter-high`, `anthropic-high`, `anthropic-med`, `openai-high`, `openai-low`), run at the same time, reproduces the set. The measuring run was the same command shape on `openrouter-high` with the measurement brief in place of the game spec; that brief lives with the run directories outside this repository, and `docs/grid/results.json` is its compiled output.
+`EAGENT_FINALECHAT=off` keeps the phone mirror out of the way for a grid of unattended runs. Fourteen directories, fourteen presets (`glm`, `openrouter-high`, `openrouter-med`, `anthropic-high`, `anthropic-med`, `openai-high`, `openai-med`, `openai-low`, `astra`, `deepseek`, `qwen`, `muse`, `opencode-med`, `nous-med`), run at the same time on `v0.8.0-1-g59ce5c7`, reproduces the set. The measuring run compiled `reports/*.metrics.json`, `*.judge.json` and `*.play.json` per preset into `docs/grid/results.json`, with per-preset spend and the $100 budget accounting in `reports/grid-costs.json`.
+
+

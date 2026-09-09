@@ -1,6 +1,6 @@
 // Shared loopback server for website verification and the social-card renderer.
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -21,9 +21,16 @@ export async function serveSite() {
         res.writeHead(404); res.end("Not found"); return;
       }
       const relative = decodeURIComponent(url.pathname.slice("/eagent/".length)) || "index.html";
-      const filename = path.resolve(site, relative);
+      let filename = path.resolve(site, relative);
       if (!filename.startsWith(site + path.sep)) {
         res.writeHead(403); res.end("Forbidden"); return;
+      }
+      // GitHub Pages serves a directory's index.html; match that behavior so
+      // clean games/<preset>/ URLs resolve in tests like they do in production.
+      try {
+        if ((await stat(filename)).isDirectory()) filename = path.join(filename, "index.html");
+      } catch {
+        // Missing paths fall through to the branded 404 below.
       }
       const data = await readFile(filename);
       res.setHeader("Content-Type", (types[path.extname(filename)] || "application/octet-stream") + ([".html", ".css", ".js"].includes(path.extname(filename)) ? "; charset=utf-8" : ""));

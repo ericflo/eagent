@@ -95,6 +95,7 @@ screenshots and game output come from the repository's published docs.
 | Dossiers and rollover | [Rollover implementation](../internal/harness/rollover.go) |
 | Original Neon Brickles run: ~\$1.20, 29 minutes, 74 + 9 checks | [README run report](../README.md#what-it-did-on-a-real-task) |
 | GLM and Anthropic-high examples | [Breakout grid](../docs/breakout-grid.md), [recorded data](../docs/grid/results.json) |
+| Playable 14-game grid gallery, comparison table, cards | [Recorded data](../docs/grid/results.json) (costs, durations, rubric, tests, entries, play notes), [staged builds](../docs/grid/builds/) (Vite `dist/` prefix stripped at stage time), [screenshots](../docs/grid/) (`<preset>-{desktop,mobile}.png` thumbnails); September 2026 runs, methodology alongside the gallery |
 | Phone, archives, and settings | [Integration documentation](../docs/FINALECHAT-INTEGRATIONS.md) |
 
 The build runs [`scripts/site-data`](../scripts/site-data/main.go), which reads

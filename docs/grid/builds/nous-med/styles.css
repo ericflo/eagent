@@ -1,0 +1,31 @@
+:root {
+  --bg: #05060f;
+  --neon: #00f6ff;
+  --hot: #ff2d78;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+#wrap {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at 50% 0%, #0b1030 0%, #05060f 70%);
+}
+canvas {
+  display: block;
+  background: #070812;
+  box-shadow: 0 0 80px rgba(0,246,255,.12), 0 0 2px rgba(0,246,255,.5);
+  touch-action: none;
+}
+#overlay {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+.hidden { display: none; }

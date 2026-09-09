@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b1026">
+<meta name="description" content="OVERDRIVE BREAKOUT — a neon brick-breaker. Smash through, get above the bricks, trigger OVERDRIVE and go exponential.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='12'%20fill='%230b1026'/%3E%3Ccircle%20cx='32'%20cy='22'%20r='10'%20fill='%2300e5ff'/%3E%3Crect%20x='12'%20y='46'%20width='40'%20height='8'%20rx='4'%20fill='%23ffe14d'/%3E%3C/svg%3E">
+<title>OVERDRIVE BREAKOUT</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div class="hud-top">
+      <div class="hud-left">
+        <div id="hud-score">0</div>
+        <div id="hud-best">BEST 0</div>
+      </div>
+      <div class="hud-mid">
+        <div id="hud-level">LV 1</div>
+        <div id="mult-wrap">
+          <div id="mult-label">x1.0</div>
+          <div id="mult-bar"><div id="mult-fill"></div></div>
+        </div>
+      </div>
+      <div class="hud-right">
+        <div id="hud-lives">●●●</div>
+        <div class="hud-btns">
+          <button id="btn-pause" class="icon-btn" aria-label="Pause">II</button>
+          <button id="btn-mute" class="icon-btn" aria-label="Mute">♪</button>
+        </div>
+      </div>
+    </div>
+    <div id="power-timers"></div>
+    <div id="serve-hint" class="hidden">TAP / CLICK / SPACE TO LAUNCH</div>
+  </div>
+
+  <!-- Overdrive banner -->
+  <div id="overdrive-banner" class="hidden">
+    <span id="od-text">OVERDRIVE x1.0 — STAY UP THERE!</span>
+  </div>
+  <div id="toast" class="hidden"></div>
+
+  <!-- Title -->
+  <div id="title-screen" class="overlay">
+    <div class="panel">
+      <h1 class="logo"><span class="logo-over">OVERDRIVE</span><span class="logo-break">BREAKOUT</span></h1>
+      <p class="tagline">Smash through. Get <b>ABOVE</b> the bricks.<br>Stay up there. Go exponential.</p>
+      <div class="best-line">HI-SCORE: <span id="title-best">0</span></div>
+      <button id="btn-play" class="big-btn">▶ PLAY</button>
+      <button id="btn-howto" class="ghost-btn">HOW TO PLAY</button>
+      <div class="controls-hint">Mouse · WASD/Arrows · Touch drag &nbsp;|&nbsp; M mute · P pause</div>
+    </div>
+  </div>
+
+  <!-- How to -->
+  <div id="howto-screen" class="overlay hidden">
+    <div class="panel">
+      <h2>HOW TO PLAY</h2>
+      <ul class="howto-list">
+        <li>🖱️ <b>Mouse</b> moves paddle (up/down too!). <b>WASD / Arrows</b> work, <b>Space</b> launches.</li>
+        <li>📱 <b>Touch:</b> drag to move (paddle sits above your finger), tap to launch.</li>
+        <li>⬆️ Flick <b>UP</b> into the ball for a <b>POWER HIT</b> (+18% speed, steeper).</li>
+        <li>▲ <b>Prism</b> needs a <b>steep</b> hit · ▼ <b>Skimmer</b> needs a <b>grazing</b> hit · ◆ <b>Velocity</b> needs <b>speed 560+</b>.</li>
+        <li>👻 Phaser bricks blink in/out · ↔ Drifters slide sideways.</li>
+        <li>🚀 Tunnel to the <b>TOPSIDE</b> to trigger <b>OVERDRIVE</b> — exponential multiplier!</li>
+        <li>💊 Catch falling capsules for Multiball, Fireball, Ghost, Heavy, Wide, Slow-Mo, Shield, +Life.</li>
+      </ul>
+      <button id="btn-howto-back" class="big-btn">GOT IT!</button>
+    </div>
+  </div>
+
+  <!-- Pause -->
+  <div id="pause-screen" class="overlay hidden">
+    <div class="panel">
+      <h2>PAUSED</h2>
+      <button id="btn-resume" class="big-btn">RESUME</button>
+      <button id="btn-restart-p" class="ghost-btn">RESTART</button>
+      <button id="btn-quit-p" class="ghost-btn">QUIT TO TITLE</button>
+    </div>
+  </div>
+
+  <!-- Level intro card -->
+  <div id="level-card" class="overlay hidden">
+    <div class="panel level-panel">
+      <div id="level-num">LEVEL 1</div>
+      <div id="level-name">WARM UP</div>
+      <div id="level-hint">Break a column, get above the bricks!</div>
+      <button id="btn-start-level" class="big-btn">START</button>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="gameover-screen" class="overlay hidden">
+    <div class="panel">
+      <h2>GAME OVER</h2>
+      <div class="score-line">SCORE <span id="go-score">0</span></div>
+      <div class="score-line dim">BEST <span id="go-best">0</span></div>
+      <div id="newbest" class="hidden">★ NEW BEST! ★</div>
+      <button id="btn-retry" class="big-btn">RETRY</button>
+      <button id="btn-quit-g" class="ghost-btn">TITLE</button>
+    </div>
+  </div>
+
+  <!-- Victory -->
+  <div id="victory-screen" class="overlay hidden">
+    <div class="panel">
+      <h2>🏆 YOU CLEARED ALL LEVELS!</h2>
+      <div class="score-line">SCORE <span id="vic-score">0</span></div>
+      <button id="btn-endless" class="big-btn">ENDLESS MODE ∞</button>
+      <button id="btn-quit-v" class="ghost-btn">TITLE</button>
+    </div>
+  </div>
+
+  <!-- Virtual thumbstick -->
+  <div id="stick-base" class="hidden"><div id="stick-knob"></div></div>
+</div>
+
+<script src="js/audio.js"></script>
+<script src="js/particles.js"></script>
+<script src="js/input.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

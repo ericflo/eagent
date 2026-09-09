@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#07101e" />
+    <meta name="description" content="OVERDRIVE — a modern brick breaker about getting beyond the wall." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2307101e'/%3E%3Cpath d='M10 32 32 10l22 22-22 22z' fill='none' stroke='%239bf7d2' stroke-width='4'/%3E%3Cpath d='m23 32 9-9 9 9-9 9z' fill='none' stroke='%23b9a3ff' stroke-width='4'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+    <title>OVERDRIVE — Break through. Go beyond.</title>
+    <script type="module" crossorigin src="/assets/index-BGU65azM.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-gmUOJqeq.css">
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="#game" aria-label="Overdrive home">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 16 16 4l12 12-12 12z"/><path d="m11 16 5-5 5 5-5 5z"/></svg>
+          <span><strong>OVERDRIVE</strong><small>BRICK BREAKER / REIMAGINED</small></span>
+        </a>
+        <nav class="top-actions" aria-label="Game options">
+          <button class="text-button" id="howTo" type="button" title="How to play" aria-label="How to play">How to play <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 9a3 3 0 1 1 5.3 1.9c-1.5.8-2.5 1.7-2.5 3.6M12 17.5h.01"/></svg></button>
+          <button class="icon-button" id="motionToggle" type="button" aria-label="Enable reduced motion" title="Enable reduced motion" aria-pressed="false"><span aria-hidden="true">◌</span></button>
+          <button class="icon-button" id="soundToggle" type="button" aria-label="Turn sound on" title="Turn sound on" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6L8 10H4zM16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10"/></svg></button>
+          <button class="icon-button" id="pauseToggle" type="button" aria-label="Pause game" title="Pause game"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+        </nav>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="page-title">
+          <div>
+            <p class="eyebrow"><i></i> THE CLASSIC. WITHOUT THE CEILING.</p>
+            <h1 id="page-title">Break through.<br /><em>Go beyond.</em></h1>
+            <p class="hero-copy">Find the gap. Set the angle. Once your ball reaches the upper zone, the whole board comes alive.</p>
+          </div>
+          <div class="breakthrough-note"><span class="dot"></span><span>BUILT FOR THE<br />BREAKTHROUGH</span></div>
+        </section>
+
+        <section class="game-layout" id="game" aria-label="Overdrive game">
+          <div class="game-column">
+            <div class="scoreboard">
+              <div class="score-cell"><span>SCORE</span><strong id="score">000,000</strong></div>
+              <div class="score-cell"><span>BEST</span><strong id="best">000,000</strong></div>
+              <div class="score-cell multiplier"><span>MULTIPLIER</span><strong id="multiplier">×1.0</strong></div>
+              <div class="score-cell lives"><span>LIVES</span><strong id="lives" aria-label="3 lives" aria-live="polite">● ● ●</strong></div>
+              <div class="game-status"><span class="pulse-dot"></span><span id="phaseLabel" role="status" aria-live="polite" aria-atomic="true">READY</span></div>
+            </div>
+            <div class="game-frame">
+              <div class="sector-badge"><span id="sectorNumber">SECTOR 01</span><b id="sectorName">FIRST CONTACT</b></div>
+              <canvas id="gameCanvas" width="960" height="640" aria-label="Overdrive brick breaker game. Move the paddle and break through the bricks." tabindex="0"></canvas>
+              <div class="game-overlay ready-overlay" id="readyOverlay">
+                <p class="overlay-kicker">SYSTEM / STANDING BY</p>
+                <h2>Find your way to<br />the other side.</h2>
+                <button class="primary-button" id="startButton" type="button">LET'S BREAK THROUGH <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12h13M13 6l6 6-6 6"/></svg></button>
+                <span class="overlay-hint">CLICK, TAP, KEYS OR THUMBS TO STEER</span>
+              </div>
+              <div class="launch-hint" aria-live="polite">BALL READY — CLICK, TAP OR PRESS SPACE TO LAUNCH</div>
+              <div class="touch-direct" aria-hidden="true">DRAG RELATIVELY TO STEER</div>
+              <div class="mobile-live-readout"><span>CHARGE <b id="mobileCharge">00%</b></span><span>POWER <b id="mobilePower">—</b></span></div>
+              <div class="mobile-phase" id="mobilePhase" aria-live="polite">READY</div>
+            </div>
+          </div>
+
+          <aside class="mission-panel">
+            <div class="mission-heading"><p class="section-label">MISSION / 01</p><h2>Your mission</h2><p>Crack a route through the field. The real score waits above it.</p></div>
+            <div class="charge-block">
+              <div class="charge-title"><span>OVERDRIVE CHARGE</span><strong id="chargeValue">00<small>%</small></strong></div>
+              <div class="charge-meter" role="progressbar" aria-label="Overdrive charge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="chargeFill"></div></div>
+              <p id="chargeMessage">Break through to charge the field.</p>
+            </div>
+            <div class="brick-guide">
+              <p class="section-label">FIELD INTELLIGENCE</p>
+              <ul>
+                <li><i class="glyph standard">•</i><span><b>STANDARD</b><small>Clean collision</small></span></li>
+                <li><i class="glyph angle">◆</i><span><b>ANGLE</b><small>Glancing trajectory</small></span></li>
+                <li><i class="glyph speed">ϟ</i><span><b>SPEED</b><small>Strike with momentum</small></span></li>
+                <li><i class="glyph power">+</i><span><b>POWER</b><small>Release an upgrade</small></span></li>
+              </ul>
+            </div>
+            <div class="power-readout"><span>CURRENT POWER-UP</span><b id="powerup">—</b><small id="powerTimer">PICK ONE UP TO ARM IT</small></div>
+            <button class="panel-help" id="panelHowTo" type="button">VIEW FULL FLIGHT MANUAL <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12h13M13 6l6 6-6 6"/></svg></button>
+          </aside>
+        </section>
+
+        <section class="desktop-controls" aria-label="Desktop controls">
+          <p>FLIGHT CONTROLS</p><div><kbd>←</kbd><kbd>→</kbd><span>MOUSE / STEER</span></div><div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>STEER</span></div><div><kbd>SPACE</kbd><span>LAUNCH</span></div><div><kbd>ESC</kbd><span>PAUSE</span></div>
+        </section>
+      </main>
+      <footer><span>CRAFTED FOR THE MOMENT THE BALL GETS ABOVE THE BRICKS.</span><span>THREE SECTORS / ONE WAY UP</span></footer>
+    </div>
+
+    <section class="mobile-controls" aria-label="Touch game controls">
+      <div class="thumbstick" id="thumbstick" role="application" aria-label="Touch thumbstick for steering"><div class="stick-dot"></div><span>STEER</span></div>
+      <button class="launch-button" id="mobileLaunch" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg><span>LAUNCH</span></button>
+    </section>
+
+    <dialog id="howToDialog" aria-labelledby="howToTitle">
+      <button class="dialog-close" data-close-dialog type="button" aria-label="Close how to play">×</button>
+      <p class="section-label">FLIGHT MANUAL / 01</p><h2 id="howToTitle">Make the opening.</h2>
+      <div class="how-grid">
+        <div><b>01 / STEER</b><p>Move with mouse, WASD/arrow keys, direct drag, or the thumbstick. The paddle has a shallow vertical lane.</p></div>
+        <div><b>02 / UPSWING</b><p>Meet the ball while moving upward for a burst of speed. Paddle edges shape its exit angle.</p></div>
+        <div><b>03 / BREAK THROUGH</b><p>Keep a ball in the top zone to build combos, charge Overdrive, and make the board pay out.</p></div>
+        <div><b>04 / READ THE FIELD</b><p>Angle bricks need a glancing trajectory, speed bricks need momentum, and power bricks drop upgrades.</p></div>
+      </div>
+      <p class="dialog-copy"><strong>Catch the falling upgrades.</strong> F ignites a piercing fireball; × splits your ball; M briefly catches and relaunches it; W widens your paddle. Timed upgrades last 12 seconds and replace one another. Fill the charge meter for an 8-second Overdrive cascade with extra balls and rising rewards.</p>
+      <div class="mobile-tip"><b>MOBILE PILOTS</b><span>Drag anywhere on the field relative to its current position, or steer with your left thumb. Launch with the right button or a tap while waiting.</span></div>
+      <button class="primary-button" data-close-dialog type="button">I'M READY <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12h13M13 6l6 6-6 6"/></svg></button>
+    </dialog>
+
+    <dialog id="pauseDialog" aria-labelledby="pauseTitle"><p class="section-label">FLIGHT PAUSED</p><h2 id="pauseTitle">Hold position.</h2><p class="dialog-copy">Your field is waiting. Take a breath, then get back to the opening.</p><button class="primary-button" id="resumeButton" type="button">RESUME RUN</button><button class="secondary-button" id="restartFromPause" type="button">RESTART RUN</button></dialog>
+    <dialog id="endDialog" aria-labelledby="endTitle"><p class="section-label" id="endKicker">RUN COMPLETE</p><h2 id="endTitle">Sector clear.</h2><p class="final-score">FINAL SCORE <strong id="finalScore">000,000</strong></p><p class="dialog-copy" id="endCopy">The upper zone was yours.</p><button class="primary-button" id="restartButton" type="button">RUN IT AGAIN</button></dialog>
+  </body>
+</html>

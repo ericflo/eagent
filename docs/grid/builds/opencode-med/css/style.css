@@ -1,0 +1,273 @@
+/* ---------------------------------------------------------------------------
+   style.css
+--------------------------------------------------------------------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: #04060d;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Designed backdrop behind the letterboxed field — replaces dead black gutters.
+   Deep nebula glow tuned to the game palette (cold blue core, faint violet edge). */
+#stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #12224a 0%, rgba(18, 34, 74, 0) 55%),
+    radial-gradient(90% 70% at 50% 110%, #1a0f33 0%, rgba(26, 15, 51, 0) 60%),
+    radial-gradient(60% 45% at 18% 55%, rgba(47, 111, 216, 0.16) 0%, rgba(47, 111, 216, 0) 70%),
+    radial-gradient(60% 45% at 82% 45%, rgba(122, 92, 255, 0.12) 0%, rgba(122, 92, 255, 0) 70%),
+    linear-gradient(180deg, #070b18 0%, #04060d 100%);
+  padding:
+    max(0px, env(safe-area-inset-top)) max(0px, env(safe-area-inset-right))
+    max(0px, env(safe-area-inset-bottom)) max(0px, env(safe-area-inset-left));
+}
+
+#game {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #dceaff;
+}
+
+#hud-top {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.hud-block { pointer-events: none; }
+.hud-label { font-size: 11px; letter-spacing: 2px; opacity: 0.65; font-weight: 700; }
+#score {
+  font-size: 30px; font-weight: 800; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 18px rgba(125, 214, 255, 0.45);
+  transition: transform 0.08s ease;
+}
+#score.pop { transform: scale(1.18); }
+#best { font-size: 10px; letter-spacing: 1.5px; opacity: 0.55; margin-top: 3px; font-weight: 700; }
+
+#hud-mid {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding-top: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+/* Level title: single line, never collides with the score digits */
+.hud-level {
+  font-size: 12px; font-weight: 800; letter-spacing: 2.5px; opacity: 0.92;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* ---- OVERDRIVE / CHARGE meter: clearly visible, labelled, always readable ---- */
+.od-meter-wrap {
+  width: 168px; max-width: 100%;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.od-meter-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 9px; font-weight: 800; letter-spacing: 2px;
+}
+.od-label {
+  color: rgba(220, 234, 255, 0.78);
+  text-shadow: 0 0 8px rgba(125, 214, 255, 0.35);
+  transition: color 0.35s;
+}
+.od-val { color: rgba(125, 214, 255, 0.75); font-variant-numeric: tabular-nums; transition: color 0.35s; }
+.od-meter {
+  position: relative;
+  width: 100%; height: 9px;
+  border-radius: 5px;
+  background: rgba(8, 12, 26, 0.72);
+  border: 1px solid rgba(125, 214, 255, 0.38);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.6),
+    0 0 12px rgba(47, 111, 216, 0.22);
+  overflow: hidden;
+}
+.od-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #1f6dff, #7dd6ff 70%, #bfefff);
+  border-radius: 4px;
+  box-shadow: 0 0 9px rgba(125, 214, 255, 0.75);
+  transition: width 0.15s linear, background 0.4s;
+}
+.od-fill.hot {
+  background: linear-gradient(90deg, #ff9a3c, #ffe98a, #ffffff);
+  box-shadow: 0 0 12px rgba(255, 170, 80, 0.9);
+}
+.od-meter-wrap.hot .od-label { color: #ffd9a0; text-shadow: 0 0 10px rgba(255, 170, 80, 0.7); }
+.od-meter-wrap.hot .od-val { color: #ffd98a; }
+.od-meter-wrap.hot .od-meter { border-color: rgba(255, 170, 90, 0.55); }
+
+/* lives: ONE unified design on every platform — small label + 3-slot dot rail */
+#lives {
+  display: inline-flex; gap: 5px; align-items: center; justify-content: center;
+  font-size: 13px; line-height: 1;
+}
+#lives .lives-label {
+  font-size: 9px; font-weight: 800; letter-spacing: 2px; color: #8aa4d4;
+  margin-right: 3px; opacity: 0.85;
+}
+#lives .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #7dd6ff; box-shadow: 0 0 9px rgba(125, 214, 255, 0.65);
+}
+#lives .dot.lost { opacity: 0.22; box-shadow: none; }
+
+/* touch control-mode pill: same family as .hud-btn — auto width, always
+   rounded (never a square-clipped edge), and vertically matched to the
+   sound/pause buttons beside it */
+.mode-btn {
+  width: auto !important;              /* .hud-btn fixes 42px; override */
+  min-width: 62px;
+  height: 38px;                        /* matches .hud-btn on desktop */
+  border-radius: 999px;
+  padding: 0 16px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.hud-right { display: flex; gap: 8px; pointer-events: auto; }
+.hud-btn {
+  pointer-events: auto;
+  background: rgba(16, 24, 48, 0.62);
+  border: 1px solid rgba(125, 214, 255, 0.24);
+  color: #dceaff;
+  width: 42px; height: 38px;
+  border-radius: 11px;
+  font-size: 16px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
+  font-family: inherit;
+}
+.hud-btn:hover { border-color: rgba(125, 214, 255, 0.55); background: rgba(23, 34, 66, 0.72); }
+.hud-btn:active { transform: scale(0.92); background: rgba(255,255,255,0.16); }
+
+/* overdrive banner */
+#od-banner {
+  position: absolute;
+  top: 13%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 9px 26px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255,110,40,0.16), rgba(255,220,120,0.14), rgba(255,110,40,0.16));
+  border: 1px solid rgba(255, 170, 90, 0.5);
+  box-shadow: 0 0 26px rgba(255,140,60,0.35), inset 0 0 14px rgba(255,160,80,0.15);
+  animation: odPulse 0.7s ease-in-out infinite alternate;
+  backdrop-filter: blur(4px);
+}
+#od-text {
+  font-size: 21px; font-weight: 900; letter-spacing: 3px;
+  background: linear-gradient(90deg, #ffd9a0, #ffffff, #ffb35c);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  white-space: nowrap;
+}
+@keyframes odPulse { from { transform: translateX(-50%) scale(1); } to { transform: translateX(-50%) scale(1.06); } }
+
+#combo-tag {
+  position: absolute;
+  top: 21%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 2px;
+  color: #ffd98a;
+  text-shadow: 0 0 14px rgba(255,190,90,0.7);
+}
+
+/* ---- desktop side panels (fill the wide letterbox gutters) ---------------- */
+/* Panels are anchored TO the playfield edges (each gutter is exactly the field's
+   leftover width), so panel + field tile the full window with no dead seams.
+   The field's own background gradient runs wall-to-wall behind them. */
+.side-panel {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 236px;
+  display: none;                 /* shown by JS on wide viewports */
+  flex-direction: column;
+  gap: 26px;
+  padding: 24px 26px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(18, 30, 62, 0.4), rgba(10, 16, 36, 0.4));
+  border: 1px solid rgba(125, 214, 255, 0.14);
+  box-shadow: 0 0 44px rgba(20, 50, 120, 0.25) inset, 0 0 0 1px rgba(0,0,0,0.25);
+  pointer-events: none;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  color: #dceaff;
+}
+#panel-left { right: calc(50% + var(--field-half, 360px)); }
+#panel-right { left: calc(50% + var(--field-half, 360px)); }
+.side-panel.on { display: flex; }
+
+.sp-title {
+  font-size: 10px; font-weight: 800; letter-spacing: 3px; color: #7dd6ff;
+  border-bottom: 1px solid rgba(125, 214, 255, 0.18);
+  padding-bottom: 8px;
+  text-shadow: 0 0 10px rgba(125, 214, 255, 0.3);
+}
+.sp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.sp-k { font-size: 10px; font-weight: 700; letter-spacing: 2px; color: #8aa4d4; white-space: nowrap; }
+.sp-v { font-size: 17px; font-weight: 800; font-variant-numeric: tabular-nums; color: #eaf4ff; }
+.sp-hint { font-size: 10px; letter-spacing: 1.5px; color: #6d85b8; margin-top: -12px; line-height: 1.8; }
+.sp-hint b { color: #9db8e8; font-weight: 800; }
+
+.legend { display: flex; flex-direction: column; gap: 7px; }
+.legend-row { display: flex; align-items: center; gap: 9px; }
+.legend-swatch { width: 15px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+.legend-name { font-size: 10px; letter-spacing: 1.5px; color: #8aa4d4; white-space: nowrap; }
+
+@media (max-width: 480px) {
+  #hud-top { gap: 6px; left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right)); top: max(8px, env(safe-area-inset-top)); }
+  #score { font-size: 22px; }
+  .hud-label { font-size: 10px; letter-spacing: 1.5px; }
+  .hud-level { font-size: 10px; letter-spacing: 2px; }
+  .od-meter-wrap { width: 104px; }
+  .od-meter { height: 8px; }
+  .od-meter-head { font-size: 8px; letter-spacing: 1.5px; }
+  .hud-btn { width: 34px; height: 30px; font-size: 13px; border-radius: 10px; padding: 0 !important; }
+  .mode-btn { height: 30px; min-width: 0; font-size: 11px; padding: 0 12px !important; }
+  #lives { gap: 4px; }
+  #lives .dot { width: 7px; height: 7px; }
+  #lives .lives-label { font-size: 8px; letter-spacing: 1.5px; }
+  #od-banner { padding: 7px 18px; }
+  #od-text { font-size: 17px; letter-spacing: 2px; }
+  #combo-tag { font-size: 13px; }
+}
+
+@media (max-width: 1000px) {
+  .side-panel { display: none !important; }
+}
+
+.hidden { display: none !important; }

@@ -366,76 +366,101 @@
       imageDialog.close();
   });
 
-  const cases = {
-    original: {
-      title: "29 minutes.<br>A whole game.",
-      preset: "RECORDED BUILD / SEPTEMBER 2026",
-      cost: "~$1.20",
-      measure: "83",
-      measureLabel: "PASSING CHECKS",
-      time: "29m",
-      description:
-        "From a dictated brief to 17 files and roughly 3,000 lines of dependency-free JavaScript. The orchestrator delegated, verified, sent a precise follow-up, fixed a final issue, and checked the result again.",
-      detail:
-        "74 unit tests + 9 headless smoke tests. Zero console errors in a real browser. The narrator sent three messages.",
-      image: "assets/neon-brickles-play.png",
-      alt: "Neon Brickles in play, with a glowing paddle, colorful special bricks, a ball trail, and a combo counter.",
-      caption: "NEON BRICKLES / ORIGINAL RUN",
-      source: "https://github.com/ericflo/eagent#what-it-did-on-a-real-task",
-    },
-    value: {
-      title: "Ten levels.<br>Two dollars and change.",
-      preset: "GLM / THE SIX-PRESET GRID",
-      cost: "$2.19",
-      measure: "26/27",
-      measureLabel: "RUBRIC SCORE",
-      time: "38m",
-      description:
-        "Neon Breakout Breach Edition: 13 files, 3,335 lines, ten levels, four special-brick mechanics, and an adaptive synthesized music engine. Built with the recorded GLM preset.",
-      detail:
-        "A passing headless Playwright harness. Six of six tasks completed. Drag and swipe-slam controls on mobile.",
-      image: "assets/glm-mobile.jpg",
-      alt: "Neon Breakout Breach Edition on a phone, with colorful bricks, a paddle, and a dedicated SLAM control.",
-      caption: "NEON BREAKOUT / GLM PRESET",
-      source:
-        "https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md",
-    },
-    polish: {
-      title: "Touch-first.<br>Polished throughout.",
-      preset: "ANTHROPIC-HIGH / THE SIX-PRESET GRID",
-      cost: "$15.54",
-      measure: "27/27",
-      measureLabel: "RUBRIC SCORE",
-      time: "71m",
-      description:
-        "TOPSIDE shipped a virtual thumbstick, a 1/120 fixed-timestep loop, five ball powers, angle- and speed-gated bricks, and a layered procedural audio engine.",
-      detail:
-        "3,195 lines across 10 files. Passing browser tests. All nine rubric items scored 3/3 in code review and scripted play; audio was assessed from code.",
-      image: "assets/anthropic-high-mobile.jpg",
-      alt: "TOPSIDE in play on a phone, with a glowing orange ball trail, special bricks, and touch controls.",
-      caption: "TOPSIDE / ANTHROPIC-HIGH PRESET",
-      source:
-        "https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md",
-    },
-  };
-  tabs(".case-tabs", (button) => {
-    const item = cases[button.dataset.case];
-    $("#case-title").innerHTML = item.title;
-    for (const key of [
-      "preset",
-      "cost",
-      "measure",
-      "time",
-      "description",
-      "detail",
-    ])
-      $("#case-" + key).textContent = item[key];
-    $("#case-measure-label").textContent = item.measureLabel;
-    $("#case-image").src = item.image;
-    $("#case-image").alt = item.alt;
-    $("#case-visual-caption").textContent = item.caption;
-    $("#case-source").href = item.source;
-  });
+  // Playable Breakout-grid gallery. Game metadata ships in #game-data (built
+  // from docs/grid/results.json); iframes load lazily on Play only, and the
+  // comparison table plus full-page links work with no JavaScript at all.
+  const gameData = $("#game-data")
+    ? JSON.parse($("#game-data").textContent)
+    : null;
+  const gameDialog = $("#game-dialog");
+  if (gameData && gameDialog) {
+    const gameFrame = $("#game-dialog-frame");
+    const gameShot = $("#game-dialog-shot");
+    const gameTitle = $("#game-dialog-title");
+    const gameMeta = $("#game-dialog-meta");
+    const gameOpen = $("#game-dialog-open");
+    const shotDesktop = $("#game-shot-desktop");
+    const shotMobile = $("#game-shot-mobile");
+    let currentGame = null;
+    let currentShot = "desktop";
+    function renderShot() {
+      const shots = {
+        desktop: [gameData[currentGame].desktop, 1280, 800, "desktop"],
+        mobile: [gameData[currentGame].mobile, 390, 844, "mobile"],
+      };
+      const [src, width, height, label] = shots[currentShot];
+      // Refresh through the staged thumbnail path so a cached desktop still
+      // never lingers after switching views.
+      gameShot.removeAttribute("src");
+      gameShot.src = src;
+      gameShot.width = width;
+      gameShot.height = height;
+      gameShot.alt =
+        "Screenshot of " + gameData[currentGame].title + " on " + label;
+      shotDesktop.setAttribute(
+        "aria-pressed",
+        String(currentShot === "desktop"),
+      );
+      shotMobile.setAttribute("aria-pressed", String(currentShot === "mobile"));
+    }
+    function openGame(preset) {
+      if (!gameData[preset]) return;
+      currentGame = preset;
+      currentShot = "desktop";
+      const game = gameData[preset];
+      gameTitle.textContent = game.title;
+      gameMeta.textContent =
+        preset +
+        " · " +
+        game.models +
+        " · " +
+        game.cost +
+        " · " +
+        game.rubric +
+        " rubric · " +
+        game.status +
+        (game.flag ? " · " + game.flag : "");
+      gameOpen.href = game.href;
+      gameFrame.title = "Play " + game.title + " (" + preset + ")";
+      // Lazy: the game boots only when its dialog opens, never 14 at once.
+      gameFrame.src = game.href;
+      renderShot();
+      gameDialog.showModal();
+      document.body.classList.add("dialog-open");
+    }
+    function closeGame() {
+      gameDialog.close();
+    }
+    $$("[data-play]").forEach((button) => {
+      button.addEventListener("click", () => openGame(button.dataset.play));
+    });
+    shotDesktop.addEventListener("click", () => {
+      currentShot = "desktop";
+      renderShot();
+    });
+    shotMobile.addEventListener("click", () => {
+      currentShot = "mobile";
+      renderShot();
+    });
+    $("#game-dialog-close").addEventListener("click", closeGame);
+    gameDialog.addEventListener("close", () => {
+      document.body.classList.remove("dialog-open");
+      // Stop the game when the dialog closes so audio and loops end.
+      gameFrame.removeAttribute("src");
+      currentGame = null;
+    });
+    gameDialog.addEventListener("click", (event) => {
+      if (event.target !== gameDialog) return;
+      const bounds = gameDialog.getBoundingClientRect();
+      if (
+        event.clientX < bounds.left ||
+        event.clientX > bounds.right ||
+        event.clientY < bounds.top ||
+        event.clientY > bounds.bottom
+      )
+        closeGame();
+    });
+  }
 
   tabs(".install-tabs", (button) => {
     const source = button.dataset.install === "source";

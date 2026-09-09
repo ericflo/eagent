@@ -1091,125 +1091,73 @@
         <div class="section-heading">
           <div>
             <p class="eyebrow">05 — THE WORK SPEAKS</p>
-            <h2>One brief.<br />Something you can play.</h2>
+            <h2>Fourteen presets.<br />One brief. Play them all.</h2>
           </div>
           <p>
-            A modern take on Breakout: special bricks, power-ups, a paddle that
-            moves in two dimensions, mobile controls, and escalating audio and
-            effects. Here’s what eagent made.
+            In September 2026, fourteen eagent presets built the same modern
+            Breakout spec in parallel, unattended: fourteen playable games for
+            about $92 in list-price spend at a 91% prompt-cache hit rate. Every
+            build below is staged from its run, with its measured cost, rubric
+            score, and an honest label where it breaks.
           </p>
         </div>
-        <div class="case-layout">
-          <div class="case-visual">
-            <div class="case-image-grid" aria-hidden="true"></div>
-            <span class="case-visual-caption" id="case-visual-caption"
-              >NEON BRICKLES / ORIGINAL RUN</span
-            >
-            <div class="game-frame">
-              <img
-                id="case-image"
-                src="assets/neon-brickles-play.png"
-                width="480"
-                height="800"
-                loading="lazy"
-                alt="Neon Brickles in play, with a glowing paddle, colorful special bricks, a ball trail, and a combo counter."
-              />
-            </div>
-            <div class="case-image-note">
-              <span class="status-dot"></span>REAL OUTPUT FROM A DOCUMENTED RUN
-            </div>
-          </div>
-          <div class="case-copy">
-            <div
-              class="case-tabs"
-              role="tablist"
-              aria-label="Documented builds"
-            >
-              <button
-                id="case-original"
-                role="tab"
-                aria-controls="case-panel"
-                aria-selected="true"
-                data-case="original"
-              >
-                The first build</button
-              ><button
-                id="case-value"
-                role="tab"
-                aria-controls="case-panel"
-                aria-selected="false"
-                tabindex="-1"
-                data-case="value"
-              >
-                The value run</button
-              ><button
-                id="case-polish"
-                role="tab"
-                aria-controls="case-panel"
-                aria-selected="false"
-                tabindex="-1"
-                data-case="polish"
-              >
-                The polish pass
-              </button>
-            </div>
-            <div
-              id="case-panel"
-              role="tabpanel"
-              aria-labelledby="case-original"
-              tabindex="0"
-            >
-              <p class="eyebrow" id="case-preset">
-                RECORDED BUILD / SEPTEMBER 2026
-              </p>
-              <h3 id="case-title">29 minutes.<br />A whole game.</h3>
-              <p id="case-description">
-                From a dictated brief to 17 files and roughly 3,000 lines of
-                dependency-free JavaScript. The orchestrator delegated,
-                verified, sent a precise follow-up, fixed a final issue, and
-                checked the result again.
-              </p>
-              <div class="case-metrics">
-                <div>
-                  <strong id="case-cost">~$1.20</strong
-                  ><span>ESTIMATED API COST</span>
-                </div>
-                <div>
-                  <strong id="case-measure">83</strong
-                  ><span id="case-measure-label">PASSING CHECKS</span>
-                </div>
-                <div>
-                  <strong id="case-time">29m</strong><span>WALL CLOCK</span>
-                </div>
-              </div>
-              <p class="case-detail" id="case-detail">
-                74 unit tests + 9 headless smoke tests. Zero console errors in a
-                real browser. The narrator sent three messages.
-              </p>
-            </div>
-            <p class="case-method">
-              Documented September 2026 runs. Costs use the recorded list
-              prices; these are individual observations, not performance
-              guarantees. Grid scores use code review and scripted browser play.
-            </p>
-            <a
-              id="case-source"
-              class="text-link"
-              href="https://github.com/ericflo/eagent#what-it-did-on-a-real-task"
-              >Read the run report
-              <svg class="icon"><use href="#i-up-right" /></svg
-            ></a>
-          </div>
-        </div>
+        <p class="game-method">
+          Documented September 2026 runs on binary v0.8.0-1-g59ce5c7. Costs use
+          September 2026 list prices; these are individual observations, not
+          performance guarantees. Each game was served statically and played
+          with scripted Chromium at desktop and phone viewports, then scored
+          against the same nine-item rubric (27 points) from code reading plus
+          that play. Statuses: done (the run declared itself finished), stopped
+          · budget (passed verification, then the budget stopped it), stopped ·
+          cap (a cost cap killed it mid-verification), halted · provider
+          (provider errors ended it). Full methodology, per-brick evidence, and
+          what the exercise changed in the harness live in the grid record.
+        </p>
         <a
-          class="field-note"
+          class="text-link game-record-link"
           href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
-          ><span class="field-note-label">FROM THE FIELD NOTES</span
-          ><span
-            >Six presets. The same brief. Every build measured, inspected, and
-            compared.</span
-          ><svg class="icon"><use href="#i-up-right" /></svg
+          >Read the Breakout grid record
+          <svg class="icon"><use href="#i-up-right" /></svg
         ></a>
+        <!-- site:game-gallery -->
+        <dialog
+          class="game-dialog"
+          id="game-dialog"
+          aria-labelledby="game-dialog-title"
+        >
+          <button
+            type="button"
+            class="dialog-close"
+            id="game-dialog-close"
+            aria-label="Close game"
+          >
+            <svg class="icon"><use href="#i-close" /></svg>
+          </button>
+          <h3 id="game-dialog-title">Game</h3>
+          <p id="game-dialog-meta"></p>
+          <div class="game-dialog-frame-wrap">
+            <iframe
+              id="game-dialog-frame"
+              title="Playable Breakout grid game"
+              loading="lazy"
+            ></iframe>
+          </div>
+          <div
+            class="game-shot-toggle"
+            role="group"
+            aria-label="Screenshot view"
+          >
+            <button type="button" id="game-shot-desktop" aria-pressed="true">
+              Desktop shot</button
+            ><button type="button" id="game-shot-mobile" aria-pressed="false">
+              Mobile shot
+            </button>
+          </div>
+          <img id="game-dialog-shot" width="1280" height="800" alt="" />
+          <a class="text-link" id="game-dialog-open" href="games/muse/"
+            >Open full page <svg class="icon"><use href="#i-up-right" /></svg
+          ></a>
+        </dialog>
       </section>
 
       <section class="beyond-terminal section-wrap" id="anywhere">

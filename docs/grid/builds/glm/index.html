@@ -1,0 +1,2036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#04060f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>NEON BREAKER — a modern Breakout</title>
+<style>
+  /* ================= base ================= */
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; overflow:hidden; background:#04060f; }
+  body{
+    font-family:"Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    color:#cfe8ff;
+    touch-action:none;                /* no page scroll/zoom while playing */
+    overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #game{
+    position:fixed; inset:0; width:100%; height:100%;
+    display:block; touch-action:none; cursor:crosshair;
+  }
+
+  /* ================= HUD buttons ================= */
+  #ui{
+    position:fixed; top:0; right:0; z-index:30;
+    display:flex; gap:10px; padding:12px 14px;
+  }
+  .icon-btn{
+    width:48px; height:48px; min-width:48px;      /* generous touch target */
+    border-radius:12px; border:1px solid rgba(120,200,255,.35);
+    background:rgba(10,20,40,.55); color:#bfeaff;
+    font-size:22px; line-height:1; cursor:pointer;
+    backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
+    transition:transform .08s ease, background .15s ease;
+  }
+  .icon-btn:hover{ background:rgba(30,60,110,.7); }
+  .icon-btn:active{ transform:scale(.92); }
+
+  /* ================= overlay screens ================= */
+  #overlay{
+    position:fixed; inset:0; z-index:20;
+    display:flex; align-items:center; justify-content:center;
+    padding:18px;
+    background:radial-gradient(120% 100% at 50% 0%, rgba(10,18,48,.88), rgba(3,5,12,.94));
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    overflow:auto;
+  }
+  #overlay.hidden{ display:none; }
+  .card{
+    width:min(680px, 100%); max-height:94vh; overflow:auto;
+    border:1px solid rgba(80,180,255,.35); border-radius:18px;
+    background:linear-gradient(160deg, rgba(14,22,52,.92), rgba(6,10,26,.92));
+    box-shadow:0 0 40px rgba(45,226,255,.18), 0 0 120px rgba(255,61,245,.08);
+    padding:26px 28px 24px;
+  }
+  .title{
+    font-size:clamp(34px, 8vw, 58px); font-weight:800; letter-spacing:2px;
+    background:linear-gradient(90deg,#2de2ff,#a06bff 45%,#ff3df5);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 0 30px rgba(45,226,255,.35);
+    text-align:center; margin-bottom:2px;
+  }
+  .subtitle{
+    text-align:center; color:#8fb6d8; font-size:14px; letter-spacing:3px;
+    text-transform:uppercase; margin-bottom:18px;
+  }
+  .panel{
+    background:rgba(8,14,34,.6); border:1px solid rgba(90,170,255,.22);
+    border-radius:12px; padding:12px 14px; margin:10px 0; font-size:14px; line-height:1.5;
+  }
+  .panel b{ color:#ffd23d; }
+  .panel .hot{ color:#2de2ff; font-weight:700; }
+  h3.sec{
+    font-size:12px; letter-spacing:2.5px; text-transform:uppercase;
+    color:#7fd8ff; margin:14px 0 6px; opacity:.9;
+  }
+  .legend{ display:grid; grid-template-columns:1fr 1fr; gap:6px 14px; }
+  @media (max-width:560px){ .legend{ grid-template-columns:1fr; } }
+  .chip{ display:flex; align-items:center; gap:9px; font-size:13px; color:#cfe4ff; }
+  .dot{ width:14px; height:14px; border-radius:4px; flex:0 0 14px; box-shadow:0 0 8px currentColor; background:currentColor; }
+  kbd{
+    display:inline-block; padding:2px 7px; border-radius:6px; font-size:12px;
+    border:1px solid rgba(140,200,255,.4); border-bottom-width:2px;
+    background:rgba(20,34,64,.8); color:#e8f6ff; margin:1px;
+  }
+  .btn{
+    display:block; width:100%; margin-top:16px; padding:15px 18px;
+    font-size:18px; font-weight:800; letter-spacing:2px; text-transform:uppercase;
+    color:#04121c; background:linear-gradient(90deg,#2de2ff,#7bfff2);
+    border:none; border-radius:12px; cursor:pointer;
+    box-shadow:0 0 24px rgba(45,226,255,.45);
+    transition:transform .08s ease, box-shadow .15s ease;
+  }
+  .btn:hover{ box-shadow:0 0 36px rgba(45,226,255,.75); }
+  .btn:active{ transform:scale(.98); }
+  .btn.alt{ background:linear-gradient(90deg,#ff3df5,#a06bff); color:#1c0426; box-shadow:0 0 24px rgba(255,61,245,.4); }
+  .row{ display:flex; gap:10px; }
+  .row .btn{ flex:1; }
+  .stats{ display:flex; justify-content:center; gap:26px; margin:12px 0 4px; flex-wrap:wrap; }
+  .stat{ text-align:center; }
+  .stat .v{ font-size:26px; font-weight:800; color:#ffd23d; }
+  .stat .k{ font-size:11px; letter-spacing:2px; color:#8fb6d8; text-transform:uppercase; }
+  .hiscore{ text-align:center; color:#ffd23d; font-weight:700; letter-spacing:1px; margin-top:8px; }
+  .foot{ text-align:center; color:#6f93b8; font-size:12px; margin-top:14px; }
+  .blink{ animation:blink 1.2s steps(2) infinite; }
+  @keyframes blink{ 50%{ opacity:.35; } }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="ui">
+  <button id="btnMute" class="icon-btn" title="Mute (M)">&#128266;</button>
+  <button id="btnPause" class="icon-btn" title="Pause (P)">&#10074;&#10074;</button>
+</div>
+
+<div id="overlay"><div class="card" id="card"></div></div>
+
+<script>
+'use strict';
+/* =====================================================================
+   NEON BREAKER — a modern Breakout where the real game begins ABOVE
+   the bricks. Single self-contained file: canvas render, WebAudio synth
+   SFX, mouse + touch + virtual-thumbstick controls, delta-time physics.
+   =====================================================================
+
+   Sections
+     1. helpers & tuning          6. gameplay (hits, power-ups, bombs)
+     2. audio synth               7. breakthrough state & scoring
+     3. canvas / resize / stars   8. update loop
+     4. state & levels            9. input (mouse / touch / keys)
+     5. entities & juice         10. rendering
+                                11. screens & boot
+   ===================================================================== */
+
+/* =====================================================================
+   1. HELPERS & TUNING
+   ===================================================================== */
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp  = (a, b, t) => a + (b - a) * t;
+const rand  = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const pick  = arr => arr[(Math.random() * arr.length) | 0];
+const hyp   = (x, y) => Math.sqrt(x * x + y * y);
+const fmt   = n => Math.round(n).toLocaleString('en-US');
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const card = document.getElementById('card');
+const overlay = document.getElementById('overlay');
+const btnMute = document.getElementById('btnMute');
+const btnPause = document.getElementById('btnPause');
+
+/* Logical playfield: width is fixed, height follows the screen aspect.
+   Everything (bricks, paddle, physics) is expressed in these units and
+   scaled to device pixels once per frame. */
+const LOGICAL_W = 800;
+const VIEW = { w: LOGICAL_W, h: 1000, scale: 1, uiW: 130, bgGrad: null };
+
+const CFG = {
+  cols: 12, brickTop: 118, brickH: 26, brickGapX: 4, brickGapY: 5, sidePad: 6,
+  ballR: 9,
+  serveSpeed: 470,          // + per difficulty cycle
+  minSpeed: 350, maxSpeed: 960,
+  speedUpPerBrick: 3.5,     // gentle rally speed ramp
+  paddleSpeed: 1150,        // keyboard / stick max speed (logical px/s)
+  paddleBandTop: 170,       // paddle can rise this far above the floor
+  paddleBandBot: 44,
+  maxLogicalH: 1150,        // portrait phones: cap field height, widen fill
+  boostUpFactor: 0.55,      // upward paddle motion -> extra ball speed
+  dampDownFactor: 0.78,     // downward paddle motion softens the ball
+  englishFactor: 0.38,      // horizontal paddle motion -> ball spin
+  powerChance: 0.13,
+  healPeriod: 6.5, healMax: 4,
+  speedThresh: 560,         // ball speed needed to crack SPEED bricks
+  bombRadius: 1.8,          // in cell widths
+  startLives: 3, maxLives: 6,
+  stickRadius: 64, dragSensitivity: 1.18,
+};
+
+const PAL = {
+  bg0: '#04060f', bg1: '#0b1130',
+  cyan: '#2de2ff', magenta: '#ff3df5', lime: '#9dff3d', gold: '#ffd23d',
+  orange: '#ff7a2d', red: '#ff3d5e', steel: '#7d8aa5', purple: '#a06bff',
+  white: '#ffffff', dim: '#8fb6d8'
+};
+
+const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif';
+const font = (weight, size) => `${weight} ${size}px ${FONT}`;
+
+/* Brick type table. "Difficult in interesting ways" — see README. */
+const BRICK = {
+  norm:  { hp: 1, color: PAL.cyan,    score: 50,  name: 'standard' },
+  arm:   { hp: 3, color: '#aab6cf',   score: 90,  name: 'armored (garnish only)' },
+  speed: { hp: 1, color: PAL.gold,    score: 130, name: 'speed-locked' },
+  shield:{ hp: 1, color: PAL.magenta, score: 150, name: 'directional shield' },
+  mover: { hp: 1, color: PAL.lime,    score: 110, name: 'moving' },
+  heal:  { hp: 1, color: PAL.purple,  score: 160, name: 'regenerator' },
+  bomb:  { hp: 1, color: PAL.orange,  score: 110, name: 'explosive' },
+  steel: { hp: Infinity, color: '#5f6f8f', score: 0, name: 'indestructible' },
+};
+
+const POWERS = {
+  multi: { color: PAL.magenta, label: 'M', name: 'MULTIBALL' },
+  fire:  { color: PAL.orange,  label: 'F', name: 'FIREBALL' },
+  big:   { color: PAL.lime,    label: 'B', name: 'BIG PADDLE' },
+  slow:  { color: PAL.cyan,    label: 'S', name: 'SLOW-MO' },
+  life:  { color: PAL.red,     label: '+', name: 'EXTRA LIFE' },
+  sticky:{ color: PAL.purple,  label: 'Z', name: 'STICKY PADDLE' },
+};
+const POWER_BAG = ['multi','multi','fire','fire','big','big','slow','slow','sticky','life'];
+/* =====================================================================
+   2. AUDIO — everything synthesized with WebAudio oscillators,
+   no files. Pitch rises with combo for that arcade escalation feel.
+   ===================================================================== */
+const AudioSys = {
+  ctx: null, master: null, muted: false,
+  init(){
+    if (this.ctx) return;
+    try{
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.5;
+      this.master.connect(this.ctx.destination);
+    }catch(e){ this.ctx = null; }
+  },
+  resume(){ if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  setMuted(m){
+    this.muted = m;
+    if (this.master) this.master.gain.value = m ? 0 : 0.5;
+    btnMute.innerHTML = m ? '&#128263;' : '&#128266;';
+  },
+  /* Core voice: an oscillator with optional pitch sweep + envelope. */
+  tone(freq, dur, { type='sine', vol=0.3, sweep=0, delay=0, attack=0.005 } = {}){
+    if (!this.ctx || this.muted) return;
+    const t0 = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(Math.max(30, freq), t0);
+    if (sweep) osc.frequency.exponentialRampToValueAtTime(Math.max(30, freq * sweep), t0 + dur);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(this.master);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+  },
+  /* Filtered noise burst — whooshes, explosions. */
+  noise(dur, { vol=0.25, freq=1000, sweep=0.4, type='lowpass', delay=0 } = {}){
+    if (!this.ctx || this.muted) return;
+    const t0 = this.ctx.currentTime + delay;
+    const len = Math.max(1, (dur * this.ctx.sampleRate) | 0);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const flt = this.ctx.createBiquadFilter();
+    flt.type = type; flt.frequency.setValueAtTime(freq, t0);
+    if (sweep) flt.frequency.exponentialRampToValueAtTime(Math.max(40, freq * sweep), t0 + dur);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(flt); flt.connect(g); g.connect(this.master);
+    src.start(t0);
+  },
+  /* --- named cues --- */
+  brick(combo){ const p = Math.pow(1.06, Math.min(combo, 40)); this.tone(330 * p, 0.1, { type:'square', vol:0.22, sweep:1.5 }); },
+  wall(){ this.tone(210, 0.06, { type:'triangle', vol:0.16, sweep:0.7 }); },
+  paddleHit(power){ this.tone(power ? 340 : 250, 0.09, { type:'sawtooth', vol:0.2, sweep: power ? 2.2 : 1.4 }); if (power) this.noise(0.1, { vol:0.1, freq:2600, sweep:0.3 }); },
+  steel(){ this.tone(120, 0.08, { type:'square', vol:0.15, sweep:0.6 }); this.noise(0.05, { vol:0.08, freq:3200, sweep:0.5 }); },
+  denied(){ this.tone(150, 0.12, { type:'square', vol:0.2, sweep:0.55 }); },
+  bomb(){ this.noise(0.5, { vol:0.5, freq:900, sweep:0.06 }); this.tone(90, 0.45, { type:'sawtooth', vol:0.35, sweep:0.3 }); },
+  breakthrough(){ /* rising arpeggio fanfare */
+    [262, 330, 392, 523, 659, 784].forEach((f, i) => this.tone(f, 0.16, { type:'square', vol:0.22, delay: i * 0.055, sweep:1.02 }));
+    this.noise(0.5, { vol:0.16, freq:1800, sweep:2.5 });
+  },
+  powerup(){ [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.12, { type:'triangle', vol:0.22, delay: i * 0.05 })); },
+  lifeLost(){ this.tone(300, 0.5, { type:'sawtooth', vol:0.3, sweep:0.18 }); this.noise(0.4, { vol:0.2, freq:1200, sweep:0.15 }); },
+  levelClear(){ [392, 494, 587, 784, 988, 1175].forEach((f, i) => this.tone(f, 0.2, { type:'square', vol:0.2, delay: i * 0.08 })); },
+  gameOver(){ [392, 330, 262, 196, 131].forEach((f, i) => this.tone(f, 0.3, { type:'sawtooth', vol:0.25, delay: i * 0.14, sweep:0.85 })); },
+  uiTick(){ this.tone(660, 0.05, { type:'square', vol:0.12 }); },
+  fireSizzle(){ this.noise(0.15, { vol:0.14, freq:3800, sweep:0.25 }); },
+};
+
+/* =====================================================================
+   3. CANVAS SIZING — devicePixelRatio-aware; fixed logical width so
+   gameplay is identical on phone and desktop (height flexes).
+   ===================================================================== */
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width  = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  // Fixed logical WIDTH on landscape/desktop; on tall portrait screens cap the
+  // logical HEIGHT instead so the field stays compact (no endless travel).
+  const prevW = VIEW.w;
+  let s = w / LOGICAL_W, lw = LOGICAL_W, lh = h / s;
+  if (lh > CFG.maxLogicalH){ s = h / CFG.maxLogicalH; lw = w / s; lh = CFG.maxLogicalH; }
+  VIEW.scale = s * dpr;
+  VIEW.w = lw;
+  VIEW.h = lh;
+  VIEW.bgGrad = null;                    // rebuild after resize
+  // rotation mid-level: remap brick columns into the new field width
+  if (G.bricks.length && prevW && prevW !== VIEW.w){
+    const f = (VIEW.w - 2 * CFG.sidePad) / Math.max(1, prevW - 2 * CFG.sidePad);
+    for (const br of G.bricks){
+      br.x = CFG.sidePad + (br.x - CFG.sidePad) * f;
+      br.baseX = CFG.sidePad + (br.baseX - CFG.sidePad) * f;
+    }
+    G.cellW = (VIEW.w - 2 * CFG.sidePad) / CFG.cols;
+  }
+  View.fit();
+  Stars.build();
+}
+window.addEventListener('resize', resize);
+
+const View = {
+  begin(){ ctx.setTransform(VIEW.scale, 0, 0, VIEW.scale, 0, 0); },
+  fit(){ G.paddle.x = clamp(G.paddle.x, G.paddle.w/2 + 8, VIEW.w - G.paddle.w/2 - 8); },
+  shake(mag){ G.shakeMag = Math.min(26, G.shakeMag + mag); },
+  flash(a){ G.flashAlpha = Math.max(G.flashAlpha, a); },
+};
+
+/* Starfield with parallax; twinkle rate scales with multiplier. */
+const Stars = {
+  list: [], grid: [], pulse: 0,
+  build(){
+    this.list = [];
+    const n = 90;
+    for (let i = 0; i < n; i++) this.list.push({
+      x: rand(VIEW.w), y: rand(VIEW.h), z: rand(0.25, 1),
+      r: rand(0.6, 2.0), tw: rand(TAU), speed: rand(6, 30),
+    });
+    this.grid = [];
+    for (let i = 0; i < 9; i++) this.grid.push({
+      x: rand(VIEW.w), y: rand(VIEW.h), s: rand(40, 100), a: rand(-1, 1), sp: rand(-0.5, 0.5), o: rand(0.02, 0.06),
+    });
+  },
+  update(dt){
+    const boost = 1 + (G.multiplier - 1) * 0.35 + (G.breakthrough ? 3 : 0);
+    this.pulse = lerp(this.pulse, G.multiplier, 0.04);
+    for (const s of this.list){
+      s.tw += dt * 3;
+      s.y += s.speed * zMul(s.z) * boost * dt;
+      if (s.y > VIEW.h + 4){ s.y = -4; s.x = rand(VIEW.w); }
+    }
+    for (const g of this.grid){ g.a += g.sp * dt * (1 + this.pulse * 0.3); }
+  },
+};
+const zMul = z => 0.3 + z * 0.9;
+
+/* =====================================================================
+   4. GAME STATE & LEVELS
+   Levels emphasize mechanic variety over hp-inflation. @ = steel,
+   # = armored (garnish), s = speed-locked, > < = directional shield
+   (open to that side), m = mover, h = regenerator, x = explosive,
+   . = normal, space = empty. A top steel "ceiling" keeps the ball in
+   the breakthrough zone on most levels.
+   ===================================================================== */
+const LEVELS = [
+  { // 1 — learn the basics: normal bricks, a couple of bombs + movers
+    name: 'FIRST CONTACT',
+    map: [
+      'S S S S S S S S S S S S',
+      '. . . m . . . . m . . .',
+      '. . . . . x . x . . . .',
+      '. . x . . . . . . . x .',
+      '. . . . . . . . . . . .',
+    ],
+    steel: 5,
+  },
+  { // 2 — the shield wall: directional shields open left/right only
+    name: 'SHIELD WALL',
+    map: [
+      'S S S S S S S S S S S S',
+      '. . < . . > . . < . . .',
+      '. . . . . . x . . . . .',
+      '. > . . m . . . m . < .',
+      '. . . . . . . . . . . .',
+      '. . s . . . . . . s . .',
+    ],
+    steel: 6,
+  },
+  { // 3 — speed gates: gold bricks only crack at high ball speed
+    name: 'SPEED GATE',
+    map: [
+      'S S S S S S S S S S S S',
+      's s . . . x . x . . s s',
+      '. . . . s . . . s . . .',
+      '. m . . . . . . . . m .',
+      '. . . < . . . . > . . .',
+      's . . . . s s . . . . s',
+    ],
+    steel: 7,
+  },
+  { // 4 — the regenerator nest: healers rebuild the wall around them
+    name: 'THE HIVE',
+    map: [
+      'S S S S S S S S S S S S',
+      '. h . . . . . . . . h .',
+      '. . . x . . . . x . . .',
+      '. . h . . < > . . h . .',
+      '. . . . m . . m . . . .',
+      '. x . # # . . # # . x .',
+    ],
+    steel: 9,
+  },
+  { // 5 — full gauntlet, narrow openings
+    name: 'THE GAUNTLET',
+    map: [
+      'S S S S S S S S S S S S',
+      'h s . . x . . . x . s h',
+      '. . < . . . m . . > . .',
+      '. x . . s . . . s . . x',
+      '. . # # . h h . # # . .',
+      's . < . . . . . . > . s',
+      '. . . m . x x . m . . .',
+    ],
+    steel: 12,
+  },
+];
+
+function buildLevel(idx){
+  const L = LEVELS[idx];
+  const cells = [];
+  const cols = CFG.cols, rows = L.map.length;
+  const cellW = (VIEW.w - CFG.sidePad * 2) / cols;
+  for (let r = 0; r < rows; r++){
+    const line = L.map[r];
+    for (let c = 0; c < cols; c++){
+      const ch = line[c] !== undefined ? line[c] : ' ';
+      if (ch === ' ') continue;
+      let t = 'norm';
+      if (ch === '.') t = 'norm'; else if (ch === '#') t = 'arm';
+      else if (ch === 's') t = 'speed'; else if (ch === '<' || ch === '>') t = 'shield';
+      else if (ch === 'm') t = 'mover'; else if (ch === 'h') t = 'heal';
+      else if (ch === 'x') t = 'bomb'; else if (ch === '@' || ch === 'S') t = 'steel';
+      const b = {
+        type: t, x: CFG.sidePad + c * cellW, y: CFG.brickTop + r * (CFG.brickH + CFG.brickGapY),
+        w: cellW - CFG.brickGapX, h: CFG.brickH, hp: BRICK[t].hp,
+        baseX: CFG.sidePad + c * cellW, row: r, col: c,
+        dir: ch === '<' ? -1 : ch === '>' ? 1 : (t === 'shield' ? pick([-1, 1]) : 0),
+        vx: t === 'mover' ? pick([-1, 1]) * rand(55, 95) : 0,
+        hitFlash: 0, dead: false,
+        healCooldown: t === 'heal' ? rand(4, 9) : 0,
+      };
+      if (t === 'shield'){ b.hp = 1; } // shield: pure angle puzzle
+      G.bricks.push(b);
+    }
+  }
+  // low steel ceiling closing the breakthrough pocket (density = difficulty)
+  if (L.steel){
+    const n = Math.max(2, Math.round(cols * (L.steel / 24)));
+    const step = cols / n;
+    for (let i = 0; i < n; i++){
+      const c = Math.round(i * step);
+      G.bricks.push({
+        type:'steel', x: CFG.sidePad + c * cellW, y: CFG.brickTop - CFG.brickH - CFG.brickGapY - 6,
+        w: cellW - CFG.brickGapX, h: CFG.brickH - 2, hp: Infinity,
+        baseX: CFG.sidePad + c * cellW, row: -1, col: c,
+        dir:0, vx:0, hitFlash:0, dead:false, healCooldown:0,
+      });
+    }
+  }
+  G.rows = rows;
+  G.cellW = cellW;
+  G.brickFieldBottom = CFG.brickTop + rows * (CFG.brickH + CFG.brickGapY);
+}
+
+/* =====================================================================
+   5. ENTITIES & JUICE
+   ===================================================================== */
+const G = {
+  mode: 'title',            // title | serve | play | dead | gameover | win | paused
+  paused: false,
+  score: 0, hiscore: +(localStorage.getItem('neonBreakerHi') || 0),
+  lives: CFG.startLives, level: 0, totalLevels: LEVELS.length,
+  multiplier: 1, multRamp: 0,
+  combo: 0, comboTimer: 0,
+  balls: [], bricks: [], drops: [], parts: [], texts: [], shockwaves: [], ripples: [],
+  paddle: { x: LOGICAL_W/2, y: 0, w: 130, baseW: 130, h: 16, vx: 0, vy: 0,
+            glow: 0, sticky: 0, stickyBall: null, prevX: 0 },
+  ballType: 'normal',       // normal | fire (cycled by F / power-up)
+  fireTimer: 0,
+  slowTimer: 0,
+  shakeMag: 0, flashAlpha: 0,
+  breakthrough: false, btTimer: 0, btBannerT: 0,
+  cycleTime: 0, healTimer: 0,
+  serveAim: 0, aimPulse: 0,
+  stats: { bricks: 0, powers: 0, bestCombo: 0, btTime: 0 },
+  levelStartTime: 0,
+};
+
+const Sounds = c => AudioSys;
+
+/* --- particles --- */
+function spawnParts(x, y, color, count, opts = {}){
+  const speed = opts.speed || 260, spread = opts.spread || TAU, dir = opts.dir || 0;
+  const size = opts.size || 3.2, life = opts.life || 0.55;
+  for (let i = 0; i < count; i++){
+    const a = dir + rand(-spread/2, spread/2);
+    const sp = rand(speed*0.3, speed) * (opts.rand || 1);
+    G.parts.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      life: rand(life*0.5, life*1.25), max: life, size: rand(size*0.5, size),
+      color, grav: opts.grav ?? 620, drag: opts.drag ?? 0.9, shape: opts.shape || 'dot' });
+  }
+}
+
+/* Brick shatter: rectangle shards spinning outward. */
+function shatterBrick(b, color){
+  const cols = 3, rows = 2;
+  for (let i = 0; i < cols * cols; i++){
+    const sx = b.x + (i % cols) * b.w / cols, sy = b.y + ((i / cols) | 0) * b.h / rows;
+    G.parts.push({ x: sx + b.w/cols/2, y: sy + b.h/rows/2,
+      vx: rand(-160, 160) + (b.vx || 0), vy: rand(-260, 60),
+      life: rand(0.5, 0.95), max: 0.95, size: b.w/cols * 0.8, color,
+      grav: 760, drag: 0.985, shape: 'shard', rot: rand(TAU), vr: rand(-9, 9) });
+  }
+}
+
+function addText(x, y, str, color, opts = {}){
+  G.texts.push({ x, y, str, color, life: opts.life || 0.8, max: opts.life || 0.8,
+    size: opts.size || 18, vy: opts.vy ?? -52, weight: opts.weight || '900' });
+}
+
+function popCombo(x, y, combo){
+  if (combo >= 2){
+    addText(x, y, combo + '× COMBO', combo >= 6 ? PAL.magenta : PAL.gold, { size: 14 + Math.min(combo, 12) });
+    if (combo > G.stats.bestCombo) G.stats.bestCombo = combo;
+  }
+}
+
+/* --- ball factory --- */
+function makeBall(x, y, angle, speed, type){
+  return { x, y, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed, r: CFG.ballR,
+           type: type || 'normal', trail: [], stuck: false, lastBrick: -1, fireHue: rand(TAU) };
+}
+
+function resetPaddle(){
+  const p = G.paddle;
+  p.w = p.baseW; p.sticky = 0; p.stickyBall = null; p.glow = 0;
+  p.x = VIEW.w/2; p.y = VIEW.h - CFG.paddleBandBot; p.vx = 0; p.vy = 0;
+}
+
+function serveBall(){
+  const p = G.paddle;
+  resetPaddle();
+  G.balls = [makeBall(p.x, p.y - 30, -Math.PI/2 + rand(-0.2, 0.2), 0, G.ballType)];
+  G.balls[0].stuck = true;           // waits on the paddle until launch
+  G.mode = 'serve';
+  G.serveAim = -Math.PI/2;
+}
+
+function launchBall(){
+  const b = G.balls[0];
+  if (!b || !b.stuck) return;
+  b.stuck = false;
+  const a = G.serveAim;
+  b.vx = Math.cos(a) * CFG.serveSpeed; b.vy = Math.sin(a) * CFG.serveSpeed;
+  G.mode = 'play';
+  AudioSys.tone(520, 0.12, { type:'square', vol:0.2, sweep:1.6 });
+}
+
+/* =====================================================================
+   6. GAMEPLAY
+   ===================================================================== */
+
+/* --- paddle integration: keyboard/stick/pointer resolved each frame --- */
+function updatePaddle(dt){
+  const p = G.paddle;
+  p.prevX = p.x; p.prevY = p.y;
+  resolvePadInput();
+  if (G.padInput.active){
+    // analog / keyboard vector
+    p.x += G.padInput.x * CFG.paddleSpeed * dt;
+    p.y += G.padInput.y * CFG.paddleSpeed * 0.85 * dt;
+  } else {
+    // pointer target (mouse absolute or touch drag): fast critically-damped chase
+    const k = 1 - Math.pow(0.00004, dt);
+    p.x = lerp(p.x, G.padInput.tx, k);
+    p.y = lerp(p.y, G.padInput.ty, k);
+  }
+  // clamp to walls and vertical band
+  p.x = clamp(p.x, p.w/2 + 8, VIEW.w - p.w/2 - 8);
+  p.y = clamp(p.y, VIEW.h - CFG.paddleBandTop, VIEW.h - CFG.paddleBandBot);
+  // real velocities (drive english + boost mechanics)
+  p.vx = (p.x - p.prevX) / Math.max(dt, 1e-5);
+  p.vy = (p.y - p.prevY) / Math.max(dt, 1e-5);
+  // charge glow from sustained upward motion
+  p.glow = clamp(p.glow + (-p.vy / 420) * dt - dt * 0.55, 0, 1);
+  if (p.w > p.baseW){ p.w = Math.max(p.baseW, p.w - 60 * dt); }
+}
+
+/* --- ball vs walls, paddle, bricks --- */
+function ballSpeed(b){ return hyp(b.vx, b.vy); }
+
+function clampBallSpeed(b){
+  const s = ballSpeed(b);
+  const max = CFG.maxSpeed * (G.breakthrough ? 1.12 : 1);
+  if (s > max){ const k = max / s; b.vx *= k; b.vy *= k; }
+  else if (s < CFG.minSpeed && s > 0){ const k = CFG.minSpeed / s; b.vx *= k; b.vy *= k; }
+}
+
+function updateBall(b, dt){
+  if (b.stuck){
+    b.x = G.paddle.x + (b.stickOffset || 0);
+    b.y = G.paddle.y - G.paddle.h / 2 - b.r - 2;
+    return;
+  }
+  // slow-mo time dilation for balls (paddle keeps full speed: feels great)
+  const tdt = dt * (G.slowTimer > 0 ? 0.55 : 1);
+
+  b.x += b.vx * tdt;
+  b.y += b.vy * tdt;
+
+  // side walls
+  if (b.x - b.r < 0){ b.x = b.r; b.vx = Math.abs(b.vx); wallFx(b.x, b.y); }
+  else if (b.x + b.r > VIEW.w){ b.x = VIEW.w - b.r; b.vx = -Math.abs(b.vx); wallFx(b.x, b.y); }
+  // top wall
+  if (b.y - b.r < 0){ b.y = b.r; b.vy = Math.abs(b.vy); wallFx(b.x, b.y); }
+
+  // paddle (only when moving downward and above its top face)
+  const p = G.paddle;
+  if (b.vy > 0 &&
+      b.x > p.x - p.w/2 - b.r && b.x < p.x + p.w/2 + b.r &&
+      b.y + b.r > p.y - p.h/2 && b.y - b.r < p.y + p.h/2){
+    if (p.sticky > 0){
+      b.stuck = true; b.stickOffset = b.x - p.x; p.stickyBall = b;
+      AudioSys.tone(300, 0.8, { type:'triangle', vol:0.15 });
+      addText(b.x, b.y - 20, 'STUCK! tap / SPACE', PAL.purple, { size: 13 });
+    } else {
+      paddleBounce(b);
+    }
+  }
+
+  // fell below screen
+  if (b.y - b.r > VIEW.h + 20){
+    b.dead = true;
+  }
+
+  // brick field
+  brickCollisions(b);
+
+  clampBallSpeed(b);
+}
+
+function wallFx(x, y){
+  AudioSys.wall();
+  spawnParts(x, y, PAL.dim, 5, { speed: 130, life: 0.3, size: 2, grav: 0 });
+  if (G.breakthrough){ View.shake(1.4); addRipple(x, y, PAL.cyan, 30); }
+}
+
+function paddleBounce(b){
+  const p = G.paddle;
+  const rel = clamp((b.x - p.x) / (p.w / 2), -1, 1);
+  const speed = Math.max(ballSpeed(b), CFG.serveSpeed * 0.9);
+  let ang = -Math.PI/2 + rel * 1.05;                    // classic position-based angle
+  // english: horizontal paddle motion skews the angle
+  ang += clamp(p.vx / CFG.paddleSpeed, -1, 1) * CFG.englishFactor;
+  const power = clamp(p.glow, 0, 1) + clamp(-p.vy / CFG.paddleSpeed, 0, 1);
+  let sp = speed;
+  if (power > 0.12){
+    sp *= 1 + CFG.boostUpFactor * clamp(power, 0, 1);   // upward paddle energy accelerates
+    p.glow *= 0.35;                                     // discharge the glow
+    View.shake(3 + power * 4);
+    View.flash(0.08);
+    addRipple(b.x, b.y, PAL.lime, 40);
+    addText(b.x, b.y - 26, 'BOOST!', PAL.lime, { size: 15 });
+    AudioSys.paddleHit(true);
+  } else {
+    if (p.vy > 120){ sp *= CFG.dampDownFactor; addText(b.x, b.y - 26, 'soft', PAL.dim, { size: 12, life: 0.5 }); }
+    AudioSys.paddleHit(false);
+  }
+  // reflect upward always; position-based angle keeps rallies readable
+  b.vx = Math.cos(ang) * sp;
+  b.vy = Math.min(-Math.abs(Math.sin(ang) * sp), -CFG.minSpeed * 0.6);
+  b.y = p.y - p.h/2 - b.r - 0.5;
+  b.lastBrick = -1;
+  spawnParts(b.x, b.y + b.r, PAL.cyan, power > 0.3 ? 14 : 7, { speed: 190, life: 0.35, dir: -Math.PI/2, spread: 2.2, grav: 340 });
+}
+
+/* Ball vs every brick. Returns after handling one hit per ball per frame
+   for stable physics (except fireball, which plows through). */
+function brickCollisions(b){
+  const fire = b.type === 'fire';
+  for (const br of G.bricks){
+    if (br.dead) continue;
+    const hw = br.w / 2 + b.r, hh = br.h / 2 + b.r;
+    const dx = b.x - (br.x + br.w/2), dy = b.y - (br.y + br.h/2);
+    if (Math.abs(dx) > hw || Math.abs(dy) > hh) continue;
+    // overlap resolution axis (classic AABB vs circle approximation)
+    const ox = hw - Math.abs(dx), oy = hh - Math.abs(dy);
+    const fromSide = ox < oy;
+    if (!fire || br.type === 'steel'){
+      if (fromSide){ b.vx = dx < 0 ? -Math.abs(b.vx) : Math.abs(b.vx); b.x += dx < 0 ? -ox : ox; }
+      else { b.vy = dy < 0 ? -Math.abs(b.vy) : Math.abs(b.vy); b.y += dy < 0 ? -oy : oy; }
+    }
+    hitBrick(br, b, fromSide);
+    if (!fire) break;
+  }
+}
+
+/* Central brick-hit dispatcher — per-type rules live here. */
+function hitBrick(br, ball, fromSide){
+  br.hitFlash = 1;
+  const cx = br.x + br.w/2, cy = br.y + br.h/2;
+  const speed = ballSpeed(ball);
+
+  if (br.type === 'steel'){
+    AudioSys.steel(); View.shake(1.6);
+    spawnParts(cx, cy, BRICK.steel.color, 6, { speed: 150, life: 0.3, size: 2.4, grav: 500 });
+    addRipple(cx, cy, PAL.steel, 24);
+    return;
+  }
+  if (br.type === 'shield'){
+    // open side: dir -1 opens RIGHT, +1 opens LEFT. A hit from the closed
+    // side is denied with a "ping" — that's the whole puzzle.
+    const fromLeft = ball.vx < 0;                 // ball travelling left hits the right face
+    const openFace = br.dir < 0 ? 'left' : 'right';
+    const hittingOpen = (openFace === 'left' && !fromLeft) || (openFace === 'right' && fromLeft);
+    if (!hittingOpen){
+      AudioSys.denied(); View.shake(2);
+      spawnParts(cx, cy, PAL.magenta, 9, { speed: 210, life: 0.3, grav: 300 });
+      addText(cx, cy - 14, 'SHIELDED', PAL.magenta, { size: 12, life: 0.45 });
+      return;
+    }
+  }
+  if (br.type === 'speed'){
+    if (speed < CFG.speedThresh){
+      AudioSys.denied(); View.shake(1.4);
+      addText(cx, cy - 14, Math.round(CFG.speedThresh) + ' SPD', PAL.gold, { size: 11, life: 0.4 });
+      spawnParts(cx, cy, PAL.gold, 6, { speed: 170, life: 0.25, grav: 300 });
+      return;
+    }
+  }
+  if (br.type === 'arm' && !(ball && ball.type === 'fire')){
+    // armored garnish: 3 hits; fireball burns straight through
+    br.hp--;
+    if (br.hp > 0){
+      AudioSys.tone(200, 0.09, { type:'square', vol:0.18, sweep:0.75 });
+      View.shake(1.8);
+      spawnParts(cx, cy, '#aab6cf', 8, { speed: 190, life: 0.3, grav: 420 });
+      addText(cx, cy - 14, 'ARMOR ×' + br.hp, '#aab6cf', { size: 11, life: 0.45 });
+      return;
+    }
+  }
+  // --- brick dies ---
+  killBrick(br, cx, cy, ball);
+}
+
+function killBrick(br, cx, cy, ball){
+  if (br.dead) return;
+  br.dead = true;
+  G.stats.bricks++;
+  const info = BRICK[br.type];
+  G.combo++;
+  G.comboTimer = 2.2;
+  if (G.combo > G.stats.bestCombo) G.stats.bestCombo = G.combo;
+
+  const bt = G.breakthrough;
+  const base = info.score;
+  const gained = Math.round(base * G.multiplier * (bt ? 2.5 : 1));
+  G.score += gained;
+  addScorePopup(cx, cy, gained);
+
+  if (bt){
+    spawnParts(cx, cy, info.color, 26, { speed: 380, life: 0.7 });
+    addRipple(cx, cy, info.color, 46);
+    View.shake(4.5); View.flash(0.1);
+    G.btBannerT = Math.max(G.btBannerT, 0.9);
+    AudioSys.brick(G.combo);
+  } else {
+    spawnParts(cx, cy, info.color, 12, { speed: 260, life: 0.45 });
+    View.shake(br.type === 'bomb' ? 7 : 2.2);
+    AudioSys.brick(G.combo);
+  }
+  popCombo(cx, cy - 12, G.combo);
+  shatterBrick(br, info.color);
+
+  // mult ramp
+  G.multRamp = Math.min(G.multRamp + 0.5, 45);
+
+  // per-type extras
+  if (br.type === 'bomb'){
+    AudioSys.bomb(); View.shake(10); View.flash(0.25);
+    G.shockwaves.push({ x: cx, y: cy, r: 8, max: CFG.bombRadius * G.cellW * 2.1, life: 0.4, max_life: 0.4, color: PAL.orange });
+    explode(cx, cy, CFG.bombRadius);
+  }
+  if (br.type === 'heal') spawnNeighbor(br);
+  if (br.type === 'mover' && Math.random() < 0.35) spawnNeighbor(br);
+
+  // speed ramp & drops
+  for (const b2 of G.balls){ if (ballSpeed(b2) < CFG.maxSpeed * 0.99){ const s = ballSpeed(b2) + CFG.speedUpPerBrick; const k = s / ballSpeed(b2); b2.vx *= k; b2.vy *= k; } }
+  maybeDrop(cx, cy);
+  checkLevelClear();
+}
+
+/* Explosions take out neighbors within a radius (steel survives). */
+function explode(cx, cy, radius){
+  const R = radius * G.cellW;
+  for (const br of G.bricks){
+    if (br.dead || br.type === 'steel') continue;
+    const bx = br.x + br.w/2, by = br.y + br.h/2;
+    if (hyp(bx - cx, by - cy) <= R){
+      br.dead = true; G.stats.bricks++;
+      const info = BRICK[br.type];
+      G.score += Math.round(info.score * 0.5 * G.multiplier);
+      shatterBrick(br, info.color);
+      spawnParts(bx, by, info.color, 10, { speed: 320, life: 0.5 });
+      addScorePopup(bx, by, Math.round(info.score * 0.5 * G.multiplier));
+    }
+  }
+  addRipple(cx, cy, PAL.orange, 90);
+  maybeDropFromExplosion(cx, cy);
+  checkLevelClear();
+}
+function maybeDropFromExplosion(cx, cy){
+  if (Math.random() < 0.35) spawnDrop(cx, cy);
+}
+
+/* Regenerators rebuild a neighbor after a delay — keeps the wall alive. */
+function spawnNeighbor(src){
+  const cands = [];
+  for (const br of G.bricks){
+    if (!br.dead || br.type === 'steel') continue;
+    if (Math.abs(br.row - src.row) + Math.abs(br.col - src.col) === 1) cands.push(br);
+  }
+  if (!cands.length) return;
+  const b = pick(cands);
+  setTimeout(() => {
+    if (G.mode !== 'play' && G.mode !== 'serve') return;
+    b.dead = false; b.type = 'norm'; b.hp = 1; b.hitFlash = 1.4;
+    spawnParts(b.x + b.w/2, b.y + b.h/2, PAL.purple, 14, { speed: 150, life: 0.5, grav: -80 });
+    addText(b.x + b.w/2, b.y - 8, 'REBUILT', PAL.purple, { size: 11, life: 0.5 });
+    AudioSys.tone(680, 0.1, { type:'triangle', vol:0.1, sweep:0.7 });
+  }, 1600);
+}
+
+/* --- power-up capsules --- */
+function maybeDrop(cx, cy){ if (Math.random() < CFG.powerChance) spawnDrop(cx, cy); }
+function spawnDrop(x, y, forceType){
+  const type = forceType || pick(POWER_BAG);
+  G.drops.push({ x, y, vy: 120, type, wob: rand(TAU), r: 15 });
+}
+function updateDrops(dt){
+  for (const d of G.drops){
+    d.y += d.vy * dt; d.wob += dt * 4; d.x += Math.sin(d.wob) * 14 * dt;
+    const p = G.paddle;
+    if (d.y + d.r > p.y - p.h/2 && d.y - d.r < p.y + p.h/2 &&
+        d.x > p.x - p.w/2 - d.r && d.x < p.x + p.w/2 + d.r){
+      d.dead = true; applyPower(d.type, d.x, d.y);
+    }
+    if (d.y > VIEW.h + 30) d.dead = true;
+  }
+  G.drops = G.drops.filter(d => !d.dead);
+}
+function applyPower(type, x, y){
+  const info = POWERS[type];
+  G.stats.powers++;
+  AudioSys.powerup(); View.flash(0.12); View.shake(2.5);
+  addRipple(x, y, info.color, 55);
+  spawnParts(x, y, info.color, 22, { speed: 300, life: 0.6, grav: 250 });
+  addText(x, y - 24, info.name, info.color, { size: 17, life: 1.1 });
+  switch (type){
+    case 'multi': {
+      const src = G.balls.filter(b => !b.dead);
+      if (src.length){
+        const base = pick(src);
+        for (const da of [-0.5, 0.5]){
+          if (G.balls.length >= 12) break;
+          const a = Math.atan2(base.vy, base.vx) + da;
+          const s = Math.max(ballSpeed(base), CFG.serveSpeed);
+          G.balls.push(makeBall(base.x, base.y, a, s, base.type));
+        }
+      }
+      break;
+    }
+    case 'fire': G.ballType = 'fire'; G.fireTimer = 12; for (const b of G.balls) b.type = 'fire'; break;
+    case 'big': G.paddle.w = Math.min(260, G.paddle.w * 1.5); break;
+    case 'slow': G.slowTimer = 7; break;
+    case 'life': if (G.lives < CFG.maxLives){ G.lives++; addText(x, y - 46, '+1 LIFE', PAL.red, { size: 15, life: 1.2 }); } else { G.score += 500; addText(x, y - 46, '+500', PAL.gold, { size: 14 }); } break;
+    case 'sticky': G.paddle.sticky = 10; break;
+  }
+}
+
+/* =====================================================================
+   7. BREAKTHROUGH — the heart of the game. When every ball sits above
+   the brick field and the field can't pull it back down, we enter the
+   escalating "above the wall" state.
+   ===================================================================== */
+function topBrickRowY(){
+  let top = Infinity;
+  for (const br of G.bricks) if (!br.dead && br.type !== 'steel') top = Math.min(top, br.y);
+  return top;
+}
+
+function updateBreakthrough(dt){
+  const topY = topBrickRowY();
+  const wasActive = G.breakthrough;
+  let active = false;
+  for (const b of G.balls){
+    if (b.dead || b.stuck) continue;
+    if (b.y + b.r < topY - 2) { active = true; break; }
+  }
+  G.breakthrough = active;
+  if (active && !wasActive){
+    G.btTimer = 0;
+    View.flash(0.35); View.shake(14);
+    AudioSys.breakthrough();
+    addText(VIEW.w/2, VIEW.h*0.32, 'BREAKTHROUGH!', PAL.gold, { size: 52, life: 2.2, vy: -30 });
+    addText(VIEW.w/2, VIEW.h*0.32 + 44, '×2.5 SCORE UP TOP', PAL.cyan, { size: 18, life: 2.2, vy: -22 });
+    for (let i = 0; i < 70; i++){
+      const a = rand(TAU), sp = rand(120, 640);
+      G.parts.push({ x: VIEW.w/2 + rand(-70, 70), y: VIEW.h*0.3, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+        life: rand(0.5, 1.2), max: 1.2, size: rand(2, 5), color: pick([PAL.gold, PAL.cyan, PAL.magenta, PAL.lime]),
+        grav: 220, drag: 0.98, shape: 'dot' });
+    }
+  }
+  if (active){
+    G.btTimer += dt;
+    G.stats.btTime += dt;
+    G.btBannerT = Math.max(G.btBannerT, 0.6);
+  } else if (wasActive){
+    G.btTimer = 0;
+    addText(VIEW.w/2, VIEW.h*0.28, 'back to the grind…', PAL.dim, { size: 15, life: 1.1, vy: -14 });
+  }
+}
+
+/* Multiplier ramps with bricks broken and climbs hard during breakthrough. */
+function updateMultiplier(dt){
+  // decay toward a floor of 1 when nothing is happening
+  G.multRamp = Math.max(0, G.multRamp - dt * (G.breakthrough ? 0.8 : 2.4));
+  const brickMult = 1 + G.multRamp * 0.1;
+  const btBonus = G.breakthrough ? 1 + G.btTimer * 0.35 : 1;
+  G.multiplier = Math.min(24, brickMult * btBonus);
+}
+
+/* =====================================================================
+   8. UPDATE LOOP
+   ===================================================================== */
+function updateEffects(dt){
+  for (const p of G.parts){
+    p.life -= dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += (p.grav || 0) * dt;
+    const dr = Math.pow(p.drag ?? 0.9, dt * 60);
+    p.vx *= dr; p.vy *= dr;
+    if (p.rot !== undefined) p.rot += p.vr * dt;
+  }
+  G.parts = G.parts.filter(p => p.life > 0);
+
+  for (const t of G.texts){ t.life -= dt; t.y += t.vy * dt; t.vy *= Math.pow(0.94, dt*60); }
+  G.texts = G.texts.filter(t => t.life > 0);
+
+  for (const s of G.shockwaves){ s.life -= dt; s.r = lerp(s.r, s.max, 1 - Math.pow(0.02, dt)); }
+  G.shockwaves = G.shockwaves.filter(s => s.life > 0);
+
+  for (const r of G.ripples){ r.life -= dt; r.radius += (r.max - r.radius) * (1 - Math.pow(0.05, dt)); }
+  G.ripples = G.ripples.filter(r => r.life > 0);
+
+  G.shakeMag = Math.max(0, G.shakeMag - dt * 34);
+  G.flashAlpha = Math.max(0, G.flashAlpha - dt * 2.2);
+  G.btBannerT = Math.max(0, G.btBannerT - dt);
+
+  // combo decay
+  if (G.comboTimer > 0){
+    G.comboTimer -= dt;
+    if (G.comboTimer <= 0) G.combo = 0;
+  }
+  // ambient ripples while breakthrough runs hot
+  if (G.breakthrough && Math.random() < dt * 6) addRipple(rand(VIEW.w), rand(0, VIEW.h*0.25), pick([PAL.cyan, PAL.magenta, PAL.gold]), rand(40, 90));
+}
+
+function addRipple(x, y, color, max){
+  G.ripples.push({ x, y, color, radius: 6, max, life: 0.5, max_life: 0.5 });
+}
+function addScorePopup(x, y, v){
+  addText(x, y, '+' + fmt(v), PAL.white, { size: 13, life: 0.6, vy: -60, weight: '700' });
+}
+
+function updateBricks(dt){
+  for (const br of G.bricks){
+    if (br.dead) continue;
+    if (br.type === 'mover' && br.vx){
+      br.x += br.vx * dt;
+      const left = CFG.sidePad, right = VIEW.w - CFG.sidePad;
+      if (br.x < left){ br.x = left; br.vx *= -1; }
+      if (br.x + br.w > right){ br.x = right - br.w; br.vx *= -1; }
+    }
+    br.hitFlash = Math.max(0, br.hitFlash - dt * 3.2);
+  }
+  // regenerators: slow passive rebuild on their own timer too
+  G.healTimer += dt;
+  if (G.healTimer > CFG.healPeriod){
+    G.healTimer = 0;
+    const src = G.bricks.find(b => !b.dead && b.type === 'heal');
+    if (src && countAlive() < 55) spawnNeighbor(src);
+  }
+}
+function countAlive(){ return G.bricks.reduce((n, b) => n + (!b.dead && b.type !== 'steel' ? 1 : 0), 0); }
+
+function checkLevelClear(){
+  if (countAlive() > 0) return;
+  if (G.mode !== 'play') return;
+  G.mode = 'win';
+  saveHiScore();
+  AudioSys.levelClear();
+  View.flash(0.4);
+  for (let i = 0; i < 90; i++){
+    const a = rand(TAU), sp = rand(150, 700);
+    G.parts.push({ x: VIEW.w/2, y: VIEW.h*0.4, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      life: rand(0.6, 1.4), max: 1.4, size: rand(2, 5), color: pick([PAL.gold, PAL.cyan, PAL.magenta]),
+      grav: 300, drag: 0.985, shape: 'dot' });
+  }
+  setTimeout(showWin, 900);
+}
+
+function loseLife(){
+  G.lives--;
+  G.combo = 0; G.multRamp = 0; G.multiplier = 1;
+  G.breakthrough = false; G.btTimer = 0;
+  G.ballType = 'normal'; G.fireTimer = 0;
+  G.paddle.sticky = 0; G.paddle.stickyBall = null;
+  G.slowTimer = 0;
+  AudioSys.lifeLost(); View.flash(0.3); View.shake(12);
+  if (G.lives <= 0){
+    G.mode = 'gameover';
+    saveHiScore();
+    AudioSys.gameOver();
+    setTimeout(showGameOver, 1000);
+  } else {
+    G.mode = 'dead';
+    setTimeout(() => { if (G.mode === 'dead') serveBall(); }, 1100);
+    addText(VIEW.w/2, VIEW.h*0.4, G.lives === 1 ? 'LAST LIFE!' : 'BALL LOST', PAL.red, { size: 34, life: 1.2, vy: -18 });
+  }
+}
+
+function saveHiScore(){
+  if (G.score > G.hiscore){
+    G.hiscore = G.score;
+    try{ localStorage.setItem('neonBreakerHi', String(Math.round(G.score))); }catch(e){}
+  }
+}
+
+/* Main per-frame update. dt already clamped by caller. */
+function update(dt){
+  G.cycleTime += dt;
+  if (G.mode === 'play' || G.mode === 'serve'){
+    updatePaddle(dt);
+    Stars.update(dt);
+    updateMultiplier(dt);
+    updateBreakthrough(dt);
+    updateBricks(dt);
+    if (G.mode === 'serve'){ G.aimPulse += dt * 4; updateServeAim(dt); }
+
+    // stick-or-drag hold detection (touch): hold still ~220ms -> floating stick
+    updateTouchHold(dt);
+
+    // balls
+    for (const b of G.balls) if (!b.dead) updateBall(b, dt);
+
+    // filter dead balls; if none left -> lose a life
+    const alive = G.balls.filter(b => !b.dead);
+    if (G.mode === 'play' && alive.length === 0){ loseLife(); }
+    G.balls = alive;
+
+    // sticky ball release timer safety
+    if (G.paddle.stickyBall && G.paddle.stickyBall.dead) G.paddle.stickyBall = null;
+    if (G.paddle.sticky > 0){
+      G.paddle.sticky -= dt;
+      if (G.paddle.sticky <= 0 && G.paddle.stickyBall && !G.paddle.stickyBall.dead && (G.mode === 'play' || G.mode === 'serve')){
+        const b = G.paddle.stickyBall;
+        b.stuck = false;
+        const a = -Math.PI/2 + clamp((b.x - G.paddle.x)/(G.paddle.w/2), -1, 1) * 0.9;
+        b.vx = Math.cos(a) * Math.max(CFG.serveSpeed, ballSpeed(b) || CFG.serveSpeed);
+        b.vy = -Math.abs(Math.sin(a) * b.vx);
+        b.y = G.paddle.y - G.paddle.h/2 - b.r - 2;
+        G.paddle.stickyBall = null;
+        AudioSys.tone(700, 0.1, { type:'triangle', vol:0.18, sweep:1.3 });
+      }
+    }
+    updateDrops(dt);
+    updateEffects(dt);
+
+    // fireball timer
+    if (G.fireTimer > 0){
+      G.fireTimer -= dt;
+      if (G.fireTimer <= 0){ G.ballType = 'normal'; for (const b of G.balls) b.type = 'normal'; }
+    }
+    if (G.slowTimer > 0) G.slowTimer -= dt;
+  } else {
+    // effects continue on title/gameover screens for ambience
+    updateEffects(dt);
+    Stars.update(dt);
+  }
+}
+
+/* =====================================================================
+   9. INPUT — mouse, touch drag (relative/offset-based), floating
+   virtual thumbstick, keyboard. All resolved in resolvePadInput().
+   ===================================================================== */
+const Keys = {};
+G.padInput = { x: 0, y: 0, active: false, tx: LOGICAL_W/2, ty: 0 };
+const TouchState = {
+  mode: null,          // 'drag' | 'stick' | 'keyboard'
+  dragId: null, startX: 0, startY: 0, baseX: LOGICAL_W/2, baseY: 0,
+  curX: 0, curY: 0, downAt: 0, moved: false,
+  stickId: null, stickOriginX: 0, stickOriginY: 0, stickDX: 0, stickDY: 0,
+  uiActive: false,
+};
+const Pointer = { x: LOGICAL_W/2, y: 0, has: false };
+
+function toLogical(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  return { x: (clientX - rect.left) / rect.width * VIEW.w,
+           y: (clientY - rect.top) / rect.height * VIEW.h };
+}
+
+/* Decide what moves the paddle this frame. */
+function resolvePadInput(){
+  const I = G.padInput;
+  // keyboard always contributes
+  const kx = (Keys['ArrowRight'] || Keys['d'] || Keys['D'] ? 1 : 0) - (Keys['ArrowLeft'] || Keys['a'] || Keys['A'] ? 1 : 0);
+  const ky = (Keys['ArrowDown'] || Keys['s'] || Keys['S'] ? 1 : 0) - (Keys['ArrowUp'] || Keys['w'] || Keys['W'] ? 1 : 0);
+  if (kx || ky){
+    const n = Math.hypot(kx, ky) || 1;
+    I.x = kx / n; I.y = ky / n; I.active = true;
+    return;
+  }
+  // virtual thumbstick (explicit or converted from a hold)
+  if (TouchState.stickId !== null){
+    let dx = TouchState.stickDX / CFG.stickRadius, dy = TouchState.stickDY / CFG.stickRadius;
+    const m = Math.hypot(dx, dy);
+    if (m > 1){ dx /= m; dy /= m; }
+    I.x = dx; I.y = dy; I.active = true;
+    return;
+  }
+  // touch drag (offset-based relative control)
+  if (TouchState.mode === 'drag' && TouchState.dragId !== null){
+    I.active = false;                       // target-chase mode
+    I.tx = TouchState.baseX + (TouchState.curX - TouchState.startX) * CFG.dragSensitivity;
+    I.ty = TouchState.baseY + (TouchState.curY - TouchState.startY) * CFG.dragSensitivity * 0.7;
+    return;
+  }
+  // plain mouse pointer
+  if (Pointer.has && TouchState.mode === null){
+    I.active = false;
+    I.tx = Pointer.x; I.ty = clamp(Pointer.y, VIEW.h - CFG.paddleBandTop, VIEW.h - CFG.paddleBandBot);
+    return;
+  }
+  I.active = false; I.x = 0; I.y = 0;
+}
+
+/* --- keyboard --- */
+window.addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  Keys[e.key] = true;
+  AudioSys.init(); AudioSys.resume();
+  if (e.key === 'p' || e.key === 'P' || e.key === 'Escape'){ togglePause(); }
+  if (e.key === 'm' || e.key === 'M'){ AudioSys.setMuted(!AudioSys.muted); }
+  if (e.key === 'b' || e.key === 'B'){ cycleBallType(); }
+  if (e.key === ' '){
+    if (G.mode === 'title'){ startGame(); }
+    else if (G.mode === 'serve'){ launchBall(); }
+    else if (G.mode === 'play' && G.paddle.stickyBall){ releaseSticky(); }
+    else if (G.mode === 'gameover' || G.mode === 'win'){ startGame(); }
+    else if (G.mode === 'dead'){ serveBall(); }
+  }
+  if (e.key === 'Enter'){
+    if (G.mode === 'title') startGame();
+    else if (G.mode === 'gameover' || G.mode === 'win') startGame();
+  }
+});
+window.addEventListener('keyup', e => { Keys[e.key] = false; });
+
+function cycleBallType(){
+  G.ballType = G.ballType === 'normal' ? 'fire' : 'normal';
+  for (const b of G.balls) b.type = G.ballType;
+  if (G.ballType === 'fire'){ G.fireTimer = 12; addText(VIEW.w/2, VIEW.h*0.5, 'FIREBALL ON', PAL.orange, { size: 22, life: 0.9 }); }
+  else { G.fireTimer = 0; addText(VIEW.w/2, VIEW.h*0.5, 'NORMAL BALL', PAL.dim, { size: 18, life: 0.8 }); }
+  AudioSys.uiTick();
+}
+function releaseSticky(){
+  const b = G.paddle.stickyBall;
+  if (!b) return;
+  b.stuck = false;
+  const a = -Math.PI/2 + clamp((b.x - G.paddle.x)/(G.paddle.w/2), -1, 1) * 0.9;
+  b.vx = Math.cos(a) * CFG.serveSpeed; b.vy = -Math.abs(Math.sin(a) * CFG.serveSpeed);
+  b.y = G.paddle.y - G.paddle.h/2 - b.r - 2;
+  G.paddle.stickyBall = null;
+  AudioSys.tone(700, 0.1, { type:'triangle', vol:0.18, sweep:1.3 });
+}
+
+/* --- pointer (mouse) --- */
+canvas.addEventListener('pointermove', e => {
+  if (e.pointerType !== 'mouse') return;
+  const p = toLogical(e.clientX, e.clientY);
+  Pointer.x = p.x; Pointer.y = p.y; Pointer.has = true;
+});
+canvas.addEventListener('pointerdown', e => {
+  AudioSys.init(); AudioSys.resume();
+  const p = toLogical(e.clientX, e.clientY);
+  if (e.pointerType === 'mouse'){
+    Pointer.x = p.x; Pointer.y = p.y; Pointer.has = true;
+    if (G.mode === 'serve') launchBall();
+    else if (G.mode === 'play' && G.paddle.stickyBall) releaseSticky();
+    return;
+  }
+  // touch begins below
+  handleTouchStart(e);
+});
+canvas.addEventListener('pointerup', e => { handleTouchEnd(e); });
+canvas.addEventListener('pointercancel', e => { handleTouchEnd(e); });
+
+/* --- touch: first finger = drag control; second finger = floating stick.
+   Stick logic takes priority (it's the analog mode). --- */
+function handleTouchStart(e){
+  const id = e.pointerId;
+  const p = toLogical(e.clientX, e.clientY);
+  if (TouchState.stickId === null && TouchState.dragId === null){
+    // first finger: becomes the drag controller (or a stick if held still)
+    TouchState.mode = 'drag'; TouchState.dragId = id;
+    TouchState.startX = p.x; TouchState.startY = p.y;
+    TouchState.curX = p.x; TouchState.curY = p.y;
+    TouchState.baseX = G.paddle.x; TouchState.baseY = G.paddle.y;
+    TouchState.downAt = performance.now(); TouchState.moved = false;
+  } else if (TouchState.stickId === null){
+    // second finger: floating thumbstick spawns wherever it lands
+    startStick(id, p.x, p.y);
+  }
+  if (G.mode === 'serve') launchBall();
+  else if (G.mode === 'play' && G.paddle.stickyBall) releaseSticky();
+}
+function startStick(id, x, y){
+  TouchState.stickId = id;
+  TouchState.stickOriginX = x; TouchState.stickOriginY = y;
+  TouchState.stickDX = 0; TouchState.stickDY = 0;
+  AudioSys.uiTick();
+}
+function handleTouchEnd(e){
+  if (e.pointerId === TouchState.dragId){ TouchState.mode = null; TouchState.dragId = null; }
+  if (e.pointerId === TouchState.stickId){ TouchState.stickId = null; TouchState.stickDX = 0; TouchState.stickDY = 0; if (TouchState.mode === 'stick') TouchState.mode = null; }
+}
+canvas.addEventListener('pointermove', e => {
+  if (e.pointerType === 'mouse') return;
+  const p = toLogical(e.clientX, e.clientY);
+  if (e.pointerId === TouchState.dragId){
+    TouchState.curX = p.x; TouchState.curY = p.y;
+  } else if (e.pointerId === TouchState.stickId){
+    TouchState.stickDX = p.x - TouchState.stickOriginX;
+    TouchState.stickDY = p.y - TouchState.stickOriginY;
+  }
+});
+
+/* Hold-still on the first finger for ~220 ms → converts to a floating
+   thumbstick so one thumb can go analog without spawning a second finger. */
+/* Aim the serve: ←/→ keys nudge continuously; the pointer aims the arrow
+   directly; touch drags work as a slingshot (pull back = aim opposite). */
+function updateServeAim(dt){
+  if (G.mode !== 'serve') return;
+  const MIN = -Math.PI + 0.5, MAX = -0.5;             // keep a useful upward range
+  // keyboard nudges
+  const kdir = (Keys['ArrowRight']||Keys['d']||Keys['D']?1:0) - (Keys['ArrowLeft']||Keys['a']||Keys['A']?1:0);
+  if (kdir) G.serveAim = clamp(G.serveAim + kdir * 1.6 * dt, MIN, MAX);
+  // pointer: aim where the mouse points (once it has moved over the canvas)
+  if (Pointer.has && TouchState.mode === null){
+    const a = Math.atan2(Pointer.y - G.balls[0].y, Pointer.x - G.balls[0].x);
+    if (a < -0.15 && a > -Math.PI + 0.15) G.serveAim = lerp(G.serveAim, a, 0.25);
+  }
+  // touch slingshot: drag away from the ball to aim opposite (pull-back feel)
+  if (TouchState.mode === 'drag' && TouchState.dragId !== null){
+    const dx = TouchState.curX - TouchState.startX;
+    if (Math.abs(dx) > 14) G.serveAim = clamp(-Math.PI/2 - dx * 0.008, MIN, MAX);
+  }
+}
+
+function updateTouchHold(dt){
+  if (TouchState.dragId === null || TouchState.stickId !== null) return;
+  const dx = TouchState.curX - TouchState.startX, dy = TouchState.curY - TouchState.startY;
+  if (Math.hypot(dx, dy) > 26) { TouchState.moved = true; return; }
+  if (!TouchState.moved && performance.now() - TouchState.downAt > 220){
+    startStick(TouchState.dragId, TouchState.startX, TouchState.startY);
+    TouchState.dragId = null; TouchState.mode = 'stick';
+  }
+}
+
+/* =====================================================================
+   10. RENDERING
+   ===================================================================== */
+function render(){
+  View.begin();
+  const shX = rand(-1, 1) * G.shakeMag, shY = rand(-1, 1) * G.shakeMag;
+  ctx.save();
+  ctx.translate(shX, shY);
+
+  drawBackground();
+  drawBricks();
+  drawDrops();
+  drawPaddle();
+  drawStick();
+  drawBalls();
+  drawParticles();
+  drawShockwaves();
+  drawRipples();
+  drawTexts();
+  if (G.mode === 'serve') drawAim();
+  drawHUD();
+  if (G.breakthrough) drawBreakthroughFx();
+  if (G.paused) drawPauseOverlay();
+
+  ctx.restore();
+
+  if (G.flashAlpha > 0){
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(G.flashAlpha, 0.85)})`;
+    ctx.fillRect(-40, -40, VIEW.w + 80, VIEW.h + 80);
+  }
+}
+
+function drawBackground(){
+  if (!VIEW.bgGrad){
+    const g = ctx.createLinearGradient(0, 0, 0, VIEW.h);
+    g.addColorStop(0, '#0d1235');
+    g.addColorStop(0.55, '#070b1f');
+    g.addColorStop(1, '#04060f');
+    VIEW.bgGrad = g;
+  }
+  ctx.fillStyle = VIEW.bgGrad;
+  ctx.fillRect(-40, -40, VIEW.w + 80, VIEW.h + 80);
+
+  // background pulse reacts to multiplier / breakthrough
+  const pulse = clamp((G.multiplier - 1) / 23, 0, 1);
+  const bt = G.breakthrough ? 1 : 0;
+  const glow = 0.10 + pulse * 0.22 + bt * 0.35;
+
+  // horizontal hue bands
+  const bands = [
+    { y: VIEW.h*0.12, c: `rgba(45,226,255,${glow*0.4})`, r: VIEW.h*0.5 },
+    { y: VIEW.h*0.55, c: `rgba(160,107,255,${glow*0.28})`, r: VIEW.h*0.6 },
+    { y: VIEW.h*0.85, c: `rgba(255,61,245,${glow*0.22})`, r: VIEW.h*0.55 },
+  ];
+  for (const b of bands){
+    const rg = ctx.createRadialGradient(VIEW.w/2, b.y, 0, VIEW.w/2, b.y, b.r);
+    rg.addColorStop(0, b.c);
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(-40, -40, VIEW.w + 80, VIEW.h + 80);
+  }
+
+  // starfield
+  const tw = 1 + (G.multiplier - 1) * 0.15;
+  for (const s of Stars.list){
+    const a = 0.25 + 0.55 * s.z + Math.sin(s.tw) * 0.25 * tw;
+    ctx.globalAlpha = clamp(a, 0.05, 1);
+    ctx.fillStyle = s.z > 0.8 ? PAL.cyan : s.z > 0.5 ? '#9db8ff' : PAL.dim;
+    ctx.fillRect(s.x, s.y, s.r, s.r);
+  }
+  ctx.globalAlpha = 1;
+
+  // drifting neon grid
+  ctx.lineWidth = 1;
+  for (const g of Stars.grid){
+    ctx.strokeStyle = `rgba(45,226,255,${Math.abs(Math.sin(g.a)) * g.o * (1 + pulse*2 + bt*3)})`;
+    const span = g.s * 6;
+    for (let i = -3; i <= 3; i++){
+      ctx.beginPath();
+      ctx.moveTo(g.x + i * g.s, g.y - span);
+      ctx.lineTo(g.x + i * g.s + span * Math.sin(g.a) * 0.4, g.y + span);
+      ctx.stroke();
+    }
+  }
+
+  // breakthrough zone glow above the bricks
+  if (G.breakthrough){
+    const rg = ctx.createRadialGradient(VIEW.w/2, CFG.brickTop - 90, 10, VIEW.w/2, CFG.brickTop - 90, 380);
+    rg.addColorStop(0, `rgba(255,210,61,${0.14 + 0.06 * Math.sin(G.cycleTime * 9)})`);
+    rg.addColorStop(1, 'rgba(255,210,61,0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, VIEW.w, CFG.brickTop + 40);
+  }
+}
+
+function roundRect(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBricks(){
+  for (const br of G.bricks){
+    if (br.dead) continue;
+    const info = BRICK[br.type];
+    const f = br.hitFlash;
+    ctx.save();
+    ctx.translate(br.x + br.w/2, br.y + br.h/2);
+    if (br.type === 'mover'){
+      ctx.strokeStyle = 'rgba(157,255,61,0.25)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-br.w/2 - 6, 0); ctx.lineTo(br.w/2 + 6, 0); ctx.stroke();
+    }
+    roundRect(-br.w/2, -br.h/2, br.w, br.h, 5);
+    // body
+    ctx.fillStyle = info.color;
+    ctx.globalAlpha = 0.92;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // inner gloss + outline
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    if (br.type === 'steel'){
+      ctx.fillStyle = 'rgba(10,14,24,0.55)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(160,180,210,0.8)';
+      ctx.stroke();
+    }
+    // hit flash
+    if (f > 0){
+      ctx.globalAlpha = Math.min(1, f) * 0.8;
+      ctx.fillStyle = '#ffffff';
+      roundRect(-br.w/2, -br.h/2, br.w, br.h, 5);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    // per-type overlays
+    if (br.type === 'arm'){
+      ctx.fillStyle = 'rgba(20,26,40,0.6)';
+      roundRect(-br.w/2 + 3, -br.h/2 + 3, br.w - 6, br.h - 6, 4); ctx.fill();
+      ctx.fillStyle = '#e8f2ff';
+      ctx.font = font('800', 12);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(br.hp, 0, 0);
+    }
+    if (br.type === 'speed'){
+      ctx.fillStyle = 'rgba(30,20,4,0.85)';
+      ctx.font = font('900', br.w > 50 ? 11 : 9);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('⚡' + CFG.speedThresh, 0, 0);
+      // pulsing halo shows it wants speed
+      ctx.strokeStyle = `rgba(255,210,61,${0.4 + 0.3 * Math.sin(G.cycleTime * 6)})`;
+      ctx.lineWidth = 2;
+      roundRect(-br.w/2 - 2, -br.h/2 - 2, br.w + 4, br.h + 4, 6);
+      ctx.stroke();
+    }
+    if (br.type === 'shield'){
+      ctx.fillStyle = 'rgba(30,4,26,0.75)';
+      roundRect(-br.w/2 + 3, -br.h/2 + 3, br.w - 6, br.h - 6, 4); ctx.fill();
+      // arrow pointing at the OPEN side
+      const dirx = br.dir; // dir<0 => open LEFT, dir>0 => open RIGHT
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(-dirx * 4, -7); ctx.lineTo(dirx * 9, 0); ctx.lineTo(-dirx * 4, 7);
+      ctx.stroke();
+      // shield arc on the closed side
+      ctx.strokeStyle = 'rgba(255,61,245,0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, br.h/2 + 2, dirx > 0 ? Math.PI/2 : -Math.PI/2, dirx > 0 ? 3*Math.PI/2 : Math.PI/2, dirx > 0);
+      ctx.stroke();
+    }
+    if (br.type === 'heal'){
+      ctx.strokeStyle = `rgba(160,107,255,${0.5 + 0.4 * Math.sin(G.cycleTime * 5)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-8, 0); ctx.lineTo(8, 0);
+      ctx.moveTo(0, -8); ctx.lineTo(0, 8);
+      ctx.stroke();
+    }
+    if (br.type === 'bomb'){
+      ctx.fillStyle = `rgba(0,0,0,${0.3 + 0.25 * Math.sin(G.cycleTime * 8 + br.col)})`;
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.fill();
+      ctx.strokeStyle = PAL.white; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.stroke();
+    }
+    if (br.type === 'mover'){
+      ctx.strokeStyle = `rgba(20,30,10,0.85)`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-6, 0); ctx.lineTo(6, 0);
+      ctx.stroke();
+      ctx.beginPath();
+      const ad = br.vx > 0 ? 0 : Math.PI;
+      ctx.moveTo(ad === 0 ? 8 : -8, 0);
+      ctx.lineTo(ad === 0 ? 2 : -2, -4);
+      ctx.lineTo(ad === 0 ? 2 : -2, 7);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(20,30,10,0.85)';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+/* Floating thumbstick UI: base ring + knob. */
+function drawStick(){
+  if (TouchState.stickId === null) return;
+  const ox = TouchState.stickOriginX, oy = TouchState.stickOriginY;
+  const R = CFG.stickRadius;
+  let kx = TouchState.stickDX, ky = TouchState.stickDY;
+  const m = Math.hypot(kx, ky);
+  if (m > R){ kx = kx / m * R; ky = ky / m * R; }
+  ctx.save();
+  ctx.globalAlpha = 0.28;
+  ctx.fillStyle = PAL.cyan;
+  ctx.beginPath(); ctx.arc(ox, oy, R, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 0.7;
+  ctx.strokeStyle = PAL.cyan; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(ox, oy, R, 0, TAU); ctx.stroke();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = PAL.white;
+  ctx.shadowColor = PAL.cyan; ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.arc(ox + kx, oy + ky, 22, 0, TAU); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+function drawDrops(){
+  for (const d of G.drops){
+    const info = POWERS[d.type];
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(Math.sin(d.wob) * 0.25);
+    // glow
+    const rg = ctx.createRadialGradient(0, 0, 2, 0, 0, 26);
+    rg.addColorStop(0, info.color + '');
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = rg;
+    ctx.fillRect(-26, -26, 52, 52);
+    ctx.globalAlpha = 1;
+    // capsule
+    ctx.fillStyle = '#08101f';
+    roundRect(-15, -10, 30, 20, 9); ctx.fill();
+    ctx.strokeStyle = info.color; ctx.lineWidth = 2;
+    roundRect(-15, -10, 30, 20, 9); ctx.stroke();
+    ctx.fillStyle = info.color;
+    ctx.font = font('900', 13);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(info.label, 0, 0);
+    ctx.restore();
+  }
+}
+
+function drawPaddle(){
+  const p = G.paddle;
+  const charge = p.glow;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  // glow when charged from upward paddle motion
+  if (charge > 0.05 || p.sticky > 0){
+    ctx.shadowColor = charge > 0.5 ? PAL.lime : PAL.purple;
+    ctx.shadowBlur = 18 + charge * 26;
+  } else {
+    ctx.shadowColor = PAL.cyan;
+    ctx.shadowBlur = 10;
+  }
+  const grad = ctx.createLinearGradient(0, -p.h/2, 0, p.h/2);
+  grad.addColorStop(0, charge > 0.3 ? '#d9ff6a' : '#bfeaff');
+  grad.addColorStop(1, charge > 0.3 ? PAL.lime : PAL.cyan);
+  ctx.fillStyle = grad;
+  roundRect(-p.w/2, -p.h/2, p.w, p.h, 7);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  // core line
+  ctx.fillStyle = 'rgba(4,10,20,0.85)';
+  roundRect(-p.w/2 + 5, -2, p.w - 10, 4, 2); ctx.fill();
+  // sticky indicator
+  if (p.sticky > 0){
+    ctx.strokeStyle = `rgba(160,107,255,${0.4 + 0.4*Math.sin(G.cycleTime*10)})`;
+    ctx.lineWidth = 2;
+    roundRect(-p.w/2 - 3, -p.h/2 - 3, p.w + 6, p.h + 6, 8); ctx.stroke();
+  }
+  // boost meter under paddle
+  if (charge > 0.05){
+    ctx.fillStyle = PAL.lime;
+    ctx.globalAlpha = 0.5 + charge * 0.5;
+    roundRect(-p.w/2 * charge, p.h/2 + 4, p.w * charge, 3, 1.5);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+function drawBalls(){
+  for (const b of G.balls){
+    if (b.dead) continue;
+    // trail
+    b.trail.unshift({ x: b.x, y: b.y });
+    if (b.trail.length > 12) b.trail.pop();
+    for (let i = b.trail.length - 1; i > 0; i--){
+      const t = b.trail[i];
+      const a = (1 - i / b.trail.length) * 0.35;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = b.type === 'fire' ? (i % 2 ? PAL.orange : PAL.gold) : G.breakthrough ? PAL.gold : PAL.cyan;
+      ctx.beginPath(); ctx.arc(t.x, t.y, b.r * (1 - i / b.trail.length * 0.7), 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // glow
+    ctx.shadowColor = b.type === 'fire' ? PAL.orange : G.breakthrough ? PAL.gold : PAL.cyan;
+    ctx.shadowBlur = 16 + (G.breakthrough ? 14 : 0) + Math.sin(G.cycleTime * 12) * 4;
+    ctx.fillStyle = b.type === 'fire' ? PAL.orange : '#ffffff';
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+    if (b.type === 'fire'){
+      ctx.fillStyle = PAL.gold;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.5, 0, TAU); ctx.fill();
+      // little flame flickers
+      for (let i = 0; i < 2; i++){
+        const a = rand(TAU);
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = PAL.orange;
+        ctx.beginPath();
+        ctx.arc(b.x + Math.cos(a) * b.r * 1.2, b.y + Math.sin(a) * b.r * 1.2, 2.5, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+    if (b.stuck){
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r + 4 + Math.sin(G.cycleTime*6)*1.5, 0, TAU); ctx.stroke();
+    }
+  }
+}
+
+function drawParticles(){
+  for (const p of G.parts){
+    const a = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    if (p.shape === 'shard'){
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot || 0);
+      ctx.fillRect(-p.size/2, -p.size/4, p.size, p.size/2);
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.4 + 0.6 * a), 0, TAU);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawShockwaves(){
+  for (const s of G.shockwaves){
+    const a = clamp(s.life / s.max_life, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 6 * a;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawRipples(){
+  for (const r of G.ripples){
+    const a = clamp(r.life / r.max_life, 0, 1);
+    ctx.globalAlpha = a * 0.7;
+    ctx.strokeStyle = r.color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.radius, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTexts(){
+  ctx.textAlign = 'center';
+  for (const t of G.texts){
+    const a = clamp(t.life / t.max, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = t.color;
+    ctx.font = font(t.weight, t.size);
+    ctx.shadowColor = t.color; ctx.shadowBlur = 12;
+    ctx.fillText(t.str, t.x, t.y);
+    ctx.shadowBlur = 0;
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawAim(){
+  const b = G.balls[0];
+  if (!b) return;
+  const len = 150 + Math.sin(G.aimPulse) * 22;
+  const grad = ctx.createLinearGradient(b.x, b.y, b.x + Math.cos(G.serveAim)*len, b.y + Math.sin(G.serveAim)*len);
+  grad.addColorStop(0, 'rgba(45,226,255,0.9)');
+  grad.addColorStop(1, 'rgba(45,226,255,0)');
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 3;
+  ctx.setLineDash([8, 7]);
+  ctx.beginPath();
+  ctx.moveTo(b.x, b.y);
+  ctx.lineTo(b.x + Math.cos(G.serveAim)*len, b.y + Math.sin(G.serveAim)*len);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.font = font('700', 12);
+  ctx.textAlign = 'center';
+  ctx.fillText('DRAG or ←/→ to aim · SPACE / tap to launch', b.x, b.y + 26);
+}
+
+function drawHUD(){
+  const narrow = VIEW.w < 620;              // phone portrait: compact HUD
+  const S = narrow ? 0.75 : 1;
+  const top = 12;
+  ctx.textBaseline = 'alphabetic';
+  // score
+  ctx.textAlign = 'left';
+  ctx.fillStyle = PAL.white;
+  ctx.font = font('900', 26 * S);
+  ctx.shadowColor = PAL.cyan; ctx.shadowBlur = 14;
+  ctx.fillText(fmt(G.score), 16, top + 26);
+  ctx.shadowBlur = 0;
+  ctx.font = font('700', 11);
+  ctx.fillStyle = PAL.dim;
+  ctx.fillText('SCORE', 16, top + 44);
+
+  // multiplier (pulses with breakthrough)
+  const mColor = G.breakthrough ? PAL.gold : PAL.magenta;
+  const mSize = (22 + (G.breakthrough ? Math.sin(G.cycleTime * 10) * 3 : 0)) * S;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = mColor;
+  ctx.font = font('900', mSize);
+  ctx.shadowColor = mColor; ctx.shadowBlur = 12;
+  ctx.fillText('×' + G.multiplier.toFixed(1), VIEW.w/2, top + 26);
+  ctx.shadowBlur = 0;
+  ctx.font = font('700', 11);
+  ctx.fillStyle = PAL.dim;
+  ctx.fillText(G.breakthrough ? 'BREAKTHROUGH ×2.5 ZONE' : 'MULTIPLIER', VIEW.w/2, top + 44);
+
+  // level & lives (below the pause/mute buttons on narrow screens)
+  const rx = narrow ? VIEW.w - 16 : VIEW.w - 96;
+  const ry = narrow ? top + 108 : top + 26;
+  ctx.textAlign = 'right';
+  ctx.fillStyle = PAL.white;
+  ctx.font = font('800', 20 * S);
+  ctx.fillText('LVL ' + (G.level + 1) + '/' + G.totalLevels, rx, ry);
+  ctx.font = font('800', 16 * S);
+  ctx.fillStyle = PAL.red;
+  let hearts2 = '';
+  for (let i = 0; i < Math.min(G.lives, 6); i++) hearts2 += '♥';
+  ctx.fillText(hearts2 || '—', rx, ry + 22);
+
+  // combo streak
+  if (G.combo >= 2){
+    ctx.textAlign = 'left';
+    ctx.fillStyle = G.combo >= 6 ? PAL.magenta : PAL.gold;
+    ctx.font = font('900', 18 * S);
+    ctx.fillText(G.combo + '× STREAK', 16, top + 84);
+  }
+
+  // hi score
+  ctx.textAlign = 'left';
+  ctx.font = font('700', 12 * S);
+  ctx.fillStyle = 'rgba(143,182,216,0.75)';
+  ctx.fillText('HI ' + fmt(Math.max(G.hiscore, G.score)), 16, top + 62);
+
+  // active power-up timers (bottom-left)
+  let py = VIEW.h - 14;
+  const timers = [];
+  if (G.fireTimer > 0) timers.push(['FIREBALL', PAL.orange, G.fireTimer / 12]);
+  if (G.slowTimer > 0) timers.push(['SLOW-MO', PAL.cyan, G.slowTimer / 7]);
+  if (G.paddle.sticky > 0) timers.push(['STICKY', PAL.purple, G.paddle.sticky / 10]);
+  for (const [label, color, frac] of timers){
+    ctx.fillStyle = color;
+    ctx.font = font('800', 11);
+    ctx.textAlign = 'left';
+    ctx.fillText(label, 16, py - 6);
+    ctx.globalAlpha = 0.25;
+    ctx.fillRect(16, py - 4, 110, 3);
+    ctx.globalAlpha = 0.9;
+    ctx.fillRect(16, py - 4, 110 * clamp(frac, 0, 1), 3);
+    ctx.globalAlpha = 1;
+    py -= 26;
+  }
+}
+
+/* Breakthrough ambience: gold vignette + banner + rising-tension lines. */
+function drawBreakthroughFx(){
+  const t = G.cycleTime;
+  const a = 0.15 + 0.05 * Math.sin(t * 8);
+  // edge vignette in gold
+  const g = ctx.createLinearGradient(0, 0, 0, 140);
+  g.addColorStop(0, `rgba(255,210,61,${a + 0.12})`);
+  g.addColorStop(1, 'rgba(255,210,61,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, VIEW.w, 140);
+  // banner while fresh
+  if (G.btBannerT > 0){
+    const ba = clamp(G.btBannerT, 0, 1);
+    ctx.globalAlpha = clamp(ba, 0, 1);
+    ctx.fillStyle = PAL.gold;
+    ctx.font = font('900', 30);
+    ctx.textAlign = 'center';
+    ctx.shadowColor = PAL.gold; ctx.shadowBlur = 22;
+    ctx.fillText('BREAKTHROUGH', VIEW.w/2, CFG.brickTop - 28);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+  }
+  // speed lines above the wall
+  ctx.strokeStyle = `rgba(255,210,61,0.25)`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 5; i++){
+    const yy = (t * 260 + i * 47) % (CFG.brickTop + 30) - 15;
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.moveTo(rand(0, VIEW.w), yy);
+    ctx.lineTo(rand(0, VIEW.w), yy + 14);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPauseOverlay(){
+  ctx.fillStyle = 'rgba(3,6,16,0.55)';
+  ctx.fillRect(0, 0, VIEW.w, VIEW.h);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PAL.cyan;
+  ctx.font = font('900', 44);
+  ctx.shadowColor = PAL.cyan; ctx.shadowBlur = 18;
+  ctx.fillText('PAUSED', VIEW.w/2, VIEW.h/2 - 8);
+  ctx.shadowBlur = 0;
+  ctx.font = font('600', 15);
+  ctx.fillStyle = PAL.dim;
+  ctx.fillText('press P or tap ▶ to resume', VIEW.w/2, VIEW.h/2 + 24);
+}
+
+/* =====================================================================
+   11. LOOP, SCREENS & BOOT
+   ===================================================================== */
+function readHi(){ try{ return +(localStorage.getItem('neonBreakerHi') || 0); }catch(e){ return 0; } }
+
+function showOverlay(html){ card.innerHTML = html; overlay.classList.remove('hidden'); btnPause.style.visibility = 'hidden'; overlay.onclick = null; }
+function hideOverlay(){ overlay.classList.add('hidden'); btnPause.style.visibility = 'visible'; }
+
+const LEGEND_BRICKS = [
+  ['norm',  'Standard — one hit breaks it'],
+  ['speed', 'Speed-locked ⚡ — only cracks if ball speed ≥ 560 (boost it!)'],
+  ['shield','Directional shield — arrow marks the OPEN side'],
+  ['mover', 'Moving — slides left/right'],
+  ['heal',  'Regenerator — rebuilds a neighbor brick'],
+  ['bomb',  'Explosive — blast takes out neighbors'],
+  ['steel', 'Indestructible — shapes the maze'],
+  ['arm',   'Armored — rare, just a tough nut (3 hits)'],
+];
+const LEGEND_POWERS = [
+  ['multi',  'M — Multiball: splits into 3'],
+  ['fire',   'F — Fireball: plows through bricks'],
+  ['big',    'B — Big Paddle'],
+  ['slow',   'S — Slow-mo (balls only, paddle stays fast)'],
+  ['sticky', 'Z — Sticky paddle: catch & aim'],
+  ['life',   '+ — Extra life'],
+];
+
+function legendRows(list){
+  return list.map(([t, txt]) =>
+    `<div class="chip"><span class="dot" style="color:${POWERS[t] ? POWERS[t].color : BRICK[t].color}"></span>${txt}</div>`
+  ).join('');
+}
+
+function showTitle(){
+  G.mode = 'title';
+  showOverlay(`
+    <div class="title">NEON BREAKER</div>
+    <div class="subtitle">get the ball ABOVE the wall — that's where the game begins</div>
+    <div class="panel">
+      <span class="hot">THE POINT:</span> ordinary Breakout is the warm-up. Punch a hole,
+      slip the ball <b>on top of the bricks</b>, and it rains destruction from above —
+      the longer it stays up there, the bigger the <b>×2.5 breakthrough multiplier</b> and
+      the crazier the lights, sound and screen shake get.
+    </div>
+    <button class="btn" id="btnStart">PLAY</button>
+    <div class="hiscore">HIGH SCORE&nbsp; ${fmt(G.hiscore)}</div>
+    <h3 class="sec">Bricks that fight back</h3>
+    <div class="legend">${legendRows(LEGEND_BRICKS)}</div>
+    <h3 class="sec">Power-ups</h3>
+    <div class="legend">${legendRows(LEGEND_POWERS)}</div>
+    <h3 class="sec">Controls</h3>
+    <div class="panel">
+      <b>Mouse:</b> move to steer (both axes) · click to launch/boost.<br>
+      <b>Touch:</b> drag anywhere — the paddle follows your thumb's motion, not its position.
+      <b>Hold still for a moment</b> (or use a second finger) to spawn a <b>floating thumbstick</b>
+      for analog 2-axis control.<br>
+      <b>Keys:</b> <kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> / <kbd>WASD</kbd> move ·
+      <kbd>Space</kbd> launch · <kbd>B</kbd> cycle fireball · <kbd>P</kbd> pause · <kbd>M</kbd> mute.<br>
+      <b>Pro tip:</b> moving the paddle <b>up</b> as you strike charges a <span class="hot">BOOST</span>
+      (glowing paddle = extra ball speed); moving down softens the return. sideways motion adds english.
+    </div>
+    <div class="foot blink">works great on phones — add to home screen for fullscreen</div>
+  `);
+  document.getElementById('btnStart').onclick = () => { AudioSys.init(); AudioSys.resume(); startGame(); };
+  // tap/click anywhere on the title overlay also starts the game
+  overlay.onclick = () => { AudioSys.init(); AudioSys.resume(); startGame(); };
+}
+
+function startGame(){
+  G.score = 0; G.lives = CFG.startLives; G.level = 0;
+  G.combo = 0; G.comboTimer = 0; G.multiplier = 1; G.multRamp = 0;
+  G.breakthrough = false; G.btTimer = 0; G.ballType = 'normal'; G.fireTimer = 0;
+  G.slowTimer = 0; G.paused = false;
+  G.stats = { bricks: 0, powers: 0, bestCombo: 0, btTime: 0 };
+  G.parts = []; G.texts = []; G.drops = []; G.shockwaves = []; G.ripples = [];
+  hideOverlay();
+  loadLevel(0);
+}
+
+function loadLevel(idx){
+  G.level = idx;
+  G.bricks = []; G.balls = []; G.drops = [];
+  buildLevel(idx);
+  G.healTimer = 0;
+  serveBall();
+}
+
+function showWin(){
+  const bonus = 750 * (G.level + 1);
+  G.score += bonus;
+  saveHiScore();
+  showOverlay(`
+    <div class="title" style="font-size:clamp(28px,6vw,44px)">LEVEL ${G.level + 1} CLEARED</div>
+    <div class="subtitle">${LEVELS[G.level].name}</div>
+    <div class="stats">
+      <div class="stat"><div class="v">${fmt(G.score)}</div><div class="k">score</div></div>
+      <div class="stat"><div class="v">+${fmt(bonus)}</div><div class="k">clear bonus</div></div>
+      <div class="stat"><div class="v">${fmt(G.stats.bricks)}</div><div class="k">bricks</div></div>
+      <div class="stat"><div class="v">${G.stats.bestCombo}×</div><div class="k">best streak</div></div>
+      <div class="stat"><div class="v">${G.stats.btTime.toFixed(1)}s</div><div class="k">air time</div></div>
+    </div>
+    <button class="btn" id="btnNext">NEXT LEVEL →</button>
+    <div class="hiscore">HIGH SCORE&nbsp; ${fmt(G.hiscore)}</div>
+  `);
+  document.getElementById('btnNext').onclick = () => { AudioSys.uiTick(); nextLevel(); };
+}
+
+function nextLevel(){
+  if (G.level + 1 >= LEVELS.length){ showFinalWin(); return; }
+  G.breakthrough = false; G.btTimer = 0;
+  G.parts = []; G.texts = []; G.drops = [];
+  hideOverlay();
+  loadLevel(G.level + 1);
+}
+
+function showFinalWin(){
+  G.mode = 'win';
+  saveHiScore();
+  showOverlay(`
+    <div class="title" style="font-size:clamp(26px,6vw,44px)">WALL? WHAT WALL?</div>
+    <div class="subtitle">every level broken through</div>
+    <div class="stats">
+      <div class="stat"><div class="v">${fmt(G.score)}</div><div class="k">final score</div></div>
+      <div class="stat"><div class="v">${G.stats.bricks}</div><div class="k">bricks</div></div>
+      <div class="stat"><div class="v">${G.stats.powers}</div><div class="k">power-ups</div></div>
+      <div class="stat"><div class="v">${G.stats.bestCombo}×</div><div class="k">best streak</div></div>
+      <div class="stat"><div class="v">${G.stats.btTime.toFixed(1)}s</div><div class="k">time on top</div></div>
+    </div>
+    <button class="btn alt" id="btnAgain">PLAY AGAIN</button>
+    <div class="hiscore">HIGH SCORE&nbsp; ${fmt(G.hiscore)}</div>
+  `);
+  document.getElementById('btnAgain').onclick = () => { AudioSys.uiTick(); startGame(); };
+}
+
+function showGameOver(){
+  saveHiScore();
+  showOverlay(`
+    <div class="title" style="font-size:clamp(30px,7vw,50px); background:linear-gradient(90deg,#ff3d5e,#ff7a2d,#ffd23d); -webkit-background-clip:text; background-clip:text;">GAME OVER</div>
+    <div class="subtitle">the wall stands… this time</div>
+    <div class="stats">
+      <div class="stat"><div class="v">${fmt(G.score)}</div><div class="k">score</div></div>
+      <div class="stat"><div class="v">${fmt(G.hiscore)}</div><div class="k">high score</div></div>
+      <div class="stat"><div class="v">${G.level + 1}</div><div class="k">reached lvl</div></div>
+      <div class="stat"><div class="v">${G.stats.bricks}</div><div class="k">bricks</div></div>
+      <div class="stat"><div class="v">${G.stats.btTime.toFixed(1)}s</div><div class="k">time on top</div></div>
+    </div>
+    ${G.score >= G.hiscore && G.score > 0 ? '<div class="hiscore blink">★ NEW HIGH SCORE ★</div>' : '<div class="hiscore">HIGH SCORE&nbsp; ' + fmt(G.hiscore) + '</div>'}
+    <button class="btn" id="btnRetry">TRY AGAIN</button>
+    <button class="btn alt" id="btnMenu" style="margin-top:10px">MENU</button>
+  `);
+  document.getElementById('btnRetry').onclick = () => { AudioSys.uiTick(); startGame(); };
+  document.getElementById('btnMenu').onclick = () => { AudioSys.uiTick(); showTitle(); };
+}
+
+function togglePause(){
+  if (G.mode !== 'play' && G.mode !== 'serve'){
+    if (G.paused){ G.paused = false; hideOverlay(); }
+    return;
+  }
+  G.paused = !G.paused;
+  if (G.paused){
+    showOverlay(`
+      <div class="title" style="font-size:clamp(26px,6vw,40px)">PAUSED</div>
+      <div class="subtitle">score ${fmt(G.score)} · lvl ${G.level + 1} · ×${G.multiplier.toFixed(1)}</div>
+      <button class="btn" id="btnResume">RESUME</button>
+      <button class="btn alt" id="btnRestart" style="margin-top:10px">RESTART RUN</button>
+      <div class="foot">P / Esc / ▶ also toggles pause · M mutes</div>
+    `);
+    document.getElementById('btnResume').onclick = togglePause;
+    document.getElementById('btnRestart').onclick = () => { AudioSys.uiTick(); G.paused = false; startGame(); };
+  } else {
+    hideOverlay();
+  }
+}
+
+btnPause.addEventListener('click', () => { AudioSys.init(); togglePause(); });
+btnMute.addEventListener('click', () => { AudioSys.init(); AudioSys.setMuted(!AudioSys.muted); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && (G.mode === 'play' || G.mode === 'serve') && !G.paused) togglePause();
+});
+
+/* --- main loop with delta-time physics --- */
+let lastT = performance.now();
+function frame(t){
+  const dt = Math.min((t - lastT) / 1000, 1/30);   // clamp to avoid tunneling
+  lastT = t;
+  if (!G.paused) update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* --- boot --- */
+resize();
+Stars.build();
+showTitle();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

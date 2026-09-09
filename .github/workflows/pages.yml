@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "docs/grid/**"
       - "scripts/*site*"
       - "scripts/site-data/**"
       - "internal/config/**"
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - "site/**"
+      - "docs/grid/**"
       - "scripts/*site*"
       - "scripts/site-data/**"
       - "internal/config/**"

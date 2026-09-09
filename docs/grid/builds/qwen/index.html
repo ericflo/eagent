@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#05070f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="icon" href="data:,">
+  <title>Overdrive Breakout</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="game-root">
+    <canvas id="gameCanvas"></canvas>
+    <!-- HUD, screens, touch buttons and hints are built here by js/ui.js -->
+  </div>
+  <script type="module">
+    import Game from './js/main.js';
+    window.__game = new Game(document.getElementById('gameCanvas'));
+  </script>
+</body>
+</html>

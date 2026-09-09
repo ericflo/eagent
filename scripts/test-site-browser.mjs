@@ -122,13 +122,19 @@ try {
     check(await page.locator("#expand-screenshot").evaluate(button => button === document.activeElement), "dialog returns focus");
     await page.locator("#view-tasks").click();
 
-    await page.locator("#case-value").click();
-    check(await page.locator("#case-cost").innerText() === "$2.19", "value run cost");
-    check(await page.locator("#case-measure").innerText() === "26/27", "value run rubric");
-    await page.locator("#case-polish").click();
-    check(await page.locator("#case-measure").innerText() === "27/27", "polish run rubric");
-    check((await page.locator("#case-image").getAttribute("src")).includes("anthropic-high-mobile"), "case image changes");
-    await page.locator("#case-original").click();
+    await page.locator("#game-thumb-muse").scrollIntoViewIfNeeded();
+    check(await page.locator(".game-card").count() === 14, "fourteen playable cards");
+    check(await page.locator("#game-table tbody tr").count() === 14, "fourteen comparison rows");
+    check(await page.locator("#game-thumb-muse").getAttribute("src") === "assets/games/muse-desktop.png", "card thumbnail");
+    await page.locator('[data-play="muse"]').click();
+    check(await page.locator("#game-dialog").evaluate(dialog => dialog.open), "game dialog opens");
+    check(((await page.locator("#game-dialog-frame").getAttribute("src")) ?? "").endsWith("games/muse/"), "lazy game iframe");
+    check(((await page.locator("#game-dialog-open").getAttribute("href")) ?? "").endsWith("games/muse/"), "full-page link");
+    await page.locator("#game-shot-mobile").click();
+    check(((await page.locator("#game-dialog-shot").getAttribute("src")) ?? "").endsWith("muse-mobile.png"), "mobile shot toggle");
+    check(await page.locator("#game-shot-mobile").getAttribute("aria-pressed") === "true", "shot toggle pressed");
+    await page.keyboard.press("Escape");
+    check(!(await page.locator("#game-dialog").evaluate(dialog => dialog.open)), "Escape closes game dialog");
 
     await page.locator("#install-source").click();
     const sourceCommand = await page.locator("#install-command").innerText();
@@ -187,6 +193,8 @@ try {
     check(await plain.locator("#navigation").isVisible(), "no-JavaScript mobile navigation");
     check(await plain.locator("#install-command").innerText() === "go install github.com/ericflo/eagent/cmd/eagent@latest", "no-JavaScript installation");
     check(await plain.locator(".menu-toggle").isHidden(), "no dead menu toggle without JavaScript");
+    check(await plain.locator("#game-table tbody tr").count() === 14, "no-JavaScript comparison table");
+    check(await plain.locator(".game-card").count() === 14, "no-JavaScript game cards");
     for (const route of example.routes) {
       check(await plain.locator("#model-" + route.actor).innerText() === route.label, "no-JavaScript canonical route: " + route.actor);
     }
