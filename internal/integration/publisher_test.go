@@ -33,6 +33,7 @@ type publicationFixture struct {
 	attempts                      []string
 	registrations, commits, calls int
 	failBefore, failAfter         bool
+	resourceRegistrations         int
 }
 
 func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +52,14 @@ func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Header.Get("Authorization") != "Bearer fc_fixture" {
 		w.WriteHeader(401)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/settings-resources/") && strings.HasSuffix(r.URL.Path, "/website") && r.Method == "PUT" {
+		f.resourceRegistrations++
+		if f.head.Artifact.ID == "" {
+			f.head = finalechat.ArtifactHead{Artifact: finalechat.Artifact{ID: fmt.Sprintf("resource-artifact-%d", f.resourceRegistrations)}}
+		}
+		send(map[string]any{"artifact": f.head.Artifact})
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v1/threads/") && r.Method == "PUT" {

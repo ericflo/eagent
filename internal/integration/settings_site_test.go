@@ -78,3 +78,49 @@ func TestSettingsSitePublishesWithoutBackupAndRecoversLostAcknowledgement(t *tes
 		}
 	}
 }
+
+func TestResourceSettingsSiteIsPublishedForTheProjectItself(t *testing.T) {
+	f, project, _ := newPublicationFixture(t)
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &finalechat.Client{BaseURL: cfg.Finalechat.BaseURL, Token: "fc_fixture"}
+	bindings := 0
+	binding := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["resource_id"] != "resource" || body["revision_id"] == nil {
+			t.Error("missing website binding")
+		}
+		bindings++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer binding.Close()
+	connector := &finalechat.Client{BaseURL: binding.URL, Token: "fcc_fixture"}
+	if err := writeJSONAtomic(config.File(project), map[string]any{"finalechat": map[string]any{"artifacts": false, "base_url": cfg.Finalechat.BaseURL}}); err != nil {
+		t.Fatal(err)
+	}
+	service := &settings.Service{Project: project}
+	view, err := service.RemoteSnapshot(service.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := publishResourceSite(context.Background(), project, "test", view, account, connector, "/api/v1/connectors/connector", "resource"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.resourceRegistrations != 1 || f.registrations != 0 {
+		t.Fatalf("the editor was registered for the resource %d times and for threads %d times", f.resourceRegistrations, f.registrations)
+	}
+	if f.commits != 1 || bindings < 1 {
+		t.Fatalf("commits=%d bindings=%d", f.commits, bindings)
+	}
+	if got, _ := f.head.Revision.Manifest.Dataset["session_id"].(string); got != "" {
+		t.Fatalf("a project editor must not name a session: %q", got)
+	}
+}

@@ -283,6 +283,9 @@ type Client struct {
 	// rejectsImages remembers that this model refused pictures, so later
 	// calls send the text alone instead of re-uploading and re-failing.
 	rejectsImages atomic.Bool
+	// rejectsToolChoice remembers that this model only accepts the default
+	// tool choice (auto), so later calls leave it out instead of failing.
+	rejectsToolChoice atomic.Bool
 }
 
 // NewClient returns a client with sensible defaults.
@@ -356,6 +359,17 @@ func (e *APIError) Unroutable() bool {
 	return false
 }
 
+// RejectsToolChoice reports that the endpoint refused the request's
+// tool_choice (some models only accept the default, auto). The caller can
+// ask again without one.
+func (e *APIError) RejectsToolChoice() bool {
+	if e.Status != 400 && e.Status != 422 {
+		return false
+	}
+	b := strings.ToLower(e.Body)
+	return strings.Contains(b, "tool_choice") || strings.Contains(b, "tool choice")
+}
+
 // ContextOverflow reports that the prompt was too long for the model.
 func (e *APIError) ContextOverflow() bool {
 	if e.Status != 400 && e.Status != 413 && e.Status != 422 {
@@ -393,7 +407,23 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if c.rejectsImages.Load() && hasImages(req) {
 			req = withoutImages(req)
 		}
+		if c.rejectsToolChoice.Load() {
+			req.ToolChoice = ""
+		}
 		resp, err := c.once(callCtx, req, obs)
+		if err != nil && req.ToolChoice != "" {
+			var ae *APIError
+			if errors.As(err, &ae) && ae.RejectsToolChoice() {
+				// Only the default tool choice is accepted: ask again without
+				// one, on this call and every later one through this client.
+				if c.rejectsToolChoice.CompareAndSwap(false, true) && c.OnRetry != nil {
+					c.OnRetry(attempt, fmt.Errorf("%s does not accept tool_choice %q; asking without it", c.Endpoint.Model, req.ToolChoice), 0)
+				}
+				req.ToolChoice = ""
+				obs.reset()
+				resp, err = c.once(callCtx, req, obs)
+			}
+		}
 		if err != nil && hasImages(req) {
 			var ae *APIError
 			if errors.As(err, &ae) && ae.RejectsImages() {

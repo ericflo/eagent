@@ -93,7 +93,31 @@ func publishSettingsSite(ctx context.Context, project, version string, thread se
 		return err
 	}
 	defer site.Close()
-	path := filepath.Join(stateDir(project), "settings-sites", thread.Session+".json")
+	return publishSite(ctx, project, thread.Session, site, func(ctx context.Context) (finalechat.Artifact, error) {
+		return account.Artifact(ctx, "ext:"+thread.External, "agent-settings", "Eagent settings")
+	}, account, connector, base, resourceID)
+}
+
+// publishResourceSite publishes the project's settings editor for the
+// resource itself, the page a new-session draft opens before any
+// conversation exists. It carries no session context.
+func publishResourceSite(ctx context.Context, project, version string, view settings.RemoteView, account, connector *finalechat.Client, base, resourceID string) error {
+	site, err := archive.SettingsWebsite(project, "", version, view)
+	if err != nil {
+		return err
+	}
+	defer site.Close()
+	return publishSite(ctx, project, "project", site, func(ctx context.Context) (finalechat.Artifact, error) {
+		return account.ResourceArtifact(ctx, resourceID, "Eagent settings")
+	}, account, connector, base, resourceID)
+}
+
+// publishSite records a website's artifact, revision and fingerprint under
+// the given name so retries and restarts reuse them, commits a new revision
+// only when the content changed, and binds the current revision to the
+// resource with the connector's credential.
+func publishSite(ctx context.Context, project, name string, site *archive.Export, register func(context.Context) (finalechat.Artifact, error), account, connector *finalechat.Client, base, resourceID string) error {
+	path := filepath.Join(stateDir(project), "settings-sites", name+".json")
 	var state struct {
 		ArtifactID  string    `json:"artifact_id"`
 		RevisionID  *string   `json:"revision_id"`
@@ -113,7 +137,7 @@ func publishSettingsSite(ctx context.Context, project, version string, thread se
 		return nil
 	}
 	if state.ArtifactID == "" {
-		a, err := account.Artifact(ctx, "ext:"+thread.External, "agent-settings", "Eagent settings")
+		a, err := register(ctx)
 		if err != nil {
 			return err
 		}

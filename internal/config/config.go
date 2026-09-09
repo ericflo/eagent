@@ -352,6 +352,16 @@ var Presets = map[string]func(*Config){
 		}
 		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "medium", "low", "none"
 	},
+	"muse": func(c *Config) {
+		c.Description = "Muse Spark 1.3 Contributor (Meta) for all three actors"
+		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
+			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolResponses, metaURL, "META_API_KEY"
+			a.Model = "muse-spark-1.3-contributor"
+			a.ContextTokens = 1_000_000
+		}
+		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "medium", "low", "minimal"
+		c.RolloverTokens = 300_000
+	},
 	"qwen": func(c *Config) {
 		c.Description = "Qwen 3.8 27B (via OpenRouter) for all three actors; a dense model you could run locally"
 		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
@@ -377,7 +387,7 @@ func PresetNames() []string {
 		"fireworks-high", "fireworks-med", "fireworks-low",
 		"opencode-high", "opencode-med", "opencode-low",
 		"nous-high", "nous-med", "nous-low",
-		"deepseek", "qwen",
+		"deepseek", "qwen", "muse",
 	}
 }
 

@@ -421,6 +421,16 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			if account != nil {
 				// Bound each publication pass so command delivery stays responsive.
 				publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+				// The resource's own editor first: it is what a new-session
+				// draft opens, and what a conversation opens until its own
+				// archived page exists.
+				if sitesVersion["project"] != publicationVersion {
+					if err := publishResourceSite(publishCtx, project, "project-settings-v1", view, account, client, base, resourceID); err == nil {
+						sitesVersion["project"] = publicationVersion
+					} else if ctx.Err() == nil {
+						logf("settings website: %v", err)
+					}
+				}
 				for _, thread := range linked {
 					if publishCtx.Err() != nil {
 						break

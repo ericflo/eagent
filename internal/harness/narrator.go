@@ -48,7 +48,14 @@ func (r *Runtime) maybeWakeNarrator() {
 	reason := r.narrPending
 	r.narrPending = ""
 	if reason != wakeFinal && reason != wakePeriodic && r.narrWorthy <= r.narrLastSeen {
-		return // nothing new since it last looked (the tick decides for itself)
+		// Nothing new since it last looked (the tick decides for itself),
+		// unless the user is still waiting for a word: a wake for something
+		// else may have shown the narrator their message with a steer that
+		// said nothing about it, and it held. The user wake carries the
+		// steer that tells it what the orchestrator has done.
+		if reason != wakeUser || r.narrSaidSeq > r.st.LastUserSeq {
+			return
+		}
 	}
 	if (reason == wakeDone || reason == wakeYield) && r.narratorCoveredYield() {
 		return // it saw the yield in the call that made it, and spoke; the yield event's own seq is not news

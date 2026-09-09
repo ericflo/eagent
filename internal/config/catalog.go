@@ -124,7 +124,7 @@ var Models = []Model{
 	{Provider: "anthropic", ID: "claude-haiku-4-5-20251001", Family: "claude-haiku-4.5", Label: "Claude Haiku 4.5", Price: p(1.00, 0.10, 5.00, "Anthropic price list"), Context: 200_000, Vision: true, Efforts: claudeEfforts},
 	// Meta
 	{Provider: "meta", ID: "muse-spark-1.3", Family: "muse-spark-1.3", Label: "Muse Spark 1.3", Price: nominal(1.25, 0.15, 4.25, "OpenCode Zen price table (Zen sells at cost)"), Context: 1_000_000, Vision: true, Efforts: museEfforts, Note: "no 'none'; checked live 2026-09-07"},
-	{Provider: "meta", ID: "muse-spark-1.3-contributor", Family: "muse-spark-1.3", Label: "Muse Spark 1.3 Contributor", Price: nominal(1.25, 0.15, 4.25, "OpenCode Zen price table (Zen sells at cost)"), Context: 1_000_000, Vision: true, Efforts: museEfforts},
+	{Provider: "meta", ID: "muse-spark-1.3-contributor", Family: "muse-spark-1.3", Label: "Muse Spark 1.3 Contributor", Price: nominal(1.25, 0.15, 4.25, "OpenCode Zen price table (Zen sells at cost)"), Context: 1_000_000, Vision: true, Efforts: museEfforts, Note: "no 'none'; only accepts tool_choice auto, which eagent falls back to on its own"},
 	// DeepInfra
 	{Provider: "deepinfra", ID: "moonshotai/Kimi-K3", Family: "kimi-k3", Label: "Kimi K3", Price: p(2.85, 0.285, 14.25, "DeepInfra catalog"), Context: 1_000_000, Vision: true, Efforts: kimiEfforts},
 	{Provider: "deepinfra", ID: "zai-org/GLM-5.3", Family: "glm-5.3", Label: "GLM-5.3", Price: p(1.20, 0.12, 4.00, "DeepInfra catalog"), Context: 200_000, Efforts: glmEfforts, Note: "measured 35 to 44 s on a trivial call"},

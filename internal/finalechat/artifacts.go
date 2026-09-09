@@ -43,6 +43,17 @@ func (c *Client) Artifact(ctx context.Context, ref, key, title string) (Artifact
 	return out.Artifact, err
 }
 
+// ResourceArtifact registers the settings website a resource's own editor is
+// served from: an artifact the resource owns, which every surface (a
+// conversation, a new-session draft) opens.
+func (c *Client) ResourceArtifact(ctx context.Context, resourceID, title string) (Artifact, error) {
+	var out struct {
+		Artifact Artifact `json:"artifact"`
+	}
+	err := c.Request(ctx, http.MethodPut, "/api/v1/settings-resources/"+url.PathEscape(resourceID)+"/website", nil, map[string]any{"title": title}, &out, 0)
+	return out.Artifact, err
+}
+
 // CommitArtifact uploads only absent content-addressed chunks, then atomically
 // publishes the manifest. Retrying the same key/manifest is safe after a lost
 // response; the caller persists the expected parent and key before starting.
