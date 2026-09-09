@@ -32,6 +32,8 @@ type publicationFixture struct {
 	keys                          map[string]finalechat.ArtifactRevision
 	attempts                      []string
 	registrations, commits, calls int
+	patches                       int
+	patchTitle, patchAgent        string
 	failBefore, failAfter         bool
 	resourceRegistrations         int
 }
@@ -68,6 +70,17 @@ func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
 			f.head = finalechat.ArtifactHead{Artifact: finalechat.Artifact{ID: fmt.Sprintf("artifact-%d", f.registrations), ThreadID: "fixture-thread"}}
 		}
 		send(map[string]any{"artifact": f.head.Artifact})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/threads/") && r.Method == "PATCH" {
+		f.patches++
+		var in struct {
+			Title string `json:"title"`
+			Agent string `json:"agent"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.patchTitle, f.patchAgent = in.Title, in.Agent
+		send(map[string]any{"thread": map[string]any{"id": "fixture-thread", "title": in.Title, "agent": in.Agent}})
 		return
 	}
 	base := "/api/v1/artifacts/" + f.head.Artifact.ID

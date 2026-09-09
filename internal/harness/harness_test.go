@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,16 +153,55 @@ func testConfig(url string) config.Config {
 	cfg.NarratorTickSeconds = 3600
 	cfg.RolloverTokens = 20000
 	off := false
-	cfg.Finalechat.Enabled = &off // never the real phone from a test
+	cfg.Finalechat.Enabled = &off    // never the real phone from a test
+	cfg.Finalechat.Artifacts = false // never the real artifact service either
 	return cfg
+}
+
+// testDeniedHTTP counts HTTP requests the hermetic guard refused: anything
+// not aimed at a test-local (loopback) server.
+var testDeniedHTTP atomic.Int64
+
+// loopbackOnlyTransport fails any request that would leave the machine, so
+// a regression can never silently reach a production service again. The
+// fake model and phone servers are httptest (127.0.0.1), so legitimate
+// test traffic is unaffected.
+type loopbackOnlyTransport struct{ base http.RoundTripper }
+
+func (t loopbackOnlyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch req.URL.Hostname() {
+	case "127.0.0.1", "::1", "localhost":
+		return t.base.RoundTrip(req)
+	default:
+		testDeniedHTTP.Add(1)
+		return nil, fmt.Errorf("hermetic test guard: refusing non-loopback request to %s", req.URL.Host)
+	}
 }
 
 // TestMain keeps every test in this package away from a real Finalechat
 // account: the kill switch wins over any token on the machine. Tests that
 // exercise the mirror point it at a fake server and flip the switch back.
+// Home is pointed at an empty directory (with the token variables cleared)
+// so credential resolution can never borrow the developer's production
+// ~/.config/finalechat/config.json, and non-loopback HTTP is refused
+// outright. A suite that attempted even one such request fails.
 func TestMain(m *testing.M) {
 	os.Setenv("EAGENT_FINALECHAT", "off")
-	os.Exit(m.Run())
+	if home, err := os.MkdirTemp("", "eagent-hermetic-home"); err == nil {
+		os.Setenv("HOME", home)
+		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	}
+	os.Unsetenv("FINALECHAT_TOKEN")
+	os.Unsetenv("FINALECHAT_URL")
+	http.DefaultTransport = loopbackOnlyTransport{base: http.DefaultTransport}
+	code := m.Run()
+	if n := testDeniedHTTP.Load(); n != 0 {
+		fmt.Fprintf(os.Stderr, "hermetic test guard: %d non-loopback HTTP requests were refused\n", n)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }
 
 // lastUserText returns the text of the last user message in a request.

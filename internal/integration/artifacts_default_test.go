@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 )
 
 // Archive publication is on by default; an explicit `artifacts: false` or
@@ -87,6 +88,11 @@ func TestPublisherPublishesByDefaultAndRespectsOptOut(t *testing.T) {
 	}
 	if !IsArtifactEnabled(project) {
 		t.Fatal("default config must enable the publisher")
+	}
+	// Automatic publication waits for the phone mirror's first Post (which
+	// creates the thread with its title); record it so registration may go.
+	if _, err := session.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "fixture-thread", ExternalID: "eagent:" + session.ID, BaseURL: cfg.Finalechat.BaseURL})); err != nil {
+		t.Fatal(err)
 	}
 	id, err := Publish(context.Background(), project, session.ID, "test", false)
 	if err != nil {

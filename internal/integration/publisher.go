@@ -18,6 +18,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/archive"
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
@@ -140,6 +141,9 @@ func publish(ctx context.Context, project, session, version string, force, recre
 			if errors.Is(resultErr, ErrPublicationConflict) {
 				status, message = "conflicted", "Local source history must preserve both pending and published native records before publication can continue."
 			}
+			if errors.Is(resultErr, ErrWaitingForMirror) {
+				status, message = "waiting-for-mirror", resultErr.Error()
+			}
 		}
 		_ = writeJSONAtomic(filepath.Join(directory, "status.json"), map[string]any{"state": status, "message": message, "at": time.Now().UTC()})
 	}()
@@ -187,6 +191,12 @@ func publish(ctx context.Context, project, session, version string, force, recre
 	}
 	if pending.Deleted {
 		return "", ErrPublicationDeleted
+	}
+	if pending.ArtifactID == "" && !force && !mirrorPosted(info) {
+		// The mirror's first Post creates the thread with its title; an
+		// artifact PUT first would auto-create an untitled thread that
+		// later posts never backfill. Wait for the mirror instead.
+		return "", ErrWaitingForMirror
 	}
 	var capabilities finalechat.Me
 	if err := client.Request(ctx, "GET", "/api/v1/me", nil, nil, &capabilities, 0); err != nil {
@@ -280,6 +290,11 @@ func publish(ctx context.Context, project, session, version string, force, recre
 		if err != nil {
 			return "", err
 		}
+		// Belt-and-braces: registration auto-creates the thread when the
+		// mirror has not yet, leaving it untitled (later posts never
+		// backfill). Re-assert title/agent so a raced registration cannot
+		// strand an orphan. Best effort: never fail publication over it.
+		_, _ = client.Patch(ctx, "ext:eagent:"+info.ID, finalechat.PatchRequest{Title: filepath.Base(project), Agent: cfg.Finalechat.AgentName()})
 		if a.ID == "" {
 			return "", fmt.Errorf("artifact registration returned no identity")
 		}
@@ -322,6 +337,22 @@ func publish(ctx context.Context, project, session, version string, force, recre
 		return "", err
 	}
 	return pending.ArtifactID, nil
+}
+
+// mirrorPosted reports whether the session's phone mirror has completed its
+// first Post: the mirror records a phone.thread event right after it, so a
+// session log without one has no thread yet on the server.
+func mirrorPosted(info store.Info) bool {
+	events, err := store.Read(info.Path)
+	if err != nil {
+		return false
+	}
+	for _, ev := range events {
+		if ev.Type == event.PhoneThread {
+			return true
+		}
+	}
+	return false
 }
 
 func active(path string) bool {
@@ -380,6 +411,8 @@ func StartPublisher(ctx context.Context, project, version string, logf func(stri
 				if ctx.Err() == nil {
 					if errors.Is(err, ErrPublicationDeleted) {
 						logf("artifact %s: %v", info.ID, err)
+					} else if errors.Is(err, ErrWaitingForMirror) {
+						logf("artifact %s: waiting for phone mirror (will retry)", info.ID)
 					} else {
 						logf("artifact %s: %v (will retry)", info.ID, err)
 					}

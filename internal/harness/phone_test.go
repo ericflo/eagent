@@ -345,8 +345,15 @@ func (f *fakePhone) postsWhere(pred func(map[string]any) bool) []map[string]any 
 }
 
 // fakePhoneConfig points the mirror at the fake service and lifts the
-// package-wide kill switch for this test only.
-func fakePhoneConfig(t *testing.T, modelURL string, fp *fakePhone) config.Config {
+// package-wide kill switch for this test only. It also pins the TempDir
+// project closed for artifact publication, in memory and on disk: Run only
+// starts the publisher when the run's own configuration enables artifacts,
+// and the publisher's sweep re-reads the project config from disk, where a
+// bare TempDir would mean defaults (artifacts ON) and credential resolution
+// would fall back to the developer's production
+// ~/.config/finalechat/config.json. Either pin alone stops that; both are
+// set so neither path can leak again.
+func fakePhoneConfig(t *testing.T, project, modelURL string, fp *fakePhone) config.Config {
 	t.Helper()
 	t.Setenv("EAGENT_FINALECHAT", "on")
 	cfg := testConfig(modelURL)
@@ -354,6 +361,18 @@ func fakePhoneConfig(t *testing.T, modelURL string, fp *fakePhone) config.Config
 	cfg.Finalechat.Enabled = &on
 	cfg.Finalechat.BaseURL = fp.srv.URL
 	cfg.Finalechat.TokenEnv = "EAGENT_TEST_FC"
+	cfg.Finalechat.Artifacts = false
+	raw, err := json.Marshal(map[string]any{"finalechat": map[string]any{"artifacts": false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(project, ".agents", "eagent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), append(raw, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return cfg
 }
 
@@ -405,7 +424,7 @@ func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(true)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
 	if err != nil {
@@ -512,7 +531,7 @@ func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: true, Prompt: "hello"}, ui)
 	if err != nil {
@@ -584,7 +603,7 @@ func TestPhoneDisabledInConfig(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	off := false
 	cfg.Finalechat.Enabled = &off
 	ui := &fakeUI{input: make(chan string)}
@@ -637,7 +656,7 @@ func TestPhoneReasksPendingQuestionOnResume(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(true)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
 	if err != nil {
@@ -740,7 +759,7 @@ func TestPhoneAttachmentsBothWays(t *testing.T) {
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
 	fp.files["att-1"] = fakeFile{name: "IMG_1.png", contentType: "image/png", data: png}
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "look at what I send you"}, ui)
 	if err != nil {
@@ -1198,7 +1217,7 @@ func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "run it"}, ui)
 	if err != nil {
@@ -1307,7 +1326,7 @@ func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
 	if err != nil {
@@ -1385,7 +1404,7 @@ func TestPhoneWithoutFeaturesSendsNoStatusOrKeys(t *testing.T) {
 	fp := newFakePhone(false)
 	fp.features = []string{}
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
 	if err != nil {
@@ -1453,7 +1472,7 @@ func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
 	fp := newFakePhone(false)
 	fp.latency = 150 * time.Millisecond
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
 	if err != nil {
@@ -1538,7 +1557,7 @@ func TestPhoneStatusOfFreshInteractiveSessionIsWaiting(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: true}, ui)
 	if err != nil {
@@ -1657,7 +1676,7 @@ func TestPhoneSessionKindsAndSequencedClear(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "idle"}, ui)
 	if err != nil {
@@ -1713,7 +1732,7 @@ func TestPhoneMirrorsTheResumePrompt(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "first ask"}, ui)
 	if err != nil {
@@ -1804,7 +1823,7 @@ func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 	defer s.srv.Close()
 	fp := newFakePhone(false)
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "clean up"}, ui)
 	if err != nil {
@@ -1870,7 +1889,7 @@ func TestPhonePollPacesItselfWhenTheServerDoesNotHold(t *testing.T) {
 	fp := newFakePhone(false)
 	fp.anchorUnknown = true
 	defer fp.srv.Close()
-	cfg := fakePhoneConfig(t, s.srv.URL, fp)
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
 	ui := &fakeUI{input: make(chan string)}
 	rt, err := New(cfg, Options{Project: project, Interactive: true}, ui)
 	if err != nil {

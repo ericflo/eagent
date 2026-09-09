@@ -19,6 +19,11 @@ var ErrPublicationDeleted = errors.New("the remote artifact was deleted; automat
 var ErrPublicationConflict = errors.New("artifact source history conflict")
 var ErrArtifactsUnsupported = errors.New("this FinaleChat deployment does not advertise artifacts.v1; ordinary chat mirroring remains available")
 
+// ErrWaitingForMirror pauses artifact registration while the session's phone
+// mirror has not completed its first Post: registering first would make the
+// server auto-create an untitled thread that later posts never backfill.
+var ErrWaitingForMirror = errors.New("phone mirror has not posted yet; artifact registration is deferred until the thread exists")
+
 func publicationHead(ctx context.Context, client *finalechat.Client, id string) (finalechat.ArtifactHead, error) {
 	head, err := client.ArtifactHead(ctx, id)
 	var apiError *finalechat.Error

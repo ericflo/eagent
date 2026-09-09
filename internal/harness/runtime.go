@@ -21,6 +21,7 @@ import (
 	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/procs"
@@ -539,7 +540,15 @@ func (r *Runtime) orchestratorHasWork() bool {
 func (r *Runtime) Run(ctx context.Context) int {
 	r.startRuntimeSettings()
 	defer r.stopRuntimeSettings()
-	stopPublisher := integration.StartPublisher(ctx, r.opts.Project, Version, r.ui.Log, r.sess.ID)
+	// The publisher re-reads the project config from disk and resolves its
+	// own credentials, so it is only started when this run's configuration
+	// enables artifact publication. Tests pin artifacts off (in memory and
+	// on disk), which keeps them from ever uploading session artifacts to
+	// a production account.
+	stopPublisher := func() {}
+	if r.cfg.Finalechat.Artifacts && !finalechat.Disabled() {
+		stopPublisher = integration.StartPublisher(ctx, r.opts.Project, Version, r.ui.Log, r.sess.ID)
+	}
 	defer stopPublisher()
 	stopConnector := integration.StartConnector(ctx, r.opts.Project, r.ui.Log)
 	defer stopConnector()

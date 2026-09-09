@@ -159,7 +159,29 @@ func (r *Runtime) startPhone() {
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
-		me, err := p.client.Me(ctx)
+		// The first call proves the token and learns the account's
+		// settings. It gets a few attempts: a transient failure here used
+		// to switch the mirror off forever, stranding the session with no
+		// thread while the publisher kept registering its artifact.
+		var me finalechat.Me
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			me, err = p.client.Me(ctx)
+			if err == nil || ctx.Err() != nil {
+				break
+			}
+			if attempt+1 < 3 {
+				timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+				case <-timer.C:
+				}
+				if ctx.Err() != nil {
+					break
+				}
+			}
+		}
 		if err != nil {
 			r.ui.Log("finalechat: %v; the phone mirror is off for this session", err)
 			r.post(func() { r.phone = nil })
