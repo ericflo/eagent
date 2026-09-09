@@ -35,17 +35,71 @@ function unlockAudio() {
 }
 gate.addEventListener('pointerdown', unlockAudio, { once: true });
 
+// Keyboard: Enter/Space confirm on menu scenes, Esc pause/back.
+window.addEventListener('keydown', (e) => {
+  const k = e.key;
+  if (k === 'Escape') {
+    if (game.scene === 'playing') game.scene = 'paused';
+    else if (game.scene === 'paused') game.scene = 'playing';
+    else if (game.scene === 'howto' || game.scene === 'settings') game.scene = 'title';
+    return;
+  }
+  if (k === 'Enter' || k === ' ') {
+    game.audio?.init?.();
+    if (game.scene === 'title' || game.scene === 'gameOver') game.startGame();
+    else if (game.scene === 'paused') game.scene = 'playing';
+  }
+});
+
+
 // title/game-over/level-clear tap-anywhere handling
 canvas.addEventListener('pointerdown', (e) => {
   game.audio?.init?.();
+  const uiScenes = ['title', 'howto', 'settings', 'paused', 'gameOver'];
+  if (game.ui && uiScenes.includes(game.scene)) {
+    const world = renderer.worldFromClient(e.clientX, e.clientY);
+    const screenInfo = { W, H, cssW: renderer.cssW, cssH: renderer.cssH };
+    let action = null;
+    try { action = game.ui.hit?.(world.x, world.y, screenInfo, game.getUIState()); } catch (err) { console.warn('[main] UI.hit threw', err); }
+    if (action) { game.handleUIAction(action); return; }
+    // tap on a UI scene that didn't hit any control: fall through to the
+    // legacy tap-anywhere behaviour below (keeps things playable even with
+    // a partially-implemented UI module).
+  }
   if (game.scene === 'title') {
     game.startGame();
   } else if (game.scene === 'gameOver') {
     game.startGame();
   } else if (game.scene === 'paused') {
     game.scene = 'playing';
+  } else if (game.scene === 'howto' || game.scene === 'settings') {
+    game.scene = 'title';
   }
 });
+
+canvas.addEventListener('pointermove', (e) => {
+  const uiScenes = ['title', 'howto', 'settings', 'paused', 'gameOver'];
+  if (game.ui && uiScenes.includes(game.scene)) {
+    const world = renderer.worldFromClient(e.clientX, e.clientY);
+    const screenInfo = { W, H, cssW: renderer.cssW, cssH: renderer.cssH };
+    try { game.ui.hover?.(world.x, world.y, screenInfo, game.getUIState()); } catch (err) { /* ignore */ }
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (game.scene === 'playing') game.scene = 'paused';
+    game.audio?.suspend?.();
+  } else {
+    game.audio?.resume?.();
+  }
+});
+window.addEventListener('blur', () => {
+  if (game.scene === 'playing') game.scene = 'paused';
+  game.audio?.suspend?.();
+});
+window.addEventListener('focus', () => { game.audio?.resume?.(); });
+
 
 let last = performance.now();
 let hadFatalError = false;
@@ -69,13 +123,6 @@ function frame(now) {
   }
 }
 requestAnimationFrame(frame);
-
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && game.scene === 'playing') game.scene = 'paused';
-});
-window.addEventListener('blur', () => {
-  if (game.scene === 'playing') game.scene = 'paused';
-});
 
 // ---------------------------------------------------------------------
 // Optional scripted autoplay for automated screenshots/tests: add
@@ -144,6 +191,7 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 function seedAttractMode(game) {
   const def = buildFallbackLevel(1);
   game.bricks = def.bricks;
+  game.rescaleBrickField?.(game.bricks);
   game.balls = [
     makeBall(300, 700, 260, 340, {}),
     makeBall(650, 900, -300, 260, {}),

@@ -9,6 +9,8 @@
 import { clamp, lerp, TAU, hsl, formatScore, rand, smoothstep } from './util.js';
 import { W, H, FIELD, POWERUPS, MULT_CAP } from './game.js';
 import fx, { glowSprite, qhue } from './fx.js';
+import audio from './audio.js';
+import { BRICK_KINDS } from './entities/bricks.js';
 
 const MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace';
 const DISPLAY = '"Trebuchet MS", "Avenir Next", Inter, system-ui, sans-serif';
@@ -102,14 +104,6 @@ if (typeof window !== 'undefined' && window.addEventListener) {
   window.addEventListener('pointerdown', (e) => {
     updatePointer(e);
     pointer.down = true;
-    // FX quality row (settings overlay only).
-    const g = lastGame;
-    if (g && g.showSettings) {
-      const b = getButtons(g).find((x) => x.id === 'toggleFx');
-      if (b && pointer.x >= b.x && pointer.x <= b.x + b.w && pointer.y >= b.y && pointer.y <= b.y + b.h) {
-        fx.toggleLite();
-      }
-    }
   }, { passive: true, capture: true });
   window.addEventListener('pointerup', () => { pointer.down = false; }, { passive: true, capture: true });
   window.addEventListener('pointercancel', () => { pointer.down = false; }, { passive: true, capture: true });
@@ -125,6 +119,30 @@ function hitButton(b) {
 const BTN = 40;
 const BTN_GAP = 46;
 
+// ---- settings overlay layout (single source of truth for draw + hit-testing)
+const SET_X = W / 2 - 160;
+const SET_W = 320;
+const SET_H = 46;
+const SET_Y0 = 250;
+const SET_STEP = 54;
+const SET_ARROW = 60;
+/** Rows in order: [id, kind]. kind: 'toggle' | 'volume' | 'action' */
+const SET_ROWS = [
+  ['toggleDrag', 'toggle'],
+  ['toggleMute', 'toggle'],
+  ['toggleFx', 'toggle'],
+  ['musicVol', 'volume'],
+  ['sfxVol', 'volume'],
+  ['resetHints', 'action'],
+  ['closeSettings', 'action'],
+];
+
+export function settingsLayout() {
+  return SET_ROWS.map(([id, kind], i) => ({
+    id, kind, x: SET_X, y: SET_Y0 + i * SET_STEP, w: SET_W, h: SET_H,
+  }));
+}
+
 export function getButtons(game) {
   const list = [
     { id: 'pause', x: W - 12 - BTN, y: 8, w: BTN, h: BTN },
@@ -132,13 +150,19 @@ export function getButtons(game) {
     { id: 'settings', x: W - 12 - BTN - BTN_GAP * 2, y: 8, w: BTN, h: BTN },
   ];
   if (game.showSettings) {
-    list.push({ id: 'toggleDrag', x: W / 2 - 155, y: 356, w: 310, h: 58 });
-    list.push({ id: 'toggleMute', x: W / 2 - 155, y: 424, w: 310, h: 58 });
-    list.push({ id: 'toggleFx', x: W / 2 - 155, y: 492, w: 310, h: 58 });
-    list.push({ id: 'closeSettings', x: W / 2 - 155, y: 568, w: 310, h: 58 });
+    for (const row of settingsLayout()) {
+      if (row.kind === 'volume') {
+        // The two arrows are the hit targets; the middle of the row is inert.
+        list.push({ id: `${row.id}Down`, x: row.x, y: row.y, w: SET_ARROW, h: row.h });
+        list.push({ id: `${row.id}Up`, x: row.x + row.w - SET_ARROW, y: row.y, w: SET_ARROW, h: row.h });
+      } else {
+        list.push({ id: row.id, x: row.x, y: row.y, w: row.w, h: row.h });
+      }
+    }
   }
   return list;
 }
+
 
 // ---------------------------------------------------------------- backdrop
 
@@ -157,11 +181,13 @@ function bgLayer(bucket) {
   const c = cv.getContext('2d');
   const h0 = 228 + I * 96;                 // indigo -> violet/magenta
   const h1 = 244 + I * 74;
+  // Escalation is carried by hue + saturation, NOT by luminance: the sky stays dark so
+  // bricks, balls, paddle and HUD keep their contrast at intensity 1.
   const base = c.createLinearGradient(0, 0, 0, NH);
-  base.addColorStop(0, hsl(h0, 52 + I * 30, 8 + I * 9));
-  base.addColorStop(0.42, hsl(h0 + 8, 55 + I * 28, 10 + I * 11));
-  base.addColorStop(0.74, hsl(h1, 55 + I * 25, 8 + I * 8));
-  base.addColorStop(1, hsl(h1 + 10, 50 + I * 20, 4 + I * 5));
+  base.addColorStop(0, hsl(h0, 52 + I * 38, 8 + I * 3));
+  base.addColorStop(0.42, hsl(h0 + 8, 55 + I * 36, 10 + I * 4));
+  base.addColorStop(0.74, hsl(h1, 55 + I * 34, 8 + I * 3));
+  base.addColorStop(1, hsl(h1 + 10, 50 + I * 30, 4 + I * 2));
   c.fillStyle = base;
   c.fillRect(0, 0, NW, NH);
 
@@ -174,11 +200,11 @@ function bgLayer(bucket) {
   ];
   for (const [x, y, r, hue, a] of clouds) {
     const hh = hue + I * 46;
-    const aa = a * (1 + I * 1.7);
+    const aa = a * (1 + I * 0.55);
     const g = c.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, hsl(hh, 88, 50 + I * 12, aa));
-    g.addColorStop(0.55, hsl(hh, 88, 40 + I * 10, aa * 0.42));
-    g.addColorStop(1, hsl(hh, 88, 30, 0));
+    g.addColorStop(0, hsl(hh, 92, 42 + I * 6, aa));
+    g.addColorStop(0.55, hsl(hh, 92, 34 + I * 5, aa * 0.42));
+    g.addColorStop(1, hsl(hh, 90, 26, 0));
     c.fillStyle = g;
     c.fillRect(x - r, y - r, r * 2, r * 2);
   }
@@ -211,7 +237,8 @@ const STREAKS = Array.from({ length: 26 }, (_, i) => ({
 }));
 
 function drawBackground(ctx, game, t, I) {
-  if (!nebula) nebula = buildNebula();
+  const bucket = Math.max(0, Math.min(BG_BUCKETS - 1, Math.round(I * (BG_BUCKETS - 1))));
+  const nebula = bgLayer(bucket);
   const beat = fx.beat;
 
   if (nebula) {
@@ -223,20 +250,21 @@ function drawBackground(ctx, game, t, I) {
     ctx.fillRect(0, 0, W, H);
   }
 
-  // Intensity tint: the whole sky warms up and brightens as you power up.
+  // Intensity tint: the sky shifts hue and saturates as you power up. The additive alpha
+  // is deliberately capped (<= 0.22) — escalation must never wash the playfield out.
   if (I > 0.01) {
     const hueA = qhue(lerp(212, 322, I));
     const hueB = qhue(lerp(190, 32, I));
     const g = cachedGrad(ctx, `tint|${hueA}|${hueB}`, (c) => {
       const gr = c.createLinearGradient(0, 0, 0, H);
-      gr.addColorStop(0, hsl(hueA, 95, 46, 0.55));
-      gr.addColorStop(0.5, hsl(hueB, 95, 40, 0.30));
-      gr.addColorStop(1, hsl(hueA, 90, 30, 0.10));
+      gr.addColorStop(0, hsl(hueA, 95, 40, 0.46));
+      gr.addColorStop(0.5, hsl(hueB, 95, 34, 0.24));
+      gr.addColorStop(1, hsl(hueA, 90, 26, 0.08));
       return gr;
     });
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = (0.10 + I * 0.34) * (0.86 + beat * 0.14);
+    ctx.globalAlpha = Math.min(0.22, (0.05 + I * 0.17) * (0.88 + beat * 0.12));
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
@@ -244,7 +272,7 @@ function drawBackground(ctx, game, t, I) {
 
   // Pulsing grid, locked to a 120 BPM beat.
   ctx.save();
-  ctx.globalAlpha = 0.045 + I * 0.075 + beat * (0.02 + I * 0.06);
+  ctx.globalAlpha = 0.045 + I * 0.11 + beat * (0.02 + I * 0.08);
   ctx.strokeStyle = hsl(qhue(lerp(196, 320, I)), 90, 62);
   ctx.lineWidth = 1;
   const step = 45;
@@ -271,15 +299,15 @@ function drawBackground(ctx, game, t, I) {
   }
   ctx.restore();
 
-  // Speed lines at high intensity.
-  if (I > 0.55 && !fx.lite) {
-    const k = (I - 0.55) / 0.45;
+  // Speed lines: motion, not light, is what sells high intensity.
+  if (I > 0.32 && !fx.lite) {
+    const k = (I - 0.32) / 0.68;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.strokeStyle = hsl(qhue(lerp(190, 40, I)), 100, 76);
     for (const s of STREAKS) {
       const y = FIELD.top + ((s.y * (H - FIELD.top) + t * s.spd) % (H - FIELD.top));
-      ctx.globalAlpha = 0.05 + k * 0.22;
+      ctx.globalAlpha = 0.05 + k * 0.26;
       ctx.lineWidth = s.w;
       ctx.beginPath();
       ctx.moveTo(s.x * W, y);
@@ -354,13 +382,13 @@ function drawOvertopZone(ctx, game, t, I) {
   // Base wash.
   const wash = cachedGrad(ctx, `zone|${Math.round(bottom)}|${hue}`, (c) => {
     const gr = c.createLinearGradient(0, FIELD.top, 0, bottom);
-    gr.addColorStop(0, hsl(hue, 95, 62, 0.34));
-    gr.addColorStop(0.45, hsl(hue, 95, 58, 0.14));
-    gr.addColorStop(1, hsl(hue, 95, 55, 0.02));
+    gr.addColorStop(0, hsl(hue, 95, 48, 0.26));
+    gr.addColorStop(0.45, hsl(hue, 95, 44, 0.11));
+    gr.addColorStop(1, hsl(hue, 95, 40, 0.02));
     return gr;
   });
   ctx.save();
-  ctx.globalAlpha = 0.24 + E * (0.55 + 0.14 * Math.sin(t * 6));
+  ctx.globalAlpha = 0.2 + E * (0.36 + 0.10 * Math.sin(t * 6));
   ctx.fillStyle = wash;
   ctx.fillRect(0, FIELD.top, W, zh);
   ctx.restore();
@@ -446,7 +474,7 @@ function drawOvertopZone(ctx, game, t, I) {
     ctx.textAlign = 'center';
     ctx.fillStyle = hsl(hue, 100, 84);
     ctx.font = `800 10px ${MONO}`;
-    ctx.fillText('P O W E R   Z O N E', W / 2, FIELD.top + 16);
+    ctx.fillText('P O W E R   Z O N E', W / 2, FIELD.top + 40);
     ctx.restore();
   }
 }
@@ -835,7 +863,11 @@ function drawPaddle(ctx, game, t, I) {
   const squash = p.squash > 0 ? p.squash : 0;
   const h = p.h * (1 - squash * 0.25);
   const y = p.y + (p.h - h);
-  const hue = game.powers.laser > 0 ? 0 : game.powers.magnet > 0 ? 330 : qhue(lerp(195, 285, I));
+  // The paddle itself advertises its state: red = lasers, pink = magnet, green = wide.
+  const hue = game.powers.laser > 0 ? 0
+    : game.powers.magnet > 0 ? 330
+      : game.powers.wide > 0 ? 142
+        : qhue(lerp(195, 285, I));
   const up = p.vy < 0;
   const rising = Math.abs(p.vy) > 60;
 
@@ -907,10 +939,48 @@ function drawPaddle(ctx, game, t, I) {
   ctx.restore();
   ctx.restore();
 
+  if (game.powers.wide > 0) {
+    // wing tips: unmistakable "this paddle is wider than normal"
+    const pulse = 0.55 + 0.45 * Math.sin(t * 5);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.45 + pulse * 0.4;
+    ctx.fillStyle = hsl(142, 100, 74);
+    rr(ctx, p.x + 3, y + h * 0.5 - 1.6, 15, 3.2, 1.6);
+    ctx.fill();
+    rr(ctx, p.x + p.w - 18, y + h * 0.5 - 1.6, 15, 3.2, 1.6);
+    ctx.fill();
+    ctx.strokeStyle = hsl(142, 100, 82);
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = 'round';
+    for (const [ex, dir] of [[p.x + 6, -1], [p.x + p.w - 6, 1]]) {
+      ctx.beginPath();
+      ctx.moveTo(ex - dir * 5, y + 3);
+      ctx.lineTo(ex + dir * 3, y + h / 2);
+      ctx.lineTo(ex - dir * 5, y + h - 3);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
   if (game.powers.laser > 0) {
-    ctx.fillStyle = hsl(0, 100, 72, 0.6 + 0.4 * Math.sin(t * 14));
-    ctx.fillRect(p.x + 6, y - 5, 4, 5);
-    ctx.fillRect(p.x + p.w - 10, y - 5, 4, 5);
+    // twin barrels with a charge glow — visible even in a still frame
+    const pulse = 0.5 + 0.5 * Math.sin(t * 14);
+    const spr2 = glowSprite(0, 100, 60);
+    for (const bx of [p.x + 8, p.x + p.w - 8]) {
+      if (spr2) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.3 + pulse * 0.45;
+        ctx.drawImage(spr2, bx - 13, y - 20, 26, 26);
+        ctx.restore();
+      }
+      ctx.fillStyle = hsl(0, 100, 62, 0.9);
+      rr(ctx, bx - 2.5, y - 8, 5, 9, 2);
+      ctx.fill();
+      ctx.fillStyle = hsl(12, 100, 84, 0.6 + pulse * 0.4);
+      rr(ctx, bx - 1.5, y - 9, 3, 4, 1.5);
+      ctx.fill();
+    }
   }
   if (game.powers.magnet > 0) {
     ctx.strokeStyle = hsl(330, 100, 78, 0.35 + 0.25 * Math.sin(t * 8));
@@ -1093,7 +1163,7 @@ function drawMultiplier(ctx, game, t, I) {
 
   ctx.font = `700 8px ${MONO}`;
   ctx.fillStyle = hsl(hue, 70, 78, 0.75);
-  ctx.fillText(tier >= 3 ? 'MULTIPLIER · MAXING' : 'MULTIPLIER', 0, 12);
+  ctx.fillText(mi >= 10 ? 'MULTIPLIER · MAXED' : tier >= 3 ? 'MULTIPLIER · HOT' : 'MULTIPLIER', 0, 12);
   ctx.restore();
 }
 
@@ -1139,29 +1209,92 @@ function shimmerBar(ctx, x, y, w, h, frac, hue, t) {
   ctx.restore();
 }
 
+/** Short HUD labels for the active-power chips. */
+const POWER_SHORT = {
+  fireball: 'FIRE', heavy: 'HEAVY', ghostball: 'GHOST', magnet: 'MAGNET',
+  wide: 'WIDE', laser: 'LASER', slowmo: 'SLOW', multiball: 'MULTI', life: 'LIFE',
+};
+
+/** Dark plate behind a HUD cluster so text survives any amount of background juice. */
+function hudPlate(ctx, x, y, w, h, a = 0.42) {
+  ctx.save();
+  ctx.fillStyle = `rgba(3,5,14,${a})`;
+  rr(ctx, x, y, w, h, 10);
+  ctx.fill();
+  ctx.restore();
+}
+
+/** The row of active power-ups, just under the HUD strip. Reads `game.activePowers`. */
+function drawActivePowers(ctx, game, t) {
+  const list = game.activePowers;
+  if (!list || !list.length) return;
+  const CW = 84, CH = 20, GAP = 4;
+  ctx.save();
+  ctx.textBaseline = 'alphabetic';
+  list.slice(0, 6).forEach((p, i) => {
+    const def = POWERUPS[p.type];
+    if (!def) return;
+    const x = 10 + i * (CW + GAP);
+    const y = FIELD.top + 6;
+    const frac = clamp(p.remaining / (p.duration || 12), 0, 1);
+    const low = p.remaining < 3;
+    const a = low ? 0.5 + 0.5 * Math.abs(Math.sin(t * 8)) : 1;
+    ctx.globalAlpha = a;
+    // dark plate + coloured rim
+    ctx.fillStyle = 'rgba(4,6,16,0.72)';
+    rr(ctx, x, y, CW, CH, 6);
+    ctx.fill();
+    ctx.fillStyle = hsl(def.hue, 90, 50, 0.22);
+    rr(ctx, x, y, CW, CH, 6);
+    ctx.fill();
+    ctx.strokeStyle = hsl(def.hue, 100, 68, 0.55);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // glyph
+    ctx.textAlign = 'center';
+    ctx.fillStyle = hsl(def.hue, 100, 84);
+    ctx.font = `700 12px ${MONO}`;
+    ctx.fillText(def.glyph, x + 12, y + 14);
+    // label
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(240,246,255,0.92)';
+    ctx.font = `700 9px ${MONO}`;
+    ctx.fillText(POWER_SHORT[p.type] || def.label, x + 22, y + 11);
+    // shrinking time bar
+    ctx.fillStyle = 'rgba(255,255,255,0.14)';
+    rr(ctx, x + 22, y + 14, CW - 30, 3, 1.5);
+    ctx.fill();
+    ctx.fillStyle = hsl(def.hue, 100, 70);
+    rr(ctx, x + 22, y + 14, Math.max(1.5, (CW - 30) * frac), 3, 1.5);
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
 function drawHud(ctx, game, t, I) {
   const beat = fx.beat;
   ctx.save();
   const g = cachedGrad(ctx, 'hud', (c) => {
     const gr = c.createLinearGradient(0, 0, 0, FIELD.top);
-    gr.addColorStop(0, 'rgba(6,8,22,0.96)');
-    gr.addColorStop(0.7, 'rgba(9,11,30,0.92)');
-    gr.addColorStop(1, 'rgba(12,14,38,0.86)');
+    gr.addColorStop(0, 'rgba(6,8,22,0.97)');
+    gr.addColorStop(0.7, 'rgba(8,10,26,0.95)');
+    gr.addColorStop(1, 'rgba(10,12,32,0.92)');
     return gr;
   });
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, FIELD.top);
   if (I > 0.02) {
+    // Tint the strip, but keep it a dark hue wash — the text has to stay legible.
     const th = qhue(lerp(200, 330, I));
     const tg = cachedGrad(ctx, `hudtint|${th}`, (c) => {
       const gr = c.createLinearGradient(0, 0, 0, FIELD.top);
-      gr.addColorStop(0, hsl(th, 100, 50, 0.0));
-      gr.addColorStop(1, hsl(th, 100, 52, 0.4));
+      gr.addColorStop(0, hsl(th, 100, 36, 0.0));
+      gr.addColorStop(1, hsl(th, 100, 38, 0.42));
       return gr;
     });
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = I * 0.55;
+    ctx.globalAlpha = Math.min(0.3, I * 0.3);
     ctx.fillStyle = tg;
     ctx.fillRect(0, 0, W, FIELD.top);
     ctx.restore();
@@ -1176,6 +1309,11 @@ function drawHud(ctx, game, t, I) {
   ctx.fillRect(0, FIELD.top - 6, W, 4);
   ctx.restore();
 
+  // Dark backing plates behind each cluster: legibility at any intensity.
+  hudPlate(ctx, 6, 6, 210, 80, 0.34 + I * 0.24);
+  hudPlate(ctx, W / 2 - 92, 6, 184, 80, 0.28 + I * 0.24);
+  hudPlate(ctx, W - 138, 52, 132, 40, 0.34 + I * 0.26);
+
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
   ctx.fillStyle = hsl(196, 40, 76, 0.62);
@@ -1188,23 +1326,25 @@ function drawHud(ctx, game, t, I) {
   ctx.font = `700 10px ${MONO}`;
   ctx.fillText(`HI ${formatScore(game.highScore)}`, 14, 60);
 
-  // lives
+  // lives — the glow sprite is centred on the pip (an offset here used to leave a row
+  // of ghost dots hanging above the BALLS line).
   ctx.fillStyle = hsl(196, 40, 76, 0.6);
   ctx.font = `700 9px ${MONO}`;
   ctx.fillText('BALLS', 14, 78);
   const pipSpr = glowSprite(48, 100, 62);
+  const pipY = 74.5;
   for (let i = 0; i < Math.min(game.lives, 5); i++) {
     const px = 62 + i * 15;
     if (pipSpr) {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.5;
-      ctx.drawImage(pipSpr, px - 9, 65 - 9, 18, 18);
+      ctx.globalAlpha = 0.45;
+      ctx.drawImage(pipSpr, px - 9, pipY - 9, 18, 18);
       ctx.restore();
     }
     ctx.fillStyle = hsl(48, 100, 70);
     ctx.beginPath();
-    ctx.arc(px, 74, 4.4, 0, TAU);
+    ctx.arc(px, pipY, 4.4, 0, TAU);
     ctx.fill();
   }
   if (game.lives > 5) {
@@ -1218,81 +1358,75 @@ function drawHud(ctx, game, t, I) {
   ctx.fillStyle = hsl(196, 70, 84, 0.92);
   ctx.font = `800 13px ${MONO}`;
   ctx.fillText(`LEVEL ${game.level}`, W / 2, 22);
-  ctx.fillStyle = hsl(196, 45, 74, 0.5);
+  ctx.fillStyle = hsl(196, 45, 78, 0.62);
   ctx.font = `600 9px ${MONO}`;
   ctx.fillText((game.levelName || '').toUpperCase(), W / 2, 34);
 
   drawMultiplier(ctx, game, t, I);
 
-  // right column: overtop state
-  ctx.textAlign = 'right';
+  // combo chip, tucked beside the multiplier
+  if (game.combo > 2) {
+    const cx = W / 2 + 50;
+    const cy = 40;
+    const hue = game.combo >= 8 ? 28 : 140;
+    ctx.save();
+    ctx.fillStyle = 'rgba(4,6,16,0.6)';
+    rr(ctx, cx, cy, 70, 18, 9);
+    ctx.fill();
+    ctx.strokeStyle = hsl(hue, 100, 70, 0.55);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = hsl(hue, 100, 80);
+    ctx.font = `800 10px ${MONO}`;
+    ctx.fillText(`COMBO ${game.combo}`, cx + 35, cy + 12.5);
+    ctx.restore();
+  }
+
+  // ---- right column: overtop state, laid out BELOW the three buttons (y 8..48)
   const barX = W - 14 - 104;
+  const rowA = 66;          // label / value baseline
+  const barY = 71;
+  const rowB = 88;          // sub-line baseline
+  ctx.textBaseline = 'alphabetic';
   if (game.overtop) {
-    ctx.fillStyle = hsl(186, 100, 78, 0.6 + 0.4 * Math.sin(t * 9));
-    ctx.font = `800 12px ${MONO}`;
-    ctx.fillText('OVERTOP', W - 14, 46);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = hsl(186, 100, 80, 0.65 + 0.35 * Math.sin(t * 9));
+    ctx.font = `800 10px ${MONO}`;
+    ctx.fillText('OVERTOP', barX, rowA);
+    ctx.textAlign = 'right';
     ctx.fillStyle = '#fff';
     ctx.font = `800 15px ${DISPLAY}`;
-    ctx.fillText(`${game.overtopTime.toFixed(1)}s`, W - 14, 62);
-    shimmerBar(ctx, barX, 66, 104, 5, (game.overtopTime % 2) / 2, 186, t);
+    ctx.fillText(`${game.overtopTime.toFixed(1)}s`, W - 14, rowA);
+    shimmerBar(ctx, barX, barY, 104, 4, (game.overtopTime % 2) / 2, 186, t);
     if (game.ceilingCombo > 1) {
-      ctx.fillStyle = hsl(48, 100, 74, 0.95);
+      ctx.fillStyle = hsl(48, 100, 76, 0.95);
       ctx.font = `800 10px ${MONO}`;
-      ctx.fillText(`CEILING x${game.ceilingCombo}`, W - 14, 84);
+      ctx.fillText(`CEILING x${game.ceilingCombo}`, W - 14, rowB);
     } else {
-      ctx.fillStyle = hsl(186, 60, 70, 0.55);
-      ctx.font = `600 8px ${MONO}`;
-      ctx.fillText('+1 MULT PER 2s', W - 14, 84);
+      ctx.fillStyle = hsl(186, 60, 76, 0.6);
+      ctx.font = `600 9px ${MONO}`;
+      ctx.fillText('+1 MULT PER 2s', W - 14, rowB);
     }
   } else {
-    ctx.fillStyle = hsl(196, 45, 66, 0.5);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hsl(196, 50, 74, 0.6);
     ctx.font = `800 11px ${MONO}`;
-    ctx.fillText(game.overtopStreak > 0 ? `STREAK ${game.overtopStreak}` : 'GET OVERTOP', W - 14, 60);
+    ctx.fillText(game.overtopStreak > 0 ? `STREAK ${game.overtopStreak}` : 'GET OVERTOP', W - 14, rowA);
     if (game.overtopStreak > 0) {
-      shimmerBar(ctx, barX, 66, 104, 5, (game.overtopStreak % 3) / 3, 196, t);
+      shimmerBar(ctx, barX, barY, 104, 4, (game.overtopStreak % 3) / 3, 196, t);
     }
     if (game.bestOvertop > 0.1) {
-      ctx.fillStyle = hsl(196, 40, 66, 0.4);
-      ctx.font = `600 8px ${MONO}`;
-      ctx.fillText(`BEST ${game.bestOvertop.toFixed(1)}s`, W - 14, 84);
+      ctx.fillStyle = hsl(196, 40, 72, 0.5);
+      ctx.font = `600 9px ${MONO}`;
+      ctx.fillText(`BEST ${game.bestOvertop.toFixed(1)}s`, W - 14, rowB);
     }
   }
 
   drawButtons(ctx, game);
-
-  // active power-up pips
-  const active = [];
-  if (game.powers.fire > 0) active.push(['fireball', game.powers.fire]);
-  if (game.powers.heavy > 0) active.push(['heavy', game.powers.heavy]);
-  if (game.powers.ghost > 0) active.push(['ghostball', game.powers.ghost]);
-  if (game.powers.magnet > 0) active.push(['magnet', game.powers.magnet]);
-  if (game.powers.wide > 0) active.push(['wide', game.powers.wide]);
-  if (game.powers.laser > 0) active.push(['laser', game.powers.laser]);
-  if (game.slowmoTimer > 0) active.push(['slowmo', game.slowmoTimer]);
-  active.forEach(([key, time], i) => {
-    const def = POWERUPS[key];
-    const x = 14 + i * 32;
-    const yy = FIELD.top + 8;
-    const low = time < 3;
-    const a = low ? 0.45 + 0.55 * Math.abs(Math.sin(t * 8)) : 1;
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.fillStyle = hsl(def.hue, 90, 55, 0.28);
-    rr(ctx, x, yy, 28, 22, 6);
-    ctx.fill();
-    ctx.strokeStyle = hsl(def.hue, 100, 72, 0.6);
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = hsl(def.hue, 100, 84, 0.98);
-    ctx.textAlign = 'center';
-    ctx.font = `700 12px ${MONO}`;
-    ctx.fillText(def.glyph, x + 14, yy + 15);
-    ctx.fillStyle = hsl(def.hue, 95, 74, 0.9);
-    ctx.fillRect(x + 2, yy + 19, 24 * clamp(time / 12, 0, 1), 2);
-    ctx.restore();
-  });
-
   ctx.restore();
+
+  drawActivePowers(ctx, game, t);
 }
 
 // ---------------------------------------------------------------- overlays
@@ -1504,7 +1638,7 @@ function drawPause(ctx, game, t) {
 }
 
 function maxMult(game) {
-  const m = game.maxMultiplier ?? game.bestMultiplier ?? game.multiplier ?? 1;
+  const m = game.stats?.maxMultiplier ?? game.maxMultiplier ?? game.multiplier ?? 1;
   return Math.round(m);
 }
 
@@ -1516,15 +1650,16 @@ function drawLevelClear(ctx, game, t) {
   ctx.fillStyle = 'rgba(3,8,14,0.62)';
   ctx.fillRect(0, 0, W, H);
   ctx.translate(0, (1 - e) * 26);
-  panel(ctx, 74, 286, W - 148, 232, 150, 0.88);
-  glowTitle(ctx, 'LEVEL CLEAR', 330, 32, 145, t, 20);
+  panel(ctx, 74, 286, W - 148, 268, 150, 0.9);
+  glowTitle(ctx, 'LEVEL CLEAR', 332, 32, 145, t, 20);
   statRows(ctx, [
     ['SCORE', formatScore(game.score), 48],
+    ['LEVEL BONUS', `+${formatScore(game.levelBonus || 0)}`, 145],
     ['BEST OVERTOP RUN', `${(game.bestOvertop || 0).toFixed(1)}s`, 186],
     ['MAX MULTIPLIER', `x${maxMult(game)}`, 328],
     ['BRICKS BROKEN', formatScore(game.stats?.bricksBroken ?? 0), 190],
-  ], 104, 372, W - 208, 32);
-  centerText(ctx, `NEXT: LEVEL ${game.level + 1}`, 500, 12, hsl(145, 90, 76, 0.8), 800);
+  ], 104, 376, W - 208, 32);
+  centerText(ctx, `NEXT: LEVEL ${game.level + 1}`, 536, 12, hsl(145, 90, 76, 0.85), 800);
   ctx.restore();
 }
 
@@ -1538,49 +1673,102 @@ function drawGameOver(ctx, game, t) {
   });
   ctx.fillStyle = scrim;
   ctx.fillRect(0, 0, W, H);
-  glowTitle(ctx, 'GAME OVER', 286, 46, 352, t, 26);
+  glowTitle(ctx, 'GAME OVER', 262, 44, 352, t, 26);
 
-  panel(ctx, 66, 320, W - 132, 262, 340, 0.86);
+  const st = game.stats || {};
+  panel(ctx, 60, 292, W - 120, 316, 340, 0.88);
   statRows(ctx, [
     ['FINAL SCORE', formatScore(game.score), 48],
     ['HIGH SCORE', formatScore(game.highScore), 190],
     ['LEVEL REACHED', game.level, 200],
-    ['BRICKS BROKEN', formatScore(game.stats?.bricksBroken ?? 0), 320],
-    ['BROKEN OVERTOP', formatScore(game.stats?.overtopBricks ?? 0), 186],
-    ['BEST OVERTOP RUN', `${(game.bestOvertop || 0).toFixed(1)}s`, 186],
-  ], 96, 360, W - 192, 36);
+    ['MAX MULTIPLIER', `x${maxMult(game)}`, 328],
+    ['LONGEST OVERTOP', `${(st.longestOvertop ?? game.bestOvertop ?? 0).toFixed(1)}s`, 186],
+    ['TOTAL OVERTOP', `${(st.overtopTotal ?? 0).toFixed(1)}s`, 186],
+    ['BRICKS BROKEN', `${formatScore(st.bricksBroken ?? 0)}  (${formatScore(st.overtopBricks ?? 0)} up top)`, 190],
+    ['BEST COMBO', `x${st.bestCombo ?? 0}`, 140],
+  ], 88, 336, W - 176, 33);
 
   if (game.newHighScore) {
     const p = 0.5 + 0.5 * Math.sin(t * 6);
     ctx.save();
     ctx.globalAlpha = 0.7 + p * 0.3;
-    panel(ctx, W / 2 - 110, 604, 220, 40, 48, 0.7);
-    centerText(ctx, 'NEW HIGH SCORE!', 630, 15, hsl(48, 100, 78), 900, DISPLAY);
+    panel(ctx, W / 2 - 110, 630, 220, 40, 48, 0.7);
+    centerText(ctx, 'NEW HIGH SCORE!', 656, 15, hsl(48, 100, 78), 900, DISPLAY);
     ctx.restore();
   }
   const pulse = 0.5 + 0.5 * Math.sin(t * 4);
-  centerText(ctx, 'TAP · CLICK · SPACE TO PLAY AGAIN', 700, 14, hsl(190, 100, 76, 0.5 + pulse * 0.5), 800);
+  centerText(ctx, 'TAP · CLICK · SPACE TO PLAY AGAIN', 712, 14, hsl(190, 100, 76, 0.5 + pulse * 0.5), 800);
   ctx.restore();
 }
 
 function drawSettings(ctx, game, t) {
   ctx.save();
-  ctx.fillStyle = 'rgba(4,6,16,0.86)';
+  ctx.fillStyle = 'rgba(4,6,16,0.9)';
   ctx.fillRect(0, 0, W, H);
-  glowTitle(ctx, 'SETTINGS', 300, 30, 200, t, 18);
-  const rows = [
-    ['toggleDrag', `TOUCH MODE: ${game.dragMode ? 'DRAG' : 'THUMBSTICK'}`],
-    ['toggleMute', `SOUND: ${game.muted ? 'OFF' : 'ON'}`],
-    ['toggleFx', `FX: ${fx.lite ? 'LITE' : 'FULL'}`],
-    ['closeSettings', 'CLOSE'],
-  ];
+  const rows = settingsLayout();
+  const top = SET_Y0 - 74;
+  const bottom = SET_Y0 + (rows.length - 1) * SET_STEP + SET_H + 46;
+  panel(ctx, SET_X - 22, top, SET_W + 44, bottom - top, 205, 0.9);
+  glowTitle(ctx, 'SETTINGS', SET_Y0 - 30, 30, 200, t, 18);
+
   const btns = getButtons(game);
-  for (const [id, label] of rows) {
-    const b = btns.find((x) => x.id === id);
+  const label = (id) => {
+    switch (id) {
+      case 'toggleDrag': return `TOUCH MODE: ${game.dragMode ? 'DRAG' : 'THUMBSTICK'}`;
+      case 'toggleMute': return `SOUND: ${game.muted ? 'OFF' : 'ON'}`;
+      case 'toggleFx': return `FX: ${fx.lite ? 'LITE' : 'FULL'}`;
+      case 'resetHints': return 'RESET TUTORIAL HINTS';
+      case 'closeSettings': return 'CLOSE';
+      default: return id;
+    }
+  };
+
+  for (const row of rows) {
+    const hue = row.id === 'closeSettings' ? 200 : row.kind === 'volume' ? 172 : 190;
+    if (row.kind === 'volume') {
+      const isMusic = row.id === 'musicVol';
+      const vol = clamp(isMusic ? (audio.musicVolume ?? 0.5) : (audio.sfxVolume ?? 0.75), 0, 1);
+      const down = btns.find((b) => b.id === `${row.id}Down`);
+      const up = btns.find((b) => b.id === `${row.id}Up`);
+      panel(ctx, row.x, row.y, row.w, row.h, hue, 0.7);
+      // arrows
+      for (const [b, glyph] of [[down, '\u25C2'], [up, '\u25B8']]) {
+        if (!b) continue;
+        const hot = hitButton(b);
+        const pressed = hot && pointer.down;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = pressed ? 0.34 : hot ? 0.18 : 0.07;
+        ctx.fillStyle = hsl(hue, 100, 62);
+        rr(ctx, b.x + 3, b.y + 3, b.w - 6, b.h - 6, 14);
+        ctx.fill();
+        ctx.restore();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `800 17px ${MONO}`;
+        ctx.fillStyle = hot ? '#fff' : 'rgba(255,255,255,0.8)';
+        ctx.fillText(glyph, b.x + b.w / 2, b.y + b.h / 2);
+      }
+      // name + value + level bar
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'center';
+      ctx.font = `800 14px ${MONO}`;
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.fillText(`${isMusic ? 'MUSIC' : 'SFX'}  ${Math.round(vol * 100)}%`, row.x + row.w / 2, row.y + 22);
+      const bw = 120;
+      const bx = row.x + row.w / 2 - bw / 2;
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      rr(ctx, bx, row.y + 29, bw, 5, 2.5);
+      ctx.fill();
+      ctx.fillStyle = hsl(hue, 100, 68);
+      rr(ctx, bx, row.y + 29, Math.max(2, bw * vol), 5, 2.5);
+      ctx.fill();
+      continue;
+    }
+    const b = btns.find((x) => x.id === row.id);
     if (!b) continue;
     const hot = hitButton(b);
     const pressed = hot && pointer.down;
-    const hue = id === 'closeSettings' ? 200 : 190;
     panel(ctx, b.x, b.y, b.w, b.h, hue, pressed ? 0.95 : 0.72);
     if (hot) {
       ctx.save();
@@ -1592,11 +1780,172 @@ function drawSettings(ctx, game, t) {
       ctx.restore();
     }
     ctx.textAlign = 'center';
-    ctx.font = `800 15px ${MONO}`;
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = `800 14px ${MONO}`;
     ctx.fillStyle = hot ? '#fff' : 'rgba(255,255,255,0.9)';
-    ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 5);
+    ctx.fillText(label(row.id), b.x + b.w / 2, b.y + b.h / 2 + 5);
   }
-  centerText(ctx, 'LITE FX = fewer particles, no aurora (slow phones)', 660, 10, 'rgba(255,255,255,0.4)', 600);
+  const foot = SET_Y0 + rows.length * SET_STEP + 6;
+  centerText(ctx, 'LITE FX = fewer particles, no aurora (slow phones)', foot, 10, 'rgba(255,255,255,0.45)', 600);
+  centerText(ctx, 'RESET HINTS replays every first-encounter brick lesson', foot + 16, 10, 'rgba(255,255,255,0.45)', 600);
+  ctx.restore();
+}
+
+// ---- brick lessons + level intro ---------------------------------------
+
+/** A throwaway brick used purely as an icon, drawn with the real brick routine. */
+function iconBrick(kind, cx, cy, w = 44, h = 20) {
+  const def = BRICK_KINDS[kind] || BRICK_KINDS.normal;
+  return {
+    kind, cx, cy, w, h,
+    x: cx - w / 2, y: cy - h / 2,
+    hue: kind === 'normal' ? 205 : def.hue,
+    spawnT: 1, shake: 0, solidity: 1, wobble: 0.7, hitFlash: 0, denyFlash: 0, assist: false,
+  };
+}
+
+function wrapText(ctx, text, maxW) {
+  const words = String(text).split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const next = line ? `${line} ${w}` : w;
+    if (ctx.measureText(next).width > maxW && line) {
+      lines.push(line);
+      line = w;
+    } else line = next;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/**
+ * `game.hint = {title, text, kind, t, life}` — first-encounter brick lesson.
+ * `t` counts DOWN to zero. Sits in the bottom third, clear of the bricks and of the
+ * paddle band, so it never hides the action.
+ */
+function drawHint(ctx, game, t) {
+  const h = game.hint;
+  if (!h) return;
+  const k = clamp(h.t / h.life, 0, 1);           // 1 -> 0
+  const inK = clamp((1 - k) / 0.12, 0, 1);       // slide in over the first 12%
+  const outK = clamp(k / 0.16, 0, 1);            // fade out over the last 16%
+  const a = Math.min(smoothstep(inK), smoothstep(outK));
+  if (a <= 0.01) return;
+
+  const CW = 452, CH = 92;
+  const x = (W - CW) / 2;
+  const y = 604 + (1 - smoothstep(inK)) * 34;
+
+  ctx.save();
+  ctx.globalAlpha = a;
+  panel(ctx, x, y, CW, CH, 196, 0.9);
+  // accent rail
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = hsl(196, 100, 66, 0.5 + 0.2 * Math.sin(t * 4));
+  rr(ctx, x + 6, y + 10, 3, CH - 20, 1.5);
+  ctx.fill();
+  ctx.restore();
+
+  // brick icon, drawn with the real brick routine
+  const icon = iconBrick(h.kind, x + 58, y + CH / 2, 62, 26);
+  ctx.save();
+  const spr = glowSprite(icon.hue, 100, 60);
+  if (spr) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.35;
+    ctx.drawImage(spr, icon.cx - 46, icon.cy - 30, 92, 60);
+    ctx.restore();
+  }
+  drawBrick(ctx, icon, t, 0.3);
+  ctx.restore();
+
+  const tx = x + 104;
+  const tw = CW - 118;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `800 9px ${MONO}`;
+  ctx.fillStyle = hsl(196, 70, 78, 0.55);
+  ctx.fillText('NEW BRICK', tx, y + 22);
+  ctx.font = `900 16px ${DISPLAY}`;
+  ctx.fillStyle = hsl(icon.hue, 100, 82);
+  ctx.fillText(h.title, tx, y + 42);
+  ctx.font = `600 11px ${MONO}`;
+  ctx.fillStyle = 'rgba(232,238,255,0.86)';
+  const lines = wrapText(ctx, h.text, tw).slice(0, 3);
+  lines.forEach((ln, i) => ctx.fillText(ln, tx, y + 60 + i * 14));
+  ctx.restore();
+}
+
+/**
+ * `game.levelIntro = {name, level, newKinds, t, life}` — the one and only level-start
+ * banner. `t` counts DOWN. Shows the new brick kinds this level introduces.
+ */
+function drawLevelIntro(ctx, game, t) {
+  const li = game.levelIntro;
+  if (!li) return;
+  const k = clamp(li.t / li.life, 0, 1);
+  const inK = clamp((1 - k) / 0.14, 0, 1);
+  const outK = clamp(k / 0.2, 0, 1);
+  const a = Math.min(smoothstep(inK), smoothstep(outK));
+  if (a <= 0.01) return;
+
+  const kinds = (li.newKinds || []).filter((x) => BRICK_KINDS[x]).slice(0, 4);
+  const title = `LEVEL ${li.level} — ${String(li.name || '').toUpperCase()}`;
+  let size = 30;
+  ctx.save();
+  ctx.font = `900 ${size}px ${DISPLAY}`;
+  const wpx = ctx.measureText(title).width;
+  if (wpx > 460) size = Math.max(17, size * (460 / wpx));
+  ctx.restore();
+
+  const yTitle = 500;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.translate(0, (1 - smoothstep(inK)) * -26);
+  // soft backing so the title reads over any brick colour
+  const bh = kinds.length ? 116 : 74;
+  ctx.save();
+  ctx.globalAlpha = a * 0.82;
+  const bg = cachedGrad(ctx, 'introbg', (c) => {
+    const gr = c.createLinearGradient(0, 0, W, 0);
+    gr.addColorStop(0, 'rgba(4,6,18,0)');
+    gr.addColorStop(0.5, 'rgba(4,6,18,0.86)');
+    gr.addColorStop(1, 'rgba(4,6,18,0)');
+    return gr;
+  });
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, yTitle - 42, W, bh);
+  ctx.restore();
+
+  glowTitle(ctx, title, yTitle, size, 190, t, 22);
+
+  if (kinds.length) {
+    // "NEW: <kind>" row with little brick icons
+    ctx.font = `700 10px ${MONO}`;
+    const IW = 34, IGAP = 10;
+    const widths = kinds.map((kd) => IW + 6 + ctx.measureText((BRICK_KINDS[kd].label || kd).toUpperCase()).width);
+    const newW = ctx.measureText('NEW:').width + 10;
+    const total = newW + widths.reduce((s2, w) => s2 + w + IGAP, 0) - IGAP;
+    let cx = W / 2 - total / 2;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = hsl(48, 100, 76, 0.9);
+    ctx.font = `800 11px ${MONO}`;
+    ctx.fillText('NEW:', cx, yTitle + 34);
+    cx += newW;
+    kinds.forEach((kd, i) => {
+      const icon = iconBrick(kd, cx + IW / 2, yTitle + 29, IW, 15);
+      drawBrick(ctx, icon, t, 0.2);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(236,242,255,0.92)';
+      ctx.font = `700 10px ${MONO}`;
+      ctx.fillText((BRICK_KINDS[kd].label || kd).toUpperCase(), cx + IW + 6, yTitle + 34);
+      cx += widths[i] + IGAP;
+    });
+  }
   ctx.restore();
 }
 
@@ -1622,7 +1971,8 @@ function drawToast(ctx, game, t) {
   const pop = k < 0.16 ? 1 + (1 - k / 0.16) * 0.4 : 1;
   ctx.save();
   ctx.globalAlpha = clamp(a, 0, 1);
-  const y = 682 - k * 26;
+  // Sit above the brick-lesson card when one is on screen.
+  const y = (game.hint ? 560 : 682) - k * 26;
   ctx.translate(W / 2, y);
   ctx.scale(pop, pop);
   ctx.translate(-W / 2, -y);
@@ -1684,13 +2034,13 @@ function drawVignette(ctx, game, t, I) {
     const eg = cachedGrad(ctx, `edge|${hue}`, (c) => {
       const gr = c.createRadialGradient(W / 2, H * 0.45, H * 0.3, W / 2, H * 0.45, H * 0.8);
       gr.addColorStop(0, hsl(hue, 100, 60, 0));
-      gr.addColorStop(0.72, hsl(hue, 100, 58, 0.16));
-      gr.addColorStop(1, hsl(hue, 100, 62, 0.5));
+      gr.addColorStop(0.72, hsl(hue, 100, 52, 0.16));
+      gr.addColorStop(1, hsl(hue, 100, 56, 0.55));
       return gr;
     });
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = e * (0.55 + 0.45 * Math.sin(t * 5));
+    ctx.globalAlpha = e * (0.20 + 0.14 * Math.sin(t * 5));
     ctx.fillStyle = eg;
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
@@ -1736,7 +2086,11 @@ export function render(ctx, game, input, time) {
 
   drawVignette(ctx, game, time, I);
 
-  if (!title) drawHud(ctx, game, time, I);
+  if (!title) {
+    drawHud(ctx, game, time, I);
+    drawLevelIntro(ctx, game, time);
+    drawHint(ctx, game, time);
+  }
   drawBanner(ctx, game);
   drawToast(ctx, game, time);
   if (input) drawStick(ctx, input);

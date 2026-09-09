@@ -75,7 +75,9 @@ grid_one_liners = {
     "openai-med": "Crack a route topside; breach lanes and cascades multiply everything.",
     "openai-high": "Breach-protocol campaign: punch above, score topside, hit Maximum Overdrive.",
     "anthropic-med": "Break through to the attic, where chained breaks escalate under time-dilation.",
-    "anthropic-high": "A neon Breakout about getting above the bricks. Ships broken \u2014 canvas stays black.",
+    "anthropic-high": "A neon Breakout about getting above the bricks \u2014 gated angle/speed bricks, overdrive multiplier, synth soundtrack.",
+    "hero-fable": "Punch a hole, get the ball into the attic, watch the multiplier climb \u2014 8 capsule powers, adaptive 7-tier soundtrack.",
+    "hero-astra": "Two-axis paddle across 5 sectors; breach the array to enter overdrive, where piercing becomes multiball.",
     "muse": "Go exponential above the bricks; gated bricks and fire, ghost, heavy, multiball powers.",
     "glm": "The real game starts above the bricks \u2014 \u00d72.5 multiplier, lights and shake.",
     "openrouter-high": "Punch above the field across 6 levels; OVERDRIVE sends combos skyward.",
@@ -93,7 +95,6 @@ grid_status_labels = {
 }
 # Honest defect labels, summarized from results.json play_notes/page_errors.
 grid_flags = {
-    "anthropic-high": "Broken canvas \u2014 crashes on load (nebula is not defined)",
     "qwen": "Mobile viewport-scaling bug \u2014 tiny centered playfield",
 }
 
@@ -117,8 +118,8 @@ def grid_tests_label(preset):
 
 
 def build_game_gallery():
-    rows = []
-    cards = []
+    row_html = {}
+    card_html = {}
     data = {}
     for preset in grid_order:
         info = grid_presets[preset]
@@ -133,7 +134,7 @@ def build_game_gallery():
         flag = grid_flags.get(preset) or ("Broken canvas" if info["page_errors"] else "")
         tests_label = grid_tests_label(preset)
         status_cell = escape(status + (" \u2014 " + flag if flag else ""))
-        rows.append(
+        row_html[preset] = (
             "<tr>"
             f"<td><code>{escape(preset)}</code></td>"
             f"<td>{escape(title)}</td>"
@@ -150,18 +151,30 @@ def build_game_gallery():
             f'<span class="game-badge">{cost}</span>'
             f'<span class="game-badge">{info["rubric_total"]}/27 rubric</span>'
         )
+        featured = preset in ("hero-fable", "hero-astra")
+        if featured:
+            badges += '<span class="game-badge">Featured hero</span>'
         if flag:
             badges += f'<span class="game-badge game-badge-warn">{escape(flag.split(" \u2014 ")[0])}</span>'
-        cards.append(
-            f'<article class="game-card" id="game-card-{escape(preset)}">'
+        card_class = "game-card game-card-featured" if featured else "game-card"
+        copy = f"<p>{escape(one_liner)}</p>"
+        if preset == "anthropic-high":
+            copy += (
+                '<p class="game-flag">Redemption arc: resumed to fix the nebula '
+                "black-canvas bug, 26\u219227 \u2014 full story in the "
+                '<a href="#game-record-link">Breakout grid record</a>.</p>'
+            )
+        elif flag:
+            copy += f'<p class="game-flag">{escape(flag)}</p>'
+        card_html[preset] = (
+            f'<article class="{card_class}" id="game-card-{escape(preset)}">'
             f'<img id="game-thumb-{escape(preset)}" src="assets/games/{escape(preset)}-desktop.png" '
             'width="1280" height="800" loading="lazy" '
             f'alt="Screenshot of {escape(title)} played on a desktop browser" />'
             '<div class="game-card-body">'
             f"<h3>{escape(title)}</h3>"
             f'<p class="game-preset"><code>{escape(preset)}</code> \u00b7 {escape(models)}</p>'
-            f"<p>{escape(one_liner)}</p>"
-            + (f'<p class="game-flag">{escape(flag)}</p>' if flag else "")
+            + copy
             + f'<p class="game-badges">{badges}</p>'
             '<div class="game-card-actions">'
             f'<button type="button" class="game-play" data-play="{escape(preset)}">Play</button>'
@@ -180,18 +193,28 @@ def build_game_gallery():
             "desktop": f"assets/games/{preset}-desktop.png",
             "mobile": f"assets/games/{preset}-mobile.png",
         }
+    # Featured order: hero runs pin to the top of the table and the cards,
+    # then the anthropic-high redemption story, then the rest by rubric rank.
+    hero_first = ["hero-fable", "hero-astra"]
+    for pinned in hero_first + ["anthropic-high"]:
+        if pinned not in row_html:
+            sys.exit(f"Featured gallery preset missing from results.json: {pinned}")
+    table_order = hero_first + [preset for preset in grid_order if preset not in hero_first]
+    card_order = hero_first + ["anthropic-high"] + [
+        preset for preset in grid_order if preset not in hero_first + ["anthropic-high"]
+    ]
     table = (
         '<div class="game-table-wrap" tabindex="0" role="region" aria-label="Breakout grid comparison table, scrollable"><table class="game-table" id="game-table">'
-        "<caption>Fourteen presets, one Breakout spec \u2014 cost, time, size, rubric score, tests, and run status from results.json.</caption>"
+        "<caption>Sixteen presets, one Breakout spec \u2014 cost, time, size, rubric score, tests, and run status from results.json.</caption>"
         "<thead><tr><th scope=\"col\">Preset</th><th scope=\"col\">Game</th><th scope=\"col\">Models</th>"
         "<th scope=\"col\">Cost</th><th scope=\"col\">Time</th><th scope=\"col\">LOC</th>"
         "<th scope=\"col\">Rubric</th><th scope=\"col\">Tests</th><th scope=\"col\">Status</th></tr></thead>"
-        "<tbody>" + "".join(rows) + "</tbody></table></div>"
+        "<tbody>" + "".join(row_html[preset] for preset in table_order) + "</tbody></table></div>"
     )
     gallery = (
         table
         + '<div class="game-grid" id="game-grid">'
-        + "".join(cards)
+        + "".join(card_html[preset] for preset in card_order)
         + "</div>"
         # Keep JSON inert even if a future title contains HTML.
         + '<script type="application/json" id="game-data">'

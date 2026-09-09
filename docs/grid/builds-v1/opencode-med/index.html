@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0f22">
+<title>BREAKTOP — a modern breakout</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="stage">
+  <canvas id="game"></canvas>
+  <aside class="side-panel" id="panel-left" aria-hidden="true">
+    <div class="sp-title">RUN STATUS</div>
+    <div class="sp-row"><span class="sp-k">SCORE</span><span class="sp-v" id="p-score">0</span></div>
+    <div class="sp-row"><span class="sp-k">BEST</span><span class="sp-v" id="p-best">0</span></div>
+    <div class="sp-row"><span class="sp-k">LIVES</span><span class="sp-v" id="p-lives">3</span></div>
+    <div class="sp-row"><span class="sp-k">LEVEL</span><span class="sp-v" id="p-level">1</span></div>
+    <div class="sp-row"><span class="sp-k">BEST COMBO</span><span class="sp-v" id="p-combo">0</span></div>
+    <div class="sp-row"><span class="sp-k">MULTIPLIER</span><span class="sp-v" id="p-mult">×1.0</span></div>
+    <div class="sp-row" style="margin-top:-6px"><span class="sp-k">CHARGE</span>
+      <span class="sp-v" style="width:120px;height:8px;border-radius:4px;background:rgba(8,12,26,.7);border:1px solid rgba(125,214,255,.35);position:relative;overflow:hidden">
+        <span id="p-charge" style="position:absolute;inset:0;width:0%;background:linear-gradient(90deg,#1f6dff,#7dd6ff);border-radius:4px;transition:width .15s linear"></span>
+      </span>
+    </div>
+  </aside>
+  <aside class="side-panel" id="panel-right" aria-hidden="true">
+    <div class="sp-title">CONTROLS</div>
+    <div class="legend">
+      <div class="legend-row"><span class="legend-swatch" style="background:#eaf4ff;box-shadow:0 0 6px #7dd6ff"></span><span class="legend-name">BALL — HOLD TO SERVE</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#8fdcff;box-shadow:0 0 6px #7dd6ff"></span><span class="legend-name">PADDLE — MOUSE / WASD</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#7dd6ff;border-radius:50%"></span><span class="legend-name">SPACE / CLICK — LAUNCH</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:transparent;border:1px dashed #8aa4d4"></span><span class="legend-name">P / ESC — PAUSE</span></div>
+    </div>
+    <div class="sp-title" style="margin-top:8px">BRICK CODES</div>
+    <div class="legend">
+      <div class="legend-row"><span class="legend-swatch" style="background:#3e6cf0"></span><span class="legend-name">STANDARD — ANY HIT</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#e0902c"></span><span class="legend-name">ANGLE — STEEP HIT</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#33c94e"></span><span class="legend-name">SPEED — HIT IT FAST</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#e0485a"></span><span class="legend-name">ARMORED — FAST + STEEP</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#f0c33e"></span><span class="legend-name">UNSTABLE — CHAIN BLAST</span></div>
+      <div class="legend-row"><span class="legend-swatch" style="background:#4fb8e8"></span><span class="legend-name">SPINNER — FREE HIT</span></div>
+    </div>
+    <div class="sp-hint" style="margin-top:6px"><b>OVERDRIVE:</b> keep the ball above the rim — the longer you last, the bigger the payout. Charge at 55%+ drops a reward capsule.</div>
+  </aside>
+  <div id="hud">
+    <div id="hud-top">
+      <div class="hud-block" id="hud-score">
+        <div class="hud-label">SCORE</div>
+        <div class="hud-value" id="score">0</div>
+        <div class="hud-best" id="best">BEST 0</div>
+      </div>
+      <div class="hud-block" id="hud-mid">
+        <div class="hud-level" id="level">LEVEL 1</div>
+        <div class="od-meter-wrap">
+          <div class="od-meter-head">
+            <span class="od-label">CHARGE</span>
+            <span class="od-label od-val" id="od-val">0%</span>
+          </div>
+          <div class="od-meter" id="od-meter"><div class="od-fill" id="od-fill"></div></div>
+        </div>
+        <div class="hud-lives" id="lives"></div>
+      </div>
+      <div class="hud-block hud-right">
+        <button id="btn-sound" class="hud-btn" aria-label="toggle sound">♪</button>
+        <button id="btn-pause" class="hud-btn" aria-label="pause">⏸</button>
+      </div>
+    </div>
+    <div id="od-banner" class="hidden"><span id="od-text">OVERDRIVE ×1.0</span></div>
+    <div id="combo-tag" class="hidden"></div>
+  </div>
+</div>
+<script type="module" src="js/game.js"></script>
+</body>
+</html>

@@ -2,29 +2,40 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#070c16" />
   <meta name="description" content="OVERDRIVE — a modern neon Breakout. Break through the field, get the ball above the bricks, and let the overdrive carry you." />
   <title>OVERDRIVE — Break through. Let go.</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23070c16'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23d8ff3e'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%2322e0ff'/%3E%3C/svg%3E" />
-  <script type="module" crossorigin src="./assets/index-CVGj-Cvg.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-BTVuYunE.css">
+  <script type="module" crossorigin src="./assets/index-CintKni9.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-DIYlC24B.css">
 </head>
 <body>
   <div id="app" class="app">
     <!-- ================= Arena column ================= -->
     <main class="stage" aria-label="OVERDRIVE game arena">
+      <div class="compact-hud" aria-label="Live score">
+        <div><span class="stat-label">OVER<span style="color:var(--lime)">DRIVE</span></span><strong id="compact-score">0</strong></div>
+        <div><span class="stat-label" id="compact-level">SECTOR 01</span><strong id="compact-mult">×1</strong></div>
+        <div><span class="stat-label">LIVES</span><strong id="compact-lives">3</strong></div>
+        <div class="compact-energy"><i id="compact-meter"></i></div>
+        <p id="compact-powers">BREAK THROUGH. LET GO.</p>
+      </div>
       <div class="stage-frame">
         <canvas id="game" width="960" height="1280" aria-label="OVERDRIVE playfield" role="img"></canvas>
 
-        <!-- floating compact HUD for mobile (DOM, over canvas) -->
-        <div class="mobile-bar" id="mobile-bar" hidden>
-          <button class="mbtn" id="btn-launch" aria-label="Launch ball">LAUNCH</button>
-          <button class="mbtn" id="btn-pause-m" aria-label="Pause game">⏸</button>
+        <div class="state-overlay" id="state-overlay" hidden>
+          <div class="state-card">
+            <p class="eyebrow" id="state-kicker">FLIGHT SYSTEMS READY</p>
+            <h2 id="state-title">Find your way through.</h2>
+            <p id="state-detail">Steer the paddle. Strike while rising.</p>
+            <button class="btn primary" id="state-action">LAUNCH BALL</button>
+            <button class="link-btn" id="state-menu">Return to menu</button>
+          </div>
         </div>
 
         <!-- touch layer: thumbstick (left) / direct drag (right) -->
-        <div class="touch-layer" id="touch-layer" aria-hidden="true"></div>
+        <div class="touch-layer" id="touch-layer" tabindex="0" role="region" aria-label="Playfield controls: arrow keys or WASD move, Space launches or pauses"></div>
 
         <!-- thumbstick visual -->
         <div class="thumbstick" id="thumbstick" hidden>
@@ -32,10 +43,23 @@
           <div class="ts-knob" id="ts-knob"></div>
         </div>
       </div>
+      <div class="control-dock" id="mobile-bar" hidden>
+        <div class="stick-pad" id="stick-pad" aria-label="Thumb control: drag in any direction to move and lift the paddle">
+          <div class="dock-stick"><span id="dock-knob"></span></div>
+          <span class="dock-label">MOVE + LIFT</span>
+        </div>
+        <div class="dock-actions">
+          <button class="btn primary" id="btn-launch">LAUNCH</button>
+          <button class="btn" id="btn-pause-m" aria-label="Pause game">Ⅱ</button>
+          <button class="btn" id="btn-help-m" aria-label="How to play">?</button>
+          <button class="btn" id="btn-dashboard" aria-label="Open settings and field guide">SETTINGS</button>
+        </div>
+      </div>
     </main>
 
     <!-- ================= Side panel ================= -->
     <aside class="panel" id="panel" aria-label="Game dashboard">
+      <button class="btn panel-close" id="btn-panel-close">BACK TO FIELD</button>
       <header class="brand">
         <h1 class="logo">OVER<span>DRIVE</span></h1>
         <p class="tagline">Break through. <em>Let go.</em></p>
@@ -87,7 +111,7 @@
       <section class="card controls">
         <div class="card-title">Controls</div>
         <div class="btn-grid">
-          <button class="btn primary" id="btn-start" hidden>NEW RUN</button>
+          <button class="btn" id="btn-start">MENU</button>
           <button class="btn" id="btn-pause">PAUSE</button>
           <button class="btn" id="btn-restart">RESTART</button>
           <button class="btn" id="btn-help">HOW TO PLAY</button>
@@ -130,16 +154,15 @@
     <div class="screen" id="screen-menu" role="dialog" aria-modal="true" aria-labelledby="menu-title">
       <div class="screen-card menu-card">
         <div class="menu-glyph" aria-hidden="true">◤◆◥</div>
-        <h1 class="logo big">OVER<span>DRIVE</span></h1>
+        <p class="eyebrow">AN ARCADE GAME ABOUT THE OTHER SIDE</p>
+        <h1 id="menu-title" class="logo big">OVER<span>DRIVE</span></h1>
         <p class="tagline center">Break through. <em>Let go.</em></p>
-        <p class="menu-lede">
-          Break through the brick field. When a ball escapes <b>above</b> it,
-          the overdrive meter charges — higher tiers multiply everything and the
-          arena starts to burn. Rising paddle strikes launch the ball harder.
-        </p>
+        <p class="menu-lede">Carve a way through. Get your ball <b>above the bricks</b>.
+          Turn a perfect escape into a neon chain reaction.</p>
+        <div class="menu-features"><span>10 SECTORS</span><span>6 POWER-UPS</span><span>×8 OVERDRIVE</span></div>
 
         <div class="setup">
-          <div class="setup-row" role="radiogroup" aria-label="Difficulty">
+          <div class="setup-row" role="group" aria-label="Difficulty">
             <button class="diff-btn" data-diff="cadet">CADET<span>slower ball · 4 balls</span></button>
             <button class="diff-btn selected" data-diff="pilot">PILOT<span>the intended run · 3 balls</span></button>
             <button class="diff-btn" data-diff="ace">ACE<span>faster ball · 2 balls</span></button>
@@ -152,7 +175,7 @@
             <span class="dot">·</span>
             <button class="link-btn" id="btn-menu-motion">Motion: full</button>
           </div>
-          <p class="hint center">A live demo plays behind this screen — watch the ball farm the top.</p>
+          <p class="hint center">Mouse · Keyboard · Touch · Gamepad<br>Lift your paddle into the ball to hit harder.</p>
         </div>
       </div>
     </div>
@@ -169,10 +192,10 @@
             every brick it clips on the way pays at your current multiplier.</p>
             <h3>Tiers</h3>
             <p>×2 <b>LIFT</b> → ×3 <b>SURGE</b> → ×5 <b>OVERDRIVE</b> → ×8 <b>SUPERNOVA</b>.
-            Drop back below the field and the meter bleeds away.</p>
+            Sustained roof rides fire cascade pulses and accelerate your balls. Dip below and stored heat keeps the reward alive briefly, then the meter cools.</p>
             <h3>Paddle</h3>
             <p>It moves <b>up and down</b> inside the bottom zone. Strike while rising:
-            the launch adds up to +30% ball speed. This is how you crack speed gates
+            the launch adds up to +32% ball speed. This is how you crack speed gates
             and steer into steep hits.</p>
           </div>
           <div class="help-col">
@@ -186,7 +209,7 @@
             <p class="hint">Gates are never grind — every one dies to a single good hit.</p>
             <h3>Systems (catch the falling pods)</h3>
             <ul>
-              <li><b>◆ PLASMA</b> — balls pierce everything, gates included, for 10s.</li>
+              <li><b>◆ PLASMA</b> — balls pierce breakable bricks and ignore gates (not steel), for 10s.</li>
               <li><b>⁂ SPLIT</b> — up to 6 balls at once.</li>
               <li><b>⚡ CHAIN</b> — each brick you break zaps its neighbours.</li>
               <li><b>↔ WIDE</b> — bigger paddle. <b>◐ SLOW</b> — capped ball speed. <b>+ EXTRA BALL</b> — one more life.</li>
@@ -197,10 +220,10 @@
             <ul>
               <li><b>Mouse</b> — move to steer, click to launch.</li>
               <li><b>Keyboard</b> — ←→ or A/D, ↑↓ or W/S to lift. Space launches · pauses. P pause · M mute · H help.</li>
-              <li><b>Touch, stick mode</b> — touch the LEFT half of the arena: a thumbstick appears under your thumb. Push up while striking to smash through.</li>
-              <li><b>Touch, drag mode</b> — touch the RIGHT half and drag; the paddle follows your finger.</li>
+              <li><b>Touch, stick mode</b> — drag the thumb pad below the arena, or touch the LEFT half of the arena. Push up while striking to smash through.</li>
+              <li><b>Touch, drag mode</b> — start on the RIGHT half and drag anywhere; the paddle follows your finger. Enable Thumbstick to use stick controls across the whole arena.</li>
             </ul>
-            <h3>Scoring</h3>
+            <p><b>Gamepad</b> — left stick moves and lifts. A launches / continues. Start pauses.</p><h3>Scoring</h3>
             <p>Standard 50 · Gates 150 · all × your tier multiplier.
             Clearing a sector pays a bonus scaled by the multiplier you kept.</p>
           </div>

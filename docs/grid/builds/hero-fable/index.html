@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#05070d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>OVERTOP</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0f1f'/%3E%3Crect x='10' y='14' width='44' height='10' rx='3' fill='%23ff4d6d'/%3E%3Crect x='10' y='28' width='44' height='10' rx='3' fill='%23ffb347'/%3E%3Ccircle cx='32' cy='10' r='5' fill='%23fff'/%3E%3Crect x='20' y='50' width='24' height='6' rx='3' fill='%233fb5ff'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <canvas id="game" aria-label="OVERTOP game canvas"></canvas>
+
+  <!-- Overlays are positioned over the letterboxed field by main.js -->
+  <div id="ui">
+    <button id="btn-pause" class="icon-btn" aria-label="Pause" title="Pause (P)">II</button>
+
+    <section id="title" class="overlay">
+      <div class="panel">
+        <h1 class="logo">OVERTOP</h1>
+        <p class="tag">Break through. Get on top. Stay there.</p>
+        <ul class="howto">
+          <li><b>Goal</b> — punch a hole in the bricks and get the ball into the attic above them. Up there it bounces on its own and the multiplier climbs every second.</li>
+          <li><b>Paddle moves up too</b> — flick it <b>UP</b> as you hit the ball to add speed. Moving down softens the hit.</li>
+          <li><b>Tricky bricks</b> — Prisms need steep shots, Armor needs speed, Lids only break from above, Phase bricks blink.</li>
+        </ul>
+        <div class="controls">
+          <div><b>Mouse</b> move · click = launch / fire</div>
+          <div><b>Keys</b> ← → ↑ ↓ / WASD · Space · P pause · M mute</div>
+          <div><b>Touch</b> thumb on the lower screen = stick · tap = launch / fire</div>
+        </div>
+        <button id="btn-start" class="big">TAP / CLICK TO START</button>
+        <p class="fine">high score <span id="title-high">0</span></p>
+      </div>
+    </section>
+
+    <section id="pause" class="overlay hidden">
+      <div class="panel small">
+        <h2>PAUSED</h2>
+        <button id="btn-resume" class="big">RESUME</button>
+        <div class="row">
+          <button id="btn-mute" class="toggle">SOUND: ON</button>
+          <button id="btn-scheme" class="toggle">TOUCH: STICK</button>
+        </div>
+        <button id="btn-quit" class="link">quit to title</button>
+        <p class="fine">P / Esc to resume · M mute</p>
+      </div>
+    </section>
+
+    <section id="gameover" class="overlay hidden">
+      <div class="panel small">
+        <h2>GAME OVER</h2>
+        <p class="score-line">score <b id="go-score">0</b></p>
+        <p class="score-line">high score <b id="go-high">0</b></p>
+        <p class="fine" id="go-stats"></p>
+        <button id="btn-restart" class="big">TAP / CLICK TO RESTART</button>
+        <p class="fine">R also restarts</p>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

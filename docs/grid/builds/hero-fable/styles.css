@@ -1,0 +1,226 @@
+/* OVERTOP — overlay styling. The game itself is drawn on the canvas.
+ *
+ * Two scales are in play:
+ *   --s   field scale (CSS px per logical unit), set by main.js — used by things that
+ *         must line up with the canvas HUD (the pause button).
+ *   --u1  UI unit for menus: whichever is tighter of 1/720 of the viewport width or
+ *         1/1000 of its height, so panels stay readable in landscape and on desktop.
+ *         Every menu font is clamped to a legible minimum in CSS px.
+ */
+:root {
+  --s: 1;
+  --u1: min(0.13889vw, 0.1vh);
+  --u1: min(0.13889dvw, 0.1dvh);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --hud-shift: 0px; /* set by render.js when the field top sits under a notch */
+  --accent: #3fb5ff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #05070d;
+  color: #fff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+#game {
+  position: fixed;
+  inset: 0;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* #ui is positioned exactly over the letterboxed field by main.js; the pause button
+   is anchored to it, while the menu overlays break out to the full viewport. */
+#ui {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 720px;
+  height: 1280px;
+  pointer-events: none;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background: rgba(5, 7, 13, 0.74);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+  padding: calc(var(--safe-top) + 16px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px);
+  overflow-y: auto;
+}
+.overlay.hidden { display: none; }
+
+.panel {
+  width: 100%;
+  max-width: min(94vw, max(calc(var(--u1) * 600), 540px));
+  margin: auto; /* centres, but never clips the top when the panel is taller than the screen */
+  text-align: center;
+  animation: pop 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+.panel.small { max-width: min(94vw, max(calc(var(--u1) * 480), 400px)); }
+@keyframes pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+.logo {
+  margin: 0;
+  font-size: clamp(42px, calc(var(--u1) * 96), 112px);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  background: linear-gradient(90deg, #3fb5ff, #c084fc, #ff5cc8, #ffe14d);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 18px rgba(120, 160, 255, 0.55));
+}
+.tag {
+  margin: clamp(4px, calc(var(--u1) * 8), 10px) 0 clamp(10px, calc(var(--u1) * 24), 26px);
+  opacity: 0.85;
+  font-size: clamp(13px, calc(var(--u1) * 22), 24px);
+}
+
+h2 {
+  margin: 0 0 clamp(8px, calc(var(--u1) * 16), 18px);
+  font-size: clamp(30px, calc(var(--u1) * 56), 64px);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+}
+
+.howto {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 clamp(8px, calc(var(--u1) * 18), 20px);
+  text-align: left;
+  font-size: clamp(12px, calc(var(--u1) * 17), 18px);
+  line-height: 1.35;
+  opacity: 0.9;
+}
+.howto li {
+  margin-bottom: clamp(4px, calc(var(--u1) * 8), 10px);
+  padding-left: clamp(8px, calc(var(--u1) * 16), 16px);
+  border-left: 3px solid var(--accent);
+}
+.howto b { color: var(--accent); }
+
+.controls {
+  font-size: clamp(11px, calc(var(--u1) * 15), 16px);
+  opacity: 0.75;
+  margin-bottom: clamp(8px, calc(var(--u1) * 22), 24px);
+  line-height: 1.6;
+}
+.controls b {
+  color: #fff;
+  opacity: 1;
+  display: inline-block;
+  width: clamp(44px, calc(var(--u1) * 60), 64px);
+  text-align: right;
+  margin-right: 8px;
+}
+
+button {
+  font: inherit;
+  color: #fff;
+  cursor: pointer;
+  border: none;
+  border-radius: clamp(10px, calc(var(--u1) * 14), 16px);
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+button.big {
+  width: 100%;
+  min-height: 48px; /* comfortable thumb target */
+  padding: clamp(10px, calc(var(--u1) * 18), 20px);
+  font-size: clamp(15px, calc(var(--u1) * 24), 26px);
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  background: linear-gradient(90deg, #3fb5ff, #c084fc);
+  box-shadow: 0 8px 30px rgba(120, 140, 255, 0.35);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+button.big:active { transform: scale(0.97); }
+
+.row { display: flex; gap: clamp(8px, calc(var(--u1) * 12), 14px); margin: clamp(8px, calc(var(--u1) * 14), 16px) 0; }
+button.toggle {
+  flex: 1;
+  min-height: 42px;
+  padding: clamp(8px, calc(var(--u1) * 12), 14px);
+  font-size: clamp(12px, calc(var(--u1) * 16), 17px);
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+button.link {
+  background: none;
+  opacity: 0.7;
+  text-decoration: underline;
+  font-size: clamp(12px, calc(var(--u1) * 16), 17px);
+  padding: 8px 12px;
+  min-height: 36px;
+}
+
+.fine { font-size: clamp(11px, calc(var(--u1) * 14), 15px); opacity: 0.6; margin: clamp(6px, calc(var(--u1) * 12), 14px) 0 0; }
+.score-line { font-size: clamp(14px, calc(var(--u1) * 22), 24px); margin: clamp(4px, calc(var(--u1) * 6), 8px) 0; opacity: 0.9; }
+.score-line b { font-size: clamp(22px, calc(var(--u1) * 34), 38px); margin-left: 8px; }
+
+/* Pause button: anchored to the field's top-right, below the HUD row, never smaller
+   than a thumb target. --hud-shift keeps it (and the canvas HUD) below a notch. */
+.icon-btn {
+  position: absolute;
+  right: calc(var(--s) * 22px);
+  top: calc(var(--s) * 96px + var(--hud-shift));
+  width: max(40px, calc(var(--s) * 48px));
+  height: max(36px, calc(var(--s) * 40px));
+  font-size: max(13px, calc(var(--s) * 16px));
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 10px;
+  pointer-events: auto;
+}
+.icon-btn.hidden { display: none; }
+
+/* Wide viewports (landscape phones, desktop): render.js moves the HUD into the
+   letterbox margins (see r.wide — keep the aspect threshold in sync), so the pause
+   button parks in the viewport's top-right corner instead of over the field. */
+@media (min-aspect-ratio: 21/20) {
+  .icon-btn {
+    position: fixed;
+    left: auto;
+    right: calc(var(--safe-right) + 14px);
+    top: calc(var(--safe-top) + 14px);
+    width: 44px;
+    height: 40px;
+    font-size: 14px;
+  }
+}
+
+/* Short screens: drop the controls cheat-sheet so the title panel fits without scrolling. */
+@media (max-height: 520px) {
+  .controls { display: none; }
+  .tag { margin-bottom: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel, button.big { animation: none; }
+}

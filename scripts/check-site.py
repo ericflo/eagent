@@ -152,7 +152,9 @@ for preset in order:
             if pattern in staged:
                 ERRORS.append(f"games/{preset}/: absolute asset ref {pattern} survived staging")
                 break
-if page_text.count('class="game-card"') != len(order):
+if len(order) != 16:
+    ERRORS.append(f"index.html: expected 16 grid presets, found {len(order)}")
+if page_text.count('<article class="game-card') != len(order):
     ERRORS.append("index.html: gallery card count != results.json preset count")
 if page_text.count("<tr>") - 1 < len(order):
     ERRORS.append("index.html: comparison table rows != results.json preset count")

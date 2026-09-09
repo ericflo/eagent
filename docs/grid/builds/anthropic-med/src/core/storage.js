@@ -6,10 +6,11 @@ const KEY_HISCORE = 'atticbreaker.hiscore.v1';
 
 const DEFAULT_SETTINGS = {
   muted: false,
-  volume: 0.8,
-  screenShake: true,
+  shake: true,
   reducedMotion: false,
   colorblind: false,
+  sfxVolume: 0.8,
+  musicVolume: 0.8,
 };
 
 function safeGet(key) {

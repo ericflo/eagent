@@ -328,13 +328,17 @@ export function drawFrame(ctx, heat, t, fullBleed = false) {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, WALL, H);
   ctx.fillRect(W - WALL, 0, WALL, H);
-  // ceiling band (the "rim")
-  const cg = ctx.createLinearGradient(0, 0, 0, CEIL + 8);
-  cg.addColorStop(0, heat > 0.05 ? '#ffd9a0' : '#8fb4ff');
+  // ceiling band (the "rim"). Full-bleed viewports: fade the glow in from
+  // ABOVE the field top (no hard edge where the letterbox boundary sits) and
+  // span the full width so the rim never reads as an inset bar or a seam.
+  const cg = ctx.createLinearGradient(0, fullBleed ? -CEIL * 0.9 : 0, 0, CEIL + 8);
+  cg.addColorStop(0, fullBleed ? 'rgba(143,180,255,0)' : (heat > 0.05 ? '#ffd9a0' : '#8fb4ff'));
+  if (!fullBleed) cg.addColorStop(0.12, heat > 0.05 ? '#ffd9a0' : '#8fb4ff');
   cg.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = cg;
   if (fullBleed) ctx.globalAlpha = 0.5;
-  ctx.fillRect(WALL, 0, W - 2 * WALL, CEIL + 8);
+  if (fullBleed) ctx.fillRect(0, -CEIL * 0.9, W, CEIL * 0.9 + CEIL + 8);
+  else ctx.fillRect(WALL, 0, W - 2 * WALL, CEIL + 8);
   if (heat > 0.05) {
     ctx.globalAlpha = 0.4 + 0.3 * Math.sin(t * 10);
     ctx.fillStyle = '#ffcf8a';

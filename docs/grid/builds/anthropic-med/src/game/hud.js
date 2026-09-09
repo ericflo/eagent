@@ -29,15 +29,32 @@ export function drawHUD(g, game, t) {
   if (Math.round(game.score) !== lastScore) { scorePop = 1; lastScore = Math.round(game.score); }
   if (scorePop > 0) scorePop = Math.max(0, scorePop - 0.06);
 
+  // Safe-area aware insets (world units) — guarantees nothing is ever
+  // clipped by a notch/home-indicator/rounded corner OR by the letterboxed
+  // canvas edge on any viewport from 320x568 up to 1600x900.
+  const safeTop = (game.renderer?.safeTop || 0);
+  const safeRight = (game.renderer?.safeRight || 0);
+  const topPad = SAFE + safeTop;
+  const rightPad = SAFE + safeRight;
+
   g.save();
   g.textBaseline = 'top';
+
+  // ---- dark scrim behind the whole top HUD band, so text stays readable
+  // at every escalation tier no matter how bright the background gets ----
+  const scrimH = topPad + 150;
+  const scrim = g.createLinearGradient(0, 0, 0, scrimH);
+  scrim.addColorStop(0, 'rgba(2,2,10,0.62)');
+  scrim.addColorStop(1, 'rgba(2,2,10,0)');
+  g.fillStyle = scrim;
+  g.fillRect(0, 0, W, scrimH);
 
   // ---- rolling odometer score (top-left), weighty pop-scale on gain ----
   dispScore = lerp(dispScore, game.score, 0.15);
   const shown = Math.round(dispScore).toLocaleString();
   const scoreScale = 1 + scorePop * 0.22;
   g.save();
-  g.translate(SAFE, SAFE);
+  g.translate(SAFE, topPad);
   g.scale(scoreScale, scoreScale);
   g.font = '900 46px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
   g.shadowColor = 'rgba(94,230,255,0.65)';
@@ -55,11 +72,12 @@ export function drawHUD(g, game, t) {
   // high score, small, under it
   g.font = '600 15px system-ui, sans-serif';
   g.fillStyle = 'rgba(255,255,255,0.55)';
-  g.fillText(`BEST ${Math.round(game.highScore).toLocaleString()}`, SAFE, SAFE + 52);
+  g.fillText(`BEST ${Math.round(game.highScore).toLocaleString()}`, SAFE, topPad + 52);
 
   // ---- multiplier: bold glowing badge, pulses per beat, colored by tier ----
   const mColor = tierColor(game.mult);
-  const cx = W - SAFE - 64, cy = SAFE + 52, rr = 40;
+  const cx = W - rightPad - 64, cy = topPad + 52, rr = 40;
+
   const mPulse = 1 + 0.08 * beatPulse + Math.min(0.25, (game.mult - 1) * 0.01);
   g.save();
   g.translate(cx, cy);
@@ -89,7 +107,7 @@ export function drawHUD(g, game, t) {
 
   // ---- lives, glowing dots ----
   g.save();
-  g.translate(SAFE, SAFE + 80);
+  g.translate(SAFE, topPad + 80);
   for (let i = 0; i < Math.max(0, game.lives); i++) {
     g.globalCompositeOperation = 'lighter';
     g.fillStyle = 'rgba(255,94,200,0.4)';
@@ -116,7 +134,7 @@ export function drawHUD(g, game, t) {
   // level name
   g.font = '700 20px system-ui, sans-serif';
   g.fillStyle = 'rgba(255,255,255,0.8)';
-  g.fillText(game.levelName || '', SAFE, SAFE + 118);
+  g.fillText(game.levelName || '', SAFE, topPad + 118);
 
   // combo
   if (game.combo > 1) {
@@ -126,7 +144,7 @@ export function drawHUD(g, game, t) {
     g.textAlign = 'center';
     g.shadowColor = 'rgba(255,209,94,0.7)';
     g.shadowBlur = 10;
-    g.fillText(`COMBO x${game.combo}`, W / 2, SAFE + 4);
+    g.fillText(`COMBO x${game.combo}`, W / 2, topPad + 4);
     g.textAlign = 'left';
     g.restore();
   }
@@ -134,7 +152,7 @@ export function drawHUD(g, game, t) {
   // ---- attic energy column: only appears when relevant (meter>0 or active) ----
   const atticA = game.attic;
   if (atticA && (atticA.meter > 0.01 || atticA.active)) {
-    const colW = 20, colH = clamp(H * 0.32, 260, 460), colX = W - SAFE - colW - 4, colY = 150;
+    const colW = 20, colH = clamp(H * 0.32, 260, 460), colX = W - rightPad - colW - 4, colY = topPad + 130;
     g.save();
     g.globalAlpha = atticA.active ? 1 : clamp(atticA.meter * 3, 0, 1);
     // column housing
@@ -175,8 +193,10 @@ export function drawHUD(g, game, t) {
 
   // ---- active powerup chips (bottom-left, countdown rings) ----
   const list = Powerups?.activeList ? Powerups.activeList(game) : [];
-  let chipX = SAFE;
-  const chipY = H - 90 - SAFE;
+  const safeBottom = (game.renderer?.safeBottom || 0);
+  const safeLeft = (game.renderer?.safeLeft || 0);
+  let chipX = SAFE + safeLeft;
+  const chipY = H - 90 - SAFE - safeBottom;
   for (const e of list) {
     g.save();
     g.translate(chipX + 26, chipY + 26);

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0c1211" />
+    <meta name="description" content="Break through. Go beyond. ASTRA is a modern breakout arcade with two-axis movement, kinetic power-ups, and a whole new side to discover." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>ASTRA — Breakout. Evolved.</title>
+    <script type="module" crossorigin src="/assets/index-B1V7ml5y.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DuFxNa4s.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#game-canvas">Skip to game</a>
+    <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="icon-orbit" viewBox="0 0 40 40"><ellipse cx="20" cy="20" rx="17" ry="8.5" transform="rotate(-42 20 20)"/><path d="M20 9v22M13 20h14"/><circle cx="30" cy="7" r="2.5" fill="currentColor" stroke="none"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="icon-sound" viewBox="0 0 24 24"><path d="m11 5-5 4H3v6h3l5 4V5Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+      <symbol id="icon-muted" viewBox="0 0 24 24"><path d="m11 5-5 4H3v6h3l5 4V5Zm5 4 5 6m0-6-5 6"/></symbol>
+      <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3"/></symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="icon-mouse" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 3v6"/></symbol>
+      <symbol id="icon-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18m-12-6 3-3 3 3m-6 12 3 3 3-3M6 9l-3 3 3 3m12-6 3 3-3 3"/></symbol>
+      <symbol id="icon-boost" viewBox="0 0 24 24"><path d="m6 12 6-6 6 6M6 18l6-6 6 6M12 12v9"/></symbol>
+      <symbol id="icon-thumb" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3"/></symbol>
+      <symbol id="icon-reset" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1 0 7M4 3v6h6"/></symbol>
+      <symbol id="icon-star" viewBox="0 0 24 24"><path d="m12 2 2.8 7.2L22 12l-7.2 2.8L12 22l-2.8-7.2L2 12l7.2-2.8L12 2Z"/></symbol>
+      <symbol id="icon-heart" viewBox="0 0 24 24"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z"/></symbol>
+      <symbol id="icon-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4m.1 3h.01"/></symbol>
+    </svg>
+
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="brand" href="./" aria-label="ASTRA home"><svg class="brand-mark"><use href="#icon-orbit"/></svg><span>ASTRA</span></a>
+        <div class="brand-caption">BREAKOUT. EVOLVED.</div>
+        <nav class="header-actions" aria-label="Game options">
+          <span class="system-status"><span class="status-dot"></span>ALL SYSTEMS PLAY</span>
+          <button class="text-button how-button" id="how-to-open" type="button"><svg class="icon"><use href="#icon-help"/></svg><span>How to play</span></button>
+          <span class="header-divider" aria-hidden="true"></span>
+          <button class="icon-button sound-button" id="sound-toggle" type="button" aria-label="Mute sound" aria-pressed="true" title="Mute sound"><svg class="icon"><use id="sound-icon" href="#icon-sound"/></svg></button>
+        </nav>
+      </header>
+
+      <main>
+        <section class="intro" aria-labelledby="page-title">
+          <div class="intro-title"><p class="eyebrow"><span class="tiny-cross" aria-hidden="true">+</span> AN ARCADE CLASSIC. A NEW FRONTIER.</p><h1 id="page-title">Break through.<span> Go beyond.</span></h1></div>
+          <p class="intro-description">The best part was always on the other side.<br class="desktop-break" /> Find your opening. Make a little chaos.</p>
+        </section>
+
+        <div class="workspace">
+          <section class="game-column" aria-label="ASTRA arcade">
+            <div class="game-frame" id="game" tabindex="-1">
+              <div class="game-hud" aria-label="Game statistics">
+                <div class="stat stat-score"><span class="stat-label">SCORE</span><span class="stat-value" id="score-value">00000</span></div>
+                <div class="stat stat-best"><span class="stat-label">PERSONAL BEST</span><span class="stat-value" id="best-value">00000</span></div>
+                <div class="stat stat-multiplier"><span class="stat-label">MULTIPLIER</span><span class="stat-value" id="multiplier-value">×1</span></div>
+                <div class="stat stat-sector"><span class="stat-label">SECTOR</span><span class="stat-value" id="level-value">01<span class="stat-denominator"> / 05</span></span></div>
+                <div class="stat stat-lives"><span class="stat-label">LIVES</span><span class="lives-value" id="lives-value" role="img" aria-label="3 lives"><svg class="icon"><use href="#icon-heart"/></svg><svg class="icon"><use href="#icon-heart"/></svg><svg class="icon"><use href="#icon-heart"/></svg></span></div>
+                <button class="icon-button pause-button" id="pause-toggle" type="button" aria-label="Pause game" title="Pause (Space)" disabled><svg class="icon"><use id="pause-icon" href="#icon-pause"/></svg></button>
+              </div>
+
+              <div class="canvas-wrap" id="canvas-wrap">
+                <canvas id="game-canvas" width="1000" height="700" tabindex="0" aria-label="ASTRA breakout game. Move the paddle with your mouse, touch thumbstick, or arrow keys. Move upward into the ball to boost it. Space pauses. Press Enter to start." aria-describedby="game-instructions">Your browser needs canvas support to play ASTRA.</canvas>
+                <div class="game-overlay" id="game-overlay">
+                  <div class="overlay-panel" id="overlay-panel">
+                    <span class="overlay-eyebrow" id="overlay-eyebrow"><span class="status-dot"></span> YOUR NEXT LITTLE ESCAPE</span>
+                    <h2 id="overlay-title">A whole new side to play.</h2>
+                    <p id="overlay-description">One paddle. Endless possibility.</p>
+                    <button class="primary-button" id="game-action" type="button"><span id="game-action-label">Let's break out</span><svg class="icon"><use href="#icon-arrow"/></svg></button>
+                    <span class="overlay-key-hint" id="overlay-key-hint">or press <kbd>ENTER</kbd> to launch</span>
+                  </div>
+                </div>
+                <div class="game-toast" id="game-toast" role="status" aria-live="polite" aria-atomic="true" hidden><svg class="icon"><use href="#icon-star"/></svg><div><strong id="toast-title"></strong><span id="toast-message"></span></div></div>
+                <div class="power-status" id="power-status" hidden><span class="status-dot"></span><span id="power-status-text"></span></div>
+              </div>
+              <div class="game-bottom-bar"><span class="game-status"><span class="status-dot" id="game-status-dot"></span><span id="game-status-text">READY WHEN YOU ARE</span></span><span class="canvas-coordinate" aria-hidden="true">ASTRA FLIGHT SYSTEM · 001</span><button class="quiet-button" id="restart-button" type="button" aria-label="Restart game" title="Restart game"><svg class="icon"><use href="#icon-reset"/></svg><span>Restart</span></button></div>
+            </div>
+
+            <div class="controls-bar" id="game-instructions">
+              <div class="control-hints" id="pointer-hints"><span><svg class="icon"><use href="#icon-move"/></svg><b>Move</b> in any direction</span><span><svg class="icon"><use href="#icon-boost"/></svg>Move up to <b>boost</b></span><span class="pause-hint"><kbd>SPACE</kbd> Pause</span></div>
+              <div class="control-hints" id="thumb-hints" hidden><span><svg class="icon"><use href="#icon-thumb"/></svg><b>Drag</b> the thumbstick</span><span><svg class="icon"><use href="#icon-boost"/></svg>Push up to <b>boost</b></span></div>
+              <div class="input-toggle" role="group" aria-label="Control mode"><button type="button" id="pointer-mode" class="mode-button is-selected" data-mode="pointer" aria-pressed="true"><svg class="icon"><use href="#icon-mouse"/></svg><span>Pointer</span></button><button type="button" id="thumb-mode" class="mode-button" data-mode="thumb" aria-pressed="false"><svg class="icon"><use href="#icon-thumb"/></svg><span>Thumb</span></button></div>
+            </div>
+          </section>
+
+          <aside class="mission-rail" aria-label="Your mission and field guide">
+            <section class="mission-intro"><div class="rail-label"><span>THE MISSION</span><span class="mission-index" id="mission-index">01 / 05</span></div><h2>Break the<br />ceiling<span class="orange-text">.</span></h2><p>Find a gap. Get above the bricks.<br /> Let the good kind of chaos take over.</p></section>
+            <section class="overdrive-card" id="overdrive-card"><div class="overdrive-art" aria-hidden="true"><svg viewBox="0 0 228 75" fill="none"><path d="M-20 68C34 68 35 18 104 18s77 50 144 5" stroke="currentColor" stroke-width="1" opacity=".25"/><path d="M-20 78C34 78 38 34 104 34s81 33 144-1" stroke="currentColor" stroke-width="1" opacity=".2"/><path d="M-20 58C40 58 48 3 107 3s67 44 141 3" stroke="currentColor" stroke-width="1" opacity=".15"/><path d="m124 21 4 11 11 4-11 4-4 11-4-11-11-4 11-4 4-11Z" fill="currentColor"/><circle cx="169" cy="21" r="2" fill="currentColor"/><circle cx="58" cy="40" r="1.5" fill="currentColor"/><path d="m191 47 2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5Z" fill="currentColor" opacity=".5"/></svg><span>THE OTHER SIDE</span></div><div class="overdrive-copy"><h3>Meet overdrive.<svg class="icon"><use href="#icon-star"/></svg></h3><p>Reach the zone above the bricks. Stack your multiplier. Light it all up.</p><span class="overdrive-tag" id="overdrive-tag">HIGHER RISK. HIGHER ORBIT.</span></div></section>
+            <section class="field-guide"><h3 class="rail-label">KNOW YOUR BRICKS</h3><div class="legend-item"><span class="brick-sample brick-standard" aria-hidden="true"></span><div><strong>The classic</strong><span>Any hit. Make it count.</span></div></div><div class="legend-item"><span class="brick-sample brick-prism" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>Prism <span class="legend-tag">ANGLE</span></strong><span>Match the diagonal slash.</span></div></div><div class="legend-item"><span class="brick-sample brick-speed" aria-hidden="true">»</span><div><strong>Velocity <span class="legend-tag">SPEED</span></strong><span>Boost to break through.</span></div></div></section>
+            <div class="rail-footnote"><svg class="icon"><use href="#icon-star"/></svg><p>Good things come in waves.<br /><span>Plasma. Multiball. Chain reactions.</span></p></div>
+          </aside>
+        </div>
+      </main>
+
+      <footer class="site-footer"><p>A familiar feeling. <span>A different dimension.</span></p><div><button type="button" class="quiet-button motion-button" id="motion-toggle" aria-pressed="false">Reduced motion <span id="motion-label">off</span></button><span class="footer-version">BUILT FOR THE BREAK · V1.0</span><svg class="footer-orbit"><use href="#icon-orbit"/></svg></div></footer>
+    </div>
+
+    <dialog id="how-to-dialog" class="help-dialog" aria-labelledby="help-title" aria-describedby="help-description">
+      <div class="dialog-topline"><span class="eyebrow">ASTRA / FLIGHT MANUAL</span><button type="button" class="icon-button" id="how-to-close" aria-label="Close instructions"><svg class="icon"><use href="#icon-close"/></svg></button></div>
+      <h2 id="help-title">A little control.<br />A lot of possibility.</h2><p id="help-description" class="dialog-intro">Break every brick to advance through five sectors. Your real destination? The space above them.</p>
+      <div class="help-controls"><div><svg class="icon"><use href="#icon-move"/></svg><h3>Move in two dimensions.</h3><p>Move your pointer or use arrow keys / WASD. Your paddle can travel left, right, up, and down in the lower quarter of the field.</p></div><div><svg class="icon"><use href="#icon-boost"/></svg><h3>Put some energy into it.</h3><p>Move upward as the ball hits your paddle to give it a boost. Where it lands on your paddle changes its direction.</p></div><div><svg class="icon"><use href="#icon-thumb"/></svg><h3>Made for your thumbs.</h3><p>Choose Thumb mode. Touch the field and drag to create a floating thumbstick. Push up to boost. Lift your finger to stop.</p></div></div>
+      <div class="help-bricks"><h3>Not all bricks play by the same rules.</h3><p><span class="inline-brick standard"></span><strong>Classic:</strong> One good hit is all it takes.</p><p><span class="inline-brick prism">/</span><strong>Prism:</strong> Match the slash direction, at least 20° from vertical.</p><p><span class="inline-brick speed">»</span><strong>Velocity:</strong> Reach 740+ speed. Boost upward into the ball first.</p></div>
+      <div class="help-powers"><svg class="icon"><use href="#icon-star"/></svg><div><h3>Then things get interesting.</h3><p>Get above the bricks to enter <strong>overdrive</strong> and grow your multiplier: <strong>plasma</strong> piercing, then <strong>multiball</strong>, then electric <strong>chain</strong> reactions. Catch falling power-ups for more boosts and extra lives. Keep at least one ball in play to save a life.</p></div></div>
+      <div class="dialog-bottom"><span><kbd>SPACE</kbd> pause / resume <span class="help-key-divider">·</span> <kbd>ESC</kbd> close</span><button class="primary-button" id="help-done" type="button">Got it. Let's play.<svg class="icon"><use href="#icon-arrow"/></svg></button></div>
+    </dialog>
+    <p class="sr-only" id="sr-status" role="status" aria-live="polite" aria-atomic="true">Ready to play. Five sectors. Three lives.</p>
+    <noscript><div class="noscript-message">ASTRA needs JavaScript to play. Please enable JavaScript in your browser.</div></noscript>
+  </body>
+</html>

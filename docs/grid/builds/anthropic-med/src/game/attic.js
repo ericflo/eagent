@@ -82,14 +82,14 @@ export class AtticSystem {
       this.chain = 0;
       this.bannerT = 1;
       this.game?.fx?.flash?.('#8ffcff', 0.45, 0.35);
-      this.game?.fx?.shake?.(6, 0.25);
+      if (this.game?.settings?.shake !== false) this.game?.fx?.shake?.(6, 0.25);
       this.game?.audio?.sfx?.('atticEnter');
     }
     if (!this.active && wasActive) {
       this.game?.audio?.sfx?.('atticExit');
     }
     if (this.bannerT > 0) this.bannerT = Math.max(0, this.bannerT - dt * 0.5);
-    if (this.tierBannerT > 0) this.tierBannerT = Math.max(0, this.tierBannerT - dt * 0.6);
+    if (this.tierBannerT > 0) this.tierBannerT = Math.max(0, this.tierBannerT - dt / 1.2); // ~1.2s fast fade
 
     if (this.active) {
       this.meter = Math.min(1, this.meter + dt / 1.2);
@@ -142,9 +142,11 @@ export class AtticSystem {
         this.game?.fx?.flash?.(t.color, 0.5, 0.4);
         this.game?.fx?.shockwave?.(cx, cy, { color: t.color, r0: 20, r1: 480, life: 0.55, width: 8 });
         this.game?.fx?.bloomPulse?.(cx, cy, { color: t.color, r: 500 + newTierIdx * 80, life: 1.1, strength: 1.3 });
-        this.game?.fx?.shake?.(6 + newTierIdx * 2, 0.3);
-        this.game?.audio?.sfx?.('multiUp', { pitch: 1 + newTierIdx * 0.08 });
-        this.game?.notify?.(`TIER UP: ${t.name}!`, t.color);
+        if (this.game?.settings?.shake !== false) this.game?.fx?.shake?.(6 + newTierIdx * 2, 0.3);
+        this.game?.audio?.music?.setTier?.(newTierIdx);
+        this.game?.audio?.sfx?.('tierUp', { tier: newTierIdx, pitch: 1 + newTierIdx * 0.08 });
+        // ONE announcement only: the compact kinetic banner (drawn by
+        // game.drawTierBanner) — no duplicate toast on top of it.
       }
     }
   }
@@ -157,12 +159,15 @@ export class AtticSystem {
     const cx = brick.cx ?? brick.x, cy = brick.cy ?? brick.y;
     const size = clamp(18 + this.chain * 1.4, 18, 46);
     const pitch = clamp(1 + this.chain * 0.035, 1, 2.4);
-    this.game?.fx?.popup?.(cx, cy, `CHAIN x${this.chain}`, { color: '#ffe15e', size });
+    // Offset below the brick-break "+score" popup (spawned by game.js at
+    // the same cx,cy) so the two never overlap illegibly.
+    this.game?.fx?.popup?.(cx, cy + 36, `CHAIN x${this.chain}`, { color: '#ffe15e', size });
     this.game?.fx?.shockwave?.(cx, cy, { color: '#8ffcff' });
     this.game?.fx?.bloomPulse?.(cx, cy, { color: '#8ffcff', size: 60 + this.chain * 6 });
-    this.game?.audio?.sfx?.('combo', { pitch });
+    this.game?.audio?.sfx?.('brickAttic', { chain: this.chain, pitch });
     this.timeDilT = 1;
   }
+
 
   /** Multiply game dt by this to get a brief time-dilation pulse on attic breaks. */
   get timeScale() {

@@ -298,6 +298,7 @@ export function drawBall(g, ball, t, opts = {}) {
   else if (flags.fire) { baseColor = '#ff7a3d'; hue = 22; }
   else if (flags.heavy) { baseColor = '#c39bff'; hue = 265; }
   else if (flags.ghost) { baseColor = 'rgba(180,220,255,0.7)'; hue = 200; }
+  else if (flags.sticky) { baseColor = '#ffd66e'; hue = 42; }
 
   const color = rainbow ? hsl((t * 220 + ball.x * 0.3) % 360, 95, 62) : baseColor;
 
@@ -403,6 +404,33 @@ export function drawBall(g, ball, t, opts = {}) {
     g.arc(ball.x, ball.y, ball.r + 2, 0, Math.PI * 2);
     g.stroke();
     g.setLineDash([]);
+  }
+
+  // --- sticky: magnetic field lines — pulsing polarity arcs orbiting the
+  // ball, unmistakably "magnetic" even before it's caught on the paddle
+  // (game.js additionally draws a live tether line while actually stuck).
+  if (flags.sticky) {
+    g.globalCompositeOperation = 'lighter';
+    const pulse = 0.5 + 0.5 * Math.sin(t * 6);
+    for (let i = 0; i < 3; i++) {
+      const rr = ball.r * (1.6 + i * 0.55) + pulse * 2;
+      const spin = t * (1.4 + i * 0.3) * (i % 2 === 0 ? 1 : -1);
+      g.strokeStyle = `rgba(255,214,110,${(0.5 - i * 0.13) * (0.6 + 0.4 * pulse)})`;
+      g.lineWidth = 1.6;
+      g.beginPath();
+      g.arc(ball.x, ball.y, rr, spin, spin + Math.PI * 1.15);
+      g.stroke();
+    }
+    // two small polarity nodes (N/S) chasing each other
+    for (let i = 0; i < 2; i++) {
+      const a = t * 3 + i * Math.PI;
+      const nr = ball.r * 2.1;
+      const nx = ball.x + Math.cos(a) * nr, ny = ball.y + Math.sin(a) * nr;
+      g.fillStyle = i === 0 ? 'rgba(255,214,110,0.85)' : 'rgba(255,240,200,0.6)';
+      g.beginPath();
+      g.arc(nx, ny, ball.r * 0.22, 0, Math.PI * 2);
+      g.fill();
+    }
   }
 
   g.restore();

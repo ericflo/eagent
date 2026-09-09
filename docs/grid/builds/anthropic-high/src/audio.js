@@ -33,6 +33,8 @@ const MIN_MS = {
   overtop: 400, overtopEnd: 300, lose: 300, levelup: 400, gameover: 500, ui: 45,
 };
 const DEFAULT_MIN_MS = 30;
+/** Minimum time the music stays "open" after an overtop hit. */
+const MIN_OPEN_MS = 1600;
 
 class AudioSystem {
   constructor() {
@@ -50,6 +52,7 @@ class AudioSystem {
     this._streak = 0;
     this._streakAt = -1e9;
     this._sfxPlayed = 0;
+    this._overtopAt = -1e9;
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -149,11 +152,18 @@ class AudioSystem {
     } catch (e) { /* ignore */ }
   }
 
-  /** Optional hook: explicit overtop flag. play('overtop'/'overtopEnd') does this too. */
+  /**
+   * Optional hook: explicit overtop flag. play('overtop'/'overtopEnd') does this too.
+   * Going up is instant; coming back down holds the open filter for MIN_OPEN_S so a
+   * one-second dip never chops the fanfare off mid-swell.
+   */
   setOvertop(on) {
     on = !!on;
     if (on === this.overtop) return;
+    const now = globalThis.performance?.now?.() ?? Date.now();
+    if (!on && now - this._overtopAt < MIN_OPEN_MS) return;   // hold the hype
     this.overtop = on;
+    if (on) this._overtopAt = now;
     if (!this.music) return;
     try { if (on) this.music.hit(); else this.music.release(); } catch (e) { /* ignore */ }
   }
@@ -188,7 +198,11 @@ class AudioSystem {
       const step = isBreak ? this._melodyStep() : 0;
 
       // musical reactions
-      if (name === 'overtop') { this.overtop = true; this.music.hit(); }
+      if (name === 'overtop') {
+        this.overtop = true;
+        this._overtopAt = globalThis.performance?.now?.() ?? Date.now();
+        this.music.hit();
+      }
       else if (name === 'overtopEnd') { this.overtop = false; this.music.release(); }
       else if (name === 'lose') { this.eng.duck(0.55, 1.0); this.overtop = false; this.music.release(); }
       else if (name === 'gameover') { this.state = 'gameover'; this.music.release(); this.eng.duck(0.45, 2.2); }

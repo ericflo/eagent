@@ -1,11 +1,12 @@
 {
-  "generated_from": "reports/*.metrics.json + reports/*.judge.json + reports/*.play.json (eagent-grid); run date 2026-09-08/09",
-  "run_date": "2026-09-08",
+  "generated_from": "reports/*.metrics.json + reports/*.judge.json + reports/*.play.json + reports/*.delta.txt (eagent-grid); run date 2026-09-08/09; v3 adds phase-3 resumes (4) + heroes (2)",
+  "run_date": "2026-09-09",
   "prompt": "Read INSTRUCTIONS.md and relentlessly build it until you're confident that it's fully and completely implemented to the highest possible standard you can manage.",
   "base_commit": "59ce5c7",
   "spend": {
-    "runs_total": 91.54,
-    "currency": "USD-list-Sept-2026"
+    "runs_total": 242.19,
+    "currency": "USD-list-Sept-2026",
+    "note": "Grid-watch TOTAL at phase-3 close; per-preset finals sum to 242.21 (2c live-recompute drift on idle presets, same as v2). Phase 1 (initial 14): 91.54. Phase 2 (4 resumes + 2 heroes): 150.65."
   },
   "presets": {
     "anthropic-high": {
@@ -18,77 +19,78 @@
         "narrator": "claude-sonnet-5"
       },
       "effort": "high",
-      "status": "stopped-budget",
+      "status": "stopped-capped",
       "end_reason": "interrupted",
-      "duration_s": 3619.8,
-      "cost_usd": 24.3058,
+      "duration_s": 16638.9,
+      "cost_usd": 40.9477,
       "cost_per_actor": {
-        "orchestrator": 1.8504,
-        "narrator": 0.3086,
-        "task": 22.1468
+        "orchestrator": 5.1868,
+        "narrator": 0.9318,
+        "task": 34.8291
       },
       "tokens": {
-        "in": 18799048,
-        "out": 386625,
-        "cached": 17737174,
+        "in": 36665230,
+        "out": 510926,
+        "cached": 34743853,
         "per_actor": {
           "orchestrator": {
-            "in": 199583,
-            "out": 14088,
-            "cached": 94430
+            "in": 1562484,
+            "out": 24034,
+            "cached": 1293303
           },
           "narrator": {
-            "in": 586741,
-            "out": 4683,
-            "cached": 506491
+            "in": 2535018,
+            "out": 9132,
+            "cached": 2349767
           },
           "task": {
-            "in": 18012724,
-            "out": 367854,
-            "cached": 17136253
+            "in": 32567728,
+            "out": 477760,
+            "cached": 31100783
           }
         }
       },
-      "cache_ratio": 0.9435,
+      "cache_ratio": 0.9476,
       "calls_per_actor": {
-        "orchestrator": 12,
-        "narrator": 29,
-        "task": 190
+        "orchestrator": 36,
+        "narrator": 62,
+        "task": 319
       },
       "tasks": {
-        "created": 4,
+        "created": 6,
         "completed": 2,
-        "failed": 0
+        "failed": 1
       },
       "rollovers": 0,
-      "narrator_msgs": 21,
+      "narrator_msgs": 39,
       "questions": 0,
       "errors": {
-        "count": 5,
+        "count": 9,
         "brief": [
           "tool send_message error: not sent: it names internal machinery (orchestrator), which the user never sees. Say it as \"I\", in your own words, and send it again.",
           "tool edit_file error: old_text not found in /home/ericflo/Development/eagent-grid/runs/anthropic-high/src/game.js. Read the file and copy the exact text, including whitespace",
           "tool edit_file error: old_text occurs 4 times in /home/ericflo/Development/eagent-grid/runs/anthropic-high/src/main.js; include more surrounding context to make it unique, or set replace_all",
           "tool edit_file error: old_text not found in /home/ericflo/Development/eagent-grid/runs/anthropic-high/tools/level-sim.mjs. Read the file and copy the exact text, including whitespace",
+          "tool wait error: wait cancelled: the session is stopping",
+          "error at task t5: api error 413: { \"error\": { \"type\": \"request_too_large\", \"message\": \"Request exceeds the maximum size\" } }",
+          "task t5 failed: model call failed: api error 413: { \"error\": { \"type\": \"request_too_large\", \"message\": \"Request exceeds the maximum size\" } }",
+          "tool edit_file error: old_text occurs 2 times in /home/ericflo/Development/eagent-grid/runs/anthropic-high/tools/phone-test.mjs; include more surrounding context to make it unique, or set replace_all",
           "tool wait error: wait cancelled: the session is stopping"
         ]
       },
       "title": "OVERTOP",
       "description": "OVERTOP \u2014 a neon Breakout about getting the ball above the bricks (gated angle/speed bricks, overdrive multiplier, synth soundtrack).",
       "entry": "index.html",
-      "files": 42,
-      "loc": 6010,
+      "files": 66,
+      "loc": 6975,
       "tests": {
         "exists": true,
-        "command": "none declared (per-file node tools/*.mjs runners)",
-        "result": "unknown (not run; code only)"
+        "command": "node tools/physics-test.mjs + node tools/level-sim.mjs (smoke.mjs needs live server, not run)",
+        "result": "pass (PHYSICS TEST PASSED; LEVEL AUDIT PASSED, 1 warning: L30 clear 34.6s just under 35s band)"
       },
       "externals": [],
       "console_errors": 0,
-      "page_errors": [
-        "nebula is not defined",
-        "[mobile] nebula is not defined"
-      ],
+      "page_errors": [],
       "canvas_found": {
         "desktop": true,
         "mobile": true
@@ -100,23 +102,29 @@
         "mobile": 3,
         "mouse": 3,
         "paddle2d": 3,
-        "polish": 2,
+        "polish": 3,
         "powerballs": 3,
         "specialbricks": 3
       },
-      "rubric_total": 26,
+      "rubric_total": 27,
       "evidence": {
         "audio": "src/audio.js:1-17 (adaptive procedural music + synthesized SFX, setIntensity drives layers); src/audio/music.js (lookahead scheduler, intensity-gated layers)",
         "breakthrough": "src/game.js:17-19 (overtop hysteresis: climb above brick tops, one continuous run), :139 (this.overtop flag), :496 (multiplier = 1 + overtopTime/2 + streak/3)",
         "juice": "src/fx.js:1-7 (particles, shards, rings, shake/zoom, flashes, floating text), :206-211 (shakeMag/shakeRot state); src/render.js:224+ (intensity tint warms sky as you power up)",
-        "mobile": "src/input.js:1 (mouse + first-class touch header), :76-89 (touch thumbstick-or-drag routing); index.html:5 (viewport-fit=cover, user-scalable=no)",
-        "mouse": "src/input.js:67-93 (pointerdown/move/up capture; mouse.x/y position-driven target mode)",
+        "mobile": "src/input.js:1 (mouse + first-class touch header), :76-89 (touch thumbstick-or-drag routing); index.html:5 (viewport-fit=cover, user-scalable=no); mobile PLAY-OK portrait (score 300, ball on paddle)",
+        "mouse": "src/input.js:67-93 (pointerdown/move/up capture; mouse.x/y position-driven target mode); desktop PLAY-OK",
         "paddle2d": "src/entities/paddle.js:33-38 (vertical band = lowest 22% of field), :87 (smashVel: decaying memory of upward speed so late smashes count)",
-        "polish": "src/game.js:166-183 (highscore/seenKinds/dragMode/mute persistence, settings); diarised but canvas never renders so polish is play-unverified",
+        "polish": "Title (OVERTOP logo, TAP-CLICK-SPACE, how-to, paddle-moves-up coach, high score, 12 hand-built levels), HUD (score/HI/balls/level/multiplier/GET OVERTOP), BALL LOST flow, settings/mute/pause; play-verified on both viewports, 0 errors",
         "powerballs": "src/game.js:30-38 (POWERUPS: multiball/fireball/ghostball/magnet/wide/slowmo/laser + heavy), :46-47 (timed ball mods)",
-        "specialbricks": "src/entities/bricks.js:25 (angle: steep-only), :40 (angleH), :56 (speed gate); src/game.js:27 (CONDITION_KINDS incl slow/ghost/topOnly)"
+        "specialbricks": "src/entities/bricks.js:25 (angle: steep-only), :40 (angleH), :56 (speed gate); src/game.js:27 (CONDITION_KINDS incl slow/ghost/topOnly); tools/level-sim.mjs audits all 30 sectors"
       },
-      "play_notes": "BROKEN both viewports. 2 pageErrors ('nebula is not defined' + '[mobile] nebula is not defined'); title/desktop/mobile shots all pure black. Cause: src/render.js:214 calls `nebula = buildNebula()` but no such binding exists (ReferenceError first frame). All scores are code-only and play-unverified; they credit structure that reads as complete and well designed."
+      "play_notes": "NEBULA BUG FIXED \u2014 canvas renders on both viewports, 0 console/page errors (v1: 'nebula is not defined' pageErrors, all-black shots). Title: OVERTOP logo, GET THE BALL ABOVE THE BRICKS, TAP-CLICK-SPACE, how-to, HIGH SCORE 0. Desktop: live Level 1 FIRST LIGHT (score 300, BALL LOST / 2 BALLS LEFT, ball on paddle). Mobile: portrait HUD (score 300, x1) with ball on paddle. PLAY-OK x2.",
+      "v2delta": "v1\u2192v2: the resume fixed the `nebula` black-canvas bug \u2014 src/render.js now binds `const nebula = bgLayer(bucket)` (:241) inside the pre-rendered backdrop path instead of the bare `nebula = buildNebula()` call that threw a ReferenceError on the first frame, so the canvas renders on both viewports (shots went from 2\u20134 KB pure black to 231\u2013343 KB live frames) with zero console/page errors. Game code grew 6010\u21926975 LOC and the node-only test harnesses now pass (tools/physics-test.mjs PHYSICS TEST PASSED; tools/level-sim.mjs LEVEL AUDIT PASSED with 1 minor warning). Scoring: 26\u219227, polish 2\u21923 (title/HUD/BALL LOST flow now play-verified desktop + mobile); all other rubric items unchanged.",
+      "spend_split": {
+        "v1_cost": 24.3058,
+        "resume_cost": 16.6419
+      },
+      "routes": []
     },
     "anthropic-med": {
       "orchestrator": "Claude Opus 5",
@@ -128,53 +136,53 @@
         "narrator": "claude-haiku-4-5-20251001"
       },
       "effort": "med",
-      "status": "stopped-budget",
+      "status": "stopped-capped",
       "end_reason": "interrupted",
-      "duration_s": 3621.2,
-      "cost_usd": 23.1745,
+      "duration_s": 16039.1,
+      "cost_usd": 37.0266,
       "cost_per_actor": {
-        "orchestrator": 3.4146,
-        "narrator": 0.2775,
-        "task": 19.4824
+        "orchestrator": 6.8553,
+        "narrator": 0.5715,
+        "task": 29.5998
       },
       "tokens": {
-        "in": 57553130,
-        "out": 607667,
-        "cached": 55433139,
+        "in": 93274573,
+        "out": 859912,
+        "cached": 89812968,
         "per_actor": {
           "orchestrator": {
-            "in": 1630006,
-            "out": 40085,
-            "cached": 1275022
+            "in": 4193957,
+            "out": 60782,
+            "cached": 3474239
           },
           "narrator": {
-            "in": 1188210,
-            "out": 14813,
-            "cached": 1094158
+            "in": 2879932,
+            "out": 22300,
+            "cached": 2688828
           },
           "task": {
-            "in": 54734914,
-            "out": 552769,
-            "cached": 53063959
+            "in": 86200684,
+            "out": 776830,
+            "cached": 83649901
           }
         }
       },
-      "cache_ratio": 0.9632,
+      "cache_ratio": 0.9629,
       "calls_per_actor": {
-        "orchestrator": 35,
-        "narrator": 43,
-        "task": 542
+        "orchestrator": 59,
+        "narrator": 70,
+        "task": 825
       },
       "tasks": {
-        "created": 9,
-        "completed": 7,
+        "created": 13,
+        "completed": 9,
         "failed": 0
       },
       "rollovers": 0,
-      "narrator_msgs": 33,
+      "narrator_msgs": 53,
       "questions": 0,
       "errors": {
-        "count": 7,
+        "count": 12,
         "brief": [
           "tool send_message error: not sent: it names internal machinery (long think), which the user never sees. Say it as \"I\", in your own words, and send it again.",
           "tool edit_file error: path is required",
@@ -182,18 +190,23 @@
           "tool edit_file error: path is required",
           "tool view_image error: no such file (looked for the exact path and for \"smoke.png\" in the project); give the path exactly as it appears in the log, or just the file name",
           "tool send_message error: not sent: it names internal machinery (harness), which the user never sees. Say it as \"I\", in your own words, and send it again.",
+          "tool wait error: wait cancelled: the session is stopping",
+          "tool bash error: command is required",
+          "tool send_message error: not sent: it names internal machinery (harness), which the user never sees. Say it as \"I\", in your own words, and send it again.",
+          "tool edit_file error: old_text must not be empty (use write_file to create content)",
+          "tool send_message error: not sent: it names internal machinery (harness), which the user never sees. Say it as \"I\", in your own words, and send it again.",
           "tool wait error: wait cancelled: the session is stopping"
         ]
       },
       "title": "Attic Breaker",
       "description": "Attic Breaker \u2014 break through to the attic above the brick field, where chained breaks escalate the multiplier under time-dilation.",
       "entry": "index.html",
-      "files": 21,
-      "loc": 7806,
+      "files": 22,
+      "loc": 10223,
       "tests": {
         "exists": true,
-        "command": "node tests/*.mjs per-file runners (no package.json; e.g. bricks-test, collision-test, flow-test, powerups-test)",
-        "result": "unknown (not run; code only)"
+        "command": "node tests/bricks-test.mjs + collision-test.mjs + flow-test.mjs + powerups-test.mjs",
+        "result": "pass (bricks 20/20; collision 100k trials no tunneling; flow level-clear/game-over/restart clean; powerups all kinds)"
       },
       "externals": [],
       "console_errors": 0,
@@ -221,11 +234,17 @@
         "mobile": "src/core/input.js:6 (STICK_MAX_PX=70 visual thumbstick), :100 (touch routing); src/core/renderer.js:13 (phone-portrait width-fit, no letterbox); mobile PLAY-OK, full-height field",
         "mouse": "src/core/input.js:29 (mouse state), :40-43 (pointerdown/move/up handlers); desktop PLAY-OK driven by pointer",
         "paddle2d": "src/game/paddle.js:27-38 (targetY clamp + vy tracking), :56-59 (uppercut rising adds up to +900 speed; downward softCatch)",
-        "polish": "src/core/renderer.js:1-13 (letterbox/portrait modes + resize), index.html gate (tap-to-start); functional but spare vs peers (plain title, monochrome field in shots)",
+        "polish": "src/core/renderer.js:1-13 (letterbox/portrait modes + resize), index.html gate (tap-to-start); functional but spare vs peers (plain gradient title, monochrome field in shots)",
         "powerballs": "src/game/powerups.js:60-72 (11 kinds: multiball/fireball/superball/heavyball/ghostball/wide/sticky/lasers/magnet/slowmo/attictime), :718+ (applyPowerup effects)",
         "specialbricks": "src/game/bricks.js:78-81 (angle + speed defs), :133-134 (per-brick required dir + 1050 speedThreshold), :239-250 (35-degree angle cone and speed-gate break rules)"
       },
-      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Minimal 'tap to start' gate; desktop shot shows live ball on paddle with level name 'First Light'; mobile shot shows full-height portrait field with ball in play."
+      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Title: minimal ATTIC BREAKER gradient gate ('tap to start'). Desktop: live First Light (score 645, x1.0, 2 lives, ball on gradient paddle, WIDE badge). Mobile: full-height portrait field (score 0, 3 lives, ball on paddle). Same spare-but-working presentation as v1.",
+      "v2delta": "v1\u2192v2: the resume grew game code 7806\u219210223 LOC with no entry or architecture change (still root index.html, Attic Breaker, tap-to-start gate) and the game remains PLAY-OK on both viewports with zero errors (desktop live at score 645, mobile full-height portrait). The four per-file node runners were executed and all pass (bricks 20/20, collision 100k trials without tunneling, flow level-clear/game-over/restart clean, powerups all kinds drawn/described). Scoring: 26\u219226, unchanged \u2014 polish stays 2 (title gate and monochrome field are still spare next to peers) and every other item holds.",
+      "spend_split": {
+        "v1_cost": 23.1745,
+        "resume_cost": 13.8521
+      },
+      "routes": []
     },
     "astra": {
       "orchestrator": "GPT-6 Astra",
@@ -237,53 +256,53 @@
         "narrator": "deepseek-ai/DeepSeek-V4-Flash-0731"
       },
       "effort": null,
-      "status": "stopped-capped",
-      "end_reason": "interrupted",
-      "duration_s": 6603.6,
-      "cost_usd": 7.3964,
+      "status": "done",
+      "end_reason": "done",
+      "duration_s": 14899.4,
+      "cost_usd": 18.3424,
       "cost_per_actor": {
-        "orchestrator": 4.8343,
-        "narrator": 0.1695,
-        "task": 2.3926
+        "orchestrator": 15.6912,
+        "narrator": 0.2019,
+        "task": 2.4493
       },
       "tokens": {
-        "in": 48252008,
-        "out": 972287,
-        "cached": 42013541,
+        "in": 56533798,
+        "out": 1019986,
+        "cached": 49620312,
         "per_actor": {
           "orchestrator": {
-            "in": 2918637,
-            "out": 13172,
-            "cached": 2778966
+            "in": 10308138,
+            "out": 48055,
+            "cached": 9976988
           },
           "narrator": {
-            "in": 2655309,
-            "out": 5838,
-            "cached": 1853455
+            "in": 2967815,
+            "out": 6202,
+            "cached": 1957564
           },
           "task": {
-            "in": 42678062,
-            "out": 953277,
-            "cached": 37381120
+            "in": 43257845,
+            "out": 965729,
+            "cached": 37685760
           }
         }
       },
-      "cache_ratio": 0.8707,
+      "cache_ratio": 0.8777,
       "calls_per_actor": {
-        "orchestrator": 64,
-        "narrator": 65,
-        "task": 624
+        "orchestrator": 116,
+        "narrator": 68,
+        "task": 657
       },
       "tasks": {
-        "created": 8,
+        "created": 11,
         "completed": 5,
-        "failed": 3
+        "failed": 4
       },
       "rollovers": 0,
-      "narrator_msgs": 47,
+      "narrator_msgs": 50,
       "questions": 0,
       "errors": {
-        "count": 36,
+        "count": 50,
         "brief": [
           "tool send_message error: text is required",
           "tool send_message error: text is required",
@@ -300,14 +319,14 @@
         ]
       },
       "title": "OVERDRIVE \u2014 Break through. Let go.",
-      "description": "OVERDRIVE \u2014 break through the brick field; balls escaping above charge a tiered overdrive meter until the arena burns (pilot/ace/cadet runs).",
+      "description": "OVERDRIVE \u2014 break through the brick field; balls escaping above charge a tiered overdrive meter until the arena burns (cadet/pilot/ace runs, 10 sectors).",
       "entry": "dist/index.html",
-      "files": 245,
-      "loc": 4668,
+      "files": 329,
+      "loc": 5633,
       "tests": {
         "exists": true,
-        "command": "npm test (vitest run: tests/engine.test.ts, tests/hardening.test.ts)",
-        "result": "unknown (not run; code only)"
+        "command": "npm test (vitest run)",
+        "result": "pass (124 tests across 6 files; incl. input-only autoplayer winning all ten sectors, score 704750, peakTier 4)"
       },
       "externals": [],
       "console_errors": 0,
@@ -332,14 +351,33 @@
         "audio": "src/ui/audio.ts:8-17 (AudioContext, separate sfx + music gains, mute/music toggles), :129-140 (minor-pentatonic sequencer, energy 0..1 drives tempo+density); src/main.ts:652-655 (overdrive meter feeds musicEnergy; handleEvent per tier)",
         "breakthrough": "src/engine/Game.ts:576-590 (above-the-roof detection requires genuine breach above topmost live row), :461-464 (above-flagged scoring), src/engine/types.ts:105 (breakthrough heat decays slowly)",
         "juice": "src/ui/particles.ts:1 (particles + floating text), src/ui/renderer.ts:63-65 (screen flash), :290-291 (ball trails); src/main.ts:553-555 (camera shake); present and working, modest vs peers",
-        "mobile": "src/main.ts:46 (stick state, radius 62), :90 (thumbstick element), :386-392 (left-half = stick, right-half = drag); mobile PLAY-OK with LAUNCH control",
+        "mobile": "src/main.ts:46 (stick state, radius 62), :90 (thumbstick element), :386-392 (left-half = stick, right-half = drag); mobile PLAY-OK: live ball in flight, brick-break particles, MOVE+LIFT stick, '70 BRICKS TO BREAKTHROUGH'",
         "mouse": "src/main.ts:187-192 (single pointer surface: mouse + touch routed together); controls legend documents 'Mouse move', desktop PLAY-OK",
         "paddle2d": "src/engine/Game.ts:330-348 (clamped vertical zone, targetY; rising feeds ball, dipping softens), src/engine/physics.ts:109-114 (lift boost 1 + lift*0.32, title: 'rising paddle adds speed')",
-        "polish": "Title screen with 3 difficulties, how-to-play, field guide, sound/music/thumbstick/calm toggles, live demo behind modal; prefs + best in src/ui/storage.ts",
+        "polish": "Title modal (CADET/PILOT/ACE difficulties, 10 SECTORS / 6 POWER-UPS / +8 OVERDRIVE, how-to, sound/music/thumbstick/calm toggles, live demo behind modal); prefs + best in src/ui/storage.ts; sector intro cards",
         "powerballs": "src/engine/types.ts:5 (PowerKind: plasma/split/chain/wide/slow/life), src/engine/constants.ts:96-104 (durations + drop weights); split = multiball, chain = lightning",
-        "specialbricks": "src/engine/types.ts:3 (BrickKind standard/angular/speed/steel), :135 (brickRejected angle|speed events); src/ui/renderer.ts:221-223 (rejection flash); levels.ts:2 (gate legend)"
+        "specialbricks": "src/engine/types.ts:3 (BrickKind standard/angular/speed/steel), :135 (brickRejected angle|speed events); src/ui/renderer.ts:221-223 (rejection flash); levels.ts:2 (gate legend); field guide on screen"
       },
-      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Title offers CADET/PILOT/ACE + live demo; desktop shot mid-run (score 50, 2 balls, TIER 0); mobile shot shows 'BALL LOST - 1 left' toast, i.e. real gameplay progression, plus LAUNCH button."
+      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors (dist entry). Title: OVERDRIVE modal (PILOT selected, ENTER THE FIELD, toggles on). Desktop: Sector 01/IGNITION card (score 50, 3 balls, LAUNCH BALL). Mobile: live flight (score 100, x1, 2 lives, ball mid-field with break particles, IN FLIGHT + thumbstick). Deepest play evidence of the group.",
+      "v2delta": "v1\u2192v2: the resume grew TypeScript game code 4668\u21925633 LOC and rebuilt dist/ (still the servable entry at dist/index.html); the title modal now advertises the expanded campaign (10 SECTORS / 6 POWER-UPS / +8 OVERDRIVE behind the CADET/PILOT/ACE picker) and both viewports are PLAY-OK with the deepest play evidence in the set (desktop Sector 01 card; mobile live ball in flight with break particles and '70 BRICKS TO BREAKTHROUGH'). The vitest suite was executed: 124/124 pass across 6 files, including an input-only autoplayer that wins all ten sectors. Scoring: 26\u219226, unchanged \u2014 juice stays 2 (working shake/flash/trails but modest next to peers); everything else holds.",
+      "spend_split": {
+        "v1_cost": 7.3964,
+        "resume_cost": 10.946
+      },
+      "routes": [
+        {
+          "actor": "orchestrator",
+          "provider": "openai-responses",
+          "model": "openai/gpt-6-astra",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        },
+        {
+          "actor": "orchestrator",
+          "provider": "openai-responses",
+          "model": "openai/gpt-6-astra",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        }
+      ]
     },
     "deepseek": {
       "orchestrator": "DeepSeek V4 Flash",
@@ -571,6 +609,249 @@
         "specialbricks": "runs/glm/index.html:199-205 (speed-locked:180 thresh 560, shield:directional, mover, heal:regenerator, bomb:explosive w/ chain :805-824, steel, armored), :361-365 (level legend)"
       },
       "play_notes": "Canvas found desktop+mobile, zero console/page errors. Title shot: full legend (brick types, powers, controls). Desktop: score 150, multiplier HUD, aim guide. Mobile: clean full-bleed portrait."
+    },
+    "hero-astra": {
+      "orchestrator": "GPT-6 Astra",
+      "worker": "GPT-6 Astra",
+      "narrator": "GPT-5.6 Luna",
+      "models": {
+        "orchestrator": "gpt-6-astra",
+        "task": "gpt-6-astra",
+        "narrator": "gpt-5.6-luna"
+      },
+      "effort": "xhigh",
+      "efforts": {
+        "orchestrator": "xhigh",
+        "task": "xhigh",
+        "narrator": "med"
+      },
+      "status": "done",
+      "end_reason": "done",
+      "duration_s": 1971.1,
+      "cost_usd": 30.3918,
+      "cost_per_actor": {
+        "orchestrator": 3.7172,
+        "narrator": 0.0352,
+        "task": 26.6395
+      },
+      "tokens": {
+        "in": 16228995,
+        "out": 179952,
+        "cached": 15470104,
+        "per_actor": {
+          "orchestrator": {
+            "in": 2241339,
+            "out": 9969,
+            "cached": 2132737
+          },
+          "narrator": {
+            "in": 933694,
+            "out": 5823,
+            "cached": 880905
+          },
+          "task": {
+            "in": 13053962,
+            "out": 164160,
+            "cached": 12456462
+          }
+        }
+      },
+      "cache_ratio": 0.9532,
+      "calls_per_actor": {
+        "orchestrator": 51,
+        "narrator": 35,
+        "task": 204
+      },
+      "tasks": {
+        "created": 5,
+        "completed": 5,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_msgs": 31,
+      "questions": 0,
+      "errors": {
+        "count": 0,
+        "brief": []
+      },
+      "title": "ASTRA \u2014 Breakout. Evolved.",
+      "description": "ASTRA \u2014 Breakout. Evolved. Two-axis paddle (move + lift to boost) across 5 sectors; breach the array to enter overdrive, where plasma piercing becomes multiball and then electric chain reactions.",
+      "entry": "dist/index.html",
+      "files": 178,
+      "loc": 1829,
+      "tests": {
+        "exists": true,
+        "command": "npm test (node --test: tests/game.test.js)",
+        "result": "pass (29 tests, 0 fail; incl. fixed-step autopilot winning all five arrays)"
+      },
+      "externals": [],
+      "console_errors": 0,
+      "page_errors": [],
+      "canvas_found": {
+        "desktop": true,
+        "mobile": true
+      },
+      "rubric": {
+        "audio": 2,
+        "breakthrough": 3,
+        "juice": 3,
+        "mobile": 3,
+        "mouse": 3,
+        "paddle2d": 3,
+        "polish": 3,
+        "powerballs": 3,
+        "specialbricks": 3
+      },
+      "rubric_total": 26,
+      "evidence": {
+        "audio": "src/game.js:126-149 (lazy WebAudio synth: oscillator+gain voices, power/overdrive/clear chords); src/main.js:58-63 (sound toggle), :181-183 (mute persistence). SFX-only, no music sequencer.",
+        "breakthrough": "src/game.js:535-547 (_enterOverdrive: breach above the array -> overdrive online, plasma pierce, speed floor 780), :548-557 (_overdriveProgress: 5 hits -> multiball, 11 hits -> chain arcs); mission rail 'Break the ceiling'",
+        "juice": "src/game.js:260 (particles/rings/floaters/bolts/drops pools), :227-228 (shake state + reduced-motion clamp), :362 (launch burst), :398-401 (ball trails), :539-546 (BREAKTHROUGH/CHAIN REACTION banners + rings)",
+        "mobile": "src/main.js:17 (thumb mode default on coarse pointers), :188-194 (Pointer/Thumb toggle); src/game.js:287-342 (pointer + thumbstick routing, clamped vertical band); mobile PLAY-OK, Thumb mode selected, stacked layout",
+        "mouse": "src/game.js:172 (pointer default mode), :287+ (canvas pointerdown/move capture), :342 (targetX/targetY from pointer); src/main.js:194 (Pointer mode hint 'Move your mouse'); desktop PLAY-OK",
+        "paddle2d": "src/game.js:342 (targetY clamped to FIELD.paddleTop/Bottom), :366-370 (vy tracked from frame delta, keyboard Y), :79-82 (rising paddle adds energy, no horizontal traps); help 'Move up to boost'",
+        "polish": "Full site shell (header/HUD/mission rail/field guide/footer), help dialog, pause/restart, best+mute+mode persistence, game-over flow ('There's always another side', score 00200 shown), reduced-motion toggle; 0 console/page errors",
+        "powerballs": "src/game.js:519-521 (kill-milestone drops: wide/plasma/split/boost + rare life), :570-593 (_drop/_collect: wide 14s, plasma pierce 12s, split multiball, boost, +1 life max 5), :548-557 (overdrive stages plasma -> multiball -> arcs)",
+        "specialbricks": "src/game.js:4 (PHYSICS: armorSpeed 740, prismAngle 20), :67-74 (canBreakBrick: regular always, armor needs speed, prism needs 20\u00b0-off-vertical matching slash), :7-9 (5 arrays with tactical briefings: Prism passage, Terminal velocity)"
+      },
+      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Title: full ASTRA site shell with live array behind overlay ('A whole new side to play', Let's break out). Desktop: played to game over (score 00200, best 00200, 'One more orbit' restart) \u2014 real run progression. Mobile: launch state, Thumb mode, paddle + ball visible, mission rail stacked below.",
+      "routes": [
+        {
+          "actor": "orchestrator",
+          "provider": "openai-responses",
+          "model": "openai/gpt-6-astra",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        },
+        {
+          "actor": "narrator",
+          "provider": "openai-responses",
+          "model": "openai/gpt-5.6-luna",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        },
+        {
+          "actor": "task",
+          "provider": "openai-responses",
+          "model": "openai/gpt-6-astra",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        }
+      ]
+    },
+    "hero-fable": {
+      "orchestrator": "Claude Fable 5.1",
+      "worker": "Claude Fable 5.1",
+      "narrator": "GPT-5.6 Luna",
+      "models": {
+        "orchestrator": "claude-fable-5-1",
+        "task": "claude-fable-5-1",
+        "narrator": "gpt-5.6-luna"
+      },
+      "effort": "xhigh",
+      "efforts": {
+        "orchestrator": "xhigh",
+        "task": "xhigh",
+        "narrator": "med"
+      },
+      "status": "stopped-capped",
+      "end_reason": "interrupted",
+      "duration_s": 7606.0,
+      "cost_usd": 78.1067,
+      "cost_per_actor": {
+        "orchestrator": 3.9065,
+        "narrator": 0.0436,
+        "task": 74.1565
+      },
+      "tokens": {
+        "in": 38904599,
+        "out": 524964,
+        "cached": 37235788,
+        "per_actor": {
+          "orchestrator": {
+            "in": 826836,
+            "out": 21973,
+            "cached": 606719
+          },
+          "narrator": {
+            "in": 1303743,
+            "out": 7043,
+            "cached": 1253396
+          },
+          "task": {
+            "in": 36774020,
+            "out": 495948,
+            "cached": 35375673
+          }
+        }
+      },
+      "cache_ratio": 0.9571,
+      "calls_per_actor": {
+        "orchestrator": 24,
+        "narrator": 52,
+        "task": 297
+      },
+      "tasks": {
+        "created": 5,
+        "completed": 4,
+        "failed": 0
+      },
+      "rollovers": 0,
+      "narrator_msgs": 50,
+      "questions": 0,
+      "errors": {
+        "count": 2,
+        "brief": [
+          "tool send_message error: not sent: at most 8 attachments per message; you gave 10. Fix the attachment or send the message without it.",
+          "tool wait error: wait cancelled: the session is stopping"
+        ]
+      },
+      "title": "OVERTOP",
+      "description": "OVERTOP \u2014 punch a hole in the bricks and get the ball into the attic above them, where it bounces on its own and the multiplier climbs; 8 capsule powers, prism/armor/lid/phase bricks, adaptive 7-tier soundtrack.",
+      "entry": "index.html",
+      "files": 28,
+      "loc": 4819,
+      "tests": {
+        "exists": true,
+        "command": "npm test (node --test tests/)",
+        "result": "pass (82 tests, 0 fail; incl. 20s sim run, life/multiplier/game-over flow, split/life/wide powerups)"
+      },
+      "externals": [],
+      "console_errors": 0,
+      "page_errors": [],
+      "canvas_found": {
+        "desktop": true,
+        "mobile": true
+      },
+      "rubric": {
+        "audio": 3,
+        "breakthrough": 3,
+        "juice": 3,
+        "mobile": 3,
+        "mouse": 3,
+        "paddle2d": 3,
+        "polish": 3,
+        "powerballs": 3,
+        "specialbricks": 3
+      },
+      "rubric_total": 27,
+      "evidence": {
+        "audio": "src/audio.js:9-17 (lazy AudioContext, setMuted, setIntensity tier 0..6 crossfade, per-frame beat scheduler), :40 (7 background layer levels, tier 0 whisper of pad), :75-80 (master bus + mute); title documents M mute",
+        "breakthrough": "src/game.js:129-130 (on-top = ball centre above highest breakable brick, below top wall = the attic), :719-722 (overtopEnter/Exit events, intensity winds down over 1s), :27 (from-above breaks score x2), :705-708 (8s on top -> heavy ball)",
+        "juice": "src/fx.js:1-2 (particles, shards, rings, popups, shake, flashes, banners, ball trails), :18-27 (pooled particles/rings/flashes/shake/trails), :34 (respects prefers-reduced-motion); desktop shot live at score 100",
+        "mobile": "src/input.js:8-15 (thumbstick radius 64, dead-zone, floatBeyond, tap-to-fire 0.22s), :43 (stick|drag schemes), :212-213 (pointer events on canvas); mobile PLAY-OK: stacked portrait, CLICK TO LAUNCH, score 250",
+        "mouse": "src/input.js:1 (mouse first in input header), :44 (default mode 'mouse'), :60-78 (mouse move/down handlers), :212-213 (pointermove/pointerdown), :235 (absolute mouse positioning); title documents mouse move, click = launch/fire",
+        "paddle2d": "src/paddle.js:10 (vertical band yMin 1040), :61-71 (vy tracked per frame), src/physics.js:142-156 (rising paddle ADDS speed / power hit, descending softens), :20 (powerHitVy 140 threshold for FX/sound)",
+        "polish": "Title panel (goal/paddle/tricky-bricks howto, controls, high score), pause (game.js:237-238), localStorage highScore+settings (main.js:20-28, :40), level flow title/playing/paused/levelclear/gameover (game.js:151), phase-brick coach marks; 0 console/page errors",
+        "powerballs": "src/balls.js:17-25 (POWERS: fire/heavy/split-multiball/magnet/wide/slow/laser/life with weighted drop table, life rare), :59-64 (rollPower), src/game.js:582 (capsule drops), :635-640 (wide/magnet/laser timers), :505-510 (magnet catch)",
+        "specialbricks": "src/bricks.js:4 (gated-hit header: steep/fast/from-above/while-solid), :29 (steel unbreakable), :56-57 (phase 2s solid/2s intangible + column offset), :108-115 (ghost solidity rules); title: Prisms steep, Armor speed, Lids from above, Phase blink"
+      },
+      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Title: OVERTOP gradient logo, goal/paddle/tricky-bricks howto, mouse/keys/touch controls, TAP/CLICK TO START. Desktop: live level 1 WARM-UP (score 100, x1, 2 lives, phase-lane coach mark, CLICK TO LAUNCH). Mobile: stacked portrait (score 250, full brick field, TAP TO LAUNCH).",
+      "routes": [
+        {
+          "actor": "narrator",
+          "provider": "openai-responses",
+          "model": "openai/gpt-5.6-luna",
+          "reason": "primary route unavailable: api error 502: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/."
+        }
+      ]
     },
     "muse": {
       "orchestrator": "Muse Spark 1.3",
@@ -1118,50 +1399,50 @@
         "narrator": "deepseek-v4-flash"
       },
       "effort": "med",
-      "status": "stopped-capped",
-      "end_reason": "interrupted",
-      "duration_s": 6001.9,
-      "cost_usd": 1.1066,
+      "status": "done",
+      "end_reason": "done",
+      "duration_s": 14195.1,
+      "cost_usd": 1.8141,
       "cost_per_actor": {
-        "orchestrator": 0.3963,
-        "narrator": 0.048,
-        "task": 0.6622
+        "orchestrator": 1.0445,
+        "narrator": 0.0958,
+        "task": 0.6739
       },
       "tokens": {
-        "in": 17934010,
-        "out": 232302,
-        "cached": 17053564,
+        "in": 21278341,
+        "out": 258860,
+        "cached": 20197109,
         "per_actor": {
           "orchestrator": {
-            "in": 900741,
-            "out": 16672,
-            "cached": 822908
+            "in": 2831839,
+            "out": 33639,
+            "cached": 2691317
           },
           "narrator": {
-            "in": 1430091,
-            "out": 7050,
-            "cached": 1376256
+            "in": 2764502,
+            "out": 11987,
+            "cached": 2630400
           },
           "task": {
-            "in": 15603178,
-            "out": 208580,
-            "cached": 14854400
+            "in": 15682000,
+            "out": 213234,
+            "cached": 14875392
           }
         }
       },
-      "cache_ratio": 0.9509,
+      "cache_ratio": 0.9492,
       "calls_per_actor": {
-        "orchestrator": 48,
-        "narrator": 53,
-        "task": 333
+        "orchestrator": 89,
+        "narrator": 74,
+        "task": 343
       },
       "tasks": {
-        "created": 8,
-        "completed": 5,
+        "created": 11,
+        "completed": 8,
         "failed": 3
       },
       "rollovers": 0,
-      "narrator_msgs": 38,
+      "narrator_msgs": 46,
       "questions": 0,
       "errors": {
         "count": 13,
@@ -1184,11 +1465,11 @@
       "description": "BREAKTOP \u2014 break through, get on top, go overdrive. Keep the ball above the rim to grow the payout; charge past 55% drops a reward capsule.",
       "entry": "index.html",
       "files": 15,
-      "loc": 3054,
+      "loc": 3373,
       "tests": {
         "exists": false,
         "command": null,
-        "result": "none (no test files found; README cites headless-Chromium Playwright verification only)"
+        "result": "none (no test files; README cites headless-Chromium Playwright verification only)"
       },
       "externals": [],
       "console_errors": 0,
@@ -1212,15 +1493,21 @@
       "evidence": {
         "audio": "js/audio.js:16-17 (music layers 0..3 + overdrive heat), :181-214 (procedural 8th-note music stepper, layered hats/lead), :52-53 (setLayers); js/game.js:500 (combo drives layers), :692 (lift drives paddle-voice)",
         "breakthrough": "js/game.js:863-884 (checkOverdriveEntry: ball above topMost-rim while rising -> OVERDRIVE! text + flashScreen + shake + layer lift), :885-900 (rim exit triggers payout), controls panel documents the loop",
-        "juice": "js/particles.js:2 (pooled particles, score popups, floating texts), js/game.js:344-358 (slow-mo timeScale), :693 (lift-scaled shake), :1213 (overdrive heat vignette); desktop shot: +136/+124 popups, COMBO x3",
-        "mobile": "js/input.js:12 (drag | stick modes), :68-73 (sliding-stick touch origin), :50-57 (mouse/pointer zones); mobile shot: DRAG badge, TAP TO LAUNCH; mobile PLAY-OK",
+        "juice": "js/particles.js:2 (pooled particles, score popups, floating texts), js/game.js:344-358 (slow-mo timeScale), :693 (lift-scaled shake), :1213 (overdrive heat vignette); desktop live at score 112",
+        "mobile": "js/input.js:12 (drag | stick modes), :68-73 (sliding-stick touch origin), :50-57 (mouse/pointer zones); mobile shot: DRAG badge, TAP TO LAUNCH, stacked layout; mobile PLAY-OK",
         "mouse": "js/input.js:51-57 (mousemove maps to paddle target, lower-zone-gated); panel legend 'PADDLE - MOUSE / WASD'; desktop PLAY-OK",
         "paddle2d": "js/game.js:463-469 (p.vy lerped, y clamped to PADDLE.bandTop/BandBottom), :470-472 (vertical-velocity squash-and-stretch), :675-680 (rising lift adds up to +150 ball speed)",
-        "polish": "Run-status + controls + brick-code side panels, charge/lives/combo/multiplier HUD, pause/sound, localStorage best (:44); desktop shot live (score 483, WIDE capsule falling, best combo x3)",
-        "powerballs": "js/powerups.js:11-18 (FIRE/GIANT/SLOW/MAGNET/STICKY/WIDE/BURST kinds), :24-26 (weighted drop table); desktop shot shows falling WIDE capsule caught mid-game",
+        "polish": "Run-status + controls + brick-code side panels, charge/lives/combo/multiplier HUD, pause/sound, localStorage best (:44); title + desktop + mobile all live-rendered, 0 errors",
+        "powerballs": "js/powerups.js:11-18 (FIRE/GIANT/SLOW/MAGNET/STICKY/WIDE/BURST kinds), :24-26 (weighted drop table)",
         "specialbricks": "js/bricks.js:54-78 (canBreak: A steep-only, S speed-gate, X speed+steep; failReason STEEP ONLY / NEED SPEED / SPEED + STEEP), title shot codex adds armored/unstable-chain/spinner-free-hit (6 codes)"
       },
-      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Richest title screen in group (run status, controls, 6 brick codes, overdrive rules). Desktop: live combo x3 with score popups and a falling WIDE capsule. Mobile: clean stacked layout with DRAG badge and tap-to-launch. Most complete play evidence in group B."
+      "play_notes": "PLAY-OK desktop + mobile, 0 console/page errors. Title: BREAKTOP (run-status panel, controls, 6 brick codes, overdrive rules, TAP TO START, charge/lives HUD). Desktop: live LV 1 CONTACT (score 112, 2 lives, best combo x1, TAP/SPACE TO LAUNCH). Mobile: stacked (score 112, DRAG badge, TAP TO LAUNCH). Richest chrome in group B, still perfect.",
+      "v2delta": "v1\u2192v2: the resume grew game code 3054\u21923373 LOC with no structural change (still root index.html + css/ + js/, no test files) and BREAKTOP remains PLAY-OK on both viewports with zero errors and the richest chrome in group B (run-status/controls/brick-code panels, charge HUD, desktop live at score 112, mobile stacked with DRAG badge). Scoring: 27\u219227, unchanged \u2014 still the only perfect score; tests remain none (README cites headless-Chromium Playwright verification only, not runnable here).",
+      "spend_split": {
+        "v1_cost": 1.1066,
+        "resume_cost": 0.7075
+      },
+      "routes": []
     },
     "openrouter-high": {
       "orchestrator": "Kimi K3",
@@ -1543,12 +1830,14 @@
     }
   },
   "ranking_by_rubric_total": [
+    "hero-fable",
     "opencode-med",
+    "anthropic-high",
     "astra",
     "openai-med",
     "openai-high",
     "anthropic-med",
-    "anthropic-high",
+    "hero-astra",
     "muse",
     "glm",
     "openrouter-high",

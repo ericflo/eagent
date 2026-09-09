@@ -81,6 +81,28 @@ const input = new Input(canvas, {
         game.dragMode = !game.dragMode;
         storage.set('overtop.dragMode', game.dragMode);
         break;
+      case 'toggleFx':
+        fx.toggleLite();
+        break;
+      case 'musicVolDown':
+        audio.setMusicVolume(Math.round((audio.musicVolume - 0.1) * 10) / 10);
+        break;
+      case 'musicVolUp':
+        audio.setMusicVolume(Math.round((audio.musicVolume + 0.1) * 10) / 10);
+        break;
+      case 'sfxVolDown':
+        audio.setSfxVolume(Math.round((audio.sfxVolume - 0.1) * 10) / 10);
+        audio.play('ui');
+        break;
+      case 'sfxVolUp':
+        audio.setSfxVolume(Math.round((audio.sfxVolume + 0.1) * 10) / 10);
+        audio.play('ui');
+        break;
+      case 'resetHints':
+        game.resetHints();
+        game.showToast('HINTS RESET', 190);
+        audio.play('ui');
+        break;
       case 'closeSettings':
         closeSettings();
         break;

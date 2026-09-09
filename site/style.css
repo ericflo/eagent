@@ -4055,6 +4055,13 @@ html:not(.enhanced) .expand-label {
   display: flex;
   flex-direction: column;
 }
+.game-card-featured {
+  border-color: var(--yellow);
+  background: var(--surface-2);
+}
+.game-card-featured img {
+  border-bottom-color: var(--yellow);
+}
 .game-card img {
   width: 100%;
   height: auto;

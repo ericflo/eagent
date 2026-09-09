@@ -362,6 +362,12 @@ Object.assign(Game.prototype, {
     this.stars.update(rdt, this.odActive ? 1 : 0, this.gutterV || 0);
     this.updateHud(rdt);
 
+    // safety net: if every brick is gone but the clear sequence hasn't fired
+    // (e.g. a brick was removed outside the break handler), fire it now.
+    if ((this.state === S.PLAY || this.state === S.SERVE) &&
+        this.bricks.length > 0 && this.remaining > 0 &&
+        !this.bricks.some(x => x.alive)) this.levelCleared();
+
     // decay feedback timers
     if (this.shakeT > 0) this.shakeT = Math.max(0, this.shakeT - rdt * 1.6);
     this.flash = Math.max(0, this.flash - rdt * 2.6);

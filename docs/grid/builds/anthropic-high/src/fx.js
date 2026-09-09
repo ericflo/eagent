@@ -183,9 +183,17 @@ class FloatText {
     this.jitter = opts.jitter ?? 0;
     this.weight = opts.weight ?? 800;
     this.alive = true;
+    // Where it was born + how old it is: used by FX.text() to keep simultaneous pops
+    // from stacking on top of each other (the label drifts up as it ages, so the live
+    // x/y is a bad key for "did these two spawn in the same place?").
+    this.spawnX = x;
+    this.spawnY = y;
+    this.age = 0;
+    this.mergeable = opts.merge !== false;
   }
   update(dt) {
     this.life -= dt;
+    this.age += dt;
     if (this.life <= 0) this.alive = false;
     this.y += this.vy * dt;
     this.vy *= Math.pow(0.94, dt * 60);
@@ -194,6 +202,11 @@ class FloatText {
 }
 
 const NUM_RE = /^\+([\d,]+)$/;
+/** Overlap-avoidance tuning for floating labels. */
+const TEXT_RECENT = 0.25;   // s — a label younger than this still "owns" its spot
+const TEXT_NEAR = 40;       // px — how close counts as the same spot
+const TEXT_STACK = 18;      // px — vertical step when stacking upward
+const TEXT_STACK_MAX = 5;   // never push more than this many steps up
 
 export class FX {
   constructor(max = 1000) {
@@ -541,31 +554,67 @@ export class FX {
     this.zoomPunch(0.03, 0.28);
   }
 
+  /**
+   * Floating label. Two labels never end up on top of each other:
+   *  1. two "+N" pops born in the same spot within TEXT_RECENT seconds MERGE into one
+   *     bigger number (so a four-brick explosion reads "+800", not "+2+2+200"), and
+   *  2. anything that cannot merge (words, `merge:false`, a number next to a word) is
+   *     STACKED upward in TEXT_STACK-px steps until it clears what is already there.
+   * API unchanged: `text(x, y, str, {hue, size, life, merge, ...})`.
+   */
   text(x, y, str, opts = {}) {
-    if (!this.enabled) return;
-    // Merge nearby score pops so a hot streak reads as one big number.
+    if (!this.enabled) return null;
     const m = NUM_RE.exec(str);
     const value = m ? Number(m[1].replace(/,/g, '')) : 0;
-    if (value > 0 && opts.merge !== false) {
+    const mergeable = opts.merge !== false;
+
+    // ---- 1. merge nearby score pops so a hot streak reads as one big number
+    if (value > 0 && mergeable) {
+      let best = null;
+      let bestD = Infinity;
       for (const t of this.texts) {
-        if (t.value > 0 && Math.abs(t.x - x) < 44 && Math.abs(t.y - y) < 34 && t.life > 0.15) {
-          t.value += value;
-          t.text = `+${t.value.toLocaleString('en-US')}`;
-          t.size = Math.min(46, t.size + 3.5);
-          t.life = Math.max(t.life, t.maxLife * 0.85);
-          t.pop = 1;
-          t.hue = opts.hue ?? t.hue;
-          t.x = lerp(t.x, x, 0.35);
-          t.y = lerp(t.y, y, 0.35);
-          return;
-        }
+        if (t.value <= 0 || !t.mergeable || t.life <= 0.15) continue;
+        if (t.age > TEXT_RECENT) continue;
+        const d = Math.hypot(t.spawnX - x, t.spawnY - y);
+        if (d < TEXT_NEAR && d < bestD) { best = t; bestD = d; }
+      }
+      if (best) {
+        best.value += value;
+        best.text = `+${best.value.toLocaleString('en-US')}`;
+        best.size = Math.min(46, best.size + 3.5);
+        best.life = Math.max(best.life, best.maxLife * 0.85);
+        best.pop = 1;
+        best.age = 0;                       // it keeps absorbing while the streak runs
+        best.hue = opts.hue ?? best.hue;
+        best.x = lerp(best.x, x, 0.35);
+        best.y = lerp(best.y, y, 0.35);
+        best.spawnX = lerp(best.spawnX, x, 0.35);
+        best.spawnY = lerp(best.spawnY, y, 0.35);
+        return best;
       }
     }
+
+    // ---- 2. stack upward past anything freshly spawned in the same place
+    let ty = y;
+    for (let i = 0; i < TEXT_STACK_MAX; i++) {
+      let blocked = false;
+      for (const t of this.texts) {
+        // Stacking looks at every label that is still bright, not just the freshest
+        // ones: a 0.4 s-old pop has barely drifted and would still collide.
+        if (!t.alive || t.life <= t.maxLife * 0.35) continue;
+        if (Math.abs(t.x - x) < TEXT_NEAR && Math.abs(t.y - ty) < TEXT_STACK) { blocked = true; break; }
+      }
+      if (!blocked) break;
+      ty -= TEXT_STACK;
+    }
+    ty = Math.max(28, ty);
+
     const cap = this.lite ? 22 : 44;
     if (this.texts.length > cap) this.texts.shift();
-    const f = new FloatText(x, y, str, { ...opts, value });
+    const f = new FloatText(x, ty, str, { ...opts, value });
     f.pop = 1;
     this.texts.push(f);
+    return f;
   }
 
   /** Trauma-style shake: magnitude decays quadratically and adds a little roll. */

@@ -166,6 +166,7 @@ export class Game {
     this.seenKinds = new Set(storage.get('overtop.seenKinds', []) || []);
     this.activePowers = [];  // [{type, remaining, duration}] for the HUD
     this.levelClearTimer = 0;
+    this.levelBonus = 0;     // last level-clear bonus, shown on the level-clear card
     this.minSpeed = 320;
     this.maxSpeed = 900;
     this.cmd = { mode: 'drive', x: W / 2, y: 0, dx: 0, dy: 0 };
@@ -242,11 +243,12 @@ export class Game {
     const kinds = [];
     for (const b of this.bricks) if (!kinds.includes(b.kind)) kinds.push(b.kind);
     const newKinds = kinds.filter((k) => !this.seenKinds.has(k));
-    this.levelIntro = { name: def.name, level: n, newKinds, t: 2.6, life: 2.6 };
+    // `levelIntro` IS the level-start banner (render draws it); no second showBanner.
+    this.levelIntro = { name: def.name, level: n, newKinds, t: 2.8, life: 2.8 };
+    this.banner = null;
     this.hint = null;
     this.hintQueue = newKinds.slice();
-    this.hintGap = 2.2;      // let the level banner read first
-    this.showBanner(`LEVEL ${n}`, def.name, 190, 2.0);
+    this.hintGap = 3.0;      // let the level banner read first
   }
 
 
@@ -503,7 +505,7 @@ export class Game {
       this.nextLifeAt += EXTRA_LIFE_EVERY;
       this.lives++;
       audio.play('powerup');
-      fx.text(W / 2, this.field.top + 190, 'EXTRA LIFE', { hue: 50, size: 26, life: 1.6 });
+      // One notice only: the toast. (There used to be a floating fx.text here too.)
       fx.flash(50, 0.25, 0.4);
       this.showToast('EXTRA LIFE', 50);
     }
@@ -563,6 +565,8 @@ export class Game {
     );
     fx.setIntensity(this.intensity);
     audio.setIntensity(this.intensity);
+    audio.setState?.(this.state);
+    audio.setOvertop?.(this.overtop);
 
     if (this.state === 'title' || this.state === 'gameover' || this.state === 'paused') {
       for (const b of this.bricks) b.update(dt);
@@ -967,14 +971,14 @@ export class Game {
     if (res.action === 'bounce') {
       brick.denyFlash = 1;
       brick.shake = 1;
-      if (res.sfx) audio.play(res.sfx, { pan });
+      if (res.sfx) audio.play(res.sfx, { pan, combo: this.overtopStreak });
       fx.sparks(info.nx ? brick.cx + info.nx * brick.w / 2 : ball.x,
         info.ny ? brick.cy + info.ny * brick.h / 2 : ball.y, 5, brick.hue, 140);
       return 'reflect';
     }
 
     // --- destruction ---
-    if (res.sfx) audio.play(res.sfx, { pan });
+    if (res.sfx) audio.play(res.sfx, { pan, combo: this.overtopStreak });
     this.destroyBrick(brick, ball);
 
     if (res.explode) this.explode(brick, ball, 0);
@@ -1131,8 +1135,10 @@ export class Game {
     this.levelClearTimer = 2.4;
     this.stats.levelsCleared++;
     const bonus = 500 + this.level * 150 + Math.floor(this.bestOvertop) * 50;
+    this.levelBonus = bonus;
     this.addScore(bonus);
-    this.showBanner('LEVEL CLEAR', `BONUS +${bonus}`, 140, 2.4);
+    // The level-clear CARD is the presentation (render.js draws the bonus row) — no banner.
+    this.banner = null;
     audio.play('levelup');
     fx.flash(140, 0.3, 0.6);
     fx.shake(8, 0.4);
