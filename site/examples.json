@@ -1,0 +1,3 @@
+{
+  "presets": ["openrouter-med", "opencode-med", "openai-med", "anthropic-med"]
+}

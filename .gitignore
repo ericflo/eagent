@@ -7,3 +7,6 @@ coverage.out
 
 # Session logs of eagent runs made inside this repository (the docs run); never commit them.
 .agents/eagent/sessions/
+
+# Development-only dependencies for the static GitHub Pages site.
+/site/node_modules/

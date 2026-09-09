@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#151613" />
+    <title>Page not found — eagent</title>
+    <link rel="icon" href="/eagent/assets/favicon.svg" />
+    <link rel="stylesheet" href="/eagent/style.css" />
+    <style>
+      main {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 25px;
+        max-width: 800px;
+      }
+      main .eyebrow {
+        color: var(--orange);
+        margin: 0;
+      }
+      main h1 {
+        font-size: clamp(52px, 9vw, 100px);
+      }
+      main p:not(.eyebrow) {
+        color: var(--muted);
+        max-width: 440px;
+      }
+      main .button {
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="section-wrap">
+      <p class="eyebrow">404 / A SMALL DETOUR</p>
+      <h1>This page<br />is off the map.</h1>
+      <p>
+        The work continues over on the home page. You can find the project,
+        documentation, and getting-started guide there.
+      </p>
+      <a class="button button-primary" href="/eagent/"
+        >Back to eagent <span aria-hidden="true">→</span></a
+      >
+    </main>
+  </body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "eagent-website",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development tools for the static eagent GitHub Pages site.",
+  "scripts": {
+    "check": "python3 ../scripts/build-site.py && node --check script.js && prettier --check index.template.html style.css script.js 404.html examples.json",
+    "test": "node ../scripts/test-site-browser.mjs",
+    "format": "prettier --write index.template.html style.css script.js 404.html examples.json",
+    "build": "python3 ../scripts/build-site.py",
+    "social-card": "node ../scripts/site-social.mjs"
+  },
+  "devDependencies": {
+    "axe-core": "4.13.0",
+    "playwright": "1.63.0",
+    "prettier": "3.9.6"
+  }
+}

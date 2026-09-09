@@ -1,0 +1,1657 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#151613" />
+    <title>eagent — Big work. One binary.</title>
+    <meta
+      name="description"
+      content="A coding agent with a planner, a builder, and a narrator. Three cooperating actors, a replayable local history, your choice of models. Open source. One Go binary."
+    />
+    <link rel="canonical" href="https://ericflo.github.io/eagent/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="eagent" />
+    <meta property="og:title" content="eagent — Big work. One binary." />
+    <meta
+      property="og:description"
+      content="A planner. A builder. A voice that keeps you in the loop. Meet the three-actor coding agent built to see it through."
+    />
+    <meta property="og:url" content="https://ericflo.github.io/eagent/" />
+    <meta
+      property="og:image"
+      content="https://ericflo.github.io/eagent/assets/social-card.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+    <link
+      rel="preload"
+      href="assets/fonts/space-grotesk.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="assets/fonts/dm-sans.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="style.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <svg
+      class="icon-definitions"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <symbol id="i-arrow" viewBox="0 0 24 24">
+        <path d="M4 12h15m-6-6 6 6-6 6" />
+      </symbol>
+      <symbol id="i-up-right" viewBox="0 0 24 24">
+        <path d="M6 18 18 6M6 6h12v12" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect x="8" y="8" width="12" height="12" rx="2" />
+        <path d="M15 8V4H4v11h4" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" />
+      </symbol>
+      <symbol id="i-github" viewBox="0 0 24 24">
+        <path
+          fill="currentColor"
+          stroke="none"
+          d="M12 .8A11.2 11.2 0 0 0 8.46 22.63c.56.1.77-.24.77-.54v-2.08c-3.13.68-3.79-1.33-3.79-1.33-.51-1.3-1.24-1.65-1.24-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.73 1.16 1.73 1.16 1 1.72 2.63 1.22 3.27.93.1-.72.4-1.22.71-1.5-2.5-.28-5.13-1.25-5.13-5.56 0-1.23.44-2.23 1.16-3.02-.12-.28-.5-1.43.11-2.98 0 0 .95-.3 3.08 1.16a10.73 10.73 0 0 1 5.6 0c2.14-1.45 3.08-1.16 3.08-1.16.61 1.55.23 2.7.11 2.98.72.79 1.15 1.79 1.15 3.02 0 4.33-2.63 5.27-5.14 5.55.4.35.77 1.03.77 2.08v3.09c0 .3.2.65.78.54A11.2 11.2 0 0 0 12 .8Z"
+        />
+      </symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24">
+        <path d="m4 6 6 6-6 6m9 0h7" />
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24">
+        <path d="m9 5 10 7-10 7Z" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M6 18 18 6" />
+      </symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24">
+        <path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" />
+      </symbol>
+      <symbol id="i-mark" viewBox="0 0 40 40">
+        <path
+          fill="currentColor"
+          stroke="none"
+          d="M6 4h30l-5 7H13v5h18l-5 7H13v5h23l-5 7H6z"
+        />
+      </symbol>
+    </svg>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="wordmark" href="#" aria-label="eagent home"
+          ><span class="brand-mark"
+            ><svg><use href="#i-mark" /></svg></span
+          >eagent<span class="wordmark-period">.</span></a
+        >
+        <button
+          class="menu-toggle"
+          type="button"
+          aria-label="Open navigation"
+          aria-expanded="false"
+          aria-controls="navigation"
+        >
+          <span></span><span></span>
+        </button>
+        <nav id="navigation" class="navigation" aria-label="Main navigation">
+          <a href="#architecture">The idea</a><a href="#features">The details</a
+          ><a href="#in-practice">In practice</a
+          ><a href="#get-started">Get started</a>
+        </nav>
+        <a
+          class="header-github"
+          aria-label="View source for eagent on GitHub"
+          href="https://github.com/ericflo/eagent"
+          ><svg class="icon"><use href="#i-github" /></svg
+          ><span>View source</span
+          ><svg class="icon small"><use href="#i-up-right" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero section-wrap" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            <span class="status-dot"></span> OPEN SOURCE. READY FOR REAL WORK.
+          </p>
+          <h1 id="hero-title">Big work.<br /><span>One binary.</span></h1>
+          <p class="hero-description">
+            A planner. A builder. A voice that keeps you in the loop. eagent
+            brings three cooperating actors together in a coding agent built to
+            see it through.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#get-started"
+              >Meet your new agent
+              <svg class="icon"><use href="#i-arrow" /></svg></a
+            ><a class="text-link" href="#walkthrough"
+              ><span class="play-icon"
+                ><svg class="icon"><use href="#i-play" /></svg></span
+              >See how it works</a
+            >
+          </div>
+          <div class="hero-install">
+            <span aria-hidden="true">$</span
+            ><code id="hero-command"
+              >go install github.com/ericflo/eagent/cmd/eagent@latest</code
+            ><button
+              class="copy-button"
+              type="button"
+              data-copy="hero-command"
+              aria-label="Copy install command"
+            >
+              <svg class="icon"><use href="#i-copy" /></svg>
+            </button>
+          </div>
+          <p class="hero-footnote">Your machine. Your models. Your history.</p>
+        </div>
+        <div
+          class="hero-art"
+          role="img"
+          aria-label="The orchestrator, task worker, and narrator orbit a single shared event log. Three actors working together inside one binary."
+        >
+          <div class="art-coordinate coordinate-top">
+            FIG. 01 <span>THE COOPERATING SYSTEM</span>
+          </div>
+          <svg
+            class="orbit-art"
+            viewBox="0 0 600 560"
+            fill="none"
+            aria-hidden="true"
+          >
+            <defs>
+              <radialGradient id="core-glow">
+                <stop stop-color="#f08050" stop-opacity=".16" />
+                <stop offset="1" stop-color="#f08050" stop-opacity="0" />
+              </radialGradient>
+              <linearGradient
+                id="core-fill"
+                x1="250"
+                y1="220"
+                x2="360"
+                y2="340"
+                gradientUnits="userSpaceOnUse"
+              >
+                <stop stop-color="#f69c70" />
+                <stop offset="1" stop-color="#df683a" />
+              </linearGradient>
+              <pattern
+                id="art-grid"
+                width="28"
+                height="28"
+                patternUnits="userSpaceOnUse"
+              >
+                <circle cx="1" cy="1" r=".8" fill="#a5a698" opacity=".2" />
+              </pattern>
+            </defs>
+            <rect
+              x="26"
+              y="26"
+              width="548"
+              height="508"
+              fill="url(#art-grid)"
+            />
+            <circle cx="300" cy="280" r="225" fill="url(#core-glow)" />
+            <circle
+              cx="300"
+              cy="280"
+              r="218"
+              stroke="#44463c"
+              stroke-dasharray="1 9"
+            />
+            <path
+              d="M300 42v36m0 404v36M62 280h36m404 0h36M293 52h14m-14 456h14M72 273v14m456-14v14"
+              stroke="#74776a"
+            />
+            <g class="orbit orbit-plan">
+              <ellipse
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(-35 300 280)"
+                stroke="#f08050"
+                stroke-opacity=".58"
+              />
+              <ellipse
+                class="orbit-trail"
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(-35 300 280)"
+                stroke="#ffc8a4"
+                stroke-width="2.5"
+                stroke-dasharray="3 999"
+                pathLength="1000"
+              />
+            </g>
+            <g class="orbit orbit-build">
+              <ellipse
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(85 300 280)"
+                stroke="#9cb89d"
+                stroke-opacity=".58"
+              />
+              <ellipse
+                class="orbit-trail"
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(85 300 280)"
+                stroke="#bed8bd"
+                stroke-width="2.5"
+                stroke-dasharray="3 999"
+                pathLength="1000"
+              />
+            </g>
+            <g class="orbit orbit-narrate">
+              <ellipse
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(25 300 280)"
+                stroke="#d3cd93"
+                stroke-opacity=".58"
+              />
+              <ellipse
+                class="orbit-trail"
+                cx="300"
+                cy="280"
+                rx="212"
+                ry="100"
+                transform="rotate(25 300 280)"
+                stroke="#f3ebae"
+                stroke-width="2.5"
+                stroke-dasharray="3 999"
+                pathLength="1000"
+              />
+            </g>
+            <circle cx="300" cy="280" r="70" fill="#191a16" stroke="#5c4936" />
+            <rect
+              x="257"
+              y="237"
+              width="86"
+              height="86"
+              rx="23"
+              fill="url(#core-fill)"
+            />
+            <path
+              d="M278 257h46l-8 10h-27v8h27l-8 10h-19v8h35l-8 10h-38z"
+              fill="#29241b"
+            />
+            <g class="art-node">
+              <circle cx="438" cy="123" r="7" fill="#f08050" />
+              <circle
+                cx="438"
+                cy="123"
+                r="14"
+                stroke="#f08050"
+                stroke-opacity=".4"
+              />
+              <path d="m449 114 24-27h60" stroke="#87634d" />
+              <text x="475" y="74" fill="#f29b72">01 / PLAN</text>
+            </g>
+            <g class="art-node">
+              <circle cx="301" cy="492" r="7" fill="#a4bba0" />
+              <circle
+                cx="301"
+                cy="492"
+                r="14"
+                stroke="#a4bba0"
+                stroke-opacity=".4"
+              />
+              <path d="m313 498 28 22h90" stroke="#61715d" />
+              <text x="350" y="511" fill="#b1c8ae">02 / BUILD</text>
+            </g>
+            <g class="art-node">
+              <circle cx="95" cy="226" r="7" fill="#d9d094" />
+              <circle
+                cx="95"
+                cy="226"
+                r="14"
+                stroke="#d9d094"
+                stroke-opacity=".4"
+              />
+              <path d="m86 218-26-32H26" stroke="#7d7858" />
+              <text x="26" y="169" fill="#d9d094">03 / NARRATE</text>
+            </g>
+            <text
+              x="300"
+              y="384"
+              text-anchor="middle"
+              class="core-label"
+              fill="#b3b3a6"
+            >
+              ONE SHARED EVENT LOG
+            </text>
+          </svg>
+          <div class="art-coordinate coordinate-bottom">
+            <span class="art-cross">+</span> INDEPENDENT CONTEXTS. SHARED
+            PURPOSE. <span class="art-cross">+</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="principles section-wrap" aria-label="At a glance">
+        <div>
+          <span class="principle-number">03</span
+          ><span
+            >Specialized actors<br /><strong
+              >Each with a clear job.</strong
+            ></span
+          >
+        </div>
+        <div>
+          <span class="principle-number">01</span
+          ><span
+            >Self-contained binary<br /><strong
+              >Go + bash. That’s it.</strong
+            ></span
+          >
+        </div>
+        <div>
+          <svg class="principle-icon" viewBox="0 0 40 40" aria-hidden="true">
+            <path d="M10 7h20v26H10zM15 14h10m-10 6h10m-10 6h6" /></svg
+          ><span
+            >Append-only history<br /><strong
+              >Every event, on disk.</strong
+            ></span
+          >
+        </div>
+        <div>
+          <svg class="principle-icon" viewBox="0 0 40 40" aria-hidden="true">
+            <path
+              d="M12 10H6v6m0-6 8 8m14 12h6v-6m0 6-8-8M32 15a13 13 0 0 0-20-7M8 25a13 13 0 0 0 20 7"
+            /></svg
+          ><span
+            >Interrupt. Resume.<br /><strong
+              >Keep the work moving.</strong
+            ></span
+          >
+        </div>
+      </div>
+
+      <section id="architecture" class="light-section architecture">
+        <div class="section-wrap">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">01 — DIVIDE THE ATTENTION</p>
+              <h2>Good work takes<br />a few different hats.</h2>
+            </div>
+            <p>
+              Planning a project, writing the code, and keeping a person
+              informed are different jobs. eagent gives each one its own actor,
+              context, and model.
+            </p>
+          </div>
+          <div class="actor-grid">
+            <article class="actor-card actor-orchestrator">
+              <div class="actor-card-top">
+                <span class="actor-number">01</span
+                ><svg viewBox="0 0 100 90" aria-hidden="true">
+                  <path d="M50 14v24M20 68V38h60v30M50 38v30" />
+                  <rect x="37" y="3" width="26" height="22" rx="3" />
+                  <rect x="9" y="66" width="22" height="20" rx="3" />
+                  <rect x="39" y="66" width="22" height="20" rx="3" />
+                  <rect x="69" y="66" width="22" height="20" rx="3" />
+                </svg>
+              </div>
+              <p class="actor-role">THE BIG PICTURE</p>
+              <h3>Orchestrator</h3>
+              <p>
+                Understands the goal. Breaks it into self-contained tasks.
+                Delegates, checks the result, and decides when the work is
+                actually done.
+              </p>
+              <div class="actor-context">
+                <span class="status-dot"></span>Continuous context
+              </div>
+              <p class="actor-default">
+                Example <span>{{EXAMPLE_ORCHESTRATOR}}</span>
+              </p>
+            </article>
+            <article class="actor-card actor-worker">
+              <div class="actor-card-top">
+                <span class="actor-number">02</span
+                ><svg viewBox="0 0 100 90" aria-hidden="true">
+                  <path d="m32 24-22 21 22 21m36-42 22 21-22 21M59 12 41 78" />
+                </svg>
+              </div>
+              <p class="actor-role">THE FOCUSED BUILDER</p>
+              <h3>Task worker</h3>
+              <p>
+                Takes one well-defined task and gets to work. Reads, writes,
+                runs, tests, and reports back. Independent tasks can run in
+                parallel.
+              </p>
+              <div class="actor-context">
+                <span class="status-dot"></span>Fresh context for every task
+              </div>
+              <p class="actor-default">Example <span>{{EXAMPLE_TASK}}</span></p>
+            </article>
+            <article class="actor-card actor-narrator">
+              <div class="actor-card-top">
+                <span class="actor-number">03</span
+                ><svg viewBox="0 0 100 90" aria-hidden="true">
+                  <path d="M12 12h76v52H43L24 80V64H12zM28 31h44M28 44h28" />
+                </svg>
+              </div>
+              <p class="actor-role">YOUR POINT OF CONTACT</p>
+              <h3>Narrator</h3>
+              <p>
+                Watches the work and tells you what matters. Shares concrete
+                progress, asks when input is needed, and delivers the final
+                report.
+              </p>
+              <div class="actor-context">
+                <span class="status-dot"></span>Continuous, compact observations
+              </div>
+              <p class="actor-default">
+                Example <span>{{EXAMPLE_NARRATOR}}</span>
+              </p>
+            </article>
+          </div>
+          <p class="architecture-note">
+            <span class="small-rule"></span>Three independent perspectives. All
+            reading and writing the same local event log.
+          </p>
+          <div id="walkthrough" class="walkthrough">
+            <div class="walkthrough-heading">
+              <div>
+                <p class="eyebrow">ONE REQUEST, THREE ACTORS</p>
+                <h3>How the actors work together.</h3>
+              </div>
+              <span class="demo-label">Example workflow</span>
+            </div>
+            <div class="walkthrough-request">
+              <span>YOUR REQUEST</span>
+              <p>“Build a Breakout game with touch controls.”</p>
+            </div>
+            <p class="walkthrough-instruction">
+              Select a stage to trace the active actors and the flow of work.
+            </p>
+            <div class="walkthrough-layout">
+              <div
+                class="step-tabs"
+                role="tablist"
+                aria-label="Example workflow stages"
+                aria-orientation="vertical"
+              >
+                <button
+                  role="tab"
+                  id="step-plan"
+                  aria-controls="step-panel"
+                  aria-selected="true"
+                  data-step="plan"
+                >
+                  <span>01</span
+                  ><span
+                    >Orchestrator delegates<small
+                      >Request → task briefs</small
+                    ></span
+                  ><svg class="icon" aria-hidden="true">
+                    <use href="#i-arrow" />
+                  </svg>
+                </button>
+                <button
+                  role="tab"
+                  id="step-build"
+                  aria-controls="step-panel"
+                  aria-selected="false"
+                  tabindex="-1"
+                  data-step="build"
+                >
+                  <span>02</span
+                  ><span
+                    >Workers implement<small
+                      >Task briefs → code &amp; reports</small
+                    ></span
+                  ><svg class="icon" aria-hidden="true">
+                    <use href="#i-arrow" />
+                  </svg>
+                </button>
+                <button
+                  role="tab"
+                  id="step-verify"
+                  aria-controls="step-panel"
+                  aria-selected="false"
+                  tabindex="-1"
+                  data-step="verify"
+                >
+                  <span>03</span
+                  ><span
+                    >Orchestrator verifies<small
+                      >Files &amp; reports → checked result</small
+                    ></span
+                  ><svg class="icon" aria-hidden="true">
+                    <use href="#i-arrow" />
+                  </svg>
+                </button>
+                <button
+                  role="tab"
+                  id="step-report"
+                  aria-controls="step-panel"
+                  aria-selected="false"
+                  tabindex="-1"
+                  data-step="report"
+                >
+                  <span>04</span
+                  ><span
+                    >Narrator reports<small
+                      >Verified outcome → your update</small
+                    ></span
+                  ><svg class="icon" aria-hidden="true">
+                    <use href="#i-arrow" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                id="step-panel"
+                class="step-panel"
+                role="tabpanel"
+                aria-labelledby="step-plan"
+                tabindex="0"
+              >
+                <div class="actor-flow" data-stage="plan">
+                  <div class="flow-toolbar">
+                    <span id="flow-phase">01 / DELEGATION</span
+                    ><span class="flow-key"><i></i> Active in this stage</span>
+                  </div>
+                  <div
+                    class="flow-canvas"
+                    role="img"
+                    aria-label="Your request reaches the orchestrator, which delegates a game-engine task and a touch-controls task to separate workers. The narrator observes."
+                  >
+                    <svg
+                      class="flow-edges"
+                      viewBox="0 0 760 360"
+                      preserveAspectRatio="none"
+                      aria-hidden="true"
+                    >
+                      <defs>
+                        <marker
+                          id="flow-arrow"
+                          viewBox="0 0 8 8"
+                          refX="7"
+                          refY="4"
+                          markerWidth="5"
+                          markerHeight="5"
+                          orient="auto-start-reverse"
+                        >
+                          <path d="M1 1 7 4 1 7" />
+                        </marker>
+                      </defs>
+                      <path
+                        data-edge="request"
+                        data-active="true"
+                        d="M163 108H277"
+                      />
+                      <path
+                        data-edge="engine"
+                        data-active="true"
+                        d="M467 108H502V90H536"
+                      />
+                      <path
+                        data-edge="touch"
+                        data-active="true"
+                        d="M467 108H502V270H536"
+                      />
+                      <path data-edge="verified" d="M372 160V270H319" />
+                      <path data-edge="report" d="M145 270H91V161" />
+                    </svg>
+                    <div
+                      class="flow-node flow-user"
+                      data-node="user"
+                      data-active="true"
+                      aria-hidden="true"
+                    >
+                      <svg viewBox="0 0 32 32">
+                        <circle cx="16" cy="10" r="5" />
+                        <path d="M6 28v-3a10 10 0 0 1 20 0v3" />
+                      </svg>
+                      <strong>You</strong
+                      ><span data-node-status>Request sent</span>
+                    </div>
+                    <div
+                      class="flow-node flow-orchestrator"
+                      data-node="orchestrator"
+                      data-active="true"
+                      aria-hidden="true"
+                    >
+                      <svg viewBox="0 0 32 32">
+                        <rect x="12" y="2" width="8" height="8" rx="1" />
+                        <path d="M16 10v7M6 23v-6h20v6" />
+                        <rect x="2" y="23" width="8" height="7" rx="1" />
+                        <rect x="22" y="23" width="8" height="7" rx="1" />
+                      </svg>
+                      <strong>Orchestrator</strong
+                      ><span data-node-status>Defining tasks</span>
+                    </div>
+                    <div
+                      class="flow-node flow-worker flow-engine"
+                      data-node="engine"
+                      data-active="false"
+                      aria-hidden="true"
+                    >
+                      <span class="flow-role">WORKER 01</span>
+                      <strong>Game engine</strong
+                      ><span data-node-status>Physics + tests</span>
+                      <div class="flow-work"><i></i><i></i><i></i></div>
+                    </div>
+                    <div
+                      class="flow-node flow-worker flow-touch"
+                      data-node="touch"
+                      data-active="false"
+                      aria-hidden="true"
+                    >
+                      <span class="flow-role">WORKER 02</span>
+                      <strong>Touch controls</strong
+                      ><span data-node-status>Input + tests</span>
+                      <div class="flow-work"><i></i><i></i><i></i></div>
+                    </div>
+                    <div
+                      class="flow-node flow-narrator"
+                      data-node="narrator"
+                      data-active="false"
+                      aria-hidden="true"
+                    >
+                      <svg viewBox="0 0 32 32">
+                        <path d="M3 4h26v19H14l-7 6v-6H3zM9 11h14M9 16h9" />
+                      </svg>
+                      <strong>Narrator</strong
+                      ><span data-node-status>Observing</span>
+                    </div>
+                    <span class="flow-return-label" aria-hidden="true"
+                      >Final report</span
+                    >
+                    <span class="flow-verified-label" aria-hidden="true"
+                      >Verified outcome</span
+                    >
+                  </div>
+                </div>
+                <div class="step-content" id="step-content">
+                  <h4>Turn the goal into focused tasks.</h4>
+                  <p>
+                    The orchestrator reads the project, defines how the pieces
+                    connect, and gives each worker a complete brief with
+                    acceptance criteria.
+                  </p>
+                  <p class="handoff-output">
+                    <span>OUTPUT → WORKERS</span>Two task briefs, each with the
+                    context needed to start.
+                  </p>
+                </div>
+                <div class="log-footer">
+                  <span class="status-dot"></span>Arrows show information flow
+                  through the shared event log.
+                </div>
+              </div>
+            </div>
+            <template id="step-build-content">
+              <h4>Build the independent pieces in parallel.</h4>
+              <p>
+                Each worker starts with a fresh context. It reads and edits
+                files, runs tools, and tests its part of the game.
+              </p>
+              <p class="handoff-output">
+                <span>OUTPUT → ORCHESTRATOR</span>Changed files and task
+                reports, including checks run and any unresolved issues.
+              </p>
+            </template>
+            <template id="step-verify-content">
+              <h4>Check that the pieces work together.</h4>
+              <p>
+                The orchestrator inspects the implementation and verifies the
+                result against your request.
+              </p>
+              <p class="handoff-output">
+                <span>OUTPUT → NARRATOR</span>A verified outcome, with evidence
+                and any remaining limitations.
+              </p>
+            </template>
+            <template id="step-report-content">
+              <h4>Report what was built and checked.</h4>
+              <p>
+                The narrator turns the recorded work into a useful final report:
+                what changed, where to find it, how it was tested, and what
+                remains unresolved.
+              </p>
+              <p class="handoff-output">
+                <span>OUTPUT → YOU</span>A clear account of the result. The
+                narrator also shares progress and asks for input while work is
+                running.
+              </p>
+            </template>
+          </div>
+        </div>
+      </section>
+      <section id="features" class="features section-wrap">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">02 — BUILT FOR THE LONG RUN</p>
+            <h2>The details that<br />keep work moving.</h2>
+          </div>
+          <p>
+            A useful agent has to handle what happens between the first prompt
+            and the final report. That’s where eagent’s architecture earns its
+            keep.
+          </p>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card feature-replay">
+            <p class="eyebrow">ONE REDUCER, LIVE OR REPLAYED</p>
+            <h3>Deterministic<br />session recovery.</h3>
+            <p>
+              The log reconstructs tasks, processes, and actor histories. On
+              resume, unfinished tool calls receive explicit error results and
+              running tasks are marked interrupted before work continues.
+            </p>
+            <figure
+              class="causal-diagram"
+              aria-labelledby="causal-title"
+              aria-describedby="causal-caption"
+            >
+              <div class="causal-heading">
+                <h4 id="causal-title">Preserve what the model saw.</h4>
+                <span>EXAMPLE TRACE</span>
+              </div>
+              <p class="causal-snapshot">
+                Orchestrator request includes events through <code>#39</code>.
+              </p>
+              <div class="causal-columns">
+                <div class="causal-log">
+                  <p class="causal-column-label">LOG ORDER</p>
+                  <div class="causal-event causal-late">
+                    <code>#40</code><strong>task.end</strong
+                    ><span>Worker finishes mid-call</span>
+                  </div>
+                  <div class="causal-event">
+                    <code>#41</code><strong>assistant</strong
+                    ><span>seen_seq: 39</span>
+                  </div>
+                  <div class="causal-event">
+                    <code>#42</code><strong>tool.result</strong
+                    ><span>Result of call #41</span>
+                  </div>
+                </div>
+                <svg
+                  class="causal-connections"
+                  viewBox="0 0 44 240"
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M1 120C23 120 21 40 43 40M1 200C23 200 21 120 43 120"
+                  />
+                  <path
+                    class="causal-late-path"
+                    d="M1 40C23 40 21 200 43 200"
+                  />
+                  <path class="causal-arrow" d="m37 35 6 5-6 5m0 70 6 5-6 5" />
+                  <path
+                    class="causal-late-path causal-arrow"
+                    d="m37 195 6 5-6 5"
+                  />
+                </svg>
+                <div class="causal-context">
+                  <p class="causal-column-label">REBUILT CONTEXT</p>
+                  <div class="causal-event">
+                    <code>#41</code><strong>assistant</strong
+                    ><span>The model’s response</span>
+                  </div>
+                  <div class="causal-event">
+                    <code>#42</code><strong>tool.result</strong
+                    ><span>Its matching result</span>
+                  </div>
+                  <div class="causal-event causal-late">
+                    <code>#40</code><strong>task report</strong
+                    ><span>Delivered after the call</span>
+                  </div>
+                </div>
+              </div>
+              <figcaption id="causal-caption">
+                <code>seen_seq</code> records the request’s visibility boundary.
+                The worker’s report arrived after that boundary, so replay
+                delivers it after the response and its tool result.
+              </figcaption>
+            </figure>
+            <a
+              class="text-link recovery-source"
+              href="https://github.com/ericflo/eagent/blob/main/internal/state/views.go"
+              >Read the conversation reducer
+              <svg class="icon"><use href="#i-up-right" /></svg
+            ></a>
+          </article>
+          <article class="feature-card feature-dossier">
+            <p class="eyebrow">CONTEXT WITH A PAPER TRAIL</p>
+            <h3>A fresh context.<br />The full backstory.</h3>
+            <p>
+              When the orchestrator’s context fills, a worker writes a dossier:
+              a briefing with <code>file:line</code> citations into the original
+              logs. Each new briefing can revisit the entire history.
+            </p>
+            <div class="dossier-stack">
+              <div class="dossier-sheet sheet-back"></div>
+              <div class="dossier-sheet sheet-middle"></div>
+              <div class="dossier-sheet sheet-front">
+                <div class="dossier-file">
+                  <svg class="icon"><use href="#i-terminal" /></svg> DOSSIER /
+                  SUBSESSION 04 <span>↗</span>
+                </div>
+                <p><span>01</span> THE USER’S GOAL</p>
+                <div class="dossier-rule"></div>
+                <div class="dossier-rule short"></div>
+                <p><span>02</span> VERIFIED STATE & NEXT STEPS</p>
+                <div class="dossier-rule"></div>
+                <p class="dossier-citation">1788751572547.jsonl:42–58</p>
+                <div class="dossier-map">
+                  BRIEFING <span>↗</span> ORIGINAL EVENTS
+                </div>
+              </div>
+            </div>
+          </article>
+          <article class="feature-card feature-cache">
+            <p class="eyebrow">SPEND TOKENS ON NEW WORK</p>
+            <div class="cache-value">
+              93<span>%</span
+              ><svg viewBox="0 0 110 110" aria-hidden="true">
+                <circle cx="55" cy="55" r="44" />
+                <circle
+                  class="cache-ring"
+                  cx="55"
+                  cy="55"
+                  r="44"
+                  pathLength="100"
+                />
+              </svg>
+            </div>
+            <h3>Built to reuse the prefix.</h3>
+            <p>
+              Stable prompts, deterministic history, and native cache controls.
+              In a documented 55-call orchestrator run, 93% of input tokens came
+              from cache.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/ericflo/eagent#prefix-caching"
+              >Read how caching works
+              <svg class="icon"><use href="#i-up-right" /></svg
+            ></a>
+          </article>
+          <article class="feature-card feature-shell">
+            <p class="eyebrow">THE HARNESS STAYS IN CONTROL</p>
+            <h3>Long commands.<br />Short feedback loops.</h3>
+            <p>
+              Every shell command starts under a managed handle. Read its
+              output, send input, extend the deadline, or stop it. Builds and
+              servers can keep running while the agent handles the next step.
+            </p>
+            <div
+              class="process-list"
+              aria-label="Examples of managed processes"
+            >
+              <div>
+                <code><span>p1</span> npm run dev</code
+                ><span class="process-badge"><i></i> serving</span>
+              </div>
+              <div>
+                <code><span>p2</span> go test ./...</code
+                ><span class="process-badge"><i></i> running</span>
+              </div>
+              <div>
+                <code><span>p3</span> git diff --stat</code
+                ><span class="process-done">✓ complete</span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="models" class="models section-wrap">
+        <div class="model-copy">
+          <p class="eyebrow">03 — YOUR CHOICE OF MODELS</p>
+          <h2>The right model.<br />For every role.</h2>
+          <p>
+            Give each actor the model that fits its job. Start with a built-in
+            preset, mix providers, add fallback routes, or connect a compatible
+            local server.
+          </p>
+          <p>
+            The graphical configuration editor shows models, reasoning effort,
+            and where each setting came from. Save your setup as a named bundle
+            and share it with your project.
+          </p>
+          <a
+            class="text-link"
+            href="https://github.com/ericflo/eagent#configuration"
+            >Explore configuration
+            <svg class="icon"><use href="#i-up-right" /></svg
+          ></a>
+          <div class="provider-list" aria-label="Supported providers">
+            <!-- site:providers -->
+          </div>
+        </div>
+        <div class="model-picker">
+          <div class="picker-top">
+            <label for="preset-select">ASSEMBLE YOUR TEAM</label
+            ><span class="demo-label">Preset explorer</span>
+          </div>
+          <div class="select-wrap">
+            <select id="preset-select" aria-describedby="preset-note">
+              <!-- site:preset-options --></select
+            ><span aria-hidden="true">⌄</span>
+          </div>
+          <div id="preset-details" aria-live="polite">
+            <!-- site:example-routes -->
+            <p id="preset-note">{{EXAMPLE_DESCRIPTION}}</p>
+          </div>
+          <div class="picker-command">
+            <span>$</span><code id="preset-command">{{EXAMPLE_COMMAND}}</code
+            ><button
+              class="copy-button"
+              type="button"
+              data-copy="preset-command"
+              aria-label="Copy preset command"
+            >
+              <svg class="icon"><use href="#i-copy" /></svg>
+            </button>
+          </div>
+          <p class="picker-footnote">
+            Explore a preset here. Configure your own team in
+            <code>eagent serve</code>.
+          </p>
+        </div>
+      </section>
+
+      <section id="workspace" class="workspace light-section">
+        <div class="section-wrap">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">04 — A WINDOW INTO THE WORK</p>
+              <h2>The whole session.<br />Right in front of you.</h2>
+            </div>
+            <div>
+              <p>
+                Run <code>eagent serve</code> and open the web UI. It reads the
+                same logs as the terminal, including sessions running in another
+                process. Watch, inspect, and steer from your browser.
+              </p>
+              <div class="inline-command">
+                <code>{{EXAMPLE_SERVE_COMMAND}}</code
+                ><span
+                  >localhost:7331
+                  <svg class="icon small"><use href="#i-up-right" /></svg
+                ></span>
+              </div>
+            </div>
+          </div>
+          <div
+            class="workspace-tabs"
+            role="tablist"
+            aria-label="Web UI screenshots"
+          >
+            <button
+              id="view-tasks"
+              role="tab"
+              aria-controls="workspace-panel"
+              aria-selected="true"
+              data-view="tasks"
+            >
+              Tasks & costs</button
+            ><button
+              id="view-chat"
+              role="tab"
+              aria-controls="workspace-panel"
+              aria-selected="false"
+              tabindex="-1"
+              data-view="chat"
+            >
+              Chat & activity</button
+            ><span class="screenshot-label">THE ACTUAL WEB UI</span>
+          </div>
+          <div
+            id="workspace-panel"
+            class="workspace-panel"
+            role="tabpanel"
+            aria-labelledby="view-tasks"
+          >
+            <div class="browser-chrome">
+              <span class="terminal-dots"><i></i><i></i><i></i></span
+              ><span>127.0.0.1:7331</span><span>eagent / local workspace</span>
+            </div>
+            <button
+              class="screenshot-button"
+              id="expand-screenshot"
+              type="button"
+              aria-label="Take a closer look at the eagent web UI"
+            >
+              <img
+                id="workspace-image"
+                src="assets/web-tasks.png"
+                width="1920"
+                height="1290"
+                loading="lazy"
+                alt="eagent’s Tasks view: per-actor costs, a task timeline with context rollover boundaries, prompt sizes, and completed dossier tasks."
+              /><span class="expand-label"
+                ><svg class="icon"><use href="#i-expand" /></svg>Take a closer
+                look</span
+              >
+            </button>
+          </div>
+          <div class="workspace-features">
+            <div>
+              <span>01 / INSPECT</span>
+              <h3>Follow every task.</h3>
+              <p>
+                Expand task reports, model turns, commands, file edits, and
+                outputs. See where the time and tokens went.
+              </p>
+            </div>
+            <div>
+              <span>02 / UNDERSTAND</span>
+              <h3>Read the timeline.</h3>
+              <p>
+                Filter actors, search events, inspect JSON, and see context
+                boundaries alongside the work.
+              </p>
+            </div>
+            <div>
+              <span>03 / STEER</span>
+              <h3>Stay in the conversation.</h3>
+              <p>
+                Answer questions in the browser while the terminal keeps
+                working. A reply can resume a finished session.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="in-practice" class="case-study section-wrap">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">05 — THE WORK SPEAKS</p>
+            <h2>One brief.<br />Something you can play.</h2>
+          </div>
+          <p>
+            A modern take on Breakout: special bricks, power-ups, a paddle that
+            moves in two dimensions, mobile controls, and escalating audio and
+            effects. Here’s what eagent made.
+          </p>
+        </div>
+        <div class="case-layout">
+          <div class="case-visual">
+            <div class="case-image-grid" aria-hidden="true"></div>
+            <span class="case-visual-caption" id="case-visual-caption"
+              >NEON BRICKLES / ORIGINAL RUN</span
+            >
+            <div class="game-frame">
+              <img
+                id="case-image"
+                src="assets/neon-brickles-play.png"
+                width="480"
+                height="800"
+                loading="lazy"
+                alt="Neon Brickles in play, with a glowing paddle, colorful special bricks, a ball trail, and a combo counter."
+              />
+            </div>
+            <div class="case-image-note">
+              <span class="status-dot"></span>REAL OUTPUT FROM A DOCUMENTED RUN
+            </div>
+          </div>
+          <div class="case-copy">
+            <div
+              class="case-tabs"
+              role="tablist"
+              aria-label="Documented builds"
+            >
+              <button
+                id="case-original"
+                role="tab"
+                aria-controls="case-panel"
+                aria-selected="true"
+                data-case="original"
+              >
+                The first build</button
+              ><button
+                id="case-value"
+                role="tab"
+                aria-controls="case-panel"
+                aria-selected="false"
+                tabindex="-1"
+                data-case="value"
+              >
+                The value run</button
+              ><button
+                id="case-polish"
+                role="tab"
+                aria-controls="case-panel"
+                aria-selected="false"
+                tabindex="-1"
+                data-case="polish"
+              >
+                The polish pass
+              </button>
+            </div>
+            <div
+              id="case-panel"
+              role="tabpanel"
+              aria-labelledby="case-original"
+              tabindex="0"
+            >
+              <p class="eyebrow" id="case-preset">
+                RECORDED BUILD / SEPTEMBER 2026
+              </p>
+              <h3 id="case-title">29 minutes.<br />A whole game.</h3>
+              <p id="case-description">
+                From a dictated brief to 17 files and roughly 3,000 lines of
+                dependency-free JavaScript. The orchestrator delegated,
+                verified, sent a precise follow-up, fixed a final issue, and
+                checked the result again.
+              </p>
+              <div class="case-metrics">
+                <div>
+                  <strong id="case-cost">~$1.20</strong
+                  ><span>ESTIMATED API COST</span>
+                </div>
+                <div>
+                  <strong id="case-measure">83</strong
+                  ><span id="case-measure-label">PASSING CHECKS</span>
+                </div>
+                <div>
+                  <strong id="case-time">29m</strong><span>WALL CLOCK</span>
+                </div>
+              </div>
+              <p class="case-detail" id="case-detail">
+                74 unit tests + 9 headless smoke tests. Zero console errors in a
+                real browser. The narrator sent three messages.
+              </p>
+            </div>
+            <p class="case-method">
+              Documented September 2026 runs. Costs use the recorded list
+              prices; these are individual observations, not performance
+              guarantees. Grid scores use code review and scripted browser play.
+            </p>
+            <a
+              id="case-source"
+              class="text-link"
+              href="https://github.com/ericflo/eagent#what-it-did-on-a-real-task"
+              >Read the run report
+              <svg class="icon"><use href="#i-up-right" /></svg
+            ></a>
+          </div>
+        </div>
+        <a
+          class="field-note"
+          href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
+          ><span class="field-note-label">FROM THE FIELD NOTES</span
+          ><span
+            >Six presets. The same brief. Every build measured, inspected, and
+            compared.</span
+          ><svg class="icon"><use href="#i-up-right" /></svg
+        ></a>
+      </section>
+
+      <section class="beyond-terminal section-wrap" id="anywhere">
+        <div class="phone-copy">
+          <p class="eyebrow">06 — STEP AWAY. STAY CONNECTED.</p>
+          <h2>Your agent can<br />reach your pocket.</h2>
+          <p>
+            With <a href="https://www.finalechat.com">Finalechat</a>, the
+            narrator’s conversation comes with you. Get progress, answer a
+            question, send a screenshot, or start a session on your machine from
+            your phone.
+          </p>
+          <p>
+            Keep <code>eagent serve</code> or
+            <code>eagent connector run</code> running in the project to revive a
+            finished thread when you reply. The same session picks up the
+            conversation.
+          </p>
+          <a
+            class="text-link"
+            href="https://github.com/ericflo/eagent#your-phone"
+            >Connect Finalechat
+            <svg class="icon"><use href="#i-up-right" /></svg
+          ></a>
+          <div class="phone-optional">
+            <span class="status-dot"></span>Optional integration. Enabled when a
+            token is found.<br /><code>EAGENT_FINALECHAT=off</code> turns
+            outbound integration traffic off.
+          </div>
+        </div>
+        <div class="phone-scene">
+          <span class="phone-orbit" aria-hidden="true"></span>
+          <div class="phone">
+            <div class="phone-top">
+              <span>9:41</span><span class="phone-island"></span
+              ><span aria-hidden="true">▰</span>
+            </div>
+            <div class="phone-app">
+              <span aria-hidden="true">‹</span>
+              <div>
+                <strong>eagent</strong><span>~/projects/next-big-thing</span>
+              </div>
+              <span class="phone-avatar"
+                ><svg><use href="#i-mark" /></svg
+              ></span>
+            </div>
+            <div class="phone-chat">
+              <p class="phone-date">TODAY</p>
+              <p class="phone-message phone-user">
+                Build the game in INSTRUCTIONS.md. Make touch controls feel
+                good.
+              </p>
+              <div class="phone-status">
+                <span class="status-dot"></span>Running the browser tests
+              </div>
+              <p class="phone-message phone-agent">
+                Touch controls are wired up. The browser checks are running
+                against both desktop and phone layouts.
+              </p>
+              <p class="phone-message phone-agent">
+                The game is ready. Tests pass, and the paddle tracks correctly
+                on a phone. The files are in <code>index.html</code>,
+                <code>css/</code>, and <code>js/</code>.
+              </p>
+              <p class="phone-message phone-user">
+                Let’s add a high score table.
+              </p>
+              <div class="phone-status">
+                <span class="status-dot"></span>Session resumed
+              </div>
+            </div>
+            <div class="phone-compose">
+              <span>Message eagent</span><span aria-hidden="true">↑</span>
+            </div>
+            <div class="phone-home"></div>
+          </div>
+          <span class="phone-scene-label">ILLUSTRATIVE CONVERSATION</span>
+        </div>
+      </section>
+
+      <section class="archive-strip section-wrap">
+        <div class="archive-icon" aria-hidden="true">
+          <svg viewBox="0 0 64 64">
+            <path d="M12 18h40v38H12zM8 8h48v10H8zM25 29h14M22 43l6 6 13-14" />
+          </svg>
+        </div>
+        <div>
+          <p class="eyebrow">TAKE THE HISTORY WITH YOU</p>
+          <h3>A session can become a portable archive.</h3>
+          <p>
+            Export the native logs, attachments, outputs, and a self-contained
+            web explorer with Go WebAssembly replay. Inspect the state at an
+            event, verify the files, and restore native sources into a new
+            directory. Online publication is a separate opt-in.
+          </p>
+        </div>
+        <a
+          class="text-link"
+          href="https://github.com/ericflo/eagent/blob/main/docs/FINALECHAT-INTEGRATIONS.md#portable-archives"
+          >Explore archives <svg class="icon"><use href="#i-up-right" /></svg
+        ></a>
+      </section>
+
+      <section id="get-started" class="get-started light-section">
+        <div class="section-wrap">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">07 — PUT IT TO WORK</p>
+              <h2>Your next project<br />starts with a prompt.</h2>
+            </div>
+            <p>
+              One binary, your API key, and a directory worth working in.
+              Install with Go 1.24 or later, or build from source. Bash is the
+              only runtime dependency.
+            </p>
+          </div>
+          <div class="setup-grid">
+            <article class="setup-card">
+              <div class="setup-top">
+                <span>01</span>
+                <h3>Get the binary.</h3>
+              </div>
+              <div
+                class="install-tabs"
+                role="tablist"
+                aria-label="Installation method"
+              >
+                <button
+                  id="install-go"
+                  role="tab"
+                  aria-controls="install-panel"
+                  aria-selected="true"
+                  data-install="go"
+                >
+                  Go install</button
+                ><button
+                  id="install-source"
+                  role="tab"
+                  aria-controls="install-panel"
+                  aria-selected="false"
+                  tabindex="-1"
+                  data-install="source"
+                >
+                  From source
+                </button>
+              </div>
+              <div
+                class="code-block"
+                id="install-panel"
+                role="tabpanel"
+                aria-labelledby="install-go"
+              >
+                <pre><code id="install-command">go install github.com/ericflo/eagent/cmd/eagent@latest</code></pre>
+                <button
+                  class="copy-button"
+                  type="button"
+                  data-copy="install-command"
+                  aria-label="Copy installation commands"
+                >
+                  <svg class="icon"><use href="#i-copy" /></svg>
+                </button>
+              </div>
+              <p id="install-note">
+                Make sure Go’s bin directory is on your <code>PATH</code>.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/ericflo/eagent/releases"
+                >Or check the releases
+                <svg class="icon"><use href="#i-up-right" /></svg
+              ></a>
+            </article>
+            <article class="setup-card">
+              <div class="setup-top">
+                <span>02</span>
+                <h3>Give it a key.</h3>
+              </div>
+              <p>{{EXAMPLE_PROVIDERS}}</p>
+              <div class="code-block">
+                <pre><code id="key-command">{{EXAMPLE_KEY_COMMANDS}}</code></pre>
+                <button
+                  class="copy-button"
+                  type="button"
+                  data-copy="key-command"
+                  aria-label="Copy API key setup commands"
+                >
+                  <svg class="icon"><use href="#i-copy" /></svg>
+                </button>
+              </div>
+              <p>
+                <code>doctor --live</code> makes a tiny paid call per actor to
+                verify the routes. Prefer another provider? Choose a
+                <a href="#models">preset</a>.
+              </p>
+            </article>
+            <article class="setup-card">
+              <div class="setup-top">
+                <span>03</span>
+                <h3>Pick a real task.</h3>
+              </div>
+              <p>Open your project directory and get going.</p>
+              <div class="code-block">
+                <pre><code id="start-command">{{EXAMPLE_START_COMMAND}}</code></pre>
+                <button
+                  class="copy-button"
+                  type="button"
+                  data-copy="start-command"
+                  aria-label="Copy first task commands"
+                >
+                  <svg class="icon"><use href="#i-copy" /></svg>
+                </button>
+              </div>
+              <p>
+                Project instructions in <code>AGENTS.md</code> or
+                <code>.agents/eagent/INSTRUCTIONS.md</code> guide the
+                orchestrator and workers.
+              </p>
+            </article>
+          </div>
+          <div class="command-reference">
+            <div>
+              <p class="eyebrow">A FEW COMMANDS TO KEEP CLOSE</p>
+              <h3>Fits into the way you work.</h3>
+            </div>
+            <dl>
+              <div>
+                <dt><code>eagent -p "Build it"</code></dt>
+                <dd>Run unattended; exit when done.</dd>
+              </div>
+              <div>
+                <dt><code>eagent -c</code></dt>
+                <dd>Continue the latest session here.</dd>
+              </div>
+              <div>
+                <dt><code>eagent -c --answer "Yes"</code></dt>
+                <dd>Answer a question and resume.</dd>
+              </div>
+              <div>
+                <dt><code>eagent serve</code></dt>
+                <dd>Open the live browser workspace.</dd>
+              </div>
+              <div>
+                <dt><code>eagent sessions</code></dt>
+                <dd>Find this project’s past sessions.</dd>
+              </div>
+              <div>
+                <dt><code>eagent prompts export</code></dt>
+                <dd>Make the actors’ prompts your own.</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+      <section class="faq section-wrap" id="questions">
+        <div>
+          <p class="eyebrow">A LITTLE MORE CONTEXT</p>
+          <h2>Good questions.</h2>
+          <a class="text-link" href="https://github.com/ericflo/eagent#readme"
+            >Read the full documentation
+            <svg class="icon"><use href="#i-up-right" /></svg
+          ></a>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary>
+              What does it cost?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              eagent is free, open-source software under the MIT license. You
+              pay your model providers for API usage. The web UI reports input,
+              output, cached tokens, and estimated cost per actor; totals are
+              marked partial when a model’s price is unknown. Actual cost
+              depends on the task, models, and cache usage.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Can I use a local model or mix providers?<span aria-hidden="true"
+                >+</span
+              >
+            </summary>
+            <p>
+              Yes. Each actor has its own route, model, reasoning effort, and
+              optional fallback. eagent supports OpenAI-compatible Chat
+              Completions, OpenAI Responses, and Anthropic Messages protocols.
+              Configure a compatible local server with its base URL and model
+              name in the project’s JSON configuration.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Where does my session live?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              Under <code>.agents/eagent/sessions/</code> in your project, as
+              timestamped JSONL files. There is no session database to run. Your
+              configured model providers receive the prompts and tool results
+              they need to do the work. Finalechat conversation mirroring is
+              optional, and native transcript publication requires a separate
+              opt-in.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Does a fresh context lose the original history?<span
+                aria-hidden="true"
+                >+</span
+              >
+            </summary>
+            <p>
+              The original logs stay on disk. On orchestrator rollover, a worker
+              builds a dossier from the previous subsessions, with citations
+              back to the full events. The orchestrator can follow those
+              citations using session-reading tools. Workers start fresh per
+              task; only the orchestrator has the dossier rollover mechanism.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Are commands sandboxed?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              Commands run on your machine with your user’s privileges. eagent
+              does not provide a sandbox. Its file tools constrain writes by
+              default, but bash can perform anything your account can. Run it in
+              a workspace and environment appropriate for the task.
+            </p>
+          </details>
+          <details>
+            <summary>
+              Can I customize more than the models?<span aria-hidden="true"
+                >+</span
+              >
+            </summary>
+            <p>
+              Yes. Tune task concurrency, call budgets, narration cadence,
+              context rollover, shell deadlines, and the narrator’s voice.
+              Export and edit the embedded Markdown prompts, keep named
+              configuration bundles in the project, or use the graphical editor.
+              The orchestrator can also create timers, loops, and cron schedules
+              for ongoing work.
+            </p>
+          </details>
+          <details>
+            <summary>
+              What happens if a provider fails?<span aria-hidden="true">+</span>
+            </summary>
+            <p>
+              Transient errors retry with backoff. Unroutable requests,
+              including exhausted credits, move to a configured fallback for any
+              actor. A worker failure is reported to the orchestrator for
+              follow-up. If orchestrator recovery also fails, the session pauses
+              with its history intact so you can resume it.
+            </p>
+          </details>
+        </div>
+      </section>
+      <section class="closing section-wrap">
+        <p class="eyebrow">
+          SMALL ENOUGH TO UNDERSTAND. BUILT TO DO REAL WORK.
+        </p>
+        <h2>Give it something<br />worth building<span>.</span></h2>
+        <div>
+          <a class="button button-primary" href="#get-started"
+            >Get started <svg class="icon"><use href="#i-arrow" /></svg></a
+          ><a class="text-link" href="https://github.com/ericflo/eagent"
+            ><svg class="icon"><use href="#i-github" /></svg>Make it your own</a
+          >
+        </div>
+        <div class="closing-orbits" aria-hidden="true">
+          <i></i><i></i><i></i>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer section-wrap">
+      <div class="footer-main">
+        <div>
+          <a class="wordmark" href="#" aria-label="eagent home"
+            ><span class="brand-mark"
+              ><svg><use href="#i-mark" /></svg></span
+            >eagent<span class="wordmark-period">.</span></a
+          >
+          <p>Three actors. One shared purpose.</p>
+        </div>
+        <div class="footer-links">
+          <div>
+            <span>THE PROJECT</span
+            ><a href="https://github.com/ericflo/eagent">Source code</a
+            ><a href="https://github.com/ericflo/eagent/releases">Releases</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/CONTRIBUTING.md"
+              >Contributing</a
+            >
+          </div>
+          <div>
+            <span>UNDER THE HOOD</span
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/DESIGN-SPEC.md"
+              >Design specification</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/EVENTS.md"
+              >Event schema</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/LESSONS.md"
+              >Lessons from real runs</a
+            >
+          </div>
+          <div>
+            <span>GO DEEPER</span
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
+              >The Breakout grid</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/FINALECHAT-INTEGRATIONS.md"
+              >Archives & integrations</a
+            ><a href="https://github.com/ericflo/eagent/blob/main/SECURITY.md"
+              >Security</a
+            >
+          </div>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span
+          >Made by <a href="https://github.com/ericflo">Eric Florenzano</a> &
+          contributors.</span
+        ><a href="https://github.com/ericflo/eagent/blob/main/LICENSE"
+          >Open source · MIT license
+          <svg class="icon small"><use href="#i-up-right" /></svg></a
+        ><a href="#">Back to top ↑</a>
+      </div>
+    </footer>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <dialog
+      class="image-dialog"
+      id="image-dialog"
+      aria-label="Web UI screenshot"
+    >
+      <button type="button" class="dialog-close" aria-label="Close screenshot">
+        <svg class="icon"><use href="#i-close" /></svg></button
+      ><img id="dialog-image" alt="" />
+      <p>eagent’s web UI · press Escape to close</p>
+    </dialog>
+    <!-- site:preset-data -->
+  </body>
+</html>
