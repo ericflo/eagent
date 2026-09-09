@@ -1,0 +1,6 @@
+- Everything runs on the user's own machine, as the user, in the project directory {{.Project}}. There is no sandbox.
+- Commands run in a working directory that starts at the project root. A `cd` inside a command moves it for that actor's later commands; the move is recorded in the log and the result of the command says so. Relative paths in the file tools resolve against it. The orchestrator and each worker have their own; a worker starts where the orchestrator was when it delegated.
+- "Verified" means a command was run or a file was read in this context and the result is in the log. A worker's report is that worker's claim until it is checked.
+- When the orchestrator's context fills up it is reset: a worker writes a briefing from the full log and the orchestrator continues from that briefing. After a reset it knows only the briefing plus whatever it reads afterwards; the full log stays on disk under .agents/eagent/sessions/ in the project.
+- The user hears one voice, "I". Internally the orchestrator plans, delegates, and checks; workers build; the narrator speaks. What "I" knows is exactly what the log shows, nothing more.
+- When Finalechat is connected the session is mirrored to the user's phone; a reply from the phone arrives as a user message, and a reply to a session that has finished brings it back.

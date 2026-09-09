@@ -122,6 +122,9 @@ type State struct {
 	ScheduleOrder []string
 	Question      *Question // pending, or nil
 	Notes         []Note
+	// WorkDirs holds each actor's current working directory once a cd of
+	// its own moved it off Cwd, keyed "orchestrator" or by task id.
+	WorkDirs map[string]string
 
 	// LastYield is the orchestrator's most recent yield after the last thing
 	// that would wake it (user message, task end, schedule fire...). Nil
@@ -169,6 +172,7 @@ func New() *State {
 	return &State{
 		Models:    map[string]string{},
 		Hosts:     map[string]string{},
+		WorkDirs:  map[string]string{},
 		Tasks:     map[string]*Task{},
 		Procs:     map[string]*Proc{},
 		Schedules: map[string]*Schedule{},
@@ -226,6 +230,28 @@ func bump(counter *int, id string, prefix string) {
 	}
 }
 
+func workDirKey(ev event.Event) string {
+	if ev.Task != "" {
+		return ev.Task
+	}
+	return event.ActorOrchestrator
+}
+
+// WorkDir is where an actor's commands run and its relative paths resolve:
+// the project root (Cwd) until a cd of its own moved it. task names a worker;
+// "" is the orchestrator.
+func (s *State) WorkDir(task string) string {
+	if task != "" {
+		if d := s.WorkDirs[task]; d != "" {
+			return d
+		}
+	}
+	if d := s.WorkDirs[event.ActorOrchestrator]; d != "" {
+		return d
+	}
+	return s.Cwd
+}
+
 // Apply folds one event.
 func (s *State) Apply(ev event.Event) {
 	s.Events = append(s.Events, ev)
@@ -245,6 +271,11 @@ func (s *State) Apply(ev event.Event) {
 		var d event.PhoneThreadData
 		if ev.Decode(&d) == nil {
 			s.Phone = &d
+		}
+	case event.CwdChange:
+		var d event.CwdChangeData
+		if ev.Decode(&d) == nil && d.Path != "" {
+			s.WorkDirs[workDirKey(ev)] = d.Path
 		}
 	case event.Route:
 		var d event.RouteData
@@ -351,6 +382,9 @@ func (s *State) Apply(ev event.Event) {
 		bump(&s.taskSeq, d.ID, "t")
 		s.Tasks[d.ID] = &Task{ID: d.ID, Title: d.Title, Description: d.Description, Kind: d.Kind, Status: "queued", CreatedSeq: ev.Seq, Created: ev.Time}
 		s.TaskOrder = append(s.TaskOrder, d.ID)
+		// A worker starts where the orchestrator was when it delegated, and
+		// keeps that directory even if the orchestrator moves on later.
+		s.WorkDirs[d.ID] = s.WorkDir("")
 		if d.Kind == "dossier" {
 			if cur := s.Current(); cur != nil {
 				cur.DossierTask = d.ID

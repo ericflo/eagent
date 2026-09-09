@@ -17,13 +17,26 @@ func (r *Runtime) wakeNarrator(reason string) {
 	if r.ending && reason != wakeFinal {
 		return
 	}
-	if r.narrBusy {
-		if r.narrPending == "" || reason == wakeFinal || reason == wakeDone {
-			r.narrPending = reason
-		}
-		return
+	// A pending reason is only replaced by one at least as pressing: the
+	// user's message must not be demoted to "the orchestrator left a note"
+	// by the note that answers it.
+	if r.narrPending == "" || wakePriority(reason) >= wakePriority(r.narrPending) {
+		r.narrPending = reason
 	}
-	r.narrPending = reason
+}
+
+// wakePriority orders wake reasons: the final report, then the work being
+// done, then the user's message, then everything else.
+func wakePriority(reason string) int {
+	switch reason {
+	case wakeFinal:
+		return 3
+	case wakeDone:
+		return 2
+	case wakeUser:
+		return 1
+	}
+	return 0
 }
 
 // maybeWakeNarrator starts a narrator turn if one is pending and something
@@ -144,6 +157,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		System: r.narratorSystem(phoneLine), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
 	}
+	leakRetried := false
 	for attempt := 0; attempt < 2; attempt++ {
 		resp, err := r.completeActor(ctx, event.ActorNarrator, "", req)
 		if err != nil {
@@ -182,6 +196,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 			return "held"
 		}
 		spoke := false
+		var rejected *llm.Message // a tool result asking for a rewrite
 		for _, tc := range resp.ToolCalls {
 			args, err := llm.ArgsObject(tc.Args)
 			if err != nil {
@@ -197,6 +212,15 @@ func (r *Runtime) narratorTurn(reason string) string {
 				}
 				if spoke {
 					r.recordToolResult(event.ActorNarrator, "", tc, "one message per wake; combine them next time", true)
+					continue
+				}
+				if leak := mechanicsLeak(text); leak != "" && !leakRetried && attempt == 0 {
+					// The machinery has names inside; the user hears "I". One
+					// rewrite is asked for, then the words go out as they are.
+					leakRetried = true
+					reason := fmt.Sprintf("not sent: it names internal machinery (%s), which the user never sees. Say it as \"I\", in your own words, and send it again.", leak)
+					r.recordToolResult(event.ActorNarrator, "", tc, reason, true)
+					rejected = &llm.Message{Role: "tool", Results: []llm.ToolResult{{CallID: tc.ID, Name: tc.Name, Output: reason}}}
 					continue
 				}
 				atts, err := r.narratorAttachments(args["attachments"])
@@ -250,6 +274,10 @@ func (r *Runtime) narratorTurn(reason string) string {
 				r.recordToolResult(event.ActorNarrator, "", tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 			}
 		}
+		if rejected != nil && !spoke {
+			req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL}, *rejected)
+			continue
+		}
 		if reason == wakeFinal && !spoke && mustSpeak {
 			if attempt == 0 {
 				req.Messages = append(req.Messages, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL}, llm.Message{Role: "tool", Results: []llm.ToolResult{{CallID: resp.ToolCalls[0].ID, Name: resp.ToolCalls[0].Name, Output: "holding is not allowed on the final wake"}}}, llm.Message{Role: "user", Text: "[harness] The session is ending. Send the final report now with send_message."})
@@ -260,6 +288,24 @@ func (r *Runtime) narratorTurn(reason string) string {
 		return "done"
 	}
 	return "done"
+}
+
+// mechanicsWords are the names of the machinery the user never sees; the
+// narrator speaks as "I" and a message naming them is sent back once.
+var mechanicsWords = regexp.MustCompile(`(?i)\b(orchestrator|narrator|task worker|dossier|subsession|rollover|context reset|harness|tool call|long think)s?\b`)
+
+// mechanicsLeak lists the internal names a message uses, or "".
+func mechanicsLeak(text string) string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range mechanicsWords.FindAllString(text, -1) {
+		w := strings.ToLower(m)
+		if !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // leakedToken matches provider control markup that occasionally escapes into
@@ -329,11 +375,11 @@ func (r *Runtime) quietFor() time.Duration {
 func (r *Runtime) inflightLines(now time.Time) []string {
 	var out []string
 	for _, p := range r.st.RunningProcs() {
-		owner := "the orchestrator"
+		owner := ""
 		if p.Task != "" {
-			owner = "task " + p.Task
+			owner = ", for worker " + p.Task
 		}
-		out = append(out, fmt.Sprintf("`%s` (%s, %s) has been running for %s", shortCommand(p.Command), p.Handle, owner, since(p.Started, now)))
+		out = append(out, fmt.Sprintf("`%s` (%s%s) has been running for %s", shortCommand(p.Command), p.Handle, owner, since(p.Started, now)))
 	}
 	for _, t := range r.st.RunningTasks() {
 		if t.Status == "running" {
@@ -341,7 +387,7 @@ func (r *Runtime) inflightLines(now time.Time) []string {
 		}
 	}
 	if r.orchBusy && !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
-		out = append(out, fmt.Sprintf("the orchestrator's current model call has been going for %s (a long think or a long reply)", since(r.orchCallAt, now)))
+		out = append(out, fmt.Sprintf("the current planning step has been going for %s with nothing produced yet (a long read or a long reply; name a step only if the log shows it)", since(r.orchCallAt, now)))
 	}
 	return out
 }
@@ -438,14 +484,14 @@ func taskEvidence(st *state.State, t *state.Task, now time.Time) string {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "task %s (%q) has been working for %s", t.ID, t.Title, since(t.Created, now))
+	fmt.Fprintf(&b, "worker %s (%q) has been working for %s", t.ID, t.Title, since(t.Created, now))
 	if calls == 0 {
 		b.WriteString("; no model call has come back yet")
 	} else {
 		fmt.Fprintf(&b, "; %d model call(s) have come back", calls)
 	}
 	if inCall {
-		fmt.Fprintf(&b, "; its current model call has been running for %s and has produced nothing visible yet", since(callStart, now))
+		fmt.Fprintf(&b, "; its current step has been running for %s and has produced nothing visible yet", since(callStart, now))
 	}
 	switch {
 	case cmds == 0 && len(files) == 0:

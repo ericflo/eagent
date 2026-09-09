@@ -274,6 +274,7 @@ function chatNode(ev) {
     case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
+    case 'cwd.change': return (ev.actor === 'orchestrator' && !ev.task) ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
       return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
@@ -488,6 +489,7 @@ function summary(ev) {
     case 'assistant': return [d.text, ...(d.tool_calls || []).map(t => `${t.name}(${clip(argPreview(t.args), 80)})`)].filter(Boolean).join(' | ');
     case 'tool.result': return `${d.name}${d.is_error ? ' ERROR' : ''} → ${clip(d.output, 200)}`;
     case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
+    case 'cwd.change': return 'working directory → ' + d.path;
     case 'task.create': return `${d.id} ${d.title}`;
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;

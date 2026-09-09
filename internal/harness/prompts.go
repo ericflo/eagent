@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/state"
 )
@@ -14,11 +15,11 @@ import (
 // text appended as the final user message (see steer* below).
 
 func (r *Runtime) orchestratorSystem() string {
-	return r.prompts.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: r.projectPath(), Instructions: r.cfg.Instructions, Interactive: r.opts.Interactive})
+	return r.prompts.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: r.projectPath(), Instructions: r.cfg.Instructions, Interactive: r.opts.Interactive, Facts: r.facts()})
 }
 
 func (r *Runtime) taskSystem() string {
-	return r.prompts.Render("TASK-WORKER.md", prompts.TaskData{Project: r.projectPath(), Instructions: r.cfg.Instructions})
+	return r.prompts.Render("TASK-WORKER.md", prompts.TaskData{Project: r.projectPath(), Instructions: r.cfg.Instructions, Facts: r.facts()})
 }
 
 // narratorSystem renders the narrator's system prompt; phone is a line about
@@ -28,7 +29,13 @@ func (r *Runtime) narratorSystem(phone string) string {
 	if persona == "" {
 		persona = strings.TrimSpace(r.prompts.Render("PERSONA.md", nil))
 	}
-	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone})
+	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone, Facts: r.facts()})
+}
+
+// facts renders the shared description of how eagent works that every actor
+// gets, so questions about the system are answered from the same truth.
+func (r *Runtime) facts() string {
+	return strings.TrimSpace(r.prompts.Render("FACTS.md", prompts.FactsData{Project: r.projectPath()}))
 }
 
 // ---- steering ------------------------------------------------------------
@@ -38,11 +45,14 @@ func (r *Runtime) narratorSystem(phone string) string {
 // orchestratorEditNudge is how many direct file edits earn the reminder.
 const orchestratorEditNudge = 8
 
-func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls, maxCalls int) string {
+func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls, maxCalls int, workDir, project string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s]", now.Local().Format("15:04:05"))
 	if reason != "" {
 		fmt.Fprintf(&b, " wake: %s.", reason)
+	}
+	if workDir != "" && workDir != project {
+		fmt.Fprintf(&b, " Working directory: %s (a cd that stuck; the project root is %s).", workDir, project)
 	}
 	running := st.RunningTasks()
 	if len(running) > 0 {
@@ -83,7 +93,7 @@ func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens
 	return b.String()
 }
 
-func steerTask(t *state.Task, turn, maxTurns int, now time.Time) string {
+func steerTask(t *state.Task, turn, maxTurns int, now time.Time, workDir, project string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] Task %s, call %d of %d.", now.Local().Format("15:04:05"), t.ID, turn, maxTurns)
 	switch remaining := maxTurns - turn; {
@@ -129,7 +139,17 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 	case wakeDone:
 		b.WriteString(" Send the final report now unless your last message already covers everything; in that case hold.")
 	case wakeUser:
-		b.WriteString(" The user just wrote to you. Reply now, in a sentence or two: acknowledge what they asked and say what is happening first. Do not wait for results; the next message will carry them.")
+		switch userWakeKind(st) {
+		case "answered":
+			b.WriteString(" The user just wrote to you and the orchestrator has answered them in a note marked as an answer. Relay that answer in your voice, faithfully, adding nothing it did not say; if it also started work, say what started.")
+		case "started":
+			b.WriteString(" The user just wrote to you and the orchestrator has started acting on it; the events since their message show what. Say what you understood and what is happening, from those events only. Do not answer a question the orchestrator has not answered, and do not promise what will happen next.")
+			if lastUserIsQuestion(st) {
+				b.WriteString(" Their message asks a question and it has not been answered yet: do not answer it, not even partly, not even from evidence you can see. Say only what is happening; the answer comes in its own note.")
+			}
+		default:
+			b.WriteString(" The user just wrote to you and the orchestrator has not reacted yet. Send one short line saying you have the message and are on it, and nothing more: no answer to their question, no promise, no description of what will happen. You will be woken again when something happens.")
+		}
 	case wakeError:
 		if interactive {
 			b.WriteString(" The orchestrator has stopped because its model calls keep failing. Tell the user plainly what happened, what state the work is in, and that typing a message will make it try again.")
@@ -172,6 +192,45 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 	}
 	b.WriteString(" Respond with exactly one tool call.")
 	return b.String()
+}
+
+// userWakeKind says what the orchestrator has done about the user's latest
+// message: "answered" (a note marked as an answer), "started" (any reaction
+// the narrator can see), or "quiet" (nothing yet).
+func userWakeKind(st *state.State) string {
+	kind := "quiet"
+	for _, ev := range st.Events {
+		if ev.Seq <= st.LastUserSeq || ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			continue
+		}
+		switch ev.Type {
+		case event.Note:
+			var d event.NoteData
+			if ev.Decode(&d) == nil && d.Answer {
+				return "answered"
+			}
+			kind = "started"
+		case event.ToolResult, event.ProcStart, event.TaskCreate, event.Yield, event.Assistant:
+			kind = "started"
+		}
+	}
+	return kind
+}
+
+// lastUserIsQuestion reports whether the user's latest message asks something.
+func lastUserIsQuestion(st *state.State) bool {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		if ev.Seq != st.LastUserSeq {
+			continue
+		}
+		if ev.Type != event.UserMessage {
+			return false
+		}
+		var d event.UserMessageData
+		return ev.Decode(&d) == nil && isQuestion(d.Text)
+	}
+	return false
 }
 
 func (r *Runtime) dossierTask(sessionDir string, files []string, st *state.State, reason string) string {

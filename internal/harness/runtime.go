@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -132,6 +133,17 @@ type Runtime struct {
 	yieldSeenSeq int64
 	lastOrchText string
 
+	// userWaitSeq is the user message whose narrator acknowledgement is held
+	// until the orchestrator reacts to it (or narratorAckGrace passes), so
+	// the user hears one reply grounded in what actually happened. When the
+	// message asks a question, only an answer or the end of the
+	// orchestrator's turn counts as the reaction.
+	userWaitSeq      int64
+	userWaitQuestion bool
+	// bashEnv is the BASH_ENV file every command sources: an EXIT trap that
+	// reports the shell's final directory, so a cd persists across commands.
+	bashEnv string
+
 	procCursor   map[string]int // handle -> bytes already shown
 	procOwner    map[string]owner
 	procSeenAt   map[string]bool // handle -> tool result already delivered final output
@@ -247,6 +259,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		activeSettings: runtimecontrol.FromConfig(cfg),
 		procs:          procs.NewManager(),
 		files:          tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
+		bashEnv:        writeBashEnv(opts.Project),
 		archive:        tools.Archive{Path: sess.Path},
 		orchTools:      tools.OrchestratorTools(),
 		taskTools:      tools.TaskTools(),
@@ -437,6 +450,12 @@ func (r *Runtime) noteWake(ev event.Event) {
 	if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
 		r.narrWorthy = ev.Seq
 	}
+	if r.userWaitSeq > 0 && ev.Seq > r.userWaitSeq && orchestratorReacted(ev, r.userWaitQuestion) {
+		// The orchestrator has done something about the user's message; the
+		// narrator can now answer with that instead of guessing.
+		r.userWaitSeq = 0
+		r.wakeNarrator(wakeUser)
+	}
 	switch ev.Type {
 	case event.Yield:
 		r.yieldSeenSeq = ev.Seq // a forced yield has no call of its own; the orchestrator overrides this for its own
@@ -447,7 +466,12 @@ func (r *Runtime) noteWake(ev event.Event) {
 		}
 		r.narrFinal = false
 		if ev.Type == event.UserMessage || ev.Type == event.UserAnswer {
-			r.wakeNarrator(wakeUser) // acknowledge at once; do not wait for results
+			question := false
+			if ev.Type == event.UserMessage {
+				var d event.UserMessageData
+				question = ev.Decode(&d) == nil && isQuestion(d.Text)
+			}
+			r.holdNarratorForOrchestrator(ev.Seq, question)
 		}
 	case event.TaskEnd:
 		var d event.TaskEndData
@@ -844,6 +868,7 @@ func (r *Runtime) onProcExit(p *procs.Proc) {
 		DurationMS: p.Duration().Milliseconds(), Tail: tail, Notify: notify,
 	}).WithTask(sp.Task)
 	r.append(ev)
+	r.adoptCwd(p.Handle)
 	r.signalWaiters("", p.Handle)
 }
 
@@ -939,6 +964,92 @@ func (r *Runtime) signalWaiters(taskID, handle string) {
 }
 
 // projectPath is the absolute project directory.
+// narratorAckGrace bounds how long the narrator's reply to a user message
+// waits for the orchestrator's first reaction.
+var narratorAckGrace = 15 * time.Second
+
+// holdNarratorForOrchestrator delays the narrator's acknowledgement of the
+// user's message until the orchestrator has reacted to it, or the grace
+// period passes. Loop goroutine only.
+func (r *Runtime) holdNarratorForOrchestrator(seq int64, question bool) {
+	r.userWaitSeq, r.userWaitQuestion = seq, question
+	time.AfterFunc(narratorAckGrace, func() {
+		r.post(func() {
+			// Still unanswered: let the narrator say the message landed. The
+			// hold stays, so the orchestrator's eventual reaction wakes it
+			// again with the answer.
+			if r.userWaitSeq == seq {
+				r.wakeNarrator(wakeUser)
+			}
+		})
+	})
+}
+
+// orchestratorReacted reports an event that shows the orchestrator acting on
+// what the user said. For an instruction any reaction counts: a note, a
+// tool result, a command, a delegation, a yield, a text-only reply, or its
+// call failing. For a question only an answer note, the end of its turn
+// (yield) or a failure counts, so the narrator never relays a half-formed
+// answer assembled from the first command's output.
+func orchestratorReacted(ev event.Event, question bool) bool {
+	if ev.Type == event.Error {
+		var d event.ErrorData
+		return ev.Decode(&d) == nil && d.Where == event.ActorOrchestrator
+	}
+	if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+		return false
+	}
+	switch ev.Type {
+	case event.Note:
+		if !question {
+			return true
+		}
+		var d event.NoteData
+		return ev.Decode(&d) == nil && d.Answer
+	case event.Yield:
+		return true
+	case event.ToolResult, event.ProcStart, event.TaskCreate:
+		return !question
+	case event.Assistant:
+		var d event.AssistantData
+		return ev.Decode(&d) == nil && len(d.ToolCalls) == 0
+	}
+	return false
+}
+
+// isQuestion is the harness's cheap reading of whether a message asks
+// something: it contains a question mark.
+func isQuestion(text string) bool { return strings.Contains(text, "?") }
+
+// workDir is where an actor's commands run and its relative paths resolve:
+// the project root until a cd of its own moved it. Loop goroutine only.
+func (r *Runtime) workDir(task string) string {
+	if d := r.st.WorkDir(task); d != "" && d != r.st.Cwd {
+		return d
+	}
+	return r.projectPath()
+}
+
+// writeBashEnv installs, for every command the actors run, an EXIT trap that
+// reports the shell's final directory, so a cd persists across commands
+// without rewriting what the model wrote. Returns "" when it cannot be
+// written, in which case cd simply does not persist.
+func writeBashEnv(project string) string {
+	path := filepath.Join(project, ".agents", "eagent", "bash_env")
+	const script = "# Written by eagent: report where a command's shell ended up, so a cd persists for later commands.\n" +
+		"trap 'if [ -n \"$EAGENT_PWD_FILE\" ]; then printf %s \"$PWD\" > \"$EAGENT_PWD_FILE\" 2>/dev/null; fi' EXIT\n"
+	if raw, err := os.ReadFile(path); err == nil && string(raw) == script {
+		return path
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return ""
+	}
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		return ""
+	}
+	return path
+}
+
 func (r *Runtime) projectPath() string {
 	abs, err := filepath.Abs(r.opts.Project)
 	if err != nil {

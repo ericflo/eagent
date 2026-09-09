@@ -253,3 +253,40 @@ func TestWriteThroughSymlinkIsRefused(t *testing.T) {
 		t.Fatalf("reads through symlinks are still allowed: %v", err)
 	}
 }
+
+func TestFilesResolveAgainstWorkingDirectory(t *testing.T) {
+	// The OS temp dir is always writable, so the fixture must live outside
+	// it: point TMPDIR at a scratch corner and keep the directories elsewhere.
+	base := t.TempDir()
+	t.Setenv("TMPDIR", filepath.Join(base, "scratch"))
+	root, other, stranger, sub := filepath.Join(base, "root"), filepath.Join(base, "other"), filepath.Join(base, "stranger"), filepath.Join(base, "root", "sub")
+	for _, d := range []string{filepath.Join(base, "scratch"), root, other, stranger, sub} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := Files{Root: root}
+	if got, _ := f.Resolve("a.txt", false); got != filepath.Join(root, "a.txt") {
+		t.Fatalf("default base: %q", got)
+	}
+	if got, _ := f.At(sub).Resolve("a.txt", false); got != filepath.Join(sub, "a.txt") {
+		t.Fatalf("base not honoured: %q", got)
+	}
+	// Writes may land in the project, in the working directory the actor
+	// chose, or in the temp dir, and nowhere else.
+	if _, err := f.At(other).Resolve("out.txt", true); err != nil {
+		t.Fatalf("write in the working directory refused: %v", err)
+	}
+	if _, err := f.At(other).Resolve(filepath.Join(root, "in.txt"), true); err != nil {
+		t.Fatalf("write in the project refused from elsewhere: %v", err)
+	}
+	if _, err := f.At(other).Resolve(filepath.Join(stranger, "x.txt"), true); err == nil || !strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("write outside both allowed: %v", err)
+	}
+	if _, err := f.Resolve(filepath.Join(stranger, "x.txt"), true); err == nil || strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("message should name only the project when no cd happened: %v", err)
+	}
+	if out, err := f.At(sub).ListDir(""); err != nil || out != "(empty directory)" {
+		t.Fatalf("list_dir with no path should list the working directory: %q %v", out, err)
+	}
+}

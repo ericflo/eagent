@@ -87,7 +87,7 @@ func (r *Runtime) narratorAttachments(raw any) ([]event.Attachment, error) {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		abs, err := r.locateFile(p)
+		abs, err := r.locateFile(caller{actor: event.ActorNarrator}, p)
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s: %v", p, err)
 		}
@@ -242,8 +242,8 @@ func attachmentSummary(atts []event.Attachment) string {
 // viewImage prepares a picture for a model to look at: the file must be an
 // image of a supported type, and a copy goes into the session so the log
 // can be replayed later.
-func (r *Runtime) viewImage(p string) (event.Attachment, error) {
-	abs, err := r.locateFile(p)
+func (r *Runtime) viewImage(c caller, p string) (event.Attachment, error) {
+	abs, err := r.locateFile(c, p)
 	if err != nil {
 		return event.Attachment{}, err
 	}
@@ -297,12 +297,12 @@ func (r *Runtime) takeImages(callID string) []event.Attachment {
 // log imperfectly, so after the exact path (absolute or project-relative)
 // it tries the file name alone: in the project, the session's attachments,
 // and the project tree a few levels deep.
-func (r *Runtime) locateFile(p string) (string, error) {
+func (r *Runtime) locateFile(c caller, p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", errors.New("path is required")
 	}
-	abs, err := r.files.Resolve(p, false)
+	abs, err := r.filesFor(c).Resolve(p, false)
 	if err != nil {
 		return "", err
 	}

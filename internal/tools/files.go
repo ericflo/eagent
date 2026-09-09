@@ -23,19 +23,37 @@ var writeMu sync.Mutex
 type Files struct {
 	Root         string
 	AllowOutside bool
+	// Base is the directory relative paths resolve against, and one more
+	// place writes may land: an actor's working directory once a cd of its
+	// own moved it off Root. Empty means Root.
+	Base string
+}
+
+// At returns a copy that resolves relative paths against base.
+func (f Files) At(base string) Files {
+	f.Base = base
+	return f
+}
+
+func (f Files) base() string {
+	if f.Base != "" {
+		return f.Base
+	}
+	return f.Root
 }
 
 // Resolve turns a model-supplied path into an absolute path. Reads may go
-// anywhere the process can see; writes are confined to the project directory
-// (or the OS temp dir) so a mistyped path cannot clobber something outside
-// the project. Escapes are rejected with a clear message.
+// anywhere the process can see; writes are confined to the project directory,
+// the actor's working directory (a place it chose to cd to), or the OS temp
+// dir, so a mistyped path cannot clobber something elsewhere. Escapes are
+// rejected with a clear message.
 func (f Files) Resolve(p string, write bool) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("path is required")
 	}
 	abs := p
 	if !filepath.IsAbs(p) {
-		abs = filepath.Join(f.Root, p)
+		abs = filepath.Join(f.base(), p)
 	}
 	abs = filepath.Clean(abs)
 	if f.AllowOutside || !write {
@@ -45,17 +63,21 @@ func (f Files) Resolve(p string, write bool) (string, error) {
 	// that points outside must not carry a write with it.
 	root := filepath.Clean(f.Root)
 	real, resolved := realPathHops(abs, 32)
-	realRoot := realPath(root)
 	if resolved {
 		// A path whose links could not all be followed is not proved to be
 		// anywhere in particular, so it fails the containment test.
-		if real == realRoot || strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
-			return abs, nil
+		roots := []string{realPath(root), realPath(filepath.Clean(os.TempDir()))}
+		if f.Base != "" {
+			roots = append(roots, realPath(filepath.Clean(f.Base)))
 		}
-		tmp := realPath(filepath.Clean(os.TempDir()))
-		if strings.HasPrefix(real, tmp+string(filepath.Separator)) {
-			return abs, nil
+		for _, r := range roots {
+			if real == r || strings.HasPrefix(real, r+string(filepath.Separator)) {
+				return abs, nil
+			}
 		}
+	}
+	if f.Base != "" && filepath.Clean(f.Base) != root {
+		return "", fmt.Errorf("refusing to write %s: it is outside both the project directory %s and your working directory %s. Write inside one of them (or use a shell command if you really mean it)", p, root, filepath.Clean(f.Base))
 	}
 	return "", fmt.Errorf("refusing to write %s: it is outside the project directory %s. Write inside the project (or use a shell command if you really mean it)", p, root)
 }

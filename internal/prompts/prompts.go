@@ -5,10 +5,11 @@
 //
 // Templates use Go text/template syntax. The data each one receives:
 //
-//	ORCHESTRATOR.md        {{.Project}} {{.Instructions}} {{.Interactive}}
-//	TASK-WORKER.md         {{.Project}} {{.Instructions}}
-//	NARRATOR.md            {{.Persona}} {{.Phone}}
+//	ORCHESTRATOR.md        {{.Project}} {{.Instructions}} {{.Interactive}} {{.Facts}}
+//	TASK-WORKER.md         {{.Project}} {{.Instructions}} {{.Facts}}
+//	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}}
 //	PERSONA.md             (plain text, inserted into NARRATOR.md)
+//	FACTS.md               {{.Project}} (how eagent works; inserted into the three actor prompts)
 //	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}}
 package prompts
 
@@ -31,7 +32,7 @@ import (
 var builtin embed.FS
 
 // Names lists the prompt files, in display order.
-var Names = []string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "COMPACTION-DOSSIER.md"}
+var Names = []string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "COMPACTION-DOSSIER.md"}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }
@@ -90,16 +91,21 @@ type OrchestratorData struct {
 	Project      string
 	Instructions string
 	Interactive  bool
+	Facts        string
 }
 
 // TaskData feeds TASK-WORKER.md.
 type TaskData struct {
 	Project      string
 	Instructions string
+	Facts        string
 }
 
 // NarratorData feeds NARRATOR.md.
-type NarratorData struct{ Persona, Phone string }
+type NarratorData struct{ Persona, Phone, Facts string }
+
+// FactsData feeds FACTS.md.
+type FactsData struct{ Project string }
 
 // DossierData feeds COMPACTION-DOSSIER.md.
 type DossierData struct {

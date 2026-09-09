@@ -163,7 +163,7 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		if note := r.unchangedSince(c, "view|"+str("path"), str("path")); note != "" {
 			return note, false
 		}
-		att, err := r.viewImage(str("path"))
+		att, err := r.viewImage(c, str("path"))
 		if err != nil {
 			return err.Error(), true
 		}
@@ -185,7 +185,7 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		// No in-tool cap: the deferred spill keeps the whole text on disk and
 		// truncates once, so "full output saved" is true. Memory is bounded
 		// by the file tool's read cap.
-		out, err := r.files.ReadFile(str("path"), num("offset", 0), num("limit", 0), 0)
+		out, err := r.filesFor(c).ReadFile(str("path"), num("offset", 0), num("limit", 0), 0)
 		if err != nil {
 			return err.Error(), true
 		}
@@ -196,19 +196,19 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		if !hasContent {
 			return "content is required (a string)", true
 		}
-		out, err := r.files.WriteFile(str("path"), content)
+		out, err := r.filesFor(c).WriteFile(str("path"), content)
 		if err != nil {
 			return err.Error(), true
 		}
 		return out, false
 	case "edit_file":
-		out, err := r.files.EditFile(str("path"), str("old_text"), str("new_text"), boolean("replace_all"))
+		out, err := r.filesFor(c).EditFile(str("path"), str("old_text"), str("new_text"), boolean("replace_all"))
 		if err != nil {
 			return err.Error(), true
 		}
 		return out, false
 	case "list_dir":
-		out, err := r.files.ListDir(str("path"))
+		out, err := r.filesFor(c).ListDir(str("path"))
 		if err != nil {
 			return err.Error(), true
 		}
@@ -281,10 +281,14 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		if text == "" {
 			return "text is required", true
 		}
+		answer := boolean("answer")
 		r.sync(func() {
-			r.append(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: text}))
+			r.append(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: text, Answer: answer}))
 			r.wakeNarrator(wakeNote)
 		})
+		if answer {
+			return "noted as your answer; the narrator relays it to the user", false
+		}
 		return "noted; the narrator will decide what to relay", false
 	case "schedule":
 		spec := strings.TrimSpace(str("spec"))
@@ -372,15 +376,23 @@ func (r *Runtime) ownedProc(c caller, handle string) (*procs.Proc, bool) {
 // owner, and attended flag are recorded before the process is launched so a
 // command that exits instantly cannot race its own bookkeeping.
 func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSeconds int) (string, bool) {
-	var handle string
-	cwd := r.projectPath()
+	var handle, cwd, gone string
 	r.sync(func() {
+		cwd = r.workDir(c.task)
+		if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
+			// A cd that stuck into a directory that has since disappeared.
+			gone, cwd = cwd, r.projectPath()
+			r.append(event.New(event.CwdChange, c.actor, event.CwdChangeData{Path: cwd, Previous: gone}).WithTask(c.task))
+		}
 		handle = r.st.NextProcHandle()
 		r.procOwner[handle] = owner{c.actor, c.task}
 		r.procAttended[handle] = waitSeconds > 0
 		r.append(event.New(event.ProcStart, c.actor, event.ProcStartData{Handle: handle, Command: command, Cwd: cwd, TimeoutS: timeoutSeconds}).WithTask(c.task))
 	})
 	spec := procs.Spec{Handle: handle, Command: command, Cwd: cwd, Owner: c.actor + "/" + c.task, EnvDeny: r.secretEnvNames()}
+	if pwd := r.pwdFile(handle); pwd != "" && r.bashEnv != "" {
+		spec.Env = append(spec.Env, "EAGENT_PWD_FILE="+pwd, "BASH_ENV="+r.bashEnv)
+	}
 	if timeoutSeconds > 0 {
 		spec.Timeout = time.Duration(timeoutSeconds) * time.Second
 	}
@@ -399,7 +411,87 @@ func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSecond
 	if waitSeconds > 0 {
 		p.Wait(c.ctx, time.Duration(waitSeconds)*time.Second)
 	}
-	return r.renderProc(c, p, waitSeconds > 0), false
+	out := r.renderProc(c, p, waitSeconds > 0)
+	if gone != "" {
+		out = fmt.Sprintf("(your working directory %s no longer exists; commands start in the project root %s again)\n", gone, cwd) + out
+	}
+	return out, false
+}
+
+// pwdFile is where a command's shell reports its final directory.
+func (r *Runtime) pwdFile(handle string) string {
+	dir := filepath.Join(r.sess.Path, "procs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	return filepath.Join(dir, handle+".pwd")
+}
+
+// adoptCwd records where a finished command left its shell when that differs
+// from its owner's working directory, so the next command starts there. Loop
+// goroutine only; a second call for the same handle finds nothing to do.
+func (r *Runtime) adoptCwd(handle string) (string, bool) {
+	path := filepath.Join(r.sess.Path, "procs", handle+".pwd")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	_ = os.Remove(path)
+	dir := strings.TrimSpace(string(raw))
+	if dir == "" || !filepath.IsAbs(dir) {
+		return "", false
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "", false
+	}
+	o := r.procOwner[handle]
+	cur := r.workDir(o.task)
+	if sameDir(dir, cur) {
+		return "", false
+	}
+	r.append(event.New(event.CwdChange, o.actor, event.CwdChangeData{Path: dir, Previous: cur}).WithTask(o.task))
+	return dir, true
+}
+
+// movedBy reports the working directory a finished command left its owner
+// in, when the log shows a move recorded after the command started. Loop
+// goroutine only.
+func (r *Runtime) movedBy(handle string) (string, bool) {
+	sp := r.st.Procs[handle]
+	if sp == nil {
+		return "", false
+	}
+	o := r.procOwner[handle]
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= sp.StartSeq {
+			break
+		}
+		if ev.Type != event.CwdChange || ev.Actor != o.actor || ev.Task != o.task {
+			continue
+		}
+		var d event.CwdChangeData
+		if ev.Decode(&d) == nil && d.Path != "" {
+			return d.Path, true
+		}
+	}
+	return "", false
+}
+
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
+}
+
+// filesFor gives an actor file access relative to its working directory.
+func (r *Runtime) filesFor(c caller) tools.Files {
+	var base string
+	r.sync(func() { base = r.workDir(c.task) })
+	return r.files.At(base)
 }
 
 // pollBash reads new output, optionally waiting for exit first.
@@ -429,11 +521,15 @@ func (r *Runtime) renderProc(c caller, p *procs.Proc, waited bool) string {
 	out, next := p.Output(cursor)
 	status := p.Status()
 	finished := status != procs.Running
+	var newDir string
+	var moved bool
 	r.sync(func() {
 		r.procCursor[p.Handle] = next
 		r.procAttended[p.Handle] = false
 		if finished {
 			r.procSeenAt[p.Handle] = true
+			r.adoptCwd(p.Handle) // a no-op when the exit handler got there first
+			newDir, moved = r.movedBy(p.Handle)
 		}
 	})
 	var b strings.Builder
@@ -459,6 +555,9 @@ func (r *Runtime) renderProc(c caller, p *procs.Proc, waited bool) string {
 		b.WriteString("\n(no output yet)")
 	} else {
 		b.WriteString("\n(no new output)")
+	}
+	if moved {
+		fmt.Fprintf(&b, "\n(working directory is now %s; your later commands start there)", newDir)
 	}
 	return b.String()
 }
@@ -641,7 +740,7 @@ func (r *Runtime) memoKey(c caller, key string) string {
 // unchangedSince returns a note when the caller already read this exact
 // thing and the file is the same size and modification time; "" otherwise.
 func (r *Runtime) unchangedSince(c caller, key, path string) string {
-	abs, err := r.locateFile(path)
+	abs, err := r.locateFile(c, path)
 	if err != nil {
 		return ""
 	}
@@ -663,7 +762,7 @@ func (r *Runtime) unchangedSince(c caller, key, path string) string {
 }
 
 func (r *Runtime) remember(c caller, key, path string) {
-	abs, err := r.locateFile(path)
+	abs, err := r.locateFile(c, path)
 	if err != nil {
 		return
 	}

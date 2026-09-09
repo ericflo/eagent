@@ -284,3 +284,48 @@ func TestImagesOfSkipsUnsupportedTypes(t *testing.T) {
 		t.Fatalf("images = %+v", imgs)
 	}
 }
+
+func TestWorkingDirectoryFollowsCdEventsPerActor(t *testing.T) {
+	st := New()
+	st.Apply(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: "1", Cwd: "/proj"}))
+	if st.WorkDir("") != "/proj" || st.WorkDir("t9") != "/proj" {
+		t.Fatalf("fresh session: %q %q", st.WorkDir(""), st.WorkDir("t9"))
+	}
+	st.Apply(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: "/proj/sub", Previous: "/proj"}))
+	if st.WorkDir("") != "/proj/sub" {
+		t.Fatalf("orchestrator cd not applied: %q", st.WorkDir(""))
+	}
+	// A worker starts where the orchestrator was, and keeps it when the
+	// orchestrator moves on; its own cd is its own.
+	st.Apply(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "x", Description: "y", Kind: "work"}))
+	st.Apply(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: "/elsewhere"}))
+	if st.WorkDir("t1") != "/proj/sub" || st.WorkDir("") != "/elsewhere" {
+		t.Fatalf("task inheritance: task=%q orch=%q", st.WorkDir("t1"), st.WorkDir(""))
+	}
+	st.Apply(event.New(event.CwdChange, event.ActorTask, event.CwdChangeData{Path: "/proj/sub/deeper"}).WithTask("t1"))
+	if st.WorkDir("t1") != "/proj/sub/deeper" || st.WorkDir("") != "/elsewhere" {
+		t.Fatalf("task cd leaked: task=%q orch=%q", st.WorkDir("t1"), st.WorkDir(""))
+	}
+	// Replaying the same events gives the same answer.
+	again := Replay(st.Events)
+	if again.WorkDir("t1") != "/proj/sub/deeper" || again.WorkDir("") != "/elsewhere" {
+		t.Fatal("replay lost the working directories")
+	}
+	if got := Observe(st.Events[1], 200); !strings.Contains(got, "/proj/sub") {
+		t.Fatalf("narrator does not see the move: %q", got)
+	}
+	if got := Observe(st.Events[len(st.Events)-1], 200); got != "" {
+		t.Fatalf("a worker's cd is not the narrator's business: %q", got)
+	}
+}
+
+func TestAnswerNotesAreMarkedForTheNarrator(t *testing.T) {
+	ev := event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "Mostly the briefing.", Answer: true})
+	if got := Observe(ev, 200); !strings.Contains(got, "ANSWER FROM THE ORCHESTRATOR") || !strings.Contains(got, "Mostly the briefing.") {
+		t.Fatalf("answer note rendering: %q", got)
+	}
+	plain := event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone"})
+	if got := Observe(plain, 200); strings.Contains(got, "ANSWER") {
+		t.Fatalf("plain note rendered as an answer: %q", got)
+	}
+}

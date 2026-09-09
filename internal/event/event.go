@@ -62,6 +62,7 @@ const (
 	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
 	PhoneQuestion  = "phone.question" // a narrator question was posted to the phone as a card
 	Steer          = "steer"          // the harness's per-call instruction to an actor, kept so every prompt extends the last
+	CwdChange      = "cwd.change"     // an actor's working directory moved: a cd in one of its commands that persists for its later ones
 	Error          = "error"
 )
 
@@ -264,6 +265,17 @@ type TaskEndData struct {
 // NoteData is an orchestrator hint for the narrator.
 type NoteData struct {
 	Text string `json:"text"`
+	// Answer marks a note that answers a question the user asked. The
+	// narrator relays it as the answer rather than deciding whether to.
+	Answer bool `json:"answer,omitempty"`
+}
+
+// CwdChangeData records that an actor's working directory moved: a cd in one
+// of its commands that persists for its later commands. The event's actor and
+// task say whose directory it is.
+type CwdChangeData struct {
+	Path     string `json:"path"`
+	Previous string `json:"previous,omitempty"`
 }
 
 // NarratorMessageData is user-visible output.

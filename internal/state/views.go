@@ -476,7 +476,17 @@ func Observe(ev event.Event, maxChars int) string {
 	case event.Note:
 		var d event.NoteData
 		_ = ev.Decode(&d)
+		if d.Answer {
+			return fmt.Sprintf("%s ANSWER FROM THE ORCHESTRATOR TO THE USER'S QUESTION (relay it in your voice, faithfully, adding nothing it did not say): %s", ts, d.Text)
+		}
 		return fmt.Sprintf("%s NOTE FROM ORCHESTRATOR (for you to consider relaying): %s", ts, d.Text)
+	case event.CwdChange:
+		if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			return ""
+		}
+		var d event.CwdChangeData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s working directory is now %s (a cd that stuck; later commands start there)", ts, d.Path)
 	case event.TaskCreate:
 		var d event.TaskCreateData
 		_ = ev.Decode(&d)

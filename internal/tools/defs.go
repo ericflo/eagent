@@ -16,7 +16,7 @@ func def(name, desc string, params string) llm.Tool {
 // Shell and file tools shared by the orchestrator and the task worker.
 var shellTools = []llm.Tool{
 	def("bash",
-		"Run a bash command in the project directory. The command starts in the background under a handle; if it finishes within wait_seconds you get its output right away, otherwise you get the handle and whatever it printed so far. Use bash_poll to read more, bash_write to answer a prompt, bash_kill to stop it. Long-running servers should be started with timeout_seconds=0. Output is stdout+stderr interleaved.",
+		"Run a bash command in your working directory: the project directory until a `cd` in one of your commands moves it, after which your later commands start there (the result says so). The command starts in the background under a handle; if it finishes within wait_seconds you get its output right away, otherwise you get the handle and whatever it printed so far. Use bash_poll to read more, bash_write to answer a prompt, bash_kill to stop it. Long-running servers should be started with timeout_seconds=0. Output is stdout+stderr interleaved.",
 		`{"type":"object","properties":{
 			"command":{"type":"string","description":"The bash command (may be multi-line)."},
 			"wait_seconds":{"type":"integer","description":"How long to wait inline for completion before returning the handle. Default 20, max 300."},
@@ -64,7 +64,7 @@ var shellTools = []llm.Tool{
 			"replace_all":{"type":"boolean"}
 		},"required":["path","old_text","new_text"]}`),
 	def("list_dir", "List a directory (directories first).",
-		`{"type":"object","properties":{"path":{"type":"string","description":"Defaults to the project root."}}}`),
+		`{"type":"object","properties":{"path":{"type":"string","description":"Defaults to your working directory."}}}`),
 }
 
 // Session archive tools for building and following dossiers.
@@ -103,8 +103,8 @@ var orchestratorOnly = []llm.Tool{
 		}}`),
 	def("cancel_task", "Cancel a running task.", `{"type":"object","properties":{"task":{"type":"string"}},"required":["task"]}`),
 	def("note",
-		"Jot a note for the narrator, who decides what to tell the user. Use it for milestones, decisions, problems, and anything the user would want to know. Also use it to request user input: describe exactly what you need decided, then call yield.",
-		`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+		"Jot a note for the narrator, who decides what to tell the user. Use it for milestones, decisions, problems, and anything the user would want to know. Also use it to request user input: describe exactly what you need decided, then call yield. When the user asked a question, answer it in a note with answer=true before anything else; that note is relayed to them as your answer, so say only what this context's log shows.",
+		`{"type":"object","properties":{"text":{"type":"string"},"answer":{"type":"boolean","description":"True when this note answers a question the user asked."}},"required":["text"]}`),
 	def("schedule",
 		"Create a recurring loop or a one-shot timer that wakes you later with the note. Interval loops: '5m', '90s'. Cron: '*/15 * * * *'. One-shot: 'in 10m' or an RFC3339 time. While a schedule exists the session stays alive.",
 		`{"type":"object","properties":{

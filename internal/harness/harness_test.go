@@ -837,3 +837,249 @@ func TestCleanNarrationStripsLeakedTokens(t *testing.T) {
 		t.Fatalf("ordinary text altered: %q", got)
 	}
 }
+
+func TestCdPersistsAcrossCommandsAndFileTools(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case !strings.Contains(all, "working directory is now"):
+				return reply{calls: []event.ToolCall{tc("bash", `{"command":"cd sub && echo moved"}`)}}
+			case !strings.Contains(all, "PWD="):
+				return reply{calls: []event.ToolCall{tc("bash", `{"command":"echo PWD=$PWD"}`), tc("write_file", `{"path":"note.txt","content":"here"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
+			}
+		default:
+			if strings.Contains(all, "DECLARED THE WORK DONE") || strings.Contains(lastUserText(msgs), "final") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"done"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "move into sub"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit code %d; logs: %v", code, ui.logs)
+	}
+	sub, _ := filepath.EvalSymlinks(filepath.Join(project, "sub"))
+	if raw, err := os.ReadFile(filepath.Join(sub, "note.txt")); err != nil || string(raw) != "here" {
+		t.Fatalf("write_file did not follow the working directory: %q %v", raw, err)
+	}
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var moves, starts []string
+	var pwdSeen, steerSeen bool
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.CwdChange:
+			var d event.CwdChangeData
+			_ = ev.Decode(&d)
+			moves = append(moves, d.Path)
+		case event.ProcStart:
+			var d event.ProcStartData
+			_ = ev.Decode(&d)
+			starts = append(starts, d.Cwd)
+		case event.ToolResult:
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			if strings.Contains(d.Output, "PWD="+sub) {
+				pwdSeen = true
+			}
+		case event.Steer:
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			if ev.Actor == event.ActorOrchestrator && strings.Contains(d.Text, "Working directory: "+sub) {
+				steerSeen = true
+			}
+		}
+	}
+	if len(moves) != 1 || moves[0] != sub {
+		t.Fatalf("cwd.change events = %v, want one to %s", moves, sub)
+	}
+	if len(starts) != 2 || !sameDir(starts[1], sub) {
+		t.Fatalf("second command did not start in sub: %v", starts)
+	}
+	if !pwdSeen || !steerSeen {
+		t.Fatalf("pwd result seen=%v, steer named the directory=%v", pwdSeen, steerSeen)
+	}
+	if st := state.Replay(evs); st.WorkDir("") != sub {
+		t.Fatalf("replayed working directory %q", st.WorkDir(""))
+	}
+}
+
+func TestNarratorAnswersWithTheOrchestratorNotAheadOfIt(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	previous := narratorAckGrace
+	narratorAckGrace = 300 * time.Millisecond
+	defer func() { narratorAckGrace = previous }()
+	project := t.TempDir()
+	release := make(chan struct{})
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			switch {
+			case strings.Contains(all, "slow question") && !strings.Contains(all, "Slowly: yes"):
+				return reply{block: release, calls: []event.ToolCall{tc("note", `{"text":"Slowly: yes.","answer":true}`), tc("yield", `{"done":false,"reason":"answered"}`)}}
+			case strings.Contains(all, "did you read the file") && !strings.Contains(all, "No, only the summary"):
+				return reply{calls: []event.ToolCall{tc("note", `{"text":"No, only the summary.","answer":true}`), tc("yield", `{"done":false,"reason":"answered"}`)}}
+			case !strings.Contains(all, "ready when you are"):
+				return reply{calls: []event.ToolCall{tc("note", `{"text":"ready when you are"}`), tc("yield", `{"done":false,"reason":"waiting"}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}}
+			}
+		default: // narrator: speak only as the steer allows
+			steer := lastUserText(msgs)
+			switch {
+			case strings.Contains(steer, "has answered them"):
+				if strings.Contains(all, "Slowly: yes") {
+					return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Slowly: yes."}`)}}
+				}
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"No, only the summary."}`)}}
+			case strings.Contains(steer, "has not reacted yet"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Got it, checking."}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Interactive: true, Prompt: "hello"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor := func(n int) []string {
+		deadline := time.Now().Add(15 * time.Second)
+		for ui.messageCount() < n && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		m, _, _ := ui.snapshot()
+		return m
+	}
+	// A question the orchestrator answers quickly: the narrator waits for
+	// the answer and relays it, never a guess.
+	ui.input <- "did you read the file?"
+	if m := waitFor(1); len(m) != 1 || m[0] != "No, only the summary." {
+		t.Fatalf("messages after a quick answer = %v", m)
+	}
+	// A question the orchestrator takes longer than the grace period on:
+	// one line that the message landed, then the answer when it comes.
+	ui.input <- "slow question"
+	if m := waitFor(2); len(m) != 2 || m[1] != "Got it, checking." {
+		t.Fatalf("messages while the orchestrator is slow = %v", m)
+	}
+	close(release)
+	if m := waitFor(3); len(m) != 3 || m[2] != "Slowly: yes." {
+		t.Fatalf("messages after the slow answer = %v", m)
+	}
+	ui.input <- "/quit"
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("did not quit")
+	}
+	// The relay came after the answer note, and the steer said so.
+	evs, _ := store.Read(rt.sess.Path)
+	var answerSeq, relaySeq int64
+	var steerAnswered, steerQuiet bool
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.Note:
+			var d event.NoteData
+			if ev.Decode(&d) == nil && d.Answer && d.Text == "No, only the summary." {
+				answerSeq = ev.Seq
+			}
+		case event.NarratorMessage:
+			var d event.NarratorMessageData
+			if ev.Decode(&d) == nil && d.Text == "No, only the summary." {
+				relaySeq = ev.Seq
+			}
+		case event.Steer:
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			if ev.Actor == event.ActorNarrator {
+				steerAnswered = steerAnswered || strings.Contains(d.Text, "has answered them")
+				steerQuiet = steerQuiet || strings.Contains(d.Text, "has not reacted yet")
+			}
+		}
+	}
+	if answerSeq == 0 || relaySeq < answerSeq {
+		t.Fatalf("relay (seq %d) did not follow the answer note (seq %d)", relaySeq, answerSeq)
+	}
+	if !steerAnswered || !steerQuiet {
+		t.Fatalf("steers seen: answered=%v quiet=%v", steerAnswered, steerQuiet)
+	}
+}
+
+func TestNarratorMessageNamingTheMachineryIsSentBackOnce(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			return reply{calls: []event.ToolCall{tc("note", `{"text":"built"}`), tc("yield", `{"done":true,"reason":"built"}`)}}
+		default:
+			if strings.Contains(all, "names internal machinery") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"I finished the build."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"The orchestrator finished the build after a rollover."}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "build"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d logs=%v", code, ui.logs)
+	}
+	messages, _, _ := ui.snapshot()
+	for _, m := range messages {
+		if mechanicsLeak(m) != "" {
+			t.Fatalf("a message naming the machinery reached the user: %v", messages)
+		}
+	}
+	if len(messages) == 0 || messages[len(messages)-1] != "I finished the build." {
+		t.Fatalf("messages = %v", messages)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	rejected := 0
+	for _, ev := range evs {
+		if ev.Type == event.ToolResult && ev.Actor == event.ActorNarrator {
+			var d event.ToolResultData
+			if ev.Decode(&d) == nil && strings.Contains(d.Output, "names internal machinery (orchestrator, rollover)") {
+				rejected++
+			}
+		}
+	}
+	if rejected != 1 {
+		t.Fatalf("rejections recorded = %d", rejected)
+	}
+}

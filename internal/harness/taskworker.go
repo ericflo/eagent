@@ -103,7 +103,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 				missing = true
 				return
 			}
-			steer = steerTask(cur, turn, maxTurns, time.Now())
+			steer = steerTask(cur, turn, maxTurns, time.Now(), r.workDir(t.ID), r.projectPath())
 			r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: steer}).WithTask(t.ID))
 			msgs = r.st.TaskView(t.ID)
 			seenSeq = r.st.LastSeq()

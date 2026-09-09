@@ -22,6 +22,12 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 ## Types
 
+### Working directory
+
+| Type | Actor | Payload | Notes |
+|---|---|---|---|
+| `cwd.change` | orchestrator or task | `path`, `previous` | The actor's working directory moved: a `cd` in one of its commands that persists for its later commands (the shell reports its final directory through an EXIT trap). A worker starts where the orchestrator was when it delegated. `state.WorkDir(task)` folds these; `session.start`'s `cwd` stays the project root. |
+
 ### Session lifecycle
 
 | Type | Actor | Payload | Notes |
@@ -44,7 +50,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 | `tool.result` | same actor | `call_id`, `name`, `output`, `is_error` | Always rendered directly after the call that produced it. |
 | `harness.message` | orchestrator or task | `text` | Steering the harness chose to persist (resume notice, nudge after a tool-less reply, recovery after a provider error). |
 | `yield` | orchestrator | `done`, `reason`, `forced` | The orchestrator has nothing to do until something happens; `done=true` ends a batch session. `forced` yields are issued by the harness and always count. |
-| `note` | orchestrator | `text` | A hint for the narrator; wakes it. |
+| `note` | orchestrator | `text`, `answer` | A hint for the narrator; wakes it. With `answer` true it answers a question the user asked, and the narrator relays it as the answer rather than deciding whether to. |
 | `narrator.message` | narrator | `text`, `important` (the phone was buzzed), `attachments` (files the narrator sent, copied under `<session>/attachments/`) | User-visible output. |
 | `narrator.question` | narrator | `id`, `text`, `options[]` | Blocks on the user in interactive sessions; ends a batch session with exit code 2. |
 

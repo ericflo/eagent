@@ -82,7 +82,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		var seenSeq int64
 		var steer string
 		r.sync(func() {
-			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls, r.cfg.MaxOrchestratorCallsPerTurn)
+			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls, r.cfg.MaxOrchestratorCallsPerTurn, r.workDir(""), r.projectPath())
 			r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: steer}))
 			msgs = r.st.OrchestratorView()
 			seenSeq = r.st.LastSeq()

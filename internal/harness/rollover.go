@@ -245,6 +245,9 @@ func (r *Runtime) fallbackDossier(partial string) string {
 			fmt.Fprintf(&b, "- [%s] %s\n", ev.Source, firstLine(d.Text, 500))
 		}
 	}
+	if wd := r.workDir(""); wd != r.projectPath() {
+		fmt.Fprintf(&b, "\nWORKING DIRECTORY: %s (a cd that stuck; the project root is %s)\n", wd, r.projectPath())
+	}
 	b.WriteString("\nTASKS:\n")
 	for _, id := range r.st.TaskOrder {
 		t := r.st.Tasks[id]

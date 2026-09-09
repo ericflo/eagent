@@ -154,6 +154,7 @@ func (r *Runtime) startPhone() {
 	for k, v := range r.st.Models {
 		models[k] = v
 	}
+	project, workDir := r.projectPath(), r.workDir("")
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
@@ -203,8 +204,8 @@ func (r *Runtime) startPhone() {
 		}
 		// Thread meta the app renders as chips: where the session runs and on what.
 		host, _ := os.Hostname()
-		meta := map[string]any{"cwd": r.opts.Project, "host": host, "model": models["orchestrator"]}
-		if branch := gitBranch(ctx, r.opts.Project); branch != "" {
+		meta := map[string]any{"project": project, "cwd": workDir, "host": host, "model": models["orchestrator"]}
+		if branch := gitBranch(ctx, workDir); branch != "" {
 			meta["branch"] = branch
 		}
 		_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
@@ -345,6 +346,22 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		var d event.NarratorQuestionData
 		_ = ev.Decode(&d)
 		p.ask(r, d.ID, d.Text, d.Options)
+	case event.CwdChange:
+		if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			return
+		}
+		var d event.CwdChangeData
+		_ = ev.Decode(&d)
+		dir := d.Path
+		p.enqueue(func(ctx context.Context) {
+			// The chip under the thread title says where the session works
+			// now; the branch chip follows it (nil clears it outside a repo).
+			meta := map[string]any{"cwd": dir, "branch": nil}
+			if branch := gitBranch(ctx, dir); branch != "" {
+				meta["branch"] = branch
+			}
+			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
+		})
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)

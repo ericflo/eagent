@@ -61,6 +61,9 @@ type SessionSummary struct {
 	Size         int64             `json:"size"`
 	Events       int               `json:"events"`
 	Cwd          string            `json:"cwd,omitempty"`
+	// WorkDir is the orchestrator's current working directory when a cd
+	// moved it off the project root.
+	WorkDir string `json:"work_dir,omitempty"`
 }
 
 // SessionDetail adds the derived runtime picture.
@@ -141,7 +144,7 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	evs := st.Events
 	sum := SessionSummary{
 		ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size,
-		Models: st.Models, Cwd: st.Cwd, Events: len(evs),
+		Models: st.Models, Cwd: st.Cwd, WorkDir: workDirOf(st), Events: len(evs),
 	}
 	if len(evs) > 0 {
 		var d event.SessionStartData
@@ -290,4 +293,13 @@ func costOfRoutesWithPrices(st *state.State, actor string, pricing *PricingSnaps
 		total += c
 	}
 	return total, priced && any
+}
+
+// workDirOf is the orchestrator's working directory when it differs from the
+// project root, else "".
+func workDirOf(st *state.State) string {
+	if d := st.WorkDir(""); d != st.Cwd {
+		return d
+	}
+	return ""
 }
