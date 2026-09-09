@@ -1122,7 +1122,7 @@ func TestNarratorSteerCadence(t *testing.T) {
 	}
 	// A user message asks for an acknowledgement at once.
 	s = steerNarrator(st, time.Now(), wakeUser, true, false, "", true, 5*time.Second, 3*time.Minute, nil)
-	if !strings.Contains(s, "Reply now") || strings.Contains(s, "heard nothing from you") {
+	if !strings.Contains(s, "has not reacted yet") || strings.Contains(s, "heard nothing from you") {
 		t.Fatalf("acknowledgement steer: %s", s)
 	}
 	// What is in flight is named, with the ask to say which one.
@@ -1493,7 +1493,7 @@ func TestTaskEvidenceReportsOnlyTheLog(t *testing.T) {
 	add(event.New(event.TurnStart, event.ActorTask, map[string]any{}).WithTask("t1"), base.Add(31*time.Second))
 	now := base.Add(8 * time.Minute)
 	got := taskEvidence(st, st.Tasks["t1"], now)
-	for _, want := range []string{"1 model call(s) have come back", "current model call has been running for 7m", "produced nothing visible yet", "run no commands and written no files"} {
+	for _, want := range []string{"1 model call(s) have come back", "current step has been running for 7m", "produced nothing visible yet", "run no commands and written no files"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("evidence lacks %q: %s", want, got)
 		}
@@ -1791,7 +1791,7 @@ func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 			switch {
 			case strings.Contains(all, "Done."):
 				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
-			case strings.Contains(all, "decided"):
+			case strings.Contains(all, "DECLARED THE WORK DONE"):
 				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
 			case strings.Contains(all, "Wipe the branch") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
 				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Wipe the branch?","options":["yes","no"]}`)}}

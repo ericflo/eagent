@@ -140,6 +140,9 @@ type Runtime struct {
 	// orchestrator's turn counts as the reaction.
 	userWaitSeq      int64
 	userWaitQuestion bool
+	// orchSawSeq is the newest event the orchestrator's latest response had
+	// seen, so a reaction is only credited to a message it had in view.
+	orchSawSeq int64
 	// bashEnv is the BASH_ENV file every command sources: an EXIT trap that
 	// reports the shell's final directory, so a cd persists across commands.
 	bashEnv string
@@ -450,9 +453,16 @@ func (r *Runtime) noteWake(ev event.Event) {
 	if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
 		r.narrWorthy = ev.Seq
 	}
-	if r.userWaitSeq > 0 && ev.Seq > r.userWaitSeq && orchestratorReacted(ev, r.userWaitQuestion) {
-		// The orchestrator has done something about the user's message; the
-		// narrator can now answer with that instead of guessing.
+	if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
+		var d event.AssistantData
+		if ev.Decode(&d) == nil && d.SeenSeq > r.orchSawSeq {
+			r.orchSawSeq = d.SeenSeq
+		}
+	}
+	if r.userWaitSeq > 0 && ev.Seq > r.userWaitSeq && r.orchSawSeq >= r.userWaitSeq && orchestratorReacted(ev, r.userWaitQuestion) {
+		// The orchestrator has done something about the user's message (in a
+		// turn that had it in view); the narrator can now answer with that
+		// instead of guessing.
 		r.userWaitSeq = 0
 		r.wakeNarrator(wakeUser)
 	}

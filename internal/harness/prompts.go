@@ -199,8 +199,18 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 // the narrator can see), or "quiet" (nothing yet).
 func userWakeKind(st *state.State) string {
 	kind := "quiet"
+	saw := false // only responses that had the message in view count
 	for _, ev := range st.Events {
 		if ev.Seq <= st.LastUserSeq || ev.Actor != event.ActorOrchestrator || ev.Task != "" {
+			continue
+		}
+		if ev.Type == event.Assistant {
+			var d event.AssistantData
+			if ev.Decode(&d) == nil && d.SeenSeq >= st.LastUserSeq {
+				saw = true
+			}
+		}
+		if !saw {
 			continue
 		}
 		switch ev.Type {
