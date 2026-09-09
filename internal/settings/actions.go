@@ -35,7 +35,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		{Operation: "bundle.delete", Label: "Delete named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64)}, "name")},
 		// Starting a session spends model credit and runs commands on the
 		// machine, so it is a cost-class action like a route test.
-		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768)}, "prompt")},
+		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768), "cwd": text(4096)}, "prompt")},
 	}
 	var out []control.Action
 	for _, action := range actions {

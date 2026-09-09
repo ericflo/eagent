@@ -52,6 +52,10 @@ type Options struct {
 	// PromptAttachments are files already saved under the session directory
 	// that arrived with Prompt.
 	PromptAttachments []event.Attachment
+	// StartDir, when set, is where a new session's commands start instead
+	// of the project root; it is recorded as the first working-directory
+	// move so the log, the phone and the UI show it from the start.
+	StartDir string
 }
 
 // Runtime is one live session.
@@ -197,6 +201,9 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Config: name,
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
+	if dir := strings.TrimSpace(opts.StartDir); dir != "" && !sameDir(dir, r.projectPath()) {
+		r.append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
+	}
 	if strings.TrimSpace(opts.Prompt) != "" {
 		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
 	}

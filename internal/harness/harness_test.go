@@ -1083,3 +1083,53 @@ func TestNarratorMessageNamingTheMachineryIsSentBackOnce(t *testing.T) {
 		t.Fatalf("rejections recorded = %d", rejected)
 	}
 }
+
+func TestStartDirIsTheFirstWorkingDirectory(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project := t.TempDir()
+	elsewhere := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if !strings.Contains(all, "PWD=") {
+				return reply{calls: []event.ToolCall{tc("bash", `{"command":"echo PWD=$PWD"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"done"}`)}}
+		default:
+			if strings.Contains(all, "DECLARED THE WORK DONE") || strings.Contains(lastUserText(msgs), "final") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"done"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "where are you", StartDir: elsewhere}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d logs=%v", code, ui.logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.WorkDir("") != elsewhere || st.Cwd != project {
+		t.Fatalf("workdir=%q project=%q", st.WorkDir(""), st.Cwd)
+	}
+	real, _ := filepath.EvalSymlinks(elsewhere)
+	seen := false
+	for _, ev := range evs {
+		if ev.Type == event.ToolResult {
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			seen = seen || strings.Contains(d.Output, "PWD="+real) || strings.Contains(d.Output, "PWD="+elsewhere)
+		}
+	}
+	if !seen {
+		t.Fatal("the first command did not run in the start directory")
+	}
+}

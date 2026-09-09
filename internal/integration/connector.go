@@ -74,6 +74,7 @@ type commandJournal struct {
 
 type sessionStartIntent struct {
 	Prompt string `json:"prompt"`
+	Dir    string `json:"dir,omitempty"`
 }
 
 func connectorPath(project string) string {
@@ -331,6 +332,7 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 	var linked []settingsThread
 	var account *finalechat.Client
 	var discovered time.Time
+	var directories map[string]any
 	sitesVersion := map[string]string{}
 	for ctx.Err() == nil {
 		var status struct {
@@ -378,6 +380,7 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 		}
 		if session == "" && time.Since(discovered) > time.Minute {
 			discovered = time.Now()
+			directories = projectDirectories(project)
 			account, _ = settingsAccount(project)
 			if account != nil && strings.TrimRight(account.BaseURL, "/") == strings.TrimRight(local.BaseURL, "/") {
 				discoverCtx, stop := context.WithTimeout(ctx, 20*time.Second)
@@ -394,6 +397,9 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 				ids = append(ids, thread.External)
 			}
 			view.Snapshot.Details["thread_external_ids"] = ids
+			// Where a session started from the phone may begin: the app
+			// offers these, and any absolute path typed in.
+			view.Snapshot.Details["directories"] = directories
 		}
 		var published struct {
 			Resource resourceInfo `json:"resource"`
@@ -603,12 +609,16 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			journal.Route = &route
 		case "session.start":
 			prompt, _ := q.Proposal.Parameters["prompt"].(string)
+			dir, _ := q.Proposal.Parameters["cwd"].(string)
+			dir = strings.TrimSpace(dir)
 			if _, err := s.ValidateAction(q.Proposal, grant); err != nil {
 				prepareErr = err
 			} else if strings.TrimSpace(prompt) == "" {
 				prepareErr = fmt.Errorf("the first message is required")
+			} else if err := checkStartDir(dir); err != nil {
+				prepareErr = err
 			} else {
-				journal.Session = &sessionStartIntent{Prompt: prompt}
+				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir}
 			}
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
@@ -653,14 +663,18 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		// Starting a session must not hold the settings writer: the new
 		// session reads the configuration through the same lock.
 		editor.Close()
-		started, err := startSession(ctx, s.Project, journal.Session.Prompt)
+		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir})
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish("unknown", map[string]any{"message": "Starting the session was interrupted. It was not repeated; check the session list."})
 			}
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
-		return finish("succeeded", map[string]any{"version": q.Proposal.ExpectedVersion, "session_id": started.ID, "thread": "ext:eagent:" + started.ID, "host": started.Host, "interactive": started.Interactive, "message": started.Message, "effects": []any{}, "snapshot_publication": "pending"})
+		cwd := journal.Session.Dir
+		if cwd == "" {
+			cwd, _ = filepath.Abs(s.Project)
+		}
+		return finish("succeeded", map[string]any{"version": q.Proposal.ExpectedVersion, "session_id": started.ID, "thread": "ext:eagent:" + started.ID, "cwd": cwd, "host": started.Host, "interactive": started.Interactive, "message": started.Message, "effects": []any{}, "snapshot_publication": "pending"})
 	}
 	if journal.Route != nil {
 		if reconcile || journal.RouteStarted {

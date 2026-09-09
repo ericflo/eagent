@@ -7,15 +7,18 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 func sessionStartCommand(t *testing.T, s *settings.Service, g control.Grant, prompt string) command {
@@ -63,10 +66,10 @@ func TestSessionStartIsAdvertisedAsACostAction(t *testing.T) {
 func TestSessionStartRunsTheRegisteredStarterExactlyOnce(t *testing.T) {
 	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no provider call expected") })
 	var calls atomic.Int32
-	restore := SetSessionStarter(func(ctx context.Context, project, prompt string) (SessionStart, error) {
+	restore := SetSessionStarter(func(ctx context.Context, project string, req SessionRequest) (SessionStart, error) {
 		calls.Add(1)
-		if project != s.Project || prompt != "Build the thing" {
-			t.Errorf("starter received %q in %q", prompt, project)
+		if project != s.Project || req.Prompt != "Build the thing" || req.Dir != "" {
+			t.Errorf("starter received %#v in %q", req, project)
 		}
 		return SessionStart{ID: "1788000000000", Host: "in_process", Interactive: true, Message: "hosted"}, nil
 	})
@@ -100,7 +103,7 @@ func TestSessionStartRunsTheRegisteredStarterExactlyOnce(t *testing.T) {
 
 func TestSessionStartRejectsAnEmptyPromptAndReportsStarterFailures(t *testing.T) {
 	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no provider call expected") })
-	restore := SetSessionStarter(func(context.Context, string, string) (SessionStart, error) {
+	restore := SetSessionStarter(func(context.Context, string, SessionRequest) (SessionStart, error) {
 		return SessionStart{}, errors.New("no model key")
 	})
 	defer restore()
@@ -119,7 +122,7 @@ func TestSessionStartRejectsAnEmptyPromptAndReportsStarterFailures(t *testing.T)
 	stale.Proposal.ExpectedVersion = "older"
 	raw, _ := json.Marshal(stale.Proposal)
 	stale.Digest = artifact.Digest(raw)
-	restore2 := SetSessionStarter(func(context.Context, string, string) (SessionStart, error) {
+	restore2 := SetSessionStarter(func(context.Context, string, SessionRequest) (SessionStart, error) {
 		return SessionStart{ID: "1788000000001", Host: "in_process", Interactive: true}, nil
 	})
 	defer restore2()
@@ -135,21 +138,21 @@ func TestDetachedSpawnReportsTheAnnouncedSession(t *testing.T) {
 	project := t.TempDir()
 	previous := spawnCommand
 	defer func() { spawnCommand = previous }()
-	spawnCommand = func(project, prompt, announce string) (*exec.Cmd, error) {
+	spawnCommand = func(project string, req SessionRequest, announce string) (*exec.Cmd, error) {
 		cmd := exec.Command("sh", "-c", `printf '%s\n' "$PROMPT" >&2; printf '1788000000042\n' > "$EAGENT_ANNOUNCE_SESSION"; sleep 2`)
-		cmd.Env = append(cmd.Env, "PROMPT="+prompt, AnnounceEnv+"="+announce, "PATH="+os.Getenv("PATH"))
+		cmd.Env = append(cmd.Env, "PROMPT="+req.Prompt, AnnounceEnv+"="+announce, "PATH="+os.Getenv("PATH"))
 		return cmd, nil
 	}
-	started, err := spawnDetachedSession(context.Background(), project, "Build the thing")
+	started, err := spawnDetachedSession(context.Background(), project, SessionRequest{Prompt: "Build the thing"})
 	if err != nil || started.ID != "1788000000042" || started.Host != "detached" || started.Interactive {
 		t.Fatalf("%#v %v", started, err)
 	}
-	spawnCommand = func(project, prompt, announce string) (*exec.Cmd, error) {
+	spawnCommand = func(project string, req SessionRequest, announce string) (*exec.Cmd, error) {
 		cmd := exec.Command("sh", "-c", `echo "no TOGETHER_API_KEY" >&2; exit 3`)
 		cmd.Env = append(cmd.Env, "PATH="+os.Getenv("PATH"))
 		return cmd, nil
 	}
-	_, err = spawnDetachedSession(context.Background(), project, "Build the thing")
+	_, err = spawnDetachedSession(context.Background(), project, SessionRequest{Prompt: "Build the thing"})
 	if err == nil || !strings.Contains(err.Error(), "no TOGETHER_API_KEY") {
 		t.Fatalf("expected the child's output in the error, got %v", err)
 	}
@@ -182,5 +185,73 @@ func TestReconnectWidensAnExistingGrantWithoutDroppingAnything(t *testing.T) {
 	}
 	if got, changed := widenGrant(nil, want); !changed || got.Key != want.Key {
 		t.Fatal("a missing grant should be requested whole")
+	}
+}
+
+func TestSessionStartDirectoryIsCheckedAndPassedThrough(t *testing.T) {
+	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no provider call expected") })
+	var got SessionRequest
+	restore := SetSessionStarter(func(_ context.Context, _ string, req SessionRequest) (SessionStart, error) {
+		got = req
+		return SessionStart{ID: "1788000000007", Host: "in_process", Interactive: true}, nil
+	})
+	defer restore()
+	elsewhere := t.TempDir()
+	q := sessionStartCommand(t, s, g, "Look around")
+	q.Proposal.Parameters["cwd"] = elsewhere
+	raw, _ := json.Marshal(q.Proposal)
+	q.Digest = artifact.Digest(raw)
+	first, err := executeCommand(context.Background(), s, g, q, false)
+	if err != nil || first.Status != "succeeded" || got.Dir != elsewhere || first.Result["cwd"] != elsewhere {
+		t.Fatalf("%s %v %#v %v", first.Status, first.Result, got, err)
+	}
+	for _, bad := range []string{"relative/path", filepath.Join(elsewhere, "missing")} {
+		q := sessionStartCommand(t, s, g, "Look around")
+		q.Proposal.Parameters["cwd"] = bad
+		raw, _ := json.Marshal(q.Proposal)
+		q.Digest = artifact.Digest(raw)
+		got = SessionRequest{}
+		res, err := executeCommand(context.Background(), s, g, q, false)
+		if err != nil || res.Status != "rejected" || got.Prompt != "" {
+			t.Fatalf("cwd %q: %s %v (starter ran: %v)", bad, res.Status, res.Result, got.Prompt != "")
+		}
+	}
+}
+
+func TestProjectDirectoriesListsRootRecentChildrenAndSiblings(t *testing.T) {
+	base := t.TempDir()
+	project := filepath.Join(base, "proj")
+	for _, d := range []string{filepath.Join(project, "src"), filepath.Join(project, ".git"), filepath.Join(project, "node_modules"), filepath.Join(base, "sibling"), filepath.Join(base, ".hidden")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sess, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: filepath.Join(base, "sibling")})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.CwdChange, event.ActorTask, event.CwdChangeData{Path: filepath.Join(project, "src")}).WithTask("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: filepath.Join(base, "gone")})); err != nil {
+		t.Fatal(err)
+	}
+	sess.Close()
+	dirs := projectDirectories(project)
+	real, _ := filepath.EvalSymlinks(project)
+	if dirs["root"] != real {
+		t.Fatalf("root = %v", dirs["root"])
+	}
+	if got := dirs["children"].([]string); len(got) != 1 || filepath.Base(got[0]) != "src" {
+		t.Fatalf("children = %v", got)
+	}
+	if got := dirs["siblings"].([]string); len(got) != 1 || filepath.Base(got[0]) != "sibling" {
+		t.Fatalf("siblings = %v", got)
+	}
+	if got := dirs["recent"].([]string); len(got) != 1 || got[0] != filepath.Join(base, "sibling") {
+		t.Fatalf("recent = %v (a worker's move and a vanished directory do not count)", got)
 	}
 }

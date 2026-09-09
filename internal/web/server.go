@@ -620,20 +620,21 @@ func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, e
 }
 
 // HostSession starts a new interactive session in this process with the
-// server's default configuration, the way the browser's "new session" does.
-func (s *Server) HostSession(prompt string) (string, error) {
-	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt}, "", "")
+// server's default configuration, the way the browser's "new session" does;
+// dir, when set, is where its commands start.
+func (s *Server) HostSession(prompt, dir string) (string, error) {
+	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt, StartDir: dir}, "", "")
 }
 
 // RegisterSessionStarter makes sessions requested from the phone run in this
 // process, where they stay interactive and the UI shows them. It returns a
 // function that restores the previous starter.
 func (s *Server) RegisterSessionStarter() func() {
-	return integration.SetSessionStarter(func(ctx context.Context, project, prompt string) (integration.SessionStart, error) {
+	return integration.SetSessionStarter(func(ctx context.Context, project string, req integration.SessionRequest) (integration.SessionStart, error) {
 		if project != s.Project {
 			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
 		}
-		id, err := s.HostSession(prompt)
+		id, err := s.HostSession(req.Prompt, req.Dir)
 		if err != nil {
 			return integration.SessionStart{}, err
 		}

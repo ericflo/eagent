@@ -79,6 +79,7 @@ Flags (before positional arguments):
                 opencode-high|med|low, nous-high|med|low
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
+  --cwd <dir>   start a new session's commands in this directory (default: the project)
   --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
@@ -112,6 +113,7 @@ func run(args []string) int {
 		addr     = fs.String("addr", "127.0.0.1:7331", "serve: listen address")
 		serveAt  = fs.String("serve", "", "serve the web UI while running")
 		answer   = fs.String("answer", "", "answer to the pending question")
+		startDir = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
 		task     = fs.String("task", "", "filter by task id")
@@ -193,6 +195,16 @@ func run(args []string) int {
 	// /dev/null on stdin would otherwise read as an immediate "quit" and the
 	// run would exit 0 having done nothing.
 	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer}
+	if *startDir != "" {
+		dir, err := filepath.Abs(*startDir)
+		if err != nil {
+			return fail(err)
+		}
+		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+			return fail(fmt.Errorf("--cwd %s is not a directory", *startDir))
+		}
+		opts.StartDir = dir
+	}
 	var sessionPath string
 	if cmd == "resume" {
 		if len(rest) < 1 {
