@@ -112,7 +112,7 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(File(project)), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(File(project), []byte(`{"preset":"anthropic-med","task":{"reasoning_effort":"medium"},"_note":"hand written"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(File(project), []byte(`{"preset":"anthropic-med","task":{"reasoning_effort":"high"},"_note":"hand written"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	res = Resolve(project, "", "")
@@ -122,7 +122,7 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 	if res.Sources["/orchestrator/model"] != "preset:anthropic-med" || res.Effective.Orchestrator.Model != "claude-opus-5" {
 		t.Fatalf("preset attribution: %s %s", res.Sources["/orchestrator/model"], res.Effective.Orchestrator.Model)
 	}
-	if res.Sources["/task/reasoning_effort"] != "file" || res.Effective.Task.ReasoningEffort != "medium" {
+	if res.Sources["/task/reasoning_effort"] != "file" || res.Effective.Task.ReasoningEffort != "high" {
 		t.Fatalf("file attribution: %s", res.Sources["/task/reasoning_effort"])
 	}
 	if res.Active.Kind != "file" {
@@ -147,7 +147,7 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 func TestOverlayWritesOnlyDifferences(t *testing.T) {
 	cfg := Defaults()
 	Presets["anthropic-med"](&cfg)
-	cfg.Task.ReasoningEffort = "medium" // differs from the preset's low
+	cfg.Task.ReasoningEffort = "high" // differs from the preset's medium
 	cfg.TaskConcurrency = 5
 	edits, err := Overlay(cfg, "anthropic-med")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestOverlayWritesOnlyDifferences(t *testing.T) {
 		t.Fatalf("unchanged actors should be dropped: %s %s", edits["orchestrator"], edits["narrator"])
 	}
 	var task map[string]json.RawMessage
-	if err := json.Unmarshal(edits["task"], &task); err != nil || len(task) != 1 || string(task["reasoning_effort"]) != `"medium"` {
+	if err := json.Unmarshal(edits["task"], &task); err != nil || len(task) != 1 || string(task["reasoning_effort"]) != `"high"` {
 		t.Fatalf("task overlay = %s", edits["task"])
 	}
 	if string(edits["task_concurrency"]) != "5" || edits["rollover_tokens"] != nil {

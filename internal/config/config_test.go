@@ -12,7 +12,7 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Orchestrator.Model != "zai-org/GLM-5.3" || cfg.Task.ReasoningEffort != "low" {
+	if cfg.Orchestrator.Model != "zai-org/GLM-5.3" || cfg.Task.ReasoningEffort != "medium" {
 		t.Fatalf("defaults = %+v", cfg.Orchestrator)
 	}
 	os.MkdirAll(filepath.Join(dir, ".agents", "eagent"), 0o755)

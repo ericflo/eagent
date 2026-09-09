@@ -80,7 +80,7 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := config.Defaults()
 	config.Presets["anthropic-med"](&cfg)
-	cfg.Task.ReasoningEffort = "medium"
+	cfg.Task.ReasoningEffort = "high"
 	cfg.TaskConcurrency = 5
 	w := do(s, "PUT", "/api/config", map[string]any{"config": cfg, "base_preset": "anthropic-med"}, nil)
 	if w.Code != 200 {
@@ -99,7 +99,7 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	if string(file["preset"]) != `"anthropic-med"` || file["orchestrator"] != nil || string(file["task_concurrency"]) != "5" {
 		t.Fatalf("overlay file = %s", raw)
 	}
-	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Task.ReasoningEffort != "medium" || res.Resolution.Effective.Orchestrator.Model != "claude-opus-5" {
+	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Task.ReasoningEffort != "high" || res.Resolution.Effective.Orchestrator.Model != "claude-opus-5" {
 		t.Fatalf("resolution after save: %+v", res.Resolution.Active)
 	}
 	// A stale etag is a 409 that carries the current file.
@@ -166,7 +166,7 @@ func TestPutConfigSkipsFieldsTheEnvironmentOverrides(t *testing.T) {
 	s, project := newTestServer(t)
 	t.Setenv("EAGENT_TASK_REASONING_EFFORT", "high")
 	cfg := config.Defaults()
-	cfg.Task.ReasoningEffort = "medium" // the default is low, so this is a real edit
+	cfg.Task.ReasoningEffort = "xhigh" // the default is medium, so this is a real edit
 	cfg.TaskConcurrency = 6
 	w := do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 200 {
