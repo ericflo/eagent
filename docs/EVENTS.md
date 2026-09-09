@@ -83,7 +83,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 The same log feeds three different prompts:
 
-- **Orchestrator:** `user.message`, `user.answer`, its own `assistant` and `tool.result` events, `task.end` of work tasks, `schedule.fire`, `proc.exit` with `notify`, `harness.message` addressed to it, and the `dossier` — all within the current subsession.
+- **Orchestrator:** `user.message`, `user.answer`, its own `assistant` and `tool.result` events, `task.end` of work tasks, `schedule.fire`, `proc.exit` with `notify`, `harness.message` addressed to it, and the `dossier` — all within the current subsession. Each `user.message` renders through the `USER_MESSAGE.md` prompt template as an IRC-style `[2006-01-02 15:04:05] <nick> text` chatlog line (nick from `source`: the terminal is `user`, `web` is `user@web`, `finalechat` is `user@phone`); each `user.answer` renders through `USER_ANSWER.md` the same way, plus the answered question's id and — when the question was asked in an earlier subsession — its restated text. Timestamps come only from the event's persisted time, so replays are byte-identical and prompt caches keep hitting. Both templates live in `.agents/eagent/prompts/` overrides like every other prompt.
 - **Task worker:** the task's `description`, its own `assistant` and `tool.result` events, `proc.exit` for its processes, and `harness.message` addressed to the task.
 - **Narrator:** its own turns plus a one-line rendering of everything the orchestrator did (text, tool calls, clipped tool results, notes, task lifecycle, schedules, yields, errors) — batched between its turns so each batch is frozen once the narrator has seen it.
 

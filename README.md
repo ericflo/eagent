@@ -255,7 +255,7 @@ The narrator has a character rather than a register: the colleague who kept the 
 
 ### Prompts
 
-The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`, `TASK-WORKER.md`, `NARRATOR.md`, `PERSONA.md` (the narrator's voice), and `COMPACTION-DOSSIER.md` (the dossier task). `eagent prompts` lists them with their sources; `eagent prompts export` copies them into `.agents/eagent/prompts/` where any edited file overrides the built-in one for that project. They are Go templates with a handful of variables (`{{.Project}}`, `{{.Instructions}}`, `{{.Interactive}}`, `{{.Persona}}`, …).
+The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`, `TASK-WORKER.md`, `NARRATOR.md`, `PERSONA.md` (the narrator's voice), `FACTS.md` (how eagent works, shared by every actor), `USER_MESSAGE.md` and `USER_ANSWER.md` (how one `user.message` / `user.answer` event renders as an IRC-style `[timestamp] <nick> text` chatlog line in the orchestrator's view), and `COMPACTION-DOSSIER.md` (the dossier task). `eagent prompts` lists them with their sources; `eagent prompts export` copies them into `.agents/eagent/prompts/` where any edited file overrides the built-in one for that project. They are Go templates with a handful of variables (`{{.Project}}`, `{{.Instructions}}`, `{{.Interactive}}`, `{{.Persona}}`, …). The user-message templates receive only the persisted event (`ev.Time`, formatted in Go) and never the current clock, so replays render byte-identical text and provider prompt caches keep hitting.
 
 ### Efficiency
 

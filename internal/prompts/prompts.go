@@ -10,6 +10,8 @@
 //	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}}
 //	PERSONA.md             (plain text, inserted into NARRATOR.md)
 //	FACTS.md               {{.Project}} (how eagent works; inserted into the three actor prompts)
+//	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}}
+//	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}}
 //	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}}
 package prompts
 
@@ -26,13 +28,14 @@ import (
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 )
 
 //go:embed *.md
 var builtin embed.FS
 
 // Names lists the prompt files, in display order.
-var Names = []string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "COMPACTION-DOSSIER.md"}
+var Names = []string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md"}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }
@@ -113,6 +116,31 @@ type DossierData struct {
 	Files        string
 	Reason       string
 	RunningTasks []string
+}
+
+// UserMessageData feeds USER_MESSAGE.md. Timestamp is preformatted from
+// Time (ev.Time.Local().Format("2006-01-02 15:04:05")) so templates never
+// call time.Now and rendering stays deterministic across replays.
+type UserMessageData struct {
+	Text        string
+	Time        time.Time
+	Timestamp   string
+	Source      string
+	Nick        string
+	Attachments string
+}
+
+// UserAnswerData feeds USER_ANSWER.md. Question is the restated question
+// text ("" when asked in this subsession); QuestionID names the question.
+type UserAnswerData struct {
+	Text        string
+	Time        time.Time
+	Timestamp   string
+	Source      string
+	Nick        string
+	Attachments string
+	QuestionID  string
+	Question    string
 }
 
 // Export writes the built-in defaults into the project's prompts directory

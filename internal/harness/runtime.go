@@ -289,6 +289,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		cancel()
 		return nil, fmt.Errorf("prompts: %w", err)
 	}
+	st.SetPrompts(r.prompts)
 	if r.orchRoutes, err = cfg.Orchestrator.Routes(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("orchestrator: %w", err)

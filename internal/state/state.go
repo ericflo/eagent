@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/prompts"
 )
 
 // Task is delegated work.
@@ -162,7 +163,16 @@ type State struct {
 	// call that predates a wake is stale and does not make the session idle.
 	lastWakeSeq  int64
 	lastOrchSeen int64
+
+	// prompts renders user messages and answers in the orchestrator's
+	// view. Nil means the built-in defaults; SetPrompts installs a
+	// project set (with overrides) loaded by the harness.
+	prompts *prompts.Set
 }
+
+// SetPrompts installs the prompt set used to render user messages and
+// answers in OrchestratorView. Pass nil to go back to the built-ins.
+func (s *State) SetPrompts(p *prompts.Set) { s.prompts = p }
 
 // RouteKey identifies the endpoint that served a set of calls, for pricing.
 type RouteKey struct{ Actor, Host, Model string }

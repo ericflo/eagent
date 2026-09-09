@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/prompts"
 )
 
 // ViewOptions tune how much of the log each actor sees.
@@ -75,7 +77,7 @@ func (s *State) OrchestratorView() []llm.Message {
 			if !asked[d.QuestionID] {
 				// The question was asked in an earlier context; restate it so
 				// a terse answer stays readable.
-				return fmt.Sprintf("[The user answered question %s, %q]\n%s", d.QuestionID, s.QuestionText(d.QuestionID), d.Text) + attachmentNotes(d.Attachments)
+				return s.renderUserAnswer(ev, d, s.QuestionText(d.QuestionID))
 			}
 		}
 		if ev.Type == event.TaskEnd {
@@ -85,7 +87,7 @@ func (s *State) OrchestratorView() []llm.Message {
 				return "" // delivered once, as the dossier message that opens the subsession
 			}
 		}
-		return orchestratorNotification(ev)
+		return s.orchestratorNotification(ev)
 	})
 	// A subsession's dossier is always the opening message, even if other
 	// notifications landed in the file before the dossier task finished.
@@ -93,7 +95,7 @@ func (s *State) OrchestratorView() []llm.Message {
 		if ev.Type != event.Dossier || i == 0 {
 			continue
 		}
-		text := orchestratorNotification(ev)
+		text := s.orchestratorNotification(ev)
 		for j, m := range msgs {
 			if m.Role == "user" && m.Text == text && j > 0 {
 				copy(msgs[1:j+1], msgs[0:j])
@@ -248,8 +250,78 @@ func renderActor(events []event.Event, actor, task string, notify func(event.Eve
 	return msgs
 }
 
+// defaultPrompts is the built-in set used when no project set was installed
+// via SetPrompts, so output is byte-identical to the default templates.
+var (
+	defaultPromptsOnce sync.Once
+	defaultPrompts     *prompts.Set
+)
+
+func builtinPrompts() *prompts.Set {
+	defaultPromptsOnce.Do(func() {
+		s, err := prompts.Load("")
+		if err != nil {
+			panic("built-in prompts: " + err.Error())
+		}
+		defaultPrompts = s
+	})
+	return defaultPrompts
+}
+
+func (s *State) promptSet() *prompts.Set {
+	if s.prompts != nil {
+		return s.prompts
+	}
+	return builtinPrompts()
+}
+
+// userNick derives the IRC nick for a user event from its source:
+// "" (terminal) -> user, web -> user@web, finalechat -> user@phone,
+// anything else -> user@<source>.
+func userNick(source string) string {
+	switch source {
+	case "":
+		return "user"
+	case "web":
+		return "user@web"
+	case "finalechat":
+		return "user@phone"
+	default:
+		return "user@" + source
+	}
+}
+
+// renderUserMessage renders a user.message event through USER_MESSAGE.md.
+// The timestamp comes only from ev.Time (persisted UTC at store.Append),
+// never time.Now at render, so replays are byte-identical.
+func (s *State) renderUserMessage(ev event.Event, d event.UserMessageData) string {
+	return s.promptSet().Render("USER_MESSAGE.md", prompts.UserMessageData{
+		Text:        d.Text,
+		Time:        ev.Time,
+		Timestamp:   ev.Time.Local().Format("2006-01-02 15:04:05"),
+		Source:      d.Source,
+		Nick:        userNick(d.Source),
+		Attachments: attachmentNotes(d.Attachments),
+	})
+}
+
+// renderUserAnswer renders a user.answer event through USER_ANSWER.md.
+// question is the restatement ("" when asked in this subsession).
+func (s *State) renderUserAnswer(ev event.Event, d event.UserAnswerData, question string) string {
+	return s.promptSet().Render("USER_ANSWER.md", prompts.UserAnswerData{
+		Text:        d.Text,
+		Time:        ev.Time,
+		Timestamp:   ev.Time.Local().Format("2006-01-02 15:04:05"),
+		Source:      d.Source,
+		Nick:        userNick(d.Source),
+		Attachments: attachmentNotes(d.Attachments),
+		QuestionID:  d.QuestionID,
+		Question:    question,
+	})
+}
+
 // orchestratorNotification renders events the orchestrator must hear about.
-func orchestratorNotification(ev event.Event) string {
+func (s *State) orchestratorNotification(ev event.Event) string {
 	switch ev.Type {
 	case event.Dossier:
 		var d event.DossierData
@@ -265,7 +337,7 @@ func orchestratorNotification(ev event.Event) string {
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
-		return d.Text + attachmentNotes(d.Attachments)
+		return s.renderUserMessage(ev, d)
 	case event.NarratorQuestion:
 		// The answer that follows names this question; without it a terse
 		// option like "Yes" would be unreadable.
@@ -279,7 +351,7 @@ func orchestratorNotification(ev event.Event) string {
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("[The user answered question %s]\n%s", d.QuestionID, d.Text) + attachmentNotes(d.Attachments)
+		return s.renderUserAnswer(ev, d, "")
 	case event.TaskEnd:
 		var d event.TaskEndData
 		_ = ev.Decode(&d)

@@ -183,6 +183,9 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 		return SessionSummary{}, nil, err
 	}
 	st := state.Replay(evs)
+	if set, err := prompts.Load(s.Project); err == nil {
+		st.SetPrompts(set)
+	}
 	return s.summarizeState(info, st), st, nil
 }
 
@@ -337,6 +340,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := state.Replay(evs)
+	if set, err := prompts.Load(s.Project); err == nil {
+		st.SetPrompts(set)
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")

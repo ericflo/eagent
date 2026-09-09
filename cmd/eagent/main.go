@@ -907,6 +907,7 @@ func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
 	if err != nil {
 		return fail(err)
 	}
+	st.SetPrompts(set)
 	cfg, _ := config.Load(project, "")
 	if actor == "" {
 		actor = event.ActorNarrator
