@@ -86,7 +86,7 @@ func autoConnectProject(ctx context.Context, project string) {
 }
 
 // The existing artifact store keeps this small website and its history. Its
-// publication is independent of the opt-in for native transcript backups.
+// publication is independent of the opt-out for native transcript backups.
 func publishSettingsSite(ctx context.Context, project, version string, thread settingsThread, view settings.RemoteView, account, connector *finalechat.Client, base, resourceID string) error {
 	site, err := archive.SettingsWebsite(project, thread.Session, version, view)
 	if err != nil {

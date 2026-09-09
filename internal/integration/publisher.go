@@ -1,4 +1,5 @@
-// Package integration owns opt-in archive publication and the outbound
+// Package integration owns archive publication (on by default; see
+// config.Finalechat.Artifacts for the opt-out) and the outbound
 // settings connector. It never writes into an active session event log.
 package integration
 

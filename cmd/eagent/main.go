@@ -52,7 +52,7 @@ Usage:
   eagent artifact verify DIR         verify a downloaded archive without executing it
   eagent artifact restore DIR --output NEW_DIR
                                     recover native sources into a new directory
-  eagent artifact enable|disable     opt this project into/out of proactive archives
+  eagent artifact enable|disable     enable/disable proactive archives (on by default)
   eagent connector pair             request remote settings access in FinaleChat
   eagent connector pair-session ID  request live settings for one session
   eagent connector run              keep remote settings available without a session

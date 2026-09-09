@@ -93,8 +93,9 @@ type Config struct {
 
 // Finalechat configures the phone mirror (https://www.finalechat.com).
 type Finalechat struct {
-	// Artifacts opts into proactive upload of native session logs and portable
-	// viewers, independently of conversation mirroring. Off by default.
+	// Artifacts enables proactive upload of native session logs and portable
+	// viewers, independently of conversation mirroring. On by default; set
+	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out.
 	Artifacts bool `json:"artifacts,omitempty"`
 	// Enabled: nil means "on when a token is found"; false turns it off even
 	// when a token is present; true makes a missing token an error at start.
@@ -184,6 +185,7 @@ func Defaults() Config {
 		BashWaitSeconds:             20,
 		BashTimeoutSeconds:          600,
 		ToolOutputMaxChars:          24_000,
+		Finalechat:                  Finalechat{Artifacts: true},
 	}
 }
 
