@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -302,6 +303,8 @@ func (s *State) renderUserMessage(ev event.Event, d event.UserMessageData) strin
 		Source:      d.Source,
 		Nick:        userNick(d.Source),
 		Attachments: attachmentNotes(d.Attachments),
+		Client:      clientSource(d.Client),
+		ClientLine:  d.Client.Compact(),
 	})
 }
 
@@ -317,7 +320,18 @@ func (s *State) renderUserAnswer(ev event.Event, d event.UserAnswerData, questio
 		Attachments: attachmentNotes(d.Attachments),
 		QuestionID:  d.QuestionID,
 		Question:    question,
+		Client:      clientSource(d.Client),
+		ClientLine:  d.Client.Compact(),
 	})
+}
+
+// clientSource is the capsule's source ("" when the client sent none), so
+// templates can name the client without touching the event's Source.
+func clientSource(c *clientcaps.Caps) string {
+	if c == nil {
+		return ""
+	}
+	return c.Source
 }
 
 // orchestratorNotification renders events the orchestrator must hear about.

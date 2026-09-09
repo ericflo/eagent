@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/ericflo/eagent/internal/clientcaps"
 )
 
 // Actor names. The user and the harness are actors too so that every line has
@@ -161,6 +163,8 @@ type UserMessageData struct {
 	// Source says where the message came from when it was not the terminal:
 	// "web" or "finalechat" (the user's phone).
 	Source string `json:"source,omitempty"`
+	// Client declares what context the sending client can supply.
+	Client *clientcaps.Caps `json:"client,omitempty"`
 	// Attachments are files the user sent, saved under the session directory.
 	Attachments []Attachment `json:"attachments,omitempty"`
 }
@@ -190,10 +194,11 @@ func (a Attachment) IsImage() bool {
 
 // UserAnswerData answers a narrator question.
 type UserAnswerData struct {
-	QuestionID  string       `json:"question_id"`
-	Text        string       `json:"text"`
-	Source      string       `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
-	Attachments []Attachment `json:"attachments,omitempty"`
+	QuestionID  string           `json:"question_id"`
+	Text        string           `json:"text"`
+	Source      string           `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
+	Client      *clientcaps.Caps `json:"client,omitempty"`
+	Attachments []Attachment     `json:"attachments,omitempty"`
 }
 
 // TurnData brackets one actor turn (one or more model calls).

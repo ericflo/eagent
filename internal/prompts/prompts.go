@@ -10,8 +10,8 @@
 //	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}}
 //	PERSONA.md             (plain text, inserted into NARRATOR.md)
 //	FACTS.md               {{.Project}} (how eagent works; inserted into the three actor prompts)
-//	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}}
-//	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}}
+//	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
+//	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
 //	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}}
 package prompts
 
@@ -128,6 +128,10 @@ type UserMessageData struct {
 	Source      string
 	Nick        string
 	Attachments string
+	// Client is the raw capsule (may be nil); ClientLine is its Compact()
+	// rendering ("" when nil or empty), the only form templates should use.
+	Client     string
+	ClientLine string
 }
 
 // UserAnswerData feeds USER_ANSWER.md. Question is the restated question
@@ -141,6 +145,10 @@ type UserAnswerData struct {
 	Attachments string
 	QuestionID  string
 	Question    string
+	// Client is the capsule's source ("" when none); ClientLine is its
+	// Compact() rendering ("" when nil or empty).
+	Client     string
+	ClientLine string
 }
 
 // Export writes the built-in defaults into the project's prompts directory

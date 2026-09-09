@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
@@ -472,6 +473,8 @@ type messageBody struct {
 	Config     string `json:"config"`
 	Preset     string `json:"preset"`
 	UseProject bool   `json:"use_project"`
+	// Client declares what context the browser can supply.
+	Client *clientcaps.Caps `json:"client"`
 }
 
 func readBody(r *http.Request) (messageBody, error) {
@@ -492,7 +495,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "message", Text: b.Text, From: "web"}); err != nil {
+		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}); err != nil {
 			writeErr(w, 500, err)
 			return
 		}
@@ -500,7 +503,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Nobody is running it: resume here with the message as the prompt.
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
+	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
 		writeErr(w, 500, err)
 		return
 	}
@@ -519,14 +522,14 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web"}); err != nil {
+		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}); err != nil {
 			writeErr(w, 500, err)
 			return
 		}
 		writeJSON(w, map[string]any{"delivered": "inbox"})
 		return
 	}
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text}, b.Config, b.Preset, true); err != nil {
+	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
 		writeErr(w, 500, err)
 		return
 	}

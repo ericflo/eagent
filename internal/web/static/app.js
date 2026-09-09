@@ -33,6 +33,23 @@ const money = usd => usd >= 1 ? '$' + usd.toFixed(2) : usd >= 0.01 ? '$' + usd.t
 const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) && d.getFullYear() > 1 ? d : null; };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
 const TOKEN = document.querySelector('meta[name="eagent-token"]')?.content || '';
+// Client capability handshake (v1): describe what context this browser can
+// supply. Gathered once, sent as `client` with every message and answer;
+// no new endpoints. Everything is guarded so a missing API never breaks send.
+let clientCapsCache = null;
+function clientCaps() {
+  if (clientCapsCache) return clientCapsCache;
+  const caps = {source: 'web', supplies: ['tz', 'locale', 'screen']};
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) caps.timezone = tz;
+    if (navigator.language) caps.locale = navigator.language;
+    if (window.screen && screen.width > 0 && screen.height > 0) caps.screen = screen.width + 'x' + screen.height;
+    caps.device = (navigator.userAgentData && navigator.userAgentData.mobile) ? 'phone' : 'desktop';
+  } catch (e) { /* keep the base capsule */ }
+  clientCapsCache = caps;
+  return caps;
+}
 async function api(path, opts) {
   if (ARCHIVE) throw new Error('This saved session is read only.');
   const headers = {'Content-Type': 'application/json'};
@@ -261,11 +278,11 @@ async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
   ta.value = ''; ta.style.height = 'auto';
   try {
-    if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID})});
-    else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text})});
+    if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
+    else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
   } catch (e) { toast(e.message, 'bad'); }
 }
-async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
+async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
 
 function chatNode(ev) {
   const d = ev.data || {};

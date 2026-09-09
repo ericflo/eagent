@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
@@ -52,6 +53,10 @@ type Options struct {
 	// PromptAttachments are files already saved under the session directory
 	// that arrived with Prompt.
 	PromptAttachments []event.Attachment
+	// PromptClient declares what context the client that sent Prompt or
+	// Answer can supply. It travels into the appended user.message or
+	// user.answer event so caps survive a resume.
+	PromptClient *clientcaps.Caps
 	// StartDir, when set, is where a new session's commands start instead
 	// of the project root; it is recorded as the first working-directory
 	// move so the log, the phone and the UI show it from the start.
@@ -205,7 +210,7 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		r.append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
 	}
 	if strings.TrimSpace(opts.Prompt) != "" {
-		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
+		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 	}
 	r.startPhone()
 	return r, nil
@@ -236,11 +241,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	r.closeInterrupted()
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil {
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		} else {
 			// Answered elsewhere first (the phone, another resume): the words
 			// still count, as a message, rather than vanishing with exit 0.
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		}
 	}
 	if text := strings.TrimSpace(opts.Prompt); text != "" || len(opts.PromptAttachments) > 0 {
@@ -250,9 +255,9 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			if n := optionIndex(text, q.Options); n >= 0 {
 				text = q.Options[n]
 			}
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		} else {
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Attachments: opts.PromptAttachments}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		}
 	}
 	r.startPhone()
@@ -783,11 +788,11 @@ func (r *Runtime) appendDirect(ev event.Event) {
 
 // ---- user input -----------------------------------------------------------
 
-func (r *Runtime) onInput(line string) { r.onInputFrom(line, "") }
+func (r *Runtime) onInput(line string) { r.onInputFrom(line, "", nil) }
 
 // onInputFrom records a line from the user; source is "" for the terminal,
 // otherwise "web" or "finalechat".
-func (r *Runtime) onInputFrom(line, source string, atts ...event.Attachment) {
+func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts ...event.Attachment) {
 	line = strings.TrimSpace(line)
 	if line == "" && len(atts) == 0 {
 		return
@@ -802,10 +807,10 @@ func (r *Runtime) onInputFrom(line, source string, atts ...event.Attachment) {
 		if n := optionIndex(line, q.Options); n >= 0 {
 			text = q.Options[n]
 		}
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Attachments: atts}))
+		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts}))
 		return
 	}
-	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source, Attachments: atts}))
+	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts}))
 }
 
 func optionIndex(line string, options []string) int {

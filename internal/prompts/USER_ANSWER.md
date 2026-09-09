@@ -13,9 +13,13 @@
     .QuestionID  the answered narrator question's id
     .Question    the question restatement ("text (options: a | b)" or "" when
                  the question was asked in this subsession and needs no restating)
+    .Client      the client capsule's source ("" when the client sent none)
+    .ClientLine  the client capsule in one line, e.g. "web · tz America/Los_Angeles · en-US"
+                 ("" when the client sent none; the bracket is omitted then so
+                 lines without caps render byte-identical to before)
 
   Keep the leading line in "[ts] <nick> text" chatlog form so turns stay
   byte-identical across replays and prompt-cache prefixes keep hitting. */}}
 [{{.Timestamp}}] <{{.Nick}}> {{.Text}}{{.Attachments}}{{if .Question}}
 [The user answered question {{.QuestionID}}, {{printf "%q" .Question}}]{{else}}
-[The user answered question {{.QuestionID}}]{{end}}
+[The user answered question {{.QuestionID}}]{{end}}{{if .ClientLine}} [{{.ClientLine}}]{{end}}

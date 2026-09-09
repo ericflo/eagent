@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 )
@@ -585,16 +586,82 @@ func (p *phone) poll(r *Runtime) {
 						}
 					}
 				}
+				caps := capsFromMeta(m.Meta)
 				r.post(func() {
-					r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Attachments: atts})
+					r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts})
 				})
 				continue
 			}
+			caps := capsFromMeta(m.Meta)
 			r.post(func() {
-				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Attachments: atts})
+				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts})
 			})
 		}
 	}
+}
+
+// capsFromMeta reads the client capability handshake (v1) from a thread
+// message's meta, without changing behavior when absent. Two forms are
+// accepted, preferring the map:
+//
+//	meta["eagent.client"] = {"timezone": ..., "locale": ..., "device": ...,
+//	                         "app": ..., "screen": ..., "supplies": [...]}
+//
+// or the flat keys meta["eagent.tz"], meta["eagent.locale"],
+// meta["eagent.device"]. The capsule's source is always "finalechat".
+// It returns nil when the message carries no capability data.
+func capsFromMeta(meta map[string]any) *clientcaps.Caps {
+	if len(meta) == 0 {
+		return nil
+	}
+	str := func(v any) string {
+		s, _ := v.(string)
+		return strings.TrimSpace(s)
+	}
+	if raw, ok := meta["eagent.client"]; ok {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			return nil
+		}
+		c := &clientcaps.Caps{
+			Source:   "finalechat",
+			Timezone: str(m["timezone"]),
+			Locale:   str(m["locale"]),
+			Device:   str(m["device"]),
+			App:      str(m["app"]),
+			Screen:   str(m["screen"]),
+		}
+		switch s := m["supplies"].(type) {
+		case []string:
+			c.Supplies = s
+		case []any:
+			for _, v := range s {
+				if t := str(v); t != "" {
+					c.Supplies = append(c.Supplies, t)
+				}
+			}
+		case string:
+			for _, t := range strings.Split(s, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					c.Supplies = append(c.Supplies, t)
+				}
+			}
+		}
+		if c.Timezone == "" && c.Locale == "" && c.Device == "" && c.App == "" && c.Screen == "" && len(c.Supplies) == 0 {
+			return nil
+		}
+		return c
+	}
+	c := &clientcaps.Caps{
+		Source:   "finalechat",
+		Timezone: str(meta["eagent.tz"]),
+		Locale:   str(meta["eagent.locale"]),
+		Device:   str(meta["eagent.device"]),
+	}
+	if c.Timezone == "" && c.Locale == "" && c.Device == "" {
+		return nil
+	}
+	return c
 }
 
 // watchQuestion notices when a phone question is cancelled or expires, so a

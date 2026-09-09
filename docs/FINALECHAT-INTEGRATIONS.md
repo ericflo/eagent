@@ -75,6 +75,16 @@ Where the session runs depends on which process holds the connector:
 
 The result reports `session_id`, the thread reference, the host and whether the session is interactive. Existing connectors gain the capability on their next reconnect without a second pairing: eagent asks Finalechat to extend its own grants, which requires the account token and the local connector secret. `EAGENT_FINALECHAT=off` disables this along with the rest of the connector.
 
+## Client capability handshake (v1)
+
+A reply from the app can declare what context its client can supply — timezone, locale, device — so the orchestrator sees it. eagent reads the reply message's `meta` without changing behavior when the keys are absent, preferring the map form:
+
+```json
+{"eagent.client": {"timezone": "America/Los_Angeles", "locale": "en-US", "device": "phone", "app": "finalechat/1.2", "supplies": ["tz", "locale"]}}
+```
+
+The flat keys `eagent.tz`, `eagent.locale`, and `eagent.device` are accepted as a fallback. The capsule is stored on the `user.message` / `user.answer` event (source `finalechat`) and renders in the orchestrator's view as a trailing `[client line]`, e.g. `[finalechat · tz America/Los_Angeles · en-US · phone]`.
+
 ## Live session controls
 
 Run `eagent connector pair-session SESSION_ID` in the project, which connects the separate session controls to your account. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.

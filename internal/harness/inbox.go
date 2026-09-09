@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 )
 
@@ -25,6 +26,8 @@ type InboxMessage struct {
 	Text       string `json:"text,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 	From       string `json:"from,omitempty"` // free-form origin, e.g. "web"
+	// Client declares what context the sending client can supply.
+	Client *clientcaps.Caps `json:"client,omitempty"`
 	// Attachments are files already saved under the session directory.
 	Attachments []event.Attachment `json:"attachments,omitempty"`
 }
@@ -91,12 +94,12 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Attachments: msg.Attachments}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments}))
 			return
 		}
 		if text != "" || len(msg.Attachments) > 0 { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Attachments: msg.Attachments}))
+			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments}))
 		}
 	case "message", "":
 		if text == "" && len(msg.Attachments) == 0 {
@@ -106,6 +109,6 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 			r.slashCommand(text)
 			return
 		}
-		r.onInputFrom(text, msg.From, msg.Attachments...)
+		r.onInputFrom(text, msg.From, msg.Client, msg.Attachments...)
 	}
 }
