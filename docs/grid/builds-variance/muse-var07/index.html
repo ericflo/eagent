@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070b18">
+<title>ROOFTOP RAMPAGE — Neon Breakout</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand"><span class="logo-ball"></span> ROOFTOP <em>RAMPAGE</em></div>
+    <div class="topbtns">
+      <button id="btnHelp" class="icon-btn" aria-label="Help">?</button>
+      <button id="btnMute" class="icon-btn" aria-label="Mute">&#9836;</button>
+      <button id="btnPause" class="icon-btn" aria-label="Pause">&#10074;&#10074;</button>
+      <button id="btnRestart" class="icon-btn" aria-label="Restart">&#8635;</button>
+    </div>
+  </header>
+
+  <div id="hud">
+    <div class="hud-left">
+      <div class="hud-item"><label>SCORE</label><span id="hudScore">0</span></div>
+      <div class="hud-item dim"><label>HI</label><span id="hudHi">0</span></div>
+      <div class="hud-item"><label>LEVEL</label><span id="hudLevel">1/7</span></div>
+    </div>
+    <div id="rooftopBadge" class="hidden">ROOFTOP <b id="rooftopX">x2</b></div>
+    <div class="hud-right">
+      <div class="hud-item"><label>LIVES</label><span id="hudLives">&#9679;&#9679;&#9679;</span></div>
+      <div class="hud-item"><label>BALLS</label><span id="hudBalls">1</span></div>
+    </div>
+  </div>
+  <div id="chips"></div>
+
+  <div id="stageWrap">
+    <canvas id="game"></canvas>
+
+    <!-- Overlays -->
+    <div id="overlayTitle" class="overlay show">
+      <div class="card">
+        <div class="kicker">NEON BREAKOUT</div>
+        <h1>ROOFTOP<br><span>RAMPAGE</span></h1>
+        <p class="sub">Smash <b>through the barrier</b>, get the ball <b>ABOVE the bricks</b>,<br>and let it go full <b>exponential frenzy</b> on the rooftop.</p>
+        <div class="legend-mini">
+          <span><i class="dot g"></i>GLASS</span><span><i class="dot v"></i>VOLT fast</span>
+          <span><i class="dot a"></i>APEX steep</span><span><i class="dot s"></i>SKIM flat</span>
+          <span><i class="dot p"></i>SPECTRAL ghost</span>
+        </div>
+        <div class="btnrow">
+          <button id="btnStart" class="big-btn">▶ &nbsp;START</button>
+          <button id="btnHow" class="ghost-btn">HOW TO PLAY</button>
+        </div>
+        <div class="lvlselect"><label>LEVEL</label><div id="lvlBtns"></div></div>
+        <p class="hint">Mouse / touch-drag / WASD · Space = launch &amp; pause</p>
+      </div>
+    </div>
+
+    <div id="overlayHelp" class="overlay">
+      <div class="card scroll">
+        <h2>HOW TO PLAY</h2>
+        <p><b>Goal:</b> clear all breakable bricks. Punch a hole through the barrier, then get ball(s) <b class="cy">ABOVE the glowing ROOFTOP line</b> — up there the <b class="cy">multiplier doubles (x2→x4→x8…x99)</b>, score ticks on its own, and the whole arena goes wild.</p>
+        <ul class="how">
+          <li><b>Move:</b> mouse follows · drag anywhere on touch (finger offset so you can see) · <b>←→↑↓ / WASD</b>. Paddle roams left/right + up/down in its track.</li>
+          <li><b>Smash:</b> hit the ball while flicking <b>UP</b> to add speed + shockwave. Faster ball = more score.</li>
+          <li><b>Launch:</b> <b>Space / tap LAUNCH</b>. You have 3 lives + shield saves.</li>
+        </ul>
+        <h3>BRICK LEGEND</h3>
+        <div class="legend">
+          <div><i class="sw g"></i><b>GLASS</b> — breaks on anything.</div>
+          <div><i class="sw v"></i><b>VOLT ⚡</b> — needs SPEED (glows when a ball is fast enough). Too slow = bounce + "TOO SLOW".</div>
+          <div><i class="sw a"></i><b>APEX ⌃</b> — needs STEEP hit (within ~40° of head-on). Flat hits bounce off.</div>
+          <div><i class="sw s"></i><b>SKIM ≋</b> — needs SHALLOW graze. Head-on hits bounce off.</div>
+          <div><i class="sw p"></i><b>SPECTRAL 👻</b> — only EMBER fire or SPECTRE ghost balls can break it.</div>
+          <div><i class="sw m"></i><b>SHIFTER</b> — slides side to side (otherwise like glass).</div>
+        </div>
+        <h3>POWER-UPS</h3>
+        <div class="legend">
+          <div>🟢 <b>MULTIBALL</b> +2 balls &nbsp; 🟠 <b>EMBER</b> fire pierce 10s &nbsp; 🟣 <b>SPECTRE</b> ghost phase 10s</div>
+          <div>🔵 <b>WIDE</b> big paddle 12s &nbsp; 🛡 <b>SHIELD</b> floor net 12s &nbsp; 🐌 <b>SLOW</b> slow-mo 6s &nbsp; ❤ <b>LIFE</b> +1</div>
+        </div>
+        <div class="btnrow"><button id="btnCloseHelp" class="big-btn">GOT IT</button></div>
+      </div>
+    </div>
+
+    <div id="overlayLevel" class="overlay">
+      <div class="card slim"><div class="kicker" id="lvlKicker">LEVEL 1</div><h2 id="lvlName">THE GAP</h2><p id="lvlDesc"></p></div>
+    </div>
+
+    <div id="overlayPause" class="overlay">
+      <div class="card slim"><h2>PAUSED</h2><p class="sub">Take a breath. The rooftop waits.</p>
+        <div class="btnrow"><button id="btnResume" class="big-btn">RESUME</button><button id="btnRestart2" class="ghost-btn">RESTART</button></div></div>
+    </div>
+
+    <div id="overlayOver" class="overlay">
+      <div class="card slim"><div class="kicker red">GAME OVER</div><h2 id="overScore">SCORE 0</h2><p class="sub" id="overBest"></p>
+        <div class="btnrow"><button id="btnRetry" class="big-btn">RETRY</button><button id="btnMenu" class="ghost-btn">MENU</button></div></div>
+    </div>
+
+    <div id="overlayWin" class="overlay">
+      <div class="card slim"><div class="kicker gold">★ YOU CLEARED ALL 7 LEVELS ★</div><h2 id="winScore">SCORE 0</h2><p class="sub">Certified Rooftop Legend. The city glows because of you.</p>
+        <div class="btnrow"><button id="btnAgain" class="big-btn">PLAY AGAIN</button><button id="btnMenu2" class="ghost-btn">MENU</button></div></div>
+    </div>
+
+    <div id="toast"></div>
+    <div id="combo"></div>
+  </div>
+
+  <div id="touchbar">
+    <button id="btnLaunch" class="touch-btn">🚀 LAUNCH</button>
+    <button id="btnSlowHud" class="touch-btn small">⏸ PAUSE</button>
+  </div>
+  <p id="foot">drag anywhere to steer · flick UP on impact for SMASH · rooftop = free money</p>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

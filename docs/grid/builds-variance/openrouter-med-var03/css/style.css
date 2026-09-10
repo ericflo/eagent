@@ -1,0 +1,40 @@
+/* Overdrive Breakout — page chrome + touch handling */
+html, body {
+  margin: 0; padding: 0;
+  background: #05060e;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;          /* we handle all touches ourselves */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#wrap {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+}
+canvas {
+  display: block;
+  background: #05060e;
+  cursor: none;
+}
+#hud-buttons {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top));
+  right: max(8px, env(safe-area-inset-right));
+  display: flex; gap: 8px;
+  z-index: 10;
+}
+#hud-buttons button {
+  background: rgba(20, 26, 48, 0.72);
+  color: #cfe6ff;
+  border: 1px solid rgba(120, 160, 255, 0.35);
+  border-radius: 10px;
+  font-size: 18px;
+  width: 44px; height: 44px;
+  padding: 0;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#hud-buttons button:active { background: rgba(70, 110, 220, 0.6); }

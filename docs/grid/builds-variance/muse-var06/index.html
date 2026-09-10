@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#050510">
+<title>OVERDRIVE // Neon Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070716'/%3E%3Crect x='4' y='4' width='56' height='56' rx='11' fill='none' stroke='%232de2ff' stroke-width='2'/%3E%3Ccircle cx='32' cy='23' r='11' fill='%232de2ff'/%3E%3Ccircle cx='28' cy='19' r='4' fill='%23ffffff'/%3E%3Crect x='12' y='45' width='40' height='9' rx='4.5' fill='%23ff2d95'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="game-root">
+  <!-- Top HUD -->
+  <header id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-label">SCORE</div>
+      <div id="hud-score" class="hud-score">0</div>
+      <div id="hud-hi" class="hud-hi">BEST 0</div>
+    </div>
+    <div class="hud-mid">
+      <div id="mult-wrap">
+        <div id="mult-label">×1</div>
+        <div id="mult-bar"><div id="mult-fill"></div></div>
+        <div id="topside-tag" class="hidden">▲ TOPSIDE FRENZY ▲</div>
+      </div>
+      <div id="level-label">LEVEL 1/6</div>
+      <div id="effects-bar"></div>
+    </div>
+    <div class="hud-right">
+      <div id="lives-bar" aria-label="lives"></div>
+      <div class="hud-btns">
+        <button id="btn-pause" class="icon-btn" aria-label="Pause">II</button>
+        <button id="btn-mute" class="icon-btn" aria-label="Mute">♪</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Playfield -->
+  <div id="stage">
+    <canvas id="game"></canvas>
+    <div id="banner" class="hidden"></div>
+    <div id="hint-toast" class="hidden"></div>
+
+    <!-- Virtual thumbstick (bottom-left) -->
+    <div id="stick-zone">
+      <div id="stick-base"><div id="stick-nub"></div></div>
+    </div>
+    <div id="launch-tip" class="hidden">TAP / CLICK TO LAUNCH</div>
+  </div>
+
+  <!-- Overlays -->
+  <div id="overlay-title" class="overlay">
+    <div class="panel">
+      <h1 class="title-neon">OVERDRIVE</h1>
+      <div class="subtitle">NEON BREAKOUT // TOPSIDE FRENZY</div>
+      <p class="blurb">Tunnel through the wall. Get <b>ABOVE</b> the bricks.<br>
+      Stay topside &amp; your multiplier doubles again… and again… <b>up to ×99</b>.</p>
+      <div class="legend-grid">
+        <div><span class="chip c-std"></span> Standard — 1 hit</div>
+        <div><span class="chip c-prism"></span> ▲ Prism — needs STEEP angle (&gt;50°)</div>
+        <div><span class="chip c-vel"></span> ≫ Velocity — needs FAST ball</div>
+        <div><span class="chip c-shield"></span> ⬢ Shield — Fire / Ghost only</div>
+        <div><span class="chip c-drift"></span> ⇄ Drifter — moves!</div>
+        <div><span class="chip c-bomb"></span> ✸ Bomb — big boom</div>
+      </div>
+      <div class="power-grid">
+        <div><span class="pchip p-multi">×3</span> Multiball</div>
+        <div><span class="pchip p-fire">F</span> Fireball pierce</div>
+        <div><span class="pchip p-ghost">G</span> Ghost phase</div>
+        <div><span class="pchip p-heavy">H</span> Heavy smash</div>
+        <div><span class="pchip p-slow">S</span> Slow-Mo control</div>
+      </div>
+      <p class="controls-help">
+        Mouse: paddle follows &nbsp;•&nbsp; Arrows/WASD (2D!) &nbsp;•&nbsp; Touch drag &nbsp;•&nbsp; Left stick<br>
+        Move <b>UP into the ball</b> to juice its speed. <b>P</b>/Esc pause • <b>M</b> mute.<br>
+        Best score: <b id="title-hi">0</b>
+      </p>
+      <button id="btn-start" class="big-btn">▶ &nbsp;START</button>
+    </div>
+  </div>
+
+  <div id="overlay-pause" class="overlay hidden">
+    <div class="panel">
+      <h2 class="title-neon small">PAUSED</h2>
+      <p class="blurb">Take a breath. The bricks aren't going anywhere.</p>
+      <button id="btn-resume" class="big-btn">RESUME</button>
+      <button id="btn-restart-p" class="ghost-btn">Restart level</button>
+    </div>
+  </div>
+
+  <div id="overlay-level" class="overlay hidden">
+    <div class="panel">
+      <h2 class="title-neon small">SECTOR CLEAR!</h2>
+      <p class="blurb" id="level-stats">Bonus +0</p>
+      <button id="btn-next" class="big-btn">NEXT SECTOR →</button>
+    </div>
+  </div>
+
+  <div id="overlay-over" class="overlay hidden">
+    <div class="panel">
+      <h2 class="title-neon small danger">GAME OVER</h2>
+      <p class="blurb" id="over-stats">Score 0</p>
+      <p class="blurb">New best: <b id="over-hi">0</b></p>
+      <button id="btn-retry" class="big-btn">↻ &nbsp;RETRY</button>
+    </div>
+  </div>
+
+  <div id="overlay-win" class="overlay hidden">
+    <div class="panel">
+      <h2 class="title-neon small gold">🏆 GRID CONQUERED!</h2>
+      <p class="blurb" id="win-stats">Score 0</p>
+      <button id="btn-again" class="big-btn">PLAY AGAIN</button>
+    </div>
+  </div>
+</div>
+<script src="audio.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

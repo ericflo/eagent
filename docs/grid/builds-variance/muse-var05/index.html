@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070b18">
+<meta name="description" content="NEON BREACH — a modern neon Breakout. Punch through, get ABOVE the bricks, and ride the OVERDRIVE multiplier to ×64.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070b18'/%3E%3Crect x='10' y='46' width='44' height='8' rx='4' fill='%2322e6ff'/%3E%3Ccircle cx='32' cy='28' r='11' fill='%23ff3df0'/%3E%3Ccircle cx='28' cy='24' r='4' fill='%23ffffff' opacity='.85'/%3E%3C/svg%3E">
+<title>NEON BREACH — Modern Breakout</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ======= HUD ======= -->
+  <header id="hud">
+    <div class="hud-row">
+      <div class="hud-block">
+        <div class="hud-label">Score</div>
+        <div class="hud-value" id="hud-score">0</div>
+      </div>
+      <div class="hud-block">
+        <div class="hud-label">Best</div>
+        <div class="hud-value dim" id="hud-high">0</div>
+      </div>
+      <div class="hud-block mult-block">
+        <div class="hud-label">Multiplier</div>
+        <div class="hud-value" id="hud-mult">×1</div>
+      </div>
+      <div class="hud-block">
+        <div class="hud-label">Lives</div>
+        <div class="hud-value" id="hud-lives">●●●</div>
+      </div>
+      <div class="hud-block">
+        <div class="hud-label">Level</div>
+        <div class="hud-value dim" id="hud-level">1/5</div>
+      </div>
+    </div>
+    <div id="od-wrap" title="Overdrive meter">
+      <div id="od-fill"></div>
+      <div id="od-label">OVERDRIVE READY — get ABOVE the bricks!</div>
+    </div>
+    <div id="fx-bar"></div>
+  </header>
+
+  <!-- ======= STAGE ======= -->
+  <main id="stage">
+    <div id="canvas-wrap">
+      <canvas id="game" width="480" height="720" aria-label="Neon Breach playfield" role="img"></canvas>
+      <div id="vignette"></div>
+      <div id="scanlines"></div>
+
+      <div id="banner" class="hidden">
+        <div id="banner-main">OVERDRIVE!</div>
+        <div id="banner-sub">×2</div>
+      </div>
+      <div id="hint" class="hidden"></div>
+
+      <!-- ======= OVERLAYS ======= -->
+      <div class="overlay" id="ov-menu">
+        <div class="panel">
+          <h1 class="title">NEON<span>BREACH</span></h1>
+          <p class="tagline">Break through. Get <b>ABOVE</b> the bricks.<br>Go <b class="od-text">OVERDRIVE</b>.</p>
+          <div class="menu-buttons">
+            <button class="btn primary" id="btn-start">▶ &nbsp;Start Game</button>
+            <button class="btn" id="btn-how">How to Play</button>
+          </div>
+          <div class="lvl-row" id="lvl-row" role="group" aria-label="Level select">
+            <span class="lvl-label">Level:</span>
+            <button class="lvl-btn" data-lvl="0" aria-label="Start at level 1">1</button>
+            <button class="lvl-btn" data-lvl="1" aria-label="Start at level 2">2</button>
+            <button class="lvl-btn" data-lvl="2" aria-label="Start at level 3">3</button>
+            <button class="lvl-btn" data-lvl="3" aria-label="Start at level 4">4</button>
+            <button class="lvl-btn" data-lvl="4" aria-label="Start at level 5">5</button>
+          </div>
+          <div class="howto hidden" id="howto">
+            <div class="how-grid">
+              <div><b>Move</b><br>Mouse · Arrows/AD · drag · thumbstick</div>
+              <div><b>Up/Down</b><br>W/S or ↑/↓ — smash <b>up</b> into the ball for extra speed!</div>
+              <div><b>Launch / Pause</b><br>Click · Tap · Space (P pause, M mute)</div>
+              <div><b>Goal</b><br>Clear bricks. Balls <b>above</b> the field build exponential multiplier up to <b>×64</b>.</div>
+            </div>
+            <div class="legend-mini" id="legend-mini"></div>
+          </div>
+          <div class="settings">
+            <label>Quality
+              <select id="sel-quality">
+                <option value="auto">Auto</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+            <label class="chk"><input type="checkbox" id="chk-shake" checked> Screen shake</label>
+            <label class="chk"><input type="checkbox" id="chk-sound" checked> Sound</label>
+            <label>Vol <input type="range" id="rng-vol" min="0" max="100" value="70"></label>
+          </div>
+          <p class="best-line">Best score: <b id="menu-high">0</b></p>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-legend">
+        <div class="panel">
+          <h2>Brick Field Guide</h2>
+          <div id="legend-full"></div>
+          <div class="menu-buttons"><button class="btn primary" id="btn-legend-close">Got it</button></div>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-intro">
+        <div class="panel">
+          <div class="kicker" id="intro-kicker">LEVEL 1</div>
+          <h2 id="intro-title">First Breach</h2>
+          <p id="intro-desc"></p>
+          <p id="intro-new" class="neon"></p>
+          <p class="tap-hint">Tap / Click / Space to begin</p>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-pause">
+        <div class="panel">
+          <h2>Paused</h2>
+          <p class="dim-line">Take a breath. The bricks can wait.</p>
+          <div class="menu-buttons">
+            <button class="btn primary" id="btn-resume">Resume</button>
+            <button class="btn" id="btn-pause-restart">Restart Level</button>
+            <button class="btn" id="btn-pause-menu">Main Menu</button>
+            <button class="btn" id="btn-mute-pause">🔊 Sound: On</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-clear">
+        <div class="panel">
+          <div class="kicker">LEVEL CLEAR</div>
+          <h2 id="clear-title">Breach Complete!</h2>
+          <p id="clear-stats"></p>
+          <div class="menu-buttons">
+            <button class="btn primary" id="btn-next">Next Level →</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-over">
+        <div class="panel">
+          <h2 class="danger">GAME OVER</h2>
+          <p id="over-stats"></p>
+          <div class="menu-buttons">
+            <button class="btn primary" id="btn-retry">↻ Retry Level</button>
+            <button class="btn" id="btn-over-menu">Main Menu</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay hidden" id="ov-win">
+        <div class="panel">
+          <div class="kicker gold">★ BREACH MASTER ★</div>
+          <h2 class="gold">YOU WIN!</h2>
+          <p id="win-stats"></p>
+          <div class="menu-buttons">
+            <button class="btn primary" id="btn-win-again">Play Again</button>
+            <button class="btn" id="btn-win-menu">Main Menu</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ======= TOUCH CONTROLS ======= -->
+      <div id="stick"><div id="stick-base"><div id="stick-knob"></div></div></div>
+      <div id="touch-btns">
+        <button id="btn-launch" aria-label="Launch">LAUNCH</button>
+        <button id="btn-pause-touch" aria-label="Pause">II</button>
+      </div>
+    </div>
+  </main>
+
+  <footer id="foot">
+    <span>🖱 move · click launch &nbsp;|&nbsp; ⌨ ←→↑↓ / WASD · space · P · M &nbsp;|&nbsp; 📱 drag / thumbstick</span>
+  </footer>
+</div>
+<script src="./game.js" defer></script>
+</body>
+</html>

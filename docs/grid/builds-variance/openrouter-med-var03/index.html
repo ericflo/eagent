@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>OVERDRIVE BREAKOUT</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+</div>
+<!-- External HUD buttons (pointer/touch friendly, outside the letterboxed canvas flow) -->
+<div id="hud-buttons">
+  <button id="btn-sound" title="Mute (M)">🔊</button>
+  <button id="btn-pause" title="Pause (P)">⏸</button>
+  <button id="btn-stick" title="Toggle thumbstick">🕹</button>
+</div>
+<script src="js/audio.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#05060f">
+<title>BREAKTHROUGH — a modern breakout</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <div id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-item"><span class="hud-label">SCORE</span><span id="hud-score">0</span></div>
+      <div class="hud-item"><span class="hud-label">BEST</span><span id="hud-best">0</span></div>
+      <div class="hud-item"><span class="hud-label">LEVEL</span><span id="hud-level">1</span></div>
+      <div class="hud-item"><span class="hud-label">LIVES</span><span id="hud-lives">♥♥♥</span></div>
+    </div>
+    <div class="hud-right">
+      <div id="mult-meter" title="Frenzy multiplier">
+        <div id="mult-fill"></div><span id="mult-label">×1</span>
+      </div>
+      <div id="power-icons"></div>
+    </div>
+  </div>
+
+  <button id="btn-pause" class="icon-btn hidden" aria-label="Pause">❚❚</button>
+
+  <div id="overlay">
+    <div id="banner" class="hidden"><div id="banner-main"></div><div id="banner-sub"></div></div>
+
+    <section id="screen-start" class="screen visible">
+      <h1 class="title">BREAK<span>THROUGH</span></h1>
+      <p class="tagline">Smash a hole in the wall. Get the ball <b>ON TOP</b>.<br>The longer it stays up there, the harder it FRENZIES.</p>
+      <div class="legend-panel small">
+        <div class="legend-bricks"></div>
+      </div>
+      <button id="btn-play" class="btn primary">▶&nbsp; PLAY</button>
+      <button id="btn-howto" class="btn link">how to play / brick legend</button>
+      <p class="hint">mouse · touch drag · WASD/arrows — space launches — P pauses</p>
+    </section>
+
+    <section id="screen-legend" class="screen">
+      <h2>HOW TO PLAY</h2>
+      <div class="legend-scroll">
+        <div class="legend-panel">
+          <h3>The goal</h3>
+          <p>Break through the brick wall so the ball gets <b>above</b> it. While the ball is up there hitting bricks you are in <b>FRENZY</b>: the multiplier ramps ×1 → ×8, the screen escalates, and everything scores more. When the ball drops back down, the multiplier decays.</p>
+          <h3>Move &amp; smash</h3>
+          <p>The paddle moves <b>up and down</b> too (bottom band). Moving <b>up</b> at contact SMASHES the ball faster; moving <b>down</b> absorbs speed for control. Where you hit the paddle bends the angle.</p>
+          <h3>Bricks</h3>
+          <div class="legend-bricks full"></div>
+          <h3>Capsules (catch with paddle)</h3>
+          <div class="legend-powers"></div>
+        </div>
+      </div>
+      <button id="btn-legend-back" class="btn primary">BACK</button>
+    </section>
+
+    <section id="screen-pause" class="screen">
+      <h2>PAUSED</h2>
+      <div class="stack">
+        <button id="btn-resume" class="btn primary">RESUME</button>
+        <button id="btn-restart" class="btn">RESTART RUN</button>
+        <button id="btn-mute" class="btn">SOUND: ON</button>
+        <button id="btn-shake" class="btn">REDUCED SHAKE: OFF</button>
+        <button id="btn-stick" class="btn">THUMBSTICK: OFF</button>
+        <button id="btn-legend" class="btn">HOW TO PLAY</button>
+      </div>
+    </section>
+
+    <section id="screen-over" class="screen">
+      <h2>GAME OVER</h2>
+      <p class="big-score" id="over-score"></p>
+      <p id="over-best" class="dim"></p>
+      <p id="over-summary" class="dim"></p>
+      <button id="btn-again" class="btn primary">PLAY AGAIN</button>
+    </section>
+  </div>
+</div>
+<script type="module" src="src/main.js"></script>
+<script>
+// file:// fallback: ES module scripts are blocked by CORS when opened directly
+// from disk in most browsers. Tell the user how to run it properly.
+setTimeout(function () {
+  if (!window.__game) {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:absolute;inset:0;z-index:99;display:flex;align-items:center;justify-content:center;background:#05060f;color:#e8f0ff;padding:24px;text-align:center;font-family:sans-serif;line-height:1.6';
+    d.innerHTML = '<div><h2 style="margin-bottom:12px">Can\u2019t start from a file:// URL</h2>' +
+      '<p>Browser security blocks ES modules on pages opened directly from disk.</p>' +
+      '<p style="margin-top:12px">Serve the folder with a static server, e.g.:<br>' +
+      '<code style="color:#5eead4">python3 -m http.server</code><br>then open <code>http://localhost:8000</code></p></div>';
+    document.body.appendChild(d);
+  }
+}, 1200);
+</script>
+</body>
+</html>

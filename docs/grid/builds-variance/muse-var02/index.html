@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e27">
+<meta name="description" content="OVERDRIVE — a neon Breakout where the fun is ABOVE the bricks. Break through, trigger exponential overdrive, master angle/speed bricks, catch power-ups. Mouse, keyboard & touch thumbstick.">
+<title>OVERDRIVE — Neon Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a0e27'/%3E%3Crect x='10' y='12' width='20' height='10' rx='3' fill='%233fa9ff'/%3E%3Crect x='34' y='12' width='20' height='10' rx='3' fill='%23b06bff'/%3E%3Crect x='10' y='26' width='44' height='6' rx='3' fill='%23ff3df0'/%3E%3Ccircle cx='32' cy='44' r='6' fill='%23fff'/%3E%3Crect x='14' y='54' width='36' height='6' rx='3' fill='%2329f6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+
+  <div id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-row"><span class="hud-label">SCORE</span><span id="hud-score">0</span></div>
+      <div class="hud-row"><span class="hud-label">BEST</span><span id="hud-high">0</span></div>
+    </div>
+    <div class="hud-center">
+      <div id="hud-mult">x1</div>
+      <div id="hud-level">LEVEL 1</div>
+    </div>
+    <div class="hud-right">
+      <div id="hud-lives" aria-label="lives"></div>
+      <div class="hud-row"><button id="btn-pause" class="mini-btn" aria-label="Pause">II</button><button id="btn-mute" class="mini-btn" aria-label="Mute">&#9836;</button></div>
+    </div>
+  </div>
+  <div id="overdrive-banner" class="hidden">OVERDRIVE <span id="od-x">x2</span></div>
+  <div id="hint-bar" class="hidden"></div>
+
+  <div id="menu" class="overlay">
+    <h1 class="title">OVER<span>DRIVE</span></h1>
+    <p class="subtitle">NEON BREAKOUT &mdash; get the ball <b>ABOVE</b> the bricks.</p>
+    <div class="best-line">BEST <span id="menu-high">0</span></div>
+    <div class="menu-btns">
+      <button id="btn-start" class="big-btn">▶ &nbsp;START</button>
+      <button id="btn-help" class="big-btn ghost">? &nbsp;HOW TO PLAY</button>
+    </div>
+    <div class="menu-toggles">
+      <button id="btn-sound" class="chip">SOUND: ON</button>
+      <button id="btn-motion" class="chip">MOTION: FULL</button>
+      <button id="btn-stick" class="chip">STICK: ON</button>
+    </div>
+    <p class="controls-line">Mouse: move &amp; click &nbsp;•&nbsp; Keys: arrows/WASD + Space &nbsp;•&nbsp; Touch: drag or thumbstick, tap to launch</p>
+    <p class="tiny">Paddle drifts up/down in the lower zone — flick <b>UP</b> into the ball for a speed boost.</p>
+  </div>
+
+  <div id="help" class="overlay hidden">
+    <h2>HOW TO PLAY</h2>
+    <div class="help-grid">
+      <div><b>GOAL</b> — Smash every brick. Punch a hole, get the ball <b class="od">ABOVE the bricks</b> for OVERDRIVE: exponential multiplier while it stays up top. Drop back down to bank the bonus!</div>
+      <div><b>PADDLE</b> — Moves left/right AND up/down (bottom zone). Hit the ball while flicking <b>UP</b> to supercharge it. Edges aim the ball.</div>
+      <div><b>BRICKS</b> — <span class="sw n"></span>Normal 1-hit &nbsp;<span class="sw p"></span><b>Prism</b>: needs a STEEP angle &nbsp;<span class="sw v"></span><b>Velocity</b>: needs SPEED (uppercut!) &nbsp;<span class="sw b"></span><b>Blink</b>: solid only when lit — time it &nbsp;<span class="sw d"></span><b>Drifter</b>: slides side to side &nbsp;<span class="sw x"></span><b>Volatile</b>: explodes, helps you!</div>
+      <div><b>BALLS</b> — <span class="sw f"></span><b>Fireball</b>: blast damage &nbsp;<span class="sw vo"></span><b>Volt</b>: chain lightning &nbsp;<span class="sw g"></span><b>Ghost</b>: phases through (3 hits) &nbsp;<span class="sw go"></span><b>Golden</b>: 2× score</div>
+      <div><b>CATCH</b> — Falling capsules: Multiball • Enlarge • Fire • Volt • Ghost • Slow-Mo • Shield net • Extra life • Laser (3 shots, tap/↑ to fire)</div>
+      <div><b>CONTROLS</b> — Mouse: move + click. Keys: ←→/AD, ↑↓/WS, Space launch, P pause, M mute. Touch: drag anywhere, or thumbstick (touch &amp; hold still), second-finger tap launches. LAUNCH / ❚❚ buttons on screen.</div>
+    </div>
+    <button id="btn-help-close" class="big-btn">GOT IT</button>
+  </div>
+
+  <div id="pause" class="overlay hidden">
+    <h2>PAUSED</h2>
+    <p class="subtitle" id="pause-sub">Take a breath.</p>
+    <div class="menu-btns"><button id="btn-resume" class="big-btn">RESUME</button><button id="btn-quit" class="big-btn ghost">MENU</button></div>
+  </div>
+
+  <div id="clear" class="overlay hidden">
+    <h2 id="clear-title">LEVEL CLEAR!</h2>
+    <p class="subtitle" id="clear-stats"></p>
+    <div class="menu-btns"><button id="btn-next" class="big-btn">NEXT LEVEL ▶</button></div>
+  </div>
+
+  <div id="over" class="overlay hidden">
+    <h2 id="over-title">GAME OVER</h2>
+    <p class="subtitle" id="over-stats"></p>
+    <div class="best-line">BEST <span id="over-high">0</span> <span id="newbest" class="hidden">★ NEW BEST! ★</span></div>
+    <div class="menu-btns"><button id="btn-retry" class="big-btn">↻ &nbsp;RETRY</button><button id="btn-menu2" class="big-btn ghost">MENU</button></div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <div id="mobile-btns" class="hidden">
+    <button id="btn-launch" class="touch-btn">LAUNCH ⬆</button>
+    <button id="btn-pause-m" class="touch-btn small">❚❚</button>
+  </div>
+  <div id="stick" class="hidden"><div id="stick-nub"></div></div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

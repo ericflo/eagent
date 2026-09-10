@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1026">
+  <title>Rooftop Breakout</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="game-wrap">
+
+    <!-- Playfield: the game canvas, scaled to fit while keeping 480x880 -->
+    <canvas id="game" width="480" height="880"></canvas>
+
+    <!-- ===================== HUD (over the canvas) ===================== -->
+    <!-- ui.js toggles .active on #hud while the game is running. -->
+    <div id="hud">
+
+      <!-- score block: top-left -->
+      <div id="hud-score" class="hud-blk">0</div>
+      <div id="hud-mult" class="hud-blk">×1</div>
+      <div id="hud-combo" class="hud-blk"></div>
+
+      <!-- lives: hearts, top-right under the buttons -->
+      <div id="hud-lives" class="hud-blk">♥♥♥</div>
+
+      <!-- rooftop streak: gold, top center below the roof area -->
+      <div id="hud-streak" class="hud-blk"></div>
+
+      <!-- power-up chips: top center, below the streak -->
+      <div id="hud-chips"></div>
+
+      <!-- mute + pause; grouped in a wrap so ui.js can toggle them
+           independently of the rest of the HUD -->
+      <div id="pause-btn-wrap">
+        <button type="button" id="btn-mute" aria-label="Toggle sound">🔊</button>
+        <button type="button" id="btn-pause" aria-label="Pause">⏸</button>
+      </div>
+
+      <!-- Virtual thumbstick; input.js repositions it and flips display.
+           Lives inside #hud so its offset parent shares the canvas origin. -->
+      <div id="stick"><div class="knob"></div></div>
+    </div>
+
+    <!-- ===================== SCREENS ===================== -->
+
+    <!-- -------- MENU -------- -->
+    <div class="screen" data-screen="menu">
+      <div class="screen-inner">
+        <h1 class="menu-title">ROOFTOP<br>BREAKOUT</h1>
+        <p class="tagline">Get the ball on the roof of the bricks. Then hold on.</p>
+
+        <div class="menu-buttons">
+          <button type="button" id="btn-play" class="btn btn-primary">PLAY</button>
+          <button type="button" id="btn-endless" class="btn btn-ghost">ENDLESS</button>
+        </div>
+
+        <p class="howto">
+          Drag with the mouse or use the thumbstick to move the paddle. Move <em>up</em> when you
+          hit the ball to launch it faster. Break bricks to score; get above them to take the
+          rooftop — that's where the real fun starts.
+        </p>
+
+        <div class="legend" aria-label="Brick legend">
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#4fc3f7"></span>
+            <span class="legend-name">Standard</span>
+            <span class="legend-desc">Breaks on any hit</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#ffd54f"></span>
+            <span class="legend-name">Crown</span>
+            <span class="legend-desc">Sits on the roof. Clearing crowns grows the Rooftop bonus</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#ba68c8"></span>
+            <span class="legend-name">Angle</span>
+            <span class="legend-desc">Breaks only at a steep angle</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#ff7043"></span>
+            <span class="legend-name">Speed</span>
+            <span class="legend-desc">Breaks only when hit fast</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#ffd700"></span>
+            <span class="legend-name">Gold</span>
+            <span class="legend-desc">Indestructible. Deflects and speeds up the ball</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#f44336"></span>
+            <span class="legend-name">Bomb</span>
+            <span class="legend-desc">Explodes, blasting nearby bricks</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#26a69a"></span>
+            <span class="legend-name">Reborn</span>
+            <span class="legend-desc">Breaks only if hit again quickly, else it regrows</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#7e57c2"></span>
+            <span class="legend-name">Top</span>
+            <span class="legend-desc">Breaks only when hit from above — get on the roof!</span>
+          </div>
+          <div class="legend-row">
+            <span class="brick-swatch" style="background:#ffca28"></span>
+            <span class="legend-name">Wild</span>
+            <span class="legend-desc">Always drops a power-up</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- -------- PAUSE -------- -->
+    <div class="screen" data-screen="pause">
+      <div class="screen-inner">
+        <h2 class="screen-title">PAUSED</h2>
+        <div class="screen-buttons">
+          <button type="button" id="btn-resume" class="btn btn-primary">RESUME</button>
+          <button type="button" id="btn-menu" class="btn btn-ghost">MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- -------- LEVEL CLEAR -------- -->
+    <div class="screen" data-screen="levelclear">
+      <div class="screen-inner">
+        <h2 class="screen-title" data-lc-title>LEVEL COMPLETE</h2>
+        <p class="screen-bonus" data-lc-bonus>ROOFTOP BONUS +0</p>
+        <p class="screen-score" data-lc-score>SCORE 0</p>
+        <div class="screen-buttons">
+          <button type="button" id="btn-next" class="btn btn-primary">NEXT LEVEL</button>
+          <button type="button" id="btn-menu2" class="btn btn-ghost">MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- -------- GAME OVER -------- -->
+    <div class="screen" data-screen="gameover">
+      <div class="screen-inner">
+        <h2 class="screen-title gameover-title">GAME OVER</h2>
+        <p class="screen-score" data-go-score>SCORE 0</p>
+        <p class="screen-streak" data-go-streak>BEST ROOFTOP STREAK 0s</p>
+        <div class="screen-buttons">
+          <button type="button" id="btn-restart" class="btn btn-primary">PLAY AGAIN</button>
+          <button type="button" id="btn-menu" class="btn btn-ghost">MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="credit">Rooftop Breakout — a modern take on a classic.</footer>
+  </div>
+
+  <!-- The game boots itself; main.js exists separately and must NOT be created here. -->
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

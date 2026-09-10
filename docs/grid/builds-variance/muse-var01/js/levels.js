@@ -1,0 +1,90 @@
+// Brick legend + hand-designed levels. 1 brick = 1 qualifying hit (no multi-HP).
+// Map chars: .=empty S=standard P=prism(st steep) K=skimmer(shallow) V=velocity(fast)
+//             N=nimbus(slow) F=inferno(fire) G=spectral(ghost) B=bomb H=shifter
+export const BRICK_INFO = {
+  S:{name:'Standard', icon:'▮', color:'#00f0ff', glow:'#00f0ff', desc:'Breaks on any hit.'},
+  P:{name:'Prism ▲', icon:'▲', color:'#7dffea', glow:'#00ffc8', desc:'Needs STEEP hit (|vy| dominant). Shallow bounces.'},
+  K:{name:'Skimmer ◀▶', icon:'◀▶', color:'#a6ff00', glow:'#a6ff00', desc:'Needs SHALLOW / grazing hit. Steep bounces.'},
+  V:{name:'Velocity ⚡', icon:'⚡', color:'#ffd400', glow:'#ffd400', desc:'Needs FAST ball. Slow balls bounce off.'},
+  N:{name:'Nimbus 🪶', icon:'🪶', color:'#e8f4ff', glow:'#cfe8ff', desc:'Needs SLOW ball. Fast balls bounce.'},
+  F:{name:'Inferno 🔥', icon:'🔥', color:'#ff6a00', glow:'#ff6a00', desc:'Only FIREBALL breaks it. Others sizzle off.'},
+  G:{name:'Spectral 👻', icon:'👻', color:'#c77dff', glow:'#c77dff', desc:'Only GHOST ball breaks it. Others pass/bounce.'},
+  B:{name:'Bomb 💥', icon:'💥', color:'#ff2f5d', glow:'#ff2f5d', desc:'Explodes! 3×3 blast + chain reaction.'},
+  H:{name:'Shifter ⟷', icon:'⟷', color:'#ff2fd6', glow:'#ff2fd6', desc:'Slides side to side. Breaks on any hit.'},
+};
+export const COLS = 10;
+export const LEVELS = [
+  { name:'FIRST CONTACT', sub:'Learn the ropes. Mind the gap!',
+    map:[
+    '..........',
+    '..SSSSSS..',
+    '..SSSSSS..',
+    '...SSSS...',
+    '....SS....',
+    '..........',
+    ]},
+  { name:'PRISM GATE', sub:'Steep hits crack Prisms ▲ — drop straight down!',
+    map:[
+    '..........',
+    '..PPPPPP..',
+    '..SSSSSS..',
+    '...SSSS...',
+    '....SS....',
+    '..........',
+    ]},
+  { name:'SKIM & ZIP', sub:'Graze Skimmers ◀▶ · Speed through Velocity ⚡',
+    map:[
+    '..........',
+    '.KKKKKKKK.',
+    '.VVVVVVVV.',
+    '..SSSSSS..',
+    '....SS....',
+    '..........',
+    ]},
+  { name:'FEATHER & FLAME', sub:'Slow for Nimbus 🪶 · Grab FIRE 🔥 for Inferno',
+    map:[
+    '..........',
+    '.NNNFFNNN.',
+    '.NNSFFSNN.',
+    '..SSSSSS..',
+    '..B....B..',
+    '..........',
+    ]},
+  { name:'GHOST TOWN', sub:'Ghost 👻 only for Spectral · Bombs 💥 open the sky',
+    map:[
+    '..........',
+    '.GGGGGGGG.',
+    '.GSSBSSG..',
+    '..SSSSSS..',
+    '...BSSB...',
+    '..........',
+    ]},
+  { name:'CROSSFIRE', sub:'Everything at once. Punch a shaft to the top!',
+    map:[
+    '..........',
+    '.PVNNFVPK.',
+    '.SKFBBFKS.',
+    '..SHHHHS..',
+    '...SSSS...',
+    '..........',
+    ]},
+  { name:'SHIFTSTORM', sub:'Moving Shifters ⟷ guard the column',
+    map:[
+    '..........',
+    '.HHHHHHHH.',
+    '.VSSSSSSV.',
+    '.KPBNNBPK.',
+    '...FGGF...',
+    '..........',
+    ]},
+  { name:'OVERTOP PRIME', sub:'The gauntlet. Get above it all. ×99 awaits.',
+    map:[
+    '.FGGGGGGF.',
+    '.PVNNNNVP.',
+    '.SKBBBBKS.',
+    '..SHHHHS..',
+    '..SBSSBS..',
+    '..........',
+    ]},
+];
+export function levelBrickCount(lv){ return lv.map.join('').replace(/\./g,'').length; }

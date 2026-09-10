@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1026">
+<title>OVER THE TOP — Modern Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1026'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="game"></canvas>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+      <div id="hud-top">
+        <div class="hud-block">
+          <div class="hud-label">SCORE</div>
+          <div id="hud-score">0</div>
+          <div id="hud-hi">BEST 0</div>
+        </div>
+        <div class="hud-block" id="mult-block">
+          <div class="hud-label">MULTIPLIER</div>
+          <div id="hud-mult">x1</div>
+          <div id="heatbar"><div id="heatfill"></div></div>
+        </div>
+        <div class="hud-block right">
+          <div class="hud-label" id="hud-level">LEVEL 1</div>
+          <div id="hud-lives">❤❤❤</div>
+          <div id="hud-progress"><div id="hud-progress-fill"></div></div>
+        </div>
+      </div>
+      <div id="hud-effects"></div>
+      <div id="ott-banner" class="hidden">⚡ OVER THE TOP <span id="ott-mult">x2</span> ⚡</div>
+      <div id="announce" class="hidden"></div>
+      <div id="hint-bar" class="hidden"></div>
+      <div id="hud-buttons">
+        <button id="btn-pause" class="icon-btn" title="Pause (P)">⏸</button>
+        <button id="btn-mute" class="icon-btn" title="Mute (M)">🔊</button>
+      </div>
+    </div>
+
+    <!-- Floating thumbstick UI -->
+    <div id="stick" class="hidden">
+      <div id="stick-base"><div id="stick-knob"></div></div>
+    </div>
+
+    <!-- Overlays -->
+    <div id="overlay-title" class="overlay">
+      <div class="panel">
+        <h1 class="logo">OVER THE TOP</h1>
+        <div class="subtitle">A MODERN BREAKOUT</div>
+        <div id="title-best">★ BEST 0 ★</div>
+        <p class="blurb">Smash through to the sky. Get the ball <b>above the bricks</b> and watch it go <b>exponentially awesome</b> — multiplier doubles while you stay on top, then banks when you drop back!</p>
+        <div class="howto">
+          <div class="how-row"><span>🖱️ Mouse</span><em>Move to steer paddle (X + Y)</em></div>
+          <div class="how-row"><span>⌨️ WASD / ←↑↓→</span><em>Move paddle • <b>SPACE</b> launch • <b>P</b> pause • <b>M</b> mute</em></div>
+          <div class="how-row"><span>📱 Touch</span><em>Drag anywhere = floating thumbstick</em></div>
+          <div class="how-row"><span>⬆️ Flick UP on hit</span><em>Moving up as you strike adds ball speed!</em></div>
+        </div>
+        <div class="legend">
+          <div><i class="sw n"></i>Normal</div>
+          <div><i class="sw a">▲</i>Angle: hit STEEP</div>
+          <div><i class="sw s">≫</i>Speed: hit FAST</div>
+          <div><i class="sw g">◌</i>Phase: Ghost/Fire only</div>
+          <div><i class="sw m">⇔</i>Slider</div>
+          <div><i class="sw b">✸</i>Bomb</div>
+        </div>
+        <div class="balls-legend">
+          <div><i class="bl std"></i>Standard</div>
+          <div><i class="bl fire"></i>Fire: pierces</div>
+          <div><i class="bl volt"></i>Volt: fast, splits</div>
+          <div><i class="bl ghost"></i>Ghost: phases</div>
+          <div><i class="bl heavy"></i>Heavy: smashes</div>
+        </div>
+        <button id="btn-start" class="big-btn">▶ &nbsp;START GAME</button>
+        <div class="row-btns">
+          <button id="btn-levels" class="ghost-btn">LEVEL SELECT</button>
+          <button id="btn-how" class="ghost-btn">BALLS &amp; BRICKS</button>
+        </div>
+        <div id="level-grid" class="hidden"></div>
+        <div class="tiny">High score saved locally • Sound: synthesized live, no files</div>
+      </div>
+    </div>
+
+    <div id="overlay-intro" class="overlay hidden">
+      <div class="panel small">
+        <div id="intro-kicker">LEVEL 1</div>
+        <h2 id="intro-name">First Contact</h2>
+        <p id="intro-desc"></p>
+        <button id="btn-go" class="big-btn">LAUNCH ▶</button>
+      </div>
+    </div>
+
+    <div id="overlay-pause" class="overlay hidden">
+      <div class="panel small">
+        <h2>⏸ PAUSED</h2>
+        <p class="blurb">Take a breath. The bricks aren't going anywhere.</p>
+        <button id="btn-resume" class="big-btn">RESUME ▶</button>
+        <div class="row-btns">
+          <button id="btn-restart" class="ghost-btn">RESTART LEVEL</button>
+          <button id="btn-quit" class="ghost-btn">QUIT TO TITLE</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="overlay-over" class="overlay hidden">
+      <div class="panel small">
+        <h2 id="over-title">💀 GAME OVER</h2>
+        <p class="blurb" id="over-stats"></p>
+        <button id="btn-retry" class="big-btn">↻ &nbsp;PLAY AGAIN</button>
+        <div class="row-btns">
+          <button id="btn-over-title" class="ghost-btn">TITLE SCREEN</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="overlay-win" class="overlay hidden">
+      <div class="panel small">
+        <h2>🏆 YOU CLEARED THEM ALL!</h2>
+        <p class="blurb" id="win-stats"></p>
+        <button id="btn-again" class="big-btn">↻ &nbsp;PLAY AGAIN</button>
+        <div class="row-btns">
+          <button id="btn-win-title" class="ghost-btn">TITLE SCREEN</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

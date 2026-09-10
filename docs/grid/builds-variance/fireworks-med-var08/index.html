@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="theme-color" content="#05060f" />
+<title>NEONBRICK — a modern Breakout</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game"></canvas>
+
+    <!-- HUD buttons (HTML for accessibility + easy touch targets) -->
+    <div id="hud-buttons">
+      <button id="btn-mute" class="hud-btn" aria-label="Mute (M)">&#128266;</button>
+      <button id="btn-pause" class="hud-btn" aria-label="Pause (Esc/P)">&#10073;&#10073;</button>
+    </div>
+
+    <!-- Overlay screens: menu / pause / level clear / game over / win -->
+    <div id="overlay" class="hidden">
+      <div id="overlay-card">
+        <h1 id="overlay-title">NEONBRICK</h1>
+        <p id="overlay-sub"></p>
+        <div id="overlay-stats"></div>
+        <button id="overlay-btn">PLAY</button>
+        <div id="overlay-hint"></div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

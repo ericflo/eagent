@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>SKYBREAK — a modern take on Breakout</title>
+<meta name="description" content="SKYBREAK: break through the ceiling and let the ball run wild above the bricks.">
+<meta name="theme-color" content="#04050c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2304050c'/%3E%3Ccircle cx='32' cy='40' r='7' fill='%234fd8ff'/%3E%3Crect x='12' y='12' width='40' height='7' rx='2' fill='%23ffb020'/%3E%3Crect x='12' y='22' width='40' height='7' rx='2' fill='%23b44dff'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #04050c;
+  --neon-cyan: #4fd8ff;
+  --neon-amber: #ffb020;
+  --neon-magenta: #b44dff;
+  --text: #dfeaff;
+  --text-dim: #8ea0c0;
+  --glass: rgba(14, 18, 40, 0.72);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  color: var(--text);
+}
+#game {
+  position: fixed; inset: 0;
+  width: 100vw; height: 100vh; height: 100dvh;
+  display: block;
+  touch-action: none;
+}
+/* ---------- HUD (DOM overlay, top of screen) ---------- */
+#hud {
+  position: fixed; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+  z-index: 10; pointer-events: none;
+}
+#hud .hud-block {
+  background: var(--glass);
+  border: 1px solid rgba(120, 160, 255, 0.18);
+  border-radius: 12px;
+  padding: 6px 12px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 2px 14px rgba(0,0,0,0.35);
+}
+#hud .label {
+  font-size: 9px; letter-spacing: 0.18em; color: var(--text-dim);
+  text-transform: uppercase; font-weight: 700;
+}
+#hud .val { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.05; }
+#score-block { min-width: 86px; }
+#level-block { min-width: 60px; text-align: center; }
+#mult-badge {
+  color: #fff;
+  font-weight: 900; font-size: 17px;
+  padding: 6px 12px; border-radius: 12px;
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  background: linear-gradient(160deg, rgba(70,50,10,0.55), rgba(20,14,40,0.72));
+  text-shadow: 0 0 8px rgba(255,176,32,0.7);
+  transition: transform .15s ease, box-shadow .3s ease;
+}
+#mult-badge.hot { animation: multPulse 1s infinite; }
+@keyframes multPulse {
+  0%,100% { transform: scale(1); box-shadow: 0 0 10px rgba(255,176,32,.35); }
+  50% { transform: scale(1.08); box-shadow: 0 0 26px rgba(255,176,32,.85); }
+}
+#hud .spacer { flex: 1; }
+#lives-row { display: flex; gap: 5px; align-items: center; padding: 0 4px; }
+#lives-row .life {
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--neon-cyan);
+  box-shadow: 0 0 8px rgba(79,216,255,0.9);
+}
+#lives-row .life.lost { background: #26304a; box-shadow: none; }
+.hud-btn {
+  pointer-events: auto;
+  width: 40px; height: 40px; border-radius: 12px;
+  border: 1px solid rgba(120,160,255,0.25);
+  background: var(--glass);
+  color: var(--text); font-size: 17px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; backdrop-filter: blur(6px);
+  transition: transform .1s ease, border-color .2s;
+}
+.hud-btn:active { transform: scale(0.92); }
+.hud-btn:hover { border-color: rgba(160,200,255,0.6); }
+/* ---------- Screens ---------- */
+.screen {
+  position: fixed; inset: 0; z-index: 30;
+  display: none; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px; padding: 24px;
+  background: radial-gradient(120% 90% at 50% 20%, rgba(10,14,34,0.62), rgba(4,5,12,0.9) 70%);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  text-align: center;
+}
+.screen.show { display: flex; animation: screenIn .35s cubic-bezier(.2,.9,.3,1.2); }
+@keyframes screenIn { from { opacity: 0; transform: scale(1.04); } to { opacity: 1; transform: scale(1); } }
+.screen h1 {
+  font-size: clamp(44px, 13vw, 84px);
+  font-weight: 900; letter-spacing: 0.06em;
+  background: linear-gradient(180deg, #bff1ff 0%, #4fd8ff 45%, #b44dff 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 0 18px rgba(79,216,255,0.45));
+}
+.screen h2 {
+  font-size: clamp(30px, 9vw, 54px); font-weight: 900; letter-spacing: 0.05em;
+  color: #8ff; filter: drop-shadow(0 0 14px rgba(80,220,255,.5));
+}
+.tagline { color: var(--text-dim); font-size: 14px; letter-spacing: 0.04em; max-width: 34ch; }
+.big-btn {
+  pointer-events: auto;
+  font-size: 20px; font-weight: 800; letter-spacing: 0.08em;
+  color: #02131a; background: linear-gradient(180deg, #9be9ff, #4fd8ff);
+  border: none; border-radius: 999px;
+  padding: 14px 42px; cursor: pointer;
+  box-shadow: 0 0 24px rgba(79,216,255,0.5), inset 0 -3px 8px rgba(0,40,60,0.25);
+  transition: transform .12s ease, box-shadow .3s;
+}
+.big-btn:hover { box-shadow: 0 0 38px rgba(79,216,255,0.8); }
+.big-btn:active { transform: scale(0.95); }
+.big-btn.alt {
+  color: #170a20; background: linear-gradient(180deg, #ffd98a, #ffb020);
+  box-shadow: 0 0 22px rgba(255,176,32,0.45), inset 0 -3px 8px rgba(60,30,0,0.2);
+  font-size: 16px; padding: 11px 30px;
+}
+.stats { display: flex; gap: 26px; margin: 4px 0 6px; }
+.stats .stat { display: flex; flex-direction: column; gap: 3px; }
+.stats .stat .label { font-size: 10px; letter-spacing: .18em; color: var(--text-dim); text-transform: uppercase; }
+.stats .stat .num { font-size: 26px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.controls-hint { font-size: 12.5px; color: var(--text-dim); line-height: 1.75; max-width: 40ch; }
+.controls-hint b { color: #aee2ff; font-weight: 700; }
+#new-best {
+  display: none; color: #ffd98a; font-weight: 900; letter-spacing: .12em;
+  font-size: 15px; animation: multPulse 1.1s infinite;
+}
+#new-best.show { display: block; }
+/* ---------- Ascended banner ---------- */
+#banner {
+  position: fixed; top: 18%; left: 0; right: 0;
+  text-align: center; z-index: 20; pointer-events: none;
+  font-size: clamp(30px, 9vw, 58px); font-weight: 900; letter-spacing: 0.1em;
+  color: #ffe9c0; opacity: 0;
+  text-shadow: 0 0 18px rgba(255,176,32,.95), 0 0 46px rgba(255,110,64,.6);
+}
+#banner.ascend { animation: bannerIn 1.6s ease-out forwards; }
+@keyframes bannerIn {
+  0% { opacity: 0; transform: scale(0.7); }
+  12% { opacity: 1; transform: scale(1.12); }
+  22% { transform: scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.04); }
+}
+/* ---------- Rotate hint on short landscape phones ---------- */
+#rotate-hint {
+  position: fixed; inset: auto 0 6px 0; z-index: 40;
+  display: none; text-align: center; pointer-events: none;
+  font-size: 11px; color: var(--text-dim); letter-spacing: .06em;
+}
+@media (orientation: landscape) and (max-height: 460px) { #rotate-hint { display: block; } }
+@media (max-width: 420px) {
+  #hud .val { font-size: 15px; }
+  #score-block { min-width: 70px; }
+  .hud-btn { width: 36px; height: 36px; }
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div class="hud-block" id="score-block">
+    <div class="label">Score</div>
+    <div class="val" id="score-val">0</div>
+  </div>
+  <div class="hud-block" id="level-block">
+    <div class="label">Level</div>
+    <div class="val" id="level-val">1</div>
+  </div>
+  <div class="hud-block" id="mult-badge">×1.0</div>
+  <div class="spacer"></div>
+  <div id="lives-row" class="hud-block" aria-label="balls left"></div>
+  <button class="hud-btn" id="btn-pause" aria-label="pause">⏸</button>
+  <button class="hud-btn" id="btn-mute" aria-label="toggle sound">🔊</button>
+</div>
+
+<div id="banner">ASCENDED!</div>
+
+<div class="screen show" id="screen-title">
+  <h1>SKYBREAK</h1>
+  <div class="tagline">Break through the ceiling. The real game lives <b>above</b> the bricks.</div>
+  <div class="stats">
+    <div class="stat"><span class="label">Best</span><span class="num" id="best-val">0</span></div>
+  </div>
+  <button class="big-btn" id="btn-start">▶&nbsp; PLAY</button>
+  <div class="controls-hint">
+    <b>Drag</b> or move the mouse to steer · <b>tap / click / space</b> to launch<br>
+    Move the paddle <b>up</b> as you strike to slam the ball harder<br>
+    Arrow keys / WASD also work · P pauses
+  </div>
+</div>
+
+<div class="screen" id="screen-pause">
+  <h2>PAUSED</h2>
+  <button class="big-btn" id="btn-resume">▶&nbsp; RESUME</button>
+  <button class="big-btn alt" id="btn-restart-p">↻&nbsp; Restart run</button>
+</div>
+
+<div class="screen" id="screen-clear">
+  <h2>LEVEL CLEAR</h2>
+  <div class="stats">
+    <div class="stat"><span class="label">Score</span><span class="num" id="clear-score">0</span></div>
+    <div class="stat"><span class="label">Best combo</span><span class="num" id="clear-maxcombo">×1</span></div>
+    <div class="stat"><span class="label">Clear bonus</span><span class="num" id="clear-bonus">0</span></div>
+  </div>
+  <button class="big-btn" id="btn-next">▶&nbsp; NEXT LEVEL</button>
+</div>
+
+<div class="screen" id="screen-over">
+  <h2>GAME OVER</h2>
+  <div id="new-best">★ NEW BEST ★</div>
+  <div class="stats">
+    <div class="stat"><span class="label">Score</span><span class="num" id="over-score">0</span></div>
+    <div class="stat"><span class="label">Level</span><span class="num" id="over-level">1</span></div>
+  </div>
+  <button class="big-btn" id="btn-restart">↻&nbsp; PLAY AGAIN</button>
+</div>
+
+<div id="rotate-hint">portrait is best — flip your phone</div>
+
+<script src="js/00-util.js"></script>
+<script src="js/10-audio.js"></script>
+<script src="js/20-effects.js"></script>
+<script src="js/30-input.js"></script>
+<script src="js/40-entities.js"></script>
+<script src="js/50-powerups.js"></script>
+<script src="js/60-levels.js"></script>
+<script src="js/70-game.js"></script>
+</body>
+</html>

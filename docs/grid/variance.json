@@ -1,0 +1,860 @@
+{
+ "excluded": {
+  "deepseek-fw-var02": {
+   "cost_usd": 0.5681,
+   "duration_min": 90.7,
+   "lane": "deepseek-fw",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "deepseek-fw-var04": {
+   "cost_usd": 0.6785,
+   "duration_min": 90.7,
+   "lane": "deepseek-fw",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "deepseek-fw-var07": {
+   "cost_usd": 1.0125,
+   "duration_min": 90.8,
+   "lane": "deepseek-fw",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "deepseek-fw-var09": {
+   "cost_usd": 0.5476,
+   "duration_min": 90.8,
+   "lane": "deepseek-fw",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "fireworks-med-var04": {
+   "cost_usd": 0.4983,
+   "duration_min": 90.6,
+   "lane": "fireworks-med",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "openrouter-med-var02": {
+   "cost_usd": 1.1122,
+   "duration_min": 90.6,
+   "lane": "openrouter-med",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  },
+  "openrouter-med-var08": {
+   "cost_usd": 1.2696,
+   "duration_min": 90.8,
+   "lane": "openrouter-med",
+   "reason": "Supervisor-stopped at the 90-minute run cap during open-ended QA; game artifact intact on disk, session parked resumable. Excluded to keep the gallery to finished, self-verified builds.",
+   "status": "timeout"
+  }
+ },
+ "lanes": {
+  "deepseek-fw": {
+   "cost_max": 0.8612,
+   "cost_mean": 0.64,
+   "cost_min": 0.5219,
+   "cost_sd": 0.1243,
+   "done": 6,
+   "duration_mean_min": 71.7,
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "runs": [
+    "deepseek-fw-var01",
+    "deepseek-fw-var03",
+    "deepseek-fw-var05",
+    "deepseek-fw-var06",
+    "deepseek-fw-var08",
+    "deepseek-fw-var10"
+   ],
+   "total": 10
+  },
+  "fireworks-med": {
+   "cost_max": 1.429,
+   "cost_mean": 0.7835,
+   "cost_min": 0.3394,
+   "cost_sd": 0.3128,
+   "done": 9,
+   "duration_mean_min": 34.6,
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "runs": [
+    "fireworks-med-var01",
+    "fireworks-med-var02",
+    "fireworks-med-var03",
+    "fireworks-med-var05",
+    "fireworks-med-var06",
+    "fireworks-med-var07",
+    "fireworks-med-var08",
+    "fireworks-med-var09",
+    "fireworks-med-var10"
+   ],
+   "total": 10
+  },
+  "muse": {
+   "cost_max": 0.0776,
+   "cost_mean": 0.0424,
+   "cost_min": 0.0306,
+   "cost_sd": 0.0135,
+   "done": 10,
+   "duration_mean_min": 16.0,
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "runs": [
+    "muse-var01",
+    "muse-var02",
+    "muse-var03",
+    "muse-var04",
+    "muse-var05",
+    "muse-var06",
+    "muse-var07",
+    "muse-var08",
+    "muse-var09",
+    "muse-var10"
+   ],
+   "total": 10
+  },
+  "openrouter-med": {
+   "cost_max": 2.2964,
+   "cost_mean": 0.9246,
+   "cost_min": 0.5626,
+   "cost_sd": 0.5933,
+   "done": 8,
+   "duration_mean_min": 45.7,
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "runs": [
+    "openrouter-med-var01",
+    "openrouter-med-var03",
+    "openrouter-med-var04",
+    "openrouter-med-var05",
+    "openrouter-med-var06",
+    "openrouter-med-var07",
+    "openrouter-med-var09",
+    "openrouter-med-var10"
+   ],
+   "total": 10
+  }
+ },
+ "runs": {
+  "deepseek-fw-var01": {
+   "cost_usd": 0.8612,
+   "duration_min": 90.4,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/core.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/render.js",
+    "style.css"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; via --config deepseek-fw (Fireworks); session 1789003645308 ended (done) \u00b7 usage: orchestrator 45 calls, 1.8M in (92% cached), 83.0k out; task 429 calls, 31.5M in (98% cached), 602.0k out; narrator 51 calls, 1.4M in (93% cached), 8.2k out",
+   "staged_bytes": 126435,
+   "status": "done",
+   "title": "TOPSIDE \u2014 a modern Breakout"
+  },
+  "deepseek-fw-var03": {
+   "cost_usd": 0.5957,
+   "duration_min": 70.4,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; via --config deepseek-fw (Fireworks); session 1789014541312 ended (done) \u00b7 usage: orchestrator 99 calls, 4.1M in (96% cached), 60.0k out; task 296 calls, 19.0M in (98% cached), 369.1k out; narrator 61 calls, 2.3M in (94% cached), 9.0k out",
+   "staged_bytes": 96545,
+   "status": "done",
+   "title": "SKY BREAK \u2014 A Modern Breakout"
+  },
+  "deepseek-fw-var05": {
+   "cost_usd": 0.539,
+   "duration_min": 62.9,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/bricks.js",
+    "js/game.js",
+    "js/levels.js",
+    "js/particles.js",
+    "js/util.js"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; via --config deepseek-fw (Fireworks); session 1789024240502 ended (done) \u00b7 usage: orchestrator 117 calls, 7.7M in (96% cached), 100.3k out; task 183 calls, 10.7M in (97% cached), 246.9k out; narrator 66 calls, 2.5M in (93% cached), 12.0k out",
+   "staged_bytes": 86920,
+   "status": "done",
+   "title": "Stratosmash \u2014 a modern Breakout"
+  },
+  "deepseek-fw-var06": {
+   "cost_usd": 0.6868,
+   "duration_min": 55.4,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/engine.js",
+    "js/game.js",
+    "js/hud.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/particles.js",
+    "js/renderer.js",
+    "js/ui.js",
+    "style.css"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; via --config deepseek-fw (Fireworks); session 1789028031093 ended (done) \u00b7 usage: orchestrator 131 calls, 11.2M in (97% cached), 159.4k out; task 195 calls, 6.1M in (94% cached), 446.6k out; narrator 59 calls, 2.2M in (95% cached), 8.1k out",
+   "staged_bytes": 183278,
+   "status": "done",
+   "title": "Rooftop Breakout"
+  },
+  "deepseek-fw-var08": {
+   "cost_usd": 0.5219,
+   "duration_min": 65.5,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/config.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "style.css"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; eagent v0.9.0-dirty via --config deepseek-fw (Fireworks); session 1789036914813 ended (done) \u00b7 usage: orchestrator 62 calls, 2.8M in (95% cached), 51.5k out; task 220 calls, 16.1M in (98% cached), 335.0k out; narrator 62 calls, 1.9M in (94% cached), 6.8k out",
+   "staged_bytes": 126902,
+   "status": "done",
+   "title": "OVERDRIVE \u2014 a modern Brickles"
+  },
+  "deepseek-fw-var10": {
+   "cost_usd": 0.6351,
+   "duration_min": 85.7,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "deepseek-fw",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/game.js",
+    "js/levels.js",
+    "js/main.js"
+   ],
+   "models": "DeepSeek V4 Flash \u00b7 orchestrator / worker / narrator \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; eagent v0.9.0-dirty via --config deepseek-fw (Fireworks); session 1789046325680 ended (done) \u00b7 usage: orchestrator 54 calls, 2.5M in (93% cached), 85.8k out; task 178 calls, 8.8M in (95% cached), 529.2k out; narrator 51 calls, 1.2M in (93% cached), 6.1k out",
+   "staged_bytes": 62815,
+   "status": "done",
+   "title": "Above the Bricks \u2014 a modern Breakout"
+  },
+  "fireworks-med-var01": {
+   "cost_usd": 0.8223,
+   "duration_min": 35.1,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "game.js",
+    "index.html"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; fireworks pre-probe HTTP 200; session 1788996628113 ended (session.end done); tasks 5/5 done; game built (index.html, game.js, screenshots, playtest scripts)",
+   "staged_bytes": 59903,
+   "status": "done",
+   "title": "Crownline"
+  },
+  "fireworks-med-var02": {
+   "cost_usd": 0.8759,
+   "duration_min": 47.7,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "src/audio.js",
+    "src/bricks.js",
+    "src/constants.js",
+    "src/entities.js",
+    "src/game.js",
+    "src/input.js",
+    "src/levels.js",
+    "src/main.js",
+    "src/particles.js",
+    "src/render.js",
+    "src/ui.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1788998739817 ended (session.end done); tasks 4/4 done; game built (index.html, src/, css/, README)",
+   "staged_bytes": 83292,
+   "status": "done",
+   "title": "BREAKTHROUGH \u2014 a modern breakout"
+  },
+  "fireworks-med-var03": {
+   "cost_usd": 0.831,
+   "duration_min": 27.6,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/bricks.js",
+    "js/entities.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/particles.js",
+    "js/ui.js",
+    "js/util.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789001604617 ended (session.end done); tasks 3/3 done; game built (index.html, js/)",
+   "staged_bytes": 92639,
+   "status": "done",
+   "title": "BREAKPOINT \u2014 a modern take on Breakout"
+  },
+  "fireworks-med-var05": {
+   "cost_usd": 0.9108,
+   "duration_min": 47.7,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789008703214 ended (session.end done); tasks 4/4 done; game built (index.html, game.js, style.css, screenshots)",
+   "staged_bytes": 92039,
+   "status": "done",
+   "title": "NEON BREAKER"
+  },
+  "fireworks-med-var06": {
+   "cost_usd": 0.6236,
+   "duration_min": 35.2,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "index.html",
+    "src/audio.js",
+    "src/bricks.js",
+    "src/canvas.js",
+    "src/game.js",
+    "src/main.js",
+    "src/particles.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789011571761 ended (session.end done); tasks 3/3 done; game built (index.html, src/, shots/, README)",
+   "staged_bytes": 75392,
+   "status": "done",
+   "title": "BREAKAWAY"
+  },
+  "fireworks-med-var07": {
+   "cost_usd": 0.7745,
+   "duration_min": 50.3,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/ball.js",
+    "js/bricks.js",
+    "js/effects.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/paddle.js",
+    "js/particles.js",
+    "js/powerups.js",
+    "js/ui.js",
+    "js/utils.js",
+    "style.css"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789013686859 ended (session.end done); tasks 5/5 done; game built (index.html, js/, style.css, screenshots, tools/)",
+   "staged_bytes": 110425,
+   "status": "done",
+   "title": "Attic Breakout"
+  },
+  "fireworks-med-var08": {
+   "cost_usd": 0.3394,
+   "duration_min": 15.1,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "index.html",
+    "src/audio.js",
+    "src/core/bricks.js",
+    "src/core/multiplier.js",
+    "src/core/paddle.js",
+    "src/core/particles.js",
+    "src/core/physics.js",
+    "src/core/powerups.js",
+    "src/game.js",
+    "src/input.js",
+    "src/levels.js",
+    "src/main.js",
+    "src/renderer.js",
+    "styles.css"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789016707183 ended (session.end done); tasks 4/4 done; game built (index.html, src/, styles.css, test/, verify/)",
+   "staged_bytes": 67979,
+   "status": "done",
+   "title": "NEONBRICK \u2014 a modern Breakout"
+  },
+  "fireworks-med-var09": {
+   "cost_usd": 1.429,
+   "duration_min": 32.7,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/bricks.js",
+    "js/effects.js",
+    "js/entities.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/physics.js",
+    "style.css"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789017616766 ended (session.end done); tasks 4/4 done; game built (index.html, js/, style.css, test/); highest-cost run, still under $3.00 cap",
+   "staged_bytes": 78817,
+   "status": "done",
+   "title": "Neon Breakout"
+  },
+  "fireworks-med-var10": {
+   "cost_usd": 0.445,
+   "duration_min": 20.1,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "fireworks-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/config.js",
+    "js/entities.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/hud.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/utils.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via Fireworks",
+   "notes": "eagent v0.9.0-dirty; session 1789019582177 ended (session.end done); tasks 3/3 done; game built (index.html, js/, css/, README)",
+   "staged_bytes": 79050,
+   "status": "done",
+   "title": "SKYBREAK \u2014 a modern breakout"
+  },
+  "muse-var01": {
+   "cost_usd": 0.0374,
+   "duration_min": 13,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/balls.js",
+    "js/bricks.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/paddle.js",
+    "js/particles.js",
+    "js/ui.js",
+    "styles.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "8 hand-designed levels, OVERDRIVE x99; orchestrator verified with node --check, http 200s, Playwright/Chromium zero-error runs (start, launch, brick breaks, life loss, overdrive, pause, help); 5 bugs fixed (resize brick resurrection, high-score storage, tab-hide autopause, launch hint, restart)",
+   "staged_bytes": 73132,
+   "status": "done",
+   "title": "NEON BREAKOUT: OVERTOP"
+  },
+  "muse-var02": {
+   "cost_usd": 0.0339,
+   "duration_min": 15,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "7 funnel levels, overdrive x999, 5 ball types, 10 power-ups; scripted player cleared level 1 (10/10 bricks, 1396 pts, overdrive x2.2 banked); prism gates 2/2, velocity-gate resist, game-over run, 390x844 touch tap-launch; screenshots reviewed",
+   "staged_bytes": 63577,
+   "status": "done",
+   "title": "OVERDRIVE \u2014 Neon Breakout"
+  },
+  "muse-var03": {
+   "cost_usd": 0.0306,
+   "duration_min": 10,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/entities.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/particles.js",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "5 JS files; node --check clean, static server 200s, headless Firefox menu/level/mobile shots; polish pass (favicon, tofu-text fix, movers, README); no browser playtest in worker env",
+   "staged_bytes": 68393,
+   "status": "done",
+   "title": "OVERDRIVE \u2014 Modern Breakout"
+  },
+  "muse-var04": {
+   "cost_usd": 0.0461,
+   "duration_min": 22,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "audio.js",
+    "game.js",
+    "index.html",
+    "levels.js",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "Slowest early build (stuck on node --check at one point); 6 levels, 7 brick types, 9 power-ups; headless Chromium zero console errors; autoplay bot cleared all 6 levels to victory",
+   "staged_bytes": 81384,
+   "status": "done",
+   "title": "OVER THE TOP \u2014 Neon Breakout"
+  },
+  "muse-var05": {
+   "cost_usd": 0.0427,
+   "duration_min": 14,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "styles.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "Orchestrator static/stub checks (ID cross-check, smoke, serve); worker headless Chromium zero errors (menu/intro/play, ball loss + re-serve, unlock persistence); polish pass (favicon, anti-stall, banner, level select)",
+   "staged_bytes": 90939,
+   "status": "done",
+   "title": "NEON BREACH \u2014 Modern Breakout"
+  },
+  "muse-var06": {
+   "cost_usd": 0.0444,
+   "duration_min": 14,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "audio.js",
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "node --check clean, server 200s, Playwright 480x900 + 1280x900 zero errors, live scores 270 at x2, pause overlay; polish (thumbstick auto-hide for mouse, topside-hint overlap); touch/emulated only, audio code-paths only",
+   "staged_bytes": 69313,
+   "status": "done",
+   "title": "OVERDRIVE // Neon Breakout"
+  },
+  "muse-var07": {
+   "cost_usd": 0.0331,
+   "duration_min": 11,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "Static-only verification (no browser in env): node --check, 29 level rows validated, resize-preserve + rooftop-grace + anti-loop confirmed in code, local serve 200s; balance tuned on paper",
+   "staged_bytes": 67031,
+   "status": "done",
+   "title": "ROOFTOP RAMPAGE \u2014 Neon Breakout"
+  },
+  "muse-var08": {
+   "cost_usd": 0.0341,
+   "duration_min": 15,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "30/30 bot checks passing desktop+mobile, zero console errors (paddle, brick gates, over-the-top mode, powerups, pause, level flow); visual + audio polish batch",
+   "staged_bytes": 83289,
+   "status": "done",
+   "title": "OVER THE TOP \u2014 Modern Breakout"
+  },
+  "muse-var09": {
+   "cost_usd": 0.0441,
+   "duration_min": 19,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/game.js",
+    "js/levels.js",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "Most flows proven incl. game-over + victory via debug-hook screenshots (reverted byte-for-byte); 2 bugs fixed (mobile hint overlapping buttons, NEW BEST badge never hiding); desktop+mobile Playwright zero errors, file:// load OK",
+   "staged_bytes": 75366,
+   "status": "done",
+   "title": "OVER THE TOP \u2014 Modern Breakout"
+  },
+  "muse-var10": {
+   "cost_usd": 0.0776,
+   "duration_min": 27,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "muse",
+   "manifest": [
+    "game.js",
+    "index.html",
+    "style.css"
+   ],
+   "models": "Muse Spark 1.3 Contributor (Meta) \u00b7 orchestrator / worker / narrator",
+   "notes": "Costliest/most thorough: 4 tasks; 7 levels, 7 no-HP brick types, 10 power-ups, X+Y smash paddle, mouse/touch/gamepad; real Chromium play (score 500, 5-combo, overdrive x2->x4), pause+mute, zero errors, mobile 390x844; 5 hardening fixes (private-mode high-score, paddle bounds/resize clamp, blur autopause, same-frame win/loss guard, mouse+gamepad); test extras cleaned up",
+   "staged_bytes": 87512,
+   "status": "done",
+   "title": "NEON OVERDRIVE \u2014 Modern Breakout"
+  },
+  "openrouter-med-var01": {
+   "cost_usd": 0.5777,
+   "duration_min": 20.2,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/balls.js",
+    "js/bricks.js",
+    "js/config.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/paddle.js",
+    "js/particles.js",
+    "js/powerups.js",
+    "js/util.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1788996591646 ended (done) \u00b7 usage: orchestrator 48 calls, 974.1k in (97% cached), 19.6k out; task 199 calls, 8.6M in (83% cached), 70.4k out; narrator 17 calls, 250.8k in (65% cached), 3.1k out",
+   "staged_bytes": 77593,
+   "status": "done",
+   "title": "OVERKICK \u2014 a modern Breakout about getting on top"
+  },
+  "openrouter-med-var03": {
+   "cost_usd": 0.9602,
+   "duration_min": 40.3,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/entities.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/levels.js",
+    "js/main.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789003262392 ended (done) \u00b7 usage: orchestrator 65 calls, 2.0M in (93% cached), 35.3k out; task 201 calls, 5.7M in (95% cached), 86.9k out; narrator 39 calls, 1.1M in (81% cached), 3.4k out",
+   "staged_bytes": 78976,
+   "status": "done",
+   "title": "OVERDRIVE BREAKOUT"
+  },
+  "openrouter-med-var04": {
+   "cost_usd": 1.1363,
+   "duration_min": 65.5,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "index.html",
+    "src/audio.js",
+    "src/balls.js",
+    "src/bricks.js",
+    "src/effects.js",
+    "src/engine.js",
+    "src/levels.js",
+    "src/main.js",
+    "src/paddle.js",
+    "src/powerups.js",
+    "src/ui.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789005692936 ended (done) \u00b7 usage: orchestrator 53 calls, 1.3M in (82% cached), 23.5k out; task 483 calls, 27.5M in (97% cached), 216.7k out; narrator 49 calls, 1.4M in (77% cached), 10.2k out",
+   "staged_bytes": 87066,
+   "status": "done",
+   "title": "Breakthrough"
+  },
+  "openrouter-med-var05": {
+   "cost_usd": 2.2964,
+   "duration_min": 83.1,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "index.html",
+    "js/00-util.js",
+    "js/10-audio.js",
+    "js/20-effects.js",
+    "js/30-input.js",
+    "js/40-entities.js",
+    "js/50-powerups.js",
+    "js/60-levels.js",
+    "js/70-game.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789009632297 ended (done) \u00b7 usage: orchestrator 78 calls, 4.9M in (95% cached), 106.0k out; task 257 calls, 8.3M in (90% cached), 111.7k out; narrator 63 calls, 2.2M in (78% cached), 5.2k out",
+   "staged_bytes": 147862,
+   "status": "done",
+   "title": "SKYBREAK \u2014 a modern take on Breakout"
+  },
+  "openrouter-med-var06": {
+   "cost_usd": 0.5626,
+   "duration_min": 22.8,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/config.js",
+    "js/entities.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/input.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/particles.js",
+    "js/ui.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789014627441 ended (done) \u00b7 usage: orchestrator 60 calls, 1.3M in (93% cached), 17.6k out; task 105 calls, 2.8M in (95% cached), 48.4k out; narrator 23 calls, 342.7k in (75% cached), 7.4k out",
+   "staged_bytes": 75915,
+   "status": "done",
+   "title": "BREAKTHROUGH \u2014 a modern Breakout"
+  },
+  "openrouter-med-var07": {
+   "cost_usd": 0.6029,
+   "duration_min": 55.5,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "css/style.css",
+    "index.html",
+    "js/audio.js",
+    "js/entities.js",
+    "js/fx.js",
+    "js/game.js",
+    "js/input.js",
+    "js/level.js",
+    "js/util.js"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789016005049 ended (done) \u00b7 usage: orchestrator 49 calls, 928.8k in (94% cached), 20.8k out; task 186 calls, 11.4M in (94% cached), 93.1k out; narrator 38 calls, 777.0k in (91% cached), 6.3k out",
+   "staged_bytes": 70701,
+   "status": "done",
+   "title": "Breakthrough"
+  },
+  "openrouter-med-var09": {
+   "cost_usd": 0.6934,
+   "duration_min": 37.9,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "index.html"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789025110584 ended (done) \u00b7 usage: orchestrator 64 calls, 1.6M in (97% cached), 31.6k out; task 143 calls, 3.3M in (94% cached), 58.2k out; narrator 31 calls, 784.2k in (78% cached), 3.5k out",
+   "staged_bytes": 53904,
+   "status": "done",
+   "title": "CHAOSBREAK \u2014 a modern breakout"
+  },
+  "openrouter-med-var10": {
+   "cost_usd": 0.5673,
+   "duration_min": 40.4,
+   "entry": "index.html",
+   "external_refs": [],
+   "lane": "openrouter-med",
+   "manifest": [
+    "index.html",
+    "js/audio.js",
+    "js/background.js",
+    "js/balls.js",
+    "js/bricks.js",
+    "js/game.js",
+    "js/levels.js",
+    "js/main.js",
+    "js/particles.js",
+    "js/powerups.js",
+    "js/render.js",
+    "js/utils.js",
+    "style.css"
+   ],
+   "models": "GLM-5.3 / GLM-5.3-Flash / DeepSeek V4 Flash \u00b7 via OpenRouter",
+   "notes": "eagent v0.9.0-dirty; session 1789027395100 ended (done) \u00b7 usage: orchestrator 43 calls, 834.2k in (88% cached), 16.4k out; task 205 calls, 6.5M in (90% cached), 78.1k out; narrator 36 calls, 757.7k in (77% cached), 4.8k out",
+   "staged_bytes": 97283,
+   "status": "done",
+   "title": "BREAKTHROUGH \u2014 a modern Breakout"
+  }
+ }
+}

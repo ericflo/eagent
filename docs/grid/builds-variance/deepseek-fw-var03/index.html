@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070b1d">
+<title>SKY BREAK — A Modern Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070b1d'/%3E%3Crect x='6' y='50' width='52' height='7' rx='3.5' fill='%23ff9f43'/%3E%3Ccircle cx='32' cy='26' r='13' fill='%2346f2ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="game" aria-label="SKY BREAK game canvas"></canvas>
+
+<div id="stage-wrap">
+
+  <!-- ===================== HUD ===================== -->
+  <div id="hud" class="hidden">
+    <button id="btn-pause" class="icon-btn" type="button" aria-label="Pause">
+      <svg viewBox="0 0 24 24" width="20" height="20"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>
+    </button>
+    <div class="hud-center">
+      <div id="hud-score">0</div>
+      <div id="hud-level">LEVEL 1</div>
+    </div>
+    <div class="hud-right">
+      <div id="skybadge" class="hidden"><div class="sky-label">SKY</div><div id="sky-mult">x1</div></div>
+      <button id="btn-mute" class="icon-btn" type="button" aria-label="Toggle sound">
+        <svg class="ico-sound-on" viewBox="0 0 24 24" width="20" height="20"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+        <svg class="ico-sound-off" viewBox="0 0 24 24" width="20" height="20"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div id="hud-lives" class="lives"></div>
+  </div>
+
+  <!-- ===================== Banner / hints ===================== -->
+  <div id="overlay-banner" class="hidden">
+    <div id="banner-title">LEVEL 1</div>
+    <div id="banner-sub"></div>
+  </div>
+
+  <!-- ===================== Title menu ===================== -->
+  <div id="menu" class="screen">
+    <div class="logo-wrap">
+      <h1 class="logo">SKY<span>BREAK</span></h1>
+      <p class="tagline">Break through. Rise above.</p>
+    </div>
+    <p id="menu-best" class="menu-best">BEST&nbsp;&nbsp;<b>0</b></p>
+    <div class="menu-buttons">
+      <button id="btn-play" class="big-btn primary" type="button">▶&nbsp; PLAY</button>
+      <button id="btn-howto" class="big-btn" type="button">HOW TO PLAY</button>
+    </div>
+    <div class="settings-panel" id="menu-settings">
+      <div class="setting-row">
+        <span class="setting-name">Sound</span>
+        <button class="toggle" data-setting="sound" type="button"><span class="knob"></span></button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-name">Music</span>
+        <button class="toggle" data-setting="music" type="button"><span class="knob"></span></button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-name">Control mode</span>
+        <div class="segmented" data-setting="control">
+          <button data-value="follow" type="button">FOLLOW</button>
+          <button data-value="relative" type="button">DRAG</button>
+        </div>
+      </div>
+    </div>
+    <p class="menu-footer">A canvas + WebAudio game · zero dependencies</p>
+  </div>
+
+  <!-- ===================== Pause ===================== -->
+  <div id="pause" class="screen hidden">
+    <h2 class="screen-title">PAUSED</h2>
+    <div class="menu-buttons">
+      <button id="btn-resume" class="big-btn primary" type="button">▶&nbsp; RESUME</button>
+      <button id="btn-restart" class="big-btn" type="button">↺&nbsp; RESTART LEVEL</button>
+    </div>
+    <div class="settings-panel">
+      <div class="setting-row">
+        <span class="setting-name">Sound</span>
+        <button class="toggle" data-setting="sound" type="button"><span class="knob"></span></button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-name">Music</span>
+        <button class="toggle" data-setting="music" type="button"><span class="knob"></span></button>
+      </div>
+      <div class="setting-row">
+        <span class="setting-name">Control mode</span>
+        <div class="segmented" data-setting="control">
+          <button data-value="follow" type="button">FOLLOW</button>
+          <button data-value="relative" type="button">DRAG</button>
+        </div>
+      </div>
+    </div>
+    <button id="btn-menu" class="link-btn" type="button">BACK TO TITLE</button>
+  </div>
+
+  <!-- ===================== Game over ===================== -->
+  <div id="gameover" class="screen hidden">
+    <h2 class="screen-title go-title">GAME OVER</h2>
+    <div id="go-newbest" class="newbest hidden">★ NEW BEST! ★</div>
+    <div class="go-stats">
+      <div class="go-row"><span>SCORE</span><b id="go-score">0</b></div>
+      <div class="go-row"><span>BEST</span><b id="go-best">0</b></div>
+      <div class="go-row"><span>LEVEL REACHED</span><b id="go-level">1</b></div>
+      <div class="go-row"><span>BRICKS BROKEN</span><b id="go-bricks">0</b></div>
+      <div class="go-row"><span>MAX MULTIPLIER</span><b id="go-mult">x1</b></div>
+    </div>
+    <div class="menu-buttons">
+      <button id="btn-again" class="big-btn primary" type="button">▶&nbsp; PLAY AGAIN</button>
+      <button id="btn-go-menu" class="big-btn" type="button">MENU</button>
+    </div>
+  </div>
+
+  <!-- ===================== How to play ===================== -->
+  <div id="howto" class="screen hidden">
+    <div class="howto-scroll">
+      <h2 class="screen-title">HOW TO PLAY</h2>
+      <div id="howto-body"></div>
+    </div>
+    <button id="btn-howto-close" class="big-btn primary" type="button">GOT IT</button>
+  </div>
+
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>BREAKTHROUGH — a modern Breakout</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23090d1a'/%3E%3Crect x='10' y='14' width='12' height='8' rx='2' fill='%23ff8b3d' transform='rotate(-15 16 18)'/%3E%3Crect x='26' y='12' width='12' height='8' rx='2' fill='%23ffd23d' transform='rotate(10 32 16)'/%3E%3Crect x='42' y='15' width='12' height='8' rx='2' fill='%23ff5d8f' transform='rotate(-8 48 19)'/%3E%3Ccircle cx='32' cy='38' r='5' fill='%23eaf6ff'/%3E%3Crect x='14' y='48' width='36' height='7' rx='3.5' fill='%2358c7f3'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+  <canvas id="game" width="720" height="960"></canvas>
+
+  <!-- Thumbstick overlay (touch only, optional) -->
+  <div id="thumbzone" class="hidden">
+    <div id="thumbbase"><div id="thumbknob"></div></div>
+  </div>
+
+  <div id="hud" class="hidden">
+    <div class="hud-top-row">
+      <div class="hud-left">
+        <div class="hud-score" id="hudScore">0</div>
+      </div>
+      <div class="hud-mid">
+        <div class="hud-mult" id="hudMult"><span id="hudMultVal">×1</span><div id="hudMultBar"><i></i></div></div>
+      </div>
+      <div class="hud-right">
+        <div id="hudLives" class="hud-lives"></div>
+        <div class="hud-hi" id="hudHi">HI 0</div>
+      </div>
+    </div>
+    <div id="hudLevel" class="hud-level">LV 1</div>
+  </div>
+
+  <div id="powerups" class="hidden"></div>
+
+  <!-- Overlays -->
+  <div id="overlay" class="overlay">
+    <div id="titleScreen" class="screen">
+      <h1 class="logo">BREAK<span>THROUGH</span></h1>
+      <p class="tagline">Break through the field. Get above it. Go frenzied.</p>
+      <div class="menu-btns">
+        <button class="btn primary" id="btnStart">PLAY</button>
+        <button class="btn" id="btnHelp">HOW TO PLAY</button>
+      </div>
+      <p class="hi-line" id="titleHi"></p>
+      <p class="hint">MOUSE · TOUCH · WASD / ARROWS</p>
+    </div>
+
+    <div id="helpScreen" class="screen hidden">
+      <h2>HOW TO PLAY</h2>
+      <div class="help-cols">
+        <div class="help-col">
+          <h3>MOVE</h3>
+          <p>Mouse or drag anywhere on screen — the paddle follows both axes.</p>
+          <p>Thumbstick: tap the STICK toggle in game for a floating stick.</p>
+          <p><b>Move UP when striking</b> to launch the ball harder.</p>
+        </div>
+        <div class="help-col">
+          <h3>SPECIAL BRICKS</h3>
+          <p><b class="c-angle">◐ Angle-locked:</b> only breaks on steep hits (|vy| dominant).</p>
+          <p><b class="c-speed">≋ Speed-gated:</b> needs a fast ball. Fast balls glow white.</p>
+          <p><b class="c-move">↔ Moving:</b> slides side to side. Time it.</p>
+          <p><b class="c-phase">◌ Phasing:</b> solid only when it <i>shimmers solid</i>. Watch its rhythm.</p>
+          <p><b class="c-bomb">✸ Bomb:</b> destroys neighbours when broken.</p>
+          <p><b class="c-regen">↻ Regenerating:</b> grows back unless you clear fast.</p>
+        </div>
+        <div class="help-col">
+          <h3>BALLS &amp; DROPS</h3>
+          <p><b class="c-fire">Fireball</b> burns through anything. <b class="c-heavy">Heavy</b> smashes gates. <b class="c-split">Splitter</b> splits on every hit. <b class="c-gold">Bouncy</b> multiplies score.</p>
+          <p>Drops: <b>Multi</b> ×3 balls, <b>Sticky</b> catch &amp; aim, <b>Wide</b> paddle, <b>Lasers</b>, <b>Slow-mo</b>, plus ball-type capsules.</p>
+          <p><b class="c-frenzy">GET ON TOP:</b> any ball above the brick field = FRENZY. Multiplier climbs the longer you stay up.</p>
+        </div>
+      </div>
+      <button class="btn primary" id="btnBack">BACK</button>
+    </div>
+
+    <div id="stateScreen" class="screen hidden">
+      <h2 id="stateTitle"></h2>
+      <div id="stateCard" class="scorecard hidden"></div>
+      <p id="stateSub" class="tagline"></p>
+      <div class="menu-btns">
+        <button class="btn primary" id="btnState">CONTINUE</button>
+        <button class="btn secondary hidden" id="btnRestart">RESTART</button>
+      </div>
+      <p class="hint" id="stateHint"></p>
+    </div>
+  </div>
+
+  <div id="topBtns">
+    <button id="btnPause" aria-label="Pause">❚❚</button>
+    <button id="btnMute" aria-label="Mute">♪</button>
+    <button id="btnStick" aria-label="Thumbstick">◎</button>
+  </div>
+</div>
+</div>
+
+<!-- Classic scripts (no modules) so file:// works -->
+<script src="js/utils.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/particles.js"></script>
+<script src="js/bricks.js"></script>
+<script src="js/balls.js"></script>
+<script src="js/powerups.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/background.js"></script>
+<script src="js/render.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

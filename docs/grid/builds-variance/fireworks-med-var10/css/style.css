@@ -1,0 +1,182 @@
+:root {
+  --bg: #070b16;
+  --panel: rgba(13, 20, 38, 0.92);
+  --line: rgba(120, 160, 255, 0.25);
+  --ink: #dfe8ff;
+  --dim: #8fa0c8;
+  --accent: #35e0ff;
+  --accent2: #ff6b35;
+  --good: #6dffb0;
+  --bad: #ff4d6d;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+canvas#game {
+  display: block;
+  background: var(--bg);
+  border-radius: 6px;
+  touch-action: none;
+}
+
+/* ---------- overlay screens ---------- */
+
+#overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#overlay .screen {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 26px 30px;
+  max-width: min(560px, 92vw);
+  max-height: 94vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 60px rgba(53, 224, 255, 0.08);
+  backdrop-filter: blur(6px);
+}
+
+#overlay .screen.hidden { display: none; }
+#overlay.hidden { display: none; }
+
+.title {
+  font-size: clamp(38px, 7vw, 58px);
+  letter-spacing: 0.14em;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 0 24px rgba(53, 224, 255, 0.65), 0 0 4px rgba(53, 224, 255, 0.8);
+}
+.title span { color: var(--accent); }
+
+.tagline { color: var(--dim); letter-spacing: 0.08em; font-size: 14px; }
+
+.heading {
+  font-size: clamp(30px, 6vw, 44px);
+  letter-spacing: 0.14em;
+  font-weight: 800;
+  color: #fff;
+}
+.heading.good { text-shadow: 0 0 22px rgba(109, 255, 176, 0.7); }
+.stats .good { color: #6dffb0; font-weight: 700; text-shadow: 0 0 12px rgba(109, 255, 176, 0.6); }
+.heading.bad  { text-shadow: 0 0 22px rgba(255, 77, 109, 0.7); }
+
+.howto {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 16px;
+  max-width: 460px;
+}
+.howto h2 {
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.howto ul { list-style: none; }
+.howto li { margin: 5px 0; padding-left: 14px; position: relative; color: var(--dim); }
+.howto li::before { content: "▸"; position: absolute; left: 0; color: var(--accent); }
+.howto b { color: var(--ink); }
+
+.settings { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(53, 224, 255, 0.08);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip select {
+  background: #101a30;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px 6px;
+  font: inherit;
+}
+
+#level-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 6px;
+  width: 100%;
+  max-width: 460px;
+}
+#level-grid button {
+  aspect-ratio: 1;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(53, 224, 255, 0.07);
+  color: var(--ink);
+  font: 700 14px/1 inherit;
+  cursor: pointer;
+}
+#level-grid button:hover:not(.locked) { background: rgba(53, 224, 255, 0.25); }
+#level-grid button.locked { opacity: 0.28; cursor: default; }
+#level-grid button.current { border-color: var(--accent); box-shadow: 0 0 10px rgba(53, 224, 255, 0.5); }
+
+button.big, button.mid {
+  font: 800 16px/1 inherit;
+  letter-spacing: 0.14em;
+  border-radius: 999px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform 0.08s ease, filter 0.08s ease;
+}
+button.big {
+  padding: 15px 54px;
+  font-size: 19px;
+  color: #04121a;
+  background: linear-gradient(180deg, #7df0ff, var(--accent));
+  box-shadow: 0 0 30px rgba(53, 224, 255, 0.45);
+}
+button.mid {
+  padding: 11px 30px;
+  color: var(--ink);
+  background: rgba(53, 224, 255, 0.08);
+  border-color: var(--line);
+}
+button.big:hover, button.mid:hover { filter: brightness(1.15); transform: translateY(-1px); }
+button.big:active, button.mid:active { transform: translateY(1px); }
+
+.stats { color: var(--dim); font-size: 15px; text-align: center; line-height: 1.7; }
+.stats b { color: var(--ink); font-size: 1.2em; }

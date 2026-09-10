@@ -1,0 +1,77 @@
+/* ---- TOPSIDE base styles ---- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #0b0620;
+  font-family: 'Avenir Next', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+#game {
+  position: fixed; inset: 0;
+  display: block;
+  width: 100%; height: 100%;
+}
+/* scanline + vignette overlays (pure CSS, cheap) */
+#scan {
+  position: fixed; inset: 0; pointer-events: none; z-index: 5;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255,255,255,0.025) 0px,
+    rgba(255,255,255,0.025) 1px,
+    rgba(0,0,0,0.06) 2px,
+    rgba(0,0,0,0.06) 3px
+  );
+  opacity: .55;
+  mix-blend-mode: overlay;
+}
+#vignette {
+  position: fixed; inset: 0; pointer-events: none; z-index: 4;
+  background: radial-gradient(ellipse at center, transparent 58%, rgba(4,0,18,0.55) 100%);
+}
+/* HUD buttons */
+#hud {
+  position: fixed; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right));
+  z-index: 10; display: flex; gap: 8px;
+}
+.hudbtn {
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.22);
+  background: rgba(20,10,50,0.55);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  transition: transform .12s ease, background .12s ease;
+}
+.hudbtn:active { transform: scale(0.9); background: rgba(60,30,120,0.7); }
+/* FIRE (power) button */
+.fab {
+  position: fixed;
+  right: max(22px, env(safe-area-inset-right));
+  bottom: max(26px, env(safe-area-inset-bottom));
+  z-index: 10;
+  width: 76px; height: 76px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.5);
+  background: radial-gradient(circle at 35% 30%, rgba(255,120,160,0.95), rgba(180,30,90,0.85));
+  color: #fff; font-size: 34px;
+  cursor: pointer;
+  display: none;
+  align-items: center; justify-content: center;
+  box-shadow: 0 0 26px rgba(255,80,140,0.8), 0 4px 18px rgba(0,0,0,0.5);
+  animation: fabpulse 1.4s ease-in-out infinite;
+  touch-action: none;
+}
+.fab.on { display: flex; }
+@keyframes fabpulse {
+  0%,100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}

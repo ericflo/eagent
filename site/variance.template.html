@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#151613" />
+    <title>Breakout variance gallery — eagent</title>
+    <meta
+      name="description"
+      content="Thirty-three finished Breakout builds from forty variance runs across four cheap eagent presets: per-lane cost, duration, and completion data plus every playable game."
+    />
+    <link rel="canonical" href="https://ericflo.github.io/eagent/variance/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="eagent" />
+    <meta property="og:title" content="Breakout variance gallery — eagent" />
+    <meta
+      property="og:description"
+      content="Same Breakout spec, ten repeats per preset, thirty-three playable games. Cost, duration, and completion variance with error bars."
+    />
+    <meta
+      property="og:url"
+      content="https://ericflo.github.io/eagent/variance/"
+    />
+    <meta
+      property="og:image"
+      content="https://ericflo.github.io/eagent/assets/social-card.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a
+          class="wordmark"
+          href="https://ericflo.github.io/eagent/"
+          aria-label="eagent home"
+          >eagent<span class="wordmark-period">.</span></a
+        >
+        <button
+          class="menu-toggle"
+          type="button"
+          aria-label="Open navigation"
+          aria-expanded="false"
+          aria-controls="navigation"
+        >
+          <span></span><span></span>
+        </button>
+        <nav id="navigation" class="navigation" aria-label="Main navigation">
+          <a href="https://ericflo.github.io/eagent/#in-practice"
+            >The 16-game gallery</a
+          ><a
+            href="https://github.com/ericflo/eagent/blob/main/docs/grid/VARIANCE.md"
+            >The variance writeup</a
+          >
+        </nav>
+        <a
+          class="header-github"
+          aria-label="View source for eagent on GitHub"
+          href="https://github.com/ericflo/eagent"
+          >View source</a
+        >
+      </div>
+    </header>
+    <main id="main">
+      <section class="section-wrap">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">BREAKOUT VARIANCE — 33 REPEATS</p>
+            <h1>Same Breakout.<br />Thirty-three times.</h1>
+          </div>
+          <p>
+            After the sixteen-preset Breakout grid, we re-ran the cheapest
+            builds ten times each to see what repeats actually cost. Four lanes,
+            forty runs, thirty-three finished games — every one below is staged
+            from its run and playable in place, with its measured cost and build
+            time.
+          </p>
+        </div>
+        <p class="game-method">
+          Same spec and one-line prompt, fresh directories,
+          <code>EAGENT_FINALECHAT=off</code>, binary
+          <code>v0.9.0-dirty</code> (the original grid ran
+          <code>v0.8.0-1-g59ce5c7-dirty</code>). Per-run caps of $2 (muse) / $3
+          (everything else) were never breached; total variance spend ≈ $23.80
+          in catalog list-price estimates. No rubric re-judging: this is cost /
+          duration / completion variance, not score variance. Per-lane means in
+          the table below are done-only (finished runs); the writeup quotes
+          slightly different headline figures for two lanes because those fold
+          the timeout-capped runs in. Each game was served statically and
+          screenshotted with scripted Chromium at desktop and phone viewports.
+          The live
+          <a href="https://ericflo.github.io/eagent/#in-practice"
+            >16-game gallery</a
+          >
+          is untouched — this page is a separate annex.
+        </p>
+        <a
+          class="text-link game-record-link"
+          href="https://github.com/ericflo/eagent/blob/main/docs/grid/VARIANCE.md"
+          >Read the variance writeup
+        </a>
+        <!-- site:variance-summary -->
+        <h2>What actually varies (and what doesn&rsquo;t)</h2>
+        <ol class="variance-findings">
+          <li>
+            <strong>The grid headline survives with error bars.</strong> The
+            4-cent muse build is also the most consistent: 10/10 finished, a
+            5-cent cost band ($0.031–$0.078), fastest at ~16 minutes average.
+            Cost predicts nothing; convergence does.
+          </li>
+          <li>
+            <strong>Same models, different pipes.</strong> The identical
+            GLM-shaped preset averages $0.78 ± $0.31 on Fireworks vs $0.92 ±
+            $0.59 on OpenRouter — the provider adds about a fifth and nearly
+            doubles the spread (ranges $0.34–$1.43 vs $0.56–$2.30).
+          </li>
+          <li>
+            <strong
+              >The variance driver is verification depth, not building.</strong
+            >
+            All 7 timeouts (0 on muse) were QA workers iterating open-endedly —
+            screenshot staring, soak loops, fix-and-check cycles — with the
+            finished game sitting on disk. Stalled runs were supervisor-stopped
+            at 90 minutes, sessions parked resumable. Muse&rsquo;s loop
+            converges: check → screenshot → fix N things → ship.
+          </li>
+        </ol>
+        <!-- site:variance-excluded -->
+        <!-- site:variance-gallery -->
+        <dialog
+          class="game-dialog"
+          id="game-dialog"
+          aria-labelledby="game-dialog-title"
+        >
+          <button
+            type="button"
+            class="dialog-close"
+            id="game-dialog-close"
+            aria-label="Close game"
+          >
+            Close
+          </button>
+          <h3 id="game-dialog-title">Game</h3>
+          <p id="game-dialog-meta"></p>
+          <div class="game-dialog-frame-wrap">
+            <iframe
+              id="game-dialog-frame"
+              title="Playable Breakout variance game"
+              loading="lazy"
+            ></iframe>
+          </div>
+          <div
+            class="game-shot-toggle"
+            role="group"
+            aria-label="Screenshot view"
+          >
+            <button type="button" id="game-shot-desktop" aria-pressed="true">
+              Desktop shot</button
+            ><button type="button" id="game-shot-mobile" aria-pressed="false">
+              Mobile shot
+            </button>
+          </div>
+          <img id="game-dialog-shot" width="1280" height="800" alt="" />
+          <a class="text-link" id="game-dialog-open" href="../games/muse-var01/"
+            >Open full page</a
+          >
+        </dialog>
+      </section>
+    </main>
+    <footer class="site-footer section-wrap">
+      <div class="footer-main">
+        <div>
+          <a
+            class="wordmark"
+            href="https://ericflo.github.io/eagent/"
+            aria-label="eagent home"
+            >eagent<span class="wordmark-period">.</span></a
+          >
+          <p>Variance annex to the Breakout grid.</p>
+        </div>
+        <div class="footer-links">
+          <div>
+            <span>VARIANCE</span
+            ><a href="https://ericflo.github.io/eagent/#in-practice"
+              >The 16-game gallery</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/grid/VARIANCE.md"
+              >The variance writeup</a
+            ><a href="https://github.com/ericflo/eagent">Source code</a>
+          </div>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span
+          >Made by <a href="https://github.com/ericflo">Eric Florenzano</a> &
+          contributors.</span
+        ><a href="https://github.com/ericflo/eagent/blob/main/LICENSE"
+          >Open source · MIT license</a
+        ><a href="#main">Back to top ↑</a>
+      </div>
+    </footer>
+    <script>
+      (() => {
+        "use strict";
+        const menuButton = document.querySelector(".menu-toggle");
+        const navigation = document.getElementById("navigation");
+        if (menuButton && navigation) {
+          menuButton.addEventListener("click", () => {
+            const open = menuButton.getAttribute("aria-expanded") !== "true";
+            menuButton.setAttribute("aria-expanded", String(open));
+            menuButton.setAttribute(
+              "aria-label",
+              open ? "Close navigation" : "Open navigation",
+            );
+            navigation.classList.toggle("open", open);
+          });
+          navigation.addEventListener("click", (event) => {
+            if (event.target.closest("a")) {
+              menuButton.setAttribute("aria-expanded", "false");
+              menuButton.setAttribute("aria-label", "Open navigation");
+              navigation.classList.remove("open");
+            }
+          });
+        }
+        const gameDataEl = document.getElementById("game-data");
+        const gameDialog = document.getElementById("game-dialog");
+        if (!gameDataEl || !gameDialog) return;
+        const gameData = JSON.parse(gameDataEl.textContent);
+        const gameFrame = document.getElementById("game-dialog-frame");
+        const gameShot = document.getElementById("game-dialog-shot");
+        const gameTitle = document.getElementById("game-dialog-title");
+        const gameMeta = document.getElementById("game-dialog-meta");
+        const gameOpen = document.getElementById("game-dialog-open");
+        const shotDesktop = document.getElementById("game-shot-desktop");
+        const shotMobile = document.getElementById("game-shot-mobile");
+        let currentGame = null;
+        let currentShot = "desktop";
+        function renderShot() {
+          const shots = {
+            desktop: [gameData[currentGame].desktop, 1280, 800, "desktop"],
+            mobile: [gameData[currentGame].mobile, 390, 844, "mobile"],
+          };
+          const [src, width, height, label] = shots[currentShot];
+          gameShot.removeAttribute("src");
+          gameShot.src = src;
+          gameShot.width = width;
+          gameShot.height = height;
+          gameShot.alt =
+            "Screenshot of " + gameData[currentGame].title + " on " + label;
+          shotDesktop.setAttribute(
+            "aria-pressed",
+            String(currentShot === "desktop"),
+          );
+          shotMobile.setAttribute(
+            "aria-pressed",
+            String(currentShot === "mobile"),
+          );
+        }
+        function openGame(run) {
+          if (!gameData[run]) return;
+          currentGame = run;
+          currentShot = "desktop";
+          const game = gameData[run];
+          gameTitle.textContent = game.title;
+          gameMeta.textContent =
+            run +
+            " · " +
+            game.models +
+            " · " +
+            game.cost +
+            " · " +
+            game.duration +
+            " · " +
+            game.status;
+          gameOpen.href = game.href;
+          gameFrame.title = "Play " + game.title + " (" + run + ")";
+          gameFrame.src = game.href;
+          renderShot();
+          gameDialog.showModal();
+        }
+        function closeGame() {
+          gameDialog.close();
+        }
+        document.querySelectorAll("[data-play]").forEach((button) => {
+          button.addEventListener("click", () => openGame(button.dataset.play));
+        });
+        shotDesktop.addEventListener("click", () => {
+          currentShot = "desktop";
+          renderShot();
+        });
+        shotMobile.addEventListener("click", () => {
+          currentShot = "mobile";
+          renderShot();
+        });
+        document
+          .getElementById("game-dialog-close")
+          .addEventListener("click", closeGame);
+        gameDialog.addEventListener("close", () => {
+          gameFrame.removeAttribute("src");
+          currentGame = null;
+        });
+        gameDialog.addEventListener("click", (event) => {
+          if (event.target !== gameDialog) return;
+          const bounds = gameDialog.getBoundingClientRect();
+          if (
+            event.clientX < bounds.left ||
+            event.clientX > bounds.right ||
+            event.clientY < bounds.top ||
+            event.clientY > bounds.bottom
+          )
+            closeGame();
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>OVERKICK — a modern Breakout about getting on top</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div class="hudItem"><span class="hudLabel">SCORE</span><span id="hudScore">0</span></div>
+    <div class="hudItem"><span class="hudLabel">LVL</span><span id="hudLevel">1</span></div>
+    <div class="hudItem"><span class="hudLabel">MULT</span><span id="hudMult">x1</span></div>
+    <div class="hudItem"><span class="hudLabel">LIVES</span><span id="hudLives">♥♥♥</span></div>
+  </div>
+  <button id="muteBtn" class="cornerBtn" title="Mute (M)">🔊</button>
+
+  <!-- Screens -->
+  <div id="titleScreen" class="screen">
+    <h1 class="title">OVER<span>KICK</span></h1>
+    <p class="tagline">Break through. Get on top. Go exponential.</p>
+    <div class="card">
+      <h2>How to play</h2>
+      <ul>
+        <li><b>Move</b>: mouse, touch drag, or thumbstick (bottom-left). Paddle moves <b>up &amp; down</b> too!</li>
+        <li><b>PUNCH</b>: move up at the moment of contact to blast the ball faster — the key to Wedge &amp; Kinetic bricks and getting <b>Over the Top</b>.</li>
+        <li><b>Wedge</b> bricks need steep hits (&gt;55°). <b>Kinetic</b> need fast balls. <b>Phase</b> blink — hit while solid. <b>Volatile</b> explode. <b>Gold</b> = big points.</li>
+        <li>Ride your ball <b>above the bricks</b>: the multiplier doubles every 2 seconds, up to <b>x64</b>.</li>
+        <li>Keys: WASD/arrows move · Space launch · P/Esc pause · M mute.</li>
+      </ul>
+      <label class="toggleRow"><input type="checkbox" id="stickToggle" checked> Virtual thumbstick (touch)</label>
+    </div>
+    <button id="startBtn" class="bigBtn">PLAY</button>
+    <p class="hint">Best: <span id="titleBest">0</span></p>
+  </div>
+
+  <div id="pauseScreen" class="screen hidden">
+    <h1>PAUSED</h1>
+    <button id="resumeBtn" class="bigBtn">Resume</button>
+  </div>
+
+  <div id="gameoverScreen" class="screen hidden">
+    <h1>GAME OVER</h1>
+    <div class="card stats">
+      <div>Score <b id="goScore">0</b></div>
+      <div>Best <b id="goBest">0</b></div>
+      <div>Level <b id="goLevel">1</b></div>
+    </div>
+    <button id="againBtn" class="bigBtn">Play again</button>
+  </div>
+
+  <div id="levelIntro" class="screen hidden"><h1 id="levelIntroText">LEVEL 1</h1></div>
+
+  <!-- Virtual thumbstick -->
+  <div id="stick"><div id="stickNub"></div></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/particles.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/paddle.js"></script>
+  <script src="js/balls.js"></script>
+  <script src="js/bricks.js"></script>
+  <script src="js/powerups.js"></script>
+  <script src="js/levels.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

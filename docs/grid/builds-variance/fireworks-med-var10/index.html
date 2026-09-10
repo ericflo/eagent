@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070b16">
+<title>SKYBREAK — a modern breakout</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="960" height="1280"></canvas>
+  <div id="overlay">
+
+    <section class="screen" id="screen-start">
+      <h1 class="title">SKY<span>BREAK</span></h1>
+      <p class="tagline">Break through the canopy. Get on top. Go wild.</p>
+      <div class="howto">
+        <h2>How to play</h2>
+        <ul>
+          <li>Move the paddle with mouse, finger, or <b>WASD / arrows</b>. It moves up <em>and</em> down — hit the ball while moving <b>up</b> for a smash.</li>
+          <li>The heart of the game: break a hole in the canopy and get the ball <b>on top of the bricks</b>. Your multiplier ramps the whole time you stay up there.</li>
+          <li>Special bricks need the right <em>angle</em>, enough <em>speed</em>, a <em>heavy</em>/<em>fire</em> ball — or a bomb next door. Never just “more hits”.</li>
+          <li>Catch capsules: <b>Fire</b>, <b>Multi</b>, <b>Heavy</b>, <b>Ghost</b>, <b>Expand</b>, <b>Sticky</b>, <b>Laser</b>, <b>Shield</b>, <b>Life</b>.</li>
+          <li>Launch the ball with <b>tap / click / space</b>. <b>P</b> pauses, <b>M</b> mutes.</li>
+        </ul>
+      </div>
+      <div class="settings">
+        <button id="btn-sound" class="chip">Sound: On</button>
+        <label class="chip">Controls:
+          <select id="sel-scheme">
+            <option value="auto">Auto</option>
+            <option value="direct">Direct (cursor)</option>
+            <option value="thumb">Thumbstick (relative)</option>
+          </select>
+        </label>
+      </div>
+      <div id="level-grid" aria-label="Level select"></div>
+      <button id="btn-play" class="big">PLAY</button>
+    </section>
+
+    <section class="screen hidden" id="screen-pause">
+      <h2 class="heading">PAUSED</h2>
+      <button id="btn-resume" class="big">RESUME</button>
+      <button id="btn-restart" class="mid">Restart level</button>
+      <button id="btn-quit" class="mid">Quit to menu</button>
+    </section>
+
+    <section class="screen hidden" id="screen-clear">
+      <h2 class="heading good">LEVEL CLEAR</h2>
+      <p class="stats" id="clear-stats"></p>
+      <button id="btn-next" class="big">NEXT LEVEL</button>
+      <button id="btn-menu2" class="mid">Menu</button>
+    </section>
+
+    <section class="screen hidden" id="screen-over">
+      <h2 class="heading bad">GAME OVER</h2>
+      <p class="stats" id="over-stats"></p>
+      <button id="btn-retry" class="big">TRY AGAIN</button>
+      <button id="btn-menu3" class="mid">Menu</button>
+    </section>
+
+    <section class="screen hidden" id="screen-victory">
+      <h2 class="heading good">YOU BROKE THE SKY</h2>
+      <p class="stats" id="victory-stats"></p>
+      <button id="btn-again" class="big">PLAY AGAIN</button>
+      <button id="btn-menu4" class="mid">Menu</button>
+    </section>
+
+  </div>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/input.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

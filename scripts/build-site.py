@@ -324,6 +324,199 @@ def stage_games():
     print(f"Staged {len(grid_order)} grid games.")
 
 
+# Breakout variance annex. Separate page under variance/; the index gallery
+# above is untouched. docs/grid/variance.json is the source of truth for every
+# displayed number; prose findings below summarize reports/VARIANCE.md in
+# eagent-grid (vendored at docs/grid/VARIANCE.md).
+VARIANCE_LANE_ORDER = ["muse", "fireworks-med", "openrouter-med", "deepseek-fw"]
+
+
+def variance_run_number(run):
+    return int(run.rsplit("-var", 1)[1])
+
+
+def build_variance_page():
+    grid_root = root / "docs" / "grid"
+    variance = json.loads((grid_root / "variance.json").read_text())
+    runs = variance["runs"]
+    lanes = variance["lanes"]
+    excluded = variance["excluded"]
+    for lane in VARIANCE_LANE_ORDER:
+        if lane not in lanes:
+            sys.exit(f"Variance lane missing from variance.json: {lane}")
+    if set(runs) != {run for lane in VARIANCE_LANE_ORDER for run in lanes[lane]["runs"]}:
+        sys.exit("Variance runs do not match lane listings in variance.json")
+
+    summary_rows = []
+    for lane in VARIANCE_LANE_ORDER:
+        info = lanes[lane]
+        summary_rows.append(
+            "<tr>"
+            f"<td><code>{escape(lane)}</code></td>"
+            f"<td>{escape(info['models'])}</td>"
+            f"<td>{info['done']}/{info['total']}</td>"
+            f"<td>${info['cost_mean']:.4f} ± ${info['cost_sd']:.4f}</td>"
+            f"<td>${info['cost_min']:.2f}–${info['cost_max']:.2f}</td>"
+            f"<td>{info['duration_mean_min']:.0f}m avg</td>"
+            "</tr>"
+        )
+    summary = (
+        '<h2>Per-lane cost, time, and completion</h2>'
+        '<div class="game-table-wrap" tabindex="0" role="region" aria-label="Variance per-lane comparison table, scrollable">'
+        '<table class="game-table" id="variance-table">'
+        "<caption>Ten repeats per lane — catalog list-price cost and wall-clock time for finished (status=done) runs; means and spreads are done-only.</caption>"
+        "<thead><tr><th scope=\"col\">Lane</th><th scope=\"col\">Preset shape</th>"
+        "<th scope=\"col\">Finished</th><th scope=\"col\">Cost mean ± sd</th>"
+        "<th scope=\"col\">Cost range</th><th scope=\"col\">Build time</th></tr></thead>"
+        "<tbody>" + "".join(summary_rows) + "</tbody></table></div>"
+    )
+
+    excluded_rows = []
+    for run in sorted(excluded):
+        info = excluded[run]
+        excluded_rows.append(
+            "<tr>"
+            f"<td><code>{escape(run)}</code></td>"
+            f"<td><code>{escape(info['lane'])}</code></td>"
+            f"<td>{escape(info['status'])}</td>"
+            f"<td>${info['cost_usd']:.2f}</td>"
+            f"<td>{info['duration_min']:.0f}m</td>"
+            "</tr>"
+        )
+    excluded_html = (
+        "<h2>Excluded: the 7 timeout runs</h2>"
+        "<p>"
+        "Seven runs never declared themselves finished and are not staged "
+        "below — all seven were supervisor-stopped at the 90-minute run cap "
+        "while QA workers iterated open-endedly (screenshot staring, soak "
+        "loops, fix-and-check cycles), with the finished game sitting on "
+        "disk and the session parked resumable. Nothing corrupted; every "
+        "stop was boring and resumable. Muse had zero timeouts."
+        "</p>"
+        '<div class="game-table-wrap" tabindex="0" role="region" aria-label="Excluded timeout runs, scrollable">'
+        '<table class="game-table" id="variance-excluded">'
+        "<caption>Timeout runs skipped by the gallery, with spend and wall-clock time at the stop.</caption>"
+        "<thead><tr><th scope=\"col\">Run</th><th scope=\"col\">Lane</th>"
+        "<th scope=\"col\">Status</th><th scope=\"col\">Cost</th><th scope=\"col\">Time</th></tr></thead>"
+        "<tbody>" + "".join(excluded_rows) + "</tbody></table></div>"
+    )
+
+    row_cards = []
+    data = {}
+    for lane in VARIANCE_LANE_ORDER:
+        info = lanes[lane]
+        ordered = sorted(info["runs"], key=variance_run_number)
+        row_cards.append(
+            f"<h2>{escape(lane)} — {info['done']}/{info['total']} finished</h2>"
+            f"<p>{escape(info['models'])}</p>"
+        )
+        cards = []
+        for run in ordered:
+            game = runs[run]
+            number = variance_run_number(run)
+            title = game["title"]
+            cost = f"${game['cost_usd']:.2f}"
+            minutes = int(round(game["duration_min"]))
+            badges = f'<span class="game-badge">{cost}</span><span class="game-badge">{minutes} min</span>'
+            cards.append(
+                f'<article class="game-card" id="game-card-{escape(run)}">'
+                f'<img id="game-thumb-{escape(run)}" src="../assets/games/{escape(run)}-desktop.png" '
+                'width="1280" height="800" loading="lazy" '
+                f'alt="Screenshot of {escape(title)} played on a desktop browser" />'
+                '<div class="game-card-body">'
+                f"<h3>{escape(title)}</h3>"
+                f"<p class=\"game-preset\"><code>{escape(run)}</code> · {escape(game['models'])}</p>"
+                f"<p>Repeat {number} of 10 · finished in {minutes} min.</p>"
+                f'<p class="game-badges">{badges}</p>'
+                '<div class="game-card-actions">'
+                f'<button type="button" class="game-play" data-play="{escape(run)}">Play</button>'
+                f'<a class="game-open" href="../games/{escape(run)}/">Open full page</a>'
+                "</div></div></article>"
+            )
+            data[run] = {
+                "title": title,
+                "models": game["models"],
+                "cost": cost,
+                "duration": f"{minutes} min",
+                "status": "Done",
+                "href": f"../games/{run}/",
+                "desktop": f"../assets/games/{run}-desktop.png",
+                "mobile": f"../assets/games/{run}-mobile.png",
+            }
+        row_cards.append('<div class="game-grid">' + "".join(cards) + "</div>")
+    gallery = "".join(row_cards) + '<script type="application/json" id="game-data">' + json.dumps(data, separators=(",", ":"), ensure_ascii=True).replace("<", "\\u003c") + "</script>"
+    return summary, excluded_html, gallery
+
+
+def stage_variance():
+    grid_root = root / "docs" / "grid"
+    builds = grid_root / "builds-variance"
+    variance = json.loads((grid_root / "variance.json").read_text())
+    runs = variance["runs"]
+    known = set(runs)
+    actual = {path.name for path in builds.iterdir() if path.is_dir()}
+    if actual != known:
+        sys.exit(f"Variance builds out of sync with variance.json: extra={sorted(actual - known)} missing={sorted(known - actual)}")
+    shots = destination / "assets" / "games"
+    shots.mkdir(parents=True, exist_ok=True)
+    for run in sorted(runs):
+        manifest = set(runs[run]["manifest"])
+        source_dir = builds / run
+        target = destination / "games" / run
+        shutil.copytree(source_dir, target, dirs_exist_ok=True)
+        staged = {str(path.relative_to(target)) for path in target.rglob("*") if path.is_file()}
+        if staged != manifest:
+            sys.exit(f"Variance run {run} staged files differ from manifest: extra={sorted(staged - manifest)} missing={sorted(manifest - staged)}")
+        for path in sorted(target.rglob("*")):
+            if not path.is_file() or path.suffix not in STAGED_TEXT_SUFFIXES:
+                continue
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError:
+                continue
+            updated = text
+            for pattern, replacement in SUBPATH_REWRITES:
+                updated, _ = pattern.subn(replacement, updated)
+            if updated != text:
+                path.write_text(updated)
+        leftovers = []
+        for path in sorted(target.rglob("*")):
+            if not path.is_file() or path.suffix not in STAGED_TEXT_SUFFIXES:
+                continue
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError:
+                continue
+            if LEFTOVER_ABSOLUTE.search(text):
+                leftovers.append(str(path.relative_to(target)))
+        if leftovers:
+            sys.exit(f"Staged variance game {run} keeps absolute asset refs: {leftovers}")
+        if not (target / "index.html").is_file():
+            sys.exit(f"Staged variance game {run} has no index.html")
+        for shot in ("desktop", "mobile"):
+            origin = grid_root / f"{run}-{shot}.png"
+            if not origin.is_file():
+                sys.exit(f"Variance run {run} is missing its {shot} screenshot")
+            shutil.copy2(origin, shots / f"{run}-{shot}.png")
+    summary, excluded_html, gallery = build_variance_page()
+    template = (source / "variance.template.html").read_text()
+    replacements = {
+        "<!-- site:variance-summary -->": summary,
+        "<!-- site:variance-excluded -->": excluded_html,
+        "<!-- site:variance-gallery -->": gallery,
+    }
+    for marker, value in replacements.items():
+        if template.count(marker) != 1:
+            sys.exit(f"Expected exactly one variance template marker: {marker}")
+        template = template.replace(marker, value)
+    if re.search(r"<!-- site:", template):
+        sys.exit("Unresolved variance template marker")
+    variance_dir = destination / "variance"
+    variance_dir.mkdir(parents=True, exist_ok=True)
+    (variance_dir / "index.html").write_text(template)
+    print(f"Staged {len(runs)} variance games.")
+
+
 # Recreate the artifact so removed source assets cannot linger in a deployment.
 if destination.exists():
     shutil.rmtree(destination)
@@ -333,6 +526,7 @@ for name in ("404.html", "style.css", "script.js", "robots.txt", "sitemap.xml", 
     shutil.copy2(source / name, destination / name)
 shutil.copytree(source / "assets", destination / "assets", dirs_exist_ok=True)
 stage_games()
+stage_variance()
 subprocess.run([sys.executable, str(root / "scripts" / "check-site.py")], check=True)
 size = sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
 print(f"Staged GitHub Pages site in {destination} ({size / 1024:.0f} KiB).")

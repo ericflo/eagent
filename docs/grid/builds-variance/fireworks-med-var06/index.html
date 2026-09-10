@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>BREAKAWAY</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%2304060f'/><circle cx='8' cy='8' r='5' fill='%234fc3f7'/></svg>">
+<style>
+  :root { --ui-font: "Segoe UI", system-ui, -apple-system, sans-serif; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #04060f; touch-action: none; overscroll-behavior: none; }
+  canvas#game { display: block; width: 100vw; height: 100vh; }
+  #ui {
+    position: fixed; inset: 0; pointer-events: none;
+    font-family: var(--ui-font); color: #cfd8ff; user-select: none; -webkit-user-select: none;
+  }
+  .btn {
+    pointer-events: auto; position: absolute; top: max(10px, env(safe-area-inset-top));
+    width: 40px; height: 40px; border-radius: 12px;
+    background: rgba(20,28,60,.72); border: 1px solid rgba(120,150,255,.35);
+    color: #cfd8ff; font-size: 17px; line-height: 1; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; backdrop-filter: blur(4px); transition: background .15s;
+  }
+  .btn:hover { background: rgba(60,80,160,.8); }
+  .btn:active { transform: scale(.94); }
+  #btnPause { right: 10px; }
+  #btnMute  { right: 58px; }
+  #btnGear  { right: 106px; }
+  #settings {
+    pointer-events: auto; position: absolute; top: 60px; right: 10px; width: 240px;
+    background: rgba(12,18,42,.95); border: 1px solid rgba(120,150,255,.4); border-radius: 14px;
+    padding: 14px; display: none; z-index: 5;
+  }
+  #settings.open { display: block; }
+  #settings h3 { font-size: 13px; letter-spacing: 2px; color: #8fa5ff; margin-bottom: 10px; }
+  #settings label { display: flex; align-items: center; justify-content: space-between; font-size: 13px; padding: 7px 0; cursor: pointer; }
+  #settings input { accent-color: #6f7dff; width: 17px; height: 17px; }
+  #settings .close { margin-top: 8px; width: 100%; padding: 7px; border-radius: 8px; border: 1px solid rgba(120,150,255,.4); background: rgba(60,80,160,.4); color: #cfd8ff; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <button id="btnGear" class="btn" title="Settings">⚙</button>
+  <button id="btnMute" class="btn" title="Mute (M)">🔊</button>
+  <button id="btnPause" class="btn" title="Pause (P)">⏸</button>
+  <div id="settings">
+    <h3>SETTINGS</h3>
+    <label>Music &amp; SFX <input type="checkbox" id="setSound" checked></label>
+    <label>Thumbstick (touch) <input type="checkbox" id="setStick"></label>
+    <label>Screen shake <input type="checkbox" id="setShake" checked></label>
+    <button class="close" id="setClose">CLOSE</button>
+  </div>
+</div>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

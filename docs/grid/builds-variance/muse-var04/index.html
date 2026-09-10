@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#070714">
+<title>OVER THE TOP — Neon Breakout</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="wrap">
+  <div id="game-container">
+    <canvas id="game"></canvas>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+      <div class="hud-left">
+        <div class="hud-block"><span class="hud-label">SCORE</span><span id="hud-score">0</span></div>
+        <div class="hud-block small"><span class="hud-label">BEST</span><span id="hud-hi">0</span></div>
+      </div>
+      <div class="hud-center">
+        <div id="hud-mult-wrap"><span id="hud-mult">x1.0</span><div id="mult-bar"><div id="mult-fill"></div></div></div>
+        <div id="hud-level">LEVEL 1</div>
+      </div>
+      <div class="hud-right">
+        <div id="hud-lives" title="Lives"></div>
+        <div class="hud-btns">
+          <button id="btn-pause" class="icon-btn" aria-label="Pause">⏸</button>
+          <button id="btn-mute" class="icon-btn" aria-label="Mute">🔊</button>
+        </div>
+      </div>
+      <div id="fx-timers"></div>
+    </div>
+
+    <!-- Over the top banner -->
+    <div id="ott-banner" class="hidden">★ OVER THE TOP ★<div id="ott-sub">multiplier rising…</div></div>
+    <div id="combo-pop" class="hidden"></div>
+    <div id="float-layer"></div>
+
+    <!-- Touch joystick -->
+    <div id="joy-base" class="hidden"><div id="joy-knob"></div></div>
+
+    <!-- Level intro card -->
+    <div id="intro-card" class="hidden">
+      <div id="intro-kicker">LEVEL 1</div>
+      <div id="intro-name">First Contact</div>
+      <div id="intro-sub">Break through. Get above it all.</div>
+    </div>
+
+    <!-- Toast / center message -->
+    <div id="toast" class="hidden"></div>
+
+    <!-- === OVERLAYS === -->
+    <div id="menu" class="overlay">
+      <div class="panel">
+        <h1 class="logo">OVER<span> THE </span>TOP</h1>
+        <p class="tagline">a neon breakout about the best 10 seconds in brick-breaking</p>
+        <div class="hi-line">BEST <b id="menu-hi">0</b></div>
+        <button id="btn-start" class="big-btn">▶ &nbsp;START</button>
+        <button id="btn-how" class="ghost-btn">HOW TO PLAY</button>
+        <div class="menu-tips">
+          <div>🖱️ mouse &nbsp;•&nbsp; ⌨️ WASD/arrows &nbsp;•&nbsp; 👆 thumbstick</div>
+          <div class="dim">Smash <b>UP</b> into the ball for extra speed. Tunnel to the sky for ★ OVER THE TOP ★.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="howto" class="overlay hidden">
+      <div class="panel wide">
+        <h2>HOW TO PLAY</h2>
+        <div class="how-grid">
+          <div class="how-col">
+            <h3>🎯 Goal</h3>
+            <p>Clear every breakable brick. You have <b>3 lives</b>. Tunnel a ball <b>above the bricks</b> to trigger <span class="ott-text">★ OVER THE TOP ★</span> — multiplier climbs while you're up there, then <b>BANK</b> it on the way down.</p>
+            <h3>🕹️ Controls</h3>
+            <ul class="ctl">
+              <li><b>Mouse:</b> paddle follows cursor · click to launch / fire lasers</li>
+              <li><b>Keyboard:</b> <kbd>A</kbd><kbd>D</kbd>/←→ move · <kbd>W</kbd><kbd>S</kbd>/↑↓ rise &amp; dive · <kbd>Space</kbd> launch / pause in menus</li>
+              <li><b>Touch:</b> drag <b>near the paddle</b> = 1:1 direct · drag <b>anywhere else</b> = thumbstick · tap = launch / fire</li>
+              <li><b>Smash:</b> move the paddle <b>UP fast</b> as the ball lands = <span class="smash-text">SMASH!</span> bonus speed + score.</li>
+              <li><kbd>P</kbd>/<kbd>Esc</kbd> pause · <kbd>M</kbd> mute</li>
+            </ul>
+          </div>
+          <div class="how-col">
+            <h3>🧱 Bricks (no HP — all 1 hit, but picky)</h3>
+            <div class="legend" id="brick-legend"></div>
+            <h3>⚡ Power-ups</h3>
+            <div class="legend" id="pu-legend"></div>
+          </div>
+        </div>
+        <div class="row">
+          <button id="btn-how-back" class="big-btn">GOT IT</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="pause-menu" class="overlay hidden">
+      <div class="panel">
+        <h2>PAUSED</h2>
+        <p class="dim">Take a breath. The bricks aren't going anywhere.</p>
+        <button id="btn-resume" class="big-btn">RESUME</button>
+        <button id="btn-restart2" class="ghost-btn">RESTART GAME</button>
+        <button id="btn-quit" class="ghost-btn">QUIT TO MENU</button>
+      </div>
+    </div>
+
+    <div id="gameover" class="overlay hidden">
+      <div class="panel">
+        <h2 class="danger">GAME OVER</h2>
+        <div class="final-score">SCORE <b id="go-score">0</b></div>
+        <div class="hi-line">BEST <b id="go-hi">0</b> <span id="go-newbest" class="hidden newbest">★ NEW BEST ★</span></div>
+        <p class="dim" id="go-stats"></p>
+        <button id="btn-retry" class="big-btn">↻ &nbsp;TRY AGAIN</button>
+        <button id="btn-go-menu" class="ghost-btn">MENU</button>
+      </div>
+    </div>
+
+    <div id="victory" class="overlay hidden">
+      <div class="panel">
+        <h2 class="gold">★ VICTORY ★</h2>
+        <p>You cleared all 6 sectors. The sky belongs to you.</p>
+        <div class="final-score">SCORE <b id="win-score">0</b></div>
+        <div class="hi-line">BEST <b id="win-hi">0</b> <span id="win-newbest" class="hidden newbest">★ NEW BEST ★</span></div>
+        <p class="dim" id="win-stats"></p>
+        <button id="btn-win-retry" class="big-btn">↻ &nbsp;PLAY AGAIN</button>
+        <button id="btn-win-menu" class="ghost-btn">MENU</button>
+      </div>
+    </div>
+
+    <div id="footer-hint">move: mouse · WASD/arrows · drag &nbsp;|&nbsp; launch: click / space / tap &nbsp;|&nbsp; smash UP into the ball!</div>
+  </div>
+</div>
+<script src="audio.js"></script>
+<script src="levels.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

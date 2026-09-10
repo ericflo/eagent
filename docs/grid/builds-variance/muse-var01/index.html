@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>NEON BREAKOUT: OVERTOP</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧱</text></svg>" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="wrap">
+  <header id="topbar">
+    <div class="logo">NEON<span>BREAKOUT</span><em>OVERTOP</em></div>
+    <div class="topbtns">
+      <button id="btn-mute" class="iconbtn" title="Mute (M)">🔊</button>
+      <button id="btn-pause" class="iconbtn" title="Pause (P)">⏸</button>
+      <button id="btn-help" class="iconbtn" title="Help (H)">?</button>
+    </div>
+  </header>
+
+  <div id="hud">
+    <div class="hud-left">
+      <div class="hud-row"><span class="lbl">SCORE</span><span id="hud-score">0</span></div>
+      <div class="hud-row dim"><span class="lbl">BEST</span><span id="hud-hi">0</span></div>
+    </div>
+    <div class="hud-mid">
+      <div id="hud-mult">×1</div>
+      <div id="hud-level">LV 1</div>
+      <div id="od-meter"><div id="od-fill"></div><span id="od-label">OVERDRIVE</span></div>
+    </div>
+    <div class="hud-right">
+      <div id="hud-lives">●●●</div>
+      <div id="fx-timers"></div>
+    </div>
+  </div>
+
+  <div id="stage">
+    <canvas id="game"></canvas>
+    <div id="vignette"></div>
+    <div id="banner" class="hidden"></div>
+    <div id="hint-top" class="hidden">▲ GET IT UP TOP! ▲</div>
+    <div id="toast-wrap"></div>
+    <div id="combo" class="hidden">COMBO ×2</div>
+    <div id="stick-ring" class="hidden"><div id="stick-nub"></div></div>
+
+    <!-- START -->
+    <div id="ov-start" class="overlay">
+      <div class="panel">
+        <h1 class="title">NEON<br/>BREAKOUT<br/><span>OVERTOP</span></h1>
+        <p class="tag">Smash through. Get <b>OVER THE TOP</b>.<br/>Ride the <b class="od">OVERDRIVE ×99</b>.</p>
+        <div class="how">
+          <div>🖱️ <b>Mouse / touch-drag</b> to move paddle (up/down too!)</div>
+          <div>⬆️ Smash <b>UP</b> into the ball to <b>BOOST</b> it faster</div>
+          <div>🌈 Get the ball <b>ABOVE all bricks</b> for exponential multiplier</div>
+        </div>
+        <div class="btnrow">
+          <button id="btn-start" class="bigbtn">▶ &nbsp;START</button>
+          <button id="btn-how" class="ghostbtn">HOW TO PLAY</button>
+        </div>
+        <div class="lvlrow"><span>LEVEL</span><div id="lvl-btns"></div></div>
+        <p class="best">BEST: <span id="start-hi">0</span></p>
+      </div>
+    </div>
+
+    <!-- HELP -->
+    <div id="ov-help" class="overlay hidden">
+      <div class="panel wide">
+        <h2>HOW TO PLAY</h2>
+        <div class="helpgrid">
+          <div><b>Move:</b> Mouse, ←→↑↓ / WASD, or drag finger. Paddle roams a band near the bottom.</div>
+          <div><b>Boost:</b> Hit the ball while moving <b>UP</b> ⬆️ = faster ball + bonus. Moving down softens.</div>
+          <div><b>Overdrive:</b> Get any ball <b>above the brick field</b> → multiplier doubles over time up to <b>×99</b> + score ticks. Don't let it fall back down!</div>
+          <div><b>Lives:</b> 3 balls. Catch falling capsules with the paddle for powers.</div>
+        </div>
+        <h3>BRICK LEGEND — 1 hit each, but conditions apply!</h3>
+        <div id="legend" class="legend"></div>
+        <h3>POWER CAPSULES</h3>
+        <div class="legend">
+          <span><i class="cap c-multi">≡</i> Multiball ×3</span>
+          <span><i class="cap c-fire">🔥</i> Fireball</span>
+          <span><i class="cap c-ghost">👻</i> Ghost</span>
+          <span><i class="cap c-heavy">🪨</i> Heavy</span>
+          <span><i class="cap c-volt">⚡</i> Volt ball</span>
+          <span><i class="cap c-slow">🕐</i> Slow-Mo</span>
+          <span><i class="cap c-wide">↔</i> Wide</span>
+          <span><i class="cap c-life">♥</i> +1 Life</span>
+          <span><i class="cap c-shield">🛡</i> Shield net</span>
+        </div>
+        <h3>BALLS</h3>
+        <div class="legend">
+          <span>⚪ Standard</span><span>🔥 Fire (blast)</span><span>👻 Ghost (phase)</span>
+          <span>🪨 Heavy (smashes fast-bricks)</span><span>⚡ Volt (fast, splits)</span>
+        </div>
+        <div class="btnrow"><button id="btn-help-close" class="bigbtn">GOT IT!</button></div>
+      </div>
+    </div>
+
+    <!-- PAUSE -->
+    <div id="ov-pause" class="overlay hidden">
+      <div class="panel"><h2>PAUSED</h2>
+        <p class="tag">Take a breath. The bricks wait.</p>
+        <div class="btnrow">
+          <button id="btn-resume" class="bigbtn">RESUME</button>
+          <button id="btn-restart-p" class="ghostbtn">RESTART</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- LEVEL CLEAR -->
+    <div id="ov-clear" class="overlay hidden">
+      <div class="panel"><h2 id="clear-title">LEVEL CLEAR!</h2>
+        <p class="tag" id="clear-sub">Bonus +500</p>
+        <div class="btnrow"><button id="btn-next" class="bigbtn">NEXT LEVEL ▶</button></div>
+      </div>
+    </div>
+
+    <!-- GAME OVER -->
+    <div id="ov-over" class="overlay hidden">
+      <div class="panel"><h2 id="over-title">GAME OVER</h2>
+        <p class="tag">SCORE <b id="over-score">0</b> · BEST <b id="over-hi">0</b></p>
+        <p class="tag dim" id="over-sub"></p>
+        <div class="btnrow">
+          <button id="btn-again" class="bigbtn">↻ PLAY AGAIN</button>
+          <button id="btn-menu" class="ghostbtn">MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="flash-boost" class="hidden">BOOST!</div>
+  </div>
+
+  <footer id="foot">Move: mouse · ←→↑↓/WASD · drag finger &nbsp;|&nbsp; P pause · M mute · H help &nbsp;|&nbsp; tip: smash UP ⬆️ into the ball</footer>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

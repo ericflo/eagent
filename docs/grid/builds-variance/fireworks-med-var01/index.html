@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Crownline</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #04050d;
+    overflow: hidden; touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; }
+  /* Portrait hint: game still runs, but landscape is the intended way to play */
+  #rotate {
+    position: fixed; left: 0; right: 0; bottom: calc(env(safe-area-inset-bottom, 6px) + 6px);
+    text-align: center; color: #8fa3c8; font: 600 13px/1.4 system-ui, sans-serif;
+    letter-spacing: .04em; opacity: 0; transition: opacity .5s; pointer-events: none;
+    text-shadow: 0 1px 4px #000;
+  }
+  @media (orientation: portrait) { #rotate { opacity: .92; } }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="720"></canvas></div>
+<div id="rotate">&#8599; Rotate for the full Crownline experience</div>
+<script src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a1a">
+<title>OVER THE TOP — Modern Breakout</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-label">SCORE</div>
+      <div id="hud-score">0</div>
+      <div id="hud-high">BEST 0</div>
+    </div>
+    <div class="hud-center">
+      <div id="hud-level">LEVEL 1</div>
+      <div id="hud-combo-wrap"><div id="hud-combo-fill"></div><span id="hud-combo">x1</span></div>
+      <div id="topzone-banner" class="hidden">TOP ZONE ×<span id="topzone-n">2</span></div>
+    </div>
+    <div class="hud-right">
+      <div class="hud-label">LIVES</div>
+      <div id="hud-lives">●●●</div>
+      <div id="hud-balls">1 BALL</div>
+    </div>
+  </div>
+
+  <div id="top-hint" class="hidden">GET ABOVE THE BRICKS!</div>
+
+  <!-- corner buttons -->
+  <div id="corner-btns" class="hidden">
+    <button id="btn-mute" class="icon-btn" title="Mute (M)" aria-label="Mute">🔊</button>
+    <button id="btn-help" class="icon-btn" title="Help" aria-label="Help">?</button>
+    <button id="btn-pause" class="icon-btn" title="Pause (P)" aria-label="Pause">⏸</button>
+  </div>
+
+  <!-- mobile buttons -->
+  <div id="mobile-btns" class="hidden">
+    <button id="btn-launch" class="big-btn">LAUNCH ⏎</button>
+  </div>
+
+  <!-- touch thumbstick visuals -->
+  <div id="stick-base" class="hidden"><div id="stick-knob"></div></div>
+
+  <!-- Overlays -->
+  <div id="overlay-title" class="overlay">
+    <div class="panel title-panel">
+      <div class="kicker">A MODERN BREAKOUT</div>
+      <h1 class="logo">OVER<br><span>THE TOP</span></h1>
+      <p class="tagline">Tunnel through. Get <b>ABOVE</b> the bricks.<br>Let the chaos bounce on its own. 🌌</p>
+      <div class="title-stats"><span id="title-high">BEST: 0</span><span class="dot">•</span><span>6 HANDCRAFTED LEVELS</span></div>
+      <div class="btn-row">
+        <button id="btn-start" class="cta">▶ START GAME</button>
+        <button id="btn-howto" class="ghost">HOW TO PLAY</button>
+      </div>
+      <div class="controls-hint" id="controls-hint-desktop">🖱 Move mouse to aim paddle &nbsp;•&nbsp; Click / <kbd>Space</kbd> to launch &nbsp;•&nbsp; <kbd>WASD</kbd>/Arrows move &nbsp;•&nbsp; <kbd>P</kbd> pause <kbd>M</kbd> mute</div>
+      <div class="controls-hint hidden" id="controls-hint-touch">👆 Drag anywhere to move paddle &nbsp;•&nbsp; Tap LAUNCH &nbsp;•&nbsp; Thumbstick: touch &amp; drag from still point</div>
+      <div class="touch-toggle"><button id="btn-touch-mode" class="mini">Touch controls: DRAG</button></div>
+    </div>
+  </div>
+
+  <div id="overlay-howto" class="overlay hidden">
+    <div class="panel howto-panel">
+      <h2>HOW TO PLAY</h2>
+      <div class="howto-cols">
+        <div>
+          <h3>🎯 Goal</h3>
+          <p>Smash a tunnel through the wall, then park the ball <b class="tz">ABOVE the bricks (TOP ZONE)</b>. Up there your multiplier ramps <b>fast</b>, effects intensify, and bricks melt on their own.</p>
+          <h3>🕹 Controls</h3>
+          <ul>
+            <li><b>Mouse:</b> move = paddle target · click / <kbd>Space</kbd> = launch</li>
+            <li><b>Keys:</b> <kbd>←→↑↓</kbd> / <kbd>WASD</kbd> · <kbd>Space</kbd> launch · <kbd>P</kbd>/<kbd>Esc</kbd> pause · <kbd>M</kbd> mute</li>
+            <li><b>Paddle Y:</b> paddle roams bottom ~18%. Flick <b>UP ↑</b> into the ball = POWER HIT (faster). Drift <b>DOWN ↓</b> = soft catch (slower).</li>
+            <li><b>Touch:</b> <b>Drag mode</b> — drag anywhere, paddle follows finger offset above. <b>Stick mode</b> — hold still to plant a floating thumbstick, push to drive velocity. Toggle on title or auto.</li>
+            <li><b>Gamepad:</b> left stick / d-pad moves, A / Start launches &amp; pauses.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>🧱 Bricks</h3>
+          <div id="legend"></div>
+          <h3>⚡ Balls &amp; Pickups</h3>
+          <div id="legend-balls"></div>
+        </div>
+      </div>
+      <div class="btn-row"><button id="btn-howto-back" class="cta">GOT IT ✓</button></div>
+    </div>
+  </div>
+
+  <div id="overlay-intro" class="overlay hidden pointer-none">
+    <div class="panel intro-panel">
+      <div class="kicker" id="intro-kicker">LEVEL 1</div>
+      <h2 id="intro-name">FIRST CONTACT</h2>
+      <p id="intro-sub"></p>
+    </div>
+  </div>
+
+  <div id="overlay-pause" class="overlay hidden">
+    <div class="panel"><h2>⏸ PAUSED</h2><p class="dim">Take a breath. The balls wait for you.</p>
+      <div class="btn-row"><button id="btn-resume" class="cta">RESUME</button><button id="btn-restart2" class="ghost">RESTART</button><button id="btn-quit" class="ghost">TITLE</button></div>
+    </div>
+  </div>
+
+  <div id="overlay-clear" class="overlay hidden pointer-none">
+    <div class="panel intro-panel"><div class="kicker">LEVEL CLEAR!</div><h2 id="clear-name"></h2><p id="clear-sub"></p></div>
+  </div>
+
+  <div id="overlay-over" class="overlay hidden">
+    <div class="panel"><div class="kicker">GAME OVER</div><h2 id="over-score">SCORE 0</h2>
+      <p class="dim" id="over-best">BEST 0 · <span id="over-newbest" class="hidden newbest">★ NEW BEST! ★</span></p>
+      <div class="btn-row"><button id="btn-retry" class="cta">↻ PLAY AGAIN</button><button id="btn-title2" class="ghost">TITLE</button></div>
+    </div>
+  </div>
+
+  <div id="overlay-win" class="overlay hidden">
+    <div class="panel"><div class="kicker">🏆 YOU CLEARED ALL LEVELS!</div><h2 id="win-score">SCORE 0</h2>
+      <p class="dim" id="win-best">BEST 0</p><p class="tagline">You are officially OVER THE TOP. 🚀</p>
+      <div class="btn-row"><button id="btn-again" class="cta">↻ PLAY AGAIN</button><button id="btn-title3" class="ghost">TITLE</button></div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+</div>
+<script src="js/audio.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

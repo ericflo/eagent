@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#07070f">
+<title>BREAKTHROUGH — a modern Breakout</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="hud-left">
+      <div class="hud-block"><span class="hud-label">SCORE</span><span id="hud-score" class="hud-value">0</span></div>
+      <div class="hud-block"><span class="hud-label">MULT</span><span id="hud-mult" class="hud-value mult">x1</span></div>
+      <div class="hud-block"><span class="hud-label">COMBO</span><span id="hud-combo" class="hud-value">0</span></div>
+    </div>
+    <div id="hud-center">
+      <div id="rush-wrap">
+        <div id="rush-bar"><div id="rush-fill"></div></div>
+        <div id="rush-label">RUSH</div>
+      </div>
+    </div>
+    <div id="hud-right">
+      <div class="hud-block"><span class="hud-label">LIVES</span><span id="hud-lives" class="hud-value">♥♥♥</span></div>
+      <div class="hud-block"><span class="hud-label">LEVEL</span><span id="hud-level" class="hud-value">1</span></div>
+      <div id="hud-buttons">
+        <button id="btn-mute" class="icon-btn" title="Mute (M)">🔊</button>
+        <button id="btn-pause" class="icon-btn" title="Pause (P)">⏸</button>
+      </div>
+    </div>
+  </div>
+  <div id="powerup-tray"></div>
+
+  <!-- Screens -->
+  <div id="screen-start" class="screen">
+    <h1 class="title">BREAK<span class="accent">THROUGH</span></h1>
+    <p class="subtitle">a modern Breakout about getting <em>on top of the wall</em></p>
+    <div class="panel howto">
+      <h2>HOW TO PLAY</h2>
+      <ul>
+        <li><b>2D PADDLE:</b> move left/right AND up/down. Moving <b>up while striking</b> the ball = SMASH (extra speed + whoosh). Side motion adds angle &amp; english.</li>
+        <li><b>BREAKTHROUGH:</b> open a hole and send the ball <b>above the brick wall</b>. Up there the ball bounces on its own while a <b>RUSH multiplier compounds</b> — the screen goes wild, the music escalates. Fall below the wall and the rush ends.</li>
+        <li><b>SMART BRICKS:</b> no hit-point slogs — bricks are tricky by <i>angle, speed, position or special balls</i>: shielded (break from the open side), phase (need ball speed), deflectors, movers, bombs, armored cores.</li>
+        <li><b>CONTROLS:</b> Mouse move + click · Touch: drag anywhere = virtual thumbstick, tap = launch · Keyboard: WASD/arrows + Space. <b>P</b> pauses, <b>M</b> mutes.</li>
+      </ul>
+    </div>
+    <button id="btn-start" class="big-btn">PLAY</button>
+    <p class="hiscore">HIGH SCORE <span id="hiscore-val">0</span></p>
+  </div>
+
+  <div id="screen-pause" class="screen hidden">
+    <h1 class="title small">PAUSED</h1>
+    <button id="btn-resume" class="big-btn">RESUME</button>
+    <button id="btn-restart" class="big-btn ghost">RESTART RUN</button>
+  </div>
+
+  <div id="screen-level" class="screen hidden">
+    <h1 class="title small">LEVEL <span id="lvl-num">1</span> CLEAR</h1>
+    <p id="lvl-bonus" class="bonus-line"></p>
+    <button id="btn-next" class="big-btn">NEXT LEVEL</button>
+  </div>
+
+  <div id="screen-over" class="screen hidden">
+    <h1 class="title small">GAME OVER</h1>
+    <p id="over-score" class="bonus-line"></p>
+    <p id="over-best" class="hiscore"></p>
+    <button id="btn-again" class="big-btn">PLAY AGAIN</button>
+  </div>
+
+  <div id="hint" class="hidden"></div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0620">
+<title>TOPSIDE — a modern Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23120a2e'/%3E%3Ccircle cx='16' cy='20' r='7' fill='%23ffe14d'/%3E%3Crect x='4' y='6' width='24' height='5' rx='2' fill='%237cff9b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="scan" aria-hidden="true"></div>
+<div id="vignette" aria-hidden="true"></div>
+<div id="hud">
+  <button id="btnMute" class="hudbtn" aria-label="toggle sound">&#128266;</button>
+  <button id="btnPause" class="hudbtn" aria-label="pause">&#9208;</button>
+</div>
+<button id="btnFire" class="fab" aria-label="fire power-up" tabindex="-1">&#9889;</button>
+<canvas id="game"></canvas>
+<script src="js/core.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/render.js"></script>
+<script src="js/input.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

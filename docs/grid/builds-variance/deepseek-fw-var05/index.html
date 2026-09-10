@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0f1e">
+<title>Stratosmash — a modern Breakout</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='42' fill='%23ffd23f'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app">
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div class="hud-left">
+      <span class="hud-chip" id="chipScore">0</span>
+    </div>
+    <div class="hud-mid">
+      <span class="hud-chip" id="chipCombo">COMBO 1x</span>
+    </div>
+    <div class="hud-right">
+      <span class="hud-chip" id="chipLives">0</span>
+      <button id="btnMute" class="hud-btn" aria-label="toggle sound">♪</button>
+      <button id="btnPause" class="hud-btn" aria-label="pause">II</button>
+    </div>
+  </div>
+  <div id="overlay" class="hidden">
+    <div id="overlayCard"></div>
+  </div>
+  <div id="fpwarn" class="hidden">↓ &nbsp;use landscape &amp; a thumb friendly height&nbsp; ↓</div>
+</div>
+
+<script type="text/javascript" src="js/audio.js"></script>
+<script type="text/javascript" src="js/util.js"></script>
+<script type="text/javascript" src="js/bricks.js"></script>
+<script type="text/javascript" src="js/particles.js"></script>
+<script type="text/javascript" src="js/levels.js"></script>
+<script type="text/javascript" src="js/game.js"></script>
+</body>
+</html>

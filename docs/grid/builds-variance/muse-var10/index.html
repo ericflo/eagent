@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070312">
+<title>NEON OVERDRIVE — Modern Breakout</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23070312'/%3E%3Crect x='10' y='12' width='44' height='10' rx='5' fill='%2300f6ff'/%3E%3Crect x='10' y='26' width='44' height='10' rx='5' fill='%23ff2fd6'/%3E%3Ccircle cx='32' cy='50' r='7' fill='%23ffd400'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="game-root">
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div class="hud-left">
+      <div class="hud-row">
+        <span class="hud-label">SCORE</span>
+        <span id="hud-score" class="hud-value">0</span>
+      </div>
+      <div class="hud-row dim">
+        <span class="hud-label">BEST</span>
+        <span id="hud-high" class="hud-value">0</span>
+      </div>
+    </div>
+    <div class="hud-center">
+      <div id="mult-wrap">
+        <div id="mult-pill"><span id="hud-mult">×1</span><span id="hud-combo"></span></div>
+        <div id="od-bar"><div id="od-fill"></div></div>
+        <div id="od-label">OVERDRIVE</div>
+      </div>
+    </div>
+    <div class="hud-right">
+      <div class="hud-row"><span class="hud-label">LVL</span><span id="hud-level" class="hud-value">1</span></div>
+      <div class="hud-row"><span class="hud-label">LIVES</span><span id="hud-lives" class="hud-value lives">●●●</span></div>
+    </div>
+  </div>
+  <div id="power-timers"></div>
+
+  <!-- corner buttons -->
+  <div id="corner-btns" class="hidden">
+    <button id="btn-pause" class="icon-btn" aria-label="Pause">❚❚</button>
+    <button id="btn-mute" class="icon-btn" aria-label="Mute">🔊</button>
+  </div>
+
+  <!-- touch joystick UI -->
+  <div id="joy-base" class="hidden"><div id="joy-knob"></div></div>
+  <div id="touch-hint" class="hidden">drag anywhere to move · stick appears under thumb</div>
+
+  <!-- Main menu -->
+  <div id="menu" class="overlay">
+    <div class="panel menu-panel">
+      <div class="logo-sub">MODERN BREAKOUT</div>
+      <h1 class="logo">NEON<br><span>OVERDRIVE</span></h1>
+      <p class="tagline">Smash through. Get <b>ABOVE</b> the bricks.<br>Let the top-zone do the work. Go exponential.</p>
+      <div class="best-line">BEST&nbsp;<span id="menu-high">0</span></div>
+      <div class="menu-btns">
+        <button id="btn-start" class="big-btn primary">▶&nbsp; START</button>
+        <button id="btn-how" class="big-btn">? HOW TO PLAY</button>
+      </div>
+      <div class="controls-line">🖱 mouse · ⌨ WASD/arrows · 👆 drag / thumbstick · 🎮 gamepad</div>
+      <div class="menu-levels"><span>LEVELS: 7</span><span>BALLS: 4</span><span>POWERUPS: 10</span><span>BRICKS: 7</span></div>
+    </div>
+  </div>
+
+  <!-- How to play -->
+  <div id="howto" class="overlay hidden">
+    <div class="panel how-panel">
+      <h2>HOW TO PLAY</h2>
+      <div class="how-cols">
+        <div class="how-col">
+          <h3>🎯 GOAL</h3>
+          <p>Clear all breakable bricks. Punch a hole, get the ball <b class="od">ABOVE the brick field</b> to trigger <b class="od">OVERDRIVE</b> — multiplier doubles: ×2 ×4 ×8 ×16 ×32!</p>
+          <h3>🏓 PADDLE</h3>
+          <p>Moves in <b>X + Y</b> (bottom zone). Hit position steers angle. Flick <b>UP</b> into the ball for a <b class="smash">SMASH</b> speed boost.</p>
+          <h3>🕹 CONTROLS</h3>
+          <ul>
+            <li><b>Mouse:</b> paddle follows cursor (in play zone)</li>
+            <li><b>Keys:</b> ←→↑↓ / WASD move · <b>Space</b> launch / shoot laser / release catch · <b>P</b> pause · <b>M</b> mute</li>
+            <li><b>Touch:</b> drag directly, or hold still &amp; push like a <b>thumbstick</b> (base appears under finger)</li>
+            <li><b>Gamepad:</b> left stick / d-pad moves, A launches</li>
+          </ul>
+        </div>
+        <div class="how-col">
+          <h3>🧱 BRICKS <span class="tiny">(no HP grind — all break in 1 good hit)</span></h3>
+          <ul id="legend" class="legend"></ul>
+          <h3>⚡ POWERUPS</h3>
+          <ul id="pow-legend" class="legend"></ul>
+        </div>
+      </div>
+      <div class="menu-btns"><button id="btn-how-back" class="big-btn primary">GOT IT</button></div>
+    </div>
+  </div>
+
+  <!-- Level intro card -->
+  <div id="level-card" class="overlay hidden pointer-none">
+    <div class="level-card-inner">
+      <div id="lc-sub">LEVEL 1</div>
+      <div id="lc-title">FIRST CONTACT</div>
+      <div id="lc-tip">Tip</div>
+    </div>
+  </div>
+
+  <!-- Center message overlays: pause / clear / over / win -->
+  <div id="pause-ov" class="overlay hidden">
+    <div class="panel small-panel"><h2>PAUSED</h2><p class="dim-line">P / Esc to resume</p>
+      <div class="menu-btns"><button id="btn-resume" class="big-btn primary">RESUME</button><button id="btn-quit" class="big-btn">QUIT</button></div>
+    </div>
+  </div>
+
+  <div id="clear-ov" class="overlay hidden">
+    <div class="panel small-panel"><div class="logo-sub">LEVEL <span id="clear-lvl">1</span> CLEAR</div>
+      <h2 id="clear-title" class="clear-title">FIELD SHATTERED!</h2>
+      <div class="stats"><div><span>LEVEL SCORE</span><b id="clear-score">0</b></div><div><span>MAX MULT</span><b id="clear-mult">×1</b></div><div><span>TIME</span><b id="clear-time">0:00</b></div></div>
+      <div class="menu-btns"><button id="btn-next" class="big-btn primary">NEXT LEVEL →</button></div>
+    </div>
+  </div>
+
+  <div id="over-ov" class="overlay hidden">
+    <div class="panel small-panel"><div class="logo-sub red">GAME OVER</div>
+      <h2 id="over-score" class="clear-title">0</h2>
+      <div class="stats"><div><span>BEST</span><b id="over-high">0</b></div><div><span>LEVEL</span><b id="over-level">1</b></div><div><span>NEW BEST</span><b id="over-newbest">—</b></div></div>
+      <div class="menu-btns"><button id="btn-retry" class="big-btn primary">↻ RETRY</button><button id="btn-menu" class="big-btn">MENU</button></div>
+    </div>
+  </div>
+
+  <div id="win-ov" class="overlay hidden">
+    <div class="panel small-panel"><div class="logo-sub gold">★ ALL SECTORS CLEAR ★</div>
+      <h2 class="clear-title rainbow">YOU BEAT THE GRID!</h2>
+      <div class="stats"><div><span>SCORE</span><b id="win-score">0</b></div><div><span>BEST</span><b id="win-high">0</b></div></div>
+      <div class="menu-btns"><button id="btn-again" class="big-btn primary">↻ PLAY AGAIN</button><button id="btn-menu2" class="big-btn">MENU</button></div>
+    </div>
+  </div>
+
+  <div id="toast-wrap"></div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

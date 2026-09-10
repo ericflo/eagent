@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#070b22">
+<title>Above the Bricks — a modern Breakout</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧱</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <div id="frame">
+    <canvas id="game"></canvas>
+
+    <!-- HUD -->
+    <div id="hud" class="hud">
+      <div class="hud-left">
+        <div class="score-line">
+          <span class="score-label">SCORE</span>
+          <span id="score" class="score-value">0</span>
+        </div>
+        <div id="best-line" class="best-line">BEST <span id="best">0</span></div>
+        <div class="sub-line"><span id="level-label">LV 1</span><span id="lives" class="lives"></span></div>
+      </div>
+
+      <div id="combo-pill" class="combo-pill hidden">
+        <span id="combo-count" class="combo-count">0</span><span class="combo-x">×</span>
+        <span id="combo-mult" class="combo-mult">1</span>
+      </div>
+
+      <div id="roof-banner" class="roof-banner hidden"><span>▲ ROOF MODE ▲</span></div>
+
+      <div class="hud-right">
+        <button id="btn-pause" class="hud-btn" aria-label="Pause">⏸</button>
+        <button id="btn-mute" class="hud-btn" aria-label="Mute sound">🔊</button>
+      </div>
+    </div>
+
+    <div id="center-msg" class="center-msg hidden"></div>
+    <div id="side-msg" class="side-msg hidden"></div>
+
+    <div id="touch-hint" class="touch-hint hidden">
+      <div class="touch-hint-card">
+        <div class="touch-hint-title">How to play</div>
+        <div class="touch-hint-row"><span class="kbd">DRAG</span> move the paddle</div>
+        <div class="touch-hint-row"><span class="kbd">TAP</span> launch the ball</div>
+        <div class="touch-hint-row"><span class="kbd">UP+SWEEP</span> slap the ball harder</div>
+        <div class="touch-hint-row dim">Get the ball above the bricks.<br>That's where the magic happens.</div>
+        <button id="btn-gotit" class="gotit-btn">LET'S GO</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
