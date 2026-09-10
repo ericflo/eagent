@@ -75,6 +75,18 @@ Where the session runs depends on which process holds the connector:
 
 The result reports `session_id`, the thread reference, the host and whether the session is interactive. Existing connectors gain the capability on their next reconnect without a second pairing: eagent asks Finalechat to extend its own grants, which requires the account token and the local connector secret. `EAGENT_FINALECHAT=off` disables this along with the rest of the connector.
 
+## Thread titles and descriptions
+
+Each session's phone thread has a `title` and a `description` (max 2000 chars; `summary` is a write alias and the thread carries both with identical values). The mirror starts the thread with the project name and the opening prompt as its description. Refresh both with a `PATCH` when the task's nature changes, after major findings, and before finishing, so the thread list stays readable:
+
+```sh
+curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION_ID \
+  -H "Authorization: Bearer $FINALECHAT_TOKEN" \
+  -d '{"title":"Fix checkout race","description":"Reproducing the cart race, then fixing and covering it."}'
+```
+
+From Go: `client.Patch(ctx, finalechat.Ref("eagent:"+id), finalechat.PatchRequest{Title: "...", Description: "...", Summary: "..."})`, or `client.UpdateThreadDescription(ctx, ref, title, description)` which sends both names. Title at session start should name the actual task, not the project. There is no automatic summarizer; update when the work itself gives you something new to say.
+
 ## Client capability handshake (v1)
 
 A reply from the app can declare what context its client can supply — timezone, locale, device — so the orchestrator sees it. eagent reads the reply message's `meta` without changing behavior when the keys are absent, preferring the map form:

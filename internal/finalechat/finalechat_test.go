@@ -302,3 +302,47 @@ func TestFeaturesActivityAndIdempotentRetry(t *testing.T) {
 		t.Fatalf("no key: %v attempts=%d slept=%v", err, attempts[""], slept)
 	}
 }
+
+// PATCH carries title+description/summary, the thread echoes both names with
+// identical values, and create-time posts ride the description along.
+func TestPatchDescriptionRoundTrip(t *testing.T) {
+	var patchBody, postBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/threads/ext:eagent:9":
+			patchBody = body
+			desc, _ := body["description"].(string)
+			_, _ = w.Write([]byte(`{"thread":{"id":"t9","external_id":"eagent:9","title":"` + body["title"].(string) + `","description":"` + desc + `","summary":"` + desc + `","agent":"eagent"}}`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages"):
+			postBody = body
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"message":{"id":"m1","thread_id":"t9","sender":"system","body":"x","created_at":"2026-09-07T00:00:00Z"},"thread":{"id":"t9","external_id":"eagent:9"}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "fc_test"}
+	ctx := context.Background()
+
+	thread, err := c.UpdateThreadDescription(ctx, Ref("eagent:9"), "Fix checkout race", "Reproducing the cart race.")
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if thread.Title != "Fix checkout race" || thread.Description != "Reproducing the cart race." || thread.Summary != thread.Description {
+		t.Fatalf("thread = %+v", thread)
+	}
+	if patchBody["title"] != "Fix checkout race" || patchBody["description"] != "Reproducing the cart race." || patchBody["summary"] != "Reproducing the cart race." {
+		t.Fatalf("patch body = %v", patchBody)
+	}
+
+	if _, _, err := c.Post(ctx, Ref("eagent:9"), PostRequest{Body: "hi", Title: "t", Description: "d", Summary: "d"}); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if postBody["description"] != "d" || postBody["summary"] != "d" || postBody["title"] != "t" {
+		t.Fatalf("post body = %v", postBody)
+	}
+}

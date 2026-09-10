@@ -193,6 +193,8 @@ type Thread struct {
 	ID               string     `json:"id"`
 	ExternalID       string     `json:"external_id"`
 	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	Summary          string     `json:"summary"`
 	Agent            string     `json:"agent"`
 	ArchivedAt       *time.Time `json:"archived_at"`
 	Muted            bool       `json:"muted"`
@@ -251,6 +253,12 @@ type PostRequest struct {
 	Meta       map[string]any `json:"meta,omitempty"`
 	Title      string         `json:"title,omitempty"` // only when this creates the ext: thread
 	Agent      string         `json:"agent,omitempty"` // only when this creates the ext: thread
+	// Description/Summary ride along only when this creates the ext: thread:
+	// a 1-2 sentence account of the session's task (max 2000 chars).
+	// Summary is a write alias of description; the thread carries both
+	// with identical values.
+	Description string `json:"description,omitempty"`
+	Summary     string `json:"summary,omitempty"`
 	// Activity is the status to show after this message, so the line does
 	// not blink off while the agent keeps working.
 	Activity *Activity `json:"activity,omitempty"`
@@ -272,6 +280,10 @@ type AskRequest struct {
 	Meta           map[string]any `json:"meta,omitempty"`
 	Title          string         `json:"title,omitempty"`
 	Agent          string         `json:"agent,omitempty"`
+	// Description/Summary ride along only when this creates the ext: thread
+	// (see PostRequest). Summary is a write alias of description.
+	Description string `json:"description,omitempty"`
+	Summary     string `json:"summary,omitempty"`
 	Activity       *Activity      `json:"activity,omitempty"`
 	ClientKey      string         `json:"client_key,omitempty"`
 }
@@ -279,6 +291,12 @@ type AskRequest struct {
 // PatchRequest updates a thread.
 type PatchRequest struct {
 	Title    string         `json:"title,omitempty"`
+	// Description is the thread's 1-2 sentence account of the session's
+	// task (max 2000 chars). Summary is a write alias: sending either
+	// sets both, and Thread carries both with identical values. Send
+	// both with the same value when the receiver may only know one name.
+	Description string         `json:"description,omitempty"`
+	Summary     string         `json:"summary,omitempty"`
 	Agent    string         `json:"agent,omitempty"`
 	Archived *bool          `json:"archived,omitempty"`
 	Muted    *bool          `json:"muted,omitempty"`
@@ -363,6 +381,8 @@ func postBody(req PostRequest) (body []byte, contentType string, wait int, err e
 	field("sender", req.Sender)
 	field("title", req.Title)
 	field("agent", req.Agent)
+	field("description", req.Description)
+	field("summary", req.Summary)
 	field("client_key", req.ClientKey)
 	if req.Notify != nil {
 		field("notify", strconv.FormatBool(*req.Notify))
@@ -609,7 +629,9 @@ func (c *Client) MessagesPage(ctx context.Context, ref, after, sender string, wa
 	return out.Messages, out.TimedOut, out.AnchorUnknown, err
 }
 
-// Patch updates a thread's title, agent, archived, or muted state.
+// Patch updates a thread's title, description/summary, agent, archived, or
+// muted state. Description and Summary are aliases: sending either sets
+// both (send both with the same value for older servers that know one name).
 func (c *Client) Patch(ctx context.Context, ref string, req PatchRequest) (Thread, error) {
 	var out struct {
 		Thread Thread `json:"thread"`
@@ -619,6 +641,20 @@ func (c *Client) Patch(ctx context.Context, ref string, req PatchRequest) (Threa
 		return Thread{}, err
 	}
 	return out.Thread, nil
+}
+
+// UpdateThreadDescription PATCHes a session thread's title and 1-2 sentence
+// description (summary is sent as an alias with the same value). Either may
+// be "" to leave it unchanged. Small periodic updates keep the phone's
+// thread list readable: set a specific title at session start, then refresh
+// both when the task's nature changes, after major findings, and before
+// finishing. It is a thin wrapper over Patch for call sites that only
+// retitle/re-describe:
+//
+//	thread, err := c.UpdateThreadDescription(ctx, finalechat.Ref("eagent:"+id),
+//	    "Fix checkout race", "Reproducing the cart race, then fixing and covering it.")
+func (c *Client) UpdateThreadDescription(ctx context.Context, ref, title, description string) (Thread, error) {
+	return c.Patch(ctx, ref, PatchRequest{Title: title, Description: description, Summary: description})
 }
 
 // Thread fetches one thread.

@@ -202,6 +202,13 @@ func (r *Runtime) startPhone() {
 		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "kind": "session_start", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
 		if !resumed && strings.TrimSpace(prompt) != "" {
 			req.Sender, req.Format = "user", "markdown"
+			// The first post creates the thread, so its title and
+			// description ride along here; later posts never backfill
+			// them. Agents refresh both with RetitleThread as the work
+			// evolves (see its comment for when and how).
+			if desc := threadDescription(prompt); desc != "" {
+				req.Description, req.Summary = desc, desc
+			}
 		}
 		msg, thread, err := p.client.Post(ctx, p.ref, req)
 		if err != nil {
@@ -507,6 +514,40 @@ func clipLabel(s string, n int) string {
 		return string(r[:n-1]) + "…"
 	}
 	return s
+}
+
+// threadDescription condenses a session prompt into the 1-2 sentence thread
+// description sent at creation. It collapses whitespace and clips to 500
+// runes, well under the server's 2000-char limit; "" means nothing worth
+// saying was known.
+func threadDescription(prompt string) string {
+	s := strings.Join(strings.Fields(strings.TrimSpace(prompt)), " ")
+	if s == "" {
+		return ""
+	}
+	return clipLabel(s, 500)
+}
+
+// RetitleThread PATCHes the session thread's title and 1-2 sentence
+// description (summary is sent as an alias with the same value). Either may
+// be "" to leave it unchanged. The mirror starts the thread with the project
+// name and the opening prompt; refresh both when the task's nature changes,
+// after major findings, and before finishing, so the phone's thread list
+// stays readable. There is no automatic summarizer: call this when the work
+// itself gives you something new to say. Loop goroutine only; the PATCH runs
+// on the mirror worker. The same call from anywhere with a token is:
+//
+//	client.Patch(ctx, ref, finalechat.PatchRequest{Title: t, Description: d, Summary: d})
+//	curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION \
+//	  -H "Authorization: Bearer $FINALECHAT_TOKEN" \
+//	  -d '{"title":"...","description":"..."}'
+func (p *phone) RetitleThread(title, description string) {
+	if strings.TrimSpace(title) == "" && strings.TrimSpace(description) == "" {
+		return
+	}
+	p.enqueue(func(ctx context.Context) {
+		_, _ = p.client.UpdateThreadDescription(ctx, p.ref, title, description)
+	})
 }
 
 // pollFloorAfter is how quickly a long poll must return, with nothing, to
