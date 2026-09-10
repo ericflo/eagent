@@ -3998,6 +3998,9 @@ html:not(.enhanced) .expand-label {
 .game-record-link {
   margin-bottom: 44px;
 }
+.variance-banner {
+  margin: 0 0 24px;
+}
 .game-table-wrap {
   overflow-x: auto;
   margin-bottom: 44px;

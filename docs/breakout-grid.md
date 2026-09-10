@@ -424,5 +424,10 @@ EAGENT_FINALECHAT=off eagent --preset NAME -p "Read INSTRUCTIONS.md and relentle
 
 `EAGENT_FINALECHAT=off` keeps the phone mirror out of the way for a grid of unattended runs. Sixteen directories, sixteen presets (`glm`, `openrouter-high`, `openrouter-med`, `anthropic-high`, `anthropic-med`, `openai-high`, `openai-med`, `openai-low`, `astra`, `deepseek`, `qwen`, `muse`, `opencode-med`, `nous-med`, `hero-astra`, `hero-fable`), run at the same time on `v0.8.0-1-g59ce5c7`, reproduces the set (heroes need their xhigh hero-model routes). The measuring run compiled `reports/*.metrics.json`, `*.judge.json` and `*.play.json` per preset into `docs/grid/results.json`, with per-preset spend, phase splits and the budget accounting in `reports/grid-costs.json`.
 
+## Variance annex
+
+Follow-up repeats of the cheapest builds are written up in [`docs/grid/VARIANCE.md`](grid/VARIANCE.md) and staged as the live [variance annex](https://ericflo.github.io/eagent/variance/): muse 10/10 at $0.04±0.01, fireworks-med 9/10 at $0.78±0.29, openrouter-med 8/10 at $0.98±0.51, deepseek-fw 6/10 at $0.66±0.15.
+The headline driver is verification depth, not building — every timeout was a QA worker iterating open-endedly with the finished game already on disk.
+
 
 
