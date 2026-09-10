@@ -77,7 +77,7 @@ The result reports `session_id`, the thread reference, the host and whether the 
 
 ## Thread titles and descriptions
 
-Each session's phone thread has a `title` and a `description` (max 2000 chars; `summary` is a write alias and the thread carries both with identical values). The mirror starts the thread with the project name and the opening prompt as its description. Refresh both with a `PATCH` when the task's nature changes, after major findings, and before finishing, so the thread list stays readable:
+Each session's phone thread has a `title` and a `description` (max 2000 chars; `summary` is a write alias and the thread carries both with identical values). The mirror starts the thread with the project name and the opening prompt as its description. The orchestrator keeps both current with its `retitle_thread` tool, which needs no token (the orchestrator's shell cannot see `FINALECHAT_TOKEN`): call it as soon as the user's intent is understood — first turn, even for idle chit-chat (e.g. "Idle chit-chat") — and again whenever the scope expands or changes, after major findings, and before finishing, so the thread list stays readable. Each call replaces the previous title and description, so always describe the WHOLE session so far, never just the latest segment: "Idle chit-chat" -> "Explain eagent chat behavior" -> "Explain and improve eagent chat summary behavior". The title is a short task name, never just the project directory name.
 
 ```sh
 curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION_ID \
@@ -85,7 +85,7 @@ curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION_ID \
   -d '{"title":"Fix checkout race","description":"Reproducing the cart race, then fixing and covering it."}'
 ```
 
-From Go: `client.Patch(ctx, finalechat.Ref("eagent:"+id), finalechat.PatchRequest{Title: "...", Description: "...", Summary: "..."})`, or `client.UpdateThreadDescription(ctx, ref, title, description)` which sends both names. Title at session start should name the actual task, not the project. There is no automatic summarizer; update when the work itself gives you something new to say.
+From Go: `client.Patch(ctx, finalechat.Ref("eagent:"+id), finalechat.PatchRequest{Title: "...", Description: "...", Summary: "..."})`, or `client.UpdateThreadDescription(ctx, ref, title, description)` which sends both names. In-session, `phone.RetitleThread(title, description)` (via `retitle_thread`) does the same without a token. There is no automatic summarizer; update when the work itself gives you something new to say.
 
 ## Client capability handshake (v1)
 

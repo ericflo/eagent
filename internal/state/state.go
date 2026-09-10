@@ -110,6 +110,8 @@ type State struct {
 	Models      map[string]string
 	Hosts       map[string]string      // actor -> base URL in use
 	Phone       *event.PhoneThreadData // Finalechat thread, when the session is mirrored
+	Title       string                 // latest thread.title title ("" until retitled)
+	Description string                 // latest thread.title description ("" until retitled)
 	Started     time.Time
 
 	Events      []event.Event
@@ -281,6 +283,18 @@ func (s *State) Apply(ev event.Event) {
 		var d event.PhoneThreadData
 		if ev.Decode(&d) == nil {
 			s.Phone = &d
+		}
+	case event.ThreadTitle:
+		var d event.ThreadTitleData
+		if ev.Decode(&d) == nil {
+			// Each retitle replaces the previous one; empty fields leave
+			// that side unchanged.
+			if d.Title != "" {
+				s.Title = d.Title
+			}
+			if d.Description != "" {
+				s.Description = d.Description
+			}
 		}
 	case event.CwdChange:
 		var d event.CwdChangeData

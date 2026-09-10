@@ -326,6 +326,34 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 			msg = "schedule " + id + " cancelled"
 		})
 		return msg, isErr
+	case "retitle_thread":
+		title, desc := strings.TrimSpace(str("title")), strings.TrimSpace(str("description"))
+		if title == "" && desc == "" {
+			return "title or description is required (pass \"\" for the one you want to leave unchanged)", true
+		}
+		if len([]rune(desc)) > 2000 {
+			desc = string([]rune(desc)[:1999]) + "…"
+		}
+		var p *phone
+		r.sync(func() {
+			p = r.phone
+			// Durable first: the webview, replay, and projection read the
+			// title from this event, so it lands even with the phone off.
+			// Empty fields leave that side unchanged (see state.Apply).
+			r.append(event.New(event.ThreadTitle, event.ActorOrchestrator, event.ThreadTitleData{Title: title, Description: desc}))
+		})
+		if p == nil {
+			return "title updated locally; phone mirror is off for this session", false
+		}
+		p.RetitleThread(title, desc)
+		switch {
+		case title != "" && desc != "":
+			return fmt.Sprintf("thread retitled to %q — description updated", title), false
+		case title != "":
+			return fmt.Sprintf("thread retitled to %q", title), false
+		default:
+			return "thread description updated", false
+		}
 	case "yield":
 		// Recorded by the orchestrator loop, which ends the turn.
 		return "ok", false

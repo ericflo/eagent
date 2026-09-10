@@ -530,12 +530,15 @@ func threadDescription(prompt string) string {
 
 // RetitleThread PATCHes the session thread's title and 1-2 sentence
 // description (summary is sent as an alias with the same value). Either may
-// be "" to leave it unchanged. The mirror starts the thread with the project
-// name and the opening prompt; refresh both when the task's nature changes,
-// after major findings, and before finishing, so the phone's thread list
-// stays readable. There is no automatic summarizer: call this when the work
-// itself gives you something new to say. Loop goroutine only; the PATCH runs
-// on the mirror worker. The same call from anywhere with a token is:
+// be "" to leave it unchanged. Set the title as soon as the user's intent is
+// understood — the first turn, even for idle chit-chat — and refresh both
+// whenever the scope expands or changes, after major findings, and before
+// finishing, so the phone's thread list stays readable. Each call replaces
+// the previous title and description, so always describe the WHOLE session
+// so far, never just the latest segment. There is no automatic summarizer:
+// call this when the work itself gives you something new to say. Loop
+// goroutine only; the PATCH runs on the mirror worker. The same call from
+// anywhere with a token is:
 //
 //	client.Patch(ctx, ref, finalechat.PatchRequest{Title: t, Description: d, Summary: d})
 //	curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION \

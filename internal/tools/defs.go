@@ -112,6 +112,12 @@ var orchestratorOnly = []llm.Tool{
 			"note":{"type":"string","description":"What to do when woken."}
 		},"required":["spec","note"]}`),
 	def("cancel_schedule", "Cancel a schedule by id.", `{"type":"object","properties":{"schedule":{"type":"string"}},"required":["schedule"]}`),
+	def("retitle_thread",
+		"Update the phone thread's title and description so the thread list stays readable. Call as soon as you understand the user's intent (first turn, even for chit-chat like \"Idle chit-chat\"), and again whenever the scope expands or changes, after major findings, and before yield done=true. Each call replaces the previous title and description, so always summarize the WHOLE session so far, not just the latest segment. Either field may be \"\" to leave it unchanged, but at least one must be non-empty. Works without any token or curl; succeeds quietly when the phone mirror is off.",
+		`{"type":"object","properties":{
+			"title":{"type":"string","description":"Short task name for the whole session so far, never just the project directory name."},
+			"description":{"type":"string","description":"1-2 sentences covering the whole session so far (max 2000 chars)."}
+		}}`),
 	def("yield",
 		"Stop working until something happens: a task finishes, a schedule fires, or the user replies. Set done=true only when the user's request is completely finished and verified; then the session can end. Give a short reason (what you are waiting for, or what was accomplished).",
 		`{"type":"object","properties":{

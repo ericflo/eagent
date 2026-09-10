@@ -55,6 +55,9 @@ type SessionSummary struct {
 	Alive        bool              `json:"alive"`
 	Hosted       bool              `json:"hosted"` // running inside this server
 	FirstMessage string            `json:"first_message"`
+	Title        string            `json:"title"`                 // latest thread.title title ("" until retitled; UI falls back to first_message)
+	Description  string            `json:"description,omitempty"` // latest thread.title description ("" until retitled)
+	Summary      string            `json:"summary,omitempty"`     // alias of description, for FinaleChat parity
 	Models       map[string]string `json:"models"`
 	Config       string            `json:"config,omitempty"`
 	Subsessions  int               `json:"subsessions"`
@@ -159,6 +162,13 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 			break
 		}
 	}
+	// The event-sourced title/description (thread.title) ride the folded
+	// state so replay sees them even with the phone off. Title defaults to
+	// "" and the UI falls back to first_message; Summary aliases
+	// Description for FinaleChat parity.
+	sum.Title = st.Title
+	sum.Description = st.Description
+	sum.Summary = st.Description
 	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
 		sum.Tokens += st.Totals[a].Input
 	}

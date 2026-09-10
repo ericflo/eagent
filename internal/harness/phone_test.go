@@ -19,6 +19,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
+	"github.com/ericflo/eagent/internal/tools"
 )
 
 // fakePhone is a minimal Finalechat: one thread, messages, questions, and
@@ -42,6 +43,7 @@ type fakePhone struct {
 	keys          map[string]string   // client_key -> message id
 	dupes         int                 // posts answered from a known key
 	metas         []map[string]any    // PATCH thread meta bodies
+	patches       []map[string]any    // PATCH thread bodies (retitles)
 	latency       time.Duration       // added to every request, to imitate a real network
 	anchorUnknown bool                // every GET …/messages answers at once with an unknown anchor
 	gets          int                 // GET …/messages calls
@@ -264,6 +266,7 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{"id": "t1"}})
 	case strings.HasPrefix(path, "/api/v1/threads/") && r.Method == http.MethodPatch:
 		f.mu.Lock()
+		f.patches = append(f.patches, body)
 		if meta, ok := body["meta"].(map[string]any); ok {
 			f.metas = append(f.metas, meta)
 		}
@@ -2263,5 +2266,145 @@ func TestFutileStandAsideIsOncePerArrival(t *testing.T) {
 	r.noteWake(event.Event{Seq: 22, Type: event.ScheduleFire, Actor: event.ActorHarness})
 	if !r.futileStandAside() {
 		t.Fatal("a schedule firing is an arrival")
+	}
+}
+
+// retitlePatches returns the PATCH bodies the fake phone has seen so far.
+func (f *fakePhone) retitlePatches() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any{}, f.patches...)
+}
+
+// The orchestrator's retitle_thread tool PATCHes the phone thread's title,
+// description, and summary alias, so the thread list tracks the work.
+func TestRetitleThreadToolPatchesThread(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "thread retitled") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"retitled"}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("retitle_thread", `{"title":"Paint the fence","description":"Repainting the fence blue and covering it."}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the retitle PATCH", func() bool {
+		for _, p := range fp.retitlePatches() {
+			if p["title"] == "Paint the fence" {
+				return true
+			}
+		}
+		return false
+	})
+	var got map[string]any
+	for _, p := range fp.retitlePatches() {
+		if p["title"] == "Paint the fence" {
+			got = p
+		}
+	}
+	if got["description"] != "Repainting the fence blue and covering it." {
+		t.Fatalf("description = %v", got["description"])
+	}
+	if got["summary"] != "Repainting the fence blue and covering it." {
+		t.Fatalf("summary alias = %v", got["summary"])
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("session did not end after retitling")
+	}
+	// The retitle is also event-sourced, so replay and the webview see it.
+	evs, _ := store.Read(rt.sess.Path)
+	var titleEv *event.Event
+	for i := range evs {
+		if evs[i].Type == event.ThreadTitle {
+			titleEv = &evs[i]
+		}
+	}
+	if titleEv == nil {
+		t.Fatal("retitle appended no thread.title event")
+	}
+	var td event.ThreadTitleData
+	if err := titleEv.Decode(&td); err != nil {
+		t.Fatal(err)
+	}
+	if td.Title != "Paint the fence" || td.Description != "Repainting the fence blue and covering it." {
+		t.Fatalf("thread.title = %+v", td)
+	}
+	if rt.st.Title != "Paint the fence" {
+		t.Fatalf("state title = %q", rt.st.Title)
+	}
+}
+
+// Without the phone mirror, retitle_thread still records the event-sourced
+// title locally (the webview reads it from the log), and reports that the
+// phone mirror is off; empty title and description are rejected so nothing
+// is wiped.
+func TestRetitleThreadToolWithoutPhone(t *testing.T) {
+	sess, err := store.Create(t.TempDir(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Runtime{loop: make(chan func(), 16), closed: make(chan struct{}), sess: sess, st: state.New(), ui: &fakeUI{input: make(chan string)}}
+	defer close(r.closed)
+	go func() {
+		for fn := range r.loop {
+			fn()
+		}
+	}()
+	c := caller{actor: event.ActorOrchestrator, ctx: context.Background()}
+	out, isErr := r.execTool(c, tc("retitle_thread", `{"title":"Paint the fence","description":"Repainting the fence."}`))
+	if isErr || !strings.Contains(out, "phone mirror is off") {
+		t.Fatalf("no-phone retitle = %q, isErr=%v", out, isErr)
+	}
+	// The title is event-sourced, so the webview sees it with no phone.
+	evs, _ := store.Read(sess.Path)
+	var found *event.Event
+	for i := range evs {
+		if evs[i].Type == event.ThreadTitle {
+			found = &evs[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("no-phone retitle appended no thread.title event")
+	}
+	var td event.ThreadTitleData
+	if err := found.Decode(&td); err != nil {
+		t.Fatal(err)
+	}
+	if td.Title != "Paint the fence" || td.Description != "Repainting the fence." {
+		t.Fatalf("thread.title = %+v", td)
+	}
+	if r.st.Title != "Paint the fence" || r.st.Description != "Repainting the fence." {
+		t.Fatalf("state title = %q desc = %q", r.st.Title, r.st.Description)
+	}
+	if out, isErr := r.execTool(c, tc("retitle_thread", `{"title":"","description":""}`)); !isErr {
+		t.Fatalf("empty retitle should err, got %q", out)
+	}
+	if !tools.Has(tools.OrchestratorTools(), "retitle_thread") {
+		t.Fatal("orchestrator tools lack retitle_thread")
+	}
+	if tools.Has(tools.TaskTools(), "retitle_thread") || tools.Has(tools.NarratorTools(), "retitle_thread") {
+		t.Fatal("retitle_thread leaked to task workers or the narrator")
 	}
 }

@@ -131,7 +131,7 @@ function renderSessions() {
     ul.append(h('li', {class: s.id === S.sid ? 'active' : '', onclick: () => location.hash = `#/s/${s.id}/chat`},
       h('span', {class: `st ${s.status}` + (s.alive ? ' pulse' : ''), title: s.status}),
       h('div', null,
-        h('div', {class: 'title'}, s.first_message ? clip(s.first_message, 70) : '(no prompt)'),
+        h('div', {class: 'title', title: s.description || ''}, s.title ? clip(s.title, 70) : (s.first_message ? clip(s.first_message, 70) : '(no prompt)')),
         h('div', {class: 'meta'}, meta.join(' · '), s.config ? h('span', {class: 'cfg'}, ' ' + s.config) : null))));
   }
 }
@@ -177,7 +177,7 @@ function openStream(id, after) {
     updateComposer();
     if (S.detail.question && !(before && before.question)) notify('eagent has a question for you');
     const s = S.sessions.find(x => x.id === id);
-    if (s && (s.status !== S.detail.status || s.alive !== S.detail.alive)) { s.status = S.detail.status; s.alive = S.detail.alive; renderSessions(); }
+    if (s && (s.status !== S.detail.status || s.alive !== S.detail.alive || s.title !== S.detail.title || s.description !== S.detail.description)) { s.status = S.detail.status; s.alive = S.detail.alive; s.title = S.detail.title; s.description = S.detail.description; renderSessions(); }
   });
   es.onerror = () => { /* the browser reconnects */ };
 }
@@ -197,7 +197,11 @@ function renderSessionShell() {
   const stopBtn = h('button', {onclick: async () => { if (confirm('Stop this session? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); }}, 'Stop');
   const resumeBtn = h('button', {onclick: async () => { try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); } }}, 'Resume');
   const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
+  const titleText = d.title ? d.title : (d.first_message ? clip(d.first_message, 120) : 'New session');
   $('#main').replaceChildren(
+    h('div', {class: 'session-head'},
+      h('div', {class: 'session-title', id: 'session-title'}, titleText),
+      h('div', {class: 'session-desc', id: 'session-desc', style: d.description ? '' : 'display:none'}, d.description || '')),
     h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), h('div', {class: 'tools'},
       d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
       cost,
@@ -241,7 +245,15 @@ function renderLive() {
   const orch = d.usage.find(u => u.actor === 'orchestrator');
   if (orch && orch.input) parts.push(`cache ${Math.round(orch.cache_ratio * 100)}%`);
   el.replaceChildren(h('span', {class: 'dot ' + (d.alive ? 'on' : '')}), h('span', null, parts.join(' · ')));
-  document.title = (d.question ? '? ' : (d.alive && (busy || live.OrchestratorBusy)) ? '● ' : '') + 'eagent';
+  // The event-sourced title (thread.title) names the whole session so far;
+  // fall back to the opening prompt, as the list does.
+  const name = d.title ? d.title : (d.first_message ? clip(d.first_message, 60) : '');
+  const st = $('#session-title');
+  if (st) st.textContent = name || 'New session';
+  const sd = $('#session-desc');
+  if (sd) { sd.textContent = d.description || ''; sd.style.display = d.description ? '' : 'none'; }
+  if (d.description) el.title = d.description; else el.removeAttribute('title');
+  document.title = (d.question ? '? ' : (d.alive && (busy || live.OrchestratorBusy)) ? '● ' : '') + (name ? name + ' · eagent' : 'eagent');
 }
 
 // ---- chat ---------------------------------------------------------------------
@@ -291,6 +303,7 @@ function chatNode(ev) {
     case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
+    case 'thread.title': return h('div', {class: 'notice'}, 'retitled' + (d.title ? ' to ' + d.title : '') + (d.description ? ' — ' + clip(d.description, 140) : ''));
     case 'cwd.change': return (ev.actor === 'orchestrator' && !ev.task) ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
@@ -508,6 +521,7 @@ function summary(ev) {
     case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
     case 'cwd.change': return 'working directory → ' + d.path;
     case 'task.create': return `${d.id} ${d.title}`;
+    case 'thread.title': return 'retitled' + (d.title ? ` to ${d.title}` : '') + (d.description ? `: ${clip(d.description, 160)}` : '');
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;
     case 'proc.exit': return `${d.handle} ${d.reason} exit=${d.exit_code}`;
