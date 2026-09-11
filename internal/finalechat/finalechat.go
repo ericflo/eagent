@@ -282,25 +282,25 @@ type AskRequest struct {
 	Agent          string         `json:"agent,omitempty"`
 	// Description/Summary ride along only when this creates the ext: thread
 	// (see PostRequest). Summary is a write alias of description.
-	Description string `json:"description,omitempty"`
-	Summary     string `json:"summary,omitempty"`
-	Activity       *Activity      `json:"activity,omitempty"`
-	ClientKey      string         `json:"client_key,omitempty"`
+	Description string    `json:"description,omitempty"`
+	Summary     string    `json:"summary,omitempty"`
+	Activity    *Activity `json:"activity,omitempty"`
+	ClientKey   string    `json:"client_key,omitempty"`
 }
 
 // PatchRequest updates a thread.
 type PatchRequest struct {
-	Title    string         `json:"title,omitempty"`
+	Title string `json:"title,omitempty"`
 	// Description is the thread's 1-2 sentence account of the session's
 	// task (max 2000 chars). Summary is a write alias: sending either
 	// sets both, and Thread carries both with identical values. Send
 	// both with the same value when the receiver may only know one name.
 	Description string         `json:"description,omitempty"`
 	Summary     string         `json:"summary,omitempty"`
-	Agent    string         `json:"agent,omitempty"`
-	Archived *bool          `json:"archived,omitempty"`
-	Muted    *bool          `json:"muted,omitempty"`
-	Meta     map[string]any `json:"meta,omitempty"`
+	Agent       string         `json:"agent,omitempty"`
+	Archived    *bool          `json:"archived,omitempty"`
+	Muted       *bool          `json:"muted,omitempty"`
+	Meta        map[string]any `json:"meta,omitempty"`
 }
 
 // Error is a Finalechat error envelope.
