@@ -79,6 +79,7 @@ const (
 	RelayTurn      = "relay.turn"      // the agent finished a turn; carries its final message
 	RelayLimit     = "relay.limit"     // the agent's usage budget crossed a threshold or ran out
 	RelayEnd       = "relay.end"       // the agent was stopped on purpose
+	RelayAutopilot = "relay.autopilot" // a standing order to keep the agent going (or its end)
 )
 
 // Event is one line of the session log.
@@ -180,6 +181,11 @@ type UserMessageData struct {
 	Client *clientcaps.Caps `json:"client,omitempty"`
 	// Attachments are files the user sent, saved under the session directory.
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// Route is who the user addressed, when their client let them say: "agent"
+	// (the relayed agent) or "eagent". Delivery is how it should reach the
+	// agent: queue, interrupt, or after_turn. Both are empty when unsaid.
+	Route    string `json:"route,omitempty"`
+	Delivery string `json:"delivery,omitempty"`
 }
 
 // Attachment is a file carried by a message: a screenshot the user sent
@@ -514,6 +520,18 @@ type RelayLimitData struct {
 	ResetsAt    string  `json:"resets_at,omitempty"`
 	Text        string  `json:"text,omitempty"`
 	Exhausted   bool    `json:"exhausted,omitempty"`
+}
+
+// RelayAutopilotData is a standing order: keep the agent working on
+// Instruction until Until (RFC3339; empty means until the user says stop),
+// deciding its questions instead of waiting for the user when Decide is set.
+// Off ends it.
+type RelayAutopilotData struct {
+	Name        string `json:"name"`
+	Instruction string `json:"instruction,omitempty"`
+	Until       string `json:"until,omitempty"`
+	Decide      bool   `json:"decide,omitempty"`
+	Off         bool   `json:"off,omitempty"`
 }
 
 // RelayEndData records the agent being stopped on purpose.

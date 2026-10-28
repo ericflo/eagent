@@ -30,7 +30,9 @@ type Relay struct {
 	// Recent is the agent's latest mid-turn remarks, newest last.
 	Recent []string
 	Limit  *event.RelayLimitData
-	Ended  bool
+	// Autopilot is the standing order to keep the agent going, nil when off.
+	Autopilot *event.RelayAutopilotData
+	Ended     bool
 	// LastEventAt is the time of the newest relay event, so a reattaching
 	// eagent knows which transcript lines are already on the record.
 	LastEventAt time.Time
@@ -116,7 +118,7 @@ func (s *State) applyRelay(ev event.Event) {
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
 		if prev != nil {
 			// A restart continues the same relay: its history stays.
-			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.Recent, r.Limit = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.Recent, prev.Limit
+			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.Recent, r.Limit, r.Autopilot = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.Recent, prev.Limit, prev.Autopilot
 			if r.InnerID == "" {
 				r.InnerID = prev.InnerID
 			}
@@ -169,9 +171,18 @@ func (s *State) applyRelay(ev event.Event) {
 		var d event.RelayLimitData
 		_ = ev.Decode(&d)
 		r.Limit = &d
+	case event.RelayAutopilot:
+		var d event.RelayAutopilotData
+		_ = ev.Decode(&d)
+		if d.Off {
+			r.Autopilot = nil
+		} else {
+			r.Autopilot = &d
+		}
 	case event.RelayEnd:
 		r.Ended = true
 		r.State, r.StateSince = "stopped", ev.Time
+		r.Autopilot = nil
 	}
 	if relayWakes(ev) {
 		s.wake(ev.Seq)
@@ -316,6 +327,17 @@ func observeRelay(ev event.Event, maxChars int, ts string) string {
 		var d event.RelayEndData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s stopped %s (%s)", ts, d.Name, d.Reason)
+	case event.RelayAutopilot:
+		var d event.RelayAutopilotData
+		_ = ev.Decode(&d)
+		if d.Off {
+			return fmt.Sprintf("%s autopilot for %s is off", ts, d.Name)
+		}
+		until := "until the user says stop"
+		if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
+			until = "until " + t.Local().Format("Mon 15:04")
+		}
+		return fmt.Sprintf("%s autopilot on for %s, %s: %s", ts, d.Name, until, clip(d.Instruction, maxChars))
 	}
 	return ""
 }

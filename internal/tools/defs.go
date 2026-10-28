@@ -156,13 +156,23 @@ var relayTools = []llm.Tool{
 		"Read the relayed agent's terminal screen (and scrollback). Only for dialogs and prompts on its screen; what it says and does comes to you from its transcript as turn reports.",
 		`{"type":"object","properties":{"relay":{"type":"string"},"lines":{"type":"integer","description":"Scrollback lines, default 60."}}}`),
 	def("relay_control",
-		"Manage the relayed agent. interrupt: press Escape to stop its current step. keys: press keys to answer a dialog on its screen (names: Enter, Escape, Up, Down, Tab, C-c, or literal text). restart: end it and start it again continuing its own session (after an exit or an upgrade). stop: end it for good (when the user is finished with it).",
+		"Manage the relayed agent. interrupt: press Escape to stop its current step. keys: press keys to answer a dialog on its screen (names: Enter, Escape, Up, Down, Tab, C-c, or literal text). restart: end it and start it again continuing its own session (after an exit). upgrade: update its CLI (codex update / claude update), then restart it continuing its session. switch: hand the work to another relay profile (profile, e.g. \"claude\" or \"codex\"): the new agent starts in the same folder with a handoff brief of the user's instructions and the last report, and the old one is stopped. stop: end it for good (when the user is finished with it).",
 		`{"type":"object","properties":{
 			"relay":{"type":"string"},
-			"action":{"type":"string","enum":["interrupt","keys","restart","stop"]},
+			"action":{"type":"string","enum":["interrupt","keys","restart","upgrade","switch","stop"]},
 			"keys":{"type":"array","items":{"type":"string"}},
+			"profile":{"type":"string","description":"switch: the profile to hand over to."},
 			"reason":{"type":"string"}
 		},"required":["action"]}`),
+	def("relay_autopilot",
+		"Keep the relayed agent going without the user: when the user says \"keep it going until 10am\", \"until I say stop\", \"keep driving it\", \"don't let it stop\". While it is on you are woken at every turn end: when the agent stops without asking anything, nudge it on with relay_send in the user's spirit (the instruction); when it asks something, decide as the user would (if decide is true) and tell the user what you chose instead of waiting. until is a time (\"10:00\", \"2026-10-28T10:00\", \"8h\") or empty for until the user says stop. off=true ends it.",
+		`{"type":"object","properties":{
+			"relay":{"type":"string"},
+			"instruction":{"type":"string","description":"The standing order, in the user's words where possible."},
+			"until":{"type":"string"},
+			"decide":{"type":"boolean","description":"Decide the agent's questions instead of asking the user. Default true."},
+			"off":{"type":"boolean"}
+		}}`),
 }
 
 var taskOnly = []llm.Tool{

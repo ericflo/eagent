@@ -107,7 +107,7 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 	}
 
 	switch tc.Name {
-	case "relay_start", "relay_forward", "relay_send", "relay_status", "relay_screen", "relay_control":
+	case "relay_start", "relay_forward", "relay_send", "relay_status", "relay_screen", "relay_control", "relay_autopilot":
 		return r.relayTool(tc.Name, str, num, strs)
 	// ---- shell ----
 	case "bash":

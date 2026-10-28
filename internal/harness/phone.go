@@ -677,11 +677,25 @@ func (p *phone) poll(r *Runtime) {
 				continue
 			}
 			caps := capsFromMeta(m.Meta)
+			route, delivery := routeFromMeta(m.Meta)
 			r.post(func() {
-				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts})
+				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery})
 			})
 		}
 	}
+}
+
+// routeFromMeta reads a relay session's composer choices from a phone
+// message: meta["eagent.route"] is "agent" or "eagent", meta["eagent.delivery"]
+// is "queue", "interrupt" or "after_turn". Anything else reads as unsaid.
+func routeFromMeta(meta map[string]any) (route, delivery string) {
+	if r, _ := meta["eagent.route"].(string); r == "agent" || r == "eagent" {
+		route = r
+	}
+	if d, _ := meta["eagent.delivery"].(string); d == "queue" || d == "interrupt" || d == "after_turn" {
+		delivery = d
+	}
+	return route, delivery
 }
 
 // capsFromMeta reads the client capability handshake (v1) from a thread

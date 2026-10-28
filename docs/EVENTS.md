@@ -43,7 +43,7 @@ next writer moves those bytes to `<file>.torn` before appending.
 
 | Type | Actor | Payload | Notes |
 |---|---|---|---|
-| `user.message` | user | `text`, `source` (`web`, `finalechat`, or absent for the terminal), `client` (optional capsule of what the sending client declared it can supply: `source`, `timezone`, `locale`, `device`, `app`, `screen`, `supplies`), `attachments` (files saved under `<session>/attachments/`: `path`, `name`, `content_type`, `size`, `kind`, `width`, `height`) | Wakes the orchestrator. |
+| `user.message` | user | `text`, `source` (`web`, `finalechat`, or absent for the terminal), `client` (optional capsule of what the sending client declared it can supply: `source`, `timezone`, `locale`, `device`, `app`, `screen`, `supplies`), `attachments` (files saved under `<session>/attachments/`: `path`, `name`, `content_type`, `size`, `kind`, `width`, `height`), `route` (`agent` or `eagent`, when the client let the user say whom a relay-session message is for), `delivery` (`queue`, `interrupt`, `after_turn`) | Wakes the orchestrator. In a relay session it is forwarded to the agent on arrival unless it is for eagent. |
 | `user.answer` | user | `question_id`, `text`, `source`, `client` (same optional capsule), `attachments` | Answers a `narrator.question`; wakes the orchestrator. |
 | `turn.start` / `turn.end` | orchestrator, narrator, task | `reason` | Brackets one actor turn (one or more model calls); for a task worker (`task` set) each model call, so a reader can tell how long a call has been in flight. Informational. |
 | `assistant` | any model actor | `provider`, `model`, `text`, `reasoning`, `tool_calls[{id,name,args}]`, `native`, `usage{input,output,cached,reasoning}`, `elapsed_ms`, `seen_seq`, `stop` | One model response. `native` is the provider's own representation (Responses output items, Anthropic content blocks) replayed verbatim on later calls. `seen_seq` is the last event the prompt contained; anything after it is delivered on the next call. |
@@ -82,7 +82,8 @@ A relay is an external coding agent (Codex, Claude Code) that the session runs i
 | `relay.progress` | harness | `name`, `text` | Something the agent said mid-turn. For the narrator. |
 | `relay.turn` | harness | `name`, `text` (the agent's final message), `duration_ms`, `tools`, `images`, `interrupted` | Wakes the orchestrator with the agent's own report. |
 | `relay.limit` | harness | `name`, `used_percent`, `window`, `resets_at`, `text`, `exhausted` | The agent's usage budget crossed 50/80/95/100%, or a limit message appeared. Wakes the orchestrator. |
-| `relay.end` | harness | `name`, `reason` | Stopped on purpose. A batch session stays up while any relay is active. |
+| `relay.autopilot` | harness | `name`, `instruction`, `until` (RFC3339, empty for "until the user says stop"), `decide`, `off` | A standing order to keep the agent going: the orchestrator nudges it at every turn end that asks nothing, and decides its questions when `decide` is set. When `until` passes the harness turns it off and tells the orchestrator to report. |
+| `relay.end` | harness | `name`, `reason` | Stopped on purpose (or handed over to another profile). A batch session stays up while any relay is active. |
 
 ### Diagnostics
 

@@ -356,14 +356,29 @@ func findByName(root, name string, maxDepth int) string {
 }
 
 // insideProject reports whether an already-resolved absolute path lies in
-// the project (or anywhere, when edits outside the project are allowed).
+// the project or an active relay's folder (or anywhere, when edits outside
+// the project are allowed). Not on the loop goroutine.
 func (r *Runtime) insideProject(abs string) bool {
 	if r.files.AllowOutside {
 		return true
 	}
-	root := filepath.Clean(r.opts.Project)
-	if real, err := filepath.EvalSymlinks(root); err == nil {
-		root = real
+	roots := []string{r.opts.Project}
+	// A relayed agent works in the folder the user chose for it; what it
+	// makes there (screenshots, renders) may be sent to the user too.
+	// Called from the narrator's goroutine, so state is read on the loop.
+	r.sync(func() {
+		for _, rel := range r.st.ActiveRelays() {
+			roots = append(roots, rel.Dir)
+		}
+	})
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if real, err := filepath.EvalSymlinks(root); err == nil {
+			root = real
+		}
+		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+			return true
+		}
 	}
-	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
+	return false
 }

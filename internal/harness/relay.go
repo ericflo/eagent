@@ -3,6 +3,7 @@ package harness
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -300,7 +301,7 @@ func (r *Runtime) autoForward(seq int64) {
 	if rel.State == "exited" || forwardedAs(r.st, rel.Name, seq) != "" {
 		return
 	}
-	var text string
+	var text, route, delivery string
 	var atts []event.Attachment
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
@@ -312,10 +313,14 @@ func (r *Runtime) autoForward(seq int64) {
 		}
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
-		text, atts = d.Text, d.Attachments
+		text, atts, route, delivery = d.Text, d.Attachments, d.Route, d.Delivery
 		break
 	}
-	if strings.TrimSpace(text) == "" && len(atts) == 0 || addressedToEagent(text) || relayMeta(text) {
+	if strings.TrimSpace(text) == "" && len(atts) == 0 || route == "eagent" {
+		return
+	}
+	// An explicit "to the agent" from the client wins over the guesses.
+	if route != "agent" && (addressedToEagent(text) || relayMeta(text)) {
 		return
 	}
 	seat := r.relays.get(rel.Name)
@@ -328,6 +333,9 @@ func (r *Runtime) autoForward(seq int64) {
 	mode := "queue"
 	if relayUrgent(text) {
 		mode = "interrupt"
+	}
+	if delivery != "" {
+		mode = delivery
 	}
 	id := r.st.NextRelaySendID()
 	r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: rel.Name, ID: id, From: "user", Seq: seq, Mode: mode, Text: text, Auto: true}))
@@ -391,8 +399,29 @@ func (r *Runtime) relayStrict() bool {
 	if len(r.st.ActiveRelays()) == 0 {
 		return false
 	}
-	text, _, _ := userEventText(r.st, r.st.LastUserSeq)
-	return !addressedToEagent(text)
+	return !userAddressedEagent(r.st, r.st.LastUserSeq)
+}
+
+// userAddressedEagent reports a user message meant for eagent: chosen so in
+// the client, or said so in the text.
+func userAddressedEagent(st *state.State, seq int64) bool {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		if ev.Seq != seq {
+			continue
+		}
+		if ev.Type == event.UserMessage {
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if d.Route != "" {
+				return d.Route == "eagent"
+			}
+			return addressedToEagent(d.Text)
+		}
+		text, _, _ := userEventText(st, seq)
+		return addressedToEagent(text)
+	}
+	return false
 }
 
 // resolveRelay picks the relay a tool call means. Loop goroutine only.
@@ -567,6 +596,55 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return "Could not restart: " + err.Error(), true
 			}
 			return r.relayStatusText(started, "Restarted, continuing its own session."), false
+		case "upgrade":
+			out, uerr := upgradeAgent(rel.Agent)
+			if uerr != nil {
+				return "The upgrade failed, so nothing was restarted: " + uerr.Error() + "\n" + out, true
+			}
+			if seat != nil {
+				_ = seat.Kill()
+				r.relays.drop(rel.Name, seat)
+			}
+			var started string
+			r.sync(func() { started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true) })
+			if err != nil {
+				return "Upgraded, but the restart failed: " + err.Error() + "\n" + out, true
+			}
+			return r.relayStatusText(started, "Upgraded ("+lastLine(out)+") and restarted, continuing its own session."), false
+		case "switch":
+			profile := strings.TrimSpace(str("profile"))
+			if profile == "" {
+				return "switch: say which profile to hand over to (e.g. claude or codex)", true
+			}
+			var brief, started string
+			r.sync(func() {
+				brief = r.handoffBrief(rel)
+				if _, ok := r.cfg.Relay.RelayProfiles()[profile]; !ok {
+					err = fmt.Errorf("no relay profile %q (have %s)", profile, strings.Join(r.cfg.Relay.RelayProfileNames(), ", "))
+					return
+				}
+				if seat != nil {
+					_ = seat.Kill()
+					r.relays.drop(rel.Name, seat)
+				}
+				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "handed over to " + profile}))
+				started, err = r.startRelay(profile, rel.Dir, "", false)
+			})
+			if err != nil {
+				return "Could not switch: " + err.Error(), true
+			}
+			next := r.relays.get(started)
+			id := ""
+			r.sync(func() {
+				id = r.st.NextRelaySendID()
+				r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: started, ID: id, From: "eagent", Mode: "queue", Text: brief}))
+			})
+			if next != nil {
+				if _, err := next.Send(id, brief, "queue"); err != nil {
+					return "Switched to " + started + ", but the handoff brief could not be typed: " + err.Error(), true
+				}
+			}
+			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false
 		case "stop":
 			if seat != nil {
 				_ = seat.Kill()
@@ -574,12 +652,208 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			r.sync(func() {
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
+				r.armAutopilots()
 			})
 			return "Stopped " + rel.Who() + ".", false
 		}
 		return fmt.Sprintf("unknown action %q", action), true
+	case "relay_autopilot":
+		var out string
+		var err error
+		r.sync(func() {
+			var rel *state.Relay
+			if rel, err = r.resolveRelay(str("relay")); err != nil {
+				return
+			}
+			d := event.RelayAutopilotData{Name: rel.Name}
+			args := str("off")
+			if args == "true" {
+				d.Off = true
+				out = "Autopilot off for " + rel.Who() + "."
+			} else {
+				d.Instruction = strings.TrimSpace(str("instruction"))
+				if d.Instruction == "" {
+					d.Instruction = "Keep going: pick the next most valuable thing toward what the user asked, do it, commit, and continue."
+				}
+				d.Decide = str("decide") != "false"
+				if u := strings.TrimSpace(str("until")); u != "" {
+					t, perr := parseUntil(u, time.Now())
+					if perr != nil {
+						err = perr
+						return
+					}
+					d.Until = t.Format(time.RFC3339)
+				}
+				out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on unless it asks something; decide its questions yourself"
+				if !d.Decide {
+					out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on unless it asks something; pass its questions to the user"
+				}
+				out += "."
+			}
+			r.append(event.New(event.RelayAutopilot, event.ActorHarness, d))
+			r.armAutopilots()
+		})
+		if err != nil {
+			return err.Error(), true
+		}
+		return out, false
 	}
 	return "unknown relay tool", true
+}
+
+// upgradeAgent runs the agent CLI's own updater.
+func upgradeAgent(agent string) (string, error) {
+	var cmd *exec.Cmd
+	switch agent {
+	case "codex", "claude":
+		cmd = exec.Command(agent, "update")
+	default:
+		return "", fmt.Errorf("no upgrade command for %s", agent)
+	}
+	timer := time.AfterFunc(5*time.Minute, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func lastLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		s = s[i+1:]
+	}
+	return clipRunes(s, 160)
+}
+
+// handoffBrief is what a new agent is told when it takes over: the user's
+// instructions, verbatim, and the old agent's last word, from the record.
+// Loop goroutine.
+func (r *Runtime) handoffBrief(rel *state.Relay) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are taking over this work from %s, which was working in %s.", rel.Who(), rel.Dir)
+	if rel.Transcript != "" {
+		fmt.Fprintf(&b, " Its full session log is %s (JSONL) if you need detail.", rel.Transcript)
+	}
+	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
+	var texts []string
+	for _, ev := range r.st.Events {
+		if ev.Type != event.RelaySend {
+			continue
+		}
+		var d event.RelaySendData
+		if ev.Decode(&d) == nil && d.Name == rel.Name && d.From == "user" {
+			texts = append(texts, d.Text)
+		}
+	}
+	if len(texts) > 12 {
+		texts = texts[len(texts)-12:]
+		b.WriteString("(the latest 12)\n")
+	}
+	for _, t := range texts {
+		b.WriteString("- " + clipRunes(strings.ReplaceAll(strings.TrimSpace(t), "\n", "\n  "), 3000) + "\n")
+	}
+	if rel.LastTurn != "" {
+		fmt.Fprintf(&b, "\n%s's last report:\n%s\n", rel.Who(), clipRunes(rel.LastTurn, 6000))
+	}
+	b.WriteString("\nCheck the working tree and recent commits, then continue where it left off.")
+	return b.String()
+}
+
+// parseUntil reads an autopilot deadline: "10:00" (the next such local
+// time), "8h" or "90m" from now, or a date and time.
+func parseUntil(s string, now time.Time) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if d, err := time.ParseDuration(s); err == nil && d > 0 {
+		return now.Add(d), nil
+	}
+	for _, layout := range []string{"15:04", "3:04pm", "3pm", "15"} {
+		if t, err := time.ParseInLocation(layout, strings.ToLower(strings.ReplaceAll(s, " ", "")), now.Location()); err == nil {
+			at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+			if !at.After(now) {
+				at = at.Add(24 * time.Hour)
+			}
+			return at, nil
+		}
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04", "2006-01-02 15:04"} {
+		if t, err := time.ParseInLocation(layout, s, now.Location()); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("could not read %q as a time: use 10:00, 8h, or 2026-10-28T10:00", s)
+}
+
+func autopilotUntil(d event.RelayAutopilotData) string {
+	if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
+		return "until " + t.Local().Format("Mon 15:04")
+	}
+	return "until the user says stop"
+}
+
+// armAutopilots sets a timer for each autopilot deadline; when one passes,
+// the autopilot ends and the orchestrator is told to wrap up. Loop goroutine.
+func (r *Runtime) armAutopilots() {
+	for name, t := range r.autopilotTimers {
+		t.Stop()
+		delete(r.autopilotTimers, name)
+	}
+	if r.autopilotTimers == nil {
+		r.autopilotTimers = map[string]*time.Timer{}
+	}
+	for _, rel := range r.st.ActiveRelays() {
+		ap := rel.Autopilot
+		if ap == nil || ap.Until == "" {
+			continue
+		}
+		until, err := time.Parse(time.RFC3339, ap.Until)
+		if err != nil {
+			continue
+		}
+		name := rel.Name
+		r.autopilotTimers[name] = time.AfterFunc(max(time.Until(until), time.Second), func() {
+			r.post(func() {
+				cur := r.st.Relays[name]
+				if cur == nil || cur.Autopilot == nil || cur.Autopilot.Until != ap.Until || r.ending {
+					return
+				}
+				r.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: name, Off: true}))
+				r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop nudging it. Let it finish what it is doing, then tell the user, in a note, what was done while they were away and where things stand.", cur.Who(), until.Local().Format("Mon 15:04"))}))
+			})
+		})
+	}
+}
+
+// userSends lists the latest user messages sent to a relay, each with when
+// it went and whether its arrival was confirmed. Loop goroutine.
+func userSends(st *state.State, name string, n int) []string {
+	rel := st.Relays[name]
+	var out []string
+	for _, ev := range st.Events {
+		if ev.Type != event.RelaySend {
+			continue
+		}
+		var d event.RelaySendData
+		if ev.Decode(&d) != nil || d.Name != name || d.From != "user" {
+			continue
+		}
+		status := "arrived"
+		if rel != nil {
+			if _, waiting := rel.Undelivered[d.ID]; waiting {
+				status = "not confirmed yet"
+				if d.Mode == "after_turn" {
+					status = "held for the end of its turn"
+				}
+			}
+		}
+		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(ev.Time)), status, clipRunes(oneLine(d.Text, 200), 200)))
+	}
+	if len(out) > n {
+		out = out[len(out)-n:]
+	}
+	return out
 }
 
 // forwardedAs names the send that already forwarded a user message.
@@ -643,6 +917,15 @@ func (r *Runtime) relayStatusText(name, lead string) string {
 		if rel.Limit != nil {
 			b.WriteString("\nUsage: " + limitLine(rel.Who(), *rel.Limit))
 		}
+		if ap := rel.Autopilot; ap != nil {
+			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
+		}
+		if sent := userSends(r.st, rel.Name, 8); len(sent) > 0 {
+			b.WriteString("\nWhat the user sent it, newest last:")
+			for _, line := range sent {
+				b.WriteString("\n- " + line)
+			}
+		}
 		if rel.Detail != "" && (state == "blocked" || state == "exited") {
 			b.WriteString("\nDetail: " + rel.Detail)
 		}
@@ -686,13 +969,22 @@ func relaySteer(st *state.State, now time.Time, reason string) string {
 	}
 	who := active[0].Who()
 	if reason == "user message" {
-		text, _, _ := userEventText(st, st.LastUserSeq)
 		if id := forwardedAs(st, active[0].Name, st.LastUserSeq); id != "" {
 			b.WriteString(" The user's latest message already went to " + who + " verbatim (" + id + "), the moment it arrived. Add context with relay_send only if it lacks something it needs; otherwise yield.")
-		} else if addressedToEagent(text) {
+		} else if userAddressedEagent(st, st.LastUserSeq) {
 			b.WriteString(" The user's latest message is addressed to you, not to " + who + ": do it yourself, then go back to relaying.")
 		} else {
 			b.WriteString(" Forward the user's latest message with relay_forward (verbatim) unless it only asks about the relay; answer that from relay_status in a note.")
+		}
+	}
+	for _, rel := range active {
+		if ap := rel.Autopilot; ap != nil {
+			fmt.Fprintf(&b, " Autopilot on for %s %s: when it ends a turn without asking anything, nudge it on with relay_send (%s)", rel.Who(), autopilotUntil(*ap), clipRunes(ap.Instruction, 300))
+			if ap.Decide {
+				b.WriteString("; when it asks something, decide as the user would, answer it with relay_send, and say in a note what you chose. Do not wait for the user.")
+			} else {
+				b.WriteString("; pass its questions to the user.")
+			}
 		}
 	}
 	b.WriteString(" You are the relay: " + who + " does the work.")

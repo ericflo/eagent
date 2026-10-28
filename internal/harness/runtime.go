@@ -117,6 +117,7 @@ type Runtime struct {
 	runtimeControl      *runtimecontrol.Controller
 	phone               *phone // Finalechat mirror; nil when off
 	relays              relaySeats
+	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	toolImagesMu        sync.Mutex
 	memoMu              sync.Mutex
 	memo                map[string]fileMark           // what each caller last read or viewed, to skip repeats
@@ -581,6 +582,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 		r.post(func() { r.beginShutdown("interrupted", 130) })
 	}()
 	r.rearmSchedules()
+	r.armAutopilots()
 	r.armNarratorTimer()
 	if r.st.Question != nil && r.opts.Interactive {
 		q := r.st.Question

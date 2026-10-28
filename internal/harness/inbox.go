@@ -30,6 +30,10 @@ type InboxMessage struct {
 	Client *clientcaps.Caps `json:"client,omitempty"`
 	// Attachments are files already saved under the session directory.
 	Attachments []event.Attachment `json:"attachments,omitempty"`
+	// Route and Delivery carry an explicit "to eagent / to the agent" and
+	// "interrupt / after this turn" choice from the client (relay sessions).
+	Route    string `json:"route,omitempty"`
+	Delivery string `json:"delivery,omitempty"`
 }
 
 // PostInbox writes a message for the session at sessionPath.
@@ -108,6 +112,13 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		if strings.HasPrefix(text, "/") {
 			r.slashCommand(text)
 			return
+		}
+		if msg.Route != "" || msg.Delivery != "" {
+			if q := r.st.Question; q == nil {
+				r.ui.Idle(false)
+				r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery}))
+				return
+			}
 		}
 		r.onInputFrom(text, msg.From, msg.Client, msg.Attachments...)
 	}

@@ -329,3 +329,178 @@ func TestAddressedToEagent(t *testing.T) {
 		}
 	}
 }
+
+// useFakeRelayFactory gives every launch a fresh fake seat.
+func useFakeRelayFactory(t *testing.T, reply string) *[]*fakeSeat {
+	t.Helper()
+	var seats []*fakeSeat
+	var mu sync.Mutex
+	oldLaunch := launchRelay
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		s := newFakeSeat(reply)
+		seats = append(seats, s)
+		return s, relay.Started{Host: "tmux", Target: relay.Target(spec.Session, spec.Name), Command: []string{spec.Profile.Agent}}, nil
+	}
+	t.Cleanup(func() { launchRelay = oldLaunch })
+	return &seats
+}
+
+func TestRelayAutopilotNudgesAndSwitchHandsOver(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seats := useFakeRelayFactory(t, "Round done; three items left.")
+	var mu sync.Mutex
+	sawAutopilotSteer := false
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model != "orch" {
+			if strings.Contains(lastUserText(msgs), "final") || strings.Contains(all, "DECLARED THE WORK DONE") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		mu.Lock()
+		sawAutopilotSteer = sawAutopilotSteer || strings.Contains(all, "Autopilot on for Codex until")
+		mu.Unlock()
+		switch {
+		case !strings.Contains(all, "Autopilot on for Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_autopilot", `{"instruction":"keep polishing until it is excellent","until":"8h"}`)}}
+		case !strings.Contains(all, "(r2)"): // r1 was the brief, forwarded on arrival
+			return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"Keep going: the three items you listed, then commit."}`)}}
+		case !strings.Contains(all, "Handed over from Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"switch","profile":"claude"}`)}}
+		case !strings.Contains(all, "Stopped Claude"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ok"}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Prompt: "Polish the onboarding flow. Keep going until I say stop!", Relay: "codex"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d: %v", code, ui.logs)
+	}
+	if len(*seats) != 2 {
+		t.Fatalf("launched %d agents, want codex then claude", len(*seats))
+	}
+	codex, claude := (*seats)[0].sentTexts(), (*seats)[1].sentTexts()
+	if len(codex) != 2 || codex[0] != "Polish the onboarding flow. Keep going until I say stop!" || !strings.HasPrefix(codex[1], "Keep going: the three items") {
+		t.Fatalf("codex got %q", codex)
+	}
+	if len(claude) != 1 || !strings.Contains(claude[0], "taking over this work from Codex") || !strings.Contains(claude[0], "- Polish the onboarding flow.") || !strings.Contains(claude[0], "Round done; three items left.") {
+		t.Fatalf("handoff brief %q", claude)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawAutopilotSteer {
+		t.Fatalf("the steer never carried the autopilot")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.Relays["codex"].State != "stopped" || st.Relays["claude"].State != "stopped" {
+		t.Fatalf("relays %+v %+v", st.Relays["codex"], st.Relays["claude"])
+	}
+}
+
+func TestRelayAutopilotDeadlineWakesTheOrchestrator(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelayFactory(t, "ok")
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model != "orch" {
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		switch {
+		case !strings.Contains(all, "Autopilot on for Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_autopilot", `{"until":"2s"}`)}}
+		case !strings.Contains(all, "[Autopilot for Codex ended"):
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}}
+		case !strings.Contains(all, "Stopped Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ok"}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Prompt: "work", Relay: "codex"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d (the deadline never woke it?): %v", code, ui.logs)
+	}
+}
+
+func TestRelayExplicitRouteFromTheClient(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("ok")
+	useFakeRelays(t, seat)
+	release := make(chan struct{})
+	defer close(release)
+	brain := func(model string, msgs []map[string]any) reply {
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}, block: release}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{input: make(chan string, 1)}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go rt.Run(ctx)
+	post := func(m InboxMessage) {
+		done := make(chan struct{})
+		rt.post(func() { rt.handleInbox(m); close(done) })
+		<-done
+	}
+	// "How's it going?" would stay with eagent; the composer said "to Codex".
+	post(InboxMessage{Type: "message", Text: "How's it going?", From: "finalechat", Route: "agent", Delivery: "after_turn"})
+	// A work-looking message the composer addressed to eagent stays here.
+	post(InboxMessage{Type: "message", Text: "Clean up docker images", From: "finalechat", Route: "eagent"})
+	deadline := time.Now().Add(5 * time.Second)
+	for len(seat.sentTexts()) < 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	got := seat.sentTexts()
+	seat.mu.Lock()
+	modes := append([]string{}, seat.modes...)
+	seat.mu.Unlock()
+	if len(got) != 1 || got[0] != "How's it going?" || modes[0] != "after_turn" {
+		t.Fatalf("sent %q modes %v", got, modes)
+	}
+	cancel()
+}
+
+func TestParseUntil(t *testing.T) {
+	now := time.Date(2026, 10, 28, 22, 30, 0, 0, time.Local)
+	for in, want := range map[string]time.Time{
+		"10:00":            time.Date(2026, 10, 29, 10, 0, 0, 0, time.Local),
+		"23:00":            time.Date(2026, 10, 28, 23, 0, 0, 0, time.Local),
+		"8h":               now.Add(8 * time.Hour),
+		"2026-10-30T09:15": time.Date(2026, 10, 30, 9, 15, 0, 0, time.Local),
+	} {
+		got, err := parseUntil(in, now)
+		if err != nil || !got.Equal(want) {
+			t.Errorf("parseUntil(%q) = %v %v, want %v", in, got, err, want)
+		}
+	}
+	if _, err := parseUntil("whenever", now); err == nil {
+		t.Errorf("nonsense should not parse")
+	}
+}

@@ -133,7 +133,9 @@ A relay session runs another coding agent in a tmux terminal eagent owns (screen
 - What the agent says and does is read from its own transcript (Codex rollouts, Claude Code session files), not scraped off the screen: nothing scrolls off, ghost suggestions are not mistaken for questions, and every send is confirmed when the transcript shows it arrived. Its folder-trust and update prompts are answered on the way up.
 - eagent is woken when the agent finishes a turn, needs attention, or crosses 50/80/95% of its usage budget, never on a timer. The narrator relays the agent's own report, attaches the screenshots it made, and sends a progress line every 15 minutes while it works (`relay.quiet_seconds`).
 - Relay mode is session state. A context reset keeps it, and the harness writes the relay's details into the dossier itself. While a relay runs, eagent refuses to edit files or delegate work unless you addressed it directly.
-- The agent outlives eagent: `eagent -c` reattaches to the running terminal, and asking for a restart (after an upgrade, say) relaunches it continuing its own session. Each relay belongs to the session that started it (`eagent-relay-<session>-<name>` on a private tmux socket); eagent never touches terminal sessions it did not create.
+- "Keep it going until 10am" (or "until I say stop") turns on autopilot: at every turn end that asks nothing, eagent nudges the agent on in the spirit of your standing order, decides its questions as you would and says what it chose, and reports when the time is up.
+- Ask for an upgrade and eagent runs `codex update` / `claude update` and restarts the agent continuing its own session; ask to switch ("have Claude continue where Codex left off") and the other agent starts in the same folder with a handoff brief of your instructions and the last report.
+- The agent outlives eagent: `eagent -c` reattaches to the running terminal. Each relay belongs to the session that started it (`eagent-relay-<session>-<name>` on a private tmux socket); eagent never touches terminal sessions it did not create.
 
 ## How a session runs
 

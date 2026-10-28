@@ -637,7 +637,7 @@ func Observe(ev event.Event, maxChars int) string {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s %s now using %s (%s)", ts, d.Actor, d.Model, d.Reason)
-	case event.RelayStart, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd:
+	case event.RelayStart, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		return observeRelay(ev, maxChars, ts)
 	}
 	return ""

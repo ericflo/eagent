@@ -512,7 +512,7 @@ func (s *State) Apply(ev event.Event) {
 		var d event.ErrorData
 		_ = ev.Decode(&d)
 		s.Errors = append(s.Errors, d.Where+": "+d.Text)
-	case event.RelayStart, event.RelayInner, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd:
+	case event.RelayStart, event.RelayInner, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		s.applyRelay(ev)
 	}
 }
