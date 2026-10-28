@@ -464,7 +464,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	switch name {
 	case "relay_start":
 		profile := strings.TrimSpace(str("profile"))
-		dir := strings.TrimSpace(str("dir"))
+		dir := relay.ExpandHome(strings.TrimSpace(str("dir")))
 		var started string
 		var err error
 		r.sync(func() {

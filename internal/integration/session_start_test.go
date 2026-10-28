@@ -205,6 +205,17 @@ func TestSessionStartDirectoryIsCheckedAndPassedThrough(t *testing.T) {
 	if err != nil || first.Status != "succeeded" || got.Dir != elsewhere || first.Result["cwd"] != elsewhere {
 		t.Fatalf("%s %v %#v %v", first.Status, first.Result, got, err)
 	}
+	// Typed on a phone, ~ is the machine's home directory.
+	t.Setenv("HOME", filepath.Dir(elsewhere))
+	q = sessionStartCommand(t, s, g, "Look around")
+	q.Proposal.Parameters["cwd"] = "~/" + filepath.Base(elsewhere)
+	raw, _ = json.Marshal(q.Proposal)
+	q.Digest = artifact.Digest(raw)
+	got = SessionRequest{}
+	tilde, err := executeCommand(context.Background(), s, g, q, false)
+	if err != nil || tilde.Status != "succeeded" || got.Dir != elsewhere {
+		t.Fatalf("~ start dir: %s %v %#v %v", tilde.Status, tilde.Result, got, err)
+	}
 	for _, bad := range []string{"relative/path", filepath.Join(elsewhere, "missing")} {
 		q := sessionStartCommand(t, s, g, "Look around")
 		q.Proposal.Parameters["cwd"] = bad

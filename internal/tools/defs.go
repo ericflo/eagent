@@ -133,7 +133,7 @@ var relayTools = []llm.Tool{
 		"Start an external coding agent in a terminal eagent owns, and make this session a relay to it: from then on the user's messages are for that agent. profile is a relay profile (built in: \"codex\" = Codex GPT-6 Astra xhigh with --yolo, \"claude\" = Claude Code Opus 5.5 xhigh with --dangerously-skip-permissions). dir is where it works (default: your working directory). Use it only when the user asks for Codex or Claude to do the work.",
 		`{"type":"object","properties":{
 			"profile":{"type":"string"},
-			"dir":{"type":"string","description":"Absolute path, or relative to your working directory."}
+			"dir":{"type":"string","description":"Absolute path, ~/path, or relative to your working directory."}
 		},"required":["profile"]}`),
 	def("relay_forward",
 		"Send the user's message to the relayed agent exactly as they wrote it, with any files they attached. This is the normal way to pass on what the user said: never paraphrase their words into relay_send. mode: queue (default; if the agent is working it reads the message at its next step), interrupt (stop what it is doing first; only when the user asks to stop or redirect it now), or after_turn (hand it over when its current turn ends).",

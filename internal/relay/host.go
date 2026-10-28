@@ -367,6 +367,19 @@ func home() string {
 	return filepath.Clean("~")
 }
 
+// ExpandHome reads a folder the way a person writes it: "~" and "~/x" are
+// in the home directory. Anything else comes back as it was.
+func ExpandHome(dir string) string {
+	if dir != "~" && !strings.HasPrefix(dir, "~/") {
+		return dir
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return dir
+	}
+	return filepath.Join(h, dir[1:])
+}
+
 // KillSocket ends the tmux server on a socket eagent (or a test) owns and
 // removes the socket file, which tmux can leave behind.
 func KillSocket(socket string) {

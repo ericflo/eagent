@@ -19,6 +19,7 @@ import (
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
 )
@@ -630,7 +631,7 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			prompt, _ := q.Proposal.Parameters["prompt"].(string)
 			dir, _ := q.Proposal.Parameters["cwd"].(string)
 			relayProfile, _ := q.Proposal.Parameters["relay"].(string)
-			dir, relayProfile = strings.TrimSpace(dir), strings.TrimSpace(relayProfile)
+			dir, relayProfile = relay.ExpandHome(strings.TrimSpace(dir)), strings.TrimSpace(relayProfile)
 			if _, err := s.ValidateAction(q.Proposal, grant); err != nil {
 				prepareErr = err
 			} else if strings.TrimSpace(prompt) == "" && relayProfile == "" {

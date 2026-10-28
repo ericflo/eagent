@@ -163,7 +163,7 @@ func checkStartDir(dir string) error {
 		return nil
 	}
 	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("the start directory must be an absolute path")
+		return fmt.Errorf("the start directory must be an absolute path (or ~/…)")
 	}
 	st, err := os.Stat(dir)
 	if err != nil {

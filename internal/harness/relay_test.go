@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -800,5 +801,48 @@ func TestRelayThreadOnThePhoneGetsReceiptsReportsAndScreens(t *testing.T) {
 	})
 	if got := seat.sentTexts(); len(got) != 2 {
 		t.Fatalf("the agent got %q (commands and the status question stay with eagent)", got)
+	}
+}
+
+// "Start codex in ~/Development/snowdown": the folder is read the way the
+// user wrote it, not as a "~" directory inside the working directory.
+func TestRelayStartReadsTheHomeFolder(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, "Development", "snowdown")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seat := newFakeSeat("Ready.")
+	launched, _ := useFakeRelays(t, seat)
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model != "orch" {
+			return reply{calls: []event.ToolCall{tc("hold", `{"reason":"nothing yet"}`)}}
+		}
+		switch {
+		case !strings.Contains(all, "Started."):
+			return reply{calls: []event.ToolCall{tc("relay_start", `{"profile":"codex","dir":"~/Development/snowdown"}`)}}
+		case !strings.Contains(all, "Stopped Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"test over"}`)}}
+		default:
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"started and stopped"}`)}}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "cd to ~/Development/snowdown and start codex there"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit code %d; logs: %v", code, ui.logs)
+	}
+	if len(*launched) != 1 || (*launched)[0].Dir != want {
+		t.Fatalf("launched %+v, want it in %s", *launched, want)
 	}
 }

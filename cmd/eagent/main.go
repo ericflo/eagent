@@ -225,7 +225,7 @@ func run(args []string) int {
 		}
 	}
 	if *startDir != "" {
-		dir, err := filepath.Abs(*startDir)
+		dir, err := filepath.Abs(relay.ExpandHome(*startDir))
 		if err != nil {
 			return fail(err)
 		}

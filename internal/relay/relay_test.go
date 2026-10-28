@@ -374,3 +374,20 @@ func TestTmuxPasteIsExact(t *testing.T) {
 		t.Fatalf("list = %+v", listed)
 	}
 }
+
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for in, want := range map[string]string{
+		"~":                 home,
+		"~/Development/foo": filepath.Join(home, "Development/foo"),
+		"/srv/app":          "/srv/app",
+		"rel/dir":           "rel/dir",
+		"~bob/x":            "~bob/x",
+		"":                  "",
+	} {
+		if got := ExpandHome(in); got != want {
+			t.Errorf("ExpandHome(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
