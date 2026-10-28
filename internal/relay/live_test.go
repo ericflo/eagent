@@ -24,7 +24,7 @@ func TestLiveRelay(t *testing.T) {
 	old := Socket
 	Socket = fmt.Sprintf("eagent-live-%d", os.Getpid())
 	defer func() {
-		exec.Command("tmux", "-L", Socket, "kill-server").Run()
+		KillSocket(Socket)
 		Socket = old
 	}()
 	exe := filepath.Join(t.TempDir(), "eagent")
@@ -75,7 +75,8 @@ func TestLiveRelay(t *testing.T) {
 				t.Fatalf("send: %v\n%s", err, screen)
 			}
 			wait("delivery of r1", 60*time.Second, func(ev Event) bool { return ev.Kind == KindDelivered && ev.SendID == "r1" && ev.OK })
-			turn := wait("first turn", 120*time.Second, func(ev Event) bool { return ev.Kind == KindTurn })
+			// Generous: the model itself is sometimes slow to answer even this.
+			turn := wait("first turn", 240*time.Second, func(ev Event) bool { return ev.Kind == KindTurn })
 			if !strings.Contains(turn.Text, "ALPHA") {
 				t.Fatalf("turn text %q", turn.Text)
 			}

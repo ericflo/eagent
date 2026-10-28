@@ -217,7 +217,12 @@ func TestSeatAnswersStartupDialogs(t *testing.T) {
 		t.Fatalf("keys for the trust prompt = %q", h.keys)
 	}
 	h.screen = "❯ Try \"refactor <filepath>\"\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
-	s.checkScreen(time.Now())
+	now := time.Now()
+	s.checkScreen(now)
+	if s.Snapshot().State != "starting" {
+		t.Fatalf("one ready-looking screen is not enough (Codex flashes one before its trust prompt)")
+	}
+	s.checkScreen(now.Add(1500 * time.Millisecond))
 	if s.Snapshot().State != "idle" {
 		t.Fatalf("an agent at its prompt should be idle, is %s", s.Snapshot().State)
 	}
@@ -332,7 +337,7 @@ func TestTmuxPasteIsExact(t *testing.T) {
 	old := Socket
 	Socket = fmt.Sprintf("eagent-test-%d", os.Getpid())
 	defer func() {
-		exec.Command("tmux", "-L", Socket, "kill-server").Run()
+		KillSocket(Socket)
 		Socket = old
 	}()
 	dir := t.TempDir()

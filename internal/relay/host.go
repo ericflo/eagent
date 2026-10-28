@@ -366,3 +366,14 @@ func home() string {
 	}
 	return filepath.Clean("~")
 }
+
+// KillSocket ends the tmux server on a socket eagent (or a test) owns and
+// removes the socket file, which tmux can leave behind.
+func KillSocket(socket string) {
+	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	_ = os.Remove(filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), socket))
+}

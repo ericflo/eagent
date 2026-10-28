@@ -425,10 +425,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				return
 			}
 		}
-		meta := map[string]any{"relay": r.relayThreadMeta()}
-		p.enqueue(func(ctx context.Context) {
-			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
-		})
+		r.publishRelayMeta()
 	case event.RelaySend:
 		var d event.RelaySendData
 		_ = ev.Decode(&d)

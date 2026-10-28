@@ -842,7 +842,7 @@ func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts
 		return
 	}
 	if strings.HasPrefix(line, "/") && !r.relayPassthrough(line, source) {
-		r.slashCommand(line)
+		r.slashCommandFrom(line, client)
 		return
 	}
 	r.ui.Idle(false)
@@ -868,10 +868,17 @@ func optionIndex(line string, options []string) int {
 	return -1
 }
 
-func (r *Runtime) slashCommand(line string) {
+func (r *Runtime) slashCommand(line string) { r.slashCommandFrom(line, nil) }
+
+// slashCommandFrom runs a command; client is what the sending client
+// declared (its time zone reads "/autopilot until 10:00" in the user's time,
+// not the machine's).
+func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 	fields := strings.Fields(line)
+	// Phone keyboards capitalise the first letter: "/Interrupt" is /interrupt.
+	fields[0] = strings.ToLower(fields[0])
 	if relayCommands[fields[0]] {
-		r.relayCommand(fields)
+		r.relayCommand(fields, client)
 		return
 	}
 	switch fields[0] {

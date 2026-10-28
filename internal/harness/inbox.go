@@ -110,7 +110,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 			return
 		}
 		if strings.HasPrefix(text, "/") && !r.relayPassthrough(text, msg.From) {
-			r.slashCommand(text)
+			r.slashCommandFrom(text, msg.Client)
 			return
 		}
 		if msg.Route != "" || msg.Delivery != "" {

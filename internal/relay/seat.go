@@ -88,6 +88,7 @@ type Seat struct {
 	turnImages []string
 	limitMark  float64
 	handled    map[string]time.Time // dialog -> when it was last answered
+	readySince time.Time            // when the screen first looked ready while starting
 	closed     bool
 }
 
@@ -261,6 +262,14 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	state, err := s.waitReady(40 * time.Second)
 	if err != nil {
 		return "", err
+	}
+	// Last look before typing: text typed into a dialog is lost (or worse).
+	for i := 0; i < 3; i++ {
+		screen, err := s.host.Capture(s.target, 0)
+		if err != nil || !s.answerDialog(screen, time.Now()) {
+			break
+		}
+		time.Sleep(time.Second)
 	}
 	label := s.agent.label()
 	switch mode {
@@ -597,20 +606,10 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Lock()
 	state := s.state
 	s.mu.Unlock()
-	for _, d := range dialogs {
-		if !containsAll(screen, d.match) {
-			continue
-		}
+	if s.answerDialog(screen, now) {
 		s.mu.Lock()
-		last := s.handled[d.name]
-		if now.Sub(last) < 5*time.Second {
-			s.mu.Unlock()
-			return
-		}
-		s.handled[d.name] = now
+		s.readySince = time.Time{} // a dialog was up: the screen was not ready
 		s.mu.Unlock()
-		_ = s.host.Keys(s.target, d.keys...)
-		s.emit(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
 		return
 	}
 	// A send that never arrived: if its text still sits in the input box,
@@ -643,7 +642,18 @@ func (s *Seat) checkScreen(now time.Time) {
 	since := now.Sub(s.stateAt)
 	s.mu.Unlock()
 	if state == "starting" && looksReady(screen) {
-		s.setState("idle", "")
+		// Codex draws a ready-looking screen for a moment before its trust
+		// prompt appears: ready only counts when it holds across two looks.
+		s.mu.Lock()
+		first := s.readySince.IsZero()
+		if first {
+			s.readySince = now
+		}
+		settled := !first && now.Sub(s.readySince) >= time.Second
+		s.mu.Unlock()
+		if settled {
+			s.setState("idle", "")
+		}
 	} else if state == "starting" && since > 25*time.Second {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
@@ -651,6 +661,28 @@ func (s *Seat) checkScreen(now time.Time) {
 	} else if state == "blocked" && looksReady(screen) {
 		s.setState("idle", "")
 	}
+}
+
+// answerDialog presses the answer to a known dialog on screen, at most once
+// per dialog every few seconds, and reports whether one was showing.
+func (s *Seat) answerDialog(screen string, now time.Time) bool {
+	for _, d := range dialogs {
+		if !containsAll(screen, d.match) {
+			continue
+		}
+		s.mu.Lock()
+		last := s.handled[d.name]
+		if now.Sub(last) < 3*time.Second {
+			s.mu.Unlock()
+			return true
+		}
+		s.handled[d.name] = now
+		s.mu.Unlock()
+		_ = s.host.Keys(s.target, d.keys...)
+		s.emit(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
+		return true
+	}
+	return false
 }
 
 // looksReady recognises an agent at its input prompt.

@@ -2,11 +2,15 @@ package harness
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
@@ -581,4 +585,125 @@ func runUntilCleanup(t *testing.T, rt *Runtime, ctx context.Context, cancel cont
 		cancel()
 		<-done
 	})
+}
+
+// TestLiveRelaySession runs a whole relay session against the real Claude
+// Code CLI (Haiku, low effort) on a private tmux socket, with eagent's own
+// actors scripted: the brief is forwarded on arrival, Claude's answer comes
+// back as a turn that wakes the orchestrator, and stopping the relay ends
+// it. Spends a cent of usage, so only with EAGENT_LIVE_RELAY=1.
+func TestLiveRelaySession(t *testing.T) {
+	if os.Getenv("EAGENT_LIVE_RELAY") != "1" {
+		t.Skip("set EAGENT_LIVE_RELAY=1 to run against the real Claude Code CLI")
+	}
+	// The hermetic HOME would hide the user's Claude login.
+	if real := os.Getenv("EAGENT_REAL_HOME"); real != "" {
+		t.Setenv("HOME", real)
+	} else {
+		t.Skip("set EAGENT_REAL_HOME to the home directory holding the Claude Code login")
+	}
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	old := relay.Socket
+	relay.Socket = fmt.Sprintf("eagent-live-%d", os.Getpid())
+	defer func() {
+		relay.KillSocket(relay.Socket)
+		relay.Socket = old
+	}()
+	var mu sync.Mutex
+	var turnText string
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model != "orch" {
+			if strings.Contains(lastUserText(msgs), "final") || strings.Contains(all, "DECLARED THE WORK DONE") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		switch {
+		case !strings.Contains(all, "[Claude finished a turn"):
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting for Claude"}`)}}
+		case !strings.Contains(all, "Stopped Claude"):
+			i := strings.Index(all, "[Claude finished a turn")
+			mu.Lock()
+			turnText = all[i:min(len(all), i+300)]
+			mu.Unlock()
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ok"}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	cfg := testConfig(s.srv.URL)
+	cfg.Relay.Profiles = map[string]config.RelayProfile{"haiku": {Agent: "claude", Model: "claude-haiku-5-5", Effort: "low", Args: []string{"--dangerously-skip-permissions"}, Host: "tmux"}}
+	project := t.TempDir()
+	ui := &fakeUI{}
+	rt, err := New(cfg, Options{Project: project, Prompt: "Reply with exactly the word PELICAN and nothing else.", Relay: "haiku"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d: %v", code, ui.logs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(turnText, "PELICAN") {
+		t.Fatalf("the orchestrator saw %q", turnText)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	rel := st.Relays["haiku"]
+	if rel == nil || rel.Turns < 1 || len(rel.Undelivered) != 0 || rel.InnerID == "" || rel.Transcript == "" {
+		t.Fatalf("relay state %+v", rel)
+	}
+}
+
+func TestRelayCommandFromAPhoneUsesItsTimeZoneAndAnyCase(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("ok"))
+	release := make(chan struct{})
+	defer close(release)
+	brain := func(model string, msgs []map[string]any) reply {
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}, block: release}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runUntilCleanup(t, rt, ctx, cancel)
+	manila, err := time.LoadLocation("Asia/Manila")
+	if err != nil {
+		t.Skip("no tz database")
+	}
+	done := make(chan struct{})
+	rt.post(func() {
+		rt.handleInbox(InboxMessage{Type: "message", Text: "/Autopilot until 10:00 finish the importer", From: "finalechat", Client: &clientcaps.Caps{Source: "finalechat", Timezone: "Asia/Manila"}})
+		close(done)
+	})
+	<-done
+	deadline := time.Now().Add(5 * time.Second)
+	var ap *event.RelayAutopilotData
+	for time.Now().Before(deadline) {
+		rt.sync(func() { ap = rt.st.Relays["codex"].Autopilot })
+		if ap != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ap == nil {
+		t.Fatalf("/Autopilot was not taken as the command")
+	}
+	until, _ := time.Parse(time.RFC3339, ap.Until)
+	if got := until.In(manila); got.Hour() != 10 || got.Minute() != 0 || ap.Instruction != "finish the importer" {
+		t.Fatalf("until %s in Manila = %s, instruction %q", ap.Until, got, ap.Instruction)
+	}
 }

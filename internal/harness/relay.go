@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 )
@@ -103,7 +106,9 @@ func (r *Runtime) relaySpec(name, profile, dir string) (relay.Spec, error) {
 		// Claude Code's Stop hook hands over messages held for the end of a
 		// turn; it is this binary, reading the relay's spool.
 		spec.Spool = filepath.Join(r.sess.Path, "relays", name, "after_turn")
-		if exe, err := os.Executable(); err == nil {
+		// Only an eagent binary has the relay-hook command (not a test
+		// binary); without the hook, held messages are typed instead.
+		if exe, err := os.Executable(); err == nil && strings.HasPrefix(filepath.Base(exe), "eagent") {
 			spec.Hook = relay.ShellQuote(exe) + " relay-hook " + relay.ShellQuote(spec.Spool)
 		}
 	}
@@ -1090,7 +1095,7 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	switch cmd := fields[0]; {
+	switch cmd := strings.ToLower(fields[0]); {
 	case relayCommands[cmd]:
 		return false
 	case cmd == "/quit" || cmd == "/exit" || cmd == "/q" || cmd == "/kill":
@@ -1108,7 +1113,7 @@ var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgr
 // relayCommand runs one. Called on the loop; the work runs on its own
 // goroutine (an upgrade takes minutes) and the outcome is told to the user
 // directly, in plain words, without waiting for a model.
-func (r *Runtime) relayCommand(fields []string) {
+func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	if len(r.st.RelayOrder) == 0 {
 		r.ui.Log("there is no relay in this session")
 		go r.deliverMessage("There is no relay in this session; start one with eagent relay codex (or claude).", false)
@@ -1147,7 +1152,19 @@ func (r *Runtime) relayCommand(fields []string) {
 			case len(args) > 0 && (args[0] == "off" || args[0] == "stop"):
 				params["off"] = true
 			case len(args) > 1 && args[0] == "until":
-				params["until"] = args[1]
+				// Read the time where the user is: a phone in Manila means
+				// Manila's 10:00, whatever the machine's zone.
+				now := time.Now()
+				if client != nil && client.Timezone != "" {
+					if loc, err := time.LoadLocation(client.Timezone); err == nil {
+						now = now.In(loc)
+					}
+				}
+				if t, err := parseUntil(args[1], now); err == nil {
+					params["until"] = t.Format(time.RFC3339)
+				} else {
+					params["until"] = args[1] // the tool reports the error
+				}
 				if len(args) > 2 {
 					params["instruction"] = strings.Join(args[2:], " ")
 				}
@@ -1193,6 +1210,7 @@ func (r *Runtime) setRelayCadence(args []string) {
 	}
 	r.relayQuietSet = r.relayQuietSet || strings.HasPrefix(msg, "No progress") || strings.HasPrefix(msg, "A progress")
 	r.ui.Log("%s", msg)
+	r.publishRelayMeta()
 	go r.deliverMessage(msg, false)
 }
 
@@ -1232,9 +1250,27 @@ func (r *Runtime) relayThreadMeta() any {
 		return nil
 	}
 	rel := active[0]
-	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": ""}
+	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "", "updates": ""}
 	if rel.Autopilot != nil {
 		m["autopilot_until"] = rel.Autopilot.Until
 	}
+	if r.relayQuietSet {
+		// What /updates set: "off", or a cadence like "15m". "" is the default.
+		m["updates"] = "off"
+		if r.relayQuiet > 0 {
+			m["updates"] = roundDur(r.relayQuiet)
+		}
+	}
 	return m
+}
+
+// publishRelayMeta updates the phone thread's relay header. Loop goroutine.
+func (r *Runtime) publishRelayMeta() {
+	if r.phone == nil {
+		return
+	}
+	p, meta := r.phone, map[string]any{"relay": r.relayThreadMeta()}
+	p.enqueue(func(ctx context.Context) {
+		_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
+	})
 }
