@@ -1257,8 +1257,13 @@ func (r *Runtime) relayThreadMeta() any {
 	if r.relayQuietSet {
 		// What /updates set: "off", or a cadence like "15m". "" is the default.
 		m["updates"] = "off"
-		if r.relayQuiet > 0 {
-			m["updates"] = roundDur(r.relayQuiet)
+		if d := r.relayQuiet; d > 0 {
+			// The commands' own form: "5m", "15m", "1h".
+			if d%time.Hour == 0 {
+				m["updates"] = fmt.Sprintf("%dh", int(d/time.Hour))
+			} else {
+				m["updates"] = fmt.Sprintf("%dm", int(d/time.Minute))
+			}
 		}
 	}
 	return m
