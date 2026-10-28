@@ -39,12 +39,6 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 			})
 		}
 		body["tools"] = tools
-		switch req.ToolChoice {
-		case "required":
-			body["tool_choice"] = "required"
-		case "none":
-			body["tool_choice"] = "none"
-		}
 	}
 	if e := c.Endpoint.ReasoningEffort; e != "" {
 		body["reasoning_effort"] = e

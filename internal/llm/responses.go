@@ -37,12 +37,6 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 			})
 		}
 		body["tools"] = tools
-		switch req.ToolChoice {
-		case "required":
-			body["tool_choice"] = "required"
-		case "none":
-			body["tool_choice"] = "none"
-		}
 	}
 	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" {
 		body["reasoning"] = map[string]any{"effort": e, "summary": "auto"}

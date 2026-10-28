@@ -49,12 +49,6 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			tools = append(tools, tool)
 		}
 		body["tools"] = tools
-		switch req.ToolChoice {
-		case "required":
-			body["tool_choice"] = map[string]any{"type": "any"}
-		case "none":
-			body["tool_choice"] = map[string]any{"type": "none"}
-		}
 	}
 	thinking := false
 	budgeted := c.anthropicBudgeted.Load() // the flavour this call sends
@@ -80,10 +74,6 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			// Current models: adaptive thinking steered by effort.
 			body["thinking"] = map[string]any{"type": "adaptive"}
 			body["output_config"] = map[string]any{"effort": e}
-		}
-		// Thinking is incompatible with forced tool use.
-		if thinking && req.ToolChoice == "required" {
-			delete(body, "tool_choice")
 		}
 	}
 	resp, err := c.post(ctx, "/messages", body, map[string]string{

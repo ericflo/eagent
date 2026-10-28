@@ -332,7 +332,7 @@ func TestAnthropicBudgetFitsUnderMaxTokens(t *testing.T) {
 		c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "claude-old", APIKey: "k", ReasoningEffort: "high", MaxTokens: tc.maxTokens})
 		c.anthropicBudgeted.Store(true)
 		c.MaxAttempts = 1
-		req := Request{Messages: []Message{{Role: "user", Text: "hi"}}, ToolChoice: "required", Tools: []Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}}}
+		req := Request{Messages: []Message{{Role: "user", Text: "hi"}}, Tools: []Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}}}
 		if _, err := c.Complete(context.Background(), req, nil); err != nil {
 			t.Fatalf("max_tokens %d: %v", tc.maxTokens, err)
 		}
@@ -348,8 +348,8 @@ func TestAnthropicBudgetFitsUnderMaxTokens(t *testing.T) {
 		if has && int(th["budget_tokens"].(float64)) != tc.budget {
 			t.Fatalf("max_tokens %d: budget %v want %d", tc.maxTokens, th["budget_tokens"], tc.budget)
 		}
-		if _, forced := parsed["tool_choice"]; forced == has {
-			t.Fatalf("max_tokens %d: tool_choice must be dropped exactly when thinking is sent", tc.maxTokens)
+		if _, forced := parsed["tool_choice"]; forced {
+			t.Fatalf("max_tokens %d: tool_choice is never sent (the default, auto, is the only choice every model accepts)", tc.maxTokens)
 		}
 	}
 }

@@ -171,7 +171,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 	}
 	req := llm.Request{
 		System: r.narratorSystem(phoneLine, relayWho), Messages: msgs, Tools: r.narrTools,
-		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
+		CacheKey: r.sess.ID + "-narrator",
 	}
 	leakRetried := false
 	for attempt := 0; attempt < 2; attempt++ {
