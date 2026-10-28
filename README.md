@@ -129,6 +129,8 @@ eagent relays attach codex                             # watch or type into one 
 
 A relay session runs another coding agent in a tmux terminal eagent owns (screen when tmux is not installed) and passes your messages to it. The built-in profiles are `codex` (GPT-6 Astra, xhigh, `--yolo`) and `claude` (Opus 5.5, xhigh, `--dangerously-skip-permissions`); add your own under `"relay": {"profiles": {...}}` in the project config. eagent advertises the profiles to Finalechat's New session screen, so a phone can start a relay too.
 
+The agent works in the folder the session starts in: `--cwd` in a terminal, the folder chip on the phone (pick one, or type any path, `~/…` included). Mid-session, "start Claude in ~/Development/snowdown" starts one there.
+
 - Your words reach the agent verbatim, the moment they arrive, whatever eagent is doing. "Stop", "wait" and "don't…" interrupt it first. Messages for eagent itself (`@e …`, "not for relay"), questions about the relay ("how's it going?") and requests to restart or change the update cadence stay with eagent.
 - What the agent says and does is read from its own transcript (Codex rollouts, Claude Code session files), not scraped off the screen: nothing scrolls off, ghost suggestions are not mistaken for questions, and every send is confirmed when the transcript shows it arrived. Its folder-trust and update prompts are answered on the way up.
 - eagent is woken when the agent finishes a turn, needs attention, or crosses 50/80/95% of its usage budget, never on a timer. The narrator relays the agent's own report, attaches the screenshots it made, and sends a progress line every 15 minutes while it works (`relay.quiet_seconds`).
