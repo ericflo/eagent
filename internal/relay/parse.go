@@ -213,7 +213,8 @@ const (
 )
 
 type claudeParser struct {
-	held string // the latest assistant text; it is either progress or the turn's report
+	held   string // the latest assistant text; it is either progress or the turn's report
+	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -250,18 +251,27 @@ func (p *claudeParser) line(raw []byte) []obs {
 		switch ev.Subtype {
 		case "turn_duration":
 			text := p.held
-			p.held = ""
+			p.held, p.inTurn = "", false
 			return []obs{{kind: "turn", text: text, at: at, durationMS: ev.DurationMS}}
 		case "compact_boundary":
 			return []obs{{kind: "compact", at: at}}
 		}
 		return nil
 	case "user":
-		if ev.IsMeta || ev.Message == nil {
+		if ev.Message == nil {
 			return nil
 		}
 		var s string
-		if json.Unmarshal(ev.Message.Content, &s) == nil {
+		isText := json.Unmarshal(ev.Message.Content, &s) == nil
+		if ev.IsMeta {
+			// Meta lines are the TUI's own, except the Stop hook's hand-over
+			// of a held message, which Claude records as meta.
+			if isText && strings.HasPrefix(s, stopHookPrefix) {
+				return p.userText(s, at)
+			}
+			return nil
+		}
+		if isText {
 			return p.userText(s, at)
 		}
 		var parts []struct {
@@ -328,14 +338,22 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 	switch {
 	case strings.HasPrefix(s, interrupted):
 		text := p.held
-		p.held = ""
+		p.held, p.inTurn = "", false
 		return []obs{{kind: "aborted", text: text, at: at}}
 	case strings.HasPrefix(s, stopHookPrefix):
-		return []obs{{kind: "user", text: strings.TrimPrefix(s, stopHookPrefix), at: at}, {kind: "working", at: at}}
+		// The Stop hook handed over a held message: the turn that was
+		// running has ended (Claude continues in the same session turn, so
+		// no turn_duration marks it), and the next one starts.
+		var out []obs
+		if p.inTurn {
+			out = append(out, obs{kind: "turn", text: p.held, at: at})
+		}
+		p.held, p.inTurn = "", true
+		return append(out, obs{kind: "user", text: strings.TrimPrefix(s, stopHookPrefix), at: at}, obs{kind: "working", at: at})
 	case strings.HasPrefix(s, "<local-command") || strings.HasPrefix(s, "<command-name>") || strings.HasPrefix(s, "<bash-"):
 		return nil // the TUI's own bookkeeping
 	}
-	p.held = ""
+	p.held, p.inTurn = "", true
 	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
 }
 

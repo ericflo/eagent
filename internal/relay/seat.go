@@ -577,7 +577,11 @@ var dialogs = []dialog{
 	{name: "claude-bypass", match: []string{"Bypass Permissions mode", "Yes, I accept"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's bypass-permissions warning"},
 	// Codex: the default choice is "Trust and continue".
 	{name: "codex-trust", match: []string{"Trust this folder?", "Trust and continue"}, keys: []string{"Enter"}, what: "accepted Codex's folder-trust prompt"},
-	{name: "codex-update", match: []string{"Update available"}, keys: []string{"Escape"}, what: "dismissed Codex's update notice (run an upgrade later)"},
+	// Codex's update prompt: choose "2. Skip" explicitly (never Escape,
+	// which quits on the trust prompt). Upgrading is the user's call; the
+	// notice says one is available. Without the menu, the "Update
+	// available" box is only a notice above a working prompt.
+	{name: "codex-update", match: []string{"Update now", "Skip until next version"}, keys: []string{"Down", "Enter"}, what: "skipped Codex's update prompt for now (a newer Codex is available; upgrade with `codex update` and a restart)"},
 }
 
 func (s *Seat) checkScreen(now time.Time) {
@@ -591,9 +595,6 @@ func (s *Seat) checkScreen(now time.Time) {
 	for _, d := range dialogs {
 		if !containsAll(screen, d.match) {
 			continue
-		}
-		if d.name == "codex-update" && state != "starting" {
-			continue // the notice is only modal at startup
 		}
 		s.mu.Lock()
 		last := s.handled[d.name]

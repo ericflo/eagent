@@ -33,7 +33,8 @@ type Host interface {
 	Paste(name, text string) error
 	// Keys presses named keys: Enter, Escape, Up, Down, Tab, C-c.
 	Keys(name string, keys ...string) error
-	// Capture returns the screen and up to lines of scrollback as text.
+	// Capture returns the visible screen (lines 0) or the screen plus up to
+	// lines of scrollback, as text.
 	Capture(name string, lines int) (string, error)
 	// Kill ends the session and its program.
 	Kill(name string) error
@@ -163,7 +164,7 @@ func (Tmux) Keys(name string, keys ...string) error {
 
 func (Tmux) Capture(name string, lines int) (string, error) {
 	if lines <= 0 {
-		lines = 60
+		return tmux(nil, "capture-pane", "-p", "-J", "-t", name+":")
 	}
 	return tmux(nil, "capture-pane", "-p", "-J", "-t", name+":", "-S", "-"+strconv.Itoa(lines))
 }
@@ -292,7 +293,11 @@ func (Screen) Capture(name string, lines int) (string, error) {
 	path := f.Name()
 	f.Close()
 	defer os.Remove(path)
-	if _, err := screen(name, "hardcopy", "-h", path); err != nil {
+	args := []string{"hardcopy", path}
+	if lines > 0 {
+		args = []string{"hardcopy", "-h", path}
+	}
+	if _, err := screen(name, args...); err != nil {
 		return "", err
 	}
 	raw, err := os.ReadFile(path)

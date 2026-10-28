@@ -70,7 +70,8 @@ func TestClaudeParser(t *testing.T) {
 		`{"type":"assistant",`+ts+`,"message":{"content":[{"type":"text","text":"ONE"}]}}`,
 		`{"type":"assistant","isSidechain":true,`+ts+`,"message":{"content":[{"type":"text","text":"subagent chatter"}]}}`,
 		`{"type":"system","subtype":"turn_duration",`+ts+`,"durationMs":5200}`,
-		`{"type":"user",`+ts+`,"message":{"content":"Stop hook feedback:\nNow TWO"}}`,
+		`{"type":"user","isMeta":true,`+ts+`,"message":{"content":"Stop hook feedback:\nNow TWO"}}`,
+		`{"type":"user","isMeta":true,`+ts+`,"message":{"content":"<system-reminder>ignored</system-reminder>"}}`,
 		`{"type":"assistant",`+ts+`,"message":{"content":[{"type":"text","text":"partial"}]}}`,
 		`{"type":"user",`+ts+`,"message":{"content":"[Request interrupted by user]"}}`,
 	)
