@@ -707,3 +707,98 @@ func TestRelayCommandFromAPhoneUsesItsTimeZoneAndAnyCase(t *testing.T) {
 		t.Fatalf("until %s in Manila = %s, instruction %q", ap.Until, got, ap.Instruction)
 	}
 }
+
+// lastPhoneMessageID is the id of the newest message the fake phone holds.
+func (f *fakePhone) lastPhoneMessageID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.messages) == 0 {
+		return ""
+	}
+	id, _ := f.messages[len(f.messages)-1]["id"].(string)
+	return id
+}
+
+func TestRelayThreadOnThePhoneGetsReceiptsReportsAndScreens(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	seat := newFakeSeat("Fixed the flaky login test; main is green.")
+	useFakeRelays(t, seat)
+	fp := newFakePhone(true)
+	defer fp.srv.Close()
+	brain := func(model string, msgs []map[string]any) reply {
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	project := t.TempDir()
+	ui := &fakeUI{}
+	rt, err := New(fakePhoneConfig(t, project, s.srv.URL, fp), Options{Project: project, Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	runUntilCleanup(t, rt, ctx, cancel)
+	lastReceipt := func(id string) string {
+		got := ""
+		for _, m := range fp.metaPatches() {
+			if rr, ok := m["relay_receipts"].(map[string]any); ok {
+				if v, ok := rr[id].(string); ok {
+					got = v
+				}
+			}
+		}
+		return got
+	}
+	reports := func() []map[string]any {
+		return fp.postsWhere(func(p map[string]any) bool {
+			meta, _ := p["meta"].(map[string]any)
+			return meta["kind"] == "relay_report"
+		})
+	}
+
+	// Replies sent before the mirror's first poll predate the session.
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	fp.userReply("Fix the flaky login test")
+	first := fp.lastPhoneMessageID()
+	waitFor(t, "a delivered receipt", func() bool { return lastReceipt(first) == "delivered" })
+	waitFor(t, "the agent's report", func() bool { return len(reports()) == 1 })
+	if r := reports()[0]; r["body"] != "Fixed the flaky login test; main is green." || r["importance"] == "important" {
+		t.Fatalf("report %v", r)
+	}
+
+	fp.userReply("/notify-done")
+	waitFor(t, "notify_done in the relay meta", func() bool {
+		for _, m := range fp.metaPatches() {
+			if rel, ok := m["relay"].(map[string]any); ok && rel["notify_done"] == true {
+				return true
+			}
+		}
+		return false
+	})
+	fp.userReply("Also update the docs")
+	waitFor(t, "a second report", func() bool { return len(reports()) == 2 })
+	if r := reports()[1]; r["importance"] != "important" {
+		t.Fatalf("the report after /notify-done should buzz: %v", r)
+	}
+
+	fp.userReply("How's it going?")
+	kept := fp.lastPhoneMessageID()
+	waitFor(t, "a kept-for-eagent receipt", func() bool { return lastReceipt(kept) == "eagent" })
+
+	fp.userReply("/screen")
+	waitFor(t, "a screen card", func() bool {
+		return len(fp.postsWhere(func(p map[string]any) bool {
+			meta, _ := p["meta"].(map[string]any)
+			body, _ := p["body"].(string)
+			return meta["kind"] == "relay_screen" && strings.Contains(body, "Ask Codex to do anything")
+		})) == 1
+	})
+	if got := seat.sentTexts(); len(got) != 2 {
+		t.Fatalf("the agent got %q (commands and the status question stay with eagent)", got)
+	}
+}

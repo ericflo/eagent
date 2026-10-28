@@ -186,6 +186,9 @@ type UserMessageData struct {
 	// agent: queue, interrupt, or after_turn. Both are empty when unsaid.
 	Route    string `json:"route,omitempty"`
 	Delivery string `json:"delivery,omitempty"`
+	// PhoneID is the Finalechat message id when the message came from the
+	// phone, so the thread can show what became of it (relay receipts).
+	PhoneID string `json:"phone_id,omitempty"`
 }
 
 // Attachment is a file carried by a message: a screenshot the user sent

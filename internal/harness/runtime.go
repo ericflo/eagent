@@ -118,6 +118,7 @@ type Runtime struct {
 	phone               *phone // Finalechat mirror; nil when off
 	relays              relaySeats
 	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
+	relayNotifyDone     map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
 	relayQuiet          time.Duration          // progress cadence the user set with /updates (when relayQuietSet)
 	relayQuietSet       bool
 	toolImagesMu        sync.Mutex
@@ -921,7 +922,7 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		}
 	case "/help", "/?":
 		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /quit  (anything else is sent to the agent)")
-		r.ui.Log("relay: /relay /interrupt /restart /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
+		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}

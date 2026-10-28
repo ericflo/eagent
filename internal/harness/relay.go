@@ -321,11 +321,14 @@ func (r *Runtime) autoForward(seq int64) {
 		text, atts, route, delivery = d.Text, d.Attachments, d.Route, d.Delivery
 		break
 	}
-	if strings.TrimSpace(text) == "" && len(atts) == 0 || route == "eagent" {
+	if strings.TrimSpace(text) == "" && len(atts) == 0 {
 		return
 	}
 	// An explicit "to the agent" from the client wins over the guesses.
-	if route != "agent" && (addressedToEagent(text) || relayMeta(text)) {
+	if route == "eagent" || route != "agent" && (addressedToEagent(text) || relayMeta(text)) {
+		if r.phone != nil {
+			r.phone.setReceipt(r, seq, "eagent")
+		}
 		return
 	}
 	seat := r.relays.get(rel.Name)
@@ -1108,7 +1111,7 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 
 // relayCommands are the slash commands a user can type (terminal, web UI,
 // phone, Messenger) to manage a relay without the orchestrator.
-var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true}
+var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true, "/screen": true, "/notify-done": true}
 
 // relayCommand runs one. Called on the loop; the work runs on its own
 // goroutine (an upgrade takes minutes) and the outcome is told to the user
@@ -1120,8 +1123,35 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 		return
 	}
 	cmd, args := fields[0], fields[1:]
-	if cmd == "/updates" {
+	switch cmd {
+	case "/updates":
 		r.setRelayCadence(args)
+		return
+	case "/notify-done":
+		r.armNotifyDone()
+		return
+	case "/screen":
+		active := r.st.ActiveRelays()
+		if len(active) == 0 {
+			go r.deliverMessage("No relay is running.", false)
+			return
+		}
+		name, seat, phone := active[0].Name, r.relays.get(active[0].Name), r.phone
+		go func() {
+			if seat == nil {
+				r.deliverMessage("The agent is not running, so there is no screen to show.", false)
+				return
+			}
+			screen, err := seat.Screen(40)
+			if err != nil {
+				r.deliverMessage("Could not read its screen: "+err.Error(), false)
+				return
+			}
+			r.ui.Log("%s", screen)
+			if phone != nil {
+				phone.postRelayScreen(name, screen)
+			}
+		}()
 		return
 	}
 	go func() {
@@ -1188,6 +1218,28 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	}()
 }
 
+// armNotifyDone handles /notify-done: the agent's next turn report buzzes
+// the phone. Loop goroutine.
+func (r *Runtime) armNotifyDone() {
+	active := r.st.ActiveRelays()
+	if len(active) == 0 {
+		go r.deliverMessage("No relay is running.", false)
+		return
+	}
+	rel := active[0]
+	if r.relayNotifyDone == nil {
+		r.relayNotifyDone = map[string]bool{}
+	}
+	r.relayNotifyDone[rel.Name] = true
+	r.publishRelayMeta()
+	msg := "You'll get a buzz when " + rel.Who() + " finishes this turn."
+	if rel.State != "working" {
+		msg = rel.Who() + " is not working right now; you'll get a buzz when its next turn ends."
+	}
+	r.ui.Log("%s", msg)
+	go r.deliverMessage(msg, false)
+}
+
 // setRelayCadence handles /updates: how often a progress line comes while
 // the agent works ("off", "5m", "15m", "1h"). Turn reports always come.
 // Loop goroutine.
@@ -1250,7 +1302,8 @@ func (r *Runtime) relayThreadMeta() any {
 		return nil
 	}
 	rel := active[0]
-	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "", "updates": ""}
+	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "", "updates": "",
+		"target": rel.Target, "attach": "eagent relays attach " + rel.Target, "notify_done": r.relayNotifyDone[rel.Name]}
 	if rel.Autopilot != nil {
 		m["autopilot_until"] = rel.Autopilot.Until
 	}

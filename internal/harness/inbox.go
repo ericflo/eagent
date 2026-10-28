@@ -34,6 +34,8 @@ type InboxMessage struct {
 	// "interrupt / after this turn" choice from the client (relay sessions).
 	Route    string `json:"route,omitempty"`
 	Delivery string `json:"delivery,omitempty"`
+	// PhoneID is the Finalechat message id of a message from the phone.
+	PhoneID string `json:"phone_id,omitempty"`
 }
 
 // PostInbox writes a message for the session at sessionPath.
@@ -113,10 +115,10 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 			r.slashCommandFrom(text, msg.Client)
 			return
 		}
-		if msg.Route != "" || msg.Delivery != "" {
+		if msg.Route != "" || msg.Delivery != "" || msg.PhoneID != "" {
 			if q := r.st.Question; q == nil {
 				r.ui.Idle(false)
-				r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery}))
+				r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery, PhoneID: msg.PhoneID}))
 				return
 			}
 		}

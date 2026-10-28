@@ -57,6 +57,9 @@ type phone struct {
 	questions  map[string]string // eagent question id -> finalechat question id
 	fromPhone  map[string]string // finalechat question id -> eagent question id
 	lastID     string            // newest message id seen, for the poll
+	mirrored   map[int64]string  // user message seq -> the thread message mirroring it
+	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
+	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
 	gone       map[string]bool   // eagent question ids cancelled or expired on the phone
 	threadID   string
 	threadSeen bool
@@ -344,6 +347,9 @@ func gitBranch(ctx context.Context, project string) string {
 // observe mirrors a newly recorded event. Loop goroutine only.
 func (p *phone) observe(r *Runtime, ev event.Event) {
 	p.noteState(r)
+	if r.st.RelayMode() {
+		p.observeRelay(r, ev)
+	}
 	seq := strconv.FormatInt(ev.Seq, 10)
 	switch ev.Type {
 	case event.NarratorMessage:
@@ -455,6 +461,12 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
 			if err == nil {
 				p.remember(msg.ID)
+				p.mu.Lock()
+				if p.mirrored == nil {
+					p.mirrored = map[int64]string{}
+				}
+				p.mirrored[ev.Seq] = msg.ID
+				p.mu.Unlock()
 			}
 		})
 	}
@@ -688,8 +700,9 @@ func (p *phone) poll(r *Runtime) {
 			}
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
+			phoneID := m.ID
 			r.post(func() {
-				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery})
+				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery, PhoneID: phoneID})
 			})
 		}
 	}
