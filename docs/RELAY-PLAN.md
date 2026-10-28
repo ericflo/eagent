@@ -25,6 +25,18 @@ Checks:
 - `c973d71`: the relay badge and controls in the thread header, the To toggle and interrupting sends in the composer, the Running-now list, and Messenger pass-through for relay commands.
 - Checked through `/version`, the epsilon Flux commits, and `rollout status deploy/web`.
 
+Relay-thread affordances, 2026-10-28 overnight (eagent `10e036a`, `da4a116`; Finalechat `709d8f3`, live as `main-20261028094348-709d8f342f96`). The spec is in finalechat/docs/design/relay-affordances.md:
+- delivery receipts on your messages;
+- the agent's verbatim report folded under each turn summary, with Reply;
+- `/screen` terminal cards;
+- quick replies (Keep going, Commit & push, Deploy, Screenshots, Stop);
+- "Tell me when it's done" (`/notify-done`) and a bell on the badge;
+- Copy attach command;
+- recent agent and folder chips on New session;
+- Messenger quick-reply buttons.
+
+Deferred: a chip for Claude Code's suggested reply. Its suggestion did not appear in two live attempts, so there was nothing to build against reliably.
+
 Deliberately not built:
 - Idle auto-park. With no polling, an idle relay costs nothing but its terminal process.
 - Phone question countdowns. Autopilot covers the "waited all day" case.
