@@ -109,7 +109,15 @@ func (r *Runtime) narratorTimerFired(generation uint64) {
 	// new landed (a long command, a long think): that is when they most
 	// want to hear which step is taking its time.
 	limit := r.quietLimit()
-	if r.narrWorthy <= r.narrLastSeen && !(limit > 0 && r.quietFor() >= limit) {
+	quietDue := limit > 0 && r.quietFor() >= limit
+	if !r.orchBusy && len(r.st.RunningTasks()) == 0 {
+		// Only a relayed agent is working. Its remarks arrive constantly;
+		// the user hears its turn reports (through the orchestrator) and, in
+		// between, one progress line per quiet limit, not one per remark.
+		if !quietDue {
+			return
+		}
+	} else if r.narrWorthy <= r.narrLastSeen && !quietDue {
 		return
 	}
 	if r.narrPending == "" {
@@ -373,8 +381,13 @@ func (r *Runtime) deliverFallbackFinal() {
 // goroutine only.
 func (r *Runtime) quietLimit() time.Duration {
 	secs := r.activeSettings.NarratorQuietSeconds
-	if len(r.st.ActiveRelays()) > 0 && secs == r.cfg.NarratorQuietSeconds && secs > 0 {
-		secs = r.cfg.Relay.Quiet()
+	if len(r.st.ActiveRelays()) > 0 {
+		if r.relayQuietSet {
+			return r.relayQuiet // the user's /updates
+		}
+		if secs == r.cfg.NarratorQuietSeconds && secs > 0 {
+			secs = r.cfg.Relay.Quiet()
+		}
 	}
 	return time.Duration(secs) * time.Second
 }

@@ -401,8 +401,10 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			// Where a session started from the phone may begin: the app
 			// offers these, and any absolute path typed in.
 			view.Snapshot.Details["directories"] = directories
-			// Which agents it may relay to instead of eagent doing the work.
+			// Which agents it may relay to instead of eagent doing the work,
+			// and the relays running on this machine right now.
 			view.Snapshot.Details["relay_profiles"] = relayProfiles(project)
+			view.Snapshot.Details["relays"] = runningRelays()
 		}
 		var published struct {
 			Resource resourceInfo `json:"resource"`
@@ -413,6 +415,10 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 		publicationVersion := fmt.Sprintf("%s:%t:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptorRaw))
 		hints, _ := json.Marshal(linked)
 		publicationVersion += artifact.Digest(hints)
+		// Details (the running relays above all) change without the
+		// settings changing; their stable fields are part of the version.
+		details, _ := json.Marshal(view.Snapshot.Details)
+		publicationVersion += artifact.Digest(details)
 		if publicationVersion != lastVersion {
 			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": view.Generation}, &published, 0); err != nil {
 				return err

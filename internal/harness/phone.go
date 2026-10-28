@@ -416,6 +416,19 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				}
 			}
 		})
+	case event.RelayStart, event.RelayState, event.RelayTurn, event.RelayAutopilot, event.RelayEnd:
+		// The thread header shows the relayed agent and what it is doing.
+		if ev.Type == event.RelayState {
+			var d event.RelayStateData
+			_ = ev.Decode(&d)
+			if rel := r.st.Relays[d.Name]; rel == nil || len(r.st.ActiveRelays()) == 0 || r.st.ActiveRelays()[0].Name != d.Name {
+				return
+			}
+		}
+		meta := map[string]any{"relay": r.relayThreadMeta()}
+		p.enqueue(func(ctx context.Context) {
+			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
+		})
 	case event.RelaySend:
 		var d event.RelaySendData
 		_ = ev.Decode(&d)

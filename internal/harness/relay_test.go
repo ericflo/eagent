@@ -16,13 +16,14 @@ import (
 // fakeSeat stands in for an agent in a terminal: whatever is sent to it is
 // recorded, and it answers each message with one finished turn.
 type fakeSeat struct {
-	mu     sync.Mutex
-	sent   []string
-	modes  []string
-	events chan relay.Event
-	once   sync.Once
-	killed bool
-	reply  string
+	mu         sync.Mutex
+	sent       []string
+	modes      []string
+	events     chan relay.Event
+	once       sync.Once
+	killed     bool
+	reply      string
+	interrupts int
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -42,7 +43,12 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 	f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}}
 	return "typed into Codex", nil
 }
-func (f *fakeSeat) Interrupt() error           { return nil }
+func (f *fakeSeat) Interrupt() error {
+	f.mu.Lock()
+	f.interrupts++
+	f.mu.Unlock()
+	return nil
+}
 func (f *fakeSeat) Keys(...string) error       { return nil }
 func (f *fakeSeat) Screen(int) (string, error) { return "› Ask Codex to do anything", nil }
 func (f *fakeSeat) Kill() error                { f.mu.Lock(); f.killed = true; f.mu.Unlock(); f.Close(); return nil }
@@ -503,4 +509,57 @@ func TestParseUntil(t *testing.T) {
 	if _, err := parseUntil("whenever", now); err == nil {
 		t.Errorf("nonsense should not parse")
 	}
+}
+
+func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("ok")
+	useFakeRelays(t, seat)
+	release := make(chan struct{})
+	defer close(release)
+	brain := func(model string, msgs []map[string]any) reply {
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}, block: release}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{input: make(chan string, 4)}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go rt.Run(ctx)
+	ui.input <- "/interrupt"
+	ui.input <- "/autopilot until 10:00 polish the onboarding until it shines"
+	ui.input <- "/updates off"
+	deadline := time.Now().Add(5 * time.Second)
+	for ui.messageCount() < 3 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	msgs, _, _ := ui.snapshot()
+	joined := strings.Join(msgs, " | ")
+	if !strings.Contains(joined, "Interrupted Codex.") || !strings.Contains(joined, "Autopilot on for Codex until") || !strings.Contains(joined, "No progress lines") {
+		t.Fatalf("acknowledgements %q", msgs)
+	}
+	seat.mu.Lock()
+	n := seat.interrupts
+	seat.mu.Unlock()
+	var ap *event.RelayAutopilotData
+	var quietSet bool
+	var quiet time.Duration
+	rt.sync(func() {
+		ap = rt.st.Relays["codex"].Autopilot
+		quietSet, quiet = rt.relayQuietSet, rt.quietLimit()
+	})
+	if n != 1 || ap == nil || ap.Instruction != "polish the onboarding until it shines" || ap.Until == "" || !quietSet || quiet != 0 {
+		t.Fatalf("interrupts=%d autopilot=%+v quietSet=%v quiet=%v", n, ap, quietSet, quiet)
+	}
+	if got := seat.sentTexts(); len(got) != 0 {
+		t.Fatalf("commands must not be typed into the agent: %q", got)
+	}
+	cancel()
 }

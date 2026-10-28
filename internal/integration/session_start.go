@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -186,6 +187,39 @@ func relayProfiles(project string) []map[string]any {
 	for _, name := range cfg.Relay.RelayProfileNames() {
 		p := profiles[name]
 		out = append(out, map[string]any{"name": name, "agent": p.Agent, "label": p.Label, "model": p.Model, "effort": p.Effort})
+	}
+	return out
+}
+
+// runningRelays lists the relays running on this machine (every eagent
+// session's), for the app's "running now" list. Only stable fields, so the
+// published snapshot changes only when a relay starts, stops or exits.
+func runningRelays() []map[string]any {
+	out := []map[string]any{}
+	for _, h := range []relay.Host{relay.Tmux{}, relay.Screen{}} {
+		if _, err := exec.LookPath(h.Name()); err != nil {
+			continue
+		}
+		listed, _ := h.List()
+		for _, l := range listed {
+			session := relay.SessionOf(l.Name)
+			name := strings.TrimPrefix(strings.TrimPrefix(l.Name, relay.Prefix), session+"-")
+			agent := name
+			for _, a := range []string{"codex", "claude"} {
+				if strings.HasPrefix(name, a) {
+					agent = a
+				}
+			}
+			state := "running"
+			if l.Dead {
+				state = "exited"
+			}
+			item := map[string]any{"name": name, "target": l.Name, "session": session, "thread": "ext:eagent:" + session, "dir": l.Dir, "agent": agent, "state": state}
+			if !l.Created.IsZero() {
+				item["created"] = l.Created.UTC().Format(time.RFC3339)
+			}
+			out = append(out, item)
+		}
 	}
 	return out
 }

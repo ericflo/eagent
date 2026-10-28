@@ -118,6 +118,8 @@ type Runtime struct {
 	phone               *phone // Finalechat mirror; nil when off
 	relays              relaySeats
 	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
+	relayQuiet          time.Duration          // progress cadence the user set with /updates (when relayQuietSet)
+	relayQuietSet       bool
 	toolImagesMu        sync.Mutex
 	memoMu              sync.Mutex
 	memo                map[string]fileMark           // what each caller last read or viewed, to skip repeats
@@ -868,6 +870,10 @@ func optionIndex(line string, options []string) int {
 
 func (r *Runtime) slashCommand(line string) {
 	fields := strings.Fields(line)
+	if relayCommands[fields[0]] {
+		r.relayCommand(fields)
+		return
+	}
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
 		r.beginShutdown("quit", 0)
@@ -908,6 +914,7 @@ func (r *Runtime) slashCommand(line string) {
 		}
 	case "/help", "/?":
 		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /quit  (anything else is sent to the agent)")
+		r.ui.Log("relay: /relay /interrupt /restart /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}

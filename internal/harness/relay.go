@@ -1076,3 +1076,141 @@ func firstNonEmpty(xs ...string) string {
 	}
 	return ""
 }
+
+// relayCommands are the slash commands a user can type (terminal, web UI,
+// phone, Messenger) to manage a relay without the orchestrator.
+var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true}
+
+// relayCommand runs one. Called on the loop; the work runs on its own
+// goroutine (an upgrade takes minutes) and the outcome is told to the user
+// directly, in plain words, without waiting for a model.
+func (r *Runtime) relayCommand(fields []string) {
+	if len(r.st.RelayOrder) == 0 {
+		r.ui.Log("there is no relay in this session")
+		go r.deliverMessage("There is no relay in this session; start one with eagent relay codex (or claude).", false)
+		return
+	}
+	cmd, args := fields[0], fields[1:]
+	if cmd == "/updates" {
+		r.setRelayCadence(args)
+		return
+	}
+	go func() {
+		params := map[string]any{}
+		tool, ack := "relay_control", ""
+		switch cmd {
+		case "/interrupt":
+			params["action"] = "interrupt"
+			ack = "Interrupted {who}."
+		case "/restart":
+			params["action"] = "restart"
+			ack = "Restarted {who}; it continues its own session."
+		case "/upgrade":
+			params["action"] = "upgrade"
+			ack = "Upgraded and restarted {who}; it continues its own session."
+		case "/stop-relay":
+			params["action"], params["reason"] = "stop", "the user stopped it"
+			ack = "Stopped {who}."
+		case "/switch":
+			if len(args) == 0 {
+				r.deliverMessage("Say which agent takes over: /switch claude or /switch codex.", false)
+				return
+			}
+			params["action"], params["profile"] = "switch", args[0]
+		case "/autopilot":
+			tool = "relay_autopilot"
+			switch {
+			case len(args) > 0 && (args[0] == "off" || args[0] == "stop"):
+				params["off"] = true
+			case len(args) > 1 && args[0] == "until":
+				params["until"] = args[1]
+				if len(args) > 2 {
+					params["instruction"] = strings.Join(args[2:], " ")
+				}
+			case len(args) > 0:
+				params["instruction"] = strings.Join(args, " ")
+			}
+		case "/relay":
+			tool = "relay_status"
+		}
+		var who string
+		r.sync(func() { who = r.relayWho() })
+		out, isErr := r.relayTool(tool, argStr(params), argNum(params), argList(params))
+		switch {
+		case isErr:
+			r.deliverMessage(cmd+" did not work: "+out, true)
+		case ack != "":
+			r.deliverMessage(strings.ReplaceAll(ack, "{who}", who), false)
+		default:
+			r.deliverMessage(out, false)
+		}
+	}()
+}
+
+// setRelayCadence handles /updates: how often a progress line comes while
+// the agent works ("off", "5m", "15m", "1h"). Turn reports always come.
+// Loop goroutine.
+func (r *Runtime) setRelayCadence(args []string) {
+	var msg string
+	switch {
+	case len(args) == 0:
+		msg = "Say how often: /updates off, /updates 5m, /updates 15m, /updates 1h."
+	case args[0] == "off" || args[0] == "0":
+		r.relayQuiet = 0
+		msg = "No progress lines from now on; you hear when it finishes a turn or needs you."
+	default:
+		d, err := time.ParseDuration(args[0])
+		if err != nil || d < time.Minute {
+			msg = "Use a duration of a minute or more: /updates 5m, /updates 15m, /updates 1h, or /updates off."
+			break
+		}
+		r.relayQuiet = d
+		msg = "A progress line every " + roundDur(d) + " while it works, plus every turn report."
+	}
+	r.relayQuietSet = r.relayQuietSet || strings.HasPrefix(msg, "No progress") || strings.HasPrefix(msg, "A progress")
+	r.ui.Log("%s", msg)
+	go r.deliverMessage(msg, false)
+}
+
+func argStr(m map[string]any) func(string) string {
+	return func(k string) string {
+		switch v := m[k].(type) {
+		case string:
+			return v
+		case bool:
+			return fmt.Sprint(v)
+		}
+		return ""
+	}
+}
+
+func argNum(m map[string]any) func(string, int) int {
+	return func(k string, def int) int {
+		if v, ok := m[k].(int); ok {
+			return v
+		}
+		return def
+	}
+}
+
+func argList(m map[string]any) func(string) []string {
+	return func(k string) []string {
+		v, _ := m[k].([]string)
+		return v
+	}
+}
+
+// relayMeta is what the phone's thread header shows about the relay: the
+// first active one, or nil when none is left. Loop goroutine.
+func (r *Runtime) relayThreadMeta() any {
+	active := r.st.ActiveRelays()
+	if len(active) == 0 {
+		return nil
+	}
+	rel := active[0]
+	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": ""}
+	if rel.Autopilot != nil {
+		m["autopilot_until"] = rel.Autopilot.Until
+	}
+	return m
+}
