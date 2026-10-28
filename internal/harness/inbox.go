@@ -109,7 +109,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		if text == "" && len(msg.Attachments) == 0 {
 			return
 		}
-		if strings.HasPrefix(text, "/") {
+		if strings.HasPrefix(text, "/") && !r.relayPassthrough(text, msg.From) {
 			r.slashCommand(text)
 			return
 		}

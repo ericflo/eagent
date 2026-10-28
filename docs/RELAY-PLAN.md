@@ -2,6 +2,17 @@
 
 Status: proposal, 2026-10-27. Based on every eagent session under `~/Development/**/.agents` (the grid and duel runs were left out: those are benchmarks with a fixed prompt), the Codex rollouts in `~/.codex/sessions` and Claude Code transcripts in `~/.claude/projects` for the relayed work, and the Finalechat repo at `3e2854c`.
 
+## Status (2026-10-28)
+
+Shipped on main and verified:
+- **eagent** (`db7b264`, `683b983`, `613d79c`, `93deb5b`): `internal/relay`, a tmux/screen terminal host with Codex and Claude Code transcript parsers, dialog handling and confirmed delivery. Also relay mode as state (`relay.*` events, `RELAY.md`, the dossier header, strict mode), and forwarding on arrival with urgent interrupt. Plus autopilot, restart/upgrade/switch, the relay commands, `eagent relay` / `eagent relays`, the phone thread meta, and running relays in the connector snapshot.
+  - The unit and harness tests pass under `-race`.
+  - `TestLiveRelay` (`EAGENT_LIVE_RELAY=1`) passes against the real Codex 0.164 and Claude Code 2.1.312.
+  - CI is green.
+- **Finalechat** (`5049bcc`, live as `main-20261028075729-5049bcc3b830`, checked through `/version`, the epsilon Flux commit `6b3c7dad`, and `rollout status deploy/web`): the New-session agent picker, `GET /version`, "Sent to Codex" bubbles, and Messenger `/new codex …`.
+
+Deliberately not built: idle auto-park. With no polling, an idle relay costs nothing but its terminal process. Also skipped are phone question countdowns (autopilot covers the "waited all day" case) and a pinned ask-ledger card (`/relay` lists what was sent and whether it arrived).
+
 ## 1. What the sessions show
 
 Since Sep 21, **17 of the 39 sessions in `~/Development/.agents/eagent/sessions` are relays**, and they hold **682 of your 889 messages (77%)**. Every multi-day session is one of them. Most start with a version of the same paragraph, retyped each time:

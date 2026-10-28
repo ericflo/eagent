@@ -536,6 +536,7 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 	ui.input <- "/interrupt"
 	ui.input <- "/autopilot until 10:00 polish the onboarding until it shines"
 	ui.input <- "/updates off"
+	ui.input <- "/goal ship the onboarding polish"
 	deadline := time.Now().Add(5 * time.Second)
 	for ui.messageCount() < 3 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -558,8 +559,14 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 	if n != 1 || ap == nil || ap.Instruction != "polish the onboarding until it shines" || ap.Until == "" || !quietSet || quiet != 0 {
 		t.Fatalf("interrupts=%d autopilot=%+v quietSet=%v quiet=%v", n, ap, quietSet, quiet)
 	}
-	if got := seat.sentTexts(); len(got) != 0 {
-		t.Fatalf("commands must not be typed into the agent: %q", got)
+	// eagent's relay commands stay with eagent; the agent's own (/goal) go
+	// to it verbatim.
+	deadline = time.Now().Add(3 * time.Second)
+	for len(seat.sentTexts()) < 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := seat.sentTexts(); len(got) != 1 || got[0] != "/goal ship the onboarding polish" {
+		t.Fatalf("sent to the agent %q", got)
 	}
 	cancel()
 }

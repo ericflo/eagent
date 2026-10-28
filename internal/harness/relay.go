@@ -1077,6 +1077,30 @@ func firstNonEmpty(xs ...string) string {
 	return ""
 }
 
+// relayPassthrough reports a slash command meant for the relayed agent
+// (Codex's /goal, Claude Code's /compact, ...): in a relay, anything eagent
+// does not own goes to the agent verbatim. From the phone or the web, even
+// eagent's terminal-only commands (/status, /tasks, ...) go to the agent,
+// since their output only shows in a terminal. Loop goroutine.
+func (r *Runtime) relayPassthrough(line, source string) bool {
+	if len(r.st.ActiveRelays()) == 0 {
+		return false
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	switch cmd := fields[0]; {
+	case relayCommands[cmd]:
+		return false
+	case cmd == "/quit" || cmd == "/exit" || cmd == "/q" || cmd == "/kill":
+		return false
+	case cmd == "/status" || cmd == "/s" || cmd == "/tasks" || cmd == "/procs" || cmd == "/schedules" || cmd == "/help" || cmd == "/?":
+		return source != ""
+	}
+	return true
+}
+
 // relayCommands are the slash commands a user can type (terminal, web UI,
 // phone, Messenger) to manage a relay without the orchestrator.
 var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true}

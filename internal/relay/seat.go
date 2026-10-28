@@ -287,6 +287,11 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	if err := s.typeText(text); err != nil {
 		return "", err
 	}
+	if strings.HasPrefix(strings.TrimSpace(text), "/") {
+		// The agent's own command (/goal, /compact): it runs it rather than
+		// recording a message, so there is no arrival to confirm.
+		return fmt.Sprintf("typed the command into %s", label), nil
+	}
 	s.track(id, text, mode)
 	switch {
 	case mode == "interrupt" && state == "working":
