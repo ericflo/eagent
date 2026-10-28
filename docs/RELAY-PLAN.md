@@ -4,14 +4,31 @@ Status: proposal, 2026-10-27. Based on every eagent session under `~/Development
 
 ## Status (2026-10-28)
 
-Shipped on main and verified:
-- **eagent** (`db7b264`, `683b983`, `613d79c`, `93deb5b`): `internal/relay`, a tmux/screen terminal host with Codex and Claude Code transcript parsers, dialog handling and confirmed delivery. Also relay mode as state (`relay.*` events, `RELAY.md`, the dossier header, strict mode), and forwarding on arrival with urgent interrupt. Plus autopilot, restart/upgrade/switch, the relay commands, `eagent relay` / `eagent relays`, the phone thread meta, and running relays in the connector snapshot.
-  - The unit and harness tests pass under `-race`.
-  - `TestLiveRelay` (`EAGENT_LIVE_RELAY=1`) passes against the real Codex 0.164 and Claude Code 2.1.312.
-  - CI is green.
-- **Finalechat** (`5049bcc`, live as `main-20261028075729-5049bcc3b830`, checked through `/version`, the epsilon Flux commit `6b3c7dad`, and `rollout status deploy/web`): the New-session agent picker, `GET /version`, "Sent to Codex" bubbles, and Messenger `/new codex …`.
+Shipped on main and verified.
 
-Deliberately not built: idle auto-park. With no polling, an idle relay costs nothing but its terminal process. Also skipped are phone question countdowns (autopilot covers the "waited all day" case) and a pinned ask-ledger card (`/relay` lists what was sent and whether it arrived).
+**eagent** (`db7b264` … `4c12792`):
+- `internal/relay`: a tmux/screen host; Codex and Claude Code transcript parsers; dialog handling that waits for a settled screen and checks again right before typing; and delivery confirmed from the transcript.
+- Relay mode is state: `relay.*` events, `RELAY.md`, the dossier header, and strict mode.
+- Messages are forwarded on arrival, urgent ones interrupt, and the agent's own slash commands pass through.
+- Autopilot, restart, upgrade and switch.
+- Relay commands from any client: case-insensitive, with `/autopilot until` read in the sender's time zone.
+- `eagent relay` / `eagent relays`, the phone thread meta, and the running relays in the connector snapshot.
+- `tool_choice` is never sent, by any protocol.
+
+Checks:
+- The unit and harness tests pass under `-race`, and CI is green.
+- `TestLiveRelay` and `TestLiveRelaySession` (`EAGENT_LIVE_RELAY=1`) pass against the real Codex 0.165 and Claude Code 2.1.312.
+- The user's `eagent serve` runs the new binary.
+
+**Finalechat**, live:
+- `5049bcc`: the New-session agent picker, `GET /version`, "Sent to Codex" bubbles, and Messenger `/new codex …`.
+- `c973d71`: the relay badge and controls in the thread header, the To toggle and interrupting sends in the composer, the Running-now list, and Messenger pass-through for relay commands.
+- Checked through `/version`, the epsilon Flux commits, and `rollout status deploy/web`.
+
+Deliberately not built:
+- Idle auto-park. With no polling, an idle relay costs nothing but its terminal process.
+- Phone question countdowns. Autopilot covers the "waited all day" case.
+- A pinned ask-ledger card. `/relay` lists what was sent and whether it arrived.
 
 ## 1. What the sessions show
 
