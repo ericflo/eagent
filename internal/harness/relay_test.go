@@ -237,7 +237,7 @@ func TestRelayMessageReachesTheAgentWhileTheOrchestratorIsBusy(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	go rt.Run(ctx)
+	runUntilCleanup(t, rt, ctx, cancel)
 	waitFor := func(n int) []string {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
@@ -468,7 +468,7 @@ func TestRelayExplicitRouteFromTheClient(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	go rt.Run(ctx)
+	runUntilCleanup(t, rt, ctx, cancel)
 	post := func(m InboxMessage) {
 		done := make(chan struct{})
 		rt.post(func() { rt.handleInbox(m); close(done) })
@@ -532,7 +532,7 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	go rt.Run(ctx)
+	runUntilCleanup(t, rt, ctx, cancel)
 	ui.input <- "/interrupt"
 	ui.input <- "/autopilot until 10:00 polish the onboarding until it shines"
 	ui.input <- "/updates off"
@@ -569,4 +569,16 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 		t.Fatalf("sent to the agent %q", got)
 	}
 	cancel()
+}
+
+// runUntilCleanup runs the session in the background and, when the test
+// ends, stops it and waits for it to finish before the temp dirs go.
+func runUntilCleanup(t *testing.T, rt *Runtime, ctx context.Context, cancel context.CancelFunc) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { rt.Run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 }
