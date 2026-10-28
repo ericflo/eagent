@@ -68,6 +68,22 @@ next writer moves those bytes to `<file>.torn` before appending.
 | `schedule.fire` | harness | `id`, `note`, `next` | Wakes the orchestrator. `next` empty means the schedule is finished. |
 | `schedule.cancel` | orchestrator | `id`, `reason` | |
 
+### Relays
+
+A relay is an external coding agent (Codex, Claude Code) that the session runs in a tmux (or screen) terminal eagent owns and passes the user's words to. The agent's own transcript (a Codex rollout, a Claude Code session file) is the source of these events; the terminal is only typed into and read for dialogs. The first `relay.start` makes the session a relay: the orchestrator's system prompt becomes `RELAY.md` from then on, including after every rollover.
+
+| Type | Actor | Payload | Notes |
+|---|---|---|---|
+| `relay.start` | harness | `name`, `profile`, `agent` (`codex` or `claude`), `label`, `dir`, `host` (`tmux` or `screen`), `target` (the terminal session, `eagent-relay-<session>-<name>`), `command`, `inner_id`, `resumed` | Launched, or relaunched continuing the agent's own session. A resumed eagent reattaches to `target` instead of starting again. |
+| `relay.inner` | harness | `name`, `inner_id`, `transcript` | The agent's own session id and transcript path, once found. |
+| `relay.send` | harness | `name`, `id` (`r1`…), `from` (`user` or `eagent`), `seq` (the forwarded user message), `mode` (`queue`, `interrupt`, `after_turn`), `text`, `auto` | Text typed into the agent. `auto` marks a user message forwarded the moment it arrived, before any model call; `from: eagent` sends are mirrored to the phone exactly as typed. |
+| `relay.delivered` | harness | `name`, `id`, `ok`, `detail` | The transcript shows the text arrived, or (`ok` false) it never did. A failure wakes the orchestrator. |
+| `relay.state` | harness | `name`, `state` (`starting`, `working`, `idle`, `blocked`, `exited`), `detail` | `blocked` (a dialog the relay could not answer, or a long silence while working) and `exited` wake the orchestrator. |
+| `relay.progress` | harness | `name`, `text` | Something the agent said mid-turn. For the narrator. |
+| `relay.turn` | harness | `name`, `text` (the agent's final message), `duration_ms`, `tools`, `images`, `interrupted` | Wakes the orchestrator with the agent's own report. |
+| `relay.limit` | harness | `name`, `used_percent`, `window`, `resets_at`, `text`, `exhausted` | The agent's usage budget crossed 50/80/95/100%, or a limit message appeared. Wakes the orchestrator. |
+| `relay.end` | harness | `name`, `reason` | Stopped on purpose. A batch session stays up while any relay is active. |
+
 ### Diagnostics
 
 | Type | Actor | Payload | Notes |

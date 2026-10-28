@@ -92,7 +92,23 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 		return out
 	}
 
+	if c.actor == event.ActorOrchestrator && c.task == "" {
+		switch tc.Name {
+		case "write_file", "edit_file", "delegate":
+			// A relay's work is the agent's. Doing it here is what the user
+			// kept having to stop ("remember you're a relay").
+			var strict bool
+			var who string
+			r.sync(func() { strict, who = r.relayStrict(), r.relayWho() })
+			if strict {
+				return fmt.Sprintf("Refused: this session is a relay and %s does the work. Forward the user's message with relay_forward (or say what %s should do with relay_send). %s is allowed only when the user's message is addressed to you (\"@e ...\", \"not for relay\").", who, who, tc.Name), true
+			}
+		}
+	}
+
 	switch tc.Name {
+	case "relay_start", "relay_forward", "relay_send", "relay_status", "relay_screen", "relay_control":
+		return r.relayTool(tc.Name, str, num, strs)
 	// ---- shell ----
 	case "bash":
 		cmd := str("command")

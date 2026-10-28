@@ -87,8 +87,77 @@ type Config struct {
 	Finalechat Finalechat `json:"finalechat"`
 	// AllowOutsideProject lets file tools touch paths outside the project.
 	AllowOutsideProject bool `json:"allow_outside_project"`
+	// Relay configures relay sessions, where eagent runs an external coding
+	// agent (Codex, Claude Code) and passes the user's words to it.
+	Relay Relay `json:"relay,omitzero"`
 	// Instructions is loaded from AGENTS.md / .agents/eagent/INSTRUCTIONS.md.
 	Instructions string `json:"-"`
+}
+
+// Relay configures relay sessions. Profiles are kept in a map so the remote
+// settings editor (which walks scalar fields) never offers them: a profile
+// names a program to run.
+type Relay struct {
+	// Profiles are named ways to start an agent. The built-in "codex" and
+	// "claude" are always available; a profile here with the same name
+	// replaces the built-in one.
+	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
+	// QuietSeconds is how long the user may go without a progress line while
+	// a relayed agent works (default 900; NarratorQuietSeconds governs
+	// sessions without a relay).
+	QuietSeconds int `json:"quiet_seconds,omitempty"`
+}
+
+// RelayProfile is one way to start an external agent.
+type RelayProfile struct {
+	// Agent is the program: "codex" or "claude".
+	Agent string `json:"agent"`
+	// Label is shown on the phone ("Codex · GPT-6 Astra xhigh").
+	Label  string `json:"label,omitempty"`
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// Args are extra command-line arguments, after the ones eagent adds.
+	Args []string `json:"args,omitempty"`
+	// Host is the terminal multiplexer: "tmux" or "screen"; empty picks tmux
+	// when it is installed.
+	Host string `json:"host,omitempty"`
+	// GitPull fast-forwards the working directory's branch before starting.
+	GitPull bool `json:"git_pull,omitempty"`
+}
+
+// BuiltinRelayProfiles are the profiles every project has.
+func BuiltinRelayProfiles() map[string]RelayProfile {
+	return map[string]RelayProfile{
+		"codex":  {Agent: "codex", Label: "Codex · GPT-6 Astra xhigh", Model: "gpt-6-astra", Effort: "xhigh", Args: []string{"--yolo"}},
+		"claude": {Agent: "claude", Label: "Claude Code · Opus 5.5 xhigh", Model: "claude-opus-5-5", Effort: "xhigh", Args: []string{"--dangerously-skip-permissions"}},
+	}
+}
+
+// RelayProfiles merges the built-in profiles with the configured ones.
+func (r Relay) RelayProfiles() map[string]RelayProfile {
+	out := BuiltinRelayProfiles()
+	for name, p := range r.Profiles {
+		out[name] = p
+	}
+	return out
+}
+
+// RelayProfileNames lists the profiles, sorted.
+func (r Relay) RelayProfileNames() []string {
+	var names []string
+	for name := range r.RelayProfiles() {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Quiet is the progress cadence while a relayed agent works.
+func (r Relay) Quiet() int {
+	if r.QuietSeconds > 0 {
+		return r.QuietSeconds
+	}
+	return 900
 }
 
 // Finalechat configures the phone mirror (https://www.finalechat.com).

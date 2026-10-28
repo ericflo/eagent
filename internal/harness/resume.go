@@ -30,6 +30,9 @@ func (r *Runtime) closeInterrupted() {
 		}).WithTask(p.Task))
 		closed = append(closed, fmt.Sprintf("process %s (%s) %s", p.Handle, firstLine(p.Command, 60), what))
 	}
+	// Relayed agents run in terminals of their own and survive this; pick
+	// them up again, and say which are gone.
+	closed = append(closed, r.reattachRelays()...)
 	// Orchestrator tool calls without results.
 	for _, tc := range r.st.DanglingCalls(event.ActorOrchestrator, "") {
 		r.append(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{

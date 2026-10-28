@@ -14,8 +14,28 @@ import (
 // prefix survives every turn. Anything that changes goes into the steering
 // text appended as the final user message (see steer* below).
 
+// orchestratorSystem is ORCHESTRATOR.md, or RELAY.md once the session is a
+// relay: the relay contract lives in the system prompt, not in a user
+// message that a long context or a dossier can bury. Loop goroutine.
 func (r *Runtime) orchestratorSystem() string {
-	return r.prompts.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: r.projectPath(), Instructions: r.cfg.Instructions, Interactive: r.opts.Interactive, Facts: r.facts()})
+	data := prompts.OrchestratorData{Project: r.projectPath(), Instructions: r.cfg.Instructions, Interactive: r.opts.Interactive, Facts: r.facts()}
+	if who := r.relayWho(); who != "" {
+		data.Agent = who
+		return r.prompts.Render("RELAY.md", data)
+	}
+	return r.prompts.Render("ORCHESTRATOR.md", data)
+}
+
+// relayWho names the agent a relay session relays to ("" otherwise): the
+// running one, else the most recent. Loop goroutine.
+func (r *Runtime) relayWho() string {
+	if !r.st.RelayMode() {
+		return ""
+	}
+	if active := r.st.ActiveRelays(); len(active) > 0 {
+		return active[0].Who()
+	}
+	return r.st.Relays[r.st.RelayOrder[len(r.st.RelayOrder)-1]].Who()
 }
 
 func (r *Runtime) taskSystem() string {
@@ -23,13 +43,14 @@ func (r *Runtime) taskSystem() string {
 }
 
 // narratorSystem renders the narrator's system prompt; phone is a line about
-// the Finalechat mirror, or "" when the session is not mirrored.
-func (r *Runtime) narratorSystem(phone string) string {
+// the Finalechat mirror, or "" when the session is not mirrored; relay names
+// the relayed agent in a relay session.
+func (r *Runtime) narratorSystem(phone, relay string) string {
 	persona := strings.TrimSpace(r.cfg.Persona)
 	if persona == "" {
 		persona = strings.TrimSpace(r.prompts.Render("PERSONA.md", nil))
 	}
-	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone, Facts: r.facts()})
+	return r.prompts.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone, Facts: r.facts(), Relay: relay})
 }
 
 // facts renders the shared description of how eagent works that every actor
@@ -89,6 +110,7 @@ func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens
 	if maxCalls > 0 && calls >= maxCalls {
 		fmt.Fprintf(&b, " You have made %d consecutive calls this turn; if you are looping or polling, delegate or use wait/yield instead.", calls)
 	}
+	b.WriteString(relaySteer(st, now, reason))
 	b.WriteString(" Continue. Respond with tool calls; your text is not shown to the user.")
 	return b.String()
 }
@@ -142,6 +164,8 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 		switch userWakeKind(st) {
 		case "answered":
 			b.WriteString(" The user just wrote to you and the orchestrator has answered them in a note marked as an answer. Relay that answer in your voice, faithfully, adding nothing it did not say; if it also started work, say what started.")
+		case "relayed":
+			b.WriteString(" The user's message was passed to " + relayAgentName(st) + " verbatim as soon as it arrived. Say in one short line that it reached " + relayAgentName(st) + " (and, if it was working, that it reads it at its next step); do not repeat the message back or answer it.")
 		case "started":
 			b.WriteString(" The user just wrote to you and the orchestrator has started acting on it; the events since their message show what. Say what you understood and what is happening, from those events only. Do not answer a question the orchestrator has not answered, and do not promise what will happen next.")
 			if lastUserIsQuestion(st) {
@@ -201,6 +225,12 @@ func userWakeKind(st *state.State) string {
 	kind := "quiet"
 	saw := false // only responses that had the message in view count
 	for _, ev := range st.Events {
+		if ev.Seq > st.LastUserSeq && ev.Type == event.RelaySend && kind == "quiet" {
+			var d event.RelaySendData
+			if ev.Decode(&d) == nil && d.From == "user" && d.Seq == st.LastUserSeq {
+				kind = "relayed"
+			}
+		}
 		if ev.Seq <= st.LastUserSeq || ev.Actor != event.ActorOrchestrator || ev.Task != "" {
 			continue
 		}
@@ -250,7 +280,7 @@ func (r *Runtime) dossierTask(sessionDir string, files []string, st *state.State
 			running = append(running, t.ID+": "+t.Title)
 		}
 	}
-	return r.prompts.Render("COMPACTION-DOSSIER.md", prompts.DossierData{SessionDir: sessionDir, Files: strings.Join(files, ", "), Reason: reason, RunningTasks: running})
+	return r.prompts.Render("COMPACTION-DOSSIER.md", prompts.DossierData{SessionDir: sessionDir, Files: strings.Join(files, ", "), Reason: reason, RunningTasks: running, Relay: r.relayWho()})
 }
 
 func since(t, now time.Time) string {
@@ -281,4 +311,12 @@ func roundDur(d time.Duration) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+// relayAgentName names the relayed agent for a steer.
+func relayAgentName(st *state.State) string {
+	if active := st.ActiveRelays(); len(active) > 0 {
+		return active[0].Who()
+	}
+	return "the agent"
 }

@@ -632,7 +632,13 @@ func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, e
 // server's default configuration, the way the browser's "new session" does;
 // dir, when set, is where its commands start.
 func (s *Server) HostSession(prompt, dir string) (string, error) {
-	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt, StartDir: dir}, "", "")
+	return s.HostRelaySession(prompt, dir, "")
+}
+
+// HostRelaySession is HostSession for a session that relays to the agent a
+// relay profile names ("" for an ordinary session).
+func (s *Server) HostRelaySession(prompt, dir, relay string) (string, error) {
+	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt, StartDir: dir, Relay: relay}, "", "")
 }
 
 // RegisterSessionStarter makes sessions requested from the phone run in this
@@ -643,7 +649,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if project != s.Project {
 			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
 		}
-		id, err := s.HostSession(req.Prompt, req.Dir)
+		id, err := s.HostRelaySession(req.Prompt, req.Dir, req.Relay)
 		if err != nil {
 			return integration.SessionStart{}, err
 		}

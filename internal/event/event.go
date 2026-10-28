@@ -67,6 +67,18 @@ const (
 	Steer          = "steer"          // the harness's per-call instruction to an actor, kept so every prompt extends the last
 	CwdChange      = "cwd.change"     // an actor's working directory moved: a cd in one of its commands that persists for its later ones
 	Error          = "error"
+
+	// A relay is an external coding agent (Codex, Claude Code) that eagent
+	// runs in a terminal it owns and passes the user's words to.
+	RelayStart     = "relay.start"     // the agent was launched (or relaunched)
+	RelayInner     = "relay.inner"     // the agent's own session id and transcript were found
+	RelaySend      = "relay.send"      // text was typed into the agent
+	RelayDelivered = "relay.delivered" // the agent's transcript shows the text arrived
+	RelayState     = "relay.state"     // working, idle, blocked on a dialog, or exited
+	RelayProgress  = "relay.progress"  // something the agent said mid-turn
+	RelayTurn      = "relay.turn"      // the agent finished a turn; carries its final message
+	RelayLimit     = "relay.limit"     // the agent's usage budget crossed a threshold or ran out
+	RelayEnd       = "relay.end"       // the agent was stopped on purpose
 )
 
 // Event is one line of the session log.
@@ -417,4 +429,95 @@ type RouteData struct {
 type ErrorData struct {
 	Where string `json:"where"`
 	Text  string `json:"text"`
+}
+
+// RelayStartData records a relayed agent being launched. Name is how the
+// session refers to it ("codex"); Target is the terminal session that hosts
+// it, so a resumed eagent can find it again.
+type RelayStartData struct {
+	Name    string   `json:"name"`
+	Profile string   `json:"profile"`
+	Agent   string   `json:"agent"` // codex | claude
+	Label   string   `json:"label,omitempty"`
+	Dir     string   `json:"dir"`
+	Host    string   `json:"host"` // tmux | screen
+	Target  string   `json:"target"`
+	Command []string `json:"command"`
+	// InnerID is the agent's own session id when eagent chose it up front
+	// (Claude Code's --session-id) or resumed it; empty until relay.inner
+	// otherwise.
+	InnerID    string `json:"inner_id,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
+	Resumed    bool   `json:"resumed,omitempty"`
+}
+
+// RelayInnerData records where the agent keeps its own transcript.
+type RelayInnerData struct {
+	Name       string `json:"name"`
+	InnerID    string `json:"inner_id"`
+	Transcript string `json:"transcript"`
+}
+
+// RelaySendData records text typed into the agent. From is "user" when it is
+// the user's own message forwarded verbatim (Seq names it) and "eagent" when
+// eagent wrote it. Mode is queue, interrupt or after_turn.
+type RelaySendData struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+	From string `json:"from"`
+	Seq  int64  `json:"seq,omitempty"`
+	Mode string `json:"mode"`
+	Text string `json:"text"`
+	// Auto marks a user message the harness forwarded the moment it
+	// arrived, without waiting for the orchestrator.
+	Auto bool `json:"auto,omitempty"`
+}
+
+// RelayDeliveredData confirms (or gives up on confirming) that a send reached
+// the agent.
+type RelayDeliveredData struct {
+	Name   string `json:"name"`
+	ID     string `json:"id"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// RelayStateData is the agent's condition: starting, working, idle, blocked
+// (a dialog on its screen needs an answer) or exited.
+type RelayStateData struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// RelayProgressData is something the agent said before its turn ended.
+type RelayProgressData struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
+// RelayTurnData is the end of one of the agent's turns.
+type RelayTurnData struct {
+	Name        string   `json:"name"`
+	Text        string   `json:"text"` // the agent's final message for the turn
+	DurationMS  int64    `json:"duration_ms,omitempty"`
+	Tools       int      `json:"tools,omitempty"`  // tool calls it made during the turn
+	Images      []string `json:"images,omitempty"` // pictures it made or looked at
+	Interrupted bool     `json:"interrupted,omitempty"`
+}
+
+// RelayLimitData reports the agent's usage budget.
+type RelayLimitData struct {
+	Name        string  `json:"name"`
+	UsedPercent float64 `json:"used_percent,omitempty"`
+	Window      string  `json:"window,omitempty"` // "weekly", "5h", ...
+	ResetsAt    string  `json:"resets_at,omitempty"`
+	Text        string  `json:"text,omitempty"`
+	Exhausted   bool    `json:"exhausted,omitempty"`
+}
+
+// RelayEndData records the agent being stopped on purpose.
+type RelayEndData struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
 }

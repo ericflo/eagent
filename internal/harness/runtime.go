@@ -62,6 +62,10 @@ type Options struct {
 	// of the project root; it is recorded as the first working-directory
 	// move so the log, the phone and the UI show it from the start.
 	StartDir string
+	// Relay, when set, names a relay profile ("codex", "claude"): the new
+	// session starts that agent in StartDir (or the project) and is a relay
+	// to it from the first message.
+	Relay string
 }
 
 // Runtime is one live session.
@@ -112,6 +116,7 @@ type Runtime struct {
 	activeSettings      runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl      *runtimecontrol.Controller
 	phone               *phone // Finalechat mirror; nil when off
+	relays              relaySeats
 	toolImagesMu        sync.Mutex
 	memoMu              sync.Mutex
 	memo                map[string]fileMark           // what each caller last read or viewed, to skip repeats
@@ -209,6 +214,14 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if dir := strings.TrimSpace(opts.StartDir); dir != "" && !sameDir(dir, r.projectPath()) {
 		r.append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
+	}
+	if profile := strings.TrimSpace(opts.Relay); profile != "" {
+		if _, err := r.startRelay(profile, r.workDir(""), "", false); err != nil {
+			// The session still starts, so the user hears why on the phone
+			// too; the orchestrator is told to explain.
+			r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: err.Error()}))
+			r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: fmt.Sprintf("The %s relay the user asked for could not be started: %v. Tell the user in a note, then wait.", profile, err)}))
+		}
 	}
 	if strings.TrimSpace(opts.Prompt) != "" {
 		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
@@ -496,6 +509,12 @@ func (r *Runtime) noteWake(ev event.Event) {
 				question = ev.Decode(&d) == nil && isQuestion(d.Text)
 			}
 			r.holdNarratorForOrchestrator(ev.Seq, question)
+			if ev.Type == event.UserMessage && len(r.st.ActiveRelays()) > 0 {
+				// Straight to the agent, before any model call: after this
+				// event has been fully recorded, on the next loop turn.
+				seq := ev.Seq
+				r.post(func() { r.autoForward(seq) })
+			}
 		}
 	case event.TaskEnd:
 		var d event.TaskEndData
@@ -508,6 +527,11 @@ func (r *Runtime) noteWake(ev event.Event) {
 		var d event.ProcExitData
 		_ = ev.Decode(&d)
 		if d.Notify && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
+			r.lastWake = ev.Seq
+			r.lastArrival = ev.Seq
+		}
+	case event.RelayTurn, event.RelayState, event.RelayDelivered, event.RelayLimit:
+		if state.RelayWakes(ev) {
 			r.lastWake = ev.Seq
 			r.lastArrival = ev.Seq
 		}
@@ -668,6 +692,9 @@ func (r *Runtime) maybeEnd() {
 	if len(r.st.ActiveSchedules()) > 0 {
 		return // a batch session with a schedule keeps running
 	}
+	if len(r.st.ActiveRelays()) > 0 {
+		return // so does one relaying to an agent: the user talks to it for days
+	}
 	if r.waitingOnPhone() {
 		// A question is open on the user's phone: a batch session waits for
 		// the answer (or the question's expiry) instead of ending.
@@ -748,6 +775,10 @@ drain:
 		}
 	}
 	close(r.closed)
+	// Relayed agents are not the session's children: they run in terminals
+	// of their own and outlive this process, so a resumed session (or the
+	// user, attached) picks up where they are. Only stop watching them.
+	r.closeRelays()
 	// Everything the session started goes with it, including background
 	// children whose shell already exited; a finished session must not
 	// leave a dev server holding a port.

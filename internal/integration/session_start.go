@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -33,6 +34,9 @@ type SessionStart struct {
 type SessionRequest struct {
 	Prompt string
 	Dir    string
+	// Relay names a relay profile ("codex", "claude"): the session starts
+	// that agent in Dir and relays the user's messages to it.
+	Relay string
 }
 
 // SessionStarter starts a new session in the project and returns its id once
@@ -79,6 +83,9 @@ var spawnCommand = func(project string, req SessionRequest, announce string) (*e
 	args := []string{"-C", project, "-p"}
 	if req.Dir != "" {
 		args = append(args, "--cwd", req.Dir)
+	}
+	if req.Relay != "" {
+		args = append(args, "--relay", req.Relay)
 	}
 	cmd := exec.Command(exe, append(args, req.Prompt)...)
 	cmd.Env = append(os.Environ(), AnnounceEnv+"="+announce)
@@ -165,6 +172,22 @@ func checkStartDir(dir string) error {
 		return fmt.Errorf("%s is not a directory", dir)
 	}
 	return nil
+}
+
+// relayProfiles describes the agents a session started from the phone may
+// relay to, for the app's agent picker: name, program, and a label.
+func relayProfiles(project string) []map[string]any {
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		cfg = config.Defaults()
+	}
+	out := []map[string]any{}
+	profiles := cfg.Relay.RelayProfiles()
+	for _, name := range cfg.Relay.RelayProfileNames() {
+		p := profiles[name]
+		out = append(out, map[string]any{"name": name, "agent": p.Agent, "label": p.Label, "model": p.Model, "effort": p.Effort})
+	}
+	return out
 }
 
 // projectDirectories lists where a new session may start: the project root,

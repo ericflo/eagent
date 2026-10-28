@@ -392,6 +392,8 @@ func (s *State) orchestratorNotification(ev event.Event) string {
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
 		return d.Text
+	case event.RelayTurn, event.RelayState, event.RelayDelivered, event.RelayLimit:
+		return s.relayNotification(ev)
 	}
 	return ""
 }
@@ -635,6 +637,8 @@ func Observe(ev event.Event, maxChars int) string {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s %s now using %s (%s)", ts, d.Actor, d.Model, d.Reason)
+	case event.RelayStart, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd:
+		return observeRelay(ev, maxChars, ts)
 	}
 	return ""
 }

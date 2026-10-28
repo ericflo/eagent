@@ -35,7 +35,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		{Operation: "bundle.delete", Label: "Delete named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64)}, "name")},
 		// Starting a session spends model credit and runs commands on the
 		// machine, so it is a cost-class action like a route test.
-		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768), "cwd": text(4096)}, "prompt")},
+		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}, "prompt")},
 	}
 	var out []control.Action
 	for _, action := range actions {
@@ -172,4 +172,14 @@ func (change ResourceChange) Apply(editor *config.Editor) error {
 
 func ResourceEffect(change ResourceChange) map[string]any {
 	return map[string]any{"key": strings.Join([]string{change.Kind, change.Name}, ":"), "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"}
+}
+
+// relayChoices are the values session.start accepts for relay: "" (eagent
+// does the work) or a relay profile name.
+func (s *Service) relayChoices() []string {
+	cfg, err := config.Load(s.Project, "")
+	if err != nil {
+		cfg = config.Defaults()
+	}
+	return append([]string{""}, cfg.Relay.RelayProfileNames()...)
 }

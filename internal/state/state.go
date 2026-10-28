@@ -128,6 +128,9 @@ type State struct {
 	// WorkDirs holds each actor's current working directory once a cd of
 	// its own moved it off Cwd, keyed "orchestrator" or by task id.
 	WorkDirs map[string]string
+	// Relays are the external agents the session runs, by name.
+	Relays     map[string]*Relay
+	RelayOrder []string
 
 	// LastYield is the orchestrator's most recent yield after the last thing
 	// that would wake it (user message, task end, schedule fire...). Nil
@@ -157,8 +160,8 @@ type State struct {
 	Latencies map[string][]int64
 
 	// Counters continue id sequences across restarts.
-	taskSeq, procSeq, scheduleSeq, questionSeq int
-	Errors                                     []string
+	taskSeq, procSeq, scheduleSeq, questionSeq, relaySendSeq int
+	Errors                                                   []string
 
 	// lastWakeSeq is the newest event that should wake the orchestrator;
 	// lastOrchSeen is what its latest call was shown. A yield produced by a
@@ -509,6 +512,8 @@ func (s *State) Apply(ev event.Event) {
 		var d event.ErrorData
 		_ = ev.Decode(&d)
 		s.Errors = append(s.Errors, d.Where+": "+d.Text)
+	case event.RelayStart, event.RelayInner, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd:
+		s.applyRelay(ev)
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
@@ -41,6 +42,10 @@ Usage:
   eagent [flags] [prompt]            start an interactive session (prompt optional)
   eagent -p [flags] "prompt"         batch mode: run until the work is done, then exit
   eagent -c [flags] [prompt]         continue the most recent session in this project
+  eagent relay <profile> [--cwd DIR] [brief]
+                                     start Codex ("codex") or Claude Code ("claude") in a terminal
+                                     eagent owns and relay to it: your messages go to it verbatim
+  eagent relays [attach|stop NAME]   list the relays running on this machine, watch one, or stop one
   eagent resume [flags] <id> [prompt]
   eagent sessions                    list sessions in this project
   eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
@@ -80,6 +85,7 @@ Flags (before positional arguments):
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
   --cwd <dir>   start a new session's commands in this directory (default: the project)
+  --relay <p>   start the new session as a relay to this profile (codex, claude, or one in config)
   --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
@@ -114,6 +120,7 @@ func run(args []string) int {
 		serveAt  = fs.String("serve", "", "serve the web UI while running")
 		answer   = fs.String("answer", "", "answer to the pending question")
 		startDir = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
+		relayTo  = fs.String("relay", "", "start the new session as a relay to this profile")
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
 		task     = fs.String("task", "", "filter by task id")
@@ -135,6 +142,14 @@ func run(args []string) int {
 		return 0
 	}
 	harness.Version = version
+	if len(rest) > 0 && rest[0] == "relay-hook" {
+		// Claude Code's Stop hook for a relay: fast, and silent unless it
+		// has messages to hand over.
+		if len(rest) < 2 {
+			return 64
+		}
+		return relay.RunStopHook(rest[1], os.Stdin, os.Stdout)
+	}
 
 	project, err := resolveProject(*dir)
 	if err != nil {
@@ -144,7 +159,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -180,6 +195,8 @@ func run(args []string) int {
 		return cmdArtifact(project, rest, *output, *recreate)
 	case "connector":
 		return cmdConnector(project, rest)
+	case "relays":
+		return cmdRelays(project, rest)
 	case "view":
 		if len(rest) < 1 {
 			return fail(errors.New("usage: eagent view <session-id> [--actor narrator] [--until SEQ]"))
@@ -194,7 +211,19 @@ func run(args []string) int {
 	// Interactive only when someone can actually type: a pipe, a file, or
 	// /dev/null on stdin would otherwise read as an immediate "quit" and the
 	// run would exit 0 having done nothing.
-	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer}
+	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer, Relay: strings.TrimSpace(*relayTo)}
+	if cmd == "relay" {
+		names := cfg.Relay.RelayProfileNames()
+		if len(rest) < 1 {
+			return fail(fmt.Errorf("usage: eagent relay <profile> [--cwd DIR] [brief]  (profiles: %s)", strings.Join(names, ", ")))
+		}
+		opts.Relay, rest = rest[0], rest[1:]
+	}
+	if opts.Relay != "" {
+		if _, ok := cfg.Relay.RelayProfiles()[opts.Relay]; !ok {
+			return fail(fmt.Errorf("no relay profile %q (have %s)", opts.Relay, strings.Join(cfg.Relay.RelayProfileNames(), ", ")))
+		}
+	}
 	if *startDir != "" {
 		dir, err := filepath.Abs(*startDir)
 		if err != nil {
@@ -230,7 +259,7 @@ func run(args []string) int {
 			raw, _ := readAll(os.Stdin)
 			opts.Prompt = strings.TrimSpace(string(raw))
 		}
-		if opts.Prompt == "" {
+		if opts.Prompt == "" && opts.Relay == "" {
 			return fail(errors.New("a non-interactive run needs a prompt: eagent -p \"...\" (stdin is not a terminal)"))
 		}
 	}

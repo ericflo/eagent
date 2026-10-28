@@ -58,6 +58,14 @@ func (r *Runtime) wakeReason() string {
 				return "new subsession with dossier"
 			case event.HarnessMessage:
 				return "harness message"
+			case event.RelayTurn:
+				return "the relayed agent finished a turn"
+			case event.RelayState:
+				return "the relayed agent needs attention"
+			case event.RelayDelivered:
+				return "a message to the relayed agent was not confirmed"
+			case event.RelayLimit:
+				return "the relayed agent's usage budget changed"
 			}
 			break
 		}
@@ -73,6 +81,11 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 	nudges := 0
 	calls := 0
 	failures := 0
+	// In a relay, a message for the agent must reach it; routed records that
+	// this turn forwarded or answered it, and unroutedNudged that the
+	// harness already reminded it once.
+	userTurn := reason == "user message"
+	routed, unroutedNudged := false, false
 	for {
 		if ctx.Err() != nil {
 			return "interrupted"
@@ -80,20 +93,21 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		calls++
 		var msgs []llm.Message
 		var seenSeq int64
-		var steer string
+		var steer, system string
 		r.sync(func() {
 			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls, r.cfg.MaxOrchestratorCallsPerTurn, r.workDir(""), r.projectPath())
 			r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: steer}))
 			msgs = r.st.OrchestratorView()
 			seenSeq = r.st.LastSeq()
 			r.orchCallAt = time.Now()
+			system = r.orchestratorSystem()
 		})
 		if len(msgs) == 0 {
 			return "nothing to do"
 		}
 		reason = ""
 		req := llm.Request{
-			System:   r.orchestratorSystem(),
+			System:   system,
 			Messages: msgs, Tools: r.orchTools, CacheKey: r.sess.ID + "-orchestrator",
 		}
 		resp, err := r.completeOrchestrator(ctx, req)
@@ -194,6 +208,24 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 			}
 			out, isErr := r.execTool(c, tc)
 			r.recordToolResult(event.ActorOrchestrator, "", tc, out, isErr)
+			switch tc.Name {
+			case "relay_forward", "relay_send", "note", "relay_control", "relay_start":
+				routed = true
+			}
+		}
+		if userTurn && !routed && !unroutedNudged && yielded != "" {
+			// About to stop without the user's words having gone anywhere.
+			var remind string
+			r.sync(func() {
+				if r.relayUnrouted() {
+					remind = "The user's message has not reached " + r.relayWho() + ". Forward it with relay_forward, or, if it only asks about the relay, answer it in a note marked as an answer."
+				}
+			})
+			if remind != "" {
+				unroutedNudged = true
+				r.recordHarnessMessage(event.ActorOrchestrator, "", remind)
+				continue // the reminder is something to act on, not a reason to stop
+			}
 		}
 		if yielded != "" {
 			return yielded

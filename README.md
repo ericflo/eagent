@@ -118,6 +118,23 @@ You can start a session from the phone too. While an eagent is running in the pr
 
 Native transcript archives are on by default. Settings for your existing FinaleChat conversations connect automatically and appear under **Settings in the thread header**. `eagent artifact export SESSION --output NEW_DIRECTORY` creates an offline archive without uploading. Proactive publication runs while eagent or its web server is running; `eagent artifact disable` opts out and `eagent artifact enable` turns it back on. `eagent connector pair` can also connect this project's settings explicitly; keep eagent, its web server, or `eagent connector run` running. `eagent connector pair-session SESSION_ID` separately requests live task concurrency and narrator timing controls for the running session. Historical websites remain readable after the original process disappears. See [session archives and settings](docs/FINALECHAT-INTEGRATIONS.md) for recovery, scope, and lifecycle details.
 
+## Relays: Codex or Claude Code doing the work
+
+```
+eagent relay codex --cwd ~/Development/epsilon "Merge every pending PR, then a deep dependency pass"
+eagent relay claude --cwd ~/Development/snowdown       # starts it and waits for your first message
+eagent relays                                          # every relay on this machine
+eagent relays attach codex                             # watch or type into one yourself
+```
+
+A relay session runs another coding agent in a tmux terminal eagent owns (screen when tmux is not installed) and passes your messages to it. The built-in profiles are `codex` (GPT-6 Astra, xhigh, `--yolo`) and `claude` (Opus 5.5, xhigh, `--dangerously-skip-permissions`); add your own under `"relay": {"profiles": {...}}` in the project config. eagent advertises the profiles to Finalechat's New session screen, so a phone can start a relay too.
+
+- Your words reach the agent verbatim, the moment they arrive, whatever eagent is doing. "Stop", "wait" and "don't…" interrupt it first. Messages for eagent itself (`@e …`, "not for relay"), questions about the relay ("how's it going?") and requests to restart or change the update cadence stay with eagent.
+- What the agent says and does is read from its own transcript (Codex rollouts, Claude Code session files), not scraped off the screen: nothing scrolls off, ghost suggestions are not mistaken for questions, and every send is confirmed when the transcript shows it arrived. Its folder-trust and update prompts are answered on the way up.
+- eagent is woken when the agent finishes a turn, needs attention, or crosses 50/80/95% of its usage budget, never on a timer. The narrator relays the agent's own report, attaches the screenshots it made, and sends a progress line every 15 minutes while it works (`relay.quiet_seconds`).
+- Relay mode is session state. A context reset keeps it, and the harness writes the relay's details into the dossier itself. While a relay runs, eagent refuses to edit files or delegate work unless you addressed it directly.
+- The agent outlives eagent: `eagent -c` reattaches to the running terminal, and asking for a restart (after an upgrade, say) relaunches it continuing its own session. Each relay belongs to the session that started it (`eagent-relay-<session>-<name>` on a private tmux socket); eagent never touches terminal sessions it did not create.
+
 ## How a session runs
 
 1. Your message wakes the **orchestrator**. It looks around, then either does something small itself or writes a self-contained task and calls `delegate`. Several tasks can run at once; `wait` blocks until one finishes.

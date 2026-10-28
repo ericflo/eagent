@@ -110,6 +110,9 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 		return finalechat.Activity{}
 	}
 	now := time.Now()
+	if text, ok := r.relayActivityLine(); ok {
+		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
+	}
 	if procs := r.st.RunningProcs(); len(procs) > 0 {
 		text := "Running " + redactSecrets(shortCommand(procs[0].Command))
 		if len(procs) > 1 {

@@ -216,6 +216,11 @@ func (r *Runtime) finishRollover(taskID, status, summary string) {
 		}
 		text = r.fallbackDossier(text)
 	}
+	if header := r.relayDossierHeader(); header != "" {
+		// The relay is state: the fresh context learns it from the record,
+		// not from whatever the worker's briefing chose to keep.
+		text = header + "\n" + text
+	}
 	r.append(event.New(event.Dossier, event.ActorHarness, event.DossierData{TaskID: taskID, Text: text}))
 	r.rolling = false
 	r.wakeNarrator("the orchestrator restarted with a fresh context and its working notes")

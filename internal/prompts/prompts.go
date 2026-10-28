@@ -6,13 +6,14 @@
 // Templates use Go text/template syntax. The data each one receives:
 //
 //	ORCHESTRATOR.md        {{.Project}} {{.Instructions}} {{.Interactive}} {{.Facts}}
+//	RELAY.md               {{.Project}} {{.Instructions}} {{.Interactive}} {{.Facts}} {{.Agent}} (the orchestrator in a relay session)
 //	TASK-WORKER.md         {{.Project}} {{.Instructions}} {{.Facts}}
-//	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}}
+//	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}} {{.Relay}}
 //	PERSONA.md             (plain text, inserted into NARRATOR.md)
 //	FACTS.md               {{.Project}} (how eagent works; inserted into the three actor prompts)
 //	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
 //	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
-//	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}}
+//	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}} {{.Relay}}
 package prompts
 
 import (
@@ -35,7 +36,7 @@ import (
 var builtin embed.FS
 
 // Names lists the prompt files, in display order.
-var Names = []string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md"}
+var Names = []string{"ORCHESTRATOR.md", "RELAY.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md"}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }
@@ -89,12 +90,14 @@ func (s *Set) Render(name string, data any) string {
 	return strings.TrimSpace(b.String()) + "\n"
 }
 
-// OrchestratorData feeds ORCHESTRATOR.md.
+// OrchestratorData feeds ORCHESTRATOR.md and RELAY.md. Agent names the
+// relayed agent ("Codex") in a relay session.
 type OrchestratorData struct {
 	Project      string
 	Instructions string
 	Interactive  bool
 	Facts        string
+	Agent        string
 }
 
 // TaskData feeds TASK-WORKER.md.
@@ -104,8 +107,9 @@ type TaskData struct {
 	Facts        string
 }
 
-// NarratorData feeds NARRATOR.md.
-type NarratorData struct{ Persona, Phone, Facts string }
+// NarratorData feeds NARRATOR.md. Relay names the relayed agent ("Codex")
+// in a relay session, "" otherwise.
+type NarratorData struct{ Persona, Phone, Facts, Relay string }
 
 // FactsData feeds FACTS.md.
 type FactsData struct{ Project string }
@@ -116,6 +120,7 @@ type DossierData struct {
 	Files        string
 	Reason       string
 	RunningTasks []string
+	Relay        string // the relayed agent in a relay session
 }
 
 // UserMessageData feeds USER_MESSAGE.md. Timestamp is preformatted from

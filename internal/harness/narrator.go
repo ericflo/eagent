@@ -100,7 +100,7 @@ func (r *Runtime) narratorTimerFired(generation uint64) {
 	if r.narrBusy || r.ending {
 		return
 	}
-	busy := r.orchBusy || len(r.st.RunningTasks()) > 0
+	busy := r.orchBusy || len(r.st.RunningTasks()) > 0 || r.st.RelayWorking()
 	if !busy {
 		return
 	}
@@ -108,7 +108,7 @@ func (r *Runtime) narratorTimerFired(generation uint64) {
 	// or when the user has waited past the quiet limit even though nothing
 	// new landed (a long command, a long think): that is when they most
 	// want to hear which step is taking its time.
-	limit := time.Duration(r.activeSettings.NarratorQuietSeconds) * time.Second
+	limit := r.quietLimit()
 	if r.narrWorthy <= r.narrLastSeen && !(limit > 0 && r.quietFor() >= limit) {
 		return
 	}
@@ -145,14 +145,15 @@ func (r *Runtime) narratorTurn(reason string) string {
 	}
 	var msgs []llm.Message
 	var seenSeq int64
-	var steer, phoneLine string
+	var steer, phoneLine, relayWho string
 	mustSpeak := false
 	r.sync(func() {
 		mustSpeak = r.narrSaidSeq <= r.st.LastUserSeq
 		if r.phone != nil {
 			phoneLine = PhoneStatus(r.phone.isRemote())
 		}
-		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), time.Duration(r.activeSettings.NarratorQuietSeconds)*time.Second, r.inflightLines(time.Now()))
+		relayWho = r.relayWho()
+		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), r.quietLimit(), r.inflightLines(time.Now()))
 		r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
 		msgs = r.st.NarratorView(nil)
 		seenSeq = r.st.LastSeq()
@@ -161,7 +162,7 @@ func (r *Runtime) narratorTurn(reason string) string {
 		return "nothing to see"
 	}
 	req := llm.Request{
-		System: r.narratorSystem(phoneLine), Messages: msgs, Tools: r.narrTools,
+		System: r.narratorSystem(phoneLine, relayWho), Messages: msgs, Tools: r.narrTools,
 		ToolChoice: "required", CacheKey: r.sess.ID + "-narrator",
 	}
 	leakRetried := false
@@ -366,6 +367,18 @@ func (r *Runtime) deliverFallbackFinal() {
 
 // quietFor is how long the user has gone without a narrator message, or
 // since the session started when there has been none. Loop goroutine only.
+// quietLimit is how long the user may go without a progress line while work
+// continues. A relayed agent works for hours, so a relay session uses the
+// relay cadence unless the user tuned the narrator's limit live. Loop
+// goroutine only.
+func (r *Runtime) quietLimit() time.Duration {
+	secs := r.activeSettings.NarratorQuietSeconds
+	if len(r.st.ActiveRelays()) > 0 && secs == r.cfg.NarratorQuietSeconds && secs > 0 {
+		secs = r.cfg.Relay.Quiet()
+	}
+	return time.Duration(secs) * time.Second
+}
+
 func (r *Runtime) quietFor() time.Duration {
 	if !r.narrSaidAt.IsZero() {
 		return time.Since(r.narrSaidAt)
@@ -393,6 +406,7 @@ func (r *Runtime) inflightLines(now time.Time) []string {
 			out = append(out, taskEvidence(r.st, t, now))
 		}
 	}
+	out = append(out, r.relayInflight(now)...)
 	if r.orchBusy && !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
 		out = append(out, fmt.Sprintf("the current planning step has been going for %s with nothing produced yet (a long read or a long reply; name a step only if the log shows it)", since(r.orchCallAt, now)))
 	}

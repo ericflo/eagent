@@ -416,6 +416,24 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				}
 			}
 		})
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		if d.From != "eagent" {
+			return // the user's own words, forwarded verbatim: already in the thread
+		}
+		// What eagent itself typed to the agent is shown exactly as sent.
+		who := d.Name
+		if rel := r.st.Relays[d.Name]; rel != nil {
+			who = rel.Who()
+		}
+		body := "→ " + who + ":\n" + d.Text
+		p.enqueue(func(ctx context.Context) {
+			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq)})
+			if err == nil {
+				p.remember(msg.ID)
+			}
+		})
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)

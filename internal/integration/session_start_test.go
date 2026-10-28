@@ -255,3 +255,37 @@ func TestProjectDirectoriesListsRootRecentChildrenAndSiblings(t *testing.T) {
 		t.Fatalf("recent = %v (a worker's move and a vanished directory do not count)", got)
 	}
 }
+
+func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
+	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no provider call expected") })
+	var got SessionRequest
+	restore := SetSessionStarter(func(_ context.Context, _ string, req SessionRequest) (SessionStart, error) {
+		got = req
+		return SessionStart{ID: "1788000000008", Host: "in_process", Interactive: true}, nil
+	})
+	defer restore()
+	q := sessionStartCommand(t, s, g, "")
+	q.Proposal.Parameters["relay"] = "codex"
+	raw, _ := json.Marshal(q.Proposal)
+	q.Digest = artifact.Digest(raw)
+	res, err := executeCommand(context.Background(), s, g, q, false)
+	if err != nil || res.Status != "succeeded" || got.Relay != "codex" {
+		t.Fatalf("%s %v %#v %v", res.Status, res.Result, got, err)
+	}
+	// Only the profiles the connector advertised are accepted.
+	q = sessionStartCommand(t, s, g, "hi")
+	q.Proposal.Parameters["relay"] = "rm -rf /"
+	raw, _ = json.Marshal(q.Proposal)
+	q.Digest = artifact.Digest(raw)
+	got = SessionRequest{}
+	if res, err := executeCommand(context.Background(), s, g, q, false); err != nil || res.Status != "rejected" || got.Relay != "" {
+		t.Fatalf("unknown profile: %s %v %#v", res.Status, res.Result, got)
+	}
+	var names []string
+	for _, p := range relayProfiles(t.TempDir()) {
+		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
+	}
+	if strings.Join(names, ",") != "claude/claude,codex/codex" {
+		t.Fatalf("advertised profiles %v", names)
+	}
+}

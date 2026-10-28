@@ -5,7 +5,9 @@ Subsession files (oldest first): {{.Files}}
 
 Use session_list, session_read, and session_search to study the logs. Start with session_read on the last file listed above (the newest completed subsession, where the most recent work is), then the earlier ones. session_list also shows the file being written right now; it holds nothing but this task, so skip it. Read the user's messages verbatim. Follow task reports and tool results to establish what is actually on disk; check the filesystem with bash or read_file when it matters.
 
-Write the dossier in this shape (markdown):
+{{if .Relay}}This session is a relay: {{.Relay}} does the work in its own terminal and the orchestrator passes the user's words to it. The harness puts the relay's live details (its terminal, its own session id, its state) at the top of your dossier itself; your job is the conversation. In USER'S GOAL list every instruction the user gave {{.Relay}}, verbatim, and in CURRENT STATE say which ones {{.Relay}}'s turn reports show done, which are in progress, and which have not been acted on. Do not describe the orchestrator doing the work itself: in a relay it does not.
+
+{{end}}Write the dossier in this shape (markdown):
 1. USER'S GOAL: the request(s) as the user wrote them, plus any clarifications or decisions they made.
 2. CURRENT STATE: what exists now (paths), what is verified working, what is in progress (running tasks/processes and their handles), what is broken or unfinished.
 3. DECISIONS AND CONSTRAINTS: architecture choices, conventions, things that were tried and rejected, and why.

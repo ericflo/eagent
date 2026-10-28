@@ -75,6 +75,7 @@ type commandJournal struct {
 type sessionStartIntent struct {
 	Prompt string `json:"prompt"`
 	Dir    string `json:"dir,omitempty"`
+	Relay  string `json:"relay,omitempty"`
 }
 
 func connectorPath(project string) string {
@@ -400,6 +401,8 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			// Where a session started from the phone may begin: the app
 			// offers these, and any absolute path typed in.
 			view.Snapshot.Details["directories"] = directories
+			// Which agents it may relay to instead of eagent doing the work.
+			view.Snapshot.Details["relay_profiles"] = relayProfiles(project)
 		}
 		var published struct {
 			Resource resourceInfo `json:"resource"`
@@ -620,15 +623,17 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		case "session.start":
 			prompt, _ := q.Proposal.Parameters["prompt"].(string)
 			dir, _ := q.Proposal.Parameters["cwd"].(string)
-			dir = strings.TrimSpace(dir)
+			relayProfile, _ := q.Proposal.Parameters["relay"].(string)
+			dir, relayProfile = strings.TrimSpace(dir), strings.TrimSpace(relayProfile)
 			if _, err := s.ValidateAction(q.Proposal, grant); err != nil {
 				prepareErr = err
-			} else if strings.TrimSpace(prompt) == "" {
+			} else if strings.TrimSpace(prompt) == "" && relayProfile == "" {
+				// A relay may start empty: the agent comes up and waits.
 				prepareErr = fmt.Errorf("the first message is required")
 			} else if err := checkStartDir(dir); err != nil {
 				prepareErr = err
 			} else {
-				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir}
+				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir, Relay: relayProfile}
 			}
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
@@ -673,7 +678,7 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		// Starting a session must not hold the settings writer: the new
 		// session reads the configuration through the same lock.
 		editor.Close()
-		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir})
+		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir, Relay: journal.Session.Relay})
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish("unknown", map[string]any{"message": "Starting the session was interrupted. It was not repeated; check the session list."})

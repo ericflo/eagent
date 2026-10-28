@@ -126,6 +126,45 @@ var orchestratorOnly = []llm.Tool{
 		},"required":["reason"]}`),
 }
 
+// relayTools drive an external coding agent (a relay). They are always in
+// the orchestrator's list so the list never changes mid-subsession.
+var relayTools = []llm.Tool{
+	def("relay_start",
+		"Start an external coding agent in a terminal eagent owns, and make this session a relay to it: from then on the user's messages are for that agent. profile is a relay profile (built in: \"codex\" = Codex GPT-6 Astra xhigh with --yolo, \"claude\" = Claude Code Opus 5.5 xhigh with --dangerously-skip-permissions). dir is where it works (default: your working directory). Use it only when the user asks for Codex or Claude to do the work.",
+		`{"type":"object","properties":{
+			"profile":{"type":"string"},
+			"dir":{"type":"string","description":"Absolute path, or relative to your working directory."}
+		},"required":["profile"]}`),
+	def("relay_forward",
+		"Send the user's message to the relayed agent exactly as they wrote it, with any files they attached. This is the normal way to pass on what the user said: never paraphrase their words into relay_send. mode: queue (default; if the agent is working it reads the message at its next step), interrupt (stop what it is doing first; only when the user asks to stop or redirect it now), or after_turn (hand it over when its current turn ends).",
+		`{"type":"object","properties":{
+			"relay":{"type":"string","description":"Which relay; omit when there is one."},
+			"seq":{"type":"integer","description":"The user message to forward, by seq; default the latest."},
+			"mode":{"type":"string","enum":["queue","interrupt","after_turn"]}
+		}}`),
+	def("relay_send",
+		"Type your own words to the relayed agent: a nudge to keep going, an answer to its question the user gave you, context it lacks. The exact text is mirrored to the user's phone. Do not use it to pass on the user's messages (relay_forward does that, verbatim). Same modes as relay_forward.",
+		`{"type":"object","properties":{
+			"relay":{"type":"string"},
+			"text":{"type":"string"},
+			"mode":{"type":"string","enum":["queue","interrupt","after_turn"]}
+		},"required":["text"]}`),
+	def("relay_status",
+		"What the relayed agent is doing: its state and for how long, what it is running right now, what it said recently, its last turn's report, messages not yet confirmed delivered, its usage budget, and how to attach to its terminal.",
+		`{"type":"object","properties":{"relay":{"type":"string"}}}`),
+	def("relay_screen",
+		"Read the relayed agent's terminal screen (and scrollback). Only for dialogs and prompts on its screen; what it says and does comes to you from its transcript as turn reports.",
+		`{"type":"object","properties":{"relay":{"type":"string"},"lines":{"type":"integer","description":"Scrollback lines, default 60."}}}`),
+	def("relay_control",
+		"Manage the relayed agent. interrupt: press Escape to stop its current step. keys: press keys to answer a dialog on its screen (names: Enter, Escape, Up, Down, Tab, C-c, or literal text). restart: end it and start it again continuing its own session (after an exit or an upgrade). stop: end it for good (when the user is finished with it).",
+		`{"type":"object","properties":{
+			"relay":{"type":"string"},
+			"action":{"type":"string","enum":["interrupt","keys","restart","stop"]},
+			"keys":{"type":"array","items":{"type":"string"}},
+			"reason":{"type":"string"}
+		},"required":["action"]}`),
+}
+
 var taskOnly = []llm.Tool{
 	def("complete_task",
 		"Finish the task and report back. This ends your context. Be specific: what you changed (paths), how you verified it, and anything unfinished or worth knowing. Use status='failed' if you could not accomplish the goal, and say why.",
@@ -156,7 +195,8 @@ var narratorOnly = []llm.Tool{
 func OrchestratorTools() []llm.Tool {
 	out := append([]llm.Tool{}, orchestratorOnly...)
 	out = append(out, shellTools...)
-	return append(out, sessionTools...)
+	out = append(out, sessionTools...)
+	return append(out, relayTools...)
 }
 
 // TaskTools returns the task worker's stable tool list.
