@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
+	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -281,8 +283,11 @@ func TestRequestSessionGrantWidensConnectorGrants(t *testing.T) {
 	t.Setenv("FINALECHAT_URL", srv.URL)
 	stored := []control.Grant{{Key: "proj", Scope: "project", Operations: []string{"settings.apply"}, Classes: []string{"preference"}}}
 	want := control.Grant{Key: "proj-session-123", Scope: "session", Operations: []string{"settings.apply", "settings.refresh"}, Classes: []string{"preference", "route"}}
-	if err := requestSessionGrant(context.Background(), project, "/api/v1/connectors/abc", stored, want); err != nil {
+	if err := requestSessionGrant(context.Background(), project, "fcc_local_secret", "/api/v1/connectors/abc", stored, want); err != nil {
 		t.Fatal(err)
+	}
+	if gotBody["secret"] != "fcc_local_secret" {
+		t.Fatalf("connect body missing the connector secret: %v", gotBody)
 	}
 	grants, ok := gotBody["requested_grants"].([]any)
 	if !ok || len(grants) != 2 {
@@ -295,5 +300,160 @@ func TestRequestSessionGrantWidensConnectorGrants(t *testing.T) {
 	classes, _ := second["classes"].([]any)
 	if len(classes) != 2 {
 		t.Fatalf("classes = %v", classes)
+	}
+}
+
+// End-to-end: an auto-discovered session worker (no pairing file) widens the
+// connector grant via /connect, publishes the session-scoped resource with
+// the session's actual routes, and binds a session settings website to it.
+func TestAutoDiscoveredSessionWorkerPublishesSessionResourceAndSite(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "on")
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	project := t.TempDir()
+	// A running session whose log says it runs custom routes.
+	sess, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
+		Session: sess.ID, Cwd: project,
+		Models:    map[string]string{"orchestrator": "anthropic/claude-sonnet-5-5", "task": "deepseek/deepseek-v4.1-flash-1017", "narrator": "anthropic/claude-haiku-5-5"},
+		Endpoints: map[string]string{"orchestrator": "https://api.anthropic.com/v1", "task": "https://openrouter.ai/api/v1", "narrator": "https://api.anthropic.com/v1"},
+		Efforts:   map[string]string{"orchestrator": "high", "task": "high", "narrator": "low"},
+		Config:    "muse",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), func(_ runtimecontrol.Request, _ runtimecontrol.Values, _ map[string]any) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+
+	projectGrant := (&settings.Service{Project: project}).Grant()
+	sessionGrant, err := runtimecontrol.Grant(project, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	widened := false
+	var connectGrants []any
+	var resourceBody map[string]any
+	var bindingBody map[string]any
+	resourceSeen := make(chan struct{}, 1)
+	bindingSeen := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == "GET" && path == "/api/v1/connectors/connector":
+			grants := []any{projectGrant}
+			if widened {
+				grants = append(grants, sessionGrant)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"connector": map[string]any{"id": "connector", "state": "active", "grants": grants}})
+		case r.Method == "POST" && strings.HasSuffix(path, "/connect"):
+			if body["secret"] != "fcc_fixture" {
+				w.WriteHeader(403)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "forbidden", "message": "You do not have access to this resource."}})
+				return
+			}
+			widened = true
+			connectGrants, _ = body["requested_grants"].([]any)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == "POST" && strings.HasSuffix(path, "/heartbeat"):
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == "POST" && strings.HasSuffix(path, "/release"):
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == "GET" && strings.Contains(path, "/commands/claim"):
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == "PUT" && strings.Contains(path, "/resources/"):
+			resourceBody = body
+			_ = json.NewEncoder(w).Encode(map[string]any{"resource": map[string]any{"id": "sess-resource", "key": sessionGrant.Key}})
+			select {
+			case resourceSeen <- struct{}{}:
+			default:
+			}
+		case r.Method == "PUT" && strings.Contains(path, "/bindings/"):
+			bindingBody = body
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+			select {
+			case bindingSeen <- struct{}{}:
+			default:
+			}
+		case r.Method == "PUT" && strings.Contains(path, "/settings-resources/") && strings.HasSuffix(path, "/website"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"artifact": map[string]any{"id": "art-1"}})
+		case r.Method == "GET" && strings.HasPrefix(path, "/api/v1/artifacts/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"artifact": map[string]any{"id": "art-1", "current_revision_id": nil}, "revision": nil})
+		case r.Method == "POST" && strings.Contains(path, "/blobs/check"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"missing": []string{}})
+		case r.Method == "PUT" && strings.Contains(path, "/blobs/"):
+			w.WriteHeader(200)
+		case r.Method == "POST" && strings.HasSuffix(path, "/revisions"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"revision": map[string]any{"id": "rev-1"}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("FINALECHAT_URL", srv.URL)
+	// Project connector credential file; the session worker derives from it.
+	dir := filepath.Join(project, ".agents", "eagent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(connectorConfig{ID: "connector", Secret: "fcc_fixture", BaseURL: srv.URL, Session: ""})
+	if err := os.WriteFile(filepath.Join(dir, "finalechat-connector.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stop := startConnectorAt(ctx, project, sess.ID, "", filepath.Join(stateDir(project), "auto-"+sess.ID+".lock"), t.Logf)
+	defer stop()
+	select {
+	case <-resourceSeen:
+	case <-ctx.Done():
+		t.Fatal("session resource was not published")
+	}
+	select {
+	case <-bindingSeen:
+	case <-ctx.Done():
+		t.Fatal("session settings website was not bound")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !widened || len(connectGrants) != 2 {
+		t.Fatalf("grant not widened: widened=%v grants=%v", widened, connectGrants)
+	}
+	details, _ := resourceBody["snapshot"].(map[string]any)["details"].(map[string]any)
+	routes, _ := details["routes"].(map[string]any)
+	orch, _ := routes["orchestrator"].(map[string]any)
+	if orch["model"] != "anthropic/claude-sonnet-5-5" || orch["effort"] != "high" {
+		t.Fatalf("session resource routes = %v", routes)
+	}
+	if details["config"] != "muse" {
+		t.Fatalf("config = %v", details["config"])
+	}
+	desc, _ := resourceBody["descriptor"].(map[string]any)
+	fields, _ := desc["fields"].([]any)
+	hasRouteField := false
+	for _, f := range fields {
+		if fm, ok := f.(map[string]any); ok && fm["key"] == "/routes/orchestrator/model" {
+			hasRouteField = true
+		}
+	}
+	if !hasRouteField {
+		t.Fatal("session resource descriptor lacks /routes/orchestrator/model")
+	}
+	if bindingBody["resource_id"] != "sess-resource" || bindingBody["revision_id"] != "rev-1" {
+		t.Fatalf("binding = %v", bindingBody)
 	}
 }

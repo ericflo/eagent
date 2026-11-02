@@ -339,13 +339,13 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 // connector's issued grants, using the account token plus the local connector
 // secret — the same owner proof `connector pair-session` uses. base is the
 // connector's API path ("/api/v1/connectors/<id>").
-func requestSessionGrant(ctx context.Context, project, base string, stored []control.Grant, want control.Grant) error {
+func requestSessionGrant(ctx context.Context, project, secret, base string, stored []control.Grant, want control.Grant) error {
 	account, err := settingsAccount(project)
 	if err != nil {
 		return fmt.Errorf("cannot request the session grant without a FinaleChat account token: %w", err)
 	}
 	id := strings.TrimPrefix(base, "/api/v1/connectors/")
-	connect := map[string]any{"requested_grants": replaceGrant(stored, want)}
+	connect := map[string]any{"secret": secret, "requested_grants": replaceGrant(stored, want)}
 	if err := account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(id)+"/connect", nil, connect, nil, 0); err != nil {
 		return fmt.Errorf("widening the connector grant for this session: %w", err)
 	}
@@ -401,7 +401,7 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			// project grant, so the server can verify the session belongs to
 			// this project and self-serve the addition — the same /connect
 			// widening `connector pair-session` performs explicitly.
-			if err := requestSessionGrant(ctx, project, base, status.Connector.Grants, expectedGrant); err != nil {
+			if err := requestSessionGrant(ctx, project, local.Secret, base, status.Connector.Grants, expectedGrant); err != nil {
 				return err
 			}
 			continue // re-read connector status with the widened grants
@@ -424,14 +424,19 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 		if err != nil {
 			return err
 		}
-		if session == "" && time.Since(discovered) > time.Minute {
+		// The account client is needed by every worker: the project worker
+		// uses it to discover threads and publish their sites, and a session
+		// worker needs it to register the session's own settings website.
+		if time.Since(discovered) > time.Minute {
 			discovered = time.Now()
 			directories = projectDirectories(project)
 			account, _ = settingsAccount(project)
 			if account != nil && strings.TrimRight(account.BaseURL, "/") == strings.TrimRight(local.BaseURL, "/") {
-				discoverCtx, stop := context.WithTimeout(ctx, 20*time.Second)
-				linked = settingsThreads(discoverCtx, project, account)
-				stop()
+				if session == "" {
+					discoverCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+					linked = settingsThreads(discoverCtx, project, account)
+					stop()
+				}
 			} else {
 				account = nil
 				linked = nil
