@@ -232,7 +232,15 @@ func startConnectorAt(ctx context.Context, project, session, path, lockPath stri
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			if _, err := os.Stat(path); err == nil || session == "" {
+			// path == "" marks an auto-discovered running session: its worker
+			// derives its connector config from the project connector instead
+			// of a pairing file, and is gated by the discovery loop, not the fs.
+			run := session == "" || path == ""
+			if !run {
+				_, statErr := os.Stat(path)
+				run = statErr == nil
+			}
+			if run {
 				lockCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
 				unlock, err := filelock.Acquire(lockCtx, lockPath)
 				stop()
@@ -273,7 +281,15 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 		logf = func(string, ...any) {}
 	}
 	var local connectorConfig
-	if err := readConnectorFile(path, &local); err != nil {
+	if path == "" {
+		// Auto-discovered running session: reuse the project connector's
+		// credential, scoped to this session. The grant key is derived from
+		// the project grant, so the server recognizes it either way.
+		if err := readConnectorFile(connectorPath(project), &local); err != nil {
+			return err
+		}
+		local.Session = session
+	} else if err := readConnectorFile(path, &local); err != nil {
 		return err
 	}
 	if local.ID == "" || !strings.HasPrefix(local.Secret, "fcc_") || local.Session != session {

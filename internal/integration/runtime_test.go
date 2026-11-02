@@ -221,3 +221,43 @@ func TestSessionRoutesReflectActualLog(t *testing.T) {
 		t.Fatalf("runtime snapshot config = %v", view.Snapshot.Details["config"])
 	}
 }
+
+func TestRunningSessionsDiscoversLiveHeartbeatOnly(t *testing.T) {
+	project := t.TempDir()
+	// A session with no runtime status is not "running".
+	dead, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dead.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := runningSessions(project); len(got) != 0 {
+		t.Fatalf("runningSessions = %v, want none", got)
+	}
+	// A session whose harness started the runtime control heartbeats.
+	live, err := store.Create(store.Root(project), time.UnixMilli(1788800000001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := runtimecontrol.New(project, live.ID, runtimecontrol.FromConfig(config.Defaults()), func(_ runtimecontrol.Request, _ runtimecontrol.Values, _ map[string]any) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := runningSessions(project)
+	if len(got) != 1 || got[0] != live.ID {
+		t.Fatalf("runningSessions = %v, want [%s]", got, live.ID)
+	}
+	// When the harness stops, the heartbeat lapses and the session drops out.
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Close heartbeats with AvailableUntil zeroed; ReadStatus still returns it,
+	// but AvailableUntil.After(now) is false.
+	if got := runningSessions(project); len(got) != 0 {
+		t.Fatalf("after shutdown runningSessions = %v, want none", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -61,12 +62,13 @@ func StartConnector(ctx context.Context, project string, logf func(string, ...an
 			}
 		}()
 		for ctx.Err() == nil {
+			present := map[string]bool{}
+			// Explicitly paired sessions (grant files) always get a worker.
 			// Bound discovery even if local files are accidentally generated in a loop.
 			if dir, err := os.Open(runtimeConnectorDir(project)); err == nil {
 				entries, readErr := dir.ReadDir(257)
 				dir.Close()
 				if (readErr == nil || readErr == io.EOF) && len(entries) <= 256 {
-					present := map[string]bool{}
 					for _, entry := range entries {
 						session, ok := strings.CutSuffix(entry.Name(), ".json")
 						if !ok || !entry.Type().IsRegular() {
@@ -76,16 +78,28 @@ func StartConnector(ctx context.Context, project string, logf func(string, ...an
 							continue
 						}
 						present[session] = true
-						if workers[session] == nil {
-							workers[session] = startConnectorAt(ctx, project, session, filepath.Join(runtimeConnectorDir(project), entry.Name()), filepath.Join(runtimeConnectorDir(project), session+".lock"), logf)
-						}
 					}
-					for session, stop := range workers {
-						if !present[session] {
-							stop()
-							delete(workers, session)
-						}
+				}
+			}
+			// Auto-discover running sessions — including ones started from the
+			// phone — so each gets a session-scoped settings resource without
+			// anyone running `connector pair-session`.
+			for _, sid := range runningSessions(project) {
+				present[sid] = true
+			}
+			for session := range present {
+				if workers[session] == nil {
+					grantPath := filepath.Join(runtimeConnectorDir(project), session+".json")
+					if _, err := os.Stat(grantPath); err != nil {
+						grantPath = "" // auto-discovered: derive from the project connector
 					}
+					workers[session] = startConnectorAt(ctx, project, session, grantPath, filepath.Join(runtimeConnectorDir(project), session+".lock"), logf)
+				}
+			}
+			for session, stop := range workers {
+				if !present[session] {
+					stop()
+					delete(workers, session)
 				}
 			}
 			select {
@@ -161,6 +175,29 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 		}
 	}
 	return view, nil
+}
+
+// runningSessions lists sessions in the project whose harness is alive right
+// now, proven by a live runtime-status heartbeat. Newest first, capped so a
+// big session directory cannot make discovery unbounded.
+func runningSessions(project string) []string {
+	infos, err := store.List(store.Root(project))
+	if err != nil {
+		return nil
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Started.After(infos[j].Started) })
+	if len(infos) > 64 {
+		infos = infos[:64]
+	}
+	var out []string
+	for _, info := range infos {
+		st, err := runtimecontrol.ReadStatus(project, info.ID)
+		if err != nil || !st.AvailableUntil.After(time.Now()) {
+			continue
+		}
+		out = append(out, info.ID)
+	}
+	return out
 }
 
 // sessionRoutes replays a session's log and returns the per-actor routes in

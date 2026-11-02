@@ -99,7 +99,7 @@ The flat keys `eagent.tz`, `eagent.locale`, and `eagent.device` are accepted as 
 
 ## Live session controls
 
-Run `eagent connector pair-session SESSION_ID` in the project, which connects the separate session controls to your account. This requests access only to that session; project-default pairing does not acquire it. Keep an updated eagent session running. Its chat thread offers **Settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.
+Every running session — including one started from the phone's **New session** — gets a session-scoped settings resource automatically: the connector discovers sessions with a live runtime heartbeat and publishes their resource under the project connector, no `connector pair-session` needed (that command is still the way to pin a session explicitly). Keep an updated eagent session running. Its chat thread offers **Settings** once the connector publishes its resource. The same form is available under FinaleChat's integration settings. Pairing can precede the session's next run; a runtime resource appears only after the updated harness has started.
 
 These controls affect this process only:
 
