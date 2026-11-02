@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 func TestRuntimeConnectorPublishesDeliversAndReconciles(t *testing.T) {
@@ -157,5 +159,65 @@ func TestRuntimeConnectorPublishesDeliversAndReconciles(t *testing.T) {
 	}
 	if _, err := os.Stat(config.File(project)); !os.IsNotExist(err) {
 		t.Fatal("runtime command wrote project defaults")
+	}
+}
+
+func TestSessionRoutesReflectActualLog(t *testing.T) {
+	project := t.TempDir()
+	sess, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
+		Session: sess.ID, Cwd: project,
+		Models:    map[string]string{"orchestrator": "reflection/beam-1.0-501b-a23b", "task": "z-ai/glm-5.3", "narrator": "deepseek/deepseek-v4.1-flash-1017"},
+		Endpoints: map[string]string{"orchestrator": "https://openrouter.ai/api/v1", "task": "https://openrouter.ai/api/v1", "narrator": "https://openrouter.ai/api/v1"},
+		Efforts:   map[string]string{"orchestrator": "xhigh", "task": "high", "narrator": "low"},
+		Config:    "muse",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fallback switched the narrator to another host mid-session.
+	_, err = sess.Append(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: "narrator", BaseURL: "https://api.together.xyz/v1", Model: "deepseek-ai/DeepSeek-V4.1-Flash-1017", Reason: "fallback"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	routes, cfgName, ok := sessionRoutes(project, sess.ID)
+	if !ok {
+		t.Fatal("no routes")
+	}
+	if cfgName != "muse" {
+		t.Fatalf("config = %q", cfgName)
+	}
+	orch := routes["orchestrator"].(map[string]any)
+	if orch["model"] != "reflection/beam-1.0-501b-a23b" || orch["effort"] != "xhigh" || orch["host"] != "https://openrouter.ai/api/v1" {
+		t.Fatalf("orchestrator route = %v", orch)
+	}
+	narr := routes["narrator"].(map[string]any)
+	if narr["model"] != "deepseek-ai/DeepSeek-V4.1-Flash-1017" || narr["host"] != "https://api.together.xyz/v1" {
+		t.Fatalf("fallback route not reflected: %v", narr)
+	}
+
+	// And the runtime snapshot for a paired session carries them in details.
+	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), func(_ runtimecontrol.Request, _ runtimecontrol.Values, _ map[string]any) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	grant, _ := runtimecontrol.Grant(project, sess.ID)
+	view, err := runtimeSnapshot(project, sess.ID, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, ok := view.Snapshot.Details["routes"].(map[string]any)
+	if !ok || rd["orchestrator"].(map[string]any)["model"] != "reflection/beam-1.0-501b-a23b" {
+		t.Fatalf("runtime snapshot routes = %v", view.Snapshot.Details["routes"])
+	}
+	if view.Snapshot.Details["config"] != "muse" {
+		t.Fatalf("runtime snapshot config = %v", view.Snapshot.Details["config"])
 	}
 }

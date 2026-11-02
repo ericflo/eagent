@@ -17,6 +17,7 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -133,6 +134,15 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 	if err != nil {
 		return view, err
 	}
+	// Carry the routes this session is actually running (per actor: model,
+	// host, reasoning effort — after any fallback) so the phone can show the
+	// real picks, not the preset name the project file happens to name.
+	if routes, cfgName, ok := sessionRoutes(project, session); ok {
+		view.Snapshot.Details["routes"] = routes
+		if cfgName != "" {
+			view.Snapshot.Details["config"] = cfgName
+		}
+	}
 	if grant.Key != view.Key || grant.Scope != "session" {
 		return view, fmt.Errorf("runtime grant identity changed")
 	}
@@ -150,6 +160,33 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 		}
 	}
 	return view, nil
+}
+
+// sessionRoutes replays a session's log and returns the per-actor routes in
+// use (model, host, effort) plus the preset/bundle name, for display in the
+// session-scoped settings snapshot.
+func sessionRoutes(project, session string) (map[string]any, string, bool) {
+	info, err := store.Resolve(store.Root(project), session)
+	if err != nil {
+		return nil, "", false
+	}
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		return nil, "", false
+	}
+	st := state.Replay(evs)
+	if len(st.Models) == 0 {
+		return nil, "", false
+	}
+	routes := map[string]any{}
+	for actor, model := range st.Models {
+		routes[actor] = map[string]any{
+			"model":  model,
+			"host":   st.Hosts[actor],
+			"effort": st.Efforts[actor],
+		}
+	}
+	return routes, st.Config, true
 }
 
 // The connector records its intent before handing a command to the owner.

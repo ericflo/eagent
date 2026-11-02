@@ -160,6 +160,13 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		keys[key] = os.Getenv(key) != ""
 	}
 	out.Snapshot.Details = map[string]any{"project": s.Project, "file_etag": res.File.ETag, "sources": res.Sources, "active": res.Active, "keys_present": keys, "context_digests": contextFiles, "prompts": promptViews, "bundles": names}
+	// The effective per-actor routes, so a reader can show what is actually
+	// in force (file overrides included) rather than the preset's own lineup.
+	out.Snapshot.Details["effective_routes"] = map[string]any{
+		"orchestrator": map[string]any{"model": res.Effective.Orchestrator.Model, "base_url": res.Effective.Orchestrator.BaseURL, "reasoning_effort": res.Effective.Orchestrator.ReasoningEffort},
+		"task":         map[string]any{"model": res.Effective.Task.Model, "base_url": res.Effective.Task.BaseURL, "reasoning_effort": res.Effective.Task.ReasoningEffort},
+		"narrator":     map[string]any{"model": res.Effective.Narrator.Model, "base_url": res.Effective.Narrator.BaseURL, "reasoning_effort": res.Effective.Narrator.ReasoningEffort},
+	}
 	// One configuration version is shared by its archive and every reader.
 	// Per-connector write permissions are applied after hashing capabilities.
 	for i := range out.Descriptor.Fields {

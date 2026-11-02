@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -142,5 +143,41 @@ func TestRemoteUnsetPreservesUnrelatedFieldsAndSecrets(t *testing.T) {
 	}
 	if saved["persona"] != "concise" || saved["private_unknown"] != "secret-never-export" {
 		t.Fatal("unrelated settings lost")
+	}
+}
+
+func TestSnapshotDetailsCarryEffectiveRoutesOverPreset(t *testing.T) {
+	project := t.TempDir()
+	// Project file builds on preset muse but overrides task and narrator.
+	raw := `{"preset":"muse","task":{"model":"z-ai/glm-5.3"},"narrator":{"model":"deepseek/deepseek-v4.1-flash-1017","reasoning_effort":"low"}}`
+	if err := os.MkdirAll(filepath.Join(project, ".agents", "eagent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".agents", "eagent", "config.json"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Project: project}
+	view, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes, ok := view.Snapshot.Details["effective_routes"].(map[string]any)
+	if !ok {
+		t.Fatalf("no effective_routes in details: %v", view.Snapshot.Details)
+	}
+	orch := routes["orchestrator"].(map[string]any)
+	if orch["model"] != "muse-spark-1.3-contributor" {
+		t.Fatalf("orchestrator should come from the preset: %v", orch)
+	}
+	if task := routes["task"].(map[string]any); task["model"] != "z-ai/glm-5.3" {
+		t.Fatalf("file override for task not reflected: %v", task)
+	}
+	narr := routes["narrator"].(map[string]any)
+	if narr["model"] != "deepseek/deepseek-v4.1-flash-1017" || narr["reasoning_effort"] != "low" {
+		t.Fatalf("file override for narrator not reflected: %v", narr)
+	}
+	// The file is the top active layer; the preset it builds on is /preset.
+	if view.Snapshot.Effective["/preset"] != "muse" {
+		t.Fatalf("effective preset = %v", view.Snapshot.Effective["/preset"])
 	}
 }
