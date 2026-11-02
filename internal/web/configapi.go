@@ -352,11 +352,18 @@ func (s *Server) recordCheck(res TestResult) {
 
 type catalogView struct {
 	Providers   []config.Provider      `json:"providers"`
-	Models      []config.Model         `json:"models"`
+	Models      []config.Model         `json:"models"` // static catalog, overlaid with live models (live: true)
 	EffortOrder []string               `json:"effort_order"`
 	Transports  map[string]string      `json:"transports"` // protocol -> how the effort travels
 	Keys        map[string]bool        `json:"keys"`       // catalog key env -> present
 	Checks      map[string]checkRecord `json:"checks"`     // "base|model|effort" -> last observed outcome
+	// Live model discovery: providers' /models lists, fetched only when this
+	// endpoint is requested and the on-disk cache is older than 24h (never
+	// at process startup).
+	LiveFetchedAt string            `json:"live_fetched_at,omitempty"`
+	LiveRefreshed bool              `json:"live_refreshed,omitempty"` // a network refresh ran on this request
+	LiveStale     bool              `json:"live_stale,omitempty"`     // served from cache because the refresh found nothing
+	LiveErrors    map[string]string `json:"live_errors,omitempty"`    // provider id -> why it contributed nothing
 }
 
 func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +377,14 @@ func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
 	s.checksMu.Lock()
 	v.Checks = s.loadChecks()
 	s.checksMu.Unlock()
+	// On-demand live models: refreshes at most once per 24h, and only when
+	// the settings page asks for the catalog — never at startup.
+	live := config.LiveModels(r.Context(), s.Project)
+	v.Models = config.MergeLive(config.Models, live.Models)
+	if !live.FetchedAt.IsZero() {
+		v.LiveFetchedAt = live.FetchedAt.UTC().Format(time.RFC3339)
+	}
+	v.LiveRefreshed, v.LiveStale, v.LiveErrors = live.Refreshed, live.Stale, live.Errors
 	writeJSON(w, v)
 }
 

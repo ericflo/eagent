@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
@@ -99,7 +101,7 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	if string(file["preset"]) != `"anthropic-med"` || file["orchestrator"] != nil || string(file["task_concurrency"]) != "5" {
 		t.Fatalf("overlay file = %s", raw)
 	}
-	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Task.ReasoningEffort != "high" || res.Resolution.Effective.Orchestrator.Model != "claude-opus-5" {
+	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Task.ReasoningEffort != "high" || res.Resolution.Effective.Orchestrator.Model != "claude-opus-5-5" {
 		t.Fatalf("resolution after save: %+v", res.Resolution.Active)
 	}
 	// A stale etag is a 409 that carries the current file.
@@ -229,7 +231,7 @@ func TestPresetChipsAndPromptsAreClosedSets(t *testing.T) {
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	pv = presetConfigView{}
-	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 || pv.Config.Preset != "anthropic-med" || pv.Config.Orchestrator.Model != "claude-opus-5" || pv.Config.TaskConcurrency == 9 {
+	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 || pv.Config.Preset != "anthropic-med" || pv.Config.Orchestrator.Model != "claude-opus-5-5" || pv.Config.TaskConcurrency == 9 {
 		t.Fatalf("bundle = %d %v %+v", w.Code, err, pv.Config.Orchestrator.Model)
 	}
 	// Anything else is a 404 before any file is opened.
@@ -368,5 +370,192 @@ func TestStopNeedsARunningSessionAndHostIsChecked(t *testing.T) {
 	wrapped.ServeHTTP(rec, r)
 	if rec.Code != 403 {
 		t.Fatalf("a LAN peer got %d", rec.Code)
+	}
+}
+
+func TestCatalogServesLiveModelsFromCache(t *testing.T) {
+	s, project := newTestServer(t)
+	// Seed a fresh live cache so the handler does no network I/O.
+	live := []config.Model{
+		{Provider: "openrouter", ID: "z-ai/glm-5.3", Family: "glm-5.3", Label: "GLM-5.3", Live: true, Context: 200_000},
+		{Provider: "openrouter", ID: "acme/nova-9", Family: "nova-9", Label: "Nova 9", Live: true, Context: 2_097_152},
+	}
+	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now(), Models: live, Errors: map[string]string{"openai": "no OPENAI_API_KEY in the environment"}}); err != nil {
+		t.Fatal(err)
+	}
+	w := do(s, "GET", "/api/catalog", nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	var v struct {
+		Models        []config.Model    `json:"models"`
+		LiveFetchedAt string            `json:"live_fetched_at"`
+		LiveRefreshed bool              `json:"live_refreshed"`
+		LiveStale     bool              `json:"live_stale"`
+		LiveErrors    map[string]string `json:"live_errors"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.LiveFetchedAt == "" || v.LiveRefreshed || v.LiveStale {
+		t.Fatalf("live freshness fields: fetched_at=%q refreshed=%v stale=%v", v.LiveFetchedAt, v.LiveRefreshed, v.LiveStale)
+	}
+	if v.LiveErrors["openai"] == "" {
+		t.Fatal("live errors not surfaced")
+	}
+	var glm, nova *config.Model
+	for i := range v.Models {
+		if v.Models[i].Provider == "openrouter" && v.Models[i].ID == "z-ai/glm-5.3" {
+			glm = &v.Models[i]
+		}
+		if v.Models[i].ID == "acme/nova-9" {
+			nova = &v.Models[i]
+		}
+	}
+	if glm == nil || !glm.Live || glm.Label != "GLM-5.3" {
+		t.Fatalf("known model should be flagged live in place: %+v", glm)
+	}
+	if nova == nil || !nova.Live || nova.Context != 2_097_152 {
+		t.Fatalf("live-only model should be appended: %+v", nova)
+	}
+	// The static catalog slice itself must be untouched.
+	for _, m := range config.Models {
+		if m.Live {
+			t.Fatalf("static catalog mutated: %+v", m)
+		}
+	}
+}
+
+func TestCatalogLiveRefreshHappensOnlyOnRequest(t *testing.T) {
+	s, project := newTestServer(t)
+	// No cache yet: merely constructing the server (startup) must not fetch,
+	// so no cache file may exist before the catalog endpoint is hit.
+	if _, err := os.Stat(config.LiveModelsPath(project)); !os.IsNotExist(err) {
+		t.Fatalf("startup created a live cache: %v", err)
+	}
+	// With no keys set and the probe failing (offline simulation via a stale
+	// seed is not needed here; just ensure the endpoint answers and writes a
+	// debouncing cache even when providers are unreachable/absent).
+	w := do(s, "GET", "/api/catalog", nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	var v struct {
+		Models []config.Model `json:"models"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &v)
+	if len(v.Models) < len(config.Models) {
+		t.Fatalf("catalog shrank: %d < %d", len(v.Models), len(config.Models))
+	}
+	if _, err := os.Stat(config.LiveModelsPath(project)); err != nil {
+		t.Fatalf("hitting the catalog endpoint should write the (possibly empty, debounced) cache: %v", err)
+	}
+}
+
+func TestApplyRoutePicks(t *testing.T) {
+	s, project := newTestServer(t)
+	// Seed a fresh live cache so no network happens; include a live-only model.
+	live := []config.Model{
+		{Provider: "openrouter", ID: "acme/nova-9", Family: "nova-9", Label: "Nova 9", Live: true, Context: 2_097_152, Vision: true, Efforts: []string{"low", "medium", "high"}},
+	}
+	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now(), Models: live}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+	cfg.Orchestrator.ReasoningEffort = "xhigh" // not in nova-9's [low medium high] -> falls back to medium
+
+	out, err := s.applyRoutePicks(context.Background(), cfg, map[string]routePick{
+		"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := out.Orchestrator
+	if a.Model != "acme/nova-9" || a.BaseURL != "https://openrouter.ai/api/v1" || a.APIKeyEnv != "OPENROUTER_API_KEY" {
+		t.Fatalf("route not resolved from the catalog provider: %+v", a)
+	}
+	if a.ContextTokens != 2_097_152 {
+		t.Fatalf("context not taken from the live model: %+v", a)
+	}
+	if a.ReasoningEffort != "medium" {
+		t.Fatalf("effort should fall back into the model's list, got %q", a.ReasoningEffort)
+	}
+	// An inherited effort that IS in the model's list is kept.
+	cfg2 := config.Defaults()
+	cfg2.Orchestrator.ReasoningEffort = "high"
+	out1b, err := s.applyRoutePicks(context.Background(), cfg2, map[string]routePick{"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"}})
+	if err != nil || out1b.Orchestrator.ReasoningEffort != "high" {
+		t.Fatalf("in-list effort should be kept: %+v %v", out1b.Orchestrator, err)
+	}
+	if out.Task.Model != cfg.Task.Model || out.Narrator.Model != cfg.Narrator.Model {
+		t.Fatal("untouched actors must keep the base preset's models")
+	}
+
+	// A statically known model keeps its catalog protocol.
+	out2, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"task": {Provider: "openai", Model: "gpt-6.1-terra"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2.Task.Protocol != "openai-responses" || out2.Task.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("static model metadata wrong: %+v", out2.Task)
+	}
+
+	// Bad picks are rejected.
+	for _, picks := range []map[string]routePick{
+		{"narratorX": {Provider: "openrouter", Model: "acme/nova-9"}},
+		{"task": {Provider: "evil", Model: "x"}},
+		{"task": {Provider: "openrouter", Model: "not/a-model"}},
+	} {
+		if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), picks); err == nil {
+			t.Fatalf("expected error for %v", picks)
+		}
+	}
+
+	// Explicit effort: accepted when the model lists it, set verbatim.
+	out3, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "high"},
+	})
+	if err != nil || out3.Narrator.ReasoningEffort != "high" {
+		t.Fatalf("explicit effort: %+v %v", out3.Narrator, err)
+	}
+	// Effort the model does not list -> rejected.
+	if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "xhigh"},
+	}); err == nil {
+		t.Fatal("effort not in the model's list should be rejected")
+	}
+	// Effort off the canonical scale -> rejected.
+	if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "ultra"},
+	}); err == nil {
+		t.Fatal("non-canonical effort should be rejected")
+	}
+	// A model whose catalog entry lists efforts accepts one of them verbatim.
+	out4, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"task": {Provider: "openai", Model: "gpt-6-astra", Effort: "max"},
+	})
+	if err != nil || out4.Task.ReasoningEffort != "max" {
+		t.Fatalf("canonical effort in the model's list: %+v %v", out4.Task, err)
+	}
+	// A model with no known effort list (minimax-m3 on fireworks) accepts any
+	// canonical level.
+	out5, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+		"task": {Provider: "fireworks", Model: "accounts/fireworks/models/minimax-m3", Effort: "xhigh"},
+	})
+	if err != nil || out5.Task.ReasoningEffort != "xhigh" || out5.Task.APIKeyEnv != "FIREWORKS_API_KEY" {
+		t.Fatalf("unchecked model accepts canonical effort: %+v %v", out5.Task, err)
+	}
+}
+
+func TestStartSessionRejectsBadRoutePick(t *testing.T) {
+	s, project := newTestServer(t)
+	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	w := do(s, "POST", "/api/sessions", map[string]any{"prompt": "hi", "routes": map[string]any{"task": map[string]any{"provider": "openrouter", "model": "nope/nothing"}}}, nil)
+	if w.Code != 400 {
+		t.Fatalf("bad route pick: status %d want 400: %s", w.Code, w.Body)
 	}
 }

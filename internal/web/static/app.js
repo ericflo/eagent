@@ -548,23 +548,137 @@ async function promptEditor(name) {
 }
 
 // ---- new session -------------------------------------------------------------------------
+const trimSlash = u => String(u || '').replace(/\/+$/, '');
 async function newSessionDialog(pre = {}) {
   let c = null; try { c = await api('/api/config'); } catch (e) {}
-  const options = [];
-  if (c) { for (const p of c.presets) options.push(h('option', {value: 'preset:' + p.name, selected: pre.preset === p.name}, `preset · ${p.name} — ${p.models}`)); for (const b of c.bundles) options.push(h('option', {value: 'config:' + b.name, selected: pre.config === b.name}, `bundle · ${b.name} — ${b.models}`)); }
   const ta = h('textarea', {placeholder: 'What should the agent do? Be as specific as you like; it will ask if it needs a decision.'});
   const srv = c && c.server && (c.server.preset || c.server.bundle);
-  const sel = h('select', null, h('option', {value: 'project:', selected: !!pre.project || !srv}, 'project configuration' + (c && c.resolution && c.resolution.active ? ` · ${c.resolution.active.kind === 'file' ? 'saved in the project' : c.resolution.active.kind + ' ' + c.resolution.active.name}` : '')),
-    srv ? h('option', {value: '', selected: !pre.project && !pre.preset && !pre.config}, `server default · ${c.server.bundle ? 'bundle ' + c.server.bundle : 'preset ' + c.server.preset}`) : null, ...options);
+  const baseOptions = () => [
+    h('option', {value: 'project:', selected: !!pre.project || !srv}, 'project configuration' + (c && c.resolution && c.resolution.active ? ` · ${c.resolution.active.kind === 'file' ? 'saved in the project' : c.resolution.active.kind + ' ' + c.resolution.active.name}` : '')),
+    srv ? h('option', {value: '', selected: !pre.project && !pre.preset && !pre.config}, `server default · ${c.server.bundle ? 'bundle ' + c.server.bundle : 'preset ' + c.server.preset}`) : null,
+    ...(c ? [...c.presets.map(p => h('option', {value: 'preset:' + p.name, selected: pre.preset === p.name}, `preset · ${p.name} — ${p.models}`)), ...c.bundles.map(b => h('option', {value: 'config:' + b.name, selected: pre.config === b.name}, `bundle · ${b.name} — ${b.models}`))] : []),
+  ];
+  const sel = h('select', null, ...baseOptions(), h('option', {value: 'custom:', selected: !!pre.custom}, 'custom models — browse the catalogue…'));
+
+  // ---- custom routing: pick one catalog model per actor, on top of a base configuration ----
+  const picks = {orchestrator: null, task: null, narrator: null};
+  let cat = null, picksInit = false, browsing = null;
+  const baseSel = h('select', null, ...baseOptions());
+  const rowLabel = {};
+  const effortSels = {};
+  const routeRows = {};
+  const pickedModel = actor => { const p = picks[actor]; return p && cat ? cat.models.find(m => m.provider === p.provider && m.id === p.model) : null; };
+  // (Re)build an actor's effort select from the picked model's known efforts
+  // (or the full scale when unknown), keeping the current pick when possible.
+  const refreshEffort = actor => {
+    const sel = effortSels[actor];
+    const m = pickedModel(actor);
+    const list = (m && m.efforts && m.efforts.length) ? m.efforts : (cat.effort_order || ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    if (picks[actor] && picks[actor].effort && !list.includes(picks[actor].effort)) {
+      picks[actor].effort = list.includes('medium') ? 'medium' : list[Math.floor(list.length / 2)];
+    }
+    const opts = [];
+    if (picks[actor] && !picks[actor].effort) opts.push(h('option', {value: '', selected: true}, 'base default'));
+    for (const e of list) opts.push(h('option', {value: e, selected: !!(picks[actor] && picks[actor].effort === e)}, e));
+    sel.replaceChildren(...opts);
+  };
+  const browsePane = h('div', {style: 'display:none; margin-top:8px'});
+  const search = h('input', {class: 'search', placeholder: 'Search models or providers…', autocomplete: 'off', style: 'flex:1; min-width:0'});
+  const browseList = h('div', {class: 'plist', style: 'max-height:300px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:4px'});
+  const setPickLabel = (actor, m, p) => { rowLabel[actor].replaceChildren(h('b', null, m ? m.label : '—'), m && m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m ? (p ? p.label : m.provider) : ''} · ${picks[actor] ? picks[actor].model : ''}`)); rowLabel[actor].title = `${m ? m.label : ''} · ${picks[actor] ? picks[actor].model : ''}`; };
+  const renderBrowse = () => {
+    const q = search.value.trim().toLowerCase();
+    const keyed = p => !!(cat.keys && cat.keys[p.key_env]);
+    const rows = cat.models.map(m => ({m, p: cat.providers.find(pp => pp.id === m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${m.live ? 'live' : ''}`.toLowerCase().includes(q)));
+    rows.sort((x, y) => (keyed(y.p) - keyed(x.p)) || x.p.label.localeCompare(y.p.label) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
+    browseList.replaceChildren();
+    let lastP = null;
+    for (const {m, p} of rows.slice(0, 150)) {
+      if (p.label !== lastP) { browseList.append(h('div', {class: 'pgroup'}, p.label + (keyed(p) ? '' : ' · no key in this shell'))); lastP = p.label; }
+      const name = h('span', {class: 'l1'}, h('b', null, m.label), m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m.id}`));
+      const ctx = m.context >= 1e6 ? (m.context / 1e6) + 'M' : Math.round(m.context / 1000) + 'k';
+      const price = h('span', {class: 'pr'}, m.price ? `$${m.price.in} / $${m.price.out}` : '—', h('span', {class: 'sub'}, ` · ${ctx}${m.vision ? ' · vision' : ''}`));
+      const row = h('button', {class: 'prow', onclick: () => {
+        const prev = picks[browsing] || {};
+        picks[browsing] = {provider: m.provider, model: m.id, effort: prev.effort || ''};
+        setPickLabel(browsing, m, p);
+        refreshEffort(browsing);
+        browsing = null; browsePane.style.display = 'none';
+      }}, h('span', {class: 'pl'}, name), price);
+      browseList.append(row);
+    }
+    if (!rows.length) browseList.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches.'));
+  };
+  search.addEventListener('input', () => cat && renderBrowse());
+  async function browse(actor) {
+    browsing = actor;
+    if (!cat) { cat = await api('/api/catalog'); } // triggers the 24h-debounced live provider fetch
+    browsePane.style.display = '';
+    renderBrowse();
+    search.focus();
+  }
+  async function initPicks() {
+    if (picksInit) return; picksInit = true;
+    try { cat = await api('/api/catalog'); } catch (e) { return; }
+    const [bk, bn] = baseSel.value.split(':');
+    const q = bk === 'preset' ? `?preset=${encodeURIComponent(bn)}` : bk === 'config' ? `?bundle=${encodeURIComponent(bn)}` : '';
+    let cc = c; try { cc = await api('/api/config' + q); } catch (e) {}
+    const eff = cc && cc.resolution && cc.resolution.effective;
+    for (const actor of ['orchestrator', 'task', 'narrator']) {
+      const a = eff && eff[actor];
+      const p = a && cat.providers.find(pp => trimSlash(pp.base_url) === trimSlash(a.base_url));
+      const m = a && cat.models.find(mm => p && mm.provider === p.id && mm.id === a.model);
+      picks[actor] = a ? {provider: p ? p.id : '', model: a.model, effort: a.reasoning_effort || ''} : null;
+      setPickLabel(actor, m, p);
+      refreshEffort(actor);
+    }
+  }
+  for (const actor of ['orchestrator', 'task', 'narrator']) {
+    rowLabel[actor] = h('span', {class: 'lbl'}, '…');
+    effortSels[actor] = h('select', {class: 'mini', onchange: ev => { if (picks[actor]) picks[actor].effort = ev.target.value; }});
+    routeRows[actor] = h('div', {class: 'routerow'}, h('span', {class: 'sub'}, actor), rowLabel[actor], h('span', {class: 'sub'}, 'effort'), effortSels[actor], h('button', {class: 'ghost small', onclick: () => browse(actor)}, 'browse'));
+  }
+  browsePane.append(h('div', {class: 'row', style: 'margin:0 0 6px'}, search, h('button', {class: 'ghost small', onclick: () => { browsing = null; browsePane.style.display = 'none'; }}, 'back')), browseList);
+  const customBox = h('div', {style: 'display:none'},
+    h('div', {class: 'row'}, h('span', {class: 'sub'}, 'base'), baseSel, h('span', {class: 'sub'}, 'picked models override the base for this session only')),
+    ...Object.values(routeRows),
+    browsePane,
+    h('div', {class: 'sub', style: 'margin-top:4px'}, 'models come from the built-in catalog plus each provider’s live list, fetched when you browse and cached for 24h'));
+  sel.addEventListener('change', () => {
+    const custom = sel.value === 'custom:';
+    customBox.style.display = custom ? '' : 'none';
+    if (custom) initPicks();
+  });
+  if (pre.custom) { sel.value = 'custom:'; customBox.style.display = ''; initPicks(); }
+
   const start = h('button', {class: 'primary', onclick: async () => {
     const prompt = ta.value.trim(); if (!prompt) return;
     start.disabled = true;
     const [kind, name] = sel.value.split(':');
-    try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify({prompt, preset: kind === 'preset' ? name : '', config: kind === 'config' ? name : '', use_project: kind === 'project'})}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
+    const body = {prompt};
+    if (kind === 'custom') {
+      const [bk, bn] = baseSel.value.split(':');
+      body.use_project = bk === 'project';
+      if (bk === 'preset') body.preset = bn;
+      if (bk === 'config') body.config = bn;
+      body.routes = {};
+      for (const a of ['orchestrator', 'task', 'narrator']) {
+        if (!picks[a] || !picks[a].provider) continue;
+        const r = {provider: picks[a].provider, model: picks[a].model};
+        if (picks[a].effort) r.effort = picks[a].effort;
+        body.routes[a] = r;
+      }
+      if (!Object.keys(body.routes).length) delete body.routes;
+    } else {
+      body.preset = kind === 'preset' ? name : '';
+      body.config = kind === 'config' ? name : '';
+      body.use_project = kind === 'project';
+    }
+    try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify(body)}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
     catch (e) { toast(e.message, 'bad'); start.disabled = false; }
   }}, 'Start');
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) start.click(); });
-  showModal(h('div', null, h('h2', null, 'New session'), ta, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'configuration'), sel, h('span', {class: 'sub', style: 'margin-left:auto'}, '⌘/Ctrl+Enter to start')), h('div', {class: 'foot'}, h('button', {onclick: closeModal}, 'Cancel'), start)));
+  showModal(h('div', null, h('h2', null, 'New session'), ta, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'configuration'), sel, h('span', {class: 'sub', style: 'margin-left:auto'}, '⌘/Ctrl+Enter to start')), customBox, h('div', {class: 'foot'}, h('button', {onclick: closeModal}, 'Cancel'), start)));
   ta.focus();
 }
 function showModal(content) { const m = $('#modal'); m.replaceChildren(h('div', {class: 'box'}, content)); m.classList.remove('hidden'); m.onclick = e => { if (e.target === m) closeModal(); }; }

@@ -154,10 +154,6 @@ func (r *Runtime) startPhone() {
 			}
 		}
 	}
-	models := map[string]string{}
-	for k, v := range r.st.Models {
-		models[k] = v
-	}
 	project, workDir := r.projectPath(), r.workDir("")
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
@@ -235,9 +231,10 @@ func (r *Runtime) startPhone() {
 				p.mu.Unlock()
 			}
 		}
-		// Thread meta the app renders as chips: where the session runs and on what.
-		host, _ := os.Hostname()
-		meta := map[string]any{"project": project, "cwd": workDir, "host": host, "model": models["orchestrator"]}
+		// Thread meta the app renders as chips: where the session runs and on
+		// what — every actor's actual model, host, and effort, not the preset
+		// name, so custom per-session routes show up as they are.
+		meta := threadRouteMeta(r, project, workDir)
 		if branch := gitBranch(ctx, workDir); branch != "" {
 			meta["branch"] = branch
 		}
@@ -325,6 +322,35 @@ func (p *phone) close(reason string) {
 
 func boolPtr(b bool) *bool { return &b }
 
+// threadRouteMeta builds the thread meta the phone app renders as chips: the
+// project, where the session works, and — per actor — the model, host, and
+// reasoning effort actually in use (after any fallback), plus the preset or
+// bundle name. "model" alone stays for older apps that read just that key.
+func threadRouteMeta(r *Runtime, project, workDir string) map[string]any {
+	host, _ := os.Hostname()
+	models := map[string]string{}
+	for k, v := range r.st.Models {
+		models[k] = v
+	}
+	hosts := map[string]string{}
+	for k, v := range r.st.Hosts {
+		hosts[k] = v
+	}
+	efforts := map[string]string{}
+	for k, v := range r.st.Efforts {
+		efforts[k] = v
+	}
+	meta := map[string]any{
+		"project": project, "cwd": workDir, "host": host,
+		"model":  models[event.ActorOrchestrator],
+		"models": models, "hosts": hosts, "efforts": efforts,
+	}
+	if r.st.Config != "" {
+		meta["config"] = r.st.Config
+	}
+	return meta
+}
+
 // gitBranch names the checked-out branch of a project, or "" when it is not
 // a git checkout or is on a detached head. Bounded so a slow disk cannot
 // hold up the mirror.
@@ -392,11 +418,19 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		p.enqueue(func(ctx context.Context) {
 			// The chip under the thread title says where the session works
 			// now; the branch chip follows it (nil clears it outside a repo).
-			meta := map[string]any{"cwd": dir, "branch": nil}
+			meta := threadRouteMeta(r, r.projectPath(), dir)
+			meta["branch"] = nil
 			if branch := gitBranch(ctx, dir); branch != "" {
 				meta["branch"] = branch
 			}
 			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
+		})
+	case event.Route:
+		// A fallback switched the route in use; refresh the model chips so
+		// the phone shows the model that is actually serving, not the
+		// configured primary.
+		p.enqueue(func(ctx context.Context) {
+			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: threadRouteMeta(r, r.projectPath(), r.workDir(""))})
 		})
 	case event.UserAnswer:
 		var d event.UserAnswerData

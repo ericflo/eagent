@@ -86,7 +86,7 @@ func TestBundlesLayerOverProjectConfig(t *testing.T) {
 		t.Fatal("EAGENT_CONFIG not honoured")
 	}
 	t.Setenv("EAGENT_CONFIG", "")
-	if cfg, err = LoadBundle(dir, "", "deepseek"); err != nil || cfg.Preset != "deepseek" || cfg.Task.Model != "deepseek-ai/DeepSeek-V4-Flash-0731" {
+	if cfg, err = LoadBundle(dir, "", "deepseek"); err != nil || cfg.Preset != "deepseek" || cfg.Task.Model != "deepseek-ai/DeepSeek-V4.1-Flash-1017" {
 		t.Fatalf("preset as bundle: %v %+v", err, cfg.Task)
 	}
 	if _, err := LoadBundle(dir, "", "nope"); err == nil {

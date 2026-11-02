@@ -66,7 +66,7 @@ func TestCatalogIsConsistent(t *testing.T) {
 			t.Errorf("%s: no context window", k)
 		}
 	}
-	if _, ok := PriceFor("https://proxy.example/v1", "claude-opus-5"); !ok {
+	if _, ok := PriceFor("https://proxy.example/v1", "claude-opus-5-5"); !ok {
 		t.Error("a known model id behind an unknown host should still price by id when every provider charges the same")
 	}
 	// The same id at different prices behind an unknown host is a guess, and
@@ -119,7 +119,7 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 	if res.LoadError != "" {
 		t.Fatalf("load error: %s", res.LoadError)
 	}
-	if res.Sources["/orchestrator/model"] != "preset:anthropic-med" || res.Effective.Orchestrator.Model != "claude-opus-5" {
+	if res.Sources["/orchestrator/model"] != "preset:anthropic-med" || res.Effective.Orchestrator.Model != "claude-opus-5-5" {
 		t.Fatalf("preset attribution: %s %s", res.Sources["/orchestrator/model"], res.Effective.Orchestrator.Model)
 	}
 	if res.Sources["/task/reasoning_effort"] != "file" || res.Effective.Task.ReasoningEffort != "high" {
@@ -168,7 +168,7 @@ func TestOverlayWritesOnlyDifferences(t *testing.T) {
 	}
 	pin := Pin(cfg, "anthropic-med")
 	var full map[string]json.RawMessage
-	if err := json.Unmarshal(pin["orchestrator"], &full); err != nil || string(full["model"]) != `"claude-opus-5"` {
+	if err := json.Unmarshal(pin["orchestrator"], &full); err != nil || string(full["model"]) != `"claude-opus-5-5"` {
 		t.Fatalf("pin should spell the orchestrator out: %s", pin["orchestrator"])
 	}
 }

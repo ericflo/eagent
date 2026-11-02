@@ -8,5 +8,9 @@ coverage.out
 # Session logs of eagent runs made inside this repository (the docs run); never commit them.
 .agents/eagent/sessions/
 
+# On-demand cache of the providers' live /models lists (refreshed when the
+# settings page is opened and the cache is older than 24h).
+.agents/eagent/live-models.json
+
 # Development-only dependencies for the static GitHub Pages site.
 /site/node_modules/

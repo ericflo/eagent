@@ -143,6 +143,7 @@ type SessionStartData struct {
 	Interactive bool              `json:"interactive"`
 	Models      map[string]string `json:"models"`              // actor -> model
 	Endpoints   map[string]string `json:"endpoints,omitempty"` // actor -> base URL actually in use
+	Efforts     map[string]string `json:"efforts,omitempty"`   // actor -> reasoning effort in use
 	Config      string            `json:"config,omitempty"`    // bundle or preset name
 }
 

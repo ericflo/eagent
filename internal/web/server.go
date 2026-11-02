@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -473,8 +474,23 @@ type messageBody struct {
 	Config     string `json:"config"`
 	Preset     string `json:"preset"`
 	UseProject bool   `json:"use_project"`
+	// Routes lets the new-session dialog start a session on catalog models
+	// picked in the browser, on top of the chosen preset/bundle. Only
+	// provider id + model id travel from the browser; the base URL and key
+	// variable are resolved server-side from the catalog, so a browser can
+	// never point a key at an arbitrary host.
+	Routes map[string]routePick `json:"routes,omitempty"`
 	// Client declares what context the browser can supply.
 	Client *clientcaps.Caps `json:"client"`
+}
+
+// routePick names one catalog model for one actor, optionally with the
+// reasoning effort to run it at. Effort is validated against the canonical
+// scale and the model's known efforts, when the catalog lists any.
+type routePick struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Effort   string `json:"effort,omitempty"`
 }
 
 func readBody(r *http.Request) (messageBody, error) {
@@ -583,12 +599,82 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 	if b.UseProject {
 		bundle, preset = "-", "-" // the project's own configuration, ignoring the server's --preset/--config
 	}
-	id, err := s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, bundle, preset)
+	cfg, err := s.loadConfig(bundle, preset)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	if len(b.Routes) > 0 {
+		cfg, err = s.applyRoutePicks(r.Context(), cfg, b.Routes)
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+	}
+	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, cfg)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
+}
+
+// applyRoutePicks overlays browser-picked catalog models onto the resolved
+// configuration. Models are resolved against the static catalog plus the
+// live provider lists (fetched on demand, 24h-debounced), so the latest
+// models are pickable without updating eagent.
+func (s *Server) applyRoutePicks(ctx context.Context, cfg config.Config, picks map[string]routePick) (config.Config, error) {
+	live := config.LiveModels(ctx, s.Project)
+	models := config.MergeLive(config.Models, live.Models)
+	actors := map[string]*config.Actor{"orchestrator": &cfg.Orchestrator, "task": &cfg.Task, "narrator": &cfg.Narrator}
+	for name, pick := range picks {
+		a, ok := actors[name]
+		if !ok {
+			return cfg, fmt.Errorf("unknown actor %q (want orchestrator, task, or narrator)", name)
+		}
+		pr, ok := config.ProviderByID(pick.Provider)
+		if !ok {
+			return cfg, fmt.Errorf("unknown provider %q", pick.Provider)
+		}
+		var m *config.Model
+		for i := range models {
+			if models[i].Provider == pr.ID && models[i].ID == pick.Model {
+				m = &models[i]
+				break
+			}
+		}
+		if m == nil {
+			return cfg, fmt.Errorf("model %q is not listed by provider %q", pick.Model, pr.ID)
+		}
+		a.BaseURL, a.APIKeyEnv, a.Model = pr.BaseURL, pr.KeyEnv, m.ID
+		a.Protocol = m.ProtocolFor()
+		if m.Context > 0 {
+			a.ContextTokens = m.Context
+		}
+		switch {
+		case pick.Effort != "":
+			if config.EffortIndex(pick.Effort) == len(config.EffortOrder) {
+				return cfg, fmt.Errorf("effort %q is not a known level (%s)", pick.Effort, strings.Join(config.EffortOrder, ", "))
+			}
+			if len(m.Efforts) > 0 && !slices.Contains(m.Efforts, pick.Effort) {
+				return cfg, fmt.Errorf("model %q does not list effort %q (known: %s)", pick.Model, pick.Effort, strings.Join(m.Efforts, ", "))
+			}
+			a.ReasoningEffort = pick.Effort
+		case len(m.Efforts) > 0 && !slices.Contains(m.Efforts, a.ReasoningEffort):
+			// No explicit pick: keep the base's effort when the model accepts
+			// it, else fall into the list (medium when offered).
+			switch {
+			case slices.Contains(m.Efforts, "medium"):
+				a.ReasoningEffort = "medium"
+			default:
+				a.ReasoningEffort = m.Efforts[len(m.Efforts)/2]
+			}
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func (s *Server) isHosted(id string) bool {
@@ -619,6 +705,12 @@ func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, e
 	if err != nil {
 		return "", err
 	}
+	return s.hostNewCfg(opts, cfg)
+}
+
+// hostNewCfg starts a new session in this process on an already-resolved
+// configuration (loadConfig plus any browser-picked route overrides).
+func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
 	ui := newWebUI(s.logf)
 	rt, err := harness.New(cfg, opts, ui)
 	if err != nil {

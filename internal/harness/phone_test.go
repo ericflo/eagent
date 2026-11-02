@@ -1272,6 +1272,23 @@ func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
 	if _, has := metas[0]["branch"]; has {
 		t.Fatalf("a temp dir is not a git checkout; meta = %v", metas[0])
 	}
+	// The meta must carry every actor's actual route, not just the
+	// orchestrator id, so the phone shows the real models in use.
+	models, _ := metas[0]["models"].(map[string]any)
+	if models["orchestrator"] != "orch" || models["task"] != "task" || models["narrator"] != "narr" {
+		t.Fatalf("meta models = %v", models)
+	}
+	efforts, _ := metas[0]["efforts"].(map[string]any)
+	if efforts["orchestrator"] != "high" || efforts["task"] != "medium" || efforts["narrator"] != "low" {
+		t.Fatalf("meta efforts = %v", efforts)
+	}
+	hosts, _ := metas[0]["hosts"].(map[string]any)
+	if hosts["orchestrator"] != s.srv.URL {
+		t.Fatalf("meta hosts = %v", hosts)
+	}
+	if metas[0]["model"] != "orch" {
+		t.Fatalf("back-compat model key = %v", metas[0]["model"])
+	}
 }
 
 func TestGitBranch(t *testing.T) {
@@ -2406,5 +2423,32 @@ func TestRetitleThreadToolWithoutPhone(t *testing.T) {
 	}
 	if tools.Has(tools.TaskTools(), "retitle_thread") || tools.Has(tools.NarratorTools(), "retitle_thread") {
 		t.Fatal("retitle_thread leaked to task workers or the narrator")
+	}
+}
+
+func TestThreadRouteMetaCarriesActualRoutes(t *testing.T) {
+	st := state.New()
+	st.Models = map[string]string{"orchestrator": "reflection/beam-1.0-501b-a23b", "task": "z-ai/glm-5.3", "narrator": "deepseek/deepseek-v4.1-flash-1017"}
+	st.Hosts = map[string]string{"orchestrator": "https://openrouter.ai/api/v1", "task": "https://openrouter.ai/api/v1", "narrator": "https://openrouter.ai/api/v1"}
+	st.Efforts = map[string]string{"orchestrator": "xhigh", "task": "high", "narrator": "low"}
+	st.Config = "openrouter-med"
+	r := &Runtime{st: st}
+	meta := threadRouteMeta(r, "/proj", "/proj/sub")
+	if meta["model"] != "reflection/beam-1.0-501b-a23b" {
+		t.Fatalf("back-compat model key = %v", meta["model"])
+	}
+	models, _ := meta["models"].(map[string]string)
+	if models["task"] != "z-ai/glm-5.3" || models["narrator"] != "deepseek/deepseek-v4.1-flash-1017" {
+		t.Fatalf("models = %#v", meta["models"])
+	}
+	efforts, _ := meta["efforts"].(map[string]string)
+	if efforts["orchestrator"] != "xhigh" {
+		t.Fatalf("efforts = %#v", meta["efforts"])
+	}
+	if meta["hosts"].(map[string]string)["orchestrator"] != "https://openrouter.ai/api/v1" {
+		t.Fatalf("hosts = %#v", meta["hosts"])
+	}
+	if meta["config"] != "openrouter-med" || meta["cwd"] != "/proj/sub" || meta["project"] != "/proj" {
+		t.Fatalf("meta = %v", meta)
 	}
 }

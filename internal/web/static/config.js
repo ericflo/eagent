@@ -114,10 +114,10 @@ function protocolOf(m) { const p = E.cat.providers.find(x => x.id === m.provider
 function effortsFor(a) { const m = lookup(a); if (m && m.efforts && m.efforts.length) return {list: m.efforts, checked: true}; return {list: E.cat.effort_order, checked: false}; }
 function keyPresent(env) { return !!E.c.keys[env]; }
 function priceLine(m) {
-  if (!m) return 'not in the catalog: sessions will show as unpriced';
+  if (!m) return 'not in any catalog: sessions will show as unpriced';
   const parts = [];
-  if (m.price) parts.push(`$${trimNum(m.price.in)} in · $${trimNum(m.price.out)} out per M tokens${m.price.nominal ? ' (list price)' : ''}`);
-  else parts.push('price unknown');
+  if (m.price) parts.push(`$${trimNum(m.price.in)} in · $${trimNum(m.price.out)} out per M tokens${m.price.nominal ? ' (list price)' : ''}${m.live ? ' (live)' : ''}`);
+  else parts.push(m.live ? 'listed live by the provider, price unknown: sessions will show as unpriced' : 'price unknown');
   parts.push(`${ctx(m.context)} context`);
   if (m.vision) parts.push('sees images');
   return parts.join(' · ');
@@ -445,22 +445,27 @@ function openPicker(card, a, key, forFallback) {
   function fill() {
     const q = input.value.trim().toLowerCase();
     const provOf = id => E.cat.providers.find(p => p.id === id);
-    let rows = E.cat.models.map(m => ({m, p: provOf(m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${(m.note || '')}`.toLowerCase().includes(q)));
+    let rows = E.cat.models.map(m => ({m, p: provOf(m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${(m.note || '')}${m.live ? ' live' : ''}`.toLowerCase().includes(q)));
     // Keyed providers first, then by family, then by price.
     rows.sort((x, y) => (keyPresent(y.p.key_env) - keyPresent(x.p.key_env)) || x.m.family.localeCompare(y.m.family) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
     list.replaceChildren();
+    if (E.cat.live_fetched_at) {
+      const errs = Object.entries(E.cat.live_errors || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+      list.append(h('div', {class: 'liveinfo', title: errs || undefined},
+        `live provider lists · fetched ${E.cat.live_fetched_at}${E.cat.live_refreshed ? ' (refreshed just now)' : ''}${E.cat.live_stale ? ' (refresh failed, showing cache)' : ''} · re-fetched when this page is opened if older than 24h`));
+    }
     let lastFam = null, lastKeyed = null;
-    for (const {m, p} of rows.slice(0, 80)) {
+    for (const {m, p} of rows.slice(0, E.cat.live_fetched_at ? 400 : 80)) {
       const keyed = keyPresent(p.key_env);
       if (lastKeyed !== null && keyed !== lastKeyed) list.append(h('div', {class: 'pgroup dim'}, 'providers without a key in this shell'));
       lastKeyed = keyed;
       if (m.family !== lastFam) { list.append(h('div', {class: 'pgroup'}, m.family)); lastFam = m.family; }
       const sel = trimSlash(p.base_url) === trimSlash(target.base_url) && m.id === target.model;
       list.append(h('button', {class: 'prow' + (sel ? ' on' : '') + (keyed ? '' : ' nokey'), onclick: () => choose(m)},
-        h('span', {class: 'kdot' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub pnote'}, m.note) : null),
+        h('span', {class: 'kdot' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub pnote'}, m.note) : null),
         h('span', {class: 'pr'}, m.price ? `$${trimNum(m.price.in)} / $${trimNum(m.price.out)}` : '—', h('span', {class: 'sub'}, ` · ${ctx(m.context)}${m.vision ? ' · vision' : ''}`))));
     }
-    if (!rows.length) list.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No catalog model matches. Custom models are added by editing the project file.'));
+    if (!rows.length) list.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches. Models the providers list live appear here automatically; others are added by editing the project file.'));
   }
   input.addEventListener('input', fill);
   input.addEventListener('keydown', ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } if (ev.key === 'Enter') { const first = list.querySelector('.prow'); if (first) first.click(); } });

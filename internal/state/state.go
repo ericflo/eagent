@@ -109,6 +109,8 @@ type State struct {
 	Interactive bool
 	Models      map[string]string
 	Hosts       map[string]string      // actor -> base URL in use
+	Efforts     map[string]string      // actor -> reasoning effort in use
+	Config      string                 // bundle or preset name the session runs under
 	Phone       *event.PhoneThreadData // Finalechat thread, when the session is mirrored
 	Title       string                 // latest thread.title title ("" until retitled)
 	Description string                 // latest thread.title description ("" until retitled)
@@ -186,6 +188,7 @@ type RouteKey struct{ Actor, Host, Model string }
 func New() *State {
 	return &State{
 		Models:    map[string]string{},
+		Efforts:   map[string]string{},
 		Hosts:     map[string]string{},
 		WorkDirs:  map[string]string{},
 		Tasks:     map[string]*Task{},
@@ -278,6 +281,10 @@ func (s *State) Apply(ev event.Event) {
 		if d.Models != nil {
 			s.Models = d.Models
 		}
+		if d.Efforts != nil {
+			s.Efforts = d.Efforts
+		}
+		s.Config = d.Config
 		for a, u := range d.Endpoints {
 			s.Hosts[a] = u
 		}
