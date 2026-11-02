@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,10 +24,29 @@ type Values struct {
 	TaskConcurrency      int    `json:"task_concurrency"`
 	NarratorTickSeconds  int    `json:"narrator_tick_seconds"`
 	NarratorQuietSeconds int    `json:"narrator_quiet_seconds"`
+	// Routes is each actor's model route for this running session, as a
+	// provider id + model id + reasoning effort. Changed at runtime through
+	// the session-scoped settings resource; applied between turns.
+	Routes map[string]Route `json:"routes,omitempty"`
+}
+
+// Route is one actor's model route pick.
+type Route struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Effort   string `json:"effort"`
 }
 
 func FromConfig(c config.Config) Values {
-	return Values{TaskConcurrency: c.TaskConcurrency, NarratorTickSeconds: c.NarratorTickSeconds, NarratorQuietSeconds: c.NarratorQuietSeconds}
+	v := Values{TaskConcurrency: c.TaskConcurrency, NarratorTickSeconds: c.NarratorTickSeconds, NarratorQuietSeconds: c.NarratorQuietSeconds, Routes: map[string]Route{}}
+	for actor, a := range map[string]config.Actor{"orchestrator": c.Orchestrator, "task": c.Task, "narrator": c.Narrator} {
+		pid := ""
+		if pr, ok := config.ProviderForURL(a.BaseURL); ok {
+			pid = pr.ID
+		}
+		v.Routes[actor] = Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
+	}
+	return v
 }
 
 func Grant(project, session string) (control.Grant, error) {
@@ -35,7 +55,7 @@ func Grant(project, session string) (control.Grant, error) {
 	}
 	projectGrant := (&settings.Service{Project: project}).Grant()
 	return control.Grant{Key: projectGrant.Key + "-session-" + session, Label: filepath.Base(project) + " · Session " + session,
-		Scope: "session", Operations: []string{"settings.apply", "settings.refresh"}, Classes: []string{"preference"}}, nil
+		Scope: "session", Operations: []string{"settings.apply", "settings.refresh"}, Classes: []string{"preference", "route"}}, nil
 }
 
 type Status struct {
@@ -68,6 +88,33 @@ func View(project, session, generation string, values Values, available bool) (s
 		fields = append(fields, field)
 		active[spec.key] = spec.value
 	}
+	// Per-actor model routes, editable live: provider (enum of catalog
+	// providers), model id (free string, validated at apply time against the
+	// catalog and the live model cache), and reasoning effort.
+	providerEnum := []any{}
+	for _, pr := range config.Providers {
+		providerEnum = append(providerEnum, pr.ID)
+	}
+	effortEnum := []any{}
+	for _, e := range config.EffortOrder {
+		effortEnum = append(effortEnum, e)
+	}
+	for _, actor := range []string{"orchestrator", "task", "narrator"} {
+		rt := values.Routes[actor]
+		routeField := func(key, label, description string, shape control.Shape) {
+			field := control.Field{Key: key, Label: label, Description: description, Shape: shape, Writable: available, Unset: false, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+			if !available {
+				field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
+			}
+			fields = append(fields, field)
+		}
+		routeField("/routes/"+actor+"/provider", actor+" provider", "Catalog provider whose base URL and key variable the route uses.", control.Shape{Type: "string", Enum: providerEnum})
+		routeField("/routes/"+actor+"/model", actor+" model", "Model id at that provider (see the Config page picker for the full list, live models included).", control.Shape{Type: "string", MaxLength: 200})
+		routeField("/routes/"+actor+"/effort", actor+" reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
+		active["/routes/"+actor+"/provider"] = rt.Provider
+		active["/routes/"+actor+"/model"] = rt.Model
+		active["/routes/"+actor+"/effort"] = rt.Effort
+	}
 	raw, _ := json.Marshal(map[string]any{"schema": Schema, "generation": generation, "values": values})
 	version := artifact.Digest(raw)
 	return settings.RemoteView{Key: grant.Key, Label: grant.Label, Scope: "session", Generation: generation,
@@ -76,7 +123,7 @@ func View(project, session, generation string, values Values, available bool) (s
 			Details: map[string]any{"session_id": session, "thread_external_id": "eagent:" + session, "persistence": "This process only. Project defaults and future or resumed sessions are unchanged."}}}, nil
 }
 
-func ApplyValues(before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant) (Values, error) {
+func ApplyValues(project string, before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant) (Values, error) {
 	if proposal.Generation != view.Generation || proposal.ExpectedVersion != view.Snapshot.Version || !view.Snapshot.RuntimeKnown {
 		return before, fmt.Errorf("runtime generation, version or availability changed")
 	}
@@ -86,7 +133,45 @@ func ApplyValues(before Values, proposal control.Proposal, view settings.RemoteV
 	if proposal.Operation == "settings.refresh" {
 		return before, nil
 	}
+	// Copy before mutating: before.Routes is shared with the controller's
+	// live Values and must not change under a rejected proposal either.
+	routes := map[string]Route{}
+	for k, v := range before.Routes {
+		routes[k] = v
+	}
+	touched := map[string]bool{}
 	for _, edit := range proposal.Edits {
+		if strings.HasPrefix(edit.Key, "/routes/") {
+			parts := strings.Split(strings.TrimPrefix(edit.Key, "/routes/"), "/")
+			if len(parts) != 2 {
+				return before, fmt.Errorf("unsupported runtime setting %q", edit.Key)
+			}
+			actor, field := parts[0], parts[1]
+			if actor != "orchestrator" && actor != "task" && actor != "narrator" {
+				return before, fmt.Errorf("unknown actor %q", actor)
+			}
+			if edit.Op != "set" {
+				return before, fmt.Errorf("route fields cannot be unset; set them instead")
+			}
+			s, ok := edit.Value.(string)
+			if !ok || s == "" {
+				return before, fmt.Errorf("%s must be a non-empty string", edit.Key)
+			}
+			rt := routes[actor]
+			switch field {
+			case "provider":
+				rt.Provider = s
+			case "model":
+				rt.Model = s
+			case "effort":
+				rt.Effort = s
+			default:
+				return before, fmt.Errorf("unsupported route field %q", field)
+			}
+			routes[actor] = rt
+			touched[actor] = true
+			continue
+		}
 		raw, _ := json.Marshal(edit.Value)
 		var value int
 		if err := json.Unmarshal(raw, &value); err != nil {
@@ -103,6 +188,27 @@ func ApplyValues(before Values, proposal control.Proposal, view settings.RemoteV
 			return before, fmt.Errorf("unsupported runtime setting")
 		}
 	}
+	// Validate the final triplets of actors touched by this proposal, after
+	// all edits are merged. Untouched routes pass through as they were.
+	for actor := range touched {
+		rt := routes[actor]
+		if rt.Provider == "" || rt.Model == "" {
+			return before, fmt.Errorf("actor %s needs both a provider and a model", actor)
+		}
+		m, _, ok := config.ResolveLiveModel(project, rt.Provider, rt.Model)
+		if !ok {
+			return before, fmt.Errorf("model %q is not listed by provider %q (check the Config page picker; live models need one catalog fetch first)", rt.Model, rt.Provider)
+		}
+		if rt.Effort != "" {
+			if config.EffortIndex(rt.Effort) == len(config.EffortOrder) {
+				return before, fmt.Errorf("effort %q is not a known level", rt.Effort)
+			}
+			if len(m.Efforts) > 0 && !slices.Contains(m.Efforts, rt.Effort) {
+				return before, fmt.Errorf("model %q does not list effort %q (known: %s)", rt.Model, rt.Effort, strings.Join(m.Efforts, ", "))
+			}
+		}
+	}
+	before.Routes = routes
 	before.Revision++
 	return before, nil
 }

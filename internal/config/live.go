@@ -350,6 +350,31 @@ func MergeLive(static, live []Model) []Model {
 	return out
 }
 
+// ReadLiveCache returns the cached live models without any network I/O
+// (unlike LiveModels, which may refresh a stale cache).
+func ReadLiveCache(project string) *LiveCache { return readLiveCache(project) }
+
+// ResolveLiveModel finds a model by provider id + model id in the static
+// catalog first, then in the cached live list — never touching the network.
+// It backs runtime route changes, which must not block on a fetch.
+func ResolveLiveModel(project, providerID, modelID string) (Model, Provider, bool) {
+	pr, ok := ProviderByID(providerID)
+	if !ok {
+		return Model{}, Provider{}, false
+	}
+	if m, ok := Lookup(pr.BaseURL, modelID); ok {
+		return m, pr, true
+	}
+	if c := readLiveCache(project); c != nil {
+		for _, m := range c.Models {
+			if m.Provider == providerID && m.ID == modelID {
+				return m, pr, true
+			}
+		}
+	}
+	return Model{}, Provider{}, false
+}
+
 // readLiveCache loads the cache file, returning nil when absent or corrupt.
 func readLiveCache(project string) *LiveCache {
 	raw, err := os.ReadFile(LiveModelsPath(project))

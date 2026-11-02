@@ -45,7 +45,7 @@ func Deliver(ctx context.Context, project, session string, request Request, reco
 	if err != nil {
 		return Outcome{}, err
 	}
-	if _, err := ApplyValues(status.Values, request.Proposal, view, request.Grant); err != nil {
+	if _, err := ApplyValues(project, status.Values, request.Proposal, view, request.Grant); err != nil {
 		return Outcome{ID: request.ID, Digest: request.Digest, Status: "conflicted", Result: map[string]any{"message": err.Error()}}, nil
 	}
 	pending, err := openDirectory(project, session, false, "generations", request.Proposal.Generation, "pending")

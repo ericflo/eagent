@@ -146,14 +146,15 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 	if grant.Key != view.Key || grant.Scope != "session" {
 		return view, fmt.Errorf("runtime grant identity changed")
 	}
-	canApply, preferences := false, false
+	canApply, preferences, routes := false, false, false
 	for _, op := range grant.Operations {
 		canApply = canApply || op == "settings.apply"
 	}
 	for _, class := range grant.Classes {
 		preferences = preferences || class == "preference"
+		routes = routes || class == "route"
 	}
-	if !canApply || !preferences {
+	if !canApply || (!preferences && !routes) {
 		for i := range view.Descriptor.Fields {
 			view.Descriptor.Fields[i].Writable = false
 			view.Descriptor.Fields[i].LockedReason = "This connector has no approval to apply preferences."

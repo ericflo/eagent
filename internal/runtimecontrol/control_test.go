@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -240,5 +241,100 @@ func TestRuntimeFilesRejectEscapesSpecialFilesAndPartialCommits(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("control reader blocked on a FIFO")
+	}
+}
+
+func TestApplyValuesRoutes(t *testing.T) {
+	project := t.TempDir()
+	c, err := New(project, "session", FromConfig(config.Defaults()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	view, err := View(project, "session", c.Generation, c.Values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _ := Grant(project, "session")
+	proposal := func(edits ...control.Edit) control.Proposal {
+		p := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation, Edits: edits}
+		return p
+	}
+	routeEdits := func(provider, model, effort string) []control.Edit {
+		return []control.Edit{
+			{Op: "set", Key: "/routes/orchestrator/provider", Value: provider},
+			{Op: "set", Key: "/routes/orchestrator/model", Value: model},
+			{Op: "set", Key: "/routes/orchestrator/effort", Value: effort},
+		}
+	}
+	// A valid change is accepted and recorded.
+	out, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "reflection/beam-1.0-501b-a23b", "xhigh")...), view, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Routes["orchestrator"] != (Route{Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"}) {
+		t.Fatalf("routes = %+v", out.Routes)
+	}
+	// Untouched actors keep their initial routes.
+	if out.Routes["task"].Model != c.Values.Routes["task"].Model {
+		t.Fatalf("untouched actor changed: %+v", out.Routes["task"])
+	}
+	// Unknown model at a known provider is rejected.
+	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "nope/nothing", "low")...), view, grant); err == nil {
+		t.Fatal("unknown model accepted")
+	}
+	// Unknown provider is rejected by descriptor enum validation.
+	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("evil", "x", "low")...), view, grant); err == nil {
+		t.Fatal("unknown provider accepted")
+	}
+	// Effort the model does not list is rejected (glm-5.3-flash has no max).
+	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "z-ai/glm-5.3-flash", "max")...), view, grant); err == nil {
+		t.Fatal("unlisted effort accepted")
+	}
+	// Unset on a route field is rejected.
+	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "unset", Key: "/routes/orchestrator/model"}), view, grant); err == nil {
+		t.Fatal("unset of route field accepted")
+	}
+	// Unknown actor is rejected.
+	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/routes/root/model", Value: "x"}), view, grant); err == nil {
+		t.Fatal("unknown actor accepted")
+	}
+	// The view exposes the route fields in the route class, writable when available.
+	routeFields := 0
+	for _, f := range view.Descriptor.Fields {
+		if strings.HasPrefix(f.Key, "/routes/") {
+			routeFields++
+			if f.Class != "route" || !f.Writable {
+				t.Fatalf("route field %s: class=%s writable=%v", f.Key, f.Class, f.Writable)
+			}
+		}
+	}
+	if routeFields != 9 {
+		t.Fatalf("route fields = %d, want 9", routeFields)
+	}
+	if view.Snapshot.Saved["/routes/orchestrator/model"] != c.Values.Routes["orchestrator"].Model {
+		t.Fatalf("saved route = %v", view.Snapshot.Saved["/routes/orchestrator/model"])
+	}
+}
+
+func TestResolveLiveModelStaticAndCached(t *testing.T) {
+	project := t.TempDir()
+	// Static catalog hit needs no cache.
+	if _, _, ok := config.ResolveLiveModel(project, "openrouter", "z-ai/glm-5.3"); !ok {
+		t.Fatal("static catalog model not resolved")
+	}
+	// A live-only model resolves from the cache.
+	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now(), Models: []config.Model{{Provider: "openrouter", ID: "acme/nova-9", Label: "Nova 9", Live: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	m, pr, ok := config.ResolveLiveModel(project, "openrouter", "acme/nova-9")
+	if !ok || m.ID != "acme/nova-9" || pr.ID != "openrouter" {
+		t.Fatalf("live model: %+v %+v %v", m, pr, ok)
+	}
+	if _, _, ok := config.ResolveLiveModel(project, "openrouter", "acme/missing"); ok {
+		t.Fatal("missing model resolved")
+	}
+	if _, _, ok := config.ResolveLiveModel(project, "nope", "z-ai/glm-5.3"); ok {
+		t.Fatal("unknown provider resolved")
 	}
 }

@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -126,11 +127,65 @@ func TestLiveSettingsReachSchedulerAndNativeHistory(t *testing.T) {
 	}
 	r2.startRuntimeSettings()
 	defer func() { r2.stopRuntimeSettings(); r2.beginShutdown("test", 0); r2.finish() }()
-	if r2.runtimeControl.Generation == status.Generation || r2.activeSettings != runtimecontrol.FromConfig(cfg) {
+	if r2.runtimeControl.Generation == status.Generation || !reflect.DeepEqual(r2.activeSettings, runtimecontrol.FromConfig(cfg)) {
 		t.Fatal("resumed runtime retained old generation or overrides")
 	}
 	q.ID = "stale-runtime"
 	if outcome, err := runtimecontrol.Deliver(context.Background(), project, r.sess.ID, q, false); err != nil || outcome.Status != "rejected" {
 		t.Fatalf("replacement accepted old command: %+v %v", outcome, err)
+	}
+}
+
+func TestApplyRoutesSwapsClientAndRecordsRoute(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("OPENROUTER_API_KEY", "x")
+	project := t.TempDir()
+	cfg := testConfig("http://127.0.0.1:1") // dead model server; clients are swapped, not called
+	cfg.Orchestrator.APIKeyEnv = "EAGENT_TEST_KEY"
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := rt.orchClient.Endpoint.Model
+	rt.applyRoutes(map[string]runtimecontrol.Route{
+		"orchestrator": {Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"},
+		"task":         {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "high"}, // task key env is EAGENT_TEST_KEY -> unroutable, skipped
+	})
+	if got := rt.orchClient.Endpoint.Model; got != "reflection/beam-1.0-501b-a23b" {
+		t.Fatalf("orchestrator client = %s (was %s)", got, before)
+	}
+	if rt.orchClient.Endpoint.ReasoningEffort != "xhigh" || rt.orchClient.Endpoint.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Fatalf("endpoint = %+v", rt.orchClient.Endpoint)
+	}
+	// The task route's key env has no key for openrouter? EAGENT_TEST_KEY is set, but the
+	// provider key env is OPENROUTER_API_KEY (set) — so task should switch too.
+	if got := rt.taskClient.Endpoint.Model; got != "z-ai/glm-5.3" {
+		t.Fatalf("task client = %s", got)
+	}
+	// A Route event was recorded for each switch.
+	evs, _ := store.Read(rt.sess.Path)
+	routes := map[string]string{}
+	for _, ev := range evs {
+		if ev.Type == event.Route {
+			var d event.RouteData
+			_ = ev.Decode(&d)
+			routes[d.Actor] = d.Model
+		}
+	}
+	if routes["orchestrator"] != "reflection/beam-1.0-501b-a23b" || routes["task"] != "z-ai/glm-5.3" {
+		t.Fatalf("route events = %v", routes)
+	}
+	// No-op when the route is unchanged.
+	n := len(evs)
+	rt.applyRoutes(map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"}})
+	evs2, _ := store.Read(rt.sess.Path)
+	if len(evs2) != n {
+		t.Fatalf("unchanged route appended events: %d -> %d", n, len(evs2))
+	}
+	// Unknown model keeps the current client.
+	rt.applyRoutes(map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "nope/none", Effort: "low"}})
+	if rt.orchClient.Endpoint.Model != "reflection/beam-1.0-501b-a23b" {
+		t.Fatalf("unknown model swapped client: %s", rt.orchClient.Endpoint.Model)
 	}
 }
