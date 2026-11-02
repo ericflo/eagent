@@ -112,6 +112,20 @@ func publishResourceSite(ctx context.Context, project, version string, view sett
 	}, account, connector, base, resourceID)
 }
 
+// publishSessionSite publishes the running session's own settings editor and
+// binds it to the session-scoped resource, so a conversation opens the
+// session's actual routes (not the project defaults) in the embedded editor.
+func publishSessionSite(ctx context.Context, project, session, version string, view settings.RemoteView, account, connector *finalechat.Client, base, resourceID string) error {
+	site, err := archive.SettingsWebsite(project, session, version, view)
+	if err != nil {
+		return err
+	}
+	defer site.Close()
+	return publishSite(ctx, project, "session-"+session, site, func(ctx context.Context) (finalechat.Artifact, error) {
+		return account.ResourceArtifact(ctx, resourceID, "Eagent session settings")
+	}, account, connector, base, resourceID)
+}
+
 // publishSite records a website's artifact, revision and fingerprint under
 // the given name so retries and restarts reuse them, commits a new revision
 // only when the content changed, and binds the current revision to the

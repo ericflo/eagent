@@ -159,10 +159,77 @@
     } catch (error) { toast(error.message, 'bad'); }
   }
   async function refresh() { const current = await finale.settings.read(); resource = current.resource; editable = !!current.editable; window.__eagent.threadControls = current.presentation === "thread"; document.body.classList.toggle("thread-controls",window.__eagent.threadControls); }
+  // ---- session-scoped editor -------------------------------------------------
+  // A session resource's snapshot is the runtime view (flat keys, /routes/*
+  // fields, details.routes), not the project Config shape, so render a
+  // dedicated page: the routes the session actually runs, then its fields.
+  const isSession = () => !!(resource && resource.scope === 'session');
+  let sessionDraft = {}, sessionTimer = 0;
+  function sessionRoutes() {
+    const d = (resource && resource.snapshot && resource.snapshot.details) || {};
+    let r = d.routes;
+    if (!r || typeof r !== 'object' || Array.isArray(r)) {
+      r = {};
+      for (const [k, v] of Object.entries((resource.snapshot && resource.snapshot.effective) || {})) {
+        const m = /^\/routes\/([^/]+)\/(provider|model|effort)$/.exec(k);
+        if (m) (r[m[1]] = r[m[1]] || {})[m[2]] = v;
+      }
+    }
+    return r;
+  }
+  function sessionFieldValue(f) {
+    const k = f.key;
+    return Object.hasOwn(sessionDraft, k) ? sessionDraft[k] : ((resource.snapshot.saved || {})[k] ?? (resource.snapshot.effective || {})[k]);
+  }
+  function sessionControl(f) {
+    const shape = f.schema || {};
+    const value = sessionFieldValue(f);
+    const disabled = !canEdit(f.key);
+    const onChange = v => { sessionDraft[f.key] = v; clearTimeout(sessionTimer); sessionTimer = setTimeout(() => void sessionStage(), 180); };
+    if (shape.enum) {
+      const sel = h('select', {disabled, onchange: e => onChange(e.target.value === '' ? null : JSON.parse(e.target.value))});
+      sel.append(h('option', {value: ''}, '—'));
+      for (const v of shape.enum) sel.append(h('option', {value: JSON.stringify(v), selected: JSON.stringify(value) === JSON.stringify(v)}, String(v)));
+      return sel;
+    }
+    if (shape.type === 'boolean') return h('select', {disabled, onchange: e => onChange(e.target.value === 'true')}, h('option', {value: 'false', selected: value === false}, 'off'), h('option', {value: 'true', selected: value === true}, 'on'));
+    if (shape.type === 'integer' || shape.type === 'number') return h('input', {type: 'number', disabled, value: value ?? '', oninput: e => onChange(e.target.value === '' ? null : Number(e.target.value))});
+    return h('input', {type: 'text', disabled, value: value ?? '', oninput: e => onChange(e.target.value), style: 'width:100%;box-sizing:border-box'});
+  }
+  async function sessionStage() {
+    const edits = Object.entries(sessionDraft).map(([key, value]) => ({op: 'set', key, value}));
+    if (active) await clear();
+    if (!edits.length) return;
+    await stage({operation: 'settings.apply', schema_version: resource.descriptor.schema_version, expected_version: resource.snapshot.version, generation: resource.generation, edits});
+  }
+  function renderSession() {
+    const main = $('#main');
+    if (!main || !resource) return;
+    const routes = sessionRoutes();
+    const order = ['orchestrator', 'task', 'narrator'];
+    const actors = [...order, ...Object.keys(routes)].filter((a, i, arr) => a in routes && arr.indexOf(a) === i);
+    const routeCard = h('div', {class: 'card'}, h('h3', null, 'This session runs'),
+      actors.length ? actors.map(a => {
+        const r = routes[a] || {};
+        const host = String(r.host ?? r.base_url ?? '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        const effort = r.effort ?? r.reasoning_effort ?? '';
+        return h('div', {class: 'field'}, h('label', null, a), h('p', {class: 'sub', style: 'white-space:normal;overflow-wrap:anywhere'}, `${r.model || '—'}${effort ? ` @ ${effort}` : ''}${host ? ` · ${host}` : ''}${r.provider ? ` (${r.provider})` : ''}`));
+      }) : h('p', {class: 'sub'}, 'No routes recorded for this session.'));
+    const fields = (resource.descriptor && resource.descriptor.fields) || [];
+    const models = fields.filter(f => /model|effort|route/i.test(f.key));
+    const behavior = fields.filter(f => !/model|effort|route/i.test(f.key));
+    const card = (title, list) => h('div', {class: 'card'}, h('h3', null, title), ...list.map(f => h('div', {class: 'field'}, h('label', null, f.label || f.key), f.description ? h('p', {class: 'sub'}, f.description) : null, sessionControl(f), !f.writable ? h('small', {class: 'sub'}, f.locked_reason || 'Read only') : null)));
+    main.replaceChildren(h('div', {class: 'cfgpage'}, h('div', {class: 'cfg-body'},
+      h('div', {class: 'settings-intro'}, h('h2', null, 'Session settings'), h('p', null, 'The routes this conversation is running and its live controls. Changes apply to this running session between turns.')),
+      routeCard,
+      models.length ? card('Models', models) : null,
+      behavior.length ? card('Behavior', behavior) : null)));
+  }
   async function load() {
     try {
       data = JSON.parse(await finale.text('settings/editor.json'));
       try { await refresh(); } catch { resource = JSON.parse(await finale.text('settings/state.json')); editable = false; }
+      if (isSession()) { sessionDraft = {}; renderSession(); message('Session settings — changes apply to this running session between turns.'); return; }
       message(editable ? 'Editing current project defaults. Picker catalogs are captured with this archive; runtime adoption is unconfirmed.' : 'Saved snapshot, read only. These are defaults at capture time; runtime adoption is unconfirmed.');
       window.EagentConfig.reset(); await window.EagentConfig.render();
     } catch (error) { message(error.message); }
@@ -185,7 +252,9 @@
         if (current.resource.snapshot.version !== command.proposal.expected_version) {
           if (meta.draftToken === draftToken()) {
             await clear();
-            resource = current.resource; editable = !!current.editable; window.EagentConfig.reset(); await window.EagentConfig.render(); message('Saved. Showing the connector’s current defaults.');
+            resource = current.resource; editable = !!current.editable;
+            if (isSession()) { sessionDraft = {}; renderSession(); message('Saved. Showing the session’s current settings.'); }
+            else { window.EagentConfig.reset(); await window.EagentConfig.render(); message('Saved. Showing the connector’s current defaults.'); }
           } else message('The reviewed changes were saved. Your newer local edits remain; reload current defaults before reviewing them again.');
           return;
         }
@@ -198,7 +267,7 @@
     readOnly: () => !editable, field, S: {}, closeStream() {}, renderLive() {},
     k: n => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n ?? 0),
     money: value => value > 0 && value < 0.01 ? '<$0.01' : '$' + Number(value || 0).toFixed(2) };
-  document.addEventListener('input', event => { inputEpoch++; if(window.__eagent.threadControls && event.target.closest('#modal')) return; formChanged(); });
+  document.addEventListener('input', event => { inputEpoch++; if (isSession()) return; if(window.__eagent.threadControls && event.target.closest('#modal')) return; formChanged(); });
   $('#artifact-local').onclick = () => finale.openLocalFiles().catch(error => message(error.message));
   $('#artifact-reload').onclick = () => {
     const reload = async () => { closeModal(); await clear(); await load(); };

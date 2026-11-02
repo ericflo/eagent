@@ -506,6 +506,21 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 				logf("settings artifact binding: %v", err)
 			}
 		}
+		if resourceID != "" && session != "" && account != nil {
+			// The session's own editor, bound to the session-scoped resource:
+			// a conversation opens this in its iframe, showing the routes the
+			// session actually runs.
+			if sitesVersion["session:"+session] != publicationVersion {
+				publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+				err := publishSessionSite(publishCtx, project, session, "session-settings-v1", view, account, client, base, resourceID)
+				stop()
+				if err == nil {
+					sitesVersion["session:"+session] = publicationVersion
+				} else if ctx.Err() == nil {
+					logf("session settings website: %v", err)
+				}
+			}
+		}
 		var claimed struct {
 			Command   *command     `json:"command"`
 			Resource  resourceInfo `json:"resource"`
