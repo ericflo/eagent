@@ -335,6 +335,23 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 	return ctx.Err()
 }
 
+// requestSessionGrant asks the server to add the session grant (want) to the
+// connector's issued grants, using the account token plus the local connector
+// secret — the same owner proof `connector pair-session` uses. base is the
+// connector's API path ("/api/v1/connectors/<id>").
+func requestSessionGrant(ctx context.Context, project, base string, stored []control.Grant, want control.Grant) error {
+	account, err := settingsAccount(project)
+	if err != nil {
+		return fmt.Errorf("cannot request the session grant without a FinaleChat account token: %w", err)
+	}
+	id := strings.TrimPrefix(base, "/api/v1/connectors/")
+	connect := map[string]any{"requested_grants": replaceGrant(stored, want)}
+	if err := account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(id)+"/connect", nil, connect, nil, 0); err != nil {
+		return fmt.Errorf("widening the connector grant for this session: %w", err)
+	}
+	return nil
+}
+
 func runConnectorConnection(ctx context.Context, project, session string, local connectorConfig, client *finalechat.Client, base, instance string, heartbeatAttempted *bool, logf func(string, ...any)) error {
 	service := &settings.Service{Project: project}
 	expectedGrant := service.Grant()
@@ -376,7 +393,18 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			}
 		}
 		if grant == nil {
-			return fmt.Errorf("this connector has no grant for this project")
+			if session == "" {
+				return fmt.Errorf("this connector has no grant for this project")
+			}
+			// Auto-discovered running session: the server has not issued the
+			// session grant to this connector yet. Its key derives from the
+			// project grant, so the server can verify the session belongs to
+			// this project and self-serve the addition — the same /connect
+			// widening `connector pair-session` performs explicitly.
+			if err := requestSessionGrant(ctx, project, base, status.Connector.Grants, expectedGrant); err != nil {
+				return err
+			}
+			continue // re-read connector status with the widened grants
 		}
 		*heartbeatAttempted = true
 		if err := client.Request(ctx, "POST", base+"/heartbeat", nil, map[string]any{"instance": instance}, nil, 0); err != nil {

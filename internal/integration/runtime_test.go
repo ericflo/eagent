@@ -261,3 +261,39 @@ func TestRunningSessionsDiscoversLiveHeartbeatOnly(t *testing.T) {
 		t.Fatalf("after shutdown runningSessions = %v, want none", got)
 	}
 }
+
+func TestRequestSessionGrantWidensConnectorGrants(t *testing.T) {
+	project := t.TempDir()
+	// Account token for settingsAccount.
+	t.Setenv("FINALECHAT_TOKEN", "fc_test_account")
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/connect") {
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	// settingsAccount resolves the base URL from the token's server; point it at the fake.
+	t.Setenv("FINALECHAT_URL", srv.URL)
+	stored := []control.Grant{{Key: "proj", Scope: "project", Operations: []string{"settings.apply"}, Classes: []string{"preference"}}}
+	want := control.Grant{Key: "proj-session-123", Scope: "session", Operations: []string{"settings.apply", "settings.refresh"}, Classes: []string{"preference", "route"}}
+	if err := requestSessionGrant(context.Background(), project, "/api/v1/connectors/abc", stored, want); err != nil {
+		t.Fatal(err)
+	}
+	grants, ok := gotBody["requested_grants"].([]any)
+	if !ok || len(grants) != 2 {
+		t.Fatalf("requested_grants = %v", gotBody)
+	}
+	second, _ := grants[1].(map[string]any)
+	if second["key"] != "proj-session-123" || second["scope"] != "session" {
+		t.Fatalf("appended grant = %v", second)
+	}
+	classes, _ := second["classes"].([]any)
+	if len(classes) != 2 {
+		t.Fatalf("classes = %v", classes)
+	}
+}
