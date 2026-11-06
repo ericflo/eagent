@@ -440,7 +440,9 @@ func StartPublisher(ctx context.Context, project, version string, logf func(stri
 	return func() {
 		cancel()
 		<-done
-		finalCtx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+		// One last pass for what changed as sessions ended. It is bounded:
+		// a publication cut short resumes from its journal next time.
+		finalCtx, stop := context.WithTimeout(context.Background(), 8*time.Second)
 		defer stop()
 		sweep(finalCtx)
 	}

@@ -81,9 +81,11 @@ Batch mode exits `0` when the orchestrator declares the work done, `2` when it s
 ## The web UI
 
 ```
-eagent serve                 # http://127.0.0.1:7331 for this project
+eagent                       # in a project: http://127.0.0.1:7331 (same as eagent serve)
 eagent -p --serve 127.0.0.1:7331 "…"  # also serve while a terminal session runs
 ```
+
+It listens on this machine only: the page can start sessions that run shell commands, so it refuses anything but local requests. Ctrl-C stops it in a few seconds (a second Ctrl-C quits at once); sessions it hosts resume when you write to them again.
 
 <p align="center">
   <img src="docs/web-chat.png" width="49%" alt="Chat view">
