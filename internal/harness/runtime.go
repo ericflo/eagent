@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ericflo/eagent/internal/netx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,12 +97,17 @@ type Runtime struct {
 	prompts   *prompts.Set
 
 	loop chan func()
-	ctx  context.Context
-	stop context.CancelFunc
-	wg   sync.WaitGroup
+	// later holds work the loop queued for itself, run once the current
+	// step is done. The loop never sends on r.loop: when that channel is
+	// full, the only goroutine that drains it would wait on itself.
+	later []func()
+	ctx   context.Context
+	stop  context.CancelFunc
+	wg    sync.WaitGroup
 
 	// Loop-owned scheduling state.
 	orchBusy            bool
+	errorRetries        int // retries scheduled since the orchestrator last got a model reply
 	orchCallAt          time.Time
 	narrBusy            bool
 	narrPending         string // reason for a wake requested during a turn
@@ -365,12 +371,33 @@ func (r *Runtime) routesFor(actor string) []llm.Endpoint {
 // call from any goroutine; several task workers may hit the same dead
 // route at once and only the first switch counts.
 func (r *Runtime) completeActor(ctx context.Context, actor, task string, req llm.Request) (*llm.Response, error) {
+	offline := 0 // consecutive calls the network kept from the provider
 	for {
 		var client *llm.Client
 		r.sync(func() { client = r.clientFor(actor) })
 		resp, err := client.Complete(ctx, req, r.observer(actor, task))
 		if err == nil {
+			if offline > 0 {
+				r.ui.Log("%s: %s is reachable again", actor, client.Endpoint.BaseURL)
+			}
 			return resp, nil
+		}
+		if ctx.Err() == nil && networkDown(err) {
+			// The provider cannot be reached at all (no DNS, no route, the
+			// connection refused or dropped). That passes: wait for the
+			// network instead of failing the turn, which would leave the
+			// session paused until someone resumes it.
+			offline++
+			wait := min(time.Duration(offline)*offlineWait, 4*offlineWait)
+			if offline == 1 {
+				r.ui.Log("%s: cannot reach %s (%s); waiting for the network", actor, client.Endpoint.BaseURL, shortErr(err))
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
 		}
 		var ae *llm.APIError
 		if !errors.As(err, &ae) || !ae.Unroutable() {
@@ -410,6 +437,16 @@ func (r *Runtime) completeActor(ctx context.Context, actor, task string, req llm
 			return nil, err
 		}
 	}
+}
+
+// offlineWait paces calls while the network is down (up to four times it).
+var offlineWait = 15 * time.Second
+
+// networkDown reports a failure to reach the provider at all, which waiting
+// fixes. A whole call running past its limit is not one: the provider was
+// reached and is slow, and the turn's own error handling decides.
+func networkDown(err error) bool {
+	return netx.Transient(err) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func (r *Runtime) newClient(ep llm.Endpoint, actor string) *llm.Client {
@@ -522,7 +559,7 @@ func (r *Runtime) noteWake(ev event.Event) {
 				// Straight to the agent, before any model call: after this
 				// event has been fully recorded, on the next loop turn.
 				seq := ev.Seq
-				r.post(func() { r.autoForward(seq) })
+				r.later = append(r.later, func() { r.autoForward(seq) })
 			}
 		}
 	case event.TaskEnd:
@@ -636,6 +673,11 @@ func (r *Runtime) inputChan() <-chan string {
 
 // tick is the scheduler: it looks at state and starts whatever should run.
 func (r *Runtime) tick() {
+	for len(r.later) > 0 {
+		fn := r.later[0]
+		r.later = r.later[1:]
+		fn()
+	}
 	if r.ending {
 		return
 	}

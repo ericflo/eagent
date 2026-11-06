@@ -83,6 +83,9 @@ func (r *Runtime) startPhone() {
 		return
 	}
 	client.UserAgent = "eagent/" + Version
+	// An outage delays the mirror's posts and questions; it does not lose
+	// them (each carries a client key, so a resend cannot duplicate).
+	client.Patient = true
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &phone{
 		client: client, ref: finalechat.Ref("eagent:" + r.sess.ID),
@@ -162,26 +165,25 @@ func (r *Runtime) startPhone() {
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
 		// The first call proves the token and learns the account's
-		// settings. It gets a few attempts: a transient failure here used
-		// to switch the mirror off forever, stranding the session with no
-		// thread while the publisher kept registering its artifact.
+		// settings. While the service cannot be reached it keeps trying:
+		// giving up switched the mirror off for the life of the process,
+		// so the thread never heard from the session again. Only an answer
+		// that says the token is no good turns it off.
 		var me finalechat.Me
 		var err error
-		for attempt := 0; attempt < 3; attempt++ {
+		for attempt := 1; ; attempt++ {
 			me, err = p.client.Me(ctx)
-			if err == nil || ctx.Err() != nil {
+			if err == nil || ctx.Err() != nil || !finalechat.Transient(err) {
 				break
 			}
-			if attempt+1 < 3 {
-				timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-				case <-timer.C:
-				}
-				if ctx.Err() != nil {
-					break
-				}
+			if attempt == 3 {
+				r.ui.Log("finalechat: %v; retrying until the service is reachable", err)
+			}
+			timer := time.NewTimer(min(time.Duration(attempt)*time.Second, time.Minute))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+			case <-timer.C:
 			}
 		}
 		if err != nil {

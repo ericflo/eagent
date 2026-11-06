@@ -137,14 +137,17 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 				r.recordHarnessMessage(event.ActorOrchestrator, "", "Your previous response could not be processed by the model provider ("+shortErr(err)+"). Continue from where you were; if you were mid-way through a tool call, issue it again.")
 				continue
 			}
-			// Pause the session rather than spin: tell the narrator, yield.
+			// Pause the session rather than spin: tell the narrator, yield,
+			// and try again by itself a while later.
 			r.sync(func() {
-				r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "the model call failed repeatedly: " + shortErr(err) + ". Resume the session to retry."}))
+				y := r.append(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "the model call failed repeatedly: " + shortErr(err) + ". It will retry by itself in a while; a message resumes it now."}))
 				r.wakeNarrator(wakeError)
+				r.retryAfterErrors(y.Seq)
 			})
 			return "error"
 		}
 		failures = 0
+		r.sync(func() { r.errorRetries = 0 })
 		r.ui.Stream(event.ActorOrchestrator, "", "", "")
 		ev := r.recordAssistant(event.ActorOrchestrator, "", resp, seenSeq)
 
@@ -258,5 +261,29 @@ func (r *Runtime) observer(actor, task string) *llm.Observer {
 func (r *Runtime) recordHarnessMessage(actor, task, text string) {
 	r.sync(func() {
 		r.append(event.New(event.HarnessMessage, actor, event.HarnessMessageData{Text: text}).WithTask(task))
+	})
+}
+
+// errorRetryDelays space out the orchestrator's own retries after model
+// calls kept failing (a provider outage, rate limits, a stalled gateway).
+var errorRetryDelays = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour, time.Hour}
+
+// retryAfterErrors wakes the orchestrator again some time after failures
+// paused it, so a provider that recovers needs no resume (and a message the
+// failure left unanswered gets its turn). Anything else that wakes the
+// orchestrator first makes this a no-op. Loop goroutine only.
+func (r *Runtime) retryAfterErrors(yieldSeq int64) {
+	if r.errorRetries >= len(errorRetryDelays) {
+		return
+	}
+	wait := errorRetryDelays[r.errorRetries]
+	r.errorRetries++
+	time.AfterFunc(wait, func() {
+		r.post(func() {
+			if r.ending || r.orchBusy || r.st.LastYield == nil || r.st.LastYield.Seq != yieldSeq {
+				return
+			}
+			r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: fmt.Sprintf("Model calls failed %s ago and the session paused. Trying again: continue from where you were.", wait)}))
+		})
 	})
 }
