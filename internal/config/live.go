@@ -408,7 +408,20 @@ func ResolveLiveModel(project, providerID, modelID string) (Model, Provider, boo
 
 // readLiveCache loads the cache file, returning nil when absent or corrupt.
 func readLiveCache(project string) *LiveCache {
-	raw, err := os.ReadFile(LiveModelsPath(project))
+	path := LiveModelsPath(project)
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	// The file is read on every settings publication; parse it again only
+	// when it changed.
+	cacheMemo.Lock()
+	defer cacheMemo.Unlock()
+	if m, ok := cacheMemo.byPath[path]; ok && m.size == st.Size() && m.mod.Equal(st.ModTime()) {
+		c := *m.cache
+		return &c
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -416,8 +429,21 @@ func readLiveCache(project string) *LiveCache {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil
 	}
-	return &c
+	cacheMemo.byPath[path] = memoEntry{size: st.Size(), mod: st.ModTime(), cache: &c}
+	out := c
+	return &out
 }
+
+type memoEntry struct {
+	size  int64
+	mod   time.Time
+	cache *LiveCache
+}
+
+var cacheMemo = struct {
+	sync.Mutex
+	byPath map[string]memoEntry
+}{byPath: map[string]memoEntry{}}
 
 // WriteLiveCache atomically persists the live cache.
 func WriteLiveCache(project string, c *LiveCache) error {
