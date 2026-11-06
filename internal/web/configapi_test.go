@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,11 @@ func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	t.Setenv("EAGENT_FINALECHAT", "off")
 	t.Setenv("EAGENT_PRESET", "")
+	// Never ask real providers for their models from a test.
+	old := config.SetLiveProbe(func(context.Context, config.Provider) ([]config.Model, error) {
+		return nil, errors.New("providers are offline in tests")
+	})
+	t.Cleanup(func() { config.SetLiveProbe(old) })
 	project := t.TempDir()
 	return New(project, nil), project
 }
@@ -462,9 +468,10 @@ func TestApplyRoutePicks(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Defaults()
-	cfg.Orchestrator.ReasoningEffort = "xhigh" // not in nova-9's [low medium high] -> falls back to medium
+	cfg.Orchestrator.ReasoningEffort = "xhigh" // not in nova-9's [low medium high] -> the nearest, high
+	cfg.Orchestrator.Fallback = &config.Actor{BaseURL: "https://api.openai.com/v1", Model: "gpt-x", APIKeyEnv: "OPENAI_API_KEY"}
 
-	out, err := s.applyRoutePicks(context.Background(), cfg, map[string]routePick{
+	out, err := s.applyRoutePicks(cfg, map[string]routePick{
 		"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"},
 	})
 	if err != nil {
@@ -474,16 +481,16 @@ func TestApplyRoutePicks(t *testing.T) {
 	if a.Model != "acme/nova-9" || a.BaseURL != "https://openrouter.ai/api/v1" || a.APIKeyEnv != "OPENROUTER_API_KEY" {
 		t.Fatalf("route not resolved from the catalog provider: %+v", a)
 	}
-	if a.ContextTokens != 2_097_152 {
-		t.Fatalf("context not taken from the live model: %+v", a)
+	if a.Fallback != nil {
+		t.Fatalf("another model kept the old model's fallback: %+v", a.Fallback)
 	}
-	if a.ReasoningEffort != "medium" {
-		t.Fatalf("effort should fall back into the model's list, got %q", a.ReasoningEffort)
+	if a.ReasoningEffort != "high" {
+		t.Fatalf("effort should move to the nearest one the model lists, got %q", a.ReasoningEffort)
 	}
 	// An inherited effort that IS in the model's list is kept.
 	cfg2 := config.Defaults()
 	cfg2.Orchestrator.ReasoningEffort = "high"
-	out1b, err := s.applyRoutePicks(context.Background(), cfg2, map[string]routePick{"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"}})
+	out1b, err := s.applyRoutePicks(cfg2, map[string]routePick{"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"}})
 	if err != nil || out1b.Orchestrator.ReasoningEffort != "high" {
 		t.Fatalf("in-list effort should be kept: %+v %v", out1b.Orchestrator, err)
 	}
@@ -492,7 +499,7 @@ func TestApplyRoutePicks(t *testing.T) {
 	}
 
 	// A statically known model keeps its catalog protocol.
-	out2, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	out2, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"task": {Provider: "openai", Model: "gpt-6.1-terra"},
 	})
 	if err != nil {
@@ -508,32 +515,32 @@ func TestApplyRoutePicks(t *testing.T) {
 		{"task": {Provider: "evil", Model: "x"}},
 		{"task": {Provider: "openrouter", Model: "not/a-model"}},
 	} {
-		if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), picks); err == nil {
+		if _, err := s.applyRoutePicks(config.Defaults(), picks); err == nil {
 			t.Fatalf("expected error for %v", picks)
 		}
 	}
 
 	// Explicit effort: accepted when the model lists it, set verbatim.
-	out3, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	out3, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "high"},
 	})
 	if err != nil || out3.Narrator.ReasoningEffort != "high" {
 		t.Fatalf("explicit effort: %+v %v", out3.Narrator, err)
 	}
 	// Effort the model does not list -> rejected.
-	if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	if _, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "xhigh"},
 	}); err == nil {
 		t.Fatal("effort not in the model's list should be rejected")
 	}
 	// Effort off the canonical scale -> rejected.
-	if _, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	if _, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "ultra"},
 	}); err == nil {
 		t.Fatal("non-canonical effort should be rejected")
 	}
 	// A model whose catalog entry lists efforts accepts one of them verbatim.
-	out4, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	out4, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"task": {Provider: "openai", Model: "gpt-6-astra", Effort: "max"},
 	})
 	if err != nil || out4.Task.ReasoningEffort != "max" {
@@ -541,7 +548,7 @@ func TestApplyRoutePicks(t *testing.T) {
 	}
 	// A model with no known effort list (minimax-m3 on fireworks) accepts any
 	// canonical level.
-	out5, err := s.applyRoutePicks(context.Background(), config.Defaults(), map[string]routePick{
+	out5, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
 		"task": {Provider: "fireworks", Model: "accounts/fireworks/models/minimax-m3", Effort: "xhigh"},
 	})
 	if err != nil || out5.Task.ReasoningEffort != "xhigh" || out5.Task.APIKeyEnv != "FIREWORKS_API_KEY" {

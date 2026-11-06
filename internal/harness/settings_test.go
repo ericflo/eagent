@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"github.com/ericflo/eagent/internal/config"
 	"reflect"
 	"testing"
 	"time"
@@ -136,56 +137,78 @@ func TestLiveSettingsReachSchedulerAndNativeHistory(t *testing.T) {
 	}
 }
 
-func TestApplyRoutesSwapsClientAndRecordsRoute(t *testing.T) {
+func TestRouteChangesSwapOnlyChangedPicksAndKeepFallbacks(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	t.Setenv("OPENROUTER_API_KEY", "x")
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	project := t.TempDir()
 	cfg := testConfig("http://127.0.0.1:1") // dead model server; clients are swapped, not called
-	cfg.Orchestrator.APIKeyEnv = "EAGENT_TEST_KEY"
-	ui := &fakeUI{input: make(chan string)}
-	rt, err := New(cfg, Options{Project: project, Interactive: false}, ui)
+	cfg.Orchestrator.Fallback = &config.Actor{Protocol: "openai-chat", BaseURL: "http://127.0.0.1:2", Model: "orch-fallback", APIKeyEnv: "EAGENT_TEST_KEY"}
+	cfg.Orchestrator.MaxTokens = 32768
+	rt, err := New(cfg, Options{Project: project, Interactive: false}, &fakeUI{input: make(chan string)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := rt.orchClient.Endpoint.Model
-	rt.applyRoutes(map[string]runtimecontrol.Route{
-		"orchestrator": {Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"},
-		"task":         {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "high"}, // task key env is EAGENT_TEST_KEY -> unroutable, skipped
-	})
-	if got := rt.orchClient.Endpoint.Model; got != "reflection/beam-1.0-501b-a23b" {
-		t.Fatalf("orchestrator client = %s (was %s)", got, before)
-	}
-	if rt.orchClient.Endpoint.ReasoningEffort != "xhigh" || rt.orchClient.Endpoint.BaseURL != "https://openrouter.ai/api/v1" {
-		t.Fatalf("endpoint = %+v", rt.orchClient.Endpoint)
-	}
-	// The task route's key env has no key for openrouter? EAGENT_TEST_KEY is set, but the
-	// provider key env is OPENROUTER_API_KEY (set) — so task should switch too.
-	if got := rt.taskClient.Endpoint.Model; got != "z-ai/glm-5.3" {
-		t.Fatalf("task client = %s", got)
-	}
-	// A Route event was recorded for each switch.
-	evs, _ := store.Read(rt.sess.Path)
-	routes := map[string]string{}
-	for _, ev := range evs {
-		if ev.Type == event.Route {
-			var d event.RouteData
-			_ = ev.Decode(&d)
-			routes[d.Actor] = d.Model
+	before := runtimecontrol.FromConfig(cfg).Routes
+	routeEvents := func() map[string]string {
+		evs, _ := store.Read(rt.sess.Path)
+		out := map[string]string{}
+		for _, ev := range evs {
+			if ev.Type == event.Route {
+				var d event.RouteData
+				_ = ev.Decode(&d)
+				out[d.Actor] = d.Model
+			}
 		}
+		return out
 	}
-	if routes["orchestrator"] != "reflection/beam-1.0-501b-a23b" || routes["task"] != "z-ai/glm-5.3" {
-		t.Fatalf("route events = %v", routes)
+
+	// Unchanged picks swap nothing: an actor that failed over to its
+	// fallback stays there when an unrelated setting changes.
+	rt.orchClient = rt.newClient(rt.orchRoutes[1], event.ActorOrchestrator)
+	swaps, err := rt.routeChanges(before, before)
+	if err != nil || len(swaps) != 0 {
+		t.Fatalf("unchanged picks: %v %v", swaps, err)
 	}
-	// No-op when the route is unchanged.
-	n := len(evs)
-	rt.applyRoutes(map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"}})
-	evs2, _ := store.Read(rt.sess.Path)
-	if len(evs2) != n {
-		t.Fatalf("unchanged route appended events: %d -> %d", n, len(evs2))
+
+	// A new model replaces the route and drops the old model's fallback,
+	// keeping the configured token limit.
+	after := map[string]runtimecontrol.Route{}
+	for k, v := range before {
+		after[k] = v
 	}
-	// Unknown model keeps the current client.
-	rt.applyRoutes(map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "nope/none", Effort: "low"}})
-	if rt.orchClient.Endpoint.Model != "reflection/beam-1.0-501b-a23b" {
-		t.Fatalf("unknown model swapped client: %s", rt.orchClient.Endpoint.Model)
+	after["task"] = runtimecontrol.Route{Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "high"}
+	swaps, err = rt.routeChanges(before, after)
+	if err != nil || len(swaps) != 1 || swaps[0].actor != "task" {
+		t.Fatalf("task pick: %+v %v", swaps, err)
+	}
+	rt.swapRoute(swaps[0])
+	if ep := rt.taskClient.Endpoint; ep.Model != "z-ai/glm-5.3" || ep.BaseURL != "https://openrouter.ai/api/v1" || ep.ReasoningEffort != "high" || len(rt.taskRoutes) != 1 {
+		t.Fatalf("task endpoint = %+v routes=%d", ep, len(rt.taskRoutes))
+	}
+	if routeEvents()["task"] != "z-ai/glm-5.3" {
+		t.Fatalf("route events = %v", routeEvents())
+	}
+
+	// Only the effort changes: same model, its fallback chain stays.
+	rt.cfg.Orchestrator.BaseURL = "https://openrouter.ai/api/v1" // a catalog provider, so the pick resolves
+	rt.cfg.Orchestrator.Model = "z-ai/glm-5.3"
+	after = map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "low"}}
+	swaps, err = rt.routeChanges(map[string]runtimecontrol.Route{"orchestrator": {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "high"}}, after)
+	if err != nil || len(swaps) != 1 {
+		t.Fatalf("effort pick: %+v %v", swaps, err)
+	}
+	if len(swaps[0].eps) != 2 || swaps[0].eps[0].ReasoningEffort != "low" || swaps[0].eps[0].MaxTokens != 32768 || swaps[0].eps[1].Model != "orch-fallback" {
+		t.Fatalf("effort change lost the fallback or limits: %+v", swaps[0].eps)
+	}
+
+	// A pick that cannot run fails the whole change before anything applies.
+	for _, bad := range []runtimecontrol.Route{
+		{Provider: "openrouter", Model: "nope/none", Effort: "low"},
+		{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}, // ANTHROPIC_API_KEY unset
+	} {
+		if _, err := rt.routeChanges(before, map[string]runtimecontrol.Route{"narrator": bad}); err == nil {
+			t.Fatalf("unusable pick %+v accepted", bad)
+		}
 	}
 }
