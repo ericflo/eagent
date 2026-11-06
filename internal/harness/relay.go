@@ -711,19 +711,13 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 
 // upgradeAgent runs the agent CLI's own updater.
 func upgradeAgent(agent string) (string, error) {
-	var cmd *exec.Cmd
-	switch agent {
-	case "codex", "claude":
-		cmd = exec.Command(agent, "update")
-	default:
+	if agent != "codex" && agent != "claude" {
 		return "", fmt.Errorf("no upgrade command for %s", agent)
 	}
-	timer := time.AfterFunc(5*time.Minute, func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-	defer timer.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, agent, "update")
+	cmd.WaitDelay = 5 * time.Second // an updater child that keeps the output open
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

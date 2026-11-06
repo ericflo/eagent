@@ -8,6 +8,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -101,8 +102,24 @@ type Tmux struct{}
 
 func (Tmux) Name() string { return "tmux" }
 
+// bounded makes a short-lived helper command (tmux, screen, git, an agent
+// CLI) that cannot hang its caller: it is killed after timeout, and its
+// output pipes are abandoned soon after even if a child keeps them open.
+// A wedged tmux server or a git credential prompt otherwise wedges the
+// session that called it.
+func bounded(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd, cancel
+}
+
+// helperTimeout bounds one tmux or screen command.
+const helperTimeout = 15 * time.Second
+
 func tmux(stdin []byte, args ...string) (string, error) {
-	cmd := exec.Command("tmux", append([]string{"-L", Socket}, args...)...)
+	cmd, cancel := bounded(helperTimeout, "tmux", append([]string{"-L", Socket}, args...)...)
+	defer cancel()
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -207,7 +224,8 @@ type Screen struct{}
 func (Screen) Name() string { return "screen" }
 
 func screen(name string, args ...string) (string, error) {
-	cmd := exec.Command("screen", append([]string{"-S", name, "-p", "0", "-X"}, args...)...)
+	cmd, cancel := bounded(helperTimeout, "screen", append([]string{"-S", name, "-p", "0", "-X"}, args...)...)
+	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("screen %s: %v: %s", args[0], err, strings.TrimSpace(string(out)))
@@ -216,7 +234,8 @@ func screen(name string, args ...string) (string, error) {
 }
 
 func (Screen) Start(name, dir string, argv, env []string) error {
-	cmd := exec.Command("screen", append([]string{"-dmS", name, "-h", "50000"}, argv...)...)
+	cmd, cancel := bounded(helperTimeout, "screen", append([]string{"-dmS", name, "-h", "50000"}, argv...)...)
+	defer cancel()
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -230,7 +249,9 @@ func (s Screen) Alive(name string) bool { return s.PID(name) > 0 }
 // PID finds the screen session's pid from `screen -ls` (the session's own
 // pid; its child is the agent).
 func (Screen) PID(name string) int {
-	out, _ := exec.Command("screen", "-ls", name).CombinedOutput()
+	cmd, cancel := bounded(helperTimeout, "screen", "-ls", name)
+	defer cancel()
+	out, _ := cmd.CombinedOutput()
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		dot := strings.IndexByte(line, '.')
@@ -317,7 +338,9 @@ func (Screen) Kill(name string) error {
 }
 
 func (Screen) List() ([]Listed, error) {
-	out, _ := exec.Command("screen", "-ls").CombinedOutput()
+	cmd, cancel := bounded(helperTimeout, "screen", "-ls")
+	defer cancel()
+	out, _ := cmd.CombinedOutput()
 	var listed []Listed
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
@@ -383,7 +406,9 @@ func ExpandHome(dir string) string {
 // KillSocket ends the tmux server on a socket eagent (or a test) owns and
 // removes the socket file, which tmux can leave behind.
 func KillSocket(socket string) {
-	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	cmd, cancel := bounded(helperTimeout, "tmux", "-L", socket, "kill-server")
+	defer cancel()
+	_ = cmd.Run()
 	dir := os.Getenv("TMUX_TMPDIR")
 	if dir == "" {
 		dir = "/tmp"

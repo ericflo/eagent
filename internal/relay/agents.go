@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -96,39 +95,46 @@ func (codexAgent) locate(dir string, launched time.Time, innerID string) (string
 		mod      time.Time
 	}
 	var cands []cand
-	for _, day := range []time.Time{launched.Add(-24 * time.Hour), launched, launched.Add(24 * time.Hour)} {
-		folder := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-		entries, err := os.ReadDir(folder)
-		if err != nil {
+	// A known id names its rollout, whatever day it began (a resumed
+	// session appends to the rollout it started, possibly days ago);
+	// otherwise the new session's rollout is in the days around the launch.
+	var paths []string
+	if innerID != "" {
+		paths, _ = filepath.Glob(filepath.Join(root, "*", "*", "*", "rollout-*-"+innerID+".jsonl"))
+	}
+	if len(paths) == 0 {
+		for _, day := range []time.Time{launched.Add(-24 * time.Hour), launched, launched.Add(24 * time.Hour)} {
+			folder := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
+			entries, _ := os.ReadDir(folder)
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), "rollout-") && strings.HasSuffix(e.Name(), ".jsonl") {
+					paths = append(paths, filepath.Join(folder, e.Name()))
+				}
+			}
+		}
+	}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil || info.ModTime().Before(launched.Add(-5*time.Second)) {
 			continue
 		}
-		for _, e := range entries {
-			if !strings.HasPrefix(e.Name(), "rollout-") || !strings.HasSuffix(e.Name(), ".jsonl") {
-				continue
-			}
-			info, err := e.Info()
-			if err != nil || info.ModTime().Before(launched.Add(-5*time.Second)) {
-				continue
-			}
-			path := filepath.Join(folder, e.Name())
-			if _, taken := claimed.Load(path); taken {
-				continue
-			}
-			meta, ok := codexMeta(path)
-			if !ok {
-				continue
-			}
-			if innerID != "" {
-				if meta.ID == innerID {
-					cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
-				}
-				continue
-			}
-			if cleanDir(meta.Cwd) != want || meta.start.Before(launched.Add(-10*time.Second)) {
-				continue
-			}
-			cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
+		if _, taken := claimed.Load(path); taken {
+			continue
 		}
+		meta, ok := codexMeta(path)
+		if !ok {
+			continue
+		}
+		if innerID != "" {
+			if meta.ID == innerID {
+				cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
+			}
+			continue
+		}
+		if cleanDir(meta.Cwd) != want || meta.start.Before(launched.Add(-10*time.Second)) {
+			continue
+		}
+		cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
 	}
 	if len(cands) == 0 {
 		return "", ""
@@ -198,7 +204,9 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	if id == "" {
 		return errors.New("Codex's session id is not known yet")
 	}
-	out, err := exec.Command("codex", "queue", "--thread", id, "--message", text).CombinedOutput()
+	cmd, cancel := bounded(time.Minute, "codex", "queue", "--thread", id, "--message", text)
+	defer cancel()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
 	}
