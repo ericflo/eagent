@@ -420,3 +420,23 @@ func TestPublisherRefusesDivergentSourcesAndUnconfinedPendingDirectory(t *testin
 		t.Fatalf("unconfined staging path accepted: %v", err)
 	}
 }
+
+// A session that has not changed since its last publication costs the
+// service nothing: no capability or artifact lookups.
+func TestUnchangedPublicationAsksTheServiceNothing(t *testing.T) {
+	f, project, session := newPublicationFixture(t)
+	if _, err := Publish(context.Background(), project, session.ID, "test", true); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.calls = 0
+	f.mu.Unlock()
+	if _, err := Publish(context.Background(), project, session.ID, "test", false); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.calls != 0 {
+		t.Fatalf("an unchanged session made %d requests", f.calls)
+	}
+}

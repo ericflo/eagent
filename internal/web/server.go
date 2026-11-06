@@ -862,11 +862,12 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	var err error
-	start := time.Now()
+	var start time.Time
 	var sessions time.Duration
 	select {
 	case err = <-errc:
 	case <-ctx.Done():
+		start = time.Now()
 		// Sessions first, so their last events are on record; then the
 		// rest at once rather than one after another.
 		s.Shutdown(10 * time.Second)
@@ -892,7 +893,7 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 		}()
 	}
 	wg.Wait()
-	if total := time.Since(start); err == nil && total > 3*time.Second {
+	if total := time.Since(start); err == nil && !start.IsZero() && total > 3*time.Second {
 		// Say where a slow stop went, so it can be fixed rather than guessed at.
 		detail := fmt.Sprintf("sessions %s", sessions.Round(100*time.Millisecond))
 		for i, part := range parts {

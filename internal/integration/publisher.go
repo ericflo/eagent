@@ -96,16 +96,19 @@ func fingerprint(m artifact.Manifest) string {
 // Publish resumes pending uploads before taking a fresh snapshot. force is
 // for the explicit CLI command; it does not enable future publication.
 func Publish(ctx context.Context, project, session, version string, force bool) (string, error) {
-	return publish(ctx, project, session, version, force, false)
+	return publish(ctx, project, session, version, force, false, nil)
 }
 
 // RecreatePublication is only called for one explicitly named deleted archive.
 // Ordinary forced publication is never permission to bypass deletion/history.
 func RecreatePublication(ctx context.Context, project, session, version string) (string, error) {
-	return publish(ctx, project, session, version, true, true)
+	return publish(ctx, project, session, version, true, true, nil)
 }
 
-func publish(ctx context.Context, project, session, version string, force, recreate bool) (_ string, resultErr error) {
+// publish captures and uploads a session's archive. shared is the project
+// part of the source signature when the caller (a sweep over many sessions)
+// computed it once already; nil computes it here.
+func publish(ctx context.Context, project, session, version string, force, recreate bool, shared map[string]any) (_ string, resultErr error) {
 	if finalechat.Disabled() {
 		return "", finalechat.ErrDisabled
 	}
@@ -192,6 +195,20 @@ func publish(ctx context.Context, project, session, version string, force, recre
 	if pending.Deleted {
 		return "", ErrPublicationDeleted
 	}
+	if shared == nil {
+		shared = projectSignature(project)
+	}
+	signature, err := sessionSignature(project, info, version, shared)
+	if err != nil {
+		return "", err
+	}
+	// Nothing changed since the last publication: nothing to ask the
+	// service either. A sweep looks at every published session, and asking
+	// about each one cost two round trips per session, every 30 seconds
+	// and again at shutdown.
+	if !force && !recreate && pending.Completed && pending.Signature == signature {
+		return pending.ArtifactID, nil
+	}
 	if pending.ArtifactID == "" && !force && !mirrorPosted(info) {
 		// The mirror's first Post creates the thread with its title; an
 		// artifact PUT first would auto-create an untitled thread that
@@ -259,10 +276,6 @@ func publish(ctx context.Context, project, session, version string, force, recre
 		if err != nil {
 			return "", err
 		}
-	}
-	signature, err := sourceSignature(project, info, version)
-	if err != nil {
-		return "", err
 	}
 	if pending.Completed && sameRevision(head.Artifact.CurrentRevisionID, pending.RevisionID) && pending.Signature == signature {
 		return pending.ArtifactID, nil
@@ -402,12 +415,13 @@ func StartPublisher(ctx context.Context, project, version string, logf func(stri
 			logf("artifact sessions: %v", err)
 			return
 		}
+		shared := projectSignature(project)
 		for _, info := range infos {
 			_, known := os.Stat(filepath.Join(stateDir(project), info.ID, "publication.json"))
 			if !active(info.Path) && known != nil && !slices.Contains(sessions, info.ID) {
 				continue
 			}
-			if _, err := Publish(ctx, project, info.ID, version, false); err != nil {
+			if _, err := publish(ctx, project, info.ID, version, false, false, shared); err != nil {
 				if ctx.Err() == nil {
 					if errors.Is(err, ErrPublicationDeleted) {
 						logf("artifact %s: %v", info.ID, err)
@@ -489,6 +503,13 @@ func IsArtifactEnabled(project string) bool {
 }
 
 func sourceSignature(project string, info store.Info, version string) (string, error) {
+	return sessionSignature(project, info, version, projectSignature(project))
+}
+
+// projectSignature is the part of every session's source signature that
+// comes from the project (its settings and editor data), computed once per
+// sweep rather than once per session.
+func projectSignature(project string) map[string]any {
 	service := &settings.Service{Project: project}
 	view, err := service.RemoteSnapshot(service.Grant())
 	settingsVersion := "unavailable"
@@ -499,6 +520,10 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 			settingsVersion = view.Snapshot.Version
 		}
 	}
+	return map[string]any{"settings": settingsVersion, "editor": editorData}
+}
+
+func sessionSignature(project string, info store.Info, version string, shared map[string]any) (string, error) {
 	files := map[string]any{}
 	if status, err := runtimecontrol.ReadStatus(project, info.ID); err == nil {
 		files["runtime_settings"] = []any{status.Generation, status.Values, status.AvailableUntil.After(time.Now())}
@@ -506,7 +531,7 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 	if stat, err := os.Stat(filepath.Join(project, ".agents/eagent/settings-audit.jsonl")); err == nil {
 		files["settings_audit"] = []any{stat.Size(), stat.ModTime().UnixNano()}
 	}
-	err = filepath.WalkDir(info.Path, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(info.Path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -533,6 +558,6 @@ func sourceSignature(project string, info store.Info, version string) (string, e
 	if err != nil {
 		return "", err
 	}
-	raw, _ := json.Marshal(map[string]any{"files": files, "settings": settingsVersion, "producer": version, "viewer": archive.ViewerFingerprint(), "editor": editorData})
+	raw, _ := json.Marshal(map[string]any{"files": files, "settings": shared["settings"], "producer": version, "viewer": archive.ViewerFingerprint(), "editor": shared["editor"]})
 	return artifact.Digest(raw), nil
 }
