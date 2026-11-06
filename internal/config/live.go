@@ -19,17 +19,20 @@ import (
 )
 
 // Live model discovery: each catalog provider's /models endpoint is queried
-// on demand — only when something asks for the live list (the web Config
-// page does, when it loads) — never at startup, so eagent never blocks
-// starting a session on a network call. Results are cached on disk for
-// LiveTTL (24h): a fresh cache is served without any HTTP, and once it is
-// older than 24h the next request refreshes it, so an eagent that runs for
-// days or weeks still picks up newly released models. Even failed refreshes
-// are stamped into the cache, so a provider outage cannot make every page
-// load retry. Keys only ever travel to the provider's own catalog base URL,
+// on demand — when something asks for the live list (the web Config page,
+// the new-session dialog, the settings connector for the phone's model
+// pickers) — never on the way to starting a session, so a start never waits
+// on the network. Results are cached on disk for LiveTTL: a fresh cache is
+// served without any HTTP, and once it is older the next request refreshes
+// it, so an eagent that runs for weeks still picks up new models. A refresh
+// that finds nothing is retried after liveRetry. Keys only ever travel to
+// the provider's own catalog base URL,
 // with the key variable the catalog already names.
 
-const LiveTTL = 24 * time.Hour
+// LiveTTL is how long a fetched list is used before it is fetched again
+// (by whichever asks first: the Config page, the new-session dialog, or the
+// settings connector, which keeps it current for the phone's pickers).
+const LiveTTL = 6 * time.Hour
 
 // LiveModelsPath is the on-disk cache of the last live fetch, per project.
 func LiveModelsPath(project string) string {

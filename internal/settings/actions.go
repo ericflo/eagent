@@ -35,7 +35,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		{Operation: "bundle.delete", Label: "Delete named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64)}, "name")},
 		// Starting a session spends model credit and runs commands on the
 		// machine, so it is a cost-class action like a route test.
-		{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}, "prompt")},
+		s.sessionStartAction(text, choices, object),
 	}
 	var out []control.Action
 	for _, action := range actions {
@@ -182,4 +182,64 @@ func (s *Service) relayChoices() []string {
 		cfg = config.Defaults()
 	}
 	return append([]string{""}, cfg.Relay.RelayProfileNames()...)
+}
+
+// Actors whose model a new session may pick, in the order they are offered.
+var StartActors = []string{"orchestrator", "task", "narrator"}
+
+// sessionStartAction declares what a session started from the phone may
+// choose: the first message, where it starts, an agent to relay to, and
+// (asked of the user, in this order) the configuration it starts from and
+// each actor's provider, model and reasoning effort. Each choice left out
+// comes from the project's own configuration.
+func (s *Service) sessionStartAction(text func(int) control.Shape, choices func([]string) control.Shape, object func(map[string]control.Shape, ...string) control.Shape) control.Action {
+	params := map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}
+	configs := append([]string{}, config.PresetNames()...)
+	if bundles, err := config.ListBundles(s.Project); err == nil {
+		for _, b := range bundles {
+			configs = append(configs, "bundle:"+b)
+		}
+	}
+	params["config"] = choices(configs)
+	inputs := []control.Input{{Name: "config", Label: "Configuration", Description: "A preset, or a configuration saved in this project (bundle:NAME). Empty: the project's own."}}
+	var providers []string
+	for _, pr := range config.Providers {
+		providers = append(providers, pr.ID)
+	}
+	for _, actor := range StartActors {
+		name := strings.ToUpper(actor[:1]) + actor[1:]
+		params[actor+"_provider"] = choices(providers)
+		params[actor+"_model"] = text(200)
+		params[actor+"_effort"] = choices(config.EffortOrder)
+		inputs = append(inputs,
+			control.Input{Name: actor + "_provider", Label: name + " provider"},
+			control.Input{Name: actor + "_model", Label: name + " model", Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}},
+			control.Input{Name: actor + "_effort", Label: name + " reasoning effort"})
+	}
+	return control.Action{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(params, "prompt"), Inputs: inputs}
+}
+
+// ModelSuggestions are the models eagent knows of (the built-in catalog and
+// the providers' live lists as last cached), grouped by provider id, for a
+// client to offer as choices. Any model id can still be typed in.
+func ModelSuggestions(project string) []control.Suggestion {
+	models := config.KnownModels(project)
+	out := make([]control.Suggestion, 0, len(models))
+	for _, m := range models {
+		label := m.Label
+		if pr, ok := config.ProviderByID(m.Provider); ok {
+			label += " · " + pr.Label
+		}
+		if m.Price != nil {
+			label += fmt.Sprintf(" · $%g/$%g", m.Price.In, m.Price.Out)
+		}
+		if len(label) > 200 {
+			label = label[:200]
+		}
+		if m.ID == "" || len(m.ID) > 500 {
+			continue
+		}
+		out = append(out, control.Suggestion{Value: m.ID, Label: label, Group: m.Provider})
+	}
+	return out
 }

@@ -623,19 +623,11 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 // live list (the dialog's browse fetched it), so starting a session never
 // waits on the network, and a browser cannot point a key elsewhere.
 func (s *Server) applyRoutePicks(cfg config.Config, picks map[string]routePick) (config.Config, error) {
-	actors := map[string]*config.Actor{"orchestrator": &cfg.Orchestrator, "task": &cfg.Task, "narrator": &cfg.Narrator}
-	for name, pick := range picks {
-		a, ok := actors[name]
-		if !ok {
-			return cfg, fmt.Errorf("unknown actor %q (want orchestrator, task, or narrator)", name)
-		}
-		picked, err := config.PickRoute(s.Project, *a, pick.Provider, pick.Model, pick.Effort)
-		if err != nil {
-			return cfg, err
-		}
-		*a = picked
+	converted := map[string]integration.RoutePick{}
+	for actor, p := range picks {
+		converted[actor] = integration.RoutePick{Provider: p.Provider, Model: p.Model, Effort: p.Effort}
 	}
-	return cfg, cfg.Validate()
+	return integration.ApplyPicks(s.Project, cfg, converted)
 }
 
 func (s *Server) isHosted(id string) bool {
@@ -681,19 +673,6 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, er
 	return rt.SessionID(), nil
 }
 
-// HostSession starts a new interactive session in this process with the
-// server's default configuration, the way the browser's "new session" does;
-// dir, when set, is where its commands start.
-func (s *Server) HostSession(prompt, dir string) (string, error) {
-	return s.HostRelaySession(prompt, dir, "")
-}
-
-// HostRelaySession is HostSession for a session that relays to the agent a
-// relay profile names ("" for an ordinary session).
-func (s *Server) HostRelaySession(prompt, dir, relay string) (string, error) {
-	return s.hostNew(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: prompt, StartDir: dir, Relay: relay}, "", "")
-}
-
 // RegisterSessionStarter makes sessions requested from the phone run in this
 // process, where they stay interactive and the UI shows them. It returns a
 // function that restores the previous starter.
@@ -702,7 +681,17 @@ func (s *Server) RegisterSessionStarter() func() {
 		if project != s.Project {
 			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
 		}
-		id, err := s.HostRelaySession(req.Prompt, req.Dir, req.Relay)
+		// The configuration and model picks the phone chose, else this
+		// server's default configuration.
+		preset, bundle := integration.SplitConfig(req.Config)
+		cfg, err := s.loadConfig(bundle, preset)
+		if err == nil {
+			cfg, err = integration.ApplyPicks(s.Project, cfg, req.Routes)
+		}
+		if err != nil {
+			return integration.SessionStart{}, err
+		}
+		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay}, cfg)
 		if err != nil {
 			return integration.SessionStart{}, err
 		}

@@ -179,6 +179,9 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
+	if slices.ContainsFunc(out.Descriptor.Actions, func(a control.Action) bool { return a.Operation == "session.start" }) {
+		out.Descriptor.Suggestions = map[string][]control.Suggestion{"models": ModelSuggestions(s.Project)}
+	}
 	if err := out.Descriptor.Validate(grant); err != nil {
 		return out, err
 	}
