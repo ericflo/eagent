@@ -850,26 +850,36 @@ func (u *webUI) status() harness.Status {
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
-	defer stopPublisher()
 	restoreStarter := s.RegisterSessionStarter()
 	defer restoreStarter()
 	stopConnector := integration.StartConnector(ctx, s.Project, s.logf)
-	defer stopConnector()
 	stopWatcher := integration.StartResumeWatcher(ctx, s.Project, s, s.logf)
-	defer stopWatcher()
 	s.addr = addr
-	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second}
+	// Requests share the server's lifetime, so the browser's live streams
+	// end with it instead of holding shutdown until its timeout.
+	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	var err error
 	select {
-	case err := <-errc:
-		return err
+	case err = <-errc:
 	case <-ctx.Done():
+		// Sessions first, so their last events are on record; then the
+		// rest at once rather than one after another.
 		s.Shutdown(10 * time.Second)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
 	}
+	var wg sync.WaitGroup
+	for _, stop := range []func(){stopWatcher, stopConnector, stopPublisher, func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}} {
+		wg.Add(1)
+		go func() { defer wg.Done(); stop() }()
+	}
+	wg.Wait()
+	return err
 }
 
 // ---- attachments ----------------------------------------------------------------

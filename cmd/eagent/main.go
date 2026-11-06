@@ -39,7 +39,8 @@ var version = "dev"
 const usage = `eagent — a three-actor, event-sourced coding agent in one binary
 
 Usage:
-  eagent [flags] [prompt]            start an interactive session (prompt optional)
+  eagent [--addr HOST:PORT]          serve this directory's web UI and phone host (as eagent serve)
+  eagent [flags] "prompt"            start an interactive session in this terminal
   eagent -p [flags] "prompt"         batch mode: run until the work is done, then exit
   eagent -c [flags] [prompt]         continue the most recent session in this project
   eagent relay <profile> [--cwd DIR] [brief]
@@ -205,6 +206,10 @@ func run(args []string) int {
 		return cmdView(project, rest[0], *actor, *task, *until, *asJSON)
 	}
 
+	if cmd == "" && len(rest) == 0 && !*batch && !*cont && *answer == "" && strings.TrimSpace(*relayTo) == "" && *startDir == "" && *serveAt == "" && stdinIsTerminal() {
+		// Plain `eagent` in a project: its web UI and phone host.
+		return cmdServe(project, *addr, *preset, *bundle, *verbose)
+	}
 	cfg, err := config.LoadBundle(project, *preset, *bundle)
 	if err != nil {
 		return fail(err)
@@ -905,7 +910,14 @@ func cmdServe(project, addr, preset, bundle string, verbose bool) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func() { <-sigs; fmt.Fprintln(os.Stderr, "stopping"); cancel() }()
+	go func() {
+		<-sigs
+		fmt.Fprintln(os.Stderr, "stopping (Ctrl+C again to quit now)")
+		cancel()
+		<-sigs
+		fmt.Fprintln(os.Stderr, "quitting")
+		os.Exit(130)
+	}()
 	fmt.Fprintf(os.Stderr, "eagent web UI for %s\n  http://%s/\n", project, displayAddr(addr))
 	if err := web.ListenAndServe(ctx, addr, ws); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fail(err)
