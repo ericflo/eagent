@@ -191,11 +191,20 @@ func relayProfiles(project string) []map[string]any {
 	return out
 }
 
-// runningRelays lists the relays running on this machine (every eagent
-// session's), for the app's "running now" list. Only stable fields, so the
-// published snapshot changes only when a relay starts, stops or exits.
-func runningRelays() []map[string]any {
+// runningRelays lists the relays of this project's running sessions, for the
+// app's "running now" list. A relay's terminal can outlive its session by
+// days (the agent sits idle at its prompt); those are not "running now", so
+// only relays whose eagent session is alive are listed. Only stable fields,
+// so the published snapshot changes only when a relay starts, stops or exits.
+func runningRelays(live []string) []map[string]any {
 	out := []map[string]any{}
+	alive := map[string]bool{}
+	for _, sid := range live {
+		alive[sid] = true
+	}
+	if len(alive) == 0 {
+		return out
+	}
 	for _, h := range []relay.Host{relay.Tmux{}, relay.Screen{}} {
 		if _, err := exec.LookPath(h.Name()); err != nil {
 			continue
@@ -203,6 +212,9 @@ func runningRelays() []map[string]any {
 		listed, _ := h.List()
 		for _, l := range listed {
 			session := relay.SessionOf(l.Name)
+			if !alive[session] {
+				continue
+			}
 			name := strings.TrimPrefix(strings.TrimPrefix(l.Name, relay.Prefix), session+"-")
 			agent := name
 			for _, a := range []string{"codex", "claude"} {

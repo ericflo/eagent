@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"encoding/json"
@@ -18,8 +19,6 @@ import (
 	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/store"
 )
-
-type settingsThread struct{ ID, Session, External string }
 
 func settingsAccount(project string) (*finalechat.Client, error) {
 	if finalechat.Disabled() {
@@ -36,32 +35,32 @@ func settingsAccount(project string) (*finalechat.Client, error) {
 	return client, nil
 }
 
-// Only existing conversations for actual local sessions are considered. A
-// settings connection never creates empty conversations or uploads their logs.
-func settingsThreads(ctx context.Context, project string, client *finalechat.Client) []settingsThread {
+// hasProjectThread reports whether any of this project's newest sessions
+// already has a FinaleChat conversation. Connecting settings never creates
+// conversations or uploads logs; it only follows ones that exist.
+func hasProjectThread(ctx context.Context, project string, client *finalechat.Client) bool {
 	infos, err := store.List(store.Root(project))
 	if err != nil {
-		return nil
+		return false
 	}
-	if len(infos) > 100 {
-		infos = infos[len(infos)-100:]
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Started.After(infos[j].Started) })
+	if len(infos) > 20 {
+		infos = infos[:20]
 	}
-	var out []settingsThread
 	for _, info := range infos {
 		if ctx.Err() != nil {
-			break
+			return false
 		}
-		external := "eagent:" + info.ID
 		var response struct {
 			Thread struct {
 				ID string `json:"id"`
 			}
 		}
-		if client.Request(ctx, "GET", "/api/v1/threads/"+url.PathEscape("ext:"+external), nil, nil, &response, 0) == nil && response.Thread.ID != "" {
-			out = append(out, settingsThread{response.Thread.ID, info.ID, external})
+		if client.Request(ctx, "GET", "/api/v1/threads/"+url.PathEscape("ext:eagent:"+info.ID), nil, nil, &response, 0) == nil && response.Thread.ID != "" {
+			return true
 		}
 	}
-	return out
+	return false
 }
 
 func autoConnectProject(ctx context.Context, project string) {
@@ -72,30 +71,13 @@ func autoConnectProject(ctx context.Context, project string) {
 		_, _ = Pair(ctx, project, "")
 		return
 	}
-	infos, _ := store.List(store.Root(project))
-	if len(infos) == 0 {
-		return
-	}
 	client, err := settingsAccount(project)
 	if err != nil {
 		return
 	}
-	if len(settingsThreads(ctx, project, client)) > 0 {
+	if hasProjectThread(ctx, project, client) {
 		_, _ = Pair(ctx, project, "")
 	}
-}
-
-// The existing artifact store keeps this small website and its history. Its
-// publication is independent of the opt-out for native transcript backups.
-func publishSettingsSite(ctx context.Context, project, version string, thread settingsThread, view settings.RemoteView, account, connector *finalechat.Client, base, resourceID string) error {
-	site, err := archive.SettingsWebsite(project, thread.Session, version, view)
-	if err != nil {
-		return err
-	}
-	defer site.Close()
-	return publishSite(ctx, project, thread.Session, site, func(ctx context.Context) (finalechat.Artifact, error) {
-		return account.Artifact(ctx, "ext:"+thread.External, "agent-settings", "Eagent settings")
-	}, account, connector, base, resourceID)
 }
 
 // publishResourceSite publishes the project's settings editor for the
@@ -109,20 +91,6 @@ func publishResourceSite(ctx context.Context, project, version string, view sett
 	defer site.Close()
 	return publishSite(ctx, project, "project", site, func(ctx context.Context) (finalechat.Artifact, error) {
 		return account.ResourceArtifact(ctx, resourceID, "Eagent settings")
-	}, account, connector, base, resourceID)
-}
-
-// publishSessionSite publishes the running session's own settings editor and
-// binds it to the session-scoped resource, so a conversation opens the
-// session's actual routes (not the project defaults) in the embedded editor.
-func publishSessionSite(ctx context.Context, project, session, version string, view settings.RemoteView, account, connector *finalechat.Client, base, resourceID string) error {
-	site, err := archive.SettingsWebsite(project, session, version, view)
-	if err != nil {
-		return err
-	}
-	defer site.Close()
-	return publishSite(ctx, project, "session-"+session, site, func(ctx context.Context) (finalechat.Artifact, error) {
-		return account.ResourceArtifact(ctx, resourceID, "Eagent session settings")
 	}, account, connector, base, resourceID)
 }
 

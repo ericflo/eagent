@@ -16,8 +16,8 @@ import (
 )
 
 func cmdConnector(project string, args []string) int {
-	if len(args) == 0 || (args[0] != "pair-session" && len(args) != 1) || (args[0] == "pair-session" && len(args) != 2) {
-		return fail(fmt.Errorf("usage: eagent connector pair|run, or pair-session SESSION"))
+	if len(args) == 0 || args[0] != "pair-session" && len(args) != 1 {
+		return fail(fmt.Errorf("usage: eagent connector pair|run"))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -30,11 +30,8 @@ func cmdConnector(project string, args []string) int {
 		fmt.Println("Connected. Open Settings in your FinaleChat conversation:", url)
 		return 0
 	case "pair-session":
-		url, err := integration.PairSession(ctx, project, args[1])
-		if err != nil {
-			return fail(err)
-		}
-		fmt.Println("Connected. Open Settings in this session’s FinaleChat conversation:", url)
+		// Every running session now gets its live settings automatically.
+		fmt.Println("No pairing needed: every running session's settings appear in its FinaleChat thread while the project's connector runs.")
 		return 0
 	case "run":
 		fmt.Println("Settings connector running. Sessions started from your phone run in this process. Press Ctrl-C to stop.")
