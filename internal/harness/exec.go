@@ -423,8 +423,9 @@ func (r *Runtime) startBash(c caller, command string, waitSeconds, timeoutSecond
 	var handle, cwd, gone string
 	r.sync(func() {
 		cwd = r.workDir(c.task)
-		if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
-			// A cd that stuck into a directory that has since disappeared.
+		if procs.CheckDir(cwd) != nil {
+			// A cd that stuck into a directory that has since disappeared
+			// or can no longer be entered.
 			gone, cwd = cwd, r.projectPath()
 			r.append(event.New(event.CwdChange, c.actor, event.CwdChangeData{Path: cwd, Previous: gone}).WithTask(c.task))
 		}

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -153,6 +154,58 @@ func TestIdleTimeoutAborts(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("idle timeout took too long")
+	}
+}
+
+// A server that takes the request and never answers (the network dropped
+// under the connection) is given up on after the idle limit, not the whole
+// call's 15 minutes, and the failure is one a retry can fix.
+func TestIdleTimeoutCoversTheWaitForAResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body) // so the server notices the client leave
+		<-r.Context().Done()               // never send headers
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	c.IdleTimeout = 300 * time.Millisecond
+	c.MaxAttempts = 1
+	start := time.Now()
+	_, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "x"}}}, nil)
+	if !errors.Is(err, ErrIdle) || !retryable(err) {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("waited past the idle limit for a response")
+	}
+}
+
+// A call that keeps running out its whole limit (a gateway that keeps the
+// connection alive without answering) is tried twice, not six times.
+func TestCallTimeoutIsRetriedOnce(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for {
+			if _, err := fmt.Fprint(w, ": PROCESSING\n\n"); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}))
+	defer srv.Close()
+	c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "m", APIKey: "k"})
+	c.CallTimeout = 300 * time.Millisecond
+	c.MaxAttempts = 6
+	_, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "x"}}}, nil)
+	if err == nil || calls.Load() != 2 {
+		t.Fatalf("err=%v calls=%d, want 2 calls", err, calls.Load())
 	}
 }
 

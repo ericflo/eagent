@@ -44,10 +44,30 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 	for k, v := range c.Endpoint.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.HTTP.Do(req)
+	// The idle limit covers the wait for the response to start, too: a
+	// connection that accepted the request and then went silent (the
+	// network dropped under it) would otherwise hold the call until the
+	// whole-call limit.
+	idle := c.IdleTimeout
+	if idle <= 0 {
+		idle = 120 * time.Second
+	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	var waited atomic.Bool
+	timer := time.AfterFunc(idle, func() { waited.Store(true); cancel() })
+	resp, err := c.HTTP.Do(req.WithContext(reqCtx))
+	if !timer.Stop() && waited.Load() {
+		if err == nil {
+			resp.Body.Close()
+		}
+		cancel()
+		return nil, fmt.Errorf("%w: no response in %s", ErrIdle, idle)
+	}
 	if err != nil {
+		cancel()
 		return nil, err
 	}
+	resp.Body = cancelOnClose{resp.Body, cancel}
 	if resp.StatusCode/100 != 2 {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -191,4 +211,16 @@ func dumpRequest(model string, raw []byte) {
 	_ = os.MkdirAll(dir, 0o755)
 	name := fmt.Sprintf("%s-%s.json", time.Now().UTC().Format("150405.000000"), strings.NewReplacer("/", "_", ":", "_").Replace(model))
 	_ = os.WriteFile(filepath.Join(dir, name), raw, 0o600)
+}
+
+// cancelOnClose releases a request's context when its body is closed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }

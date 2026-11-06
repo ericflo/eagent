@@ -26,8 +26,7 @@ var ErrWaitingForMirror = errors.New("phone mirror has not posted yet; artifact 
 
 func publicationHead(ctx context.Context, client *finalechat.Client, id string) (finalechat.ArtifactHead, error) {
 	head, err := client.ArtifactHead(ctx, id)
-	var apiError *finalechat.Error
-	if errors.As(err, &apiError) && apiError.Status == 404 {
+	if finalechat.Gone(err) {
 		return head, ErrPublicationDeleted
 	}
 	return head, err

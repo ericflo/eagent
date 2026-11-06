@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ericflo/eagent/internal/netx"
 	"net/http"
 	"os"
 	"strings"
@@ -288,7 +289,7 @@ type Client struct {
 func NewClient(ep Endpoint) *Client {
 	return &Client{
 		Endpoint:    ep,
-		HTTP:        &http.Client{Timeout: 0}, // per-request deadlines are set via context
+		HTTP:        &http.Client{Transport: netx.Transport()}, // per-request deadlines are set via context
 		IdleTimeout: 120 * time.Second,
 		CallTimeout: 15 * time.Minute,
 		MaxAttempts: 6,
@@ -381,6 +382,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 	if attempts <= 0 {
 		attempts = 1
 	}
+	callTimeouts := 0
 	for attempt := 1; attempt <= attempts; attempt++ {
 		start := time.Now()
 		callCtx := ctx
@@ -425,7 +427,12 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if !retryable(err) || attempt == attempts {
+		if errors.Is(err, context.DeadlineExceeded) && callCtx.Err() != nil {
+			// The whole call ran out its limit. One more try can help (a
+			// stuck upstream); five more only hold the turn for hours.
+			callTimeouts++
+		}
+		if !retryable(err) || attempt == attempts || callTimeouts > 1 {
 			return nil, err
 		}
 		wait := backoff(attempt, err)
@@ -450,7 +457,7 @@ func retryable(err error) bool {
 	if errors.Is(err, ErrIdle) || errors.Is(err, ErrTruncatedStream) {
 		return true
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || netx.Transient(err) {
 		return true
 	}
 	// Network-level failures (reset, EOF mid-stream, DNS) are transient.

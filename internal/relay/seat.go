@@ -124,7 +124,11 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 		innerID = a.chooseID()
 	}
 	if spec.Profile.GitPull {
-		_ = exec.Command("git", "-C", spec.Dir, "pull", "--ff-only").Run()
+		// Never a prompt for credentials: nobody is at this terminal.
+		cmd, cancel := bounded(time.Minute, "git", "-C", spec.Dir, "pull", "--ff-only")
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+		_ = cmd.Run()
+		cancel()
 	}
 	argv := a.command(spec.Profile, innerID, resume, spec.Hook)
 	env := append([]string{"PATH=" + os.Getenv("PATH"), "FINALECHAT_MIRROR=off", "EAGENT_RELAY=" + target}, spec.Env...)
@@ -212,7 +216,12 @@ func (s *Seat) Close() {
 	s.closed = true
 	s.mu.Unlock()
 	close(s.stop)
-	<-s.done
+	// The watcher's own calls are bounded; this bounds the wait as well, so
+	// stopping a session can never hang on its relay.
+	select {
+	case <-s.done:
+	case <-time.After(30 * time.Second):
+	}
 }
 
 // Kill stops watching and ends the agent's terminal session.
@@ -390,12 +399,25 @@ const tailBackfill = 4 << 20
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer close(s.events)
+	// However watching ends (the pane died, a restart, an upgrade, the
+	// session stopping), the transcript is let go, so the next seat for this
+	// agent can follow it. Held, it made a restarted Codex deaf until
+	// eagent itself restarted.
+	defer func() {
+		s.mu.Lock()
+		path := s.transcript
+		s.mu.Unlock()
+		if path != "" {
+			claimed.CompareAndDelete(path, s.target)
+		}
+	}()
 	var tail *tailer
 	var p parser
 	tick := time.NewTicker(pollEvery)
 	defer tick.Stop()
 	lastAlive := time.Now()
 	lastDialog := time.Time{}
+	missed := 0 // liveness checks in a row that found no pane
 	for {
 		select {
 		case <-s.stop:
@@ -448,10 +470,14 @@ func (s *Seat) watch() {
 		}
 		if now.Sub(lastAlive) >= 3*time.Second {
 			lastAlive = now
-			if !s.host.Alive(s.target) {
+			// One failed check can be a slow or busy tmux; two in a row,
+			// three seconds apart, mean the pane is gone. Marked exited by
+			// mistake, a relay could not be restarted while its agent ran.
+			if s.host.Alive(s.target) {
+				missed = 0
+			} else if missed++; missed >= 2 {
 				screen, _ := s.host.Capture(s.target, 15)
 				s.setState("exited", lastLines(screen, 6))
-				claimed.Delete(s.transcript)
 				return
 			}
 		}

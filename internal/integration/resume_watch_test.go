@@ -3,11 +3,14 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,7 +107,9 @@ func TestReplyToFinishedSessionResumesItOnce(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- watchResumes(ctx, project, host, t.Logf) }()
+	go func() {
+		done <- watchResumes(ctx, project, host, &replyRetries{replies: map[string]pendingReply{}}, t.Logf)
+	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for host.calls() == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
@@ -154,7 +159,7 @@ func TestSweepFindsRepliesSentWhileNothingWatched(t *testing.T) {
 	t.Setenv("FINALECHAT_URL", server.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	host := &fakeResumeHost{hosted: map[string]bool{}}
-	err := watchResumes(context.Background(), project, host, t.Logf)
+	err := watchResumes(context.Background(), project, host, &replyRetries{replies: map[string]pendingReply{}}, t.Logf)
 	if err == nil {
 		t.Fatal("expected the missing stream to end the watch")
 	}
@@ -201,5 +206,60 @@ func TestElectedResumeWatcherStartsInAFreshProject(t *testing.T) {
 	}
 	if host.calls() != 1 || host.resumed[0].Text != "hello again" {
 		t.Fatalf("the elected watcher did not resume the session: %#v", host.resumed)
+	}
+}
+
+type flakyResumeHost struct {
+	fakeResumeHost
+	failures int
+}
+
+func (h *flakyResumeHost) Resume(id string, msg PhoneMessage) error {
+	h.mu.Lock()
+	if h.failures > 0 {
+		h.failures--
+		h.mu.Unlock()
+		return errors.New("config.json is being edited")
+	}
+	h.mu.Unlock()
+	return h.fakeResumeHost.Resume(id, msg)
+}
+
+// A reply whose session could not be resumed is tried again on the next
+// sweep (and the thread hears why once), instead of being dropped until
+// eagent restarts.
+func TestFailedResumeIsRetried(t *testing.T) {
+	project := t.TempDir()
+	sess, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Close()
+	var notes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/messages") {
+			notes.Add(1)
+			_, _ = w.Write([]byte(`{"message":{"id":"note"},"thread":{"id":"t"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"threads":[]}`))
+	}))
+	defer srv.Close()
+	host := &flakyResumeHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, failures: 1}
+	w := &resumeWatcher{project: project, host: host, client: &finalechat.Client{BaseURL: srv.URL, Token: "fc_test"}, logf: t.Logf,
+		retries: &replyRetries{replies: map[string]pendingReply{}}, handled: map[string]time.Time{}}
+	thread := finalechat.Thread{ID: "t", ExternalID: "eagent:" + sess.ID}
+	msg := finalechat.Message{ID: "m1", Sender: "user", Body: "keep going"}
+	w.consider(context.Background(), thread, msg)
+	if host.calls() != 0 || notes.Load() != 1 {
+		t.Fatalf("after a failed resume: resumed=%d notes=%d", host.calls(), notes.Load())
+	}
+	w.sweep(context.Background())
+	if host.calls() != 1 {
+		t.Fatalf("the reply was not retried: resumed=%d", host.calls())
+	}
+	w.sweep(context.Background())
+	if host.calls() != 1 || notes.Load() != 1 {
+		t.Fatalf("after success: resumed=%d notes=%d", host.calls(), notes.Load())
 	}
 }

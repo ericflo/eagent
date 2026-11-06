@@ -346,3 +346,12 @@ func TestPatchDescriptionRoundTrip(t *testing.T) {
 		t.Fatalf("post body = %v", postBody)
 	}
 }
+
+func TestGoneOnlyForFinaleChatsOwnNotFound(t *testing.T) {
+	if !Gone(&Error{Status: 404, Code: "not_found"}) {
+		t.Fatal("FinaleChat's not_found is gone")
+	}
+	if Gone(&Error{Status: 404, Message: "404 page not found"}) || Gone(&Error{Status: 503}) {
+		t.Fatal("a proxy's 404 or an outage is not a deletion")
+	}
+}

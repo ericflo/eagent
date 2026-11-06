@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ericflo/eagent/internal/netx"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -21,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -53,6 +55,30 @@ type Client struct {
 	HTTP   *http.Client
 	// UserAgent identifies the caller.
 	UserAgent string
+	// Patient keeps retrying an idempotent post or question (one with a
+	// client key) for as long as the service cannot be reached or answers
+	// 429/5xx, until ctx ends, instead of giving up after three tries. A
+	// long-running mirror uses it so an outage delays messages rather than
+	// losing them.
+	Patient bool
+}
+
+// Gone reports that FinaleChat itself says the thing does not exist (its
+// own not_found error), as opposed to a 404 from something in front of it,
+// such as a proxy during a deploy, which says nothing about the thing.
+func Gone(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == 404 && e.Code == "not_found"
+}
+
+// Transient reports a failure that passes on its own: the service could not
+// be reached, timed out, or answered 429 or 5xx.
+func Transient(err error) bool {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Temporary()
+	}
+	return netx.Transient(err)
 }
 
 // Resolve finds a token the way the finalechat CLI does: the environment
@@ -436,9 +462,9 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		attempts = 3
 	}
 	var err error
-	for i := 0; i < attempts; i++ {
+	for i := 0; i < attempts || retry && c.Patient && Transient(err); i++ {
 		if i > 0 {
-			d := time.Duration(i) * time.Second
+			d := min(time.Duration(i)*time.Second, time.Minute)
 			var e *Error
 			if errors.As(err, &e) && e.RetryAfter > 0 {
 				d = e.RetryAfter
@@ -789,12 +815,17 @@ func (c *Client) Events(ctx context.Context, fn func(name string, data []byte) e
 	}
 }
 
+// defaultHTTP pings idle HTTP/2 connections, so a long poll on a connection
+// the network took down fails in under a minute instead of hanging.
+// It is made on first use, after any test has guarded the default transport.
+var defaultHTTP = sync.OnceValue(func() *http.Client { return &http.Client{Transport: netx.Transport()} })
+
 // doRaw performs one request with a prepared body.
 // API credentials belong to the configured service, including its port. Never
 // forward them through a redirect (Go otherwise forwards to another local port).
 func credentialHTTPClient(client *http.Client) *http.Client {
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultHTTP()
 	}
 	copy := *client
 	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
