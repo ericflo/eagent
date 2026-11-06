@@ -558,7 +558,7 @@ async function newSessionDialog(pre = {}) {
     srv ? h('option', {value: '', selected: !pre.project && !pre.preset && !pre.config}, `server default · ${c.server.bundle ? 'bundle ' + c.server.bundle : 'preset ' + c.server.preset}`) : null,
     ...(c ? [...c.presets.map(p => h('option', {value: 'preset:' + p.name, selected: pre.preset === p.name}, `preset · ${p.name} — ${p.models}`)), ...c.bundles.map(b => h('option', {value: 'config:' + b.name, selected: pre.config === b.name}, `bundle · ${b.name} — ${b.models}`))] : []),
   ];
-  const sel = h('select', null, ...baseOptions(), h('option', {value: 'custom:', selected: !!pre.custom}, 'custom models — browse the catalogue…'));
+  const sel = h('select', null, ...baseOptions(), h('option', {value: 'custom:'}, 'custom models — browse the catalogue…'));
 
   // ---- custom routing: pick one catalog model per actor, on top of a base configuration ----
   const picks = {orchestrator: null, task: null, narrator: null};
@@ -569,13 +569,20 @@ async function newSessionDialog(pre = {}) {
   const routeRows = {};
   const pickedModel = actor => { const p = picks[actor]; return p && cat ? cat.models.find(m => m.provider === p.provider && m.id === p.model) : null; };
   // (Re)build an actor's effort select from the picked model's known efforts
-  // (or the full scale when unknown), keeping the current pick when possible.
+  // (or the full scale when unknown), keeping the current pick when possible
+  // and otherwise taking the nearest level, as the server does.
+  const order = () => cat.effort_order || ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const nearestEffort = (list, want) => {
+    const i = order().indexOf(want);
+    if (i < 0) return list.includes('medium') ? 'medium' : list[Math.floor(list.length / 2)];
+    return list.reduce((best, e) => Math.abs(order().indexOf(e) - i) < Math.abs(order().indexOf(best) - i) ? e : best, list[0]);
+  };
   const refreshEffort = actor => {
     const sel = effortSels[actor];
     const m = pickedModel(actor);
-    const list = (m && m.efforts && m.efforts.length) ? m.efforts : (cat.effort_order || ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    const list = (m && m.efforts && m.efforts.length) ? m.efforts : order();
     if (picks[actor] && picks[actor].effort && !list.includes(picks[actor].effort)) {
-      picks[actor].effort = list.includes('medium') ? 'medium' : list[Math.floor(list.length / 2)];
+      picks[actor].effort = nearestEffort(list, picks[actor].effort);
     }
     const opts = [];
     if (picks[actor] && !picks[actor].effort) opts.push(h('option', {value: '', selected: true}, 'base default'));
@@ -593,7 +600,8 @@ async function newSessionDialog(pre = {}) {
     rows.sort((x, y) => (keyed(y.p) - keyed(x.p)) || x.p.label.localeCompare(y.p.label) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
     browseList.replaceChildren();
     let lastP = null;
-    for (const {m, p} of rows.slice(0, 150)) {
+    const shown = 150;
+    for (const {m, p} of rows.slice(0, shown)) {
       if (p.label !== lastP) { browseList.append(h('div', {class: 'pgroup'}, p.label + (keyed(p) ? '' : ' · no key in this shell'))); lastP = p.label; }
       const name = h('span', {class: 'l1'}, h('b', null, m.label), m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m.id}`));
       const ctx = m.context >= 1e6 ? (m.context / 1e6) + 'M' : Math.round(m.context / 1000) + 'k';
@@ -608,6 +616,7 @@ async function newSessionDialog(pre = {}) {
       browseList.append(row);
     }
     if (!rows.length) browseList.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches.'));
+    if (rows.length > shown) browseList.append(h('div', {class: 'sub', style: 'padding:10px'}, `Showing ${shown} of ${rows.length}. Search to find the rest.`));
   };
   search.addEventListener('input', () => cat && renderBrowse());
   async function browse(actor) {
@@ -617,6 +626,7 @@ async function newSessionDialog(pre = {}) {
     renderBrowse();
     search.focus();
   }
+  // Picks start from the chosen base and follow it when the base changes.
   async function initPicks() {
     if (picksInit) return; picksInit = true;
     try { cat = await api('/api/catalog'); } catch (e) { return; }
@@ -649,7 +659,7 @@ async function newSessionDialog(pre = {}) {
     customBox.style.display = custom ? '' : 'none';
     if (custom) initPicks();
   });
-  if (pre.custom) { sel.value = 'custom:'; customBox.style.display = ''; initPicks(); }
+  baseSel.addEventListener('change', () => { picksInit = false; initPicks(); });
 
   const start = h('button', {class: 'primary', onclick: async () => {
     const prompt = ta.value.trim(); if (!prompt) return;

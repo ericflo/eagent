@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,8 +21,8 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/relay"
-	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 type connectorConfig struct {
@@ -29,7 +30,6 @@ type connectorConfig struct {
 	Secret      string `json:"secret"`
 	BaseURL     string `json:"base_url"`
 	ApprovalURL string `json:"approval_url"`
-	Session     string `json:"session_id,omitempty"`
 }
 type connectorInfo struct {
 	ID     string          `json:"id"`
@@ -93,16 +93,16 @@ func randomID() string {
 // Pair connects this account’s own installation. The scoped
 // secret stays in a private project file and is excluded from every archive.
 func Pair(ctx context.Context, project, name string) (string, error) {
-	return pairResource(ctx, project, name, "", connectorPath(project), (&settings.Service{Project: project}).Grant())
+	return pairResource(ctx, project, name, connectorPath(project), (&settings.Service{Project: project}).Grant())
 }
 
-func pairResource(ctx context.Context, project, name, session, path string, grant control.Grant) (string, error) {
+func pairResource(ctx context.Context, project, name, path string, grant control.Grant) (string, error) {
 	if finalechat.Disabled() {
 		return "", finalechat.ErrDisabled
 	}
 	var existing connectorConfig
 	if err := readConnectorFile(path, &existing); err == nil {
-		if existing.ID != "" && existing.Session == session {
+		if existing.ID != "" {
 			account, err := settingsAccount(project)
 			if err != nil {
 				return "", err
@@ -164,7 +164,7 @@ func pairResource(ctx context.Context, project, name, session, path string, gran
 	if response.Connector.ID == "" || !strings.HasPrefix(response.Secret, "fcc_") {
 		return "", fmt.Errorf("invalid pairing response")
 	}
-	local := connectorConfig{ID: response.Connector.ID, Secret: response.Secret, BaseURL: client.BaseURL, ApprovalURL: response.ApprovalURL, Session: session}
+	local := connectorConfig{ID: response.Connector.ID, Secret: response.Secret, BaseURL: client.BaseURL, ApprovalURL: response.ApprovalURL}
 	if err := writeJSONAtomic(path, local); err != nil {
 		return "", err
 	}
@@ -219,8 +219,8 @@ func replaceGrant(stored []control.Grant, wider control.Grant) []control.Grant {
 	return out
 }
 
-// startConnectorAt elects one process per explicitly paired resource.
-func startConnectorAt(ctx context.Context, project, session, path, lockPath string, logf func(string, ...any)) func() {
+// startConnectorAt elects one process per project to hold its connector.
+func startConnectorAt(ctx context.Context, project, path, lockPath string, logf func(string, ...any)) func() {
 	if finalechat.Disabled() {
 		return func() {}
 	}
@@ -232,29 +232,17 @@ func startConnectorAt(ctx context.Context, project, session, path, lockPath stri
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			// path == "" marks an auto-discovered running session: its worker
-			// derives its connector config from the project connector instead
-			// of a pairing file, and is gated by the discovery loop, not the fs.
-			run := session == "" || path == ""
-			if !run {
-				_, statErr := os.Stat(path)
-				run = statErr == nil
-			}
-			if run {
-				lockCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
-				unlock, err := filelock.Acquire(lockCtx, lockPath)
+			lockCtx, stop := context.WithTimeout(ctx, 100*time.Millisecond)
+			unlock, err := filelock.Acquire(lockCtx, lockPath)
+			stop()
+			if err == nil {
+				connectCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+				autoConnectProject(connectCtx, project)
 				stop()
-				if err == nil {
-					if session == "" {
-						connectCtx, stop := context.WithTimeout(ctx, 30*time.Second)
-						autoConnectProject(connectCtx, project)
-						stop()
-					}
-					err = runConnectorAt(ctx, project, session, path, logf)
-					unlock()
-					if err != nil && ctx.Err() == nil {
-						logf("settings connector: %v (will retry)", err)
-					}
+				err = runConnectorAt(ctx, project, path, logf)
+				unlock()
+				if err != nil && ctx.Err() == nil {
+					logf("settings connector: %v (will retry)", err)
 				}
 			}
 			select {
@@ -268,12 +256,12 @@ func startConnectorAt(ctx context.Context, project, session, path, lockPath stri
 }
 
 func RunConnector(ctx context.Context, project string, logf func(string, ...any)) error {
-	return runConnectorAt(ctx, project, "", connectorPath(project), logf)
+	return runConnectorAt(ctx, project, connectorPath(project), logf)
 }
 
 var errConnectorOccupied = errors.New("another settings connection is still active; waiting for it to disconnect")
 
-func runConnectorAt(ctx context.Context, project, session, path string, logf func(string, ...any)) error {
+func runConnectorAt(ctx context.Context, project, path string, logf func(string, ...any)) error {
 	if finalechat.Disabled() {
 		return finalechat.ErrDisabled
 	}
@@ -281,18 +269,10 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 		logf = func(string, ...any) {}
 	}
 	var local connectorConfig
-	if path == "" {
-		// Auto-discovered running session: reuse the project connector's
-		// credential, scoped to this session. The grant key is derived from
-		// the project grant, so the server recognizes it either way.
-		if err := readConnectorFile(connectorPath(project), &local); err != nil {
-			return err
-		}
-		local.Session = session
-	} else if err := readConnectorFile(path, &local); err != nil {
+	if err := readConnectorFile(path, &local); err != nil {
 		return err
 	}
-	if local.ID == "" || !strings.HasPrefix(local.Secret, "fcc_") || local.Session != session {
+	if local.ID == "" || !strings.HasPrefix(local.Secret, "fcc_") {
 		return fmt.Errorf("invalid connector configuration")
 	}
 	client := &finalechat.Client{BaseURL: local.BaseURL, Token: local.Secret, UserAgent: "eagent-settings/1"}
@@ -311,7 +291,7 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 	}()
 	lastError := ""
 	for ctx.Err() == nil {
-		err := runConnectorConnection(ctx, project, session, local, client, base, instance, &heartbeatAttempted, logf)
+		err := runConnectorConnection(ctx, project, local, client, base, instance, &heartbeatAttempted, logf)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -335,40 +315,24 @@ func runConnectorAt(ctx context.Context, project, session, path string, logf fun
 	return ctx.Err()
 }
 
-// requestSessionGrant asks the server to add the session grant (want) to the
-// connector's issued grants, using the account token plus the local connector
-// secret — the same owner proof `connector pair-session` uses. base is the
-// connector's API path ("/api/v1/connectors/<id>").
-func requestSessionGrant(ctx context.Context, project, secret, base string, stored []control.Grant, want control.Grant) error {
-	account, err := settingsAccount(project)
-	if err != nil {
-		return fmt.Errorf("cannot request the session grant without a FinaleChat account token: %w", err)
-	}
-	id := strings.TrimPrefix(base, "/api/v1/connectors/")
-	connect := map[string]any{"secret": secret, "requested_grants": replaceGrant(stored, want)}
-	if err := account.Request(ctx, "POST", "/api/v1/connectors/"+url.PathEscape(id)+"/connect", nil, connect, nil, 0); err != nil {
-		return fmt.Errorf("widening the connector grant for this session: %w", err)
-	}
-	return nil
-}
-
-func runConnectorConnection(ctx context.Context, project, session string, local connectorConfig, client *finalechat.Client, base, instance string, heartbeatAttempted *bool, logf func(string, ...any)) error {
+// runConnectorConnection serves one connection of the project's connector:
+// it keeps the heartbeat lease, publishes the project defaults and one live
+// resource per running session (all under this one lease), keeps the
+// session grants in step with the sessions actually running, and executes
+// the commands the app queues for any of them. Everything is pull-based:
+// the app never calls this process; it queues commands that this loop claims.
+func runConnectorConnection(ctx context.Context, project string, local connectorConfig, client *finalechat.Client, base, instance string, heartbeatAttempted *bool, logf func(string, ...any)) error {
 	service := &settings.Service{Project: project}
 	expectedGrant := service.Grant()
-	if session != "" {
-		var err error
-		expectedGrant, err = runtimecontrol.Grant(project, session)
-		if err != nil {
-			return err
-		}
-	}
-	lastVersion := ""
 	resourceID := ""
-	var linked []settingsThread
 	var account *finalechat.Client
 	var discovered time.Time
 	var directories map[string]any
-	sitesVersion := map[string]string{}
+	published := map[string]string{} // resource key -> last published version
+	bound := map[string]string{}     // archive artifact -> resource:generation:revision bound
+	siteVersion := ""
+	var grantRetryAfter, siteRetryAfter time.Time
+	lastGrantRequest := ""
 	for ctx.Err() == nil {
 		var status struct {
 			Connector connectorInfo `json:"connector"`
@@ -385,26 +349,21 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			}
 		}
 		var grant *control.Grant
+		sessionGrant := map[string]control.Grant{} // resource key -> grant
+		sessionID := map[string]string{}           // resource key -> session id
 		for _, g := range status.Connector.Grants {
 			if g.Key == expectedGrant.Key && g.Scope == expectedGrant.Scope {
 				copy := g
 				grant = &copy
-				break
 			}
 		}
 		if grant == nil {
-			if session == "" {
-				return fmt.Errorf("this connector has no grant for this project")
+			return fmt.Errorf("this connector has no grant for this project")
+		}
+		for _, g := range status.Connector.Grants {
+			if sid, ok := sessionOfGrant(grant.Key, g); ok {
+				sessionGrant[g.Key], sessionID[g.Key] = g, sid
 			}
-			// Auto-discovered running session: the server has not issued the
-			// session grant to this connector yet. Its key derives from the
-			// project grant, so the server can verify the session belongs to
-			// this project and self-serve the addition — the same /connect
-			// widening `connector pair-session` performs explicitly.
-			if err := requestSessionGrant(ctx, project, local.Secret, base, status.Connector.Grants, expectedGrant); err != nil {
-				return err
-			}
-			continue // re-read connector status with the widened grants
 		}
 		*heartbeatAttempted = true
 		if err := client.Request(ctx, "POST", base+"/heartbeat", nil, map[string]any{"instance": instance}, nil, 0); err != nil {
@@ -414,131 +373,87 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 			}
 			return err
 		}
-		var view settings.RemoteView
-		var err error
-		if session == "" {
-			view, err = service.RemoteSnapshot(*grant)
-		} else {
-			view, err = runtimeSnapshot(project, session, *grant)
-		}
+		view, err := service.RemoteSnapshot(*grant)
 		if err != nil {
 			return err
 		}
-		// The account client is needed by every worker: the project worker
-		// uses it to discover threads and publish their sites, and a session
-		// worker needs it to register the session's own settings website.
 		if time.Since(discovered) > time.Minute {
 			discovered = time.Now()
 			directories = projectDirectories(project)
 			account, _ = settingsAccount(project)
-			if account != nil && strings.TrimRight(account.BaseURL, "/") == strings.TrimRight(local.BaseURL, "/") {
-				if session == "" {
-					discoverCtx, stop := context.WithTimeout(ctx, 20*time.Second)
-					linked = settingsThreads(discoverCtx, project, account)
-					stop()
-				}
-			} else {
+			if account != nil && strings.TrimRight(account.BaseURL, "/") != strings.TrimRight(local.BaseURL, "/") {
 				account = nil
-				linked = nil
 			}
 		}
-		if session == "" {
-			ids := []string{}
-			for _, thread := range linked {
-				ids = append(ids, thread.External)
+		live := runningSessions(project)
+		// The conversations whose settings these are, so the app offers the
+		// project defaults in their threads too.
+		view.Snapshot.Details["thread_external_ids"] = projectThreadIDs(project)
+		// Where a session started from the phone may begin: the app
+		// offers these, and any absolute path typed in.
+		view.Snapshot.Details["directories"] = directories
+		// Which agents it may relay to instead of eagent doing the work,
+		// and the relays of sessions running right now.
+		view.Snapshot.Details["relay_profiles"] = relayProfiles(project)
+		view.Snapshot.Details["relays"] = runningRelays(live)
+		if resourceID, err = publishResource(ctx, client, base, instance, grant.Key, view, published); err != nil {
+			return err
+		}
+		// Each running session's own settings. A session that stopped is
+		// published once more as unavailable before its grant is dropped.
+		for key, g := range sessionGrant {
+			sview, err := runtimeSnapshot(project, sessionID[key], g)
+			if err != nil {
+				continue
 			}
-			view.Snapshot.Details["thread_external_ids"] = ids
-			// Where a session started from the phone may begin: the app
-			// offers these, and any absolute path typed in.
-			view.Snapshot.Details["directories"] = directories
-			// Which agents it may relay to instead of eagent doing the work,
-			// and the relays running on this machine right now.
-			view.Snapshot.Details["relay_profiles"] = relayProfiles(project)
-			view.Snapshot.Details["relays"] = runningRelays()
-		}
-		var published struct {
-			Resource resourceInfo `json:"resource"`
-		}
-		// Refresh bindings with current artifact revisions even when no settings
-		// changed. Snapshot timestamps are kept distinct from heartbeat liveness.
-		descriptorRaw, _ := json.Marshal(view.Descriptor)
-		publicationVersion := fmt.Sprintf("%s:%t:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptorRaw))
-		hints, _ := json.Marshal(linked)
-		publicationVersion += artifact.Digest(hints)
-		// Details (the running relays above all) change without the
-		// settings changing; their stable fields are part of the version.
-		details, _ := json.Marshal(view.Snapshot.Details)
-		publicationVersion += artifact.Digest(details)
-		if publicationVersion != lastVersion {
-			if err := client.Request(ctx, "PUT", base+"/resources/"+grant.Key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": view.Generation}, &published, 0); err != nil {
+			if _, err := publishResource(ctx, client, base, instance, key, sview, published); err != nil {
 				return err
 			}
-			lastVersion = publicationVersion
-			resourceID = published.Resource.ID
 		}
-		if resourceID != "" && session == "" {
-			if account != nil {
-				// Bound each publication pass so command delivery stays responsive.
-				publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
-				// The resource's own editor first: it is what a new-session
-				// draft opens, and what a conversation opens until its own
-				// archived page exists.
-				if sitesVersion["project"] != publicationVersion {
-					if err := publishResourceSite(publishCtx, project, "project-settings-v1", view, account, client, base, resourceID); err == nil {
-						sitesVersion["project"] = publicationVersion
-					} else if ctx.Err() == nil {
-						logf("settings website: %v", err)
-					}
+		// The account token plus this installation's secret prove the owner's
+		// own connector, so it can change its own grants. The same request is
+		// not repeated for a while if the server does not take it.
+		if want := sessionGrants(project, status.Connector.Grants, *grant, live); account != nil && !sameGrantKeys(want, status.Connector.Grants) {
+			raw, _ := json.Marshal(want)
+			if string(raw) != lastGrantRequest || time.Now().After(grantRetryAfter) {
+				lastGrantRequest, grantRetryAfter = string(raw), time.Now().Add(time.Minute)
+				connect := map[string]any{"secret": local.Secret, "requested_grants": want}
+				if err := account.Request(ctx, "POST", base+"/connect", nil, connect, nil, 0); err != nil {
+					logf("settings connector: updating session grants: %v", err)
+				} else {
+					continue // publish under the new grant set right away
 				}
-				for _, thread := range linked {
-					if publishCtx.Err() != nil {
-						break
-					}
-					if sitesVersion[thread.External] == publicationVersion {
-						continue
-					}
-					err := publishSettingsSite(publishCtx, project, "thread-settings-v1", thread, view, account, client, base, resourceID)
-					if err == nil {
-						sitesVersion[thread.External] = publicationVersion
-					}
-					if err != nil && ctx.Err() == nil {
-						logf("settings website: %v", err)
-					}
-				}
-				stop()
-			}
-			if err := bindPublished(ctx, client, base, project, resourceID); err != nil && ctx.Err() == nil {
-				logf("settings artifact binding: %v", err)
 			}
 		}
-		if resourceID != "" && session != "" && account != nil {
-			// The session's own editor, bound to the session-scoped resource:
-			// a conversation opens this in its iframe, showing the routes the
-			// session actually runs.
-			if sitesVersion["session:"+session] != publicationVersion {
-				publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
-				err := publishSessionSite(publishCtx, project, session, "session-settings-v1", view, account, client, base, resourceID)
-				stop()
-				if err == nil {
-					sitesVersion["session:"+session] = publicationVersion
-				} else if ctx.Err() == nil {
-					logf("session settings website: %v", err)
-				}
+		// The resource's own editor: an optional, richer page the app can
+		// open instead of its own form. Rebuilt only when settings change.
+		if v := settingsSiteVersion(view); account != nil && v != siteVersion && time.Now().After(siteRetryAfter) {
+			publishCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+			err := publishResourceSite(publishCtx, project, "project-settings-v1", view, account, client, base, resourceID)
+			stop()
+			if err == nil {
+				siteVersion = v
+			} else if ctx.Err() == nil {
+				siteRetryAfter = time.Now().Add(time.Minute)
+				logf("settings website: %v", err)
 			}
+		}
+		if err := bindPublished(ctx, client, base, project, resourceID, view.Generation, bound); err != nil && ctx.Err() == nil {
+			logf("settings artifact binding: %v", err)
 		}
 		var claimed struct {
 			Command   *command     `json:"command"`
 			Resource  resourceInfo `json:"resource"`
 			Reconcile bool         `json:"reconcile_only"`
 		}
-		if err := client.Request(ctx, "POST", base+"/commands/claim", url.Values{"wait": {"25"}}, map[string]any{"instance": instance}, &claimed, 25); err != nil {
+		if err := client.Request(ctx, "POST", base+"/commands/claim", url.Values{"wait": {"10"}}, map[string]any{"instance": instance}, &claimed, 10); err != nil {
 			return err
 		}
 		if claimed.Command == nil {
 			continue
 		}
 		q := *claimed.Command
-		if claimed.Resource.Key != grant.Key || q.ResourceID != claimed.Resource.ID {
+		if q.ResourceID != claimed.Resource.ID || claimed.Resource.Key != grant.Key && sessionID[claimed.Resource.Key] == "" {
 			return fmt.Errorf("command targeted an unregistered local resource")
 		}
 		// Renew immediately before entering the writer. No external action runs
@@ -567,10 +482,11 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 		}()
 		var journal commandJournal
 		var executeErr error
-		if session == "" {
+		if claimed.Resource.Key == grant.Key {
 			journal, executeErr = executeCommand(execCtx, service, *grant, q, claimed.Reconcile)
 		} else {
-			journal, executeErr = executeRuntimeCommand(execCtx, project, session, *grant, q, claimed.Reconcile)
+			key := claimed.Resource.Key
+			journal, executeErr = executeRuntimeCommand(execCtx, project, sessionID[key], sessionGrant[key], q, claimed.Reconcile)
 		}
 		stop()
 		<-keepDone
@@ -580,12 +496,71 @@ func runConnectorConnection(ctx context.Context, project, session string, local 
 		if err := client.Request(ctx, "POST", "/api/v1/commands/"+q.ID+"/result", nil, map[string]any{"claim_token": q.ClaimToken, "instance": instance, "status": journal.Status, "result": journal.Result}, nil, 0); err != nil {
 			return err
 		}
-		lastVersion = "" // publish the new snapshot after durable acknowledgement
+		delete(published, claimed.Resource.Key) // publish the new snapshot after durable acknowledgement
 	}
 	return ctx.Err()
 }
 
-func bindPublished(ctx context.Context, c *finalechat.Client, base, project, resource string) error {
+// publishResource publishes a resource's descriptor and snapshot when either
+// changed since the last publication on this connection.
+func publishResource(ctx context.Context, client *finalechat.Client, base, instance, key string, view settings.RemoteView, published map[string]string) (string, error) {
+	descriptor, _ := json.Marshal(view.Descriptor)
+	details, _ := json.Marshal(view.Snapshot.Details)
+	version := fmt.Sprintf("%s:%t:%s:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptor), artifact.Digest(details))
+	id, ok := strings.CutPrefix(published[key], version+"\n")
+	if ok {
+		return id, nil
+	}
+	var out struct {
+		Resource resourceInfo `json:"resource"`
+	}
+	if err := client.Request(ctx, "PUT", base+"/resources/"+key, nil, map[string]any{"instance": instance, "descriptor": view.Descriptor, "snapshot": view.Snapshot, "generation": view.Generation}, &out, 0); err != nil {
+		return "", err
+	}
+	published[key] = version + "\n" + out.Resource.ID
+	return out.Resource.ID, nil
+}
+
+// settingsSiteVersion identifies what the published settings editor shows:
+// the settings themselves, not the running relays or the thread list.
+func settingsSiteVersion(view settings.RemoteView) string {
+	details := map[string]any{}
+	for k, v := range view.Snapshot.Details {
+		switch k {
+		case "relays", "thread_external_ids", "directories", "relay_profiles":
+		default:
+			details[k] = v
+		}
+	}
+	descriptor, _ := json.Marshal(view.Descriptor)
+	raw, _ := json.Marshal(details)
+	return fmt.Sprintf("%s:%t:%s:%s", view.Snapshot.Version, view.Snapshot.RuntimeKnown, artifact.Digest(descriptor), artifact.Digest(raw))
+}
+
+// projectThreadIDs names the conversations of this project's newest
+// sessions. The app matches them against its threads; nothing is fetched.
+func projectThreadIDs(project string) []string {
+	infos, err := store.List(store.Root(project))
+	if err != nil {
+		return []string{}
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Started.After(infos[j].Started) })
+	if len(infos) > 100 {
+		infos = infos[:100]
+	}
+	ids := make([]string, 0, len(infos))
+	for _, info := range infos {
+		ids = append(ids, "eagent:"+info.ID)
+	}
+	return ids
+}
+
+// bindPublished points each completed session archive at the project
+// resource, once per archive revision (and again if the resource changes).
+func bindPublished(ctx context.Context, c *finalechat.Client, base, project, resource, generation string, bound map[string]string) error {
+	if resource == "" {
+		return nil
+	}
 	entries, err := os.ReadDir(stateDir(project))
 	if os.IsNotExist(err) {
 		return nil
@@ -605,9 +580,14 @@ func bindPublished(ctx context.Context, c *finalechat.Client, base, project, res
 		if json.Unmarshal(raw, &pub) != nil || !pub.Completed || pub.RevisionID == nil {
 			continue
 		}
+		want := resource + ":" + generation + ":" + *pub.RevisionID
+		if bound[pub.ArtifactID] == want {
+			continue
+		}
 		if err := c.Request(ctx, "PUT", base+"/bindings/"+pub.ArtifactID, nil, map[string]any{"resource_id": resource, "revision_id": *pub.RevisionID}, nil, 0); err != nil {
 			return err
 		}
+		bound[pub.ArtifactID] = want
 	}
 	return nil
 }

@@ -13,103 +13,19 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
-	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/settings"
-	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
 
-func runtimeConnectorDir(project string) string {
-	return filepath.Join(stateDir(project), "runtime-connectors")
-}
-
-// PairSession requests an additional, explicit session grant. A project-default
-// connector never acquires permission to change a running session implicitly.
-func PairSession(ctx context.Context, project, ref string) (string, error) {
-	if finalechat.Disabled() {
-		return "", finalechat.ErrDisabled
-	}
-	info, err := store.Resolve(store.Root(project), ref)
-	if err != nil {
-		return "", err
-	}
-	grant, err := runtimecontrol.Grant(project, info.ID)
-	if err != nil {
-		return "", err
-	}
-	return pairResource(ctx, project, "eagent · "+grant.Label, info.ID, filepath.Join(runtimeConnectorDir(project), info.ID+".json"), grant)
-}
-
-// StartConnector supervises independent elected workers for project defaults
-// and explicitly paired sessions. Pairing during a run is discovered locally.
+// StartConnector runs this project's settings connector. One process per
+// project wins the election (every eagent process in the project tries); it
+// publishes the project defaults and a live resource for each running
+// session, and executes the commands the app queues for either.
 func StartConnector(ctx context.Context, project string, logf func(string, ...any)) func() {
-	if finalechat.Disabled() {
-		return func() {}
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		projectStop := startConnectorAt(ctx, project, "", connectorPath(project), filepath.Join(stateDir(project), "connector.lock"), logf)
-		defer projectStop()
-		workers := map[string]func(){}
-		defer func() {
-			for _, stop := range workers {
-				stop()
-			}
-		}()
-		for ctx.Err() == nil {
-			present := map[string]bool{}
-			// Explicitly paired sessions (grant files) always get a worker.
-			// Bound discovery even if local files are accidentally generated in a loop.
-			if dir, err := os.Open(runtimeConnectorDir(project)); err == nil {
-				entries, readErr := dir.ReadDir(257)
-				dir.Close()
-				if (readErr == nil || readErr == io.EOF) && len(entries) <= 256 {
-					for _, entry := range entries {
-						session, ok := strings.CutSuffix(entry.Name(), ".json")
-						if !ok || !entry.Type().IsRegular() {
-							continue
-						}
-						if _, err := runtimecontrol.Grant(project, session); err != nil {
-							continue
-						}
-						present[session] = true
-					}
-				}
-			}
-			// Auto-discover running sessions — including ones started from the
-			// phone — so each gets a session-scoped settings resource without
-			// anyone running `connector pair-session`.
-			for _, sid := range runningSessions(project) {
-				present[sid] = true
-			}
-			for session := range present {
-				if workers[session] == nil {
-					grantPath := filepath.Join(runtimeConnectorDir(project), session+".json")
-					if _, err := os.Stat(grantPath); err != nil {
-						grantPath = "" // auto-discovered: derive from the project connector
-					}
-					workers[session] = startConnectorAt(ctx, project, session, grantPath, filepath.Join(runtimeConnectorDir(project), session+".lock"), logf)
-				}
-			}
-			for session, stop := range workers {
-				if !present[session] {
-					stop()
-					delete(workers, session)
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-		}
-	}()
-	return func() { cancel(); <-done }
+	return startConnectorAt(ctx, project, connectorPath(project), filepath.Join(stateDir(project), "connector.lock"), logf)
 }
 
 func readConnectorFile(path string, out any) error {
@@ -148,15 +64,6 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 	if err != nil {
 		return view, err
 	}
-	// Carry the routes this session is actually running (per actor: model,
-	// host, reasoning effort — after any fallback) so the phone can show the
-	// real picks, not the preset name the project file happens to name.
-	if routes, cfgName, ok := sessionRoutes(project, session); ok {
-		view.Snapshot.Details["routes"] = routes
-		if cfgName != "" {
-			view.Snapshot.Details["config"] = cfgName
-		}
-	}
 	if grant.Key != view.Key || grant.Scope != "session" {
 		return view, fmt.Errorf("runtime grant identity changed")
 	}
@@ -177,9 +84,13 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 	return view, nil
 }
 
+// maxSessionResources bounds how many running sessions get a live settings
+// resource at once (the server caps a connector's grants at 50).
+const maxSessionResources = 16
+
 // runningSessions lists sessions in the project whose harness is alive right
-// now, proven by a live runtime-status heartbeat. Newest first, capped so a
-// big session directory cannot make discovery unbounded.
+// now, proven by a live runtime-status heartbeat. Newest first; only the
+// newest 64 sessions are looked at, so a big session directory stays cheap.
 func runningSessions(project string) []string {
 	infos, err := store.List(store.Root(project))
 	if err != nil {
@@ -200,31 +111,55 @@ func runningSessions(project string) []string {
 	return out
 }
 
-// sessionRoutes replays a session's log and returns the per-actor routes in
-// use (model, host, effort) plus the preset/bundle name, for display in the
-// session-scoped settings snapshot.
-func sessionRoutes(project, session string) (map[string]any, string, bool) {
-	info, err := store.Resolve(store.Root(project), session)
-	if err != nil {
-		return nil, "", false
-	}
-	evs, err := store.Read(info.Path)
-	if err != nil {
-		return nil, "", false
-	}
-	st := state.Replay(evs)
-	if len(st.Models) == 0 {
-		return nil, "", false
-	}
-	routes := map[string]any{}
-	for actor, model := range st.Models {
-		routes[actor] = map[string]any{
-			"model":  model,
-			"host":   st.Hosts[actor],
-			"effort": st.Efforts[actor],
+// sessionGrants is the grant set the project connector should hold: its
+// project grant, any unrelated grant the server already issued, and one
+// session grant per running session (newest first, bounded). Session grants
+// of sessions that have stopped are dropped, so they never accumulate.
+func sessionGrants(project string, held []control.Grant, projectGrant control.Grant, live []string) []control.Grant {
+	out := []control.Grant{projectGrant}
+	for _, g := range held {
+		if g.Key != projectGrant.Key && !strings.HasPrefix(g.Key, projectGrant.Key+"-session-") {
+			out = append(out, g)
 		}
 	}
-	return routes, st.Config, true
+	for _, sid := range live {
+		if len(out) > maxSessionResources {
+			break
+		}
+		if g, err := runtimecontrol.Grant(project, sid); err == nil {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// sameGrantKeys reports whether two grant sets name the same resources with
+// the same operations and classes, ignoring order.
+func sameGrantKeys(a, b []control.Grant) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	index := map[string]string{}
+	for _, g := range a {
+		raw, _ := json.Marshal(g)
+		index[g.Key] = string(raw)
+	}
+	for _, g := range b {
+		raw, _ := json.Marshal(g)
+		if index[g.Key] != string(raw) {
+			return false
+		}
+	}
+	return true
+}
+
+// sessionOfGrant returns the session a session grant of this project names.
+func sessionOfGrant(projectKey string, g control.Grant) (string, bool) {
+	if g.Scope != "session" {
+		return "", false
+	}
+	sid, ok := strings.CutPrefix(g.Key, projectKey+"-session-")
+	return sid, ok && sid != ""
 }
 
 // The connector records its intent before handing a command to the owner.

@@ -267,6 +267,12 @@ func TestApplyValuesRoutes(t *testing.T) {
 			{Op: "set", Key: "/routes/orchestrator/effort", Value: effort},
 		}
 	}
+	// A pick whose key is not set where the session runs is rejected.
+	t.Setenv("OPENROUTER_API_KEY", "")
+	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "reflection/beam-1.0-501b-a23b", "xhigh")...), view, grant); err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+		t.Fatalf("keyless pick: %v", err)
+	}
+	t.Setenv("OPENROUTER_API_KEY", "test")
 	// A valid change is accepted and recorded.
 	out, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "reflection/beam-1.0-501b-a23b", "xhigh")...), view, grant)
 	if err != nil {

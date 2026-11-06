@@ -5,8 +5,8 @@ package runtimecontrol
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -108,9 +108,10 @@ func View(project, session, generation string, values Values, available bool) (s
 			}
 			fields = append(fields, field)
 		}
-		routeField("/routes/"+actor+"/provider", actor+" provider", "Catalog provider whose base URL and key variable the route uses.", control.Shape{Type: "string", Enum: providerEnum})
-		routeField("/routes/"+actor+"/model", actor+" model", "Model id at that provider (see the Config page picker for the full list, live models included).", control.Shape{Type: "string", MaxLength: 200})
-		routeField("/routes/"+actor+"/effort", actor+" reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
+		name := strings.ToUpper(actor[:1]) + actor[1:]
+		routeField("/routes/"+actor+"/provider", name+" provider", "Catalog provider whose base URL and key variable the route uses.", control.Shape{Type: "string", Enum: providerEnum})
+		routeField("/routes/"+actor+"/model", name+" model", "Model id at that provider (see the Config page picker for the full list, live models included).", control.Shape{Type: "string", MaxLength: 200})
+		routeField("/routes/"+actor+"/effort", name+" reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
 		active["/routes/"+actor+"/provider"] = rt.Provider
 		active["/routes/"+actor+"/model"] = rt.Model
 		active["/routes/"+actor+"/effort"] = rt.Effort
@@ -195,17 +196,12 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if rt.Provider == "" || rt.Model == "" {
 			return before, fmt.Errorf("actor %s needs both a provider and a model", actor)
 		}
-		m, _, ok := config.ResolveLiveModel(project, rt.Provider, rt.Model)
-		if !ok {
-			return before, fmt.Errorf("model %q is not listed by provider %q (check the Config page picker; live models need one catalog fetch first)", rt.Model, rt.Provider)
+		picked, err := config.PickRoute(project, config.Actor{}, rt.Provider, rt.Model, rt.Effort)
+		if err != nil {
+			return before, err
 		}
-		if rt.Effort != "" {
-			if config.EffortIndex(rt.Effort) == len(config.EffortOrder) {
-				return before, fmt.Errorf("effort %q is not a known level", rt.Effort)
-			}
-			if len(m.Efforts) > 0 && !slices.Contains(m.Efforts, rt.Effort) {
-				return before, fmt.Errorf("model %q does not list effort %q (known: %s)", rt.Model, rt.Effort, strings.Join(m.Efforts, ", "))
-			}
+		if os.Getenv(picked.APIKeyEnv) == "" {
+			return before, fmt.Errorf("%s is not set where this session runs, so the %s cannot use %s", picked.APIKeyEnv, actor, rt.Provider)
 		}
 	}
 	before.Routes = routes

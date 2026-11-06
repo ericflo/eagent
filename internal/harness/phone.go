@@ -155,6 +155,9 @@ func (r *Runtime) startPhone() {
 		}
 	}
 	project, workDir := r.projectPath(), r.workDir("")
+	host, _ := os.Hostname()
+	meta := routeMeta(r)
+	meta["project"], meta["cwd"], meta["host"] = project, workDir, host
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
@@ -231,10 +234,7 @@ func (r *Runtime) startPhone() {
 				p.mu.Unlock()
 			}
 		}
-		// Thread meta the app renders as chips: where the session runs and on
-		// what — every actor's actual model, host, and effort, not the preset
-		// name, so custom per-session routes show up as they are.
-		meta := threadRouteMeta(r, project, workDir)
+		// Thread meta the app renders as chips: where the session runs and on what.
 		if branch := gitBranch(ctx, workDir); branch != "" {
 			meta["branch"] = branch
 		}
@@ -322,33 +322,13 @@ func (p *phone) close(reason string) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// threadRouteMeta builds the thread meta the phone app renders as chips: the
-// project, where the session works, and — per actor — the model, host, and
-// reasoning effort actually in use (after any fallback), plus the preset or
-// bundle name. "model" alone stays for older apps that read just that key.
-func threadRouteMeta(r *Runtime, project, workDir string) map[string]any {
-	host, _ := os.Hostname()
-	models := map[string]string{}
-	for k, v := range r.st.Models {
-		models[k] = v
-	}
-	hosts := map[string]string{}
-	for k, v := range r.st.Hosts {
-		hosts[k] = v
-	}
-	efforts := map[string]string{}
-	for k, v := range r.st.Efforts {
-		efforts[k] = v
-	}
-	meta := map[string]any{
-		"project": project, "cwd": workDir, "host": host,
-		"model":  models[event.ActorOrchestrator],
-		"models": models, "hosts": hosts, "efforts": efforts,
-	}
-	if r.st.Config != "" {
-		meta["config"] = r.st.Config
-	}
-	return meta
+// routeMeta is the thread's model chip: the orchestrator's model in use,
+// after any fallback. Every actor's route is in the session's settings, not
+// the thread header; the per-actor keys earlier builds set are cleared.
+// It reads session state, so it runs on the loop goroutine, never inside an
+// enqueued phone call.
+func routeMeta(r *Runtime) map[string]any {
+	return map[string]any{"model": r.st.Models[event.ActorOrchestrator], "models": nil, "hosts": nil, "efforts": nil, "config": nil}
 }
 
 // gitBranch names the checked-out branch of a project, or "" when it is not
@@ -418,19 +398,18 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		p.enqueue(func(ctx context.Context) {
 			// The chip under the thread title says where the session works
 			// now; the branch chip follows it (nil clears it outside a repo).
-			meta := threadRouteMeta(r, r.projectPath(), dir)
-			meta["branch"] = nil
+			meta := map[string]any{"cwd": dir, "branch": nil}
 			if branch := gitBranch(ctx, dir); branch != "" {
 				meta["branch"] = branch
 			}
 			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
 		})
 	case event.Route:
-		// A fallback switched the route in use; refresh the model chips so
-		// the phone shows the model that is actually serving, not the
-		// configured primary.
+		// A fallback or a settings change switched the route in use; the
+		// model chip follows the model actually serving.
+		meta := routeMeta(r)
 		p.enqueue(func(ctx context.Context) {
-			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: threadRouteMeta(r, r.projectPath(), r.workDir(""))})
+			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: meta})
 		})
 	case event.UserAnswer:
 		var d event.UserAnswerData

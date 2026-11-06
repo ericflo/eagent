@@ -13,7 +13,7 @@ import (
 )
 
 func TestSettingsSitePublishesWithoutBackupAndRecoversLostAcknowledgement(t *testing.T) {
-	f, project, session := newPublicationFixture(t)
+	f, project, _ := newPublicationFixture(t)
 	cfg, err := config.Load(project, "")
 	if err != nil {
 		t.Fatal(err)
@@ -49,9 +49,8 @@ func TestSettingsSitePublishesWithoutBackupAndRecoversLostAcknowledgement(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	thread := settingsThread{ID: "thread", Session: session.ID, External: "eagent:" + session.ID}
 	publish := func() error {
-		return publishSettingsSite(context.Background(), project, "test", thread, view, account, connector, "/api/v1/connectors/connector", "resource")
+		return publishResourceSite(context.Background(), project, "test", view, account, connector, "/api/v1/connectors/connector", "resource")
 	}
 	f.failAfter = true
 	_ = publish()

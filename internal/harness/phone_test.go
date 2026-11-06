@@ -1272,22 +1272,15 @@ func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
 	if _, has := metas[0]["branch"]; has {
 		t.Fatalf("a temp dir is not a git checkout; meta = %v", metas[0])
 	}
-	// The meta must carry every actor's actual route, not just the
-	// orchestrator id, so the phone shows the real models in use.
-	models, _ := metas[0]["models"].(map[string]any)
-	if models["orchestrator"] != "orch" || models["task"] != "task" || models["narrator"] != "narr" {
-		t.Fatalf("meta models = %v", models)
-	}
-	efforts, _ := metas[0]["efforts"].(map[string]any)
-	if efforts["orchestrator"] != "high" || efforts["task"] != "medium" || efforts["narrator"] != "low" {
-		t.Fatalf("meta efforts = %v", efforts)
-	}
-	hosts, _ := metas[0]["hosts"].(map[string]any)
-	if hosts["orchestrator"] != s.srv.URL {
-		t.Fatalf("meta hosts = %v", hosts)
+	// The model chip is the orchestrator's model; per-actor routes live in
+	// the session's settings, and keys earlier builds set are cleared.
+	for _, k := range []string{"models", "hosts", "efforts", "config"} {
+		if v, has := metas[0][k]; !has || v != nil {
+			t.Fatalf("meta %s = %v, want cleared", k, v)
+		}
 	}
 	if metas[0]["model"] != "orch" {
-		t.Fatalf("back-compat model key = %v", metas[0]["model"])
+		t.Fatalf("model chip = %v", metas[0]["model"])
 	}
 }
 
@@ -2426,29 +2419,14 @@ func TestRetitleThreadToolWithoutPhone(t *testing.T) {
 	}
 }
 
-func TestThreadRouteMetaCarriesActualRoutes(t *testing.T) {
+func TestRouteMetaIsTheModelInUse(t *testing.T) {
 	st := state.New()
-	st.Models = map[string]string{"orchestrator": "reflection/beam-1.0-501b-a23b", "task": "z-ai/glm-5.3", "narrator": "deepseek/deepseek-v4.1-flash-1017"}
-	st.Hosts = map[string]string{"orchestrator": "https://openrouter.ai/api/v1", "task": "https://openrouter.ai/api/v1", "narrator": "https://openrouter.ai/api/v1"}
-	st.Efforts = map[string]string{"orchestrator": "xhigh", "task": "high", "narrator": "low"}
-	st.Config = "openrouter-med"
-	r := &Runtime{st: st}
-	meta := threadRouteMeta(r, "/proj", "/proj/sub")
+	st.Models = map[string]string{"orchestrator": "reflection/beam-1.0-501b-a23b", "task": "z-ai/glm-5.3"}
+	meta := routeMeta(&Runtime{st: st})
 	if meta["model"] != "reflection/beam-1.0-501b-a23b" {
-		t.Fatalf("back-compat model key = %v", meta["model"])
+		t.Fatalf("model = %v", meta["model"])
 	}
-	models, _ := meta["models"].(map[string]string)
-	if models["task"] != "z-ai/glm-5.3" || models["narrator"] != "deepseek/deepseek-v4.1-flash-1017" {
-		t.Fatalf("models = %#v", meta["models"])
-	}
-	efforts, _ := meta["efforts"].(map[string]string)
-	if efforts["orchestrator"] != "xhigh" {
-		t.Fatalf("efforts = %#v", meta["efforts"])
-	}
-	if meta["hosts"].(map[string]string)["orchestrator"] != "https://openrouter.ai/api/v1" {
-		t.Fatalf("hosts = %#v", meta["hosts"])
-	}
-	if meta["config"] != "openrouter-med" || meta["cwd"] != "/proj/sub" || meta["project"] != "/proj" {
+	if len(meta) != 5 || meta["models"] != nil {
 		t.Fatalf("meta = %v", meta)
 	}
 }

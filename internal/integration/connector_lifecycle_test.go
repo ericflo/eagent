@@ -103,7 +103,7 @@ func TestConnectorRetainsIdentityOnRetryAndReleasesOnShutdown(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- runConnectorAt(ctx, project, "", path, nil) }()
+			go func() { done <- runConnectorAt(ctx, project, path, nil) }()
 			select {
 			case <-ready:
 			case <-ctx.Done():
