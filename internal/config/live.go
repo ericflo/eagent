@@ -71,23 +71,61 @@ func LiveModels(ctx context.Context, project string) LiveResult {
 	if cache != nil && time.Since(cache.FetchedAt) < LiveTTL {
 		return LiveResult{Models: cache.Models, FetchedAt: cache.FetchedAt, Errors: cache.Errors}
 	}
-	fresh := refreshLive(ctx)
+	// The refresh outlives the request that asked for it: a page closed
+	// mid-fetch must not leave a cache of nothing behind.
+	fresh := refreshLive(context.WithoutCancel(ctx))
 	now := time.Now()
+	if cache == nil {
+		cache = &LiveCache{}
+	}
 	if len(fresh.Models) > 0 {
+		// A provider that failed this time keeps the models it listed
+		// before, so one timeout does not hide its live-only models.
+		for _, m := range cache.Models {
+			if _, failed := fresh.Errors[m.Provider]; failed {
+				fresh.Models = append(fresh.Models, m)
+			}
+		}
+		sortLive(fresh.Models)
 		fresh.FetchedAt = now
 		fresh.Refreshed = true
 		_ = WriteLiveCache(project, &LiveCache{FetchedAt: now, Models: fresh.Models, Errors: fresh.Errors})
 		return fresh
 	}
 	// The refresh found nothing (offline, no keys). Serve whatever was cached
-	// and stamp the cache as just-checked so the failure is debounced too.
-	if cache == nil {
-		cache = &LiveCache{}
-	}
-	cache.FetchedAt = now
+	// and try again in a while rather than on every request or a day later.
+	cache.FetchedAt = now.Add(liveRetry - LiveTTL)
 	cache.Errors = fresh.Errors
 	_ = WriteLiveCache(project, cache)
-	return LiveResult{Models: cache.Models, FetchedAt: now, Stale: cache.Models != nil, Errors: fresh.Errors}
+	return LiveResult{Models: cache.Models, FetchedAt: cache.FetchedAt, Stale: cache.Models != nil, Errors: fresh.Errors}
+}
+
+// SetLiveProbe replaces how providers are asked for their models and
+// returns the previous probe. Tests outside this package use it so they
+// never reach real providers with the developer's keys.
+func SetLiveProbe(fn func(context.Context, Provider) ([]Model, error)) func(context.Context, Provider) ([]Model, error) {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	old := liveProbe
+	liveProbe = fn
+	return old
+}
+
+// liveRetry is how soon a refresh that found nothing is tried again.
+const liveRetry = 10 * time.Minute
+
+// sortLive orders live models by catalog provider, then id.
+func sortLive(models []Model) {
+	order := map[string]int{}
+	for i, pr := range Providers {
+		order[pr.ID] = i
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		if order[models[i].Provider] != order[models[j].Provider] {
+			return order[models[i].Provider] < order[models[j].Provider]
+		}
+		return models[i].ID < models[j].ID
+	})
 }
 
 // refreshLive probes every catalog provider concurrently and merges what
@@ -101,17 +139,14 @@ func refreshLive(ctx context.Context) LiveResult {
 		err    error
 	}
 	ch := make(chan out, len(Providers))
+	probe := liveProbe // read under liveMu, which LiveModels holds
 	for _, pr := range Providers {
 		go func(pr Provider) {
-			ms, err := liveProbe(ctx, pr)
+			ms, err := probe(ctx, pr)
 			ch <- out{pr, ms, err}
 		}(pr)
 	}
 	res := LiveResult{Errors: map[string]string{}}
-	order := map[string]int{}
-	for i, pr := range Providers {
-		order[pr.ID] = i
-	}
 	for range Providers {
 		o := <-ch
 		if o.err != nil {
@@ -120,12 +155,7 @@ func refreshLive(ctx context.Context) LiveResult {
 		}
 		res.Models = append(res.Models, o.models...)
 	}
-	sort.SliceStable(res.Models, func(i, j int) bool {
-		if order[res.Models[i].Provider] != order[res.Models[j].Provider] {
-			return order[res.Models[i].Provider] < order[res.Models[j].Provider]
-		}
-		return res.Models[i].ID < res.Models[j].ID
-	})
+	sortLive(res.Models)
 	return res
 }
 
@@ -310,7 +340,9 @@ func livePrice(pr *struct {
 		return f * 1e6
 	}
 	in, cached, out := perM(pr.Prompt), perM(pr.InputCacheRead), perM(pr.Completion)
-	if in == 0 && out == 0 {
+	// Routers such as openrouter/auto list "-1": the price depends on the
+	// model they pick, so it is unknown, not negative.
+	if in == 0 && out == 0 || in < 0 || out < 0 || cached < 0 {
 		return nil, false
 	}
 	return &Price{In: in, Cached: cached, Out: out, AsOf: time.Now().Format("2006-01-02"), Source: "live GET /models"}, true
@@ -349,10 +381,6 @@ func MergeLive(static, live []Model) []Model {
 	}
 	return out
 }
-
-// ReadLiveCache returns the cached live models without any network I/O
-// (unlike LiveModels, which may refresh a stale cache).
-func ReadLiveCache(project string) *LiveCache { return readLiveCache(project) }
 
 // ResolveLiveModel finds a model by provider id + model id in the static
 // catalog first, then in the cached live list — never touching the network.

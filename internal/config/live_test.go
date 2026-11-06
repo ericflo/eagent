@@ -90,10 +90,10 @@ func TestLiveModelsFailedRefreshServesStaleAndDebounces(t *testing.T) {
 	if !res.Stale || res.Refreshed || len(res.Models) != 1 || res.Models[0].ID != "old/one" {
 		t.Fatalf("expected stale cache served, got %+v", res)
 	}
-	// The failure must be stamped into the cache: the next call within 24h
-	// does not hit the network again.
+	// The failure is stamped into the cache: the next call soon after does
+	// not hit the network again (it retries after liveRetry, not a day).
 	stubProbe(t, func(ctx context.Context, pr Provider) ([]Model, error) {
-		t.Fatal("failed refresh should be debounced for 24h")
+		t.Fatal("failed refresh should be debounced")
 		return nil, nil
 	})
 	res2 := LiveModels(context.Background(), project)
@@ -238,5 +238,56 @@ func TestLiveCacheRoundTrip(t *testing.T) {
 	}
 	if len(back.Models) != 1 || !back.Models[0].Live || back.Errors["openai"] == "" || back.FetchedAt.IsZero() {
 		t.Fatalf("round trip: %+v", back)
+	}
+}
+
+func TestLiveModelsFailedRefreshRetriesSoon(t *testing.T) {
+	project := t.TempDir()
+	stubProbe(t, func(ctx context.Context, pr Provider) ([]Model, error) { return nil, errors.New("offline") })
+	LiveModels(context.Background(), project)
+	c := readLiveCache(project)
+	if age := time.Since(c.FetchedAt); age < LiveTTL-liveRetry-time.Minute || age > LiveTTL-liveRetry+time.Minute {
+		t.Fatalf("a failed refresh is retried after %v, want about %v", LiveTTL-age, liveRetry)
+	}
+}
+
+func TestLiveModelsSurvivesCancelledRequestAndProviderHiccups(t *testing.T) {
+	project := t.TempDir()
+	before := []Model{{Provider: "together", ID: "live-only/model", Label: "live", Live: true}, {Provider: "openrouter", ID: "old/one", Label: "old", Live: true}}
+	if err := WriteLiveCache(project, &LiveCache{FetchedAt: time.Now().Add(-25 * time.Hour), Models: before}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the page that asked was closed
+	stubProbe(t, func(ctx context.Context, pr Provider) ([]Model, error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		switch pr.ID {
+		case "openrouter":
+			return []Model{{Provider: "openrouter", ID: "new/one", Label: "new", Live: true}}, nil
+		case "together":
+			return nil, errors.New("timeout")
+		}
+		return nil, errors.New("no key")
+	})
+	res := LiveModels(ctx, project)
+	ids := map[string]bool{}
+	for _, m := range res.Models {
+		ids[m.ID] = true
+	}
+	if !ids["new/one"] || !ids["live-only/model"] || ids["old/one"] {
+		t.Fatalf("models after refresh = %v", ids)
+	}
+}
+
+func TestLivePriceTreatsNegativeAsUnknown(t *testing.T) {
+	p := &struct {
+		Prompt         string `json:"prompt"`
+		Completion     string `json:"completion"`
+		InputCacheRead string `json:"input_cache_read"`
+	}{Prompt: "-1", Completion: "-1"}
+	if _, ok := livePrice(p); ok {
+		t.Fatal("router price -1 read as a price")
 	}
 }
