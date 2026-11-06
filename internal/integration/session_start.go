@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/ericflo/eagent/internal/procs"
+	"github.com/ericflo/eagent/internal/settings"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,79 @@ type SessionRequest struct {
 	// Relay names a relay profile ("codex", "claude"): the session starts
 	// that agent in Dir and relays the user's messages to it.
 	Relay string
+	// Config is the preset (or "bundle:NAME") the session starts from, ""
+	// for the project's own configuration; Routes are per-actor model picks
+	// on top of it.
+	Config string
+	Routes map[string]RoutePick
+}
+
+// RoutePick is one actor's model pick for a new session. An empty provider
+// is inferred from the model; a pick with only an effort keeps the model.
+type RoutePick struct {
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Effort   string `json:"effort,omitempty"`
+}
+
+// SplitConfig turns a session.start configuration choice into a preset or a
+// bundle name.
+func SplitConfig(name string) (preset, bundle string) {
+	if b, ok := strings.CutPrefix(name, "bundle:"); ok {
+		return "", b
+	}
+	return name, ""
+}
+
+// ApplyPicks puts per-actor model picks on a configuration, each through
+// config.PickRoute (catalog or cached live models only, never the network).
+func ApplyPicks(project string, cfg config.Config, picks map[string]RoutePick) (config.Config, error) {
+	actors := map[string]*config.Actor{"orchestrator": &cfg.Orchestrator, "task": &cfg.Task, "narrator": &cfg.Narrator}
+	for name, p := range picks {
+		a, ok := actors[name]
+		if !ok {
+			return cfg, fmt.Errorf("unknown actor %q (want orchestrator, task, or narrator)", name)
+		}
+		if p.Model == "" {
+			if p.Provider != "" {
+				return cfg, fmt.Errorf("%s: pick a model at %s", name, p.Provider)
+			}
+			if p.Effort != "" {
+				a.ReasoningEffort = p.Effort
+			}
+			continue
+		}
+		picked, err := config.PickRoute(project, *a, p.Provider, p.Model, p.Effort)
+		if err != nil {
+			return cfg, fmt.Errorf("%s: %w", name, err)
+		}
+		*a = picked
+	}
+	return cfg, cfg.Validate()
+}
+
+// startPicks reads the configuration and model picks a session.start
+// carries and checks them against the configuration they apply to, so a
+// bad pick is refused before anything starts.
+func startPicks(project string, params map[string]any) (string, map[string]RoutePick, error) {
+	text := func(key string) string { v, _ := params[key].(string); return strings.TrimSpace(v) }
+	name := text("config")
+	picks := map[string]RoutePick{}
+	for _, actor := range settings.StartActors {
+		p := RoutePick{Provider: text(actor + "_provider"), Model: text(actor + "_model"), Effort: text(actor + "_effort")}
+		if p != (RoutePick{}) {
+			picks[actor] = p
+		}
+	}
+	preset, bundle := SplitConfig(name)
+	cfg, err := config.LoadBundle(project, preset, bundle)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := ApplyPicks(project, cfg, picks); err != nil {
+		return "", nil, err
+	}
+	return name, picks, nil
 }
 
 // SessionStarter starts a new session in the project and returns its id once
@@ -89,8 +163,30 @@ var spawnCommand = func(project string, req SessionRequest, announce string) (*e
 	if req.Relay != "" {
 		args = append(args, "--relay", req.Relay)
 	}
+	preset, bundle := SplitConfig(req.Config)
+	if preset != "" {
+		args = append(args, "--preset", preset)
+	}
+	if bundle != "" {
+		args = append(args, "--config", bundle)
+	}
+	env := append(os.Environ(), AnnounceEnv+"="+announce)
+	if len(req.Routes) > 0 {
+		// The picks reach the new process as its actor overrides.
+		cfg, err := config.LoadBundle(project, preset, bundle)
+		if err != nil {
+			return nil, err
+		}
+		picked, err := ApplyPicks(project, cfg, req.Routes)
+		if err != nil {
+			return nil, err
+		}
+		for name, a := range map[string]config.Actor{"ORCHESTRATOR": picked.Orchestrator, "TASK": picked.Task, "NARRATOR": picked.Narrator} {
+			env = append(env, "EAGENT_"+name+"_MODEL="+a.Model, "EAGENT_"+name+"_BASE_URL="+a.BaseURL, "EAGENT_"+name+"_API_KEY_ENV="+a.APIKeyEnv, "EAGENT_"+name+"_PROTOCOL="+a.Protocol, "EAGENT_"+name+"_REASONING_EFFORT="+a.ReasoningEffort)
+		}
+	}
 	cmd := exec.Command(exe, append(args, req.Prompt)...)
-	cmd.Env = append(os.Environ(), AnnounceEnv+"="+announce)
+	cmd.Env = env
 	return cmd, nil
 }
 

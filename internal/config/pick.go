@@ -12,8 +12,17 @@ import (
 // cached live list; the network is never touched. The actor keeps its own
 // limits; picking a different model drops its fallback chain, which belonged
 // to the old model. An empty effort keeps the actor's when the model accepts
-// it, else takes the nearest level the model offers.
+// it, else takes the nearest level the model offers. An empty provider is
+// inferred from the model.
 func PickRoute(project string, a Actor, providerID, modelID, effort string) (Actor, error) {
+	if providerID == "" {
+		// No provider named: the actor's own, when it lists the model, or
+		// the one provider that does.
+		var err error
+		if providerID, err = providerFor(project, a, modelID); err != nil {
+			return a, err
+		}
+	}
 	m, pr, ok := ResolveLiveModel(project, providerID, modelID)
 	if !ok {
 		return a, fmt.Errorf("model %q is not listed by provider %q (live models need one catalog fetch first)", modelID, providerID)
@@ -61,4 +70,37 @@ func NearestEffort(offered []string, want string) string {
 		}
 	}
 	return best
+}
+
+// providerFor finds the provider for a model named without one.
+func providerFor(project string, a Actor, modelID string) (string, error) {
+	if pr, ok := ProviderForURL(a.BaseURL); ok {
+		if _, _, ok := ResolveLiveModel(project, pr.ID, modelID); ok {
+			return pr.ID, nil
+		}
+	}
+	var found []string
+	for _, m := range KnownModels(project) {
+		if m.ID == modelID && !slices.Contains(found, m.Provider) {
+			found = append(found, m.Provider)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("no provider lists model %q (live models need one catalog fetch first)", modelID)
+	default:
+		return "", fmt.Errorf("model %q is offered by %s; pick a provider", modelID, strings.Join(found, ", "))
+	}
+}
+
+// KnownModels are the models a pick can name: the built-in catalog plus the
+// providers' live lists as last cached. It never touches the network.
+func KnownModels(project string) []Model {
+	var live []Model
+	if c := readLiveCache(project); c != nil {
+		live = c.Models
+	}
+	return MergeLive(Models, live)
 }

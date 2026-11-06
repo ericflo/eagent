@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"net/http"
 	"os"
 	"os/exec"
@@ -298,5 +300,101 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "claude/claude,codex/codex" {
 		t.Fatalf("advertised profiles %v", names)
+	}
+}
+
+// A session started from the phone can name its configuration and each
+// actor's model; a bad pick is refused before anything starts.
+func TestStartPicks(t *testing.T) {
+	project := t.TempDir()
+	name, picks, err := startPicks(project, map[string]any{"config": "anthropic-med", "task_provider": "openrouter", "task_model": "z-ai/glm-5.3", "task_effort": "high", "narrator_effort": "low"})
+	if err != nil || name != "anthropic-med" || picks["task"].Model != "z-ai/glm-5.3" || picks["narrator"].Effort != "low" || len(picks) != 2 {
+		t.Fatalf("picks = %q %+v %v", name, picks, err)
+	}
+	cfg, _ := config.LoadBundle(project, "anthropic-med", "")
+	out, err := ApplyPicks(project, cfg, picks)
+	if err != nil || out.Task.Model != "z-ai/glm-5.3" || out.Task.BaseURL != "https://openrouter.ai/api/v1" || out.Narrator.ReasoningEffort != "low" || out.Narrator.Model != cfg.Narrator.Model {
+		t.Fatalf("applied = %+v / %+v (%v)", out.Task, out.Narrator, err)
+	}
+	// The provider is inferred from a model only one provider lists.
+	if _, p, err := startPicks(project, map[string]any{"orchestrator_model": "reflection/beam-1.0-501b-a23b"}); err != nil || p["orchestrator"].Model == "" {
+		t.Fatalf("inferred provider: %v", err)
+	}
+	for _, bad := range []map[string]any{
+		{"task_provider": "openrouter", "task_model": "nope/none"},
+		{"task_provider": "openrouter"},
+		{"config": "bundle:missing"},
+		{"task_model": "claude-opus-5-5"}, // two providers list it: say which
+	} {
+		if _, _, err := startPicks(project, bad); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+}
+
+// A detached session gets the configuration as flags and the picks as its
+// actor overrides.
+func TestSpawnCommandCarriesPicks(t *testing.T) {
+	project := t.TempDir()
+	cmd, err := spawnCommand(project, SessionRequest{Prompt: "go", Config: "anthropic-med", Routes: map[string]RoutePick{"task": {Provider: "openrouter", Model: "z-ai/glm-5.3"}}}, filepath.Join(project, "announce"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--preset anthropic-med") {
+		t.Fatalf("args = %s", args)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	if !strings.Contains(env, "EAGENT_TASK_MODEL=z-ai/glm-5.3") || !strings.Contains(env, "EAGENT_TASK_BASE_URL=https://openrouter.ai/api/v1") {
+		t.Fatal("picks missing from the environment")
+	}
+	cmd, _ = spawnCommand(project, SessionRequest{Prompt: "go", Config: "bundle:eric"}, filepath.Join(project, "announce"))
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--config eric") {
+		t.Fatalf("bundle args = %v", cmd.Args)
+	}
+}
+
+// Both the project's start action and a session's model fields offer the
+// known models, narrowed by the provider picked beside them.
+func TestModelSuggestionsAreOffered(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "on")
+	project := t.TempDir()
+	s := &settings.Service{Project: project}
+	view, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Descriptor.Suggestions["models"]) < len(config.Models) {
+		t.Fatalf("project offers %d models", len(view.Descriptor.Suggestions["models"]))
+	}
+	var start control.Action
+	for _, a := range view.Descriptor.Actions {
+		if a.Operation == "session.start" {
+			start = a
+		}
+	}
+	if len(start.Inputs) != 10 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
+		t.Fatalf("start inputs = %+v", start.Inputs)
+	}
+	sess, _ := store.Create(store.Root(project), time.Now())
+	_ = sess.Close()
+	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	grant, _ := runtimecontrol.Grant(project, sess.ID)
+	sv, err := runtimeSnapshot(project, sess.ID, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range sv.Descriptor.Fields {
+		if f.Key == "/routes/task/model" {
+			found = f.Suggest != nil && f.Suggest.GroupBy == "/routes/task/provider"
+		}
+	}
+	if !found || len(sv.Descriptor.Suggestions["models"]) == 0 || sv.Descriptor.Validate(grant) != nil {
+		t.Fatal("the session's model fields offer no models")
 	}
 }
