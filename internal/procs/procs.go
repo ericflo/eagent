@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,22 +118,30 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 	cmd.Env = append(withoutEnv(os.Environ(), spec.EnvDeny), spec.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	p := &Proc{Spec: spec, cmd: cmd, status: Running, done: make(chan struct{}), reaped: make(chan struct{})}
-	stdin, err := cmd.StdinPipe()
+	// stdin is a plain pipe the harness writes with a deadline: a process
+	// that never reads its input must not hang the writer.
+	inR, inW, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	p.stdin = stdin
+	cmd.Stdin = inR
+	p.stdin = inW
 	pr, pw, err := os.Pipe()
 	if err != nil {
+		inR.Close()
+		inW.Close()
 		return nil, err
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 	if err := cmd.Start(); err != nil {
+		inR.Close()
+		inW.Close()
 		pr.Close()
 		pw.Close()
 		return nil, err
 	}
+	inR.Close() // the child holds its copy
 	if cmd.Process != nil {
 		p.startTicks = startTicksOf(cmd.Process.Pid)
 	}
@@ -151,6 +160,10 @@ func (m *Manager) Start(spec Spec) (*Proc, error) {
 	go func() {
 		err := cmd.Wait()
 		p.mu.Lock()
+		if p.stdin != nil {
+			p.stdin.Close() // nobody is left to read it
+			p.stdin = nil
+		}
 		if p.timer != nil {
 			p.timer.Stop()
 		}
@@ -530,6 +543,9 @@ func (p *Proc) Tail(n int) string {
 	return string(p.buf[len(p.buf)-n:])
 }
 
+// stdinWriteTimeout bounds one write to a process's stdin.
+var stdinWriteTimeout = 10 * time.Second
+
 // Write sends bytes to the process's stdin; closeAfter closes stdin.
 func (p *Proc) Write(s string, closeAfter bool) error {
 	p.mu.Lock()
@@ -543,7 +559,14 @@ func (p *Proc) Write(s string, closeAfter bool) error {
 		return errors.New("stdin already closed")
 	}
 	if s != "" {
-		if _, err := io.WriteString(stdin, s); err != nil {
+		if f, ok := stdin.(*os.File); ok {
+			_ = f.SetWriteDeadline(time.Now().Add(stdinWriteTimeout))
+		}
+		n, err := io.WriteString(stdin, s)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("the process is not reading its input: %d of %d bytes went in before %s passed", n, len(s), stdinWriteTimeout)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -635,4 +658,27 @@ func withoutEnv(env, deny []string) []string {
 		out = append(out, kv)
 	}
 	return out
+}
+
+// CheckDir reports whether a shell can start in dir: it exists, is a
+// directory, and can be entered and listed. A directory that exists but
+// cannot be entered (another user's home, mode 000) fails every command run
+// in it, and a session stuck there could never cd out.
+func CheckDir(dir string) error {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("%s does not exist", dir)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".")); err != nil {
+		return fmt.Errorf("%s cannot be entered (permission denied)", dir)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("%s cannot be read (permission denied)", dir)
+	}
+	f.Close()
+	return nil
 }

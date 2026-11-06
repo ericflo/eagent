@@ -49,6 +49,7 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	retries := &replyRetries{replies: map[string]pendingReply{}}
 	go func() {
 		defer close(done)
 		lastError := ""
@@ -57,7 +58,7 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 			unlock, err := filelock.Acquire(lockCtx, filepath.Join(stateDir(project), "resume-watch.lock"))
 			stop()
 			if err == nil {
-				err = watchResumes(ctx, project, host, logf)
+				err = watchResumes(ctx, project, host, retries, logf)
 				unlock()
 				if err != nil && ctx.Err() == nil && err.Error() != lastError {
 					lastError = err.Error()
@@ -79,20 +80,36 @@ type resumeWatcher struct {
 	host    ResumeHost
 	client  *finalechat.Client
 	logf    func(string, ...any)
+	retries *replyRetries
 	mu      sync.Mutex
-	handled map[string]time.Time // message ids already acted on
+	handled map[string]time.Time // message ids acted on, or being acted on
+}
+
+// pendingReply is a reply whose session could not be resumed yet.
+type pendingReply struct {
+	thread finalechat.Thread
+	msg    finalechat.Message
+	since  time.Time
+	told   bool
+}
+
+// replyRetries outlives one connection to the event stream: a reply that
+// could not resume its session is tried again every sweep, for a day.
+type replyRetries struct {
+	mu      sync.Mutex
+	replies map[string]pendingReply
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
 // then every minute while it lasts, since the stream has no replay and a
 // busy server may drop an event for a subscriber.
-func watchResumes(ctx context.Context, project string, host ResumeHost, logf func(string, ...any)) error {
+func watchResumes(ctx context.Context, project string, host ResumeHost, retries *replyRetries, logf func(string, ...any)) error {
 	client, err := settingsAccount(project)
 	if err != nil {
 		return err
 	}
 	client.UserAgent = "eagent-resume/1"
-	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, handled: map[string]time.Time{}}
+	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}}
 	w.sweep(ctx)
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	defer stopSweeps()
@@ -145,10 +162,22 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		w.mu.Unlock()
 		return
 	}
+	// Claimed while it is acted on. The claim stands only once the reply is
+	// dealt with; a resume that failed is tried again by the next sweep
+	// instead of being dropped until eagent restarts.
 	w.handled[m.ID] = time.Now()
 	w.mu.Unlock()
+	settled := false
+	defer func() {
+		if !settled {
+			w.mu.Lock()
+			delete(w.handled, m.ID)
+			w.mu.Unlock()
+		}
+	}()
 	info, ok := w.session(sid)
 	if !ok {
+		settled = true
 		return // not a session of this project
 	}
 	if store.Alive(info.Path) || w.host.Hosted(sid) {
@@ -165,13 +194,59 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		msg.Attachments = append(msg.Attachments, saved)
 	}
 	if msg.Text == "" && len(msg.Attachments) == 0 {
+		settled = true
 		return
 	}
 	if err := w.host.Resume(sid, msg); err != nil {
-		w.logf("finalechat: could not resume session %s for your reply: %v", sid, err)
+		w.logf("finalechat: could not resume session %s for your reply: %v (will retry)", sid, err)
+		w.retryLater(ctx, thread, m, "eagent could not resume this session for your reply yet: "+err.Error()+". It keeps trying every minute.")
 		return
 	}
+	settled = true
+	w.retries.mu.Lock()
+	delete(w.retries.replies, m.ID)
+	w.retries.mu.Unlock()
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
+}
+
+// retryLater keeps a reply that could not resume its session for the next
+// sweeps, and says so in the thread once, so it does not look ignored.
+func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread, m finalechat.Message, note string) {
+	w.retries.mu.Lock()
+	p, ok := w.retries.replies[m.ID]
+	if !ok {
+		p = pendingReply{thread: thread, msg: m, since: time.Now()}
+	}
+	tell := !p.told
+	p.told = true
+	w.retries.replies[m.ID] = p
+	w.retries.mu.Unlock()
+	if tell {
+		postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+		defer stop()
+		_, _, _ = w.client.Post(postCtx, finalechat.Ref(thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-failed-" + m.ID})
+	}
+}
+
+// retryPending tries the replies that could not resume their sessions
+// before. A day after the first try a reply is let go.
+func (w *resumeWatcher) retryPending(ctx context.Context) {
+	w.retries.mu.Lock()
+	pending := make([]pendingReply, 0, len(w.retries.replies))
+	for id, p := range w.retries.replies {
+		if time.Since(p.since) > 24*time.Hour {
+			delete(w.retries.replies, id)
+			continue
+		}
+		pending = append(pending, p)
+	}
+	w.retries.mu.Unlock()
+	for _, p := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		w.consider(ctx, p.thread, p.msg)
+	}
 }
 
 func (w *resumeWatcher) session(id string) (store.Info, bool) {
@@ -201,6 +276,7 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 	}
 	sweepCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
+	w.retryPending(sweepCtx)
 	if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", url.Values{"limit": {"200"}}, nil, &page, 0); err != nil {
 		return
 	}

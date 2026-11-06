@@ -85,7 +85,8 @@ func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	base := "/api/v1/artifacts/" + f.head.Artifact.ID
 	if f.head.Artifact.ID == "" || !strings.HasPrefix(r.URL.Path, base) {
-		w.WriteHeader(404)
+		w.WriteHeader(404) // as FinaleChat says it: its own not_found
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Not found."}}`))
 		return
 	}
 	if r.Method == "GET" && r.URL.Path == base {
@@ -161,6 +162,7 @@ func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(404)
+	_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Not found."}}`))
 }
 
 func newPublicationFixture(t *testing.T) (*publicationFixture, string, *store.Session) {

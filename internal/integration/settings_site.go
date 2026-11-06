@@ -2,7 +2,6 @@ package integration
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -130,8 +129,7 @@ func publishSite(ctx context.Context, project, name string, site *archive.Export
 	}
 	head, err := account.ArtifactHead(ctx, state.ArtifactID)
 	if err != nil {
-		var apiErr *finalechat.Error
-		if errors.As(err, &apiErr) && apiErr.Status == 404 {
+		if finalechat.Gone(err) {
 			state.Deleted = true
 			_ = writeJSONAtomic(path, state)
 		}

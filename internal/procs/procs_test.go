@@ -293,3 +293,47 @@ func TestReapOrphanGroupChecksIdentity(t *testing.T) {
 		t.Fatal("nothing to reap without a pid and an instant")
 	}
 }
+
+// Writing to a process that never reads its input fails after a while
+// instead of blocking the caller forever.
+func TestWriteToAProcessThatDoesNotRead(t *testing.T) {
+	old := stdinWriteTimeout
+	stdinWriteTimeout = 300 * time.Millisecond
+	defer func() { stdinWriteTimeout = old }()
+	m := NewManager()
+	p, err := m.Start(Spec{Command: "sleep 30", Cwd: t.TempDir(), Timeout: 20 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.kill(Killed)
+	done := make(chan error, 1)
+	go func() { done <- p.Write(strings.Repeat("x", 1<<20), false) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not reading its input") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the write blocked")
+	}
+}
+
+func TestCheckDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := CheckDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "f")
+	_ = os.WriteFile(file, nil, 0o644)
+	locked := filepath.Join(dir, "locked")
+	_ = os.Mkdir(locked, 0o000)
+	defer os.Chmod(locked, 0o755)
+	for _, bad := range []string{filepath.Join(dir, "missing"), file} {
+		if CheckDir(bad) == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	if os.Geteuid() != 0 && CheckDir(locked) == nil {
+		t.Error("a directory that cannot be entered was accepted")
+	}
+}

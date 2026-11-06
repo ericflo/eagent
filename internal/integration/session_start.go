@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ericflo/eagent/internal/procs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,7 +158,7 @@ func logTail(path string) string {
 }
 
 // checkStartDir accepts an empty directory (the project root) or an absolute
-// path to an existing directory.
+// path to a directory a shell can start in.
 func checkStartDir(dir string) error {
 	if dir == "" {
 		return nil
@@ -165,12 +166,8 @@ func checkStartDir(dir string) error {
 	if !filepath.IsAbs(dir) {
 		return fmt.Errorf("the start directory must be an absolute path (or ~/…)")
 	}
-	st, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("the start directory %s does not exist", dir)
-	}
-	if !st.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+	if err := procs.CheckDir(dir); err != nil {
+		return fmt.Errorf("the start directory: %w", err)
 	}
 	return nil
 }
