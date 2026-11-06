@@ -117,3 +117,25 @@ func TestBundlesLayerOverProjectConfig(t *testing.T) {
 		t.Fatal("bad name accepted")
 	}
 }
+
+// The orchestrator in every preset runs at its model's highest effort below
+// max, as the catalog lists the model's efforts.
+func TestPresetOrchestratorsThinkHardest(t *testing.T) {
+	for name, apply := range Presets {
+		c := Defaults()
+		apply(&c)
+		m, ok := Lookup(c.Orchestrator.BaseURL, c.Orchestrator.Model)
+		if !ok || len(m.Efforts) == 0 {
+			continue
+		}
+		want := m.Efforts[0]
+		for _, e := range m.Efforts {
+			if e != "max" && EffortIndex(e) > EffortIndex(want) {
+				want = e
+			}
+		}
+		if c.Orchestrator.ReasoningEffort != want {
+			t.Errorf("%s: orchestrator %s runs %q, want %q", name, c.Orchestrator.Model, c.Orchestrator.ReasoningEffort, want)
+		}
+	}
+}

@@ -324,13 +324,13 @@ var Presets = map[string]func(*Config){
 	// Anthropic.
 	"anthropic-high": func(c *Config) {
 		c.Description = "Claude Fable 5.1 orchestrating, Opus 5.5 working, Sonnet 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-fable-5-1", "high", 32768)
+		c.Orchestrator = anthropicActor("claude-fable-5-1", "xhigh", 32768)
 		c.Task = anthropicActor("claude-opus-5-5", "high", 32768)
 		c.Narrator = anthropicActor("claude-sonnet-5-5", "low", 4096)
 	},
 	"anthropic-med": func(c *Config) {
 		c.Description = "Claude Opus 5.5 orchestrating, Sonnet 5.5 working, Haiku 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-opus-5-5", "high", 32768)
+		c.Orchestrator = anthropicActor("claude-opus-5-5", "xhigh", 32768)
 		c.Task = anthropicActor("claude-sonnet-5-5", "medium", 32768)
 		c.Narrator = anthropicActor("claude-haiku-5-5", "low", 4096)
 	},
@@ -382,7 +382,7 @@ var Presets = map[string]func(*Config){
 		c.Description = "Claude Fable 5.1 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenCode Zen)"
 		c.Orchestrator = Actor{
 			Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1",
-			APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "high", MaxTokens: 32768, ContextTokens: 1_000_000,
+			APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "xhigh", MaxTokens: 32768, ContextTokens: 1_000_000,
 		}
 		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "high", 32768, 200_000)
 		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 4096, 200_000)
