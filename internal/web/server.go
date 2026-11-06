@@ -862,23 +862,44 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	var err error
+	start := time.Now()
+	var sessions time.Duration
 	select {
 	case err = <-errc:
 	case <-ctx.Done():
 		// Sessions first, so their last events are on record; then the
 		// rest at once rather than one after another.
 		s.Shutdown(10 * time.Second)
+		sessions = time.Since(start)
 	}
-	var wg sync.WaitGroup
-	for _, stop := range []func(){stopWatcher, stopConnector, stopPublisher, func() {
+	parts := []struct {
+		name string
+		stop func()
+	}{{"phone replies", stopWatcher}, {"settings", stopConnector}, {"archives", stopPublisher}, {"web", func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
-	}} {
+	}}}
+	took := make([]time.Duration, len(parts))
+	var wg sync.WaitGroup
+	for i, part := range parts {
 		wg.Add(1)
-		go func() { defer wg.Done(); stop() }()
+		go func() {
+			defer wg.Done()
+			t := time.Now()
+			part.stop()
+			took[i] = time.Since(t)
+		}()
 	}
 	wg.Wait()
+	if total := time.Since(start); err == nil && total > 3*time.Second {
+		// Say where a slow stop went, so it can be fixed rather than guessed at.
+		detail := fmt.Sprintf("sessions %s", sessions.Round(100*time.Millisecond))
+		for i, part := range parts {
+			detail += fmt.Sprintf(", %s %s", part.name, took[i].Round(100*time.Millisecond))
+		}
+		s.logf("stopped in %s (%s)", total.Round(100*time.Millisecond), detail)
+	}
 	return err
 }
 
