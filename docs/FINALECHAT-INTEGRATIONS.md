@@ -114,6 +114,16 @@ The trusted Save sends an expiring, versioned command for the displayed runtime 
 
 Each run records `settings.runtime_started`. Archives retain these native events and capture `context/runtime-settings.json` when local status exists, explicitly distinguishing the captured observation from the native source prefix. Project defaults remain in their separate settings artifact. Credentials, control queues and runtime acknowledgements stay in private local state and are excluded from archives. The kill switch also gates session resources.
 
+## When the network or a provider fails
+
+A long-running `eagent serve` should never need a restart to get unstuck:
+
+- **No network.** Model calls that cannot reach their provider (DNS, no route, refused or dropped connections) wait and retry until it is back; the turn is not failed. A connection that went silent is dropped after two minutes, and idle HTTP/2 connections are pinged so a dead one is noticed in under a minute.
+- **Provider errors.** After repeated 5xx/429 failures the orchestrator pauses, then retries by itself after 1, 5, 15 and 30 minutes, then twice more an hour apart; a message from you resumes it at once. A call that runs out its whole 15-minute limit is tried once more, not five times.
+- **FinaleChat unreachable.** The phone mirror keeps trying its first contact, posts and questions (each idempotent) until FinaleChat answers; only a rejected token turns it off. A reply whose session cannot be resumed is retried every minute for a day, and the thread is told why once. A proxy's 404 during a deploy no longer marks an archive deleted.
+- **Relays.** A restarted or upgraded Codex relay finds its transcript again (by id, whatever day it began); tmux, screen, git and agent CLI calls are bounded; one missed liveness check no longer marks a relay exited.
+- **Shell.** Writing to a process that does not read its input fails after ten seconds; a working directory that cannot be entered is refused at start and escaped like a deleted one.
+
 ## Disable all outbound integration traffic
 
 `EAGENT_FINALECHAT=off` is the process-wide kill switch. `0`, `false`, and `no` also disable it, case-insensitively. It overrides artifact publication, forced publish, pairing, and stored connector credentials, including the publisher's final shutdown sweep. Local export, verification and recovery remain available.
