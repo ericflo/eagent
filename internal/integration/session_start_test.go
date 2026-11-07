@@ -397,4 +397,17 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	if !found || len(sv.Descriptor.Suggestions["models"]) == 0 || sv.Descriptor.Validate(grant) != nil {
 		t.Fatal("the session's model fields offer no models")
 	}
+	// A card per actor under Models, named providers, the rest under Behavior.
+	for _, f := range sv.Descriptor.Fields {
+		route := strings.HasPrefix(f.Key, "/routes/")
+		if route && (f.Section != "Models" || f.Group == "" || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
+			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
+		}
+		if strings.HasSuffix(f.Key, "/provider") && (f.Suggest == nil || f.Suggest.List != "providers") {
+			t.Errorf("%s names no providers", f.Key)
+		}
+	}
+	if len(sv.Descriptor.Suggestions["providers"]) != len(config.Providers) {
+		t.Fatalf("providers = %+v", sv.Descriptor.Suggestions["providers"])
+	}
 }

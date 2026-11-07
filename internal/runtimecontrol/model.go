@@ -72,22 +72,7 @@ func View(project, session, generation string, values Values, available bool) (s
 	}
 	fields := []control.Field{}
 	active := map[string]any{}
-	for _, spec := range []struct {
-		key, label, effect, description string
-		value, minimum, maximum         int
-	}{
-		{"/task_concurrency", "Task workers at once", "next_task", "Changes admission of queued tasks; currently running tasks continue.", values.TaskConcurrency, 1, 128},
-		{"/narrator_tick_seconds", "Narrator check interval (seconds)", "immediate", "Reschedules the next narrator check without interrupting a current turn.", values.NarratorTickSeconds, 1, 86400},
-		{"/narrator_quiet_seconds", "Narrator quiet limit (seconds)", "next_turn", "Used at the next narrator check and when preparing its next turn; zero disables the quiet-limit wake.", values.NarratorQuietSeconds, 0, 86400},
-	} {
-		minimum, maximum := float64(spec.minimum), float64(spec.maximum)
-		field := control.Field{Key: spec.key, Label: spec.label, Description: spec.description, Shape: control.Shape{Type: "integer", Minimum: &minimum, Maximum: &maximum}, Writable: available, Unset: false, Class: "preference", EffectiveWhen: spec.effect, Source: "runtime:" + generation}
-		if !available {
-			field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
-		}
-		fields = append(fields, field)
-		active[spec.key] = spec.value
-	}
+
 	// Per-actor model routes, editable live: provider (enum of catalog
 	// providers), model id (free string, validated at apply time against the
 	// catalog and the live model cache), and reasoning effort.
@@ -101,20 +86,36 @@ func View(project, session, generation string, values Values, available bool) (s
 	}
 	for _, actor := range []string{"orchestrator", "task", "narrator"} {
 		rt := values.Routes[actor]
-		routeField := func(key, label, description string, shape control.Shape) {
-			field := control.Field{Key: key, Label: label, Description: description, Shape: shape, Writable: available, Unset: false, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+		routeField := func(key, group, label, description string, shape control.Shape) {
+			field := control.Field{Key: key, Label: label, Description: description, Section: "Models", Group: group, Shape: shape, Writable: available, Unset: false, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
 			if !available {
 				field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
 			}
 			fields = append(fields, field)
 		}
 		name := strings.ToUpper(actor[:1]) + actor[1:]
-		routeField("/routes/"+actor+"/provider", name+" provider", "Catalog provider whose base URL and key variable the route uses.", control.Shape{Type: "string", Enum: providerEnum})
-		routeField("/routes/"+actor+"/model", name+" model", "Model id at that provider (see the Config page picker for the full list, live models included).", control.Shape{Type: "string", MaxLength: 200})
-		routeField("/routes/"+actor+"/effort", name+" reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
+		routeField("/routes/"+actor+"/provider", name, "Provider", "", control.Shape{Type: "string", Enum: providerEnum})
+		routeField("/routes/"+actor+"/model", name, "Model", "", control.Shape{Type: "string", MaxLength: 200})
+		routeField("/routes/"+actor+"/effort", name, "Reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
 		active["/routes/"+actor+"/provider"] = rt.Provider
 		active["/routes/"+actor+"/model"] = rt.Model
 		active["/routes/"+actor+"/effort"] = rt.Effort
+	}
+	for _, spec := range []struct {
+		key, group, label, effect, description string
+		value, minimum, maximum                int
+	}{
+		{"/task_concurrency", "Work", "Tasks at once", "next_task", "Queued tasks start as workers free up; running tasks continue.", values.TaskConcurrency, 1, 128},
+		{"/narrator_tick_seconds", "Narrator", "Check interval (seconds)", "immediate", "How often the narrator looks in while work goes on.", values.NarratorTickSeconds, 1, 86400},
+		{"/narrator_quiet_seconds", "Narrator", "Quiet limit (seconds)", "next_turn", "The longest you go without a progress line while work continues. 0 turns the reminder off.", values.NarratorQuietSeconds, 0, 86400},
+	} {
+		minimum, maximum := float64(spec.minimum), float64(spec.maximum)
+		field := control.Field{Key: spec.key, Label: spec.label, Description: spec.description, Section: "Behavior", Group: spec.group, Shape: control.Shape{Type: "integer", Minimum: &minimum, Maximum: &maximum}, Writable: available, Unset: false, Class: "preference", EffectiveWhen: spec.effect, Source: "runtime:" + generation}
+		if !available {
+			field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
+		}
+		fields = append(fields, field)
+		active[spec.key] = spec.value
 	}
 	raw, _ := json.Marshal(map[string]any{"schema": Schema, "generation": generation, "values": values})
 	version := artifact.Digest(raw)
