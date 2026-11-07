@@ -67,11 +67,36 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 	if grant.Key != view.Key || grant.Scope != "session" {
 		return view, fmt.Errorf("runtime grant identity changed")
 	}
+	decorateSessionView(project, &view, grant)
+	return view, nil
+}
+
+// decorateSessionView adds what a reader offers on a session's settings:
+// configurations, models and providers to pick from, and the connector's
+// own limits on writing them.
+func decorateSessionView(project string, view *settings.RemoteView, grant control.Grant) {
 	// Each actor's model field offers the known models of the provider
 	// picked beside it (picking one picks its provider too); any model id
 	// can still be typed in.
-	view.Descriptor.Suggestions = map[string][]control.Suggestion{"models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()}
+	// The configuration field offers each configuration with what it would
+	// set the routes to.
+	configs := settings.SessionConfigSuggestions(project)
+	view.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": configs, "models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()}
 	for i, f := range view.Descriptor.Fields {
+		if f.Key == "/config" {
+			view.Descriptor.Fields[i].Suggest = &control.Suggest{List: "configs"}
+			// A session started before configurations were recorded is
+			// named by the one its routes match, if any.
+			if view.Snapshot.Effective["/config"] == "" {
+				for _, c := range configs {
+					if len(c.Implies) > 0 && impliedBy(c.Implies, view.Snapshot.Effective) {
+						view.Snapshot.Effective["/config"] = c.Value
+						view.Snapshot.Saved["/config"] = c.Value
+						break
+					}
+				}
+			}
+		}
 		if !strings.HasPrefix(f.Key, "/routes/") {
 			continue
 		}
@@ -95,7 +120,16 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 			view.Descriptor.Fields[i].LockedReason = "This connector has no approval to apply preferences."
 		}
 	}
-	return view, nil
+}
+
+// impliedBy reports whether values already hold everything implies names.
+func impliedBy(implies, values map[string]any) bool {
+	for k, v := range implies {
+		if values[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // maxSessionResources bounds how many running sessions get a live settings

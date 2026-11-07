@@ -400,11 +400,32 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	// A card per actor under Models, named providers, the rest under Behavior.
 	for _, f := range sv.Descriptor.Fields {
 		route := strings.HasPrefix(f.Key, "/routes/")
+		if f.Key == "/config" {
+			if f.Section != "Models" || f.Suggest == nil || f.Suggest.List != "configs" || sv.Snapshot.Effective["/config"] != "glm" {
+				t.Errorf("configuration field = %+v, value %v", f, sv.Snapshot.Effective["/config"])
+			}
+			continue
+		}
 		if route && (f.Section != "Models" || f.Group == "" || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
 			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
 		}
 		if strings.HasSuffix(f.Key, "/provider") && (f.Suggest == nil || f.Suggest.List != "providers") {
 			t.Errorf("%s names no providers", f.Key)
+		}
+	}
+	// Each configuration says what it sets the session's routes to.
+	fields := map[string]bool{}
+	for _, f := range sv.Descriptor.Fields {
+		fields[f.Key] = true
+	}
+	configs := sv.Descriptor.Suggestions["configs"]
+	i := slices.IndexFunc(configs, func(s control.Suggestion) bool { return s.Value == "anthropic-high" })
+	if i < 0 || configs[i].Implies["/routes/orchestrator/model"] != "claude-fable-5-1" || configs[i].Implies["/routes/narrator/provider"] != "anthropic" || len(configs[i].Implies) != 9 {
+		t.Fatalf("anthropic-high in a session = %+v", configs)
+	}
+	for k := range configs[i].Implies {
+		if !fields[k] {
+			t.Errorf("implies %s, which the session has no field for", k)
 		}
 	}
 	if len(sv.Descriptor.Suggestions["providers"]) != len(config.Providers) {

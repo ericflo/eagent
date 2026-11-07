@@ -133,7 +133,7 @@ func TestProjectSettingsAreLaidOut(t *testing.T) {
 	if !slices.Contains(fields["/task/reasoning_effort"].Shape.Enum, any("xhigh")) {
 		t.Error("reasoning effort is not a choice")
 	}
-	if p := fields["/preset"]; p.Suggest == nil || p.Suggest.List != "configs" || slices.Contains(p.Shape.Enum, any("")) {
+	if p := fields["/preset"]; p.Suggest == nil || p.Suggest.List != "presets" || slices.Contains(p.Shape.Enum, any("")) {
 		t.Errorf("preset field = %+v", p)
 	}
 	// No saved configurations: nothing to choose, so nothing offered.
@@ -168,5 +168,49 @@ func TestHugeModelListsStillPublish(t *testing.T) {
 	}
 	if got[0].Label == "" || !strings.Contains(got[0].Detail, "per M") {
 		t.Errorf("first model = %+v", got[0])
+	}
+}
+
+// Choosing a preset among the project's settings puts its models back to the
+// preset's own, so each preset says what it gives those settings, by key.
+func TestProjectPresetsSayWhatTheySet(t *testing.T) {
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.File(project), []byte(`{"preset":"openai-med","narrator":{"reasoning_effort":"medium"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Project: project}
+	view, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]control.Field{}
+	for _, f := range view.Descriptor.Fields {
+		fields[f.Key] = f
+	}
+	if p := fields["/preset"]; p.Suggest == nil || p.Suggest.List != "presets" {
+		t.Fatalf("preset field = %+v", p)
+	}
+	presets := view.Descriptor.Suggestions["presets"]
+	if len(presets) != len(config.PresetNames()) {
+		t.Fatalf("%d presets suggested", len(presets))
+	}
+	i := slices.IndexFunc(presets, func(s control.Suggestion) bool { return s.Value == "anthropic-high" })
+	if i < 0 {
+		t.Fatal("anthropic-high not suggested")
+	}
+	got := presets[i]
+	// The preset's own narrator effort, not the project's: choosing it resets that.
+	if got.Implies["/orchestrator/model"] != "claude-fable-5-1" || got.Implies["/narrator/reasoning_effort"] != "low" || got.Implies["/task/api_key_env"] != "ANTHROPIC_API_KEY" || got.Group != "Anthropic" || !strings.Contains(got.Detail, "orchestrating") {
+		t.Fatalf("anthropic-high = %+v", got)
+	}
+	for _, p := range presets {
+		for k := range p.Implies {
+			if _, ok := fields[k]; !ok {
+				t.Errorf("%s implies %s, which is no setting", p.Value, k)
+			}
+		}
 	}
 }
