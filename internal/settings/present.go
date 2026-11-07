@@ -20,7 +20,7 @@ type fieldPlace struct {
 }
 
 var projectPlaces = map[string]fieldPlace{
-	"/preset":                              {"Models", "Configuration", "Preset", "The built-in lineup of models new sessions start from. This project's own settings still apply on top.", false},
+	"/preset":                              {"Models", "Configuration", "Preset", "The built-in lineup of models new sessions start from. Choosing one sets every actor's models to it.", false},
 	"/default_config":                      {"Models", "Configuration", "Saved configuration", "A configuration saved in this project that new sessions start from instead.", false},
 	"/task_concurrency":                    {"Behavior", "Work", "Tasks at once", "How many task workers run at the same time.", false},
 	"/max_task_turns":                      {"Behavior", "Work", "Turns per task", "Model calls a task may make before it is stopped.", false},
@@ -184,6 +184,65 @@ func ConfigSuggestions(project string) []control.Suggestion {
 		}
 		s.Group = group
 		out = append(out, s)
+	}
+	return out
+}
+
+// PresetSuggestions describe each built-in preset as choosing it among the
+// project's own settings gives it: the preset alone, since choosing one puts
+// the project's model settings back to it. Each implies the values it gives
+// those settings, by key.
+func PresetSuggestions(project string) []control.Suggestion {
+	var out []control.Suggestion
+	for _, name := range config.PresetNames() {
+		s := control.Suggestion{Value: name, Group: "Presets"}
+		if cfg, err := config.LoadBundleWithFile(project, name, "", map[string]json.RawMessage{}); err == nil {
+			s.Detail = clip(lineup(project, cfg), 300)
+			s.Implies = projectImplies(cfg)
+			if pr, ok := config.ProviderForURL(cfg.Orchestrator.BaseURL); ok {
+				s.Group = pr.Label
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// projectImplies maps a configuration's routes onto the project settings
+// that hold them: each actor's model, effort, and the route it is reached by.
+func projectImplies(cfg config.Config) map[string]any {
+	out := map[string]any{}
+	for actor, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
+		p := "/" + actor + "/"
+		for k, v := range map[string]string{"model": a.Model, "reasoning_effort": a.ReasoningEffort, "base_url": a.BaseURL, "protocol": a.Protocol, "api_key_env": a.APIKeyEnv} {
+			if v != "" && len(v) <= 500 {
+				out[p+k] = v
+			}
+		}
+		for k, v := range map[string]int{"max_tokens": a.MaxTokens, "context_tokens": a.ContextTokens} {
+			if v > 0 {
+				out[p+k] = v
+			}
+		}
+		if a.ReplayReasoning != nil {
+			out[p+"replay_reasoning"] = *a.ReplayReasoning
+		}
+	}
+	return out
+}
+
+// SessionConfigSuggestions are ConfigSuggestions for a running session's own
+// settings, whose routes are keyed /routes/ACTOR/provider, model, effort.
+func SessionConfigSuggestions(project string) []control.Suggestion {
+	out := ConfigSuggestions(project)
+	for i := range out {
+		implied := map[string]any{}
+		for k, v := range out[i].Implies {
+			if actor, input, ok := strings.Cut(k, "_"); ok {
+				implied["/routes/"+actor+"/"+input] = v
+			}
+		}
+		out[i].Implies = implied
 	}
 	return out
 }

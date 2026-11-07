@@ -113,7 +113,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			for _, v := range config.PresetNames() {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
-			field.Suggest = &control.Suggest{List: "configs"}
+			field.Suggest = &control.Suggest{List: "presets"}
 		}
 		if prefix == "/default_config" {
 			field.Shape.Enum = []any{}
@@ -138,6 +138,13 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	visit(reflect.TypeOf(config.Config{}), "", 0)
+	// The preset comes first among configuration settings: it is the usual choice.
+	if p := slices.IndexFunc(out.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/preset" }); p > 0 {
+		if d := slices.IndexFunc(out.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/default_config" }); d >= 0 && d < p {
+			preset := out.Descriptor.Fields[p]
+			out.Descriptor.Fields = slices.Insert(slices.Delete(out.Descriptor.Fields, p, p+1), d, preset)
+		}
+	}
 	out.Descriptor.Actions = s.Actions(s.Grant())
 	contextFiles := map[string]string{}
 	promptViews := map[string]any{}
@@ -185,7 +192,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
-	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "providers": ProviderSuggestions()}
+	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions()}
 	if slices.ContainsFunc(out.Descriptor.Actions, func(a control.Action) bool { return a.Operation == "session.start" }) {
 		out.Descriptor.Suggestions["models"] = ModelSuggestions(s.Project)
 	}

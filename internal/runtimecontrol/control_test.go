@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -320,6 +321,58 @@ func TestApplyValuesRoutes(t *testing.T) {
 	}
 	if view.Snapshot.Saved["/routes/orchestrator/model"] != c.Values.Routes["orchestrator"].Model {
 		t.Fatalf("saved route = %v", view.Snapshot.Saved["/routes/orchestrator/model"])
+	}
+}
+
+// Choosing a configuration sets every actor's route to what it runs here,
+// and route edits in the same proposal apply on top of it.
+func TestApplyValuesConfiguration(t *testing.T) {
+	project := t.TempDir()
+	c, err := New(project, "session", FromConfig(config.Defaults()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.Values.Config != "glm" {
+		t.Fatalf("defaults start as %q", c.Values.Config)
+	}
+	view, err := View(project, "session", c.Generation, c.Values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Snapshot.Effective["/config"] != "glm" || view.Descriptor.Fields[0].Key != "/config" {
+		t.Fatalf("configuration = %v, first field %s", view.Snapshot.Effective["/config"], view.Descriptor.Fields[0].Key)
+	}
+	grant, _ := Grant(project, "session")
+	proposal := func(edits ...control.Edit) control.Proposal {
+		return control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation, Edits: edits}
+	}
+	choose := control.Edit{Op: "set", Key: "/config", Value: "anthropic-high"}
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	if _, err := ApplyValues(project, c.Values, proposal(choose), view, grant); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Fatalf("keyless configuration: %v", err)
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "test")
+	out, err := ApplyValues(project, c.Values, proposal(choose), view, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := config.LoadBundle(project, "anthropic-high", "")
+	if out.Config != "anthropic-high" || !reflect.DeepEqual(out.Routes, FromConfig(want).Routes) {
+		t.Fatalf("after anthropic-high: %+v", out)
+	}
+	if c.Values.Routes["orchestrator"].Model == out.Routes["orchestrator"].Model {
+		t.Fatal("the controller's own routes changed under the proposal")
+	}
+	out, err = ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/routes/narrator/model", Value: "claude-opus-5-5"}, choose), view, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Routes["narrator"].Model != "claude-opus-5-5" || out.Routes["task"] != FromConfig(want).Routes["task"] {
+		t.Fatalf("a change on top: %+v", out.Routes)
+	}
+	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/config", Value: "no-such"}), view, grant); err == nil {
+		t.Fatal("unknown configuration accepted")
 	}
 }
 

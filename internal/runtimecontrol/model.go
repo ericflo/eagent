@@ -28,6 +28,10 @@ type Values struct {
 	// provider id + model id + reasoning effort. Changed at runtime through
 	// the session-scoped settings resource; applied between turns.
 	Routes map[string]Route `json:"routes,omitempty"`
+	// Config is the configuration the routes were last set from as a whole
+	// (a preset, or bundle:NAME); routes changed one by one since still
+	// name it, so a reader can say what they were changed from.
+	Config string `json:"config,omitempty"`
 }
 
 // Route is one actor's model route pick.
@@ -45,6 +49,14 @@ func FromConfig(c config.Config) Values {
 			pid = pr.ID
 		}
 		v.Routes[actor] = Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
+	}
+	switch {
+	case c.Name != "":
+		v.Config = "bundle:" + c.Name
+	case c.Preset != "":
+		v.Config = c.Preset
+	default:
+		v.Config = "glm" // the built-in defaults are its lineup
 	}
 	return v
 }
@@ -84,6 +96,18 @@ func View(project, session, generation string, values Values, available bool) (s
 	for _, e := range config.EffortOrder {
 		effortEnum = append(effortEnum, e)
 	}
+	// The configuration the routes come from: choosing one sets every
+	// actor's route to what it runs in this project.
+	configs := []any{}
+	for _, name := range settings.ConfigChoices(project) {
+		configs = append(configs, name)
+	}
+	configField := control.Field{Key: "/config", Label: "Configuration", Description: "Choosing one sets every actor's provider, model and effort to what it runs in this project. This session only.", Section: "Models", Shape: control.Shape{Type: "string", Enum: configs}, Writable: available, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+	if !available {
+		configField.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
+	}
+	fields = append(fields, configField)
+	active["/config"] = values.Config
 	for _, actor := range []string{"orchestrator", "task", "narrator"} {
 		rt := values.Routes[actor]
 		routeField := func(key, group, label, description string, shape control.Shape) {
@@ -142,7 +166,34 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		routes[k] = v
 	}
 	touched := map[string]bool{}
+	// A configuration chosen sets every route to what it runs here; route
+	// edits in the same proposal then apply on top of it.
 	for _, edit := range proposal.Edits {
+		if edit.Key != "/config" {
+			continue
+		}
+		name, ok := edit.Value.(string)
+		if edit.Op != "set" || !ok {
+			return before, fmt.Errorf("choose a configuration by name")
+		}
+		preset, bundle := name, ""
+		if b, isBundle := strings.CutPrefix(name, "bundle:"); isBundle {
+			preset, bundle = "", b
+		}
+		cfg, err := config.LoadBundle(project, preset, bundle)
+		if err != nil {
+			return before, fmt.Errorf("configuration %s: %w", name, err)
+		}
+		for actor, rt := range FromConfig(cfg).Routes {
+			routes[actor] = rt
+			touched[actor] = true
+		}
+		before.Config = name
+	}
+	for _, edit := range proposal.Edits {
+		if edit.Key == "/config" {
+			continue
+		}
 		if strings.HasPrefix(edit.Key, "/routes/") {
 			parts := strings.Split(strings.TrimPrefix(edit.Key, "/routes/"), "/")
 			if len(parts) != 2 {
