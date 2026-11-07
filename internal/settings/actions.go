@@ -191,55 +191,47 @@ var StartActors = []string{"orchestrator", "task", "narrator"}
 // choose: the first message, where it starts, an agent to relay to, and
 // (asked of the user, in this order) the configuration it starts from and
 // each actor's provider, model and reasoning effort. Each choice left out
-// comes from the project's own configuration.
+// comes from the project's own configuration, which each input's default
+// shows; what a configuration gives each actor is in its suggestion.
 func (s *Service) sessionStartAction(text func(int) control.Shape, choices func([]string) control.Shape, object func(map[string]control.Shape, ...string) control.Shape) control.Action {
 	params := map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}
-	configs := append([]string{}, config.PresetNames()...)
-	if bundles, err := config.ListBundles(s.Project); err == nil {
-		for _, b := range bundles {
-			configs = append(configs, "bundle:"+b)
+	configs := ConfigChoices(s.Project)
+	params["config"] = choices(configs)
+	configInput := control.Input{Name: "config", Label: "Configuration", Description: "The models and settings this session starts from. The project's own settings still apply on top.", Suggest: &control.Suggest{List: "configs"}}
+	// What a session started with no choices runs: the project as it loads.
+	project, err := config.LoadBundle(s.Project, "", "")
+	if err == nil {
+		switch {
+		case project.Name != "" && slices.Contains(configs, "bundle:"+project.Name):
+			configInput.Default = "bundle:" + project.Name
+		case slices.Contains(configs, project.Preset):
+			configInput.Default = project.Preset
+		case project.Preset == "" && project.Name == "":
+			configInput.Default = "glm" // the built-in defaults are its lineup
 		}
 	}
-	params["config"] = choices(configs)
-	inputs := []control.Input{{Name: "config", Label: "Configuration", Description: "A preset, or a configuration saved in this project (bundle:NAME). Empty: the project's own."}}
+	inputs := []control.Input{configInput}
 	var providers []string
 	for _, pr := range config.Providers {
 		providers = append(providers, pr.ID)
 	}
 	for _, actor := range StartActors {
-		name := strings.ToUpper(actor[:1]) + actor[1:]
+		name := actorName(actor)
 		params[actor+"_provider"] = choices(providers)
 		params[actor+"_model"] = text(200)
 		params[actor+"_effort"] = choices(config.EffortOrder)
-		inputs = append(inputs,
-			control.Input{Name: actor + "_provider", Label: name + " provider"},
-			control.Input{Name: actor + "_model", Label: name + " model", Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}},
-			control.Input{Name: actor + "_effort", Label: name + " reasoning effort"})
+		provider := control.Input{Name: actor + "_provider", Label: "Provider", Group: name, Suggest: &control.Suggest{List: "providers"}}
+		model := control.Input{Name: actor + "_model", Label: "Model", Group: name, Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}}
+		effort := control.Input{Name: actor + "_effort", Label: "Reasoning effort", Group: name}
+		if err == nil {
+			route := routeInputs(map[string]config.Actor{"orchestrator": project.Orchestrator, "task": project.Task, "narrator": project.Narrator}[actor])
+			for in, key := range map[*control.Input]string{&provider: "provider", &model: "model", &effort: "effort"} {
+				if v, ok := route[key]; ok {
+					in.Default = v
+				}
+			}
+		}
+		inputs = append(inputs, provider, model, effort)
 	}
 	return control.Action{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(params, "prompt"), Inputs: inputs}
-}
-
-// ModelSuggestions are the models eagent knows of (the built-in catalog and
-// the providers' live lists as last cached), grouped by provider id, for a
-// client to offer as choices. Any model id can still be typed in.
-func ModelSuggestions(project string) []control.Suggestion {
-	models := config.KnownModels(project)
-	out := make([]control.Suggestion, 0, len(models))
-	for _, m := range models {
-		label := m.Label
-		if pr, ok := config.ProviderByID(m.Provider); ok {
-			label += " · " + pr.Label
-		}
-		if m.Price != nil {
-			label += fmt.Sprintf(" · $%g/$%g", m.Price.In, m.Price.Out)
-		}
-		if len(label) > 200 {
-			label = label[:200]
-		}
-		if m.ID == "" || len(m.ID) > 500 {
-			continue
-		}
-		out = append(out, control.Suggestion{Value: m.ID, Label: label, Group: m.Provider})
-	}
-	return out
 }

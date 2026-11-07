@@ -68,11 +68,17 @@ func runtimeSnapshot(project, session string, grant control.Grant) (settings.Rem
 		return view, fmt.Errorf("runtime grant identity changed")
 	}
 	// Each actor's model field offers the known models of the provider
-	// picked beside it; any model id can still be typed in.
-	view.Descriptor.Suggestions = map[string][]control.Suggestion{"models": settings.ModelSuggestions(project)}
+	// picked beside it (picking one picks its provider too); any model id
+	// can still be typed in.
+	view.Descriptor.Suggestions = map[string][]control.Suggestion{"models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()}
 	for i, f := range view.Descriptor.Fields {
-		if actor, ok := strings.CutSuffix(strings.TrimPrefix(f.Key, "/routes/"), "/model"); ok && strings.HasPrefix(f.Key, "/routes/") {
+		if !strings.HasPrefix(f.Key, "/routes/") {
+			continue
+		}
+		if actor, ok := strings.CutSuffix(strings.TrimPrefix(f.Key, "/routes/"), "/model"); ok {
 			view.Descriptor.Fields[i].Suggest = &control.Suggest{List: "models", GroupBy: "/routes/" + actor + "/provider"}
+		} else if strings.HasSuffix(f.Key, "/provider") {
+			view.Descriptor.Fields[i].Suggest = &control.Suggest{List: "providers"}
 		}
 	}
 	canApply, preferences, routes := false, false, false

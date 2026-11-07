@@ -107,21 +107,27 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
 		}
+		// Leaving these unset is how "none" is chosen.
 		if prefix == "/preset" {
-			field.Shape.Enum = []any{""}
+			field.Shape.Enum = []any{}
 			for _, v := range config.PresetNames() {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
+			field.Suggest = &control.Suggest{List: "configs"}
 		}
 		if prefix == "/default_config" {
-			field.Shape.Enum = []any{""}
+			field.Shape.Enum = []any{}
 			names, _ := config.ListBundles(s.Project)
 			for _, v := range names {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
 		}
-		if prefix == "/persona" {
-			field.Description = "Narrator voice for new or resumed sessions."
+		placeProjectField(&field)
+		if prefix == "/default_config" && len(field.Shape.Enum) == 0 {
+			field.Advanced, field.Writable = true, false
+			if field.LockedReason == "" {
+				field.LockedReason = "No configuration is saved in this project yet."
+			}
 		}
 		out.Descriptor.Fields = append(out.Descriptor.Fields, field)
 		if v, ok := pointerValue(onDisk, prefix); ok && v != nil {
@@ -179,8 +185,9 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
+	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "providers": ProviderSuggestions()}
 	if slices.ContainsFunc(out.Descriptor.Actions, func(a control.Action) bool { return a.Operation == "session.start" }) {
-		out.Descriptor.Suggestions = map[string][]control.Suggestion{"models": ModelSuggestions(s.Project)}
+		out.Descriptor.Suggestions["models"] = ModelSuggestions(s.Project)
 	}
 	if err := out.Descriptor.Validate(grant); err != nil {
 		return out, err
