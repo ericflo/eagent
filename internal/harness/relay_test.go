@@ -137,7 +137,8 @@ func TestRelaySessionForwardsVerbatimAndRefusesToDoTheWork(t *testing.T) {
 	if got := seat.sentTexts(); len(got) != 1 || got[0] != brief {
 		t.Fatalf("sent to the agent %q, want the brief verbatim", got)
 	}
-	if len(*launched) != 1 || (*launched)[0].Profile.Model != "gpt-6-astra" || (*launched)[0].Dir != rt.projectPath() {
+	// The built-in profile leaves the model to Codex's own configuration.
+	if len(*launched) != 1 || (*launched)[0].Profile.Model != "" || (*launched)[0].Dir != rt.projectPath() {
 		t.Fatalf("launched %+v", *launched)
 	}
 	if !seat.wasKilled() {

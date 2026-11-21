@@ -67,6 +67,9 @@ type Options struct {
 	// session starts that agent in StartDir (or the project) and is a relay
 	// to it from the first message.
 	Relay string
+	// RelayModel and RelayEffort, when set, are that agent's model and
+	// reasoning effort instead of the profile's (or the agent's own).
+	RelayModel, RelayEffort string
 }
 
 // Runtime is one live session.
@@ -125,6 +128,7 @@ type Runtime struct {
 	relays              relaySeats
 	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	relayNotifyDone     map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
+	relayRepick         map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
 	relayQuiet          time.Duration          // progress cadence the user set with /updates (when relayQuietSet)
 	relayQuietSet       bool
 	toolImagesMu        sync.Mutex
@@ -231,7 +235,7 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		r.append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
 	}
 	if profile := strings.TrimSpace(opts.Relay); profile != "" {
-		if _, err := r.startRelay(profile, r.workDir(""), "", false); err != nil {
+		if _, err := r.startRelay(profile, r.workDir(""), "", false, relayPick{strings.TrimSpace(opts.RelayModel), strings.TrimSpace(opts.RelayEffort)}); err != nil {
 			// The session still starts, so the user hears why on the phone
 			// too; the orchestrator is told to explain.
 			r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: err.Error()}))
@@ -969,7 +973,7 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		}
 	case "/help", "/?":
 		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /quit  (anything else is sent to the agent)")
-		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
+		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}

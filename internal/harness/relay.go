@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -94,12 +95,23 @@ func (s *relaySeats) all() map[string]relaySeat {
 	return out
 }
 
-// relaySpec builds the launch description for a profile. Loop goroutine
-// (or before the loop starts).
-func (r *Runtime) relaySpec(name, profile, dir string) (relay.Spec, error) {
+// relayPick is a session's choice of model and reasoning effort for a
+// relay, over its profile's ("" keeps the profile's).
+type relayPick struct{ Model, Effort string }
+
+// relaySpec builds the launch description for a profile with the session's
+// picks. Loop goroutine (or before the loop starts).
+func (r *Runtime) relaySpec(name, profile, dir string, pick relayPick) (relay.Spec, error) {
 	p, ok := r.cfg.Relay.RelayProfiles()[profile]
 	if !ok {
 		return relay.Spec{}, fmt.Errorf("no relay profile %q (have %s)", profile, strings.Join(r.cfg.Relay.RelayProfileNames(), ", "))
+	}
+	// A profile that names its own model keeps its own label; otherwise the
+	// label says what it runs ("Codex · GPT-6.2-Astra xhigh").
+	custom := p.Label != "" && p.Model != "" && pick == (relayPick{})
+	p = p.With(pick.Model, pick.Effort)
+	if !custom {
+		p.Label = relay.Label(p.Agent, r.opts.Project, p.Model, p.Effort)
 	}
 	spec := relay.Spec{Session: r.sess.ID, Name: name, Profile: p, Dir: dir}
 	if p.Agent == "claude" {
@@ -115,10 +127,36 @@ func (r *Runtime) relaySpec(name, profile, dir string) (relay.Spec, error) {
 	return spec, nil
 }
 
-// startRelay launches an agent and makes the session a relay to it. resume
-// continues the named relay's own session (a restart). Loop goroutine (or
-// before the loop starts).
-func (r *Runtime) startRelay(profile, dir, name string, resume bool) (string, error) {
+// pickArg reads a model or effort a tool was given: "default" (or nothing)
+// leaves it to the profile and the agent.
+func pickArg(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "default") {
+		return ""
+	}
+	return s
+}
+
+// checkRelayPick refuses an effort the profile's agent does not take, before
+// anything starts.
+func (r *Runtime) checkRelayPick(profile string, pick relayPick) error {
+	p, ok := r.cfg.Relay.RelayProfiles()[profile]
+	if !ok {
+		return fmt.Errorf("no relay profile %q (have %s)", profile, strings.Join(r.cfg.Relay.RelayProfileNames(), ", "))
+	}
+	if efforts := relay.AgentEfforts(p.Agent); pick.Effort != "" && len(efforts) > 0 && !slices.Contains(efforts, pick.Effort) {
+		return fmt.Errorf("%s takes reasoning effort %s, not %q", relay.AgentName(p.Agent), strings.Join(efforts, ", "), pick.Effort)
+	}
+	if len(pick.Model) > 200 || strings.ContainsAny(pick.Model, " \t\n") {
+		return fmt.Errorf("%q is not a model name", pick.Model)
+	}
+	return nil
+}
+
+// startRelay launches an agent and makes the session a relay to it, with
+// the session's model and effort picks. resume continues the named relay's
+// own session (a restart). Loop goroutine (or before the loop starts).
+func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayPick) (string, error) {
 	if name == "" {
 		name = profile
 		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active(); i++ {
@@ -131,7 +169,12 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool) (string, er
 	if abs, err := filepath.Abs(dir); err == nil {
 		dir = abs
 	}
-	spec, err := r.relaySpec(name, profile, dir)
+	if !resume {
+		if err := r.checkRelayPick(profile, pick); err != nil {
+			return "", err
+		}
+	}
+	spec, err := r.relaySpec(name, profile, dir, pick)
 	if err != nil {
 		return "", err
 	}
@@ -146,7 +189,9 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool) (string, er
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
 		Name: name, Profile: profile, Agent: spec.Profile.Agent, Label: spec.Profile.Label, Dir: dir,
 		Host: started.Host, Target: started.Target, Command: started.Command, InnerID: started.InnerID, Resumed: resume && innerID != "",
+		Model: pick.Model, Effort: pick.Effort,
 	}))
+	r.syncRelaySettings()
 	r.watchSeat(name, seat)
 	return name, nil
 }
@@ -176,6 +221,9 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			return
 		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000)}))
+		if ev.State == "idle" {
+			r.applyWaitingRepick(name)
+		}
 	case relay.KindDelivered:
 		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Detail: clipRunes(ev.Detail, 2000)}))
 	case relay.KindProgress:
@@ -185,6 +233,8 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
+		// A model or effort change that waited for this turn to end.
+		r.applyWaitingRepick(name)
 	case relay.KindLimit:
 		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted}))
 	case relay.KindActivity:
@@ -208,7 +258,7 @@ func (r *Runtime) reattachRelays() []string {
 		if rel.State == "exited" {
 			continue
 		}
-		spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir)
+		spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort})
 		if err == nil {
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
@@ -471,7 +521,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			if dir != "" && !filepath.IsAbs(dir) {
 				dir = filepath.Join(r.workDir(""), dir)
 			}
-			started, err = r.startRelay(profile, dir, "", false)
+			started, err = r.startRelay(profile, dir, "", false, relayPick{pickArg(str("model")), pickArg(str("effort"))})
 		})
 		if err != nil {
 			return "Could not start the relay: " + err.Error(), true
@@ -599,7 +649,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				r.relays.drop(rel.Name, seat)
 			}
 			var started string
-			r.sync(func() { started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true) })
+			r.sync(func() {
+				started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
+			})
 			if err != nil {
 				return "Could not restart: " + err.Error(), true
 			}
@@ -614,7 +666,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				r.relays.drop(rel.Name, seat)
 			}
 			var started string
-			r.sync(func() { started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true) })
+			r.sync(func() {
+				started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
+			})
 			if err != nil {
 				return "Upgraded, but the restart failed: " + err.Error() + "\n" + out, true
 			}
@@ -636,7 +690,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					r.relays.drop(rel.Name, seat)
 				}
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "handed over to " + profile}))
-				started, err = r.startRelay(profile, rel.Dir, "", false)
+				started, err = r.startRelay(profile, rel.Dir, "", false, relayPick{pickArg(str("model")), pickArg(str("effort"))})
 			})
 			if err != nil {
 				return "Could not switch: " + err.Error(), true
@@ -653,6 +707,35 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				}
 			}
 			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false
+		case "model":
+			pick := relayPick{strings.TrimSpace(str("model")), strings.TrimSpace(str("effort"))}
+			if pick == (relayPick{}) {
+				return "model: say the model, the effort, or both (\"default\" goes back to the agent's own)", true
+			}
+			var msg string
+			r.sync(func() {
+				// "default" clears that pick; the other one is kept.
+				next := relayPick{rel.Model, rel.Effort}
+				if p, ok := r.relayRepick[rel.Name]; ok {
+					next = p
+				}
+				for _, f := range []struct {
+					in  string
+					out *string
+				}{{pick.Model, &next.Model}, {pick.Effort, &next.Effort}} {
+					switch {
+					case strings.EqualFold(f.in, "default"):
+						*f.out = ""
+					case f.in != "":
+						*f.out = f.in
+					}
+				}
+				msg, err = r.repickRelay(rel.Name, next)
+			})
+			if err != nil {
+				return err.Error(), true
+			}
+			return msg, false
 		case "stop":
 			if seat != nil {
 				_ = seat.Kill()
@@ -1105,7 +1188,7 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 
 // relayCommands are the slash commands a user can type (terminal, web UI,
 // phone, Messenger) to manage a relay without the orchestrator.
-var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true, "/screen": true, "/notify-done": true}
+var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/model": true, "/upgrade": true, "/switch": true, "/autopilot": true, "/updates": true, "/stop-relay": true, "/relay": true, "/screen": true, "/notify-done": true}
 
 // relayCommand runs one. Called on the loop; the work runs on its own
 // goroutine (an upgrade takes minutes) and the outcome is told to the user
@@ -1170,6 +1253,36 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 				return
 			}
 			params["action"], params["profile"] = "switch", args[0]
+		case "/model":
+			// /model sonnet, /model high, /model opus max, /model default.
+			var agent, now string
+			r.sync(func() {
+				if active := r.st.ActiveRelays(); len(active) > 0 {
+					rel := active[0]
+					agent = rel.Agent
+					pick := relayPick{rel.Model, rel.Effort}
+					if p, ok := r.relayRepick[rel.Name]; ok {
+						pick = p
+					}
+					now = rel.Who() + " runs " + r.pickText(rel, pick) + "."
+				}
+			})
+			if len(args) == 0 {
+				r.deliverMessage(now+" Change it with /model <model> [effort], e.g. /model sonnet high, or /model default for its own. It restarts on the same conversation, after the turn it's on.", false)
+				return
+			}
+			params["action"] = "model"
+			efforts := relay.AgentEfforts(agent)
+			for _, a := range args[:min(len(args), 2)] {
+				switch {
+				case slices.Contains(efforts, strings.ToLower(a)):
+					params["effort"] = strings.ToLower(a)
+				case params["model"] == nil:
+					params["model"] = a
+				default:
+					params["effort"] = a // "default", or an effort the tool refuses
+				}
+			}
 		case "/autopilot":
 			tool = "relay_autopilot"
 			switch {

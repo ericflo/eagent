@@ -111,6 +111,13 @@ func (c *Controller) heartbeat(available bool) error {
 	return nil
 }
 
+// Update replaces the values the runtime reports (a relay started or
+// stopped) and publishes them at once. Loop goroutine.
+func (c *Controller) Update(values Values) error {
+	c.Values = values
+	return c.heartbeat(true)
+}
+
 func (c *Controller) Poll() error {
 	if time.Since(c.lastHeartbeat) >= 10*time.Second {
 		if err := c.heartbeat(true); err != nil {

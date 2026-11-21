@@ -193,8 +193,19 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	out.Descriptor.Actions = s.Actions(grant)
 	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions()}
-	if slices.ContainsFunc(out.Descriptor.Actions, func(a control.Action) bool { return a.Operation == "session.start" }) {
+	for _, a := range out.Descriptor.Actions {
+		if a.Operation != "session.start" {
+			continue
+		}
 		out.Descriptor.Suggestions["models"] = ModelSuggestions(s.Project)
+		// Each relayed agent's models, for its model input.
+		for _, in := range a.Inputs {
+			if in.Suggest != nil && in.Suggest.List != "models" {
+				if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
+					out.Descriptor.Suggestions[in.Suggest.List] = RelayModelSuggestions(agent, s.Project)
+				}
+			}
+		}
 	}
 	if err := out.Descriptor.Validate(grant); err != nil {
 		return out, err

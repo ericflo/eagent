@@ -397,3 +397,47 @@ func TestResolveLiveModelStaticAndCached(t *testing.T) {
 		t.Fatal("unknown provider resolved")
 	}
 }
+
+// A relay's model and effort are session settings: shown first, with what
+// leaving them alone gives, settable and resettable.
+func TestRelayFields(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	project := t.TempDir()
+	values := FromConfig(config.Defaults())
+	values.Relays = map[string]RelayRoute{"claude": {Agent: "claude", Model: "opus", DefaultModel: "fable", DefaultEffort: "medium"}}
+	view, err := View(project, "session", "gen", values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _ := Grant(project, "session")
+	if err := view.Descriptor.Validate(grant); err != nil {
+		t.Fatal(err)
+	}
+	model, effort := view.Descriptor.Fields[0], view.Descriptor.Fields[1]
+	if model.Key != "/relays/claude/model" || model.Group != "Claude Code" || !model.Unset || model.Suggest == nil || model.Suggest.List != "claude_models" || len(view.Descriptor.Suggestions["claude_models"]) == 0 {
+		t.Fatalf("model field %+v", model)
+	}
+	if effort.Key != "/relays/claude/effort" || len(effort.Shape.Enum) != 5 || effort.EffectiveWhen != "next_turn" {
+		t.Fatalf("effort field %+v", effort)
+	}
+	if view.Snapshot.Saved["/relays/claude/model"] != "opus" || view.Snapshot.Effective["/relays/claude/model"] != "opus" {
+		t.Fatalf("picked model not shown: %v / %v", view.Snapshot.Saved, view.Snapshot.Effective)
+	}
+	if _, saved := view.Snapshot.Saved["/relays/claude/effort"]; saved || view.Snapshot.Effective["/relays/claude/effort"] != "medium" {
+		t.Fatalf("default effort: %v / %v", view.Snapshot.Saved, view.Snapshot.Effective)
+	}
+	proposal := func(edits ...control.Edit) control.Proposal {
+		return control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: "gen", Edits: edits}
+	}
+	after, err := ApplyValues(project, values, proposal(control.Edit{Op: "unset", Key: "/relays/claude/model"}, control.Edit{Op: "set", Key: "/relays/claude/effort", Value: "max"}), view, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Relays["claude"]; got.Model != "" || got.Effort != "max" || values.Relays["claude"].Model != "opus" {
+		t.Fatalf("applied %+v (before %+v)", got, values.Relays["claude"])
+	}
+	if _, err := ApplyValues(project, values, proposal(control.Edit{Op: "set", Key: "/relays/claude/effort", Value: "ultra"}), view, grant); err == nil {
+		t.Fatal("an effort Claude Code does not take was accepted")
+	}
+}

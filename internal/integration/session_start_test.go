@@ -352,12 +352,24 @@ func TestSpawnCommandCarriesPicks(t *testing.T) {
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--config eric") {
 		t.Fatalf("bundle args = %v", cmd.Args)
 	}
+	// A relay's model and effort reach the detached process as flags.
+	cmd, _ = spawnCommand(project, SessionRequest{Prompt: "go", Relay: "claude", RelayModel: "sonnet", RelayEffort: "high"}, filepath.Join(project, "announce"))
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--relay claude --relay-model sonnet --relay-effort high") {
+		t.Fatalf("relay args = %v", cmd.Args)
+	}
 }
 
 // Both the project's start action and a session's model fields offer the
 // known models, narrowed by the provider picked beside them.
 func TestModelSuggestionsAreOffered(t *testing.T) {
 	t.Setenv("EAGENT_FINALECHAT", "on")
+	codexHome, claudeHome := t.TempDir(), t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
+	t.Setenv("ANTHROPIC_MODEL", "")
+	if err := os.WriteFile(filepath.Join(claudeHome, "settings.json"), []byte(`{"model":"fable","effortLevel":"medium"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	project := t.TempDir()
 	s := &settings.Service{Project: project}
 	view, err := s.RemoteSnapshot(s.Grant())
@@ -373,8 +385,28 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			start = a
 		}
 	}
-	if len(start.Inputs) != 10 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
+	if len(start.Inputs) != 14 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
 		t.Fatalf("start inputs = %+v", start.Inputs)
+	}
+	// eagent's own models apply only when eagent does the work; each relay
+	// profile's model and effort only with that profile, defaulting to what
+	// the agent's own configuration says.
+	inputs := map[string]control.Input{}
+	for _, in := range start.Inputs {
+		inputs[in.Name] = in
+	}
+	if w := inputs["orchestrator_model"].When["relay"]; len(w) != 1 || w[0] != "" {
+		t.Fatalf("orchestrator model applies when %v", inputs["orchestrator_model"].When)
+	}
+	claudeModel, claudeEffort, codexModel := inputs["relay_claude_model"], inputs["relay_claude_effort"], inputs["relay_codex_model"]
+	if w := claudeModel.When["relay"]; len(w) != 1 || w[0] != "claude" || claudeModel.Default != "fable" || claudeEffort.Default != "medium" || claudeModel.Group != "Claude Code" || claudeModel.Suggest == nil || claudeModel.Suggest.List != "claude_models" {
+		t.Fatalf("claude inputs %+v %+v", claudeModel, claudeEffort)
+	}
+	if codexModel.Default != nil || codexModel.Suggest == nil || len(view.Descriptor.Suggestions["codex_models"]) == 0 || view.Descriptor.Suggestions["claude_models"][0].Value != "fable" {
+		t.Fatalf("codex input %+v, lists %d/%d", codexModel, len(view.Descriptor.Suggestions["codex_models"]), len(view.Descriptor.Suggestions["claude_models"]))
+	}
+	if model, effort := RelayPicks(map[string]any{"relay_claude_model": " sonnet ", "relay_codex_model": "x", "relay_claude_effort": "high"}, "claude"); model != "sonnet" || effort != "high" {
+		t.Fatalf("picks %q %q", model, effort)
 	}
 	sess, _ := store.Create(store.Root(project), time.Now())
 	_ = sess.Close()

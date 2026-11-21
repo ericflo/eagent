@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/settings"
 )
 
@@ -32,6 +34,26 @@ type Values struct {
 	// (a preset, or bundle:NAME); routes changed one by one since still
 	// name it, so a reader can say what they were changed from.
 	Config string `json:"config,omitempty"`
+	// Relays are the session's relays to external agents, by name, with
+	// the model and effort each runs. Changing one starts the agent again
+	// on its own conversation once its current turn ends.
+	Relays map[string]RelayRoute `json:"relays,omitempty"`
+}
+
+// RelayRoute is a relay's model and reasoning effort in this session.
+type RelayRoute struct {
+	Agent string `json:"agent"` // codex | claude
+	// Model and Effort are the session's picks ("" leaves it to the
+	// default below).
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// DefaultModel and DefaultEffort are what leaving a pick alone gives:
+	// the relay profile's, else the agent's own configured default ("" when
+	// neither says).
+	DefaultModel  string `json:"default_model,omitempty"`
+	DefaultEffort string `json:"default_effort,omitempty"`
+	// Waiting says a change waits for the agent's current turn to end.
+	Waiting bool `json:"waiting,omitempty"`
 }
 
 // Route is one actor's model route pick.
@@ -84,6 +106,61 @@ func View(project, session, generation string, values Values, available bool) (s
 	}
 	fields := []control.Field{}
 	active := map[string]any{}
+	// What leaving a relay's pick alone gives: shown, not saved.
+	defaults := map[string]any{}
+	suggestions := map[string][]control.Suggestion{}
+	locked := "This runtime is unavailable. A replacement process requires its own current generation."
+
+	// Each relay's model and effort first: in a relay session they are
+	// what does the work.
+	names := make([]string, 0, len(values.Relays))
+	for name := range values.Relays {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		rt := values.Relays[name]
+		who := relay.AgentName(rt.Agent)
+		group := who
+		if name != rt.Agent {
+			group = who + " (" + name + ")"
+		}
+		note := "Changing it starts " + who + " again on the same conversation, once the turn it is on ends."
+		if rt.Waiting {
+			note += " A change is waiting for its current turn to end."
+		}
+		list := rt.Agent + "_models"
+		if _, ok := suggestions[list]; !ok {
+			suggestions[list] = settings.RelayModelSuggestions(rt.Agent, project)
+		}
+		effortChoices := []any{}
+		for _, e := range relay.AgentEfforts(rt.Agent) {
+			effortChoices = append(effortChoices, e)
+		}
+		for _, spec := range []struct {
+			key, label, value, fallback string
+			shape                       control.Shape
+			suggest                     *control.Suggest
+		}{
+			{"/relays/" + name + "/model", "Model", rt.Model, rt.DefaultModel, control.Shape{Type: "string", MaxLength: 200}, &control.Suggest{List: list}},
+			{"/relays/" + name + "/effort", "Reasoning effort", rt.Effort, rt.DefaultEffort, control.Shape{Type: "string", Enum: effortChoices}, nil},
+		} {
+			description := note // once per card: under the model
+			if spec.suggest == nil {
+				description = ""
+			}
+			field := control.Field{Key: spec.key, Label: spec.label, Description: description, Section: "Models", Group: group, Shape: spec.shape, Suggest: spec.suggest, Writable: available, Unset: true, Class: "route", EffectiveWhen: "next_turn", Source: "runtime:" + generation}
+			if !available {
+				field.LockedReason = locked
+			}
+			fields = append(fields, field)
+			if spec.value != "" {
+				active[spec.key] = spec.value
+			} else if spec.fallback != "" && spec.shape.Validate(spec.fallback) == nil {
+				defaults[spec.key] = spec.fallback
+			}
+		}
+	}
 
 	// Per-actor model routes, editable live: provider (enum of catalog
 	// providers), model id (free string, validated at apply time against the
@@ -143,9 +220,20 @@ func View(project, session, generation string, values Values, available bool) (s
 	}
 	raw, _ := json.Marshal(map[string]any{"schema": Schema, "generation": generation, "values": values})
 	version := artifact.Digest(raw)
+	effective := map[string]any{}
+	for k, v := range active {
+		effective[k] = v
+	}
+	for k, v := range defaults {
+		effective[k] = v
+	}
+	descriptor := control.Descriptor{Format: control.Format, SchemaVersion: Schema, AdapterVersion: "1", Fields: fields}
+	if len(suggestions) > 0 {
+		descriptor.Suggestions = suggestions
+	}
 	return settings.RemoteView{Key: grant.Key, Label: grant.Label, Scope: "session", Generation: generation,
-		Descriptor: control.Descriptor{Format: control.Format, SchemaVersion: Schema, AdapterVersion: "1", Fields: fields},
-		Snapshot: control.Snapshot{Version: version, Context: project + " · " + session, Saved: active, Effective: active, RuntimeKnown: available, RuntimeVersion: version,
+		Descriptor: descriptor,
+		Snapshot: control.Snapshot{Version: version, Context: project + " · " + session, Saved: active, Effective: effective, RuntimeKnown: available, RuntimeVersion: version,
 			Details: map[string]any{"session_id": session, "thread_external_id": "eagent:" + session, "persistence": "This process only. Project defaults and future or resumed sessions are unchanged."}}}, nil
 }
 
@@ -164,6 +252,13 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	routes := map[string]Route{}
 	for k, v := range before.Routes {
 		routes[k] = v
+	}
+	var relays map[string]RelayRoute
+	if before.Relays != nil {
+		relays = map[string]RelayRoute{}
+		for k, v := range before.Relays {
+			relays[k] = v
+		}
 	}
 	touched := map[string]bool{}
 	// A configuration chosen sets every route to what it runs here; route
@@ -192,6 +287,35 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	}
 	for _, edit := range proposal.Edits {
 		if edit.Key == "/config" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(edit.Key, "/relays/"); ok {
+			name, field, _ := strings.Cut(rest, "/")
+			rt, exists := relays[name]
+			if !exists {
+				return before, fmt.Errorf("no relay %q in this session", name)
+			}
+			value := ""
+			switch edit.Op {
+			case "set":
+				s, ok := edit.Value.(string)
+				if !ok || strings.TrimSpace(s) == "" || strings.ContainsAny(s, " \t\n") {
+					return before, fmt.Errorf("%s must be a model or effort name", edit.Key)
+				}
+				value = s
+			case "unset":
+			default:
+				return before, fmt.Errorf("unsupported edit %q", edit.Op)
+			}
+			switch field {
+			case "model":
+				rt.Model = value
+			case "effort":
+				rt.Effort = value
+			default:
+				return before, fmt.Errorf("unsupported relay setting %q", edit.Key)
+			}
+			relays[name] = rt
 			continue
 		}
 		if strings.HasPrefix(edit.Key, "/routes/") {
@@ -257,6 +381,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		}
 	}
 	before.Routes = routes
+	before.Relays = relays
 	before.Revision++
 	return before, nil
 }

@@ -112,8 +112,13 @@ type Relay struct {
 type RelayProfile struct {
 	// Agent is the program: "codex" or "claude".
 	Agent string `json:"agent"`
-	// Label is shown on the phone ("Codex · GPT-6 Astra xhigh").
-	Label  string `json:"label,omitempty"`
+	// Label is shown on the phone ("Codex"); empty reads as the agent's name
+	// with the model it runs.
+	Label string `json:"label,omitempty"`
+	// Model and Effort are passed to the agent (codex -m and
+	// model_reasoning_effort, claude --model and --effort). Empty passes
+	// nothing, so the agent uses its own configured default. A session may
+	// pick others when it starts the relay, and change them while it runs.
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
 	// Args are extra command-line arguments, after the ones eagent adds.
@@ -125,12 +130,27 @@ type RelayProfile struct {
 	GitPull bool `json:"git_pull,omitempty"`
 }
 
-// BuiltinRelayProfiles are the profiles every project has.
+// BuiltinRelayProfiles are the profiles every project has. They name no
+// model or effort: each agent starts with the defaults in its own
+// configuration (~/.codex/config.toml, ~/.claude/settings.json), and a
+// session can choose others.
 func BuiltinRelayProfiles() map[string]RelayProfile {
 	return map[string]RelayProfile{
-		"codex":  {Agent: "codex", Label: "Codex · GPT-6 Astra xhigh", Model: "gpt-6-astra", Effort: "xhigh", Args: []string{"--yolo"}},
-		"claude": {Agent: "claude", Label: "Claude Code · Opus 5.5 xhigh", Model: "claude-opus-5-5", Effort: "xhigh", Args: []string{"--dangerously-skip-permissions"}},
+		"codex":  {Agent: "codex", Label: "Codex", Args: []string{"--yolo"}},
+		"claude": {Agent: "claude", Label: "Claude Code", Args: []string{"--dangerously-skip-permissions"}},
 	}
+}
+
+// With is the profile with a session's picks over its model and effort
+// ("" keeps the profile's own).
+func (p RelayProfile) With(model, effort string) RelayProfile {
+	if model != "" {
+		p.Model = model
+	}
+	if effort != "" {
+		p.Effort = effort
+	}
+	return p
 }
 
 // RelayProfiles merges the built-in profiles with the configured ones.

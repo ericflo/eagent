@@ -459,6 +459,11 @@ type RelayStartData struct {
 	InnerID    string `json:"inner_id,omitempty"`
 	Transcript string `json:"transcript,omitempty"`
 	Resumed    bool   `json:"resumed,omitempty"`
+	// Model and Effort are the session's picks over the profile's ("" keeps
+	// the profile's, and a profile without one leaves it to the agent's own
+	// configuration). A restart starts it with the same picks.
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // RelayInnerData records where the agent keeps its own transcript.

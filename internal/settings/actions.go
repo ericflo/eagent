@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 func (s *Service) Actions(grant control.Grant) []control.Action {
@@ -184,20 +186,94 @@ func (s *Service) relayChoices() []string {
 	return append([]string{""}, cfg.Relay.RelayProfileNames()...)
 }
 
+// RelayInput names the session.start input for a relay profile's model or
+// effort ("relay_codex_model"), "" for a profile whose name cannot be one.
+func RelayInput(profile, field string) string {
+	if profile == "" || len(profile) > 40 || strings.Trim(profile, "abcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+		return ""
+	}
+	return "relay_" + profile + "_" + field
+}
+
+// RelayModelSuggestions are the models an agent's relay can run, for its
+// model inputs and fields (any other name can still be typed).
+func RelayModelSuggestions(agent, project string) []control.Suggestion {
+	out := []control.Suggestion{}
+	for _, m := range relay.AgentModels(agent, project) {
+		if len(m.ID) > 500 {
+			continue
+		}
+		out = append(out, control.Suggestion{Value: m.ID, Label: clip(m.Label, 200), Detail: clip(m.Detail, 300)})
+	}
+	return out
+}
+
+// relayStartInputs are each relay profile's model and effort for a session
+// started with it, asked only when that profile is chosen. Left alone, the
+// agent runs what the profile names, else its own configured default; each
+// input's default shows which.
+func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]string) control.Shape, params map[string]control.Shape) []control.Input {
+	cfg, err := config.Load(s.Project, "")
+	if err != nil {
+		cfg = config.Defaults()
+	}
+	profiles := cfg.Relay.RelayProfiles()
+	var inputs []control.Input
+	for _, name := range cfg.Relay.RelayProfileNames() {
+		p := profiles[name]
+		modelName, effortName := RelayInput(name, "model"), RelayInput(name, "effort")
+		efforts := relay.AgentEfforts(p.Agent)
+		if modelName == "" || len(efforts) == 0 {
+			continue
+		}
+		who := relay.AgentName(p.Agent)
+		group := who
+		if name != p.Agent {
+			group = who + " (" + name + ")"
+		}
+		agentModel, agentEffort := relay.AgentDefaults(p.Agent)
+		when := map[string][]any{"relay": {name}}
+		params[modelName] = text(200)
+		params[effortName] = choices(efforts)
+		model := control.Input{Name: modelName, Label: "Model", Group: group, When: when, Suggest: &control.Suggest{List: p.Agent + "_models"},
+			Description: "Left alone, " + who + " uses the model in its own configuration."}
+		effort := control.Input{Name: effortName, Label: "Reasoning effort", Group: group, When: when,
+			Description: "Left alone, " + who + " uses the effort in its own configuration."}
+		if m := cmp.Or(p.Model, agentModel); m != "" && len(m) <= 200 {
+			model.Default = m
+		}
+		if e := cmp.Or(p.Effort, agentEffort); slices.Contains(efforts, e) {
+			effort.Default = e
+		}
+		if p.Model != "" {
+			model.Description = "Left alone, the " + name + " profile's model."
+		}
+		if p.Effort != "" {
+			effort.Description = "Left alone, the " + name + " profile's effort."
+		}
+		inputs = append(inputs, model, effort)
+	}
+	return inputs
+}
+
 // Actors whose model a new session may pick, in the order they are offered.
 var StartActors = []string{"orchestrator", "task", "narrator"}
 
 // sessionStartAction declares what a session started from the phone may
 // choose: the first message, where it starts, an agent to relay to, and
 // (asked of the user, in this order) the configuration it starts from and
-// each actor's provider, model and reasoning effort. Each choice left out
-// comes from the project's own configuration, which each input's default
-// shows; what a configuration gives each actor is in its suggestion.
+// each actor's provider, model and reasoning effort, or, with an agent to
+// relay to, that agent's model and effort. Each choice left out comes from
+// the project's own configuration (or the agent's), which each input's
+// default shows; what a configuration gives each actor is in its
+// suggestion.
 func (s *Service) sessionStartAction(text func(int) control.Shape, choices func([]string) control.Shape, object func(map[string]control.Shape, ...string) control.Shape) control.Action {
 	params := map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}
 	configs := ConfigChoices(s.Project)
 	params["config"] = choices(configs)
-	configInput := control.Input{Name: "config", Label: "Configuration", Description: "The models and settings this session starts from. The project's own settings still apply on top.", Suggest: &control.Suggest{List: "configs"}}
+	// eagent's own models are asked for only when eagent does the work.
+	eagentOnly := map[string][]any{"relay": {""}}
+	configInput := control.Input{Name: "config", Label: "Configuration", Description: "The models and settings this session starts from. The project's own settings still apply on top.", Suggest: &control.Suggest{List: "configs"}, When: eagentOnly}
 	// What a session started with no choices runs: the project as it loads.
 	project, err := config.LoadBundle(s.Project, "", "")
 	if err == nil {
@@ -220,9 +296,9 @@ func (s *Service) sessionStartAction(text func(int) control.Shape, choices func(
 		params[actor+"_provider"] = choices(providers)
 		params[actor+"_model"] = text(200)
 		params[actor+"_effort"] = choices(config.EffortOrder)
-		provider := control.Input{Name: actor + "_provider", Label: "Provider", Group: name, Suggest: &control.Suggest{List: "providers"}}
-		model := control.Input{Name: actor + "_model", Label: "Model", Group: name, Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}}
-		effort := control.Input{Name: actor + "_effort", Label: "Reasoning effort", Group: name}
+		provider := control.Input{Name: actor + "_provider", Label: "Provider", Group: name, Suggest: &control.Suggest{List: "providers"}, When: eagentOnly}
+		model := control.Input{Name: actor + "_model", Label: "Model", Group: name, Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}, When: eagentOnly}
+		effort := control.Input{Name: actor + "_effort", Label: "Reasoning effort", Group: name, When: eagentOnly}
 		if err == nil {
 			route := routeInputs(map[string]config.Actor{"orchestrator": project.Orchestrator, "task": project.Task, "narrator": project.Narrator}[actor])
 			for in, key := range map[*control.Input]string{&provider: "provider", &model: "model", &effort: "effort"} {
@@ -233,5 +309,6 @@ func (s *Service) sessionStartAction(text func(int) control.Shape, choices func(
 		}
 		inputs = append(inputs, provider, model, effort)
 	}
+	inputs = append(inputs, s.relayStartInputs(text, choices, params)...)
 	return control.Action{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(params, "prompt"), Inputs: inputs}
 }

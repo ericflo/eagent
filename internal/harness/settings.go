@@ -31,6 +31,7 @@ func (r *Runtime) stopRuntimeSettings() {
 
 func (r *Runtime) pollRuntimeSettings() {
 	if r.runtimeControl != nil && !r.ending {
+		r.syncRelaySettings()
 		if err := r.runtimeControl.Poll(); err != nil {
 			r.ui.Log("live settings: %v", err)
 		}
@@ -47,6 +48,17 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	if err != nil {
 		return err
 	}
+	// So is a relay pick its agent cannot take.
+	repicks := relayRepicks(r.activeSettings.Relays, values.Relays)
+	for name, pick := range repicks {
+		rel := r.st.Relays[name]
+		if rel == nil || !rel.Active() {
+			return fmt.Errorf("relay %s is no longer running", name)
+		}
+		if err := r.checkRelayPick(rel.Profile, pick); err != nil {
+			return err
+		}
+	}
 	previousSeq := r.st.LastSeq()
 	ev := r.append(event.New(runtimecontrol.EventType, event.ActorHarness, map[string]any{
 		"format": runtimecontrol.Schema, "command_id": q.ID, "user_id": q.UserID, "proposal_sha256": q.Digest,
@@ -62,6 +74,14 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	}
 	for _, sw := range swaps {
 		r.swapRoute(sw)
+	}
+	for name, pick := range repicks {
+		msg, err := r.repickRelay(name, pick)
+		if err != nil {
+			r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: err.Error()}))
+			continue
+		}
+		r.ui.Log("relay %s: %s", name, msg)
 	}
 	return nil
 }

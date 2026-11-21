@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,9 @@ type SessionRequest struct {
 	// Relay names a relay profile ("codex", "claude"): the session starts
 	// that agent in Dir and relays the user's messages to it.
 	Relay string
+	// RelayModel and RelayEffort are that agent's model and reasoning
+	// effort ("" for the profile's, else the agent's own configuration).
+	RelayModel, RelayEffort string
 	// Config is the preset (or "bundle:NAME") the session starts from, ""
 	// for the project's own configuration; Routes are per-actor model picks
 	// on top of it.
@@ -115,6 +119,17 @@ func startPicks(project string, params map[string]any) (string, map[string]Route
 	return name, picks, nil
 }
 
+// RelayPicks reads the relayed agent's model and effort from a
+// session.start's parameters (relay_<profile>_model and _effort; see
+// settings.RelayInput).
+func RelayPicks(params map[string]any, profile string) (model, effort string) {
+	if profile == "" {
+		return "", ""
+	}
+	text := func(key string) string { v, _ := params[key].(string); return strings.TrimSpace(v) }
+	return text(settings.RelayInput(profile, "model")), text(settings.RelayInput(profile, "effort"))
+}
+
 // SessionStarter starts a new session in the project and returns its id once
 // the session exists on disk.
 type SessionStarter func(ctx context.Context, project string, req SessionRequest) (SessionStart, error)
@@ -162,6 +177,12 @@ var spawnCommand = func(project string, req SessionRequest, announce string) (*e
 	}
 	if req.Relay != "" {
 		args = append(args, "--relay", req.Relay)
+		if req.RelayModel != "" {
+			args = append(args, "--relay-model", req.RelayModel)
+		}
+		if req.RelayEffort != "" {
+			args = append(args, "--relay-effort", req.RelayEffort)
+		}
 	}
 	preset, bundle := SplitConfig(req.Config)
 	if preset != "" {
@@ -279,7 +300,15 @@ func relayProfiles(project string) []map[string]any {
 	profiles := cfg.Relay.RelayProfiles()
 	for _, name := range cfg.Relay.RelayProfileNames() {
 		p := profiles[name]
-		out = append(out, map[string]any{"name": name, "agent": p.Agent, "label": p.Label, "model": p.Model, "effort": p.Effort})
+		// What it runs when nothing is picked: the profile's model and
+		// effort, else the agent's own configured ones.
+		model, effort := relay.AgentDefaults(p.Agent)
+		model, effort = cmp.Or(p.Model, model), cmp.Or(p.Effort, effort)
+		label := p.Label
+		if p.Model == "" {
+			label = relay.Label(p.Agent, project, model, effort)
+		}
+		out = append(out, map[string]any{"name": name, "agent": p.Agent, "label": label, "model": model, "effort": effort})
 	}
 	return out
 }

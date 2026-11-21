@@ -13,17 +13,20 @@ import (
 // the log, not anything a model remembers, is what makes a session a relay.
 type Relay struct {
 	Name, Profile, Agent, Label string
-	Dir, Host, Target           string
-	Command                     []string
-	InnerID, Transcript         string
-	State                       string // starting | working | idle | blocked | exited | stopped
-	Detail                      string
-	StateSince                  time.Time
-	StartSeq                    int64
-	Turns                       int
-	LastTurn                    string
-	LastTurnAt                  time.Time
-	Sends                       int
+	// Model and Effort are the session's picks over the profile's ("" for
+	// the profile's own).
+	Model, Effort       string
+	Dir, Host, Target   string
+	Command             []string
+	InnerID, Transcript string
+	State               string // starting | working | idle | blocked | exited | stopped
+	Detail              string
+	StateSince          time.Time
+	StartSeq            int64
+	Turns               int
+	LastTurn            string
+	LastTurnAt          time.Time
+	Sends               int
 	// Undelivered holds sends whose arrival the transcript has not shown
 	// yet, by send id.
 	Undelivered map[string]string
@@ -114,7 +117,7 @@ func (s *State) applyRelay(ev event.Event) {
 		var d event.RelayStartData
 		_ = ev.Decode(&d)
 		prev := r
-		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, Label: d.Label, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
+		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
 		if prev != nil {
 			// A restart continues the same relay: its history stays.

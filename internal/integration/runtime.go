@@ -81,7 +81,13 @@ func decorateSessionView(project string, view *settings.RemoteView, grant contro
 	// The configuration field offers each configuration with what it would
 	// set the routes to.
 	configs := settings.SessionConfigSuggestions(project)
-	view.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": configs, "models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()}
+	// A relay's model list (from the view) stays beside them.
+	if view.Descriptor.Suggestions == nil {
+		view.Descriptor.Suggestions = map[string][]control.Suggestion{}
+	}
+	for name, list := range map[string][]control.Suggestion{"configs": configs, "models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()} {
+		view.Descriptor.Suggestions[name] = list
+	}
 	for i, f := range view.Descriptor.Fields {
 		if f.Key == "/config" {
 			view.Descriptor.Fields[i].Suggest = &control.Suggest{List: "configs"}

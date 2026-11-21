@@ -312,18 +312,28 @@ func TestCodexLocate(t *testing.T) {
 }
 
 func TestCommands(t *testing.T) {
+	// The built-in profiles pass no model or effort: each agent starts
+	// with its own configured defaults.
 	codex := codexAgent{}.command(config.BuiltinRelayProfiles()["codex"], "", false, "")
-	if strings.Join(codex, " ") != `codex --yolo -m gpt-6-astra -c model_reasoning_effort="xhigh"` {
+	if strings.Join(codex, " ") != `codex --yolo` {
 		t.Fatalf("codex argv %q", codex)
 	}
-	resume := codexAgent{}.command(config.BuiltinRelayProfiles()["codex"], "abc", true, "")
-	if strings.Join(resume[:3], " ") != "codex resume abc" {
+	picked := codexAgent{}.command(config.BuiltinRelayProfiles()["codex"].With("gpt-6.2-astra", "max"), "", false, "")
+	if strings.Join(picked, " ") != `codex --yolo -m gpt-6.2-astra -c model_reasoning_effort="max"` {
+		t.Fatalf("codex picked argv %q", picked)
+	}
+	resume := codexAgent{}.command(config.BuiltinRelayProfiles()["codex"].With("gpt-6.2-sol", ""), "abc", true, "")
+	if strings.Join(resume, " ") != "codex resume abc --yolo -m gpt-6.2-sol" {
 		t.Fatalf("codex resume argv %q", resume)
 	}
 	claude := claudeAgent{}.command(config.BuiltinRelayProfiles()["claude"], "u-1", false, "/bin/eagent relay-hook /spool")
 	joined := strings.Join(claude, " ")
-	if !strings.HasPrefix(joined, "claude --session-id u-1 --model claude-opus-5-5 --effort xhigh --settings ") || !strings.HasSuffix(joined, "--dangerously-skip-permissions") || !strings.Contains(joined, `relay-hook /spool`) {
+	if !strings.HasPrefix(joined, "claude --session-id u-1 --settings ") || !strings.HasSuffix(joined, "--dangerously-skip-permissions") || !strings.Contains(joined, `relay-hook /spool`) || strings.Contains(joined, "--model") || strings.Contains(joined, "--effort") {
 		t.Fatalf("claude argv %q", claude)
+	}
+	claude = claudeAgent{}.command(config.BuiltinRelayProfiles()["claude"].With("sonnet", "high"), "u-1", true, "")
+	if joined := strings.Join(claude, " "); joined != "claude --resume u-1 --model sonnet --effort high --dangerously-skip-permissions" {
+		t.Fatalf("claude picked argv %q", joined)
 	}
 	if id := (claudeAgent{}).chooseID(); len(id) != 36 || id[14] != '4' {
 		t.Fatalf("not a v4 uuid: %s", id)

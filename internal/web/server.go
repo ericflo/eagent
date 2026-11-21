@@ -691,7 +691,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
-		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay}, cfg)
+		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg)
 		if err != nil {
 			return integration.SessionStart{}, err
 		}

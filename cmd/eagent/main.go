@@ -87,6 +87,9 @@ Flags (before positional arguments):
   --answer <s>  answer the pending question when resuming
   --cwd <dir>   start a new session's commands in this directory (default: the project)
   --relay <p>   start the new session as a relay to this profile (codex, claude, or one in config)
+  --relay-model <m>, --relay-effort <e>
+                the relayed agent's model and reasoning effort (default: the
+                profile's, else the agent's own configuration)
   --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
@@ -123,6 +126,8 @@ func run(args []string) int {
 		answer   = fs.String("answer", "", "answer to the pending question")
 		startDir = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
 		relayTo  = fs.String("relay", "", "start the new session as a relay to this profile")
+		relayMdl = fs.String("relay-model", "", "the relayed agent's model (default: the profile's, else the agent's own)")
+		relayEff = fs.String("relay-effort", "", "the relayed agent's reasoning effort (default: the profile's, else the agent's own)")
 		showRaw  = fs.Bool("raw", false, "show raw events")
 		actor    = fs.String("actor", "", "filter by actor")
 		task     = fs.String("task", "", "filter by task id")
@@ -217,7 +222,7 @@ func run(args []string) int {
 	// Interactive only when someone can actually type: a pipe, a file, or
 	// /dev/null on stdin would otherwise read as an immediate "quit" and the
 	// run would exit 0 having done nothing.
-	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer, Relay: strings.TrimSpace(*relayTo)}
+	opts := harness.Options{Project: project, Interactive: !*batch && stdinIsTerminal(), Verbose: *verbose, Answer: *answer, Relay: strings.TrimSpace(*relayTo), RelayModel: strings.TrimSpace(*relayMdl), RelayEffort: strings.TrimSpace(*relayEff)}
 	if cmd == "relay" {
 		names := cfg.Relay.RelayProfileNames()
 		if len(rest) < 1 {
