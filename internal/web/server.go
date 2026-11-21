@@ -852,6 +852,9 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
 	restoreStarter := s.RegisterSessionStarter()
 	defer restoreStarter()
+	// What the last server was running, back before the reply watcher
+	// starts, so the two never resume the same session.
+	s.restoreHosted(ctx)
 	stopConnector := integration.StartConnector(ctx, s.Project, s.logf)
 	stopWatcher := integration.StartResumeWatcher(ctx, s.Project, s, s.logf)
 	s.addr = addr
@@ -869,7 +872,9 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	case <-ctx.Done():
 		start = time.Now()
 		// Sessions first, so their last events are on record; then the
-		// rest at once rather than one after another.
+		// rest at once rather than one after another. The next server
+		// brings back the ones running now.
+		s.rememberHosted()
 		s.Shutdown(10 * time.Second)
 		sessions = time.Since(start)
 	}

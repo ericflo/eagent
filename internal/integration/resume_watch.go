@@ -292,7 +292,7 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 		if !ok || !t.LastActivityAt.After(info.Modified) || store.Alive(info.Path) || w.host.Hosted(sid) {
 			continue
 		}
-		last, ok := w.lastUserMessage(sweepCtx, t.ExternalID)
+		last, ok, _ := w.lastUserMessage(sweepCtx, t.ExternalID)
 		if !ok || !last.CreatedAt.After(info.Modified) {
 			continue
 		}
@@ -301,14 +301,18 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 }
 
 // lastUserMessage pages through the user's messages in a thread and returns
-// the newest one the user wrote from the app.
-func (w *resumeWatcher) lastUserMessage(ctx context.Context, external string) (finalechat.Message, bool) {
+// the newest one the user wrote from the app. err says the thread could not
+// be read to the end.
+func (w *resumeWatcher) lastUserMessage(ctx context.Context, external string) (finalechat.Message, bool, error) {
 	var last finalechat.Message
 	found := false
 	after := ""
 	for i := 0; i < 50; i++ {
 		msgs, _, _, err := w.client.MessagesPage(ctx, finalechat.Ref(external), after, "user", 0, 100)
-		if err != nil || len(msgs) == 0 {
+		if err != nil {
+			return last, found, err
+		}
+		if len(msgs) == 0 {
 			break
 		}
 		for _, m := range msgs {
@@ -321,7 +325,40 @@ func (w *resumeWatcher) lastUserMessage(ctx context.Context, external string) (f
 			break
 		}
 	}
-	return last, found
+	return last, found, nil
+}
+
+// PendingReply is the user's newest message in a session's thread when it
+// came after the session last wrote its log: a reply sent while nothing ran
+// the session. A session brought back without it would never see it (its
+// mirror reads on from its own first post), so whoever resumes the session
+// passes it as the prompt, as the reply watcher does. ok is false when
+// there is none, or no phone; err when the thread could not be read.
+func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMessage, bool, error) {
+	if finalechat.Disabled() {
+		return PhoneMessage{}, false, nil
+	}
+	client, err := settingsAccount(project)
+	if err != nil {
+		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
+	}
+	w := &resumeWatcher{project: project, client: client}
+	last, ok, err := w.lastUserMessage(ctx, "eagent:"+info.ID)
+	if err != nil {
+		return PhoneMessage{}, false, err
+	}
+	if !ok || !last.CreatedAt.After(info.Modified) {
+		return PhoneMessage{}, false, nil
+	}
+	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body)}
+	for _, a := range last.Attachments {
+		saved, err := saveAttachment(ctx, client, info.Path, a)
+		if err != nil {
+			return PhoneMessage{}, false, err
+		}
+		msg.Attachments = append(msg.Attachments, saved)
+	}
+	return msg, msg.Text != "" || len(msg.Attachments) > 0, nil
 }
 
 var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
