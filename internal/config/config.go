@@ -98,7 +98,7 @@ type Config struct {
 // settings editor (which walks scalar fields) never offers them: a profile
 // names a program to run.
 type Relay struct {
-	// Profiles are named ways to start an agent. The built-in "codex" and
+	// Profiles are named ways to start an agent. The built-in "antigravity", "codex" and
 	// "claude" are always available; a profile here with the same name
 	// replaces the built-in one.
 	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
@@ -110,7 +110,7 @@ type Relay struct {
 
 // RelayProfile is one way to start an external agent.
 type RelayProfile struct {
-	// Agent is the program: "codex" or "claude".
+	// Agent is the relay agent: "antigravity", "codex" or "claude".
 	Agent string `json:"agent"`
 	// Label is shown on the phone ("Codex"); empty reads as the agent's name
 	// with the model it runs.
@@ -136,8 +136,9 @@ type RelayProfile struct {
 // session can choose others.
 func BuiltinRelayProfiles() map[string]RelayProfile {
 	return map[string]RelayProfile{
-		"codex":  {Agent: "codex", Label: "Codex", Args: []string{"--yolo"}},
-		"claude": {Agent: "claude", Label: "Claude Code", Args: []string{"--dangerously-skip-permissions"}},
+		"antigravity": {Agent: "antigravity", Label: "Antigravity", Args: []string{"--dangerously-skip-permissions"}},
+		"codex":       {Agent: "codex", Label: "Codex", Args: []string{"--yolo"}},
+		"claude":      {Agent: "claude", Label: "Claude Code", Args: []string{"--dangerously-skip-permissions"}},
 	}
 }
 

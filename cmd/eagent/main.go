@@ -44,7 +44,7 @@ Usage:
   eagent -p [flags] "prompt"         batch mode: run until the work is done, then exit
   eagent -c [flags] [prompt]         continue the most recent session in this project
   eagent relay <profile> [--cwd DIR] [brief]
-                                     start Codex ("codex") or Claude Code ("claude") in a terminal
+                                     start Antigravity, Codex or Claude Code in a terminal
                                      eagent owns and relay to it: your messages go to it verbatim
   eagent relays [attach|stop NAME]   list the relays running on this machine, watch one, or stop one
   eagent resume [flags] <id> [prompt]
@@ -86,7 +86,7 @@ Flags (before positional arguments):
   --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
   --cwd <dir>   start a new session's commands in this directory (default: the project)
-  --relay <p>   start the new session as a relay to this profile (codex, claude, or one in config)
+  --relay <p>   start the new session as a relay to this profile (antigravity, codex, claude, or one in config)
   --relay-model <m>, --relay-effort <e>
                 the relayed agent's model and reasoning effort (default: the
                 profile's, else the agent's own configuration)
@@ -149,6 +149,9 @@ func run(args []string) int {
 		return 0
 	}
 	harness.Version = version
+	if len(rest) == 2 && rest[0] == "relay-agy-status" {
+		return relay.WriteAntigravityStatus(rest[1], os.Stdin, os.Stdout)
+	}
 	if len(rest) > 0 && rest[0] == "relay-hook" {
 		// Claude Code's Stop hook for a relay: fast, and silent unless it
 		// has messages to hand over.

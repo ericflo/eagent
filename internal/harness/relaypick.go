@@ -20,8 +20,7 @@ import (
 // profile's model and effort, else the agent's own configured defaults.
 func (r *Runtime) relayDefaults(rel *state.Relay) (model, effort string) {
 	p := r.cfg.Relay.RelayProfiles()[rel.Profile]
-	agentModel, agentEffort := relay.AgentDefaults(rel.Agent)
-	return firstNonEmpty(p.Model, agentModel), firstNonEmpty(p.Effort, agentEffort)
+	return relay.ProfileDefaults(rel.Agent, p.Model, p.Effort)
 }
 
 // relayRoutes are the session's relays as live settings: each one's picks

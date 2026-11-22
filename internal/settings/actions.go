@@ -1,7 +1,6 @@
 package settings
 
 import (
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -231,7 +230,7 @@ func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]
 		if name != p.Agent {
 			group = who + " (" + name + ")"
 		}
-		agentModel, agentEffort := relay.AgentDefaults(p.Agent)
+		defaultModel, defaultEffort := relay.ProfileDefaults(p.Agent, p.Model, p.Effort)
 		when := map[string][]any{"relay": {name}}
 		params[modelName] = text(200)
 		params[effortName] = choices(efforts)
@@ -239,11 +238,11 @@ func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]
 			Description: "Left alone, " + who + " uses the model in its own configuration."}
 		effort := control.Input{Name: effortName, Label: "Reasoning effort", Group: group, When: when,
 			Description: "Left alone, " + who + " uses the effort in its own configuration."}
-		if m := cmp.Or(p.Model, agentModel); m != "" && len(m) <= 200 {
-			model.Default = m
+		if defaultModel != "" && len(defaultModel) <= 200 {
+			model.Default = defaultModel
 		}
-		if e := cmp.Or(p.Effort, agentEffort); slices.Contains(efforts, e) {
-			effort.Default = e
+		if slices.Contains(efforts, defaultEffort) {
+			effort.Default = defaultEffort
 		}
 		if p.Model != "" {
 			model.Description = "Left alone, the " + name + " profile's model."

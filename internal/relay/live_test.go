@@ -35,6 +35,7 @@ func TestLiveRelay(t *testing.T) {
 		name    string
 		profile config.RelayProfile
 	}{
+		{"antigravity", config.BuiltinRelayProfiles()["antigravity"].With("gemini-3.8-flash-low", "low")},
 		{"claude", config.RelayProfile{Agent: "claude", Model: "claude-haiku-5-5", Effort: "low", Args: []string{"--dangerously-skip-permissions"}, Host: "tmux"}},
 		{"codex", config.RelayProfile{Agent: "codex", Model: "gpt-6-astra", Effort: "low", Args: []string{"--yolo"}, Host: "tmux"}},
 	} {
@@ -44,6 +45,10 @@ func TestLiveRelay(t *testing.T) {
 			spool := filepath.Join(t.TempDir(), "spool")
 			spec := Spec{Session: "live", Name: tc.name, Profile: tc.profile, Dir: dir, Spool: spool,
 				Hook: ShellQuote(exe) + " relay-hook " + ShellQuote(spool)}
+			if tc.name == "antigravity" {
+				spec.StatusFile = filepath.Join(t.TempDir(), "status.json")
+				spec.Hook = ShellQuote(exe) + " relay-agy-status " + ShellQuote(spec.StatusFile)
+			}
 			seat, started, err := Launch(spec, "", false)
 			if err != nil {
 				t.Fatal(err)
@@ -108,6 +113,28 @@ func TestLiveRelay(t *testing.T) {
 			joined := strings.Join(texts, " | ")
 			if !strings.Contains(joined, "BRAVO") || !strings.Contains(joined, "CHARLIE") {
 				t.Fatalf("turns %q", joined)
+			}
+			if tc.name == "antigravity" {
+				if err := seat.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				spec.Profile = spec.Profile.With("gemini-3.8-flash-medium", "medium")
+				seat, _, err = Launch(spec, snap.InnerID, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer seat.Kill()
+				if _, err := seat.Send("r4", "Which single word did I ask you to say first in this conversation? Reply with just that word.", "queue"); err != nil {
+					t.Fatal(err)
+				}
+				reply := wait("resumed reply", 180*time.Second, func(ev Event) bool { return ev.Kind == KindTurn })
+				if !strings.Contains(reply.Text, "ALPHA") || seat.Snapshot().InnerID != snap.InnerID {
+					t.Fatalf("resume lost conversation: %q", reply.Text)
+				}
+				status := (antigravityAgent{statusFile: spec.StatusFile}).status()
+				if !strings.Contains(status.Model.Name, "Flash (Medium)") {
+					t.Fatalf("resumed model = %q", status.Model.Name)
+				}
 			}
 			t.Logf("events: %v", log)
 		})

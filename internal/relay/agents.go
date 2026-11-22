@@ -31,19 +31,21 @@ type agent interface {
 	label() string
 }
 
-func agentFor(name string) (agent, error) {
+func agentFor(name, statusFile string) (agent, error) {
 	switch name {
+	case "antigravity":
+		return antigravityAgent{statusFile: statusFile}, nil
 	case "codex":
 		return codexAgent{}, nil
 	case "claude":
 		return claudeAgent{}, nil
 	}
-	return nil, fmt.Errorf("unknown relay agent %q (codex or claude)", name)
+	return nil, fmt.Errorf("unknown relay agent %q (antigravity, codex or claude)", name)
 }
 
 // AgentLabel is the human name of an agent program.
 func AgentLabel(name string) string {
-	if a, err := agentFor(name); err == nil {
+	if a, err := agentFor(name, ""); err == nil {
 		return a.label()
 	}
 	return name

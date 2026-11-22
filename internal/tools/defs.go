@@ -130,12 +130,12 @@ var orchestratorOnly = []llm.Tool{
 // the orchestrator's list so the list never changes mid-subsession.
 var relayTools = []llm.Tool{
 	def("relay_start",
-		"Start an external coding agent in a terminal eagent owns, and make this session a relay to it: from then on the user's messages are for that agent. profile is a relay profile (built in: \"codex\" = Codex with --yolo, \"claude\" = Claude Code with --dangerously-skip-permissions; both use the model and effort in the agent's own configuration unless model or effort is given). dir is where it works (default: your working directory). Use it only when the user asks for Codex or Claude to do the work.",
+		"Start an external coding agent in a terminal eagent owns, and make this session a relay to it: from then on the user's messages are for that agent. profile is a relay profile (built in: \"codex\" = Codex with --yolo, \"claude\" = Claude Code with --dangerously-skip-permissions; the antigravity profile runs agy with --dangerously-skip-permissions. All use the model and effort in the agent's own configuration unless model or effort is given). dir is where it works (default: your working directory). Use it only when the user asks for Antigravity, Codex or Claude to do the work.",
 		`{"type":"object","properties":{
 			"profile":{"type":"string"},
 			"dir":{"type":"string","description":"Absolute path, ~/path, or relative to your working directory."},
-			"model":{"type":"string","description":"Only when the user names one: the agent's model (claude: fable, opus, sonnet, haiku or a full id; codex: e.g. gpt-6.2-astra)."},
-			"effort":{"type":"string","description":"Only when the user names one: reasoning effort (claude: low..max; codex: low..max or ultra)."}
+			"model":{"type":"string","description":"Only when the user names one: the agent's model (antigravity: an ID from agy models; claude: fable, opus, sonnet, haiku or a full id; codex: e.g. gpt-6.2-astra)."},
+			"effort":{"type":"string","description":"Only when the user names one: reasoning effort (antigravity and claude: low..max; codex: low..max or ultra)."}
 		},"required":["profile"]}`),
 	def("relay_forward",
 		"Send the user's message to the relayed agent exactly as they wrote it, with any files they attached. This is the normal way to pass on what the user said: never paraphrase their words into relay_send. mode: queue (default; if the agent is working it reads the message at its next step), interrupt (stop what it is doing first; only when the user asks to stop or redirect it now), or after_turn (hand it over when its current turn ends).",
@@ -158,7 +158,7 @@ var relayTools = []llm.Tool{
 		"Read the relayed agent's terminal screen (and scrollback). Only for dialogs and prompts on its screen; what it says and does comes to you from its transcript as turn reports.",
 		`{"type":"object","properties":{"relay":{"type":"string"},"lines":{"type":"integer","description":"Scrollback lines, default 60."}}}`),
 	def("relay_control",
-		"Manage the relayed agent. interrupt: press Escape to stop its current step. keys: press keys to answer a dialog on its screen (names: Enter, Escape, Up, Down, Tab, C-c, or literal text). restart: end it and start it again continuing its own session (after an exit). model: give it another model and/or reasoning effort (model, effort; \"default\" goes back to the agent's own): it starts again on its own conversation, once its current turn ends if it is in one. upgrade: update its CLI (codex update / claude update), then restart it continuing its session. switch: hand the work to another relay profile (profile, e.g. \"claude\" or \"codex\"; model and effort as for relay_start): the new agent starts in the same folder with a handoff brief of the user's instructions and the last report, and the old one is stopped. stop: end it for good (when the user is finished with it).",
+		"Manage the relayed agent. interrupt: stop its current step. keys: press keys to answer a dialog on its screen (names: Enter, Escape, Up, Down, Tab, C-c, or literal text). restart: end it and start it again continuing its own session (after an exit). model: give it another model and/or reasoning effort (model, effort; \"default\" goes back to the agent's own): it starts again on its own conversation, once its current turn ends if it is in one. upgrade: update its CLI (agy update / codex update / claude update), then restart it continuing its session. switch: hand the work to another relay profile (profile, e.g. \"claude\" or \"codex\"; model and effort as for relay_start): the new agent starts in the same folder with a handoff brief of the user's instructions and the last report, and the old one is stopped. stop: end it for good (when the user is finished with it).",
 		`{"type":"object","properties":{
 			"relay":{"type":"string"},
 			"action":{"type":"string","enum":["interrupt","keys","restart","model","upgrade","switch","stop"]},

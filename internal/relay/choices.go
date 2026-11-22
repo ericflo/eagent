@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"cmp"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -21,8 +22,8 @@ type ModelChoice struct {
 	ID, Label, Detail string
 }
 
-// claudeEfforts are what `claude --effort` accepts.
-var claudeEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+// standardEfforts are the levels accepted by the Claude and Antigravity CLIs.
+var standardEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 
 // codexEfforts are offered when Codex's model cache cannot be read: the
 // levels its current models accept.
@@ -34,6 +35,8 @@ var codexEfforts = []string{"low", "medium", "high", "xhigh", "max"}
 // (ANTHROPIC_MODEL overrides its model). Either is "" when not set there.
 func AgentDefaults(agent string) (model, effort string) {
 	switch agent {
+	case "antigravity":
+		return antigravityDefaults()
 	case "codex":
 		raw, err := os.ReadFile(filepath.Join(codexHome(), "config.toml"))
 		if err != nil {
@@ -118,6 +121,8 @@ func AgentModels(agent, project string) []ModelChoice {
 		}
 	}
 	switch agent {
+	case "antigravity":
+		return antigravityModels()
 	case "codex":
 		if c, ok := readCodexCache(); ok {
 			for _, m := range c.Models {
@@ -187,8 +192,8 @@ func claudeVersion(id string) (family int, version []int) {
 // Codex, every level its listed models take.
 func AgentEfforts(agent string) []string {
 	switch agent {
-	case "claude":
-		return slices.Clone(claudeEfforts)
+	case "antigravity", "claude":
+		return slices.Clone(standardEfforts)
 	case "codex":
 		c, ok := readCodexCache()
 		if !ok {
@@ -227,6 +232,8 @@ func AgentEfforts(agent string) []string {
 // AgentName is how people call an agent ("Claude Code", "Codex").
 func AgentName(agent string) string {
 	switch agent {
+	case "antigravity":
+		return "Antigravity"
 	case "claude":
 		return "Claude Code"
 	case "codex":
@@ -239,26 +246,39 @@ func AgentName(agent string) string {
 func ModelLabel(agent, project, model string) string {
 	for _, c := range AgentModels(agent, project) {
 		if c.ID == model && c.Label != "" {
-			return strings.TrimPrefix(strings.TrimSuffix(c.Label, " (latest)"), "Claude ")
+			if agent == "claude" {
+				return strings.TrimPrefix(strings.TrimSuffix(c.Label, " (latest)"), "Claude ")
+			}
+			return c.Label
 		}
 	}
 	return model
+}
+
+// ProfileDefaults resolves a relay's overrides against its native defaults.
+func ProfileDefaults(agent, model, effort string) (string, string) {
+	if agent == "antigravity" && model != "" {
+		id, variant := agyModelVariant(model)
+		return id, cmp.Or(effort, variant)
+	}
+	defModel, defEffort := AgentDefaults(agent)
+	return cmp.Or(model, defModel), cmp.Or(effort, defEffort)
 }
 
 // Label names a relay for people with what it runs: "Codex · GPT-6.2-Astra
 // xhigh". model and effort are what it starts with ("" for the agent's own
 // default, read from its configuration where it says).
 func Label(agent, project, model, effort string) string {
-	defModel, defEffort := AgentDefaults(agent)
-	if model == "" {
-		model = defModel
-	}
-	if effort == "" {
-		effort = defEffort
-	}
+	model, effort = ProfileDefaults(agent, model, effort)
 	var parts []string
 	if model != "" {
-		parts = append(parts, ModelLabel(agent, project, model))
+		label := ModelLabel(agent, project, model)
+		if agent == "antigravity" && effort != "" {
+			if stem, suffix, ok := strings.Cut(label, " ("); ok && slices.Contains(standardEfforts, strings.ToLower(strings.TrimSuffix(suffix, ")"))) {
+				label = stem
+			}
+		}
+		parts = append(parts, label)
 	}
 	if effort != "" {
 		parts = append(parts, effort)

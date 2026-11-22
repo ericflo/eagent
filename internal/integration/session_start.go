@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -302,8 +301,7 @@ func relayProfiles(project string) []map[string]any {
 		p := profiles[name]
 		// What it runs when nothing is picked: the profile's model and
 		// effort, else the agent's own configured ones.
-		model, effort := relay.AgentDefaults(p.Agent)
-		model, effort = cmp.Or(p.Model, model), cmp.Or(p.Effort, effort)
+		model, effort := relay.ProfileDefaults(p.Agent, p.Model, p.Effort)
 		label := p.Label
 		if p.Model == "" {
 			label = relay.Label(p.Agent, project, model, effort)
@@ -339,7 +337,7 @@ func runningRelays(live []string) []map[string]any {
 			}
 			name := strings.TrimPrefix(strings.TrimPrefix(l.Name, relay.Prefix), session+"-")
 			agent := name
-			for _, a := range []string{"codex", "claude"} {
+			for _, a := range []string{"antigravity", "codex", "claude"} {
 				if strings.HasPrefix(name, a) {
 					agent = a
 				}

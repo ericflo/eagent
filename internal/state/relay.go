@@ -44,6 +44,8 @@ type Relay struct {
 // Who names the agent for people: its label's program name or its name.
 func (r *Relay) Who() string {
 	switch r.Agent {
+	case "antigravity":
+		return "Antigravity"
 	case "codex":
 		return "Codex"
 	case "claude":

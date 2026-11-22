@@ -114,6 +114,14 @@ func (r *Runtime) relaySpec(name, profile, dir string, pick relayPick) (relay.Sp
 		p.Label = relay.Label(p.Agent, r.opts.Project, p.Model, p.Effort)
 	}
 	spec := relay.Spec{Session: r.sess.ID, Name: name, Profile: p, Dir: dir}
+	if p.Agent == "antigravity" {
+		exe, err := os.Executable()
+		if err != nil {
+			return relay.Spec{}, err
+		}
+		spec.StatusFile = filepath.Join(r.sess.Path, "relays", name, "agy-status.json")
+		spec.Hook = relay.ShellQuote(exe) + " relay-agy-status " + relay.ShellQuote(spec.StatusFile)
+	}
 	if p.Agent == "claude" {
 		// Claude Code's Stop hook hands over messages held for the end of a
 		// turn; it is this binary, reading the relay's spool.
@@ -147,8 +155,12 @@ func (r *Runtime) checkRelayPick(profile string, pick relayPick) error {
 	if efforts := relay.AgentEfforts(p.Agent); pick.Effort != "" && len(efforts) > 0 && !slices.Contains(efforts, pick.Effort) {
 		return fmt.Errorf("%s takes reasoning effort %s, not %q", relay.AgentName(p.Agent), strings.Join(efforts, ", "), pick.Effort)
 	}
-	if len(pick.Model) > 200 || strings.ContainsAny(pick.Model, " \t\n") {
+	if len(pick.Model) > 200 || strings.ContainsAny(pick.Model, "\r\t\n") || p.Agent != "antigravity" && strings.Contains(pick.Model, " ") {
 		return fmt.Errorf("%q is not a model name", pick.Model)
+	}
+	if p.Agent == "antigravity" {
+		p = p.With(pick.Model, pick.Effort)
+		return relay.CheckAntigravityEffort(p.Model, p.Effort)
 	}
 	return nil
 }
@@ -291,7 +303,7 @@ func addressedToEagent(text string) bool {
 			return true
 		}
 	}
-	for _, phrase := range []string{"not for relay", "not for the relay", "not to relay", "don't relay", "do not relay", "not for codex", "not for claude", "this can be you", "between you and me", "you, not codex", "you, not claude", "you (not codex)", "you (not claude)", "can be you and not relayed"} {
+	for _, phrase := range []string{"not for relay", "not for the relay", "not to relay", "don't relay", "do not relay", "not for codex", "not for claude", "not for antigravity", "not for agy", "this can be you", "between you and me", "you, not codex", "you, not claude", "you, not antigravity", "you, not agy", "you (not codex)", "you (not claude)", "you (not antigravity)", "you (not agy)", "can be you and not relayed"} {
 		if strings.Contains(l, phrase) {
 			return true
 		}
@@ -311,9 +323,9 @@ func relayMeta(text string) bool {
 	for _, phrase := range []string{
 		"how's it going", "hows it going", "how is it going", "how's it looking", "how are things", "how far along", "any update", "what's the update", "whats the update", "status update", "status?",
 		"is it stuck", "it's not stuck", "sure it's not stuck", "is it done", "did it finish", "is it working", "what's taking so long", "whats taking so long", "why is it taking so long", "taking so long",
-		"what is it doing", "what's it doing", "whats it doing", "what is codex doing", "what's codex doing", "what is claude doing", "what's claude doing",
-		"what did you send", "did you send", "send me the prompt", "is this you", "you have claude doing", "you have codex doing", "are both screens", "you're a relay", "you are a relay", "are you there",
-		"restart the session", "restart codex", "restart claude", "restart it", "upgrade codex", "upgrade claude", "update codex", "update claude", "upgrade and then restart", "update and then restart",
+		"what is antigravity doing", "what's antigravity doing", "what is agy doing", "what's agy doing", "what is it doing", "what's it doing", "whats it doing", "what is codex doing", "what's codex doing", "what is claude doing", "what's claude doing",
+		"what did you send", "did you send", "send me the prompt", "is this you", "you have antigravity doing", "you have agy doing", "you have claude doing", "you have codex doing", "are both screens", "you're a relay", "you are a relay", "are you there",
+		"restart antigravity", "upgrade antigravity", "update antigravity", "restart agy", "upgrade agy", "update agy", "restart the session", "restart codex", "restart claude", "restart it", "upgrade codex", "upgrade claude", "update codex", "update claude", "upgrade and then restart", "update and then restart",
 		"close the screen", "kill the screen", "kill screen", "close out the screen", "stop monitoring", "stop polling", "stop updating", "stop the updates", "updates every", "update me every", "give me updates", "regular updates", "less often", "more often",
 	} {
 		if strings.Contains(l, phrase) {
@@ -676,7 +688,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		case "switch":
 			profile := strings.TrimSpace(str("profile"))
 			if profile == "" {
-				return "switch: say which profile to hand over to (e.g. claude or codex)", true
+				return "switch: say which profile to hand over to (e.g. antigravity, claude or codex)", true
 			}
 			var brief, started string
 			r.sync(func() {
@@ -794,7 +806,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 
 // upgradeAgent runs the agent CLI's own updater.
 func upgradeAgent(agent string) (string, error) {
-	if agent != "codex" && agent != "claude" {
+	if agent == "antigravity" {
+		agent = "agy"
+	} else if agent != "codex" && agent != "claude" {
 		return "", fmt.Errorf("no upgrade command for %s", agent)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -1196,7 +1210,7 @@ var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/mode
 func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	if len(r.st.RelayOrder) == 0 {
 		r.ui.Log("there is no relay in this session")
-		go r.deliverMessage("There is no relay in this session; start one with eagent relay codex (or claude).", false)
+		go r.deliverMessage("There is no relay in this session; start one with eagent relay <profile> (antigravity, claude or codex).", false)
 		return
 	}
 	cmd, args := fields[0], fields[1:]
@@ -1249,7 +1263,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 			ack = "Stopped {who}."
 		case "/switch":
 			if len(args) == 0 {
-				r.deliverMessage("Say which agent takes over: /switch claude or /switch codex.", false)
+				r.deliverMessage("Say which agent takes over: /switch antigravity, /switch claude or /switch codex.", false)
 				return
 			}
 			params["action"], params["profile"] = "switch", args[0]
@@ -1411,6 +1425,14 @@ func (r *Runtime) relayThreadMeta() any {
 	rel := active[0]
 	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "", "updates": "",
 		"target": rel.Target, "attach": "eagent relays attach " + rel.Target, "notify_done": r.relayNotifyDone[rel.Name]}
+	var alternatives []string
+	for _, profile := range r.cfg.Relay.RelayProfileNames() {
+		if profile != rel.Profile {
+			alternatives = append(alternatives, profile)
+		}
+	}
+	m["switch_profiles"] = alternatives
+
 	if rel.Autopilot != nil {
 		m["autopilot_until"] = rel.Autopilot.Until
 	}

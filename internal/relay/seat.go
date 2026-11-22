@@ -51,9 +51,10 @@ type Spec struct {
 	Dir     string
 	// Hook is the shell command Claude Code runs as its Stop hook; Spool is
 	// the directory where messages wait for it.
-	Hook  string
-	Spool string
-	Env   []string
+	StatusFile string // Antigravity session identity reported by its status line
+	Hook       string
+	Spool      string
+	Env        []string
 }
 
 // Started is what a launch did, for the relay.start event.
@@ -101,7 +102,7 @@ type pending struct {
 // Launch starts the agent in a new terminal session and begins watching it.
 // With resume set, innerID names the agent's own session to continue.
 func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
-	a, err := agentFor(spec.Profile.Agent)
+	a, err := agentFor(spec.Profile.Agent, spec.StatusFile)
 	if err != nil {
 		return nil, Started{}, err
 	}
@@ -112,17 +113,18 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 	if st, err := os.Stat(spec.Dir); err != nil || !st.IsDir() {
 		return nil, Started{}, fmt.Errorf("%s is not a directory", spec.Dir)
 	}
-	if _, err := exec.LookPath(spec.Profile.Agent); err != nil {
-		return nil, Started{}, fmt.Errorf("%s is not installed (not on PATH)", spec.Profile.Agent)
+	if innerID == "" {
+		innerID = a.chooseID()
+	}
+	argv := a.command(spec.Profile, innerID, resume, spec.Hook)
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return nil, Started{}, fmt.Errorf("%s is not installed (not on PATH)", argv[0])
 	}
 	target := Target(spec.Session, spec.Name)
 	if host.Alive(target) {
 		return nil, Started{}, fmt.Errorf("a relay named %s is already running (%s)", spec.Name, target)
 	}
 	_ = host.Kill(target) // a dead pane left over from an earlier run
-	if innerID == "" {
-		innerID = a.chooseID()
-	}
 	if spec.Profile.GitPull {
 		// Never a prompt for credentials: nobody is at this terminal.
 		cmd, cancel := bounded(time.Minute, "git", "-C", spec.Dir, "pull", "--ff-only")
@@ -130,7 +132,11 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 		_ = cmd.Run()
 		cancel()
 	}
-	argv := a.command(spec.Profile, innerID, resume, spec.Hook)
+	if spec.StatusFile != "" {
+		if err := os.Remove(spec.StatusFile); err != nil && !os.IsNotExist(err) {
+			return nil, Started{}, err
+		}
+	}
 	env := append([]string{"PATH=" + os.Getenv("PATH"), "FINALECHAT_MIRROR=off", "EAGENT_RELAY=" + target}, spec.Env...)
 	if err := host.Start(target, spec.Dir, argv, env); err != nil {
 		return nil, Started{}, err
@@ -150,7 +156,7 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 // of the last thing already on the record; earlier transcript lines are
 // skipped.
 func Attach(spec Spec, hostName, target, innerID, transcript string, since time.Time) (*Seat, error) {
-	a, err := agentFor(spec.Profile.Agent)
+	a, err := agentFor(spec.Profile.Agent, spec.StatusFile)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +292,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		mode = "queue"
 	case "interrupt":
 		if state == "working" {
-			if err := s.host.Keys(s.target, "Escape"); err != nil {
+			if err := s.Interrupt(); err != nil {
 				return "", err
 			}
 			time.Sleep(1500 * time.Millisecond)
@@ -359,7 +365,12 @@ func (s *Seat) track(id, text, mode string) {
 }
 
 // Interrupt stops what the agent is doing (Escape).
-func (s *Seat) Interrupt() error { return s.host.Keys(s.target, "Escape") }
+func (s *Seat) Interrupt() error {
+	if s.spec.Profile.Agent == "antigravity" {
+		return s.host.Keys(s.target, "C-c")
+	}
+	return s.host.Keys(s.target, "Escape")
+}
 
 // Keys presses keys in the agent's terminal (answering a dialog).
 func (s *Seat) Keys(keys ...string) error { return s.host.Keys(s.target, keys...) }
@@ -480,6 +491,9 @@ func (s *Seat) watch() {
 				s.setState("exited", lastLines(screen, 6))
 				return
 			}
+		}
+		if a, ok := s.agent.(antigravityAgent); ok && tail != nil {
+			a.poll(s, now)
 		}
 		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
 			lastDialog = now
@@ -612,6 +626,7 @@ type dialog struct {
 }
 
 var dialogs = []dialog{
+	{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
 	// Claude Code: the default choice is "No, exit".
 	{name: "claude-trust", match: []string{"Yes, I trust this folder"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's folder-trust prompt"},
 	{name: "claude-bypass", match: []string{"Bypass Permissions mode", "Yes, I accept"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's bypass-permissions warning"},
@@ -713,7 +728,7 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 
 // looksReady recognises an agent at its input prompt.
 func looksReady(screen string) bool {
-	return strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "Ask Codex to do anything") || strings.Contains(screen, "for shortcuts")
+	return strings.Contains(screen, "Antigravity relay ·") || strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "Ask Codex to do anything") || strings.Contains(screen, "for shortcuts")
 }
 
 func removePending(list []*pending, x *pending) []*pending {

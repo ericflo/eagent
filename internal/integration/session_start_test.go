@@ -298,7 +298,7 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	for _, p := range relayProfiles(t.TempDir()) {
 		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
 	}
-	if strings.Join(names, ",") != "claude/claude,codex/codex" {
+	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex" {
 		t.Fatalf("advertised profiles %v", names)
 	}
 }
@@ -385,7 +385,7 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			start = a
 		}
 	}
-	if len(start.Inputs) != 14 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
+	if len(start.Inputs) != 16 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
 		t.Fatalf("start inputs = %+v", start.Inputs)
 	}
 	// eagent's own models apply only when eagent does the work; each relay
@@ -397,6 +397,10 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	if w := inputs["orchestrator_model"].When["relay"]; len(w) != 1 || w[0] != "" {
 		t.Fatalf("orchestrator model applies when %v", inputs["orchestrator_model"].When)
+	}
+	agy := inputs["relay_antigravity_model"]
+	if agy.Group != "Antigravity" || agy.Suggest == nil || agy.Suggest.List != "antigravity_models" || inputs["relay_antigravity_effort"].Group != agy.Group {
+		t.Fatalf("Antigravity model/effort inputs: %+v", inputs)
 	}
 	claudeModel, claudeEffort, codexModel := inputs["relay_claude_model"], inputs["relay_claude_effort"], inputs["relay_codex_model"]
 	if w := claudeModel.When["relay"]; len(w) != 1 || w[0] != "claude" || claudeModel.Default != "fable" || claudeEffort.Default != "medium" || claudeModel.Group != "Claude Code" || claudeModel.Suggest == nil || claudeModel.Suggest.List != "claude_models" {
