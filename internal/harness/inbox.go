@@ -96,7 +96,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	text := strings.TrimSpace(msg.Text)
 	switch msg.Type {
 	case "stop":
-		r.beginShutdown("quit", 0)
+		r.stopSession("the user stopped the session")
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)

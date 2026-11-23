@@ -294,6 +294,23 @@ func (r *Runtime) reattachRelays() []string {
 
 // closeRelays stops watching every relay; the agents keep running so a
 // resumed session can reattach.
+// stopSession is Stop session (from the app or the web UI): the relayed
+// agents stop too, as /stop-relay stops one, and then the session quits.
+// Other ways a session ends leave them running for a resume to pick up.
+// Loop goroutine.
+func (r *Runtime) stopSession(reason string) {
+	for _, rel := range r.st.ActiveRelays() {
+		if seat := r.relays.get(rel.Name); seat != nil {
+			if err := seat.Kill(); err != nil {
+				r.ui.Log("relay %s: %v", rel.Name, err)
+			}
+			r.relays.drop(rel.Name, seat)
+		}
+		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: reason}))
+	}
+	r.beginShutdown("quit", 0)
+}
+
 func (r *Runtime) closeRelays() {
 	for _, seat := range r.relays.all() {
 		seat.Close()

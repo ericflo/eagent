@@ -33,12 +33,12 @@ func TestRunningSessionOffersStopInItsOwnWords(t *testing.T) {
 	if len(view.Descriptor.Actions) != 1 || view.Descriptor.Actions[0].Operation != StopOperation || view.Descriptor.Actions[0].Label != "Stop session" {
 		t.Fatalf("actions: %+v", view.Descriptor.Actions)
 	}
-	if d := view.Descriptor.Actions[0].Description; !strings.Contains(d, "A reply here resumes it") || strings.Contains(d, "terminal") {
+	if d := view.Descriptor.Actions[0].Description; !strings.Contains(d, "A reply here resumes the session") || strings.Contains(d, "stops with it") {
 		t.Fatalf("description: %q", d)
 	}
 	values.Relays = map[string]RelayRoute{"claude": {Agent: "claude"}}
 	view, _ = View(t.TempDir(), "session", "g", values, true)
-	if d := view.Descriptor.Actions[0].Description; !strings.Contains(d, "Claude Code keeps running in its own terminal") {
+	if d := view.Descriptor.Actions[0].Description; !strings.Contains(d, "Claude Code stops with it.") {
 		t.Fatalf("relay not named: %q", d)
 	}
 	grant, _ := Grant(t.TempDir(), "session")

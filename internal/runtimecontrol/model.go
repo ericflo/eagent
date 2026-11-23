@@ -98,7 +98,7 @@ func WithoutStop(g control.Grant) control.Grant {
 // stopAction is the stop a running session offers. What it says is what the
 // app shows before the user confirms.
 func stopAction(values Values) control.Action {
-	text := "Ends this eagent session now, like Stop in eagent's web UI. A reply here resumes it while eagent serve or connector run is up."
+	text := "Ends this eagent session now, like Stop in eagent's web UI."
 	names := make([]string, 0, len(values.Relays))
 	for name := range values.Relays {
 		names = append(names, name)
@@ -113,10 +113,11 @@ func stopAction(values Values) control.Action {
 	switch len(who) {
 	case 0:
 	case 1:
-		text += " " + who[0] + " keeps running in its own terminal; stop it from its controls."
+		text += " " + who[0] + " stops with it."
 	default:
-		text += " " + strings.Join(who, " and ") + " keep running in their own terminals; stop them from their controls."
+		text += " " + strings.Join(who, " and ") + " stop with it."
 	}
+	text += " A reply here resumes the session while eagent serve or connector run is up."
 	return control.Action{Operation: StopOperation, Label: "Stop session", Description: text, Class: "preference", Parameters: control.Shape{Type: "object"}}
 }
 

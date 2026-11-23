@@ -39,7 +39,7 @@ func (r *Runtime) pollRuntimeSettings() {
 		// A stop from the app ends the session the way the web UI's Stop
 		// does, now that the controller has acknowledged it.
 		if r.remoteStop {
-			r.beginShutdown("quit", 0)
+			r.stopSession("the user stopped the session")
 		}
 	}
 }

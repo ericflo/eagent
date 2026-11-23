@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/ericflo/eagent/internal/config"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,5 +279,90 @@ func TestRemoteStopEndsTheSession(t *testing.T) {
 	}
 	if !requested || reason != "quit" {
 		t.Fatalf("stop recorded %v, session ended with %q", requested, reason)
+	}
+}
+
+// Stop session in a relay session stops the relayed agent too (its
+// terminal is killed and its end recorded); the web UI's Stop does the same.
+func TestStopSessionStopsItsRelays(t *testing.T) {
+	for _, from := range []string{"app", "web"} {
+		t.Run(from, func(t *testing.T) {
+			t.Setenv("EAGENT_TEST_KEY", "x")
+			project := t.TempDir()
+			seat := newFakeSeat("Ready.")
+			seat.waiting = true
+			useFakeRelays(t, seat)
+			s := newScripted(func(model string, msgs []map[string]any) reply {
+				if model == "orch" {
+					return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting for Claude Code"}`)}}
+				}
+				return reply{calls: []event.ToolCall{tc("hold", `{"reason":"nothing yet"}`)}}
+			})
+			defer s.srv.Close()
+			r, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "Look at the open issues", Relay: "claude", Interactive: true}, &fakeUI{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() { r.Run(ctx); close(done) }()
+			var status runtimecontrol.Status
+			for {
+				active := 0
+				r.sync(func() { active = len(r.st.ActiveRelays()) })
+				if status, err = runtimecontrol.ReadStatus(project, r.sess.ID); err == nil && status.AvailableUntil.After(time.Now()) && active == 1 && r.relays.get("claude") != nil {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					t.Fatal("the relay session never came up")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if from == "web" {
+				if err := PostInbox(r.sess.Path, InboxMessage{Type: "stop", From: "web"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				grant, _ := runtimecontrol.Grant(project, r.sess.ID)
+				view, err := runtimecontrol.View(project, r.sess.ID, status.Generation, status.Values, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d := view.Descriptor.Actions[0].Description; !strings.Contains(d, "Claude Code stops with it.") {
+					t.Fatalf("stop does not say the relay stops: %q", d)
+				}
+				p := control.Proposal{Operation: runtimecontrol.StopOperation, SchemaVersion: runtimecontrol.Schema, Generation: status.Generation, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{}}
+				raw, _ := json.Marshal(p)
+				q := runtimecontrol.Request{ID: "stop-relay-session", UserID: "test-owner", Digest: artifact.Digest(raw), Expires: time.Now().Add(10 * time.Second), Proposal: p, Grant: grant}
+				if result, err := runtimecontrol.Deliver(ctx, project, r.sess.ID, q, false); err != nil || result.Status != "succeeded" {
+					t.Fatalf("stop: %+v %v", result, err)
+				}
+			}
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("the session did not end")
+			}
+			if !seat.wasKilled() {
+				t.Fatal("the relayed agent was left running")
+			}
+			events, err := store.Read(r.sess.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ended := false
+			for _, e := range events {
+				if e.Type == event.RelayEnd {
+					var d event.RelayEndData
+					_ = json.Unmarshal(e.Data, &d)
+					ended = ended || d.Name == "claude" && d.Reason == "the user stopped the session"
+				}
+			}
+			if !ended {
+				t.Fatal("the relay's end was not recorded")
+			}
+		})
 	}
 }
