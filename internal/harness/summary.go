@@ -436,7 +436,9 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 		switch ev.Type {
 		case event.UserMessage:
 			var d event.UserMessageData
-			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
+			// A command to the relay (/stop-relay, /model …) manages the
+			// session; it says nothing about the work.
+			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" && !controlCommand(d.Text) {
 				user = append(user, line{ev.Time, d.Text})
 			}
 		case event.UserAnswer:
@@ -520,7 +522,7 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 		case "blocked":
 			fmt.Fprintf(&b, "%s is stuck on a prompt on its screen.\n", rel.Who())
 		case "idle":
-			fmt.Fprintf(&b, "%s stopped %s ago. If its report says it left something running in the background, that may still be going.\n", rel.Who(), roundDur(now.Sub(rel.StateSince)))
+			fmt.Fprintf(&b, "%s last reported %s ago and is not working at the moment. If its report says it left something running in the background, that may still be going.\n", rel.Who(), roundDur(now.Sub(rel.StateSince)))
 		}
 	}
 	if n := len(st.RunningTasks()); n > 0 {
@@ -540,7 +542,10 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 	case lastYield == nil:
 		b.WriteString("The agent is working.\n")
 	case st.RelayMode() && len(st.ActiveRelays()) == 0:
-		b.WriteString("The agent has been stopped; nothing is in progress.\n")
+		// The user stopped the relayed agent. Said outright, that becomes
+		// the summary's second sentence ("…; relay stopped"), which tells
+		// the reader nothing about the work.
+		b.WriteString("Nothing is in progress. The second sentence says where the work was left: what is finished and what is not.\n")
 	case st.RelayMode():
 		// The note is eagent's own, about a session another agent works in.
 		if reason != "" {
@@ -549,9 +554,17 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 	case lastYield.Done:
 		fmt.Fprintf(&b, "The agent says the work is finished: %s\n", reason)
 	default:
-		fmt.Fprintf(&b, "Nothing is running; the agent has stopped and is waiting for the user. %s\n", reason)
+		fmt.Fprintf(&b, "Nothing is running. The agent's closing note: %s\n", reason)
 	}
 	return b.String()
+}
+
+// controlCommand reports whether a user message is a slash command that
+// manages the session's relay rather than something the user said about
+// the work.
+func controlCommand(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) > 0 && relayCommands[fields[0]]
 }
 
 // SessionSummary is a stored session's fresh title and summary.

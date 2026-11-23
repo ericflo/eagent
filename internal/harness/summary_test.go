@@ -151,17 +151,26 @@ func TestSummaryInput(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "note " + string(rune('a'+i))}))
 	}
+	// Commands that manage the session are not part of the conversation; a
+	// message that only starts with a slash is.
+	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/stop-relay"}))
+	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/model opus high"}))
+	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/home/u/fence.jpg is the colour"}))
 	add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "First coat is on."}))
 	add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "both coats are dry"}))
 
 	in := summaryInput(st, "Development", at.Add(time.Hour))
+	if strings.Contains(in, "/stop-relay") || strings.Contains(in, "/model opus") {
+		t.Errorf("relay commands should stay out of the input:\n%s", in)
+	}
 	for _, want := range []string{
 		"Current title: none yet.",
 		"Current summary: none yet.",
 		"Project directory (not a title): Development",
 		"1. [", "Repaint the back fence blue. Two coats.",
-		"(5 more messages in between)",
+		"(6 more messages in between)",
 		"21. [", "note t",
+		"22. [", "/home/u/fence.jpg is the colour",
 		"First coat is on.",
 		"The agent says the work is finished: both coats are dry",
 	} {
