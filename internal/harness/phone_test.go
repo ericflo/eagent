@@ -47,6 +47,28 @@ type fakePhone struct {
 	latency       time.Duration       // added to every request, to imitate a real network
 	anchorUnknown bool                // every GET …/messages answers at once with an unknown anchor
 	gets          int                 // GET …/messages calls
+	// The thread's title and summary as the app would show them, with the
+	// service's pin rule: what the user wrote stays, whatever a token sends.
+	title, desc             string
+	titlePinned, descPinned bool
+}
+
+// threadJSON is the thread as the service returns it. Call with f.mu held.
+func (f *fakePhone) threadJSON() map[string]any {
+	return map[string]any{"id": "t1", "external_id": "eagent:x", "title": f.title, "description": f.desc, "summary": f.desc, "title_pinned": f.titlePinned, "description_pinned": f.descPinned}
+}
+
+// rename is the user renaming the thread in the app, which pins the title.
+func (f *fakePhone) rename(title string) {
+	f.mu.Lock()
+	f.title, f.titlePinned = title, title != ""
+	f.mu.Unlock()
+}
+
+func (f *fakePhone) threadTitle() (title, desc string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.title, f.desc
 }
 
 type fakeFile struct {
@@ -159,10 +181,16 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.messages = append(f.messages, m)
 		f.posts = append(f.posts, body)
+		// Only the post that creates the thread names it.
+		if title, _ := body["title"].(string); f.title == "" && len(f.posts) == 1 {
+			f.title = title
+		}
+		thread := f.threadJSON()
+		thread["agent"] = body["agent"]
 		f.cond.Broadcast()
 		f.mu.Unlock()
 		w.WriteHeader(201)
-		_ = json.NewEncoder(w).Encode(map[string]any{"message": m, "thread": map[string]any{"id": "t1", "external_id": "eagent:x", "title": body["title"], "agent": body["agent"]}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": m, "thread": thread})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodGet:
 		f.mu.Lock()
 		f.gets++
@@ -270,8 +298,25 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		if meta, ok := body["meta"].(map[string]any); ok {
 			f.metas = append(f.metas, meta)
 		}
+		if title, _ := body["title"].(string); title != "" && !f.titlePinned {
+			f.title = title
+		}
+		if desc, _ := body["description"].(string); desc != "" && !f.descPinned {
+			f.desc = desc
+		}
+		thread := f.threadJSON()
 		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{"id": "t1"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"thread": thread})
+	case strings.HasPrefix(path, "/api/v1/threads/") && r.Method == http.MethodGet && strings.Count(path, "/") == 4:
+		f.mu.Lock()
+		thread, exists := f.threadJSON(), f.title != "" || len(f.posts) > 0
+		f.mu.Unlock()
+		if !exists {
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no thread"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"thread": thread})
 	default:
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"` + path + `"}}`))
@@ -2316,6 +2361,13 @@ func TestFutileStandAsideIsOncePerArrival(t *testing.T) {
 	if !r.futileStandAside() {
 		t.Fatal("a schedule firing is an arrival")
 	}
+}
+
+// postBodies returns the bodies of the messages posted so far.
+func (f *fakePhone) postBodies() []map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]any{}, f.posts...)
 }
 
 // retitlePatches returns the PATCH bodies the fake phone has seen so far.

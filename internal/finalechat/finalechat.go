@@ -216,16 +216,21 @@ type Question struct {
 
 // Thread is one conversation.
 type Thread struct {
-	ID               string     `json:"id"`
-	ExternalID       string     `json:"external_id"`
-	Title            string     `json:"title"`
-	Description      string     `json:"description"`
-	Summary          string     `json:"summary"`
-	Agent            string     `json:"agent"`
-	ArchivedAt       *time.Time `json:"archived_at"`
-	Muted            bool       `json:"muted"`
-	PendingQuestions int        `json:"pending_questions"`
-	Activity         *Status    `json:"activity"` // the live status line, or nil
+	ID          string `json:"id"`
+	ExternalID  string `json:"external_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Summary     string `json:"summary"`
+	// TitlePinned and DescriptionPinned say the user wrote that field in
+	// the app: the service ignores an agent's value for it until the user
+	// clears it. Absent (false) from servers that predate pins.
+	TitlePinned       bool       `json:"title_pinned"`
+	DescriptionPinned bool       `json:"description_pinned"`
+	Agent             string     `json:"agent"`
+	ArchivedAt        *time.Time `json:"archived_at"`
+	Muted             bool       `json:"muted"`
+	PendingQuestions  int        `json:"pending_questions"`
+	Activity          *Status    `json:"activity"` // the live status line, or nil
 }
 
 // Status is the live status line the app shows as a typing indicator.
@@ -671,11 +676,12 @@ func (c *Client) Patch(ctx context.Context, ref string, req PatchRequest) (Threa
 
 // UpdateThreadDescription PATCHes a session thread's title and 1-2 sentence
 // description (summary is sent as an alias with the same value). Either may
-// be "" to leave it unchanged. Small periodic updates keep the phone's
-// thread list readable: set a specific title at session start, then refresh
-// both when the task's nature changes, after major findings, and before
-// finishing. It is a thin wrapper over Patch for call sites that only
-// retitle/re-describe:
+// be "" to leave it unchanged. The title names the session's subject and
+// should stay put; the description covers the whole session and where it
+// stands, and is refreshed as the work moves. The returned thread is what
+// the service now shows, which differs from what was sent when the user
+// pinned a field in the app. It is a thin wrapper over Patch for call sites
+// that only retitle/re-describe:
 //
 //	thread, err := c.UpdateThreadDescription(ctx, finalechat.Ref("eagent:"+id),
 //	    "Fix checkout race", "Reproducing the cart race, then fixing and covering it.")

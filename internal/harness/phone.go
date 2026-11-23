@@ -206,13 +206,10 @@ func (r *Runtime) startPhone() {
 		req := finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Title: p.title, Agent: p.agent, Meta: map[string]any{"eagent": "session", "kind": "session_start", "session_id": r.sess.ID}, ClientKey: p.key("start", strconv.Itoa(p.resumes))}
 		if !resumed && strings.TrimSpace(prompt) != "" {
 			req.Sender, req.Format = "user", "markdown"
-			// The first post creates the thread, so its title and
-			// description ride along here; later posts never backfill
-			// them. Agents refresh both with RetitleThread as the work
-			// evolves (see its comment for when and how).
-			if desc := threadDescription(prompt); desc != "" {
-				req.Description, req.Summary = desc, desc
-			}
+			// The thread starts under the project's name with no summary;
+			// the list shows this first message until the session's own
+			// summary lands a moment later (summary.go). The request is
+			// never sent as the summary: it is not one.
 		}
 		msg, thread, err := p.client.Post(ctx, p.ref, req)
 		if err != nil {
@@ -226,6 +223,7 @@ func (r *Runtime) startPhone() {
 		p.lastID = msg.ID
 		p.threadID = thread.ID
 		p.mu.Unlock()
+		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
 			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
@@ -571,41 +569,70 @@ func clipLabel(s string, n int) string {
 	return s
 }
 
-// threadDescription condenses a session prompt into the 1-2 sentence thread
-// description sent at creation. It collapses whitespace and clips to 500
-// runes, well under the server's 2000-char limit; "" means nothing worth
-// saying was known.
-func threadDescription(prompt string) string {
-	s := strings.Join(strings.Fields(strings.TrimSpace(prompt)), " ")
-	if s == "" {
-		return ""
-	}
-	return clipLabel(s, 500)
-}
-
-// RetitleThread PATCHes the session thread's title and 1-2 sentence
-// description (summary is sent as an alias with the same value). Either may
-// be "" to leave it unchanged. Set the title as soon as the user's intent is
-// understood — the first turn, even for idle chit-chat — and refresh both
-// whenever the scope expands or changes, after major findings, and before
-// finishing, so the phone's thread list stays readable. Each call replaces
-// the previous title and description, so always describe the WHOLE session
-// so far, never just the latest segment. There is no automatic summarizer:
-// call this when the work itself gives you something new to say. Loop
-// goroutine only; the PATCH runs on the mirror worker. The same call from
-// anywhere with a token is:
+// RetitleThread PATCHes the session thread's title and summary (sent under
+// both names, description and summary). Either may be "" to leave it
+// unchanged. The harness calls it with each summary it writes (summary.go),
+// and the orchestrator's retitle_thread tool with a name the user asked
+// for. What comes back is what the service now shows: a field the user
+// pinned in the app keeps their words, and the session takes them as its
+// own. Loop goroutine only; the PATCH runs on the mirror worker. The same
+// call from anywhere with a token is:
 //
 //	client.Patch(ctx, ref, finalechat.PatchRequest{Title: t, Description: d, Summary: d})
 //	curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION \
 //	  -H "Authorization: Bearer $FINALECHAT_TOKEN" \
 //	  -d '{"title":"...","description":"..."}'
-func (p *phone) RetitleThread(title, description string) {
+func (p *phone) RetitleThread(r *Runtime, title, description string) {
 	if strings.TrimSpace(title) == "" && strings.TrimSpace(description) == "" {
 		return
 	}
 	p.enqueue(func(ctx context.Context) {
-		_, _ = p.client.UpdateThreadDescription(ctx, p.ref, title, description)
+		thread, err := p.client.UpdateThreadDescription(ctx, p.ref, title, description)
+		if err != nil || r == nil {
+			return
+		}
+		if thread.TitlePinned || thread.DescriptionPinned {
+			r.post(func() { r.adoptThread(p, thread) })
+		}
 	})
+}
+
+// adoptThread makes the session's title and summary agree with the thread
+// as the app shows it. The app is where the user reads them, renames the
+// thread, and where another process may have rewritten them (eagent
+// summarize), so its values win over the log's whenever it has real ones;
+// a thread that still has only the project's name takes the session's. Loop
+// goroutine only.
+func (r *Runtime) adoptThread(p *phone, thread finalechat.Thread) {
+	if r.phone != p || r.ending {
+		return
+	}
+	r.summary.attached = true
+	project := filepath.Base(r.projectPath())
+	remoteTitle, remoteDesc := strings.TrimSpace(thread.Title), strings.TrimSpace(thread.Description)
+	named := remoteTitle != "" && !genericTitle(remoteTitle, project)
+	d := event.ThreadTitleData{By: "finalechat"}
+	if named && (remoteTitle != r.st.Title || thread.TitlePinned != r.st.TitlePinned) {
+		d.Title, d.Pin = remoteTitle, thread.TitlePinned
+	}
+	if remoteDesc != "" && remoteDesc != r.st.Description {
+		d.Description = remoteDesc
+	}
+	if d.Title != "" || d.Description != "" {
+		r.append(event.New(event.ThreadTitle, event.ActorHarness, d))
+	}
+	// The other way: a thread created under the project's name, or with no
+	// summary, when the session already has better.
+	title, desc := "", ""
+	if !named && r.st.Title != "" && !genericTitle(r.st.Title, project) {
+		title = r.st.Title
+	}
+	if remoteDesc == "" && r.st.Description != "" {
+		desc = r.st.Description
+	}
+	if title != "" || desc != "" {
+		p.RetitleThread(nil, title, desc)
+	}
 }
 
 // pollFloorAfter is how quickly a long poll must return, with nothing, to

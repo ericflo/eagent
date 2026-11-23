@@ -361,6 +361,12 @@ func claudeTool(name string, in map[string]any, at time.Time) []obs {
 	str := func(k string) string { s, _ := in[k].(string); return s }
 	switch name {
 	case "Bash":
+		// Claude Code says what each command is for. On a phone that line
+		// reads better than the command itself, which stands when it gave
+		// none.
+		if d := oneLine(str("description"), 120); d != "" {
+			return []obs{{kind: "activity", text: d, at: at, tool: true}}
+		}
 		return []obs{{kind: "activity", text: "running " + oneLine(str("command"), 120), at: at, tool: true}}
 	case "Read":
 		if p := str("file_path"); isImagePath(p) {

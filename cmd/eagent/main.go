@@ -49,6 +49,10 @@ Usage:
   eagent relays [attach|stop NAME]   list the relays running on this machine, watch one, or stop one
   eagent resume [flags] <id> [prompt]
   eagent sessions                    list sessions in this project
+  eagent summarize <id>... | --all [--dry-run] [--json] [-v]
+                                     write a fresh title and summary for stored sessions
+                                     to their FinaleChat threads (running sessions do this
+                                     themselves; this is for ones from before they did)
   eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
   eagent replay <id>                 rebuild state from the log and print it
   eagent artifact export <id> --output DIR
@@ -137,6 +141,8 @@ func run(args []string) int {
 		write    = fs.Bool("write", false, "config: write config.json")
 		output   = fs.String("output", "", "artifact export/restore: new destination directory")
 		recreate = fs.Bool("recreate", false, "artifact publish: explicitly recreate a deleted archive")
+		allFlag  = fs.Bool("all", false, "summarize: every session in the project")
+		dryRun   = fs.Bool("dry-run", false, "summarize: print the new title and summary without sending them")
 		helpFlag = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
@@ -169,7 +175,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -183,6 +189,8 @@ func run(args []string) int {
 		return 0
 	case "sessions":
 		return cmdSessions(project)
+	case "summarize":
+		return cmdSummarize(project, *preset, *bundle, rest, *allFlag, *dryRun, *jsonOut, *verbose)
 	case "show":
 		if len(rest) < 1 {
 			return fail(errors.New("usage: eagent show <session-id>"))
@@ -422,6 +430,136 @@ func cmdSessions(project string) int {
 		fmt.Printf("%s  %s  %-15s %2d file%s %7s  %s\n", s.ID, s.Started.Local().Format("2006-01-02 15:04"), status, s.Subsessions, plural(s.Subsessions), humanBytes(s.Size), clip(first, 60))
 	}
 	return 0
+}
+
+// cmdSummarize writes a fresh title and summary for stored sessions, from
+// their logs, to their FinaleChat threads. A running session keeps its own
+// thread current; this is for sessions from before eagent did that, and for
+// checking what the summary prompt produces (--dry-run). It reads logs and
+// never writes them. With --json each line carries the old title and
+// summary too, so a run can be undone by hand.
+func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, asJSON, verbose bool) int {
+	if all == (len(refs) > 0) {
+		return fail(errors.New("usage: eagent summarize <session-id>... | --all [--dry-run] [--json]"))
+	}
+	cfg, err := config.LoadBundle(project, preset, bundle)
+	if err != nil {
+		return fail(err)
+	}
+	routes, err := cfg.Narrator.Routes()
+	if err != nil {
+		return fail(fmt.Errorf("narrator: %w", err))
+	}
+	model := llm.NewClient(routes[0])
+	set, err := prompts.Load(project)
+	if err != nil {
+		return fail(err)
+	}
+	var client *finalechat.Client
+	if !finalechat.Disabled() && cfg.Finalechat.Wanted() {
+		if c, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL); ok {
+			c.UserAgent = "eagent/" + version
+			client = c
+		}
+	}
+	if client == nil && !dryRun {
+		return fail(errors.New("summarize needs a FinaleChat token to write to (or --dry-run to only print)"))
+	}
+	root := store.Root(project)
+	var sessions []store.Info
+	if all {
+		if sessions, err = store.List(root); err != nil {
+			return fail(err)
+		}
+	} else {
+		for _, ref := range refs {
+			info, err := store.Resolve(root, ref)
+			if err != nil {
+				return fail(err)
+			}
+			sessions = append(sessions, info)
+		}
+	}
+	// A few at a time: each is one read of a log and one model call, and a
+	// project can hold hundreds. Results print in the sessions' own order.
+	type outcome struct {
+		res harness.SessionSummary
+		err error
+	}
+	results := make([]chan outcome, len(sessions))
+	slots := make(chan struct{}, 6)
+	for i, info := range sessions {
+		results[i] = make(chan outcome, 1)
+		go func(done chan<- outcome, info store.Info) {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			res, err := harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
+			done <- outcome{res, err}
+		}(results[i], info)
+	}
+	code := 0
+	var usage event.Usage
+	sent := 0
+	for i, info := range sessions {
+		o := <-results[i]
+		res, err := o.res, o.err
+		usage.Input += res.Usage.Input
+		usage.Output += res.Usage.Output
+		if res.Sent {
+			sent++
+		}
+		if verbose && !asJSON && res.Input != "" {
+			// For work on the prompt: what the model read and what it said.
+			fmt.Printf("---- %s read:\n%s---- and answered: %q / %q\n", info.ID, res.Input, res.ModelTitle, res.ModelSummary)
+		}
+		if asJSON {
+			line := map[string]any{"session": res.Session, "title": res.Title, "summary": res.Description, "old_title": res.OldTitle, "old_summary": res.OldDesc, "thread": res.Thread, "sent": res.Sent}
+			if res.Skipped != "" {
+				line["skipped"] = res.Skipped
+			}
+			if err != nil {
+				line["error"] = err.Error()
+			}
+			raw, _ := json.Marshal(line)
+			fmt.Println(string(raw))
+		} else {
+			switch {
+			case err != nil:
+				fmt.Printf("%s  error: %v\n", info.ID, err)
+			case res.Title == "" && res.Description == "":
+				fmt.Printf("%s  unchanged (%s)\n", info.ID, res.Skipped)
+			default:
+				title := res.Title
+				if title == "" {
+					title = res.OldTitle + " (title kept)"
+				}
+				note := ""
+				switch {
+				case res.Sent:
+					note = "  [sent]"
+				case res.Skipped != "":
+					note = "  [" + res.Skipped + "]"
+				}
+				fmt.Printf("%s  %s%s\n               %s\n", info.ID, title, note, res.Description)
+			}
+		}
+		if err != nil {
+			code = 1
+		}
+	}
+	if !asJSON {
+		fmt.Printf("%d session%s, %d thread%s updated, %d tokens in / %d out on %s\n", len(sessions), pluralS(len(sessions)), sent, pluralS(sent), usage.Input, usage.Output, routes[0].Model)
+	}
+	return code
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func plural(n int) string {

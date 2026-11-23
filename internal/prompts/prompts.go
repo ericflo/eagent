@@ -14,6 +14,7 @@
 //	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
 //	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
 //	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}} {{.Relay}}
+//	THREAD-SUMMARY.md      (plain text: how the session's title and summary are written)
 package prompts
 
 import (
@@ -36,7 +37,7 @@ import (
 var builtin embed.FS
 
 // Names lists the prompt files, in display order.
-var Names = []string{"ORCHESTRATOR.md", "RELAY.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md"}
+var Names = []string{"ORCHESTRATOR.md", "RELAY.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md", "THREAD-SUMMARY.md"}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }

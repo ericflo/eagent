@@ -113,10 +113,10 @@ var orchestratorOnly = []llm.Tool{
 		},"required":["spec","note"]}`),
 	def("cancel_schedule", "Cancel a schedule by id.", `{"type":"object","properties":{"schedule":{"type":"string"}},"required":["schedule"]}`),
 	def("retitle_thread",
-		"Update the phone thread's title and description so the thread list stays readable. Call as soon as you understand the user's intent (first turn, even for chit-chat like \"Idle chit-chat\"), and again whenever the scope expands or changes, after major findings, and before yield done=true. Each call replaces the previous title and description, so always summarize the WHOLE session so far, not just the latest segment. Either field may be \"\" to leave it unchanged, but at least one must be non-empty. Works without any token or curl; succeeds quietly when the phone mirror is off.",
+		"Set the thread's title, and optionally its summary, by hand. You do not need this to keep the thread list readable: the harness writes both itself as the session goes. Use it when the user asks for a particular name for the thread, or says the title or summary is wrong. A title set here is kept: later automatic summaries leave it alone and only refresh the summary. Either field may be \"\" to leave it unchanged, but at least one must be non-empty. Works without any token or curl; succeeds quietly when the phone mirror is off.",
 		`{"type":"object","properties":{
-			"title":{"type":"string","description":"Short task name for the whole session so far, never just the project directory name."},
-			"description":{"type":"string","description":"1-2 sentences covering the whole session so far (max 2000 chars)."}
+			"title":{"type":"string","description":"The name the user asked for: the session's subject in a few words, never just the project directory name."},
+			"description":{"type":"string","description":"1-2 sentences covering the whole session so far and where it stands (max 2000 chars). The harness will refresh it as work continues."}
 		}}`),
 	def("yield",
 		"Stop working until something happens: a task finishes, a schedule fires, or the user replies. Set done=true only when the user's request is completely finished and verified; then the session can end. Give a short reason (what you are waiting for, or what was accomplished).",

@@ -122,6 +122,7 @@ type Runtime struct {
 	narrFinal           bool      // final report delivered
 	narrTicker          *time.Timer
 	narrTimerGeneration uint64
+	summary             summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings      runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl      *runtimecontrol.Controller
 	phone               *phone // Finalechat mirror; nil when off
@@ -519,6 +520,7 @@ func (r *Runtime) append(ev event.Event) event.Event {
 	}
 	r.st.Apply(ev)
 	r.noteWake(ev)
+	r.noteSummary(ev)
 	if r.phone != nil {
 		r.phone.observe(r, ev)
 	}
@@ -634,6 +636,8 @@ func (r *Runtime) Run(ctx context.Context) int {
 	r.rearmSchedules()
 	r.armAutopilots()
 	r.armNarratorTimer()
+	r.startSummaries()
+	defer r.stopSummaries()
 	if r.st.Question != nil && r.opts.Interactive {
 		q := r.st.Question
 		r.ui.Ask(q.ID, q.Text, q.Options)
@@ -762,11 +766,17 @@ func (r *Runtime) maybeEnd() {
 		r.narrFinal = true
 		if r.narrSaidSeq > r.st.LastYield.Seq || r.narratorCoveredYield() {
 			// It already reported after the orchestrator finished.
+			if r.finalSummary() {
+				return
+			}
 			r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
 			return
 		}
 		r.wakeNarrator(wakeFinal)
 		return
+	}
+	if r.finalSummary() {
+		return // the thread list gets how it ended, then the session ends
 	}
 	r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
 }

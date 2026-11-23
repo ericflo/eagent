@@ -63,7 +63,7 @@ const (
 	Route          = "route"
 	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
 	PhoneQuestion  = "phone.question" // a narrator question was posted to the phone as a card
-	ThreadTitle    = "thread.title"   // the session's title/description (whole session so far), mirrored to FinaleChat when the phone is on
+	ThreadTitle    = "thread.title"   // the session's title and summary (whole session so far), mirrored to FinaleChat when the phone is on
 	Steer          = "steer"          // the harness's per-call instruction to an actor, kept so every prompt extends the last
 	CwdChange      = "cwd.change"     // an actor's working directory moved: a cd in one of its commands that persists for its later ones
 	Error          = "error"
@@ -331,13 +331,31 @@ type PhoneThreadData struct {
 	RemoteMode bool   `json:"remote_mode"` // the user said they are away from the terminal
 }
 
-// ThreadTitleData records the session's title and description (always the
-// WHOLE session so far, never just the latest segment). Each event replaces
-// the previous one; an empty Title or Description leaves that field
-// unchanged. The phone mirror PATCHes the same values to FinaleChat.
+// ThreadTitleData records the session's title and summary (always the WHOLE
+// session so far, never just the latest segment). Each event replaces the
+// previous one; an empty Title or Description leaves that field unchanged.
+// The phone mirror PATCHes the same values to FinaleChat.
+//
+// The harness writes these itself as the session moves (By "summary"), so
+// the thread list stays readable without the orchestrator remembering to.
+// The orchestrator's retitle_thread (By "") is for a name the user asked
+// for, and the mirror records what FinaleChat already shows when it attaches
+// (By "finalechat").
 type ThreadTitleData struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
+	// By is who wrote it: "" the orchestrator, "summary" the harness's own
+	// summary of the session, "finalechat" the thread as the app has it.
+	By string `json:"by,omitempty"`
+	// Pin marks a title someone chose on purpose (the user in the app, or
+	// the orchestrator at the user's request): later summaries keep it.
+	Pin bool `json:"pin,omitempty"`
+	// SeenSeq is the newest event a summary took into account.
+	SeenSeq int64 `json:"seen_seq,omitempty"`
+	// Usage and ElapsedMS account for the model call behind a summary. It
+	// runs on the narrator's route and is counted with the narrator's.
+	Usage     *Usage `json:"usage,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
 }
 
 // NarratorQuestionData is a question that blocks on the user.

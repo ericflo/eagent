@@ -112,9 +112,17 @@ type State struct {
 	Efforts     map[string]string      // actor -> reasoning effort in use
 	Config      string                 // bundle or preset name the session runs under
 	Phone       *event.PhoneThreadData // Finalechat thread, when the session is mirrored
-	Title       string                 // latest thread.title title ("" until retitled)
-	Description string                 // latest thread.title description ("" until retitled)
-	Started     time.Time
+	Title       string                 // latest thread.title title ("" until titled)
+	Description string                 // latest thread.title summary ("" until summarized)
+	// TitlePinned says someone chose the title on purpose (see
+	// event.ThreadTitleData.Pin); TitleSeq is the event that last changed
+	// it; TitleRevisions counts the harness's own changes to it; SummarySeq
+	// is the newest event the latest summary covered.
+	TitlePinned    bool
+	TitleSeq       int64
+	TitleRevisions int
+	SummarySeq     int64
+	Started        time.Time
 
 	Events      []event.Event
 	Subsessions []Subsession
@@ -297,13 +305,45 @@ func (s *State) Apply(ev event.Event) {
 	case event.ThreadTitle:
 		var d event.ThreadTitleData
 		if ev.Decode(&d) == nil {
-			// Each retitle replaces the previous one; empty fields leave
-			// that side unchanged.
+			// Each one replaces the previous; empty fields leave that side
+			// unchanged.
 			if d.Title != "" {
-				s.Title = d.Title
+				if d.Title != s.Title {
+					s.Title, s.TitleSeq = d.Title, ev.Seq
+					if d.By == "summary" {
+						s.TitleRevisions++
+					}
+				}
+				if d.By != "summary" {
+					s.TitlePinned = d.Pin
+				}
 			}
 			if d.Description != "" {
 				s.Description = d.Description
+			}
+			if d.By == "summary" {
+				if d.SeenSeq > s.SummarySeq {
+					s.SummarySeq = d.SeenSeq
+				}
+				if d.Usage != nil {
+					// The summary's model call ran on the narrator's route.
+					key := event.ActorNarrator
+					tot := s.Totals[key]
+					tot.Input += d.Usage.Input
+					tot.Output += d.Usage.Output
+					tot.Cached += d.Usage.Cached
+					tot.Reasoning += d.Usage.Reasoning
+					s.Totals[key] = tot
+					rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
+					ru := s.ByRoute[rk]
+					ru.Input += d.Usage.Input
+					ru.Output += d.Usage.Output
+					ru.Cached += d.Usage.Cached
+					ru.Reasoning += d.Usage.Reasoning
+					s.ByRoute[rk] = ru
+					s.Calls[key]++
+					s.Latencies[key] = append(s.Latencies[key], d.ElapsedMS)
+				}
 			}
 		}
 	case event.CwdChange:

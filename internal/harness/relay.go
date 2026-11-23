@@ -1205,7 +1205,7 @@ func (r *Runtime) relayInflight(now time.Time) []string {
 			act := r.relays.activity[rel.Name]
 			r.relays.mu.Unlock()
 			if act.text != "" {
-				line += fmt.Sprintf("; right now it is %s (for %s)", act.text, roundDur(now.Sub(act.at)))
+				line += fmt.Sprintf("; right now: %s (for %s)", act.text, roundDur(now.Sub(act.at)))
 			}
 			out = append(out, line)
 		case "blocked":

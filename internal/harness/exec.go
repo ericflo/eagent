@@ -356,12 +356,14 @@ func (r *Runtime) execTool(c caller, tc event.ToolCall) (out string, isErr bool)
 			// Durable first: the webview, replay, and projection read the
 			// title from this event, so it lands even with the phone off.
 			// Empty fields leave that side unchanged (see state.Apply).
-			r.append(event.New(event.ThreadTitle, event.ActorOrchestrator, event.ThreadTitleData{Title: title, Description: desc}))
+			// A title set here is one the user asked for: it is pinned, and
+			// the harness's own summaries leave it alone.
+			r.append(event.New(event.ThreadTitle, event.ActorOrchestrator, event.ThreadTitleData{Title: title, Description: desc, Pin: title != ""}))
 		})
 		if p == nil {
 			return "title updated locally; phone mirror is off for this session", false
 		}
-		p.RetitleThread(title, desc)
+		p.RetitleThread(r, title, desc)
 		switch {
 		case title != "" && desc != "":
 			return fmt.Sprintf("thread retitled to %q — description updated", title), false

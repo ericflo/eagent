@@ -296,6 +296,18 @@ async function send() {
 }
 async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
 
+// What a thread.title event changed, in words: the session's own summary
+// (by "summary"), a name set at the user's request, or the thread as the
+// phone app has it. '' when a summary call found nothing to change.
+function titleNotice(d) {
+  const title = d.title ? `titled “${d.title}”` : '';
+  const text = d.description ? clip(d.description, 200) : '';
+  if (!title && !text) return '';
+  const who = d.by === 'summary' ? '' : d.by === 'finalechat' ? ' (from the phone app)' : ' (set by hand)';
+  if (title && text) return `${title}${who} · ${text}`;
+  return title ? title + who : `summary${who}: ${text}`;
+}
+
 function chatNode(ev) {
   const d = ev.data || {};
   switch (ev.type) {
@@ -303,7 +315,7 @@ function chatNode(ev) {
     case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
-    case 'thread.title': return h('div', {class: 'notice'}, 'retitled' + (d.title ? ' to ' + d.title : '') + (d.description ? ' — ' + clip(d.description, 140) : ''));
+    case 'thread.title': return titleNotice(d) ? h('div', {class: 'notice'}, titleNotice(d)) : null;
     case 'cwd.change': return (ev.actor === 'orchestrator' && !ev.task) ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
@@ -521,7 +533,7 @@ function summary(ev) {
     case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
     case 'cwd.change': return 'working directory → ' + d.path;
     case 'task.create': return `${d.id} ${d.title}`;
-    case 'thread.title': return 'retitled' + (d.title ? ` to ${d.title}` : '') + (d.description ? `: ${clip(d.description, 160)}` : '');
+    case 'thread.title': return titleNotice(d) || 'summary checked: nothing to change';
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;
     case 'proc.exit': return `${d.handle} ${d.reason} exit=${d.exit_code}`;

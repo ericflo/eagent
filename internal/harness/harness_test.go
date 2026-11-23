@@ -187,6 +187,10 @@ func (t loopbackOnlyTransport) RoundTrip(req *http.Request) (*http.Response, err
 // outright. A suite that attempted even one such request fails.
 func TestMain(m *testing.M) {
 	os.Setenv("EAGENT_FINALECHAT", "off")
+	// The harness's own summary call (summary.go) would reach every scripted
+	// model with a request it has no script for; the tests that cover it
+	// turn it back on.
+	os.Setenv("EAGENT_SUMMARIES", "off")
 	if home, err := os.MkdirTemp("", "eagent-hermetic-home"); err == nil {
 		os.Setenv("HOME", home)
 		os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))

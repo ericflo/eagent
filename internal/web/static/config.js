@@ -530,7 +530,7 @@ function phoneCard() {
     field('Mirror', [seg], [srcNode('/finalechat/enabled'), ...problemNodes('/finalechat/enabled')]), state, det);
 }
 function promptsCard() {
-  const HELP = {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context'};
+  const HELP = {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context', 'THREAD-SUMMARY.md': 'how a session\'s title and summary in the thread list are written'};
   return h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('p', {class: 'sub'}, 'The instructions each actor works from. Click one to read or edit it; edits are saved as project overrides.'),
     h('div', {class: 'plist2'}, ...E.c.prompts.map(p => h('button', {class: 'prompt-row', onclick: () => X.promptEditor(p.name)},
       h('code', {class: 'inline'}, p.name), h('span', {class: 'badge' + (p.source === 'built-in' ? '' : ' completed')}, p.source === 'built-in' ? 'built-in' : 'override'), h('span', {class: 'sub'}, HELP[p.name] || '')))));

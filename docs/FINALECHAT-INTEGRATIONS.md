@@ -81,17 +81,29 @@ Where the session runs depends on which process holds the connector:
 
 The result reports `session_id`, the thread reference, the host and whether the session is interactive. Existing connectors gain the capability on their next reconnect without a second pairing: eagent asks Finalechat to extend its own grants, which requires the account token and the local connector secret. `EAGENT_FINALECHAT=off` disables this along with the rest of the connector.
 
-## Thread titles and descriptions
+## Thread titles and summaries
 
-Each session's phone thread has a `title` and a `description` (max 2000 chars; `summary` is a write alias and the thread carries both with identical values). The mirror starts the thread with the project name and the opening prompt as its description. The orchestrator keeps both current with its `retitle_thread` tool, which needs no token (the orchestrator's shell cannot see `FINALECHAT_TOKEN`): call it as soon as the user's intent is understood — first turn, even for idle chit-chat (e.g. "Idle chit-chat") — and again whenever the scope expands or changes, after major findings, and before finishing, so the thread list stays readable. Each call replaces the previous title and description, so always describe the WHOLE session so far, never just the latest segment: "Idle chit-chat" -> "Explain eagent chat behavior" -> "Explain and improve eagent chat summary behavior". The title is a short task name, never just the project directory name.
+Each session's phone thread has a `title` and a `description` (max 2000 chars; `summary` is a write alias and the thread carries both with identical values). They are what the thread list shows, so eagent keeps them current itself:
+
+- The harness summarizes the session with a small model call on the narrator's route (`internal/harness/summary.go`, prompt `THREAD-SUMMARY.md`, overridable like the other prompts). It reads what the user wrote, what they have been told lately, the relayed agent's latest report, the tasks and the state of play, and returns a title and a two-sentence summary of the whole session and where it stands.
+- It runs about two seconds after a session's first message, twenty seconds after a later one, shortly after a turn ends or a question is asked, and every fifteen minutes during one long turn. A batch session waits for one last summary before it ends. Each call is recorded as a `thread.title` event (`by: "summary"`) with its token usage, which is counted with the narrator's.
+- The title names the session's subject and is meant to stay put. The summary's title replaces a missing or generic one (the project directory's name is never a title), may be revised once as the work comes into focus, and after that changes only when the user has written since it was set.
+- A title someone chose is kept. The orchestrator's `retitle_thread` tool is for a name the user asked for, and pins it. A title or summary the user types in the FinaleChat app is pinned by the service (`title_pinned`, `description_pinned`): token updates to that field are ignored until the user clears it, and the session takes the user's words as its own (`thread.title` with `by: "finalechat"`).
+- The thread is created under the project's name with no description. The opening prompt is never sent as the description.
+
+`EAGENT_SUMMARIES=off` turns the summary calls off; titles then change only through `retitle_thread`.
+
+`eagent summarize <session>... | --all [--dry-run] [--json] [-v]` writes a fresh title and summary for stored sessions from their logs to their threads. It reads logs and never writes them, so it is safe on a session another process is running. `--dry-run` prints without sending, `-v` also prints what the model read, and `--json` includes the old title and summary on each line.
+
+From anywhere with a token, the same update is a PATCH:
 
 ```sh
 curl -XPATCH $FINALECHAT_URL/api/v1/threads/ext:eagent:SESSION_ID \
   -H "Authorization: Bearer $FINALECHAT_TOKEN" \
-  -d '{"title":"Fix checkout race","description":"Reproducing the cart race, then fixing and covering it."}'
+  -d '{"title":"Checkout race fix","description":"Cart totals raced with coupon updates. Fix is in and covered; waiting on review."}'
 ```
 
-From Go: `client.Patch(ctx, finalechat.Ref("eagent:"+id), finalechat.PatchRequest{Title: "...", Description: "...", Summary: "..."})`, or `client.UpdateThreadDescription(ctx, ref, title, description)` which sends both names. In-session, `phone.RetitleThread(title, description)` (via `retitle_thread`) does the same without a token. There is no automatic summarizer; update when the work itself gives you something new to say.
+From Go: `client.Patch(ctx, finalechat.Ref("eagent:"+id), finalechat.PatchRequest{Title: "...", Description: "...", Summary: "..."})`, or `client.UpdateThreadDescription(ctx, ref, title, description)`, which sends both names and returns the thread as the service now shows it.
 
 ## Client capability handshake (v1)
 

@@ -401,3 +401,17 @@ func TestExpandHome(t *testing.T) {
 		}
 	}
 }
+
+// A command Claude Code describes shows as what it is for; one it does not
+// shows as the command.
+func TestClaudeCommandActivity(t *testing.T) {
+	at := time.Now()
+	got := claudeTool("Bash", map[string]any{"command": "until [ -s /tmp/x ]; do sleep 1; done", "description": "Wait for the render to finish"}, at)
+	if len(got) != 1 || got[0].kind != "activity" || got[0].text != "Wait for the render to finish" || !got[0].tool {
+		t.Fatalf("described command = %+v", got)
+	}
+	got = claudeTool("Bash", map[string]any{"command": "go test ./..."}, at)
+	if len(got) != 1 || got[0].text != "running go test ./..." {
+		t.Fatalf("bare command = %+v", got)
+	}
+}
