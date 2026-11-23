@@ -84,6 +84,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 	if pick == (relayPick{rel.Model, rel.Effort}) {
 		delete(r.relayRepick, name)
 		r.syncRelaySettings()
+		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
 	if rel.State == "working" {
@@ -92,6 +93,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		}
 		r.relayRepick[name] = pick
 		r.syncRelaySettings()
+		r.publishRelayMeta() // the thread header says a change is waiting
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
 	if _, err := r.restartRelayWith(rel, pick); err != nil {

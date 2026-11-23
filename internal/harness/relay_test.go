@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,9 @@ type fakeSeat struct {
 	// waiting makes every reply a turn that runs nothing, as an agent
 	// holding on work of its own answers.
 	waiting bool
+	// hang leaves the agent working: it takes the message and never ends
+	// the turn.
+	hang bool
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -48,6 +52,9 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 	f.events <- relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}
 	if f.waiting {
 		f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 1000}
+		return "typed into Codex", nil
+	}
+	if f.hang {
 		return "typed into Codex", nil
 	}
 	f.events <- relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."}
@@ -631,7 +638,7 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 	runUntilCleanup(t, rt, ctx, cancel)
 	ui.input <- "/interrupt"
 	ui.input <- "/autopilot until 10:00 polish the onboarding until it shines"
-	ui.input <- "/updates off"
+	ui.input <- "/updates off" // from an older client: answered, no longer a setting
 	ui.input <- "/goal ship the onboarding polish"
 	deadline := time.Now().Add(5 * time.Second)
 	for ui.messageCount() < 3 && time.Now().Before(deadline) {
@@ -639,21 +646,20 @@ func TestRelaySlashCommandsActWithoutTheOrchestrator(t *testing.T) {
 	}
 	msgs, _, _ := ui.snapshot()
 	joined := strings.Join(msgs, " | ")
-	if !strings.Contains(joined, "Interrupted Codex.") || !strings.Contains(joined, "Autopilot on for Codex until") || !strings.Contains(joined, "No progress lines") {
+	if !strings.Contains(joined, "Interrupted Codex.") || !strings.Contains(joined, "Autopilot on for Codex until") || !strings.Contains(joined, "Updates are not a setting any more") {
 		t.Fatalf("acknowledgements %q", msgs)
 	}
 	seat.mu.Lock()
 	n := seat.interrupts
 	seat.mu.Unlock()
 	var ap *event.RelayAutopilotData
-	var quietSet bool
 	var quiet time.Duration
 	rt.sync(func() {
 		ap = rt.st.Relays["codex"].Autopilot
-		quietSet, quiet = rt.relayQuietSet, rt.quietLimit()
+		quiet = rt.quietLimit()
 	})
-	if n != 1 || ap == nil || ap.Instruction != "polish the onboarding until it shines" || ap.Until == "" || !quietSet || quiet != 0 {
-		t.Fatalf("interrupts=%d autopilot=%+v quietSet=%v quiet=%v", n, ap, quietSet, quiet)
+	if n != 1 || ap == nil || ap.Instruction != "polish the onboarding until it shines" || ap.Until == "" || quiet != 180*time.Second {
+		t.Fatalf("interrupts=%d autopilot=%+v quiet=%v", n, ap, quiet)
 	}
 	// eagent's relay commands stay with eagent; the agent's own (/goal) go
 	// to it verbatim.
@@ -935,5 +941,91 @@ func TestRelayStartReadsTheHomeFolder(t *testing.T) {
 	}
 	if len(*launched) != 1 || (*launched)[0].Dir != want {
 		t.Fatalf("launched %+v, want it in %s", *launched, want)
+	}
+}
+
+// /switch takes the new agent's model and effort, the app's header data
+// says what the running agent runs, and a pick the new agent cannot take
+// leaves the running one alone.
+func TestRelaySwitchCarriesModelAndEffort(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	seats := useFakeRelayFactory(t, "ok")
+	var specs []relay.Spec
+	inner := launchRelay
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		specs = append(specs, spec)
+		return inner(spec, innerID, resume)
+	}
+	s := newScripted(func(model string, msgs []map[string]any) reply {
+		if model == "orch" {
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"waiting"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+	})
+	defer s.srv.Close()
+	ui := &fakeUI{input: make(chan string, 4)}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runUntilCleanup(t, rt, ctx, cancel)
+	said := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			msgs, _, _ := ui.snapshot()
+			if strings.Contains(strings.Join(msgs, " | "), want) {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		msgs, _, logs := ui.snapshot()
+		t.Fatalf("never said %q: %q (logs %q)", want, msgs, logs)
+	}
+	// An effort Claude does not take: Codex keeps running.
+	ui.input <- "/switch claude opus ludicrous"
+	said("Claude Code takes reasoning effort")
+	if len(*seats) != 1 || (*seats)[0].wasKilled() {
+		t.Fatalf("a refused switch touched the running agent (%d launched)", len(*seats))
+	}
+	ui.input <- `/switch claude opus high`
+	eventually(t, rt, "Claude to take over", func() bool {
+		rel := rt.st.Relays["claude"]
+		return rel != nil && rel.Active() && rel.Model == "opus" && rel.Effort == "high"
+	})
+	if got := specs[len(specs)-1].Profile; got.Model != "opus" || got.Effort != "high" {
+		t.Fatalf("launched with %+v", got)
+	}
+	var meta map[string]any
+	rt.sync(func() { meta, _ = rt.relayThreadMeta().(map[string]any) })
+	if meta["profile"] != "claude" || meta["model"] != "opus" || meta["effort"] != "high" || meta["updates"] != nil || meta["pending"] != nil {
+		t.Fatalf("thread header data %+v", meta)
+	}
+	if alt, _ := meta["switch_profiles"].([]string); len(alt) == 0 || slices.Contains(alt, "claude") || !slices.Contains(alt, "codex") {
+		t.Fatalf("switch_profiles %v", meta["switch_profiles"])
+	}
+}
+
+func TestSplitArgsKeepsQuotedModelNames(t *testing.T) {
+	got := splitArgs(`/switch antigravity "Gemini 3.1 Pro" high`)
+	if strings.Join(got, "|") != "/switch|antigravity|Gemini 3.1 Pro|high" {
+		t.Fatalf("%q", got)
+	}
+	params := map[string]any{}
+	modelAndEffort(params, got[2:], []string{"low", "medium", "high"})
+	if params["model"] != "Gemini 3.1 Pro" || params["effort"] != "high" {
+		t.Fatalf("%v", params)
+	}
+	params = map[string]any{}
+	modelAndEffort(params, []string{"default", "default"}, []string{"low", "high"})
+	if params["model"] != "default" || params["effort"] != "default" {
+		t.Fatalf("%v", params)
+	}
+	if got := splitArgs("/model   opus\tmax "); strings.Join(got, "|") != "/model|opus|max" {
+		t.Fatalf("%q", got)
 	}
 }

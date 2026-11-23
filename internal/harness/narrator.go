@@ -104,46 +104,32 @@ func (r *Runtime) narratorTimerFired(generation uint64) {
 	if !busy {
 		return
 	}
-	// Wake when the orchestrator's world moved since the narrator looked,
-	// or when the user has waited past the quiet limit even though nothing
-	// new landed (a long command, a long think): that is when they most
-	// want to hear which step is taking its time.
-	limit := r.quietLimit()
-	quietDue := limit > 0 && r.quietFor() >= limit
-	if !r.orchBusy && len(r.st.RunningTasks()) == 0 {
-		// Only a relayed agent is working. Its remarks arrive constantly;
-		// the user hears its turn reports (through the orchestrator) and, in
-		// between, one progress line per quiet limit, not one per remark.
-		if !quietDue {
-			return
-		}
-	} else if r.narrWorthy <= r.narrLastSeen && !quietDue {
-		return
-	}
-	if r.narrPending == "" {
-		r.narrPending = wakePeriodic
-	}
+	r.maybeCheckProgress()
 }
 
 func (r *Runtime) startNarratorTurn(reason string) {
 	r.narrBusy = true
+	r.flushQuietChecks()
 	r.append(event.New(event.TurnStart, event.ActorNarrator, event.TurnData{Reason: reason}))
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		endReason := r.narratorTurn(reason)
+		endReason := r.narratorTurn(reason, nil)
 		r.post(func() {
 			r.narrBusy = false
 			r.append(event.New(event.TurnEnd, event.ActorNarrator, event.TurnData{Reason: endReason}))
 			if reason == wakeFinal {
 				r.narrFinal = true
 			}
+			r.maybeTrimNarrator(r.st.ContextTokens(event.ActorNarrator))
 		})
 	}()
 }
 
-// narratorTurn makes one narrator decision. Runs on its own goroutine.
-func (r *Runtime) narratorTurn(reason string) string {
+// narratorTurn makes one narrator decision. A progress check (check set)
+// is put on the record only once the narrator decides to speak. Runs on its
+// own goroutine.
+func (r *Runtime) narratorTurn(reason string, check *progressCheck) string {
 	ctx := r.ctx
 	if reason == wakeFinal {
 		// Give the final report a short grace period even during shutdown.
@@ -161,6 +147,13 @@ func (r *Runtime) narratorTurn(reason string) string {
 			phoneLine = PhoneStatus(r.phone.isRemote())
 		}
 		relayWho = r.relayWho()
+		if check != nil {
+			// Shown to the model, not recorded: see below.
+			steer = r.steerCheck(time.Now(), check)
+			msgs = state.WithSteer(r.st.NarratorView(nil), steer)
+			seenSeq = r.st.LastSeq()
+			return
+		}
 		steer = steerNarrator(r.st, time.Now(), reason, r.opts.Interactive, r.phone != nil, r.narrLastSaid, mustSpeak, r.quietFor(), r.quietLimit(), r.inflightLines(time.Now()))
 		r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
 		msgs = r.st.NarratorView(nil)
@@ -181,6 +174,11 @@ func (r *Runtime) narratorTurn(reason string) string {
 				return "interrupted"
 			}
 			r.ui.Log("narrator: model call failed: %v", shortErr(err))
+			if check != nil && !check.recorded {
+				// A check that could not be made is not asked again at once.
+				r.sync(func() { r.checkSeenSeq, r.checkSeenSteps, r.checkFailedAt = seenSeq, check.steps, time.Now() })
+				return "error"
+			}
 			r.sync(func() {
 				// The narrator looked at everything up to seenSeq even though
 				// the call failed; leaving the cursor behind would make the
@@ -195,6 +193,25 @@ func (r *Runtime) narratorTurn(reason string) string {
 			return "error"
 		}
 		r.ui.Stream(event.ActorNarrator, "", "", "")
+		if check != nil && !check.recorded {
+			check.tokens = resp.Usage.Input
+			if !speaks(resp) {
+				// Nothing to say: the check leaves no trace beyond its cost.
+				r.sync(func() {
+					r.checkSeenSeq, r.checkSeenSteps = seenSeq, check.steps
+					r.noteQuietCheck(resp)
+				})
+				return "held"
+			}
+			// From here it is an ordinary turn on the record, starting
+			// with the steer it was given.
+			r.sync(func() {
+				r.flushQuietChecks()
+				r.append(event.New(event.TurnStart, event.ActorNarrator, event.TurnData{Reason: reason}))
+				r.append(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
+			})
+			check.recorded = true
+		}
 		r.recordAssistant(event.ActorNarrator, "", resp, seenSeq)
 		r.sync(func() { r.narrLastSeen = seenSeq })
 
@@ -345,6 +362,7 @@ func (r *Runtime) deliverMessage(text string, important bool, atts ...event.Atta
 		r.narrLastSaid = text
 		r.narrSaidSeq = ev.Seq
 		r.narrSaidAt = time.Now()
+		r.narrSaidSeen = r.narrLastSeen
 	})
 	if s := attachmentSummary(atts); s != "" {
 		text += "\n" + s
@@ -373,25 +391,20 @@ func (r *Runtime) deliverFallbackFinal() {
 	r.deliverMessage(b.String(), true)
 }
 
-// quietFor is how long the user has gone without a narrator message, or
-// since the session started when there has been none. Loop goroutine only.
-// quietLimit is how long the user may go without a progress line while work
-// continues. A relayed agent works for hours, so a relay session uses the
-// relay cadence unless the user tuned the narrator's limit live. Loop
-// goroutine only.
+// quietLimit is the longest the user goes without a progress line while
+// work continues: the same for every kind of session, unless the project
+// sets another for relays and the narrator's own was not changed for this
+// session. Loop goroutine only.
 func (r *Runtime) quietLimit() time.Duration {
 	secs := r.activeSettings.NarratorQuietSeconds
-	if len(r.st.ActiveRelays()) > 0 {
-		if r.relayQuietSet {
-			return r.relayQuiet // the user's /updates
-		}
-		if secs == r.cfg.NarratorQuietSeconds && secs > 0 {
-			secs = r.cfg.Relay.Quiet()
-		}
+	if own := r.cfg.Relay.QuietSeconds; own > 0 && len(r.st.ActiveRelays()) > 0 && secs == r.cfg.NarratorQuietSeconds && secs > 0 {
+		secs = own
 	}
 	return time.Duration(secs) * time.Second
 }
 
+// quietFor is how long the user has gone without a narrator message, or
+// since the session started when there has been none. Loop goroutine only.
 func (r *Runtime) quietFor() time.Duration {
 	if !r.narrSaidAt.IsZero() {
 		return time.Since(r.narrSaidAt)

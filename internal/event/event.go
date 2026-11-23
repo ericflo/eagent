@@ -80,6 +80,8 @@ const (
 	RelayLimit     = "relay.limit"     // the agent's usage budget crossed a threshold or ran out
 	RelayEnd       = "relay.end"       // the agent was stopped on purpose
 	RelayAutopilot = "relay.autopilot" // a standing order to keep the agent going (or its end)
+	NarratorTrim   = "narrator.trim"   // the narrator's view of the session now starts later, to keep its prompt short
+	NarratorChecks = "narrator.checks" // progress checks that ended in silence, counted for their tokens only
 )
 
 // Event is one line of the session log.
@@ -563,6 +565,23 @@ type RelayAutopilotData struct {
 	Until       string `json:"until,omitempty"`
 	Decide      bool   `json:"decide,omitempty"`
 	Off         bool   `json:"off,omitempty"`
+}
+
+// NarratorTrimData moves the start of the narrator's view: events up to
+// FromSeq are no longer rendered for it, and Recap (what it told the user
+// before that) stands in their place.
+type NarratorTrimData struct {
+	FromSeq int64  `json:"from_seq"`
+	Recap   string `json:"recap,omitempty"`
+}
+
+// NarratorChecksData totals the narrator's progress checks that said
+// nothing since the last such record. They leave no turn in its
+// conversation; this keeps their tokens in the session's totals.
+type NarratorChecksData struct {
+	Count     int   `json:"count"`
+	Usage     Usage `json:"usage"`
+	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
 }
 
 // RelayEndData records the agent being stopped on purpose.

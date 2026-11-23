@@ -106,6 +106,9 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 			continue
 		}
 		r.ui.Log("relay %s: %s", name, msg)
+		// Said in the conversation too, as /model says it: a change made in
+		// the app's settings is otherwise silent until the agent restarts.
+		go r.deliverMessage(msg, false)
 	}
 	return nil
 }

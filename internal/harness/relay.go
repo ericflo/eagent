@@ -55,6 +55,10 @@ type relaySeats struct {
 	seats map[string]relaySeat
 	// activity is what each agent is doing right now (not logged).
 	activity map[string]relayActivity
+	// steps are each agent's latest steps, oldest first, and stepCount how
+	// many it has taken in all (not logged; see relaywatch.go).
+	steps     map[string][]relayStep
+	stepCount int
 }
 
 type relayActivity struct {
@@ -252,6 +256,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
+		r.flushQuietChecks()
 		// A model or effort change that waited for this turn to end.
 		r.applyWaitingRepick(name)
 		r.armAutopilotCheck(name)
@@ -264,6 +269,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		}
 		r.relays.activity[name] = relayActivity{text: ev.Text, at: time.Now()}
 		r.relays.mu.Unlock()
+		r.relays.noteStep(name, ev.Text, time.Now())
 		if r.phone != nil {
 			r.phone.kick()
 		}
@@ -718,8 +724,10 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			var brief, started string
 			r.sync(func() {
 				brief = r.handoffBrief(rel)
-				if _, ok := r.cfg.Relay.RelayProfiles()[profile]; !ok {
-					err = fmt.Errorf("no relay profile %q (have %s)", profile, strings.Join(r.cfg.Relay.RelayProfileNames(), ", "))
+				// Checked before the running agent is stopped: a model or
+				// effort the new one cannot take must leave this one working.
+				pick := relayPick{pickArg(str("model")), pickArg(str("effort"))}
+				if err = r.checkRelayPick(profile, pick); err != nil {
 					return
 				}
 				if seat != nil {
@@ -727,7 +735,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					r.relays.drop(rel.Name, seat)
 				}
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "handed over to " + profile}))
-				started, err = r.startRelay(profile, rel.Dir, "", false, relayPick{pickArg(str("model")), pickArg(str("effort"))})
+				started, err = r.startRelay(profile, rel.Dir, "", false, pick)
 			})
 			if err != nil {
 				return "Could not switch: " + err.Error(), true
@@ -1292,7 +1300,9 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	cmd, args := fields[0], fields[1:]
 	switch cmd {
 	case "/updates":
-		r.setRelayCadence(args)
+		// No longer a setting (older clients still send it): the narrator
+		// says what the agent is doing as it goes.
+		go r.deliverMessage("Updates are not a setting any more. While the agent works I tell you what it is doing as it goes, and you never wait more than a few minutes to hear.", false)
 		return
 	case "/notify-done":
 		r.armNotifyDone()
@@ -1338,11 +1348,15 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 			params["action"], params["reason"] = "stop", "the user stopped it"
 			ack = "Stopped {who}."
 		case "/switch":
+			// /switch codex, /switch codex gpt-6.2-astra high, /switch claude default max.
 			if len(args) == 0 {
-				r.deliverMessage("Say which agent takes over: /switch antigravity, /switch claude or /switch codex.", false)
+				r.deliverMessage("Say which agent takes over: /switch antigravity, /switch claude or /switch codex, with a model and effort after it if you want other than its own.", false)
 				return
 			}
 			params["action"], params["profile"] = "switch", args[0]
+			agent := ""
+			r.sync(func() { agent = r.cfg.Relay.RelayProfiles()[args[0]].Agent })
+			modelAndEffort(params, args[1:], relay.AgentEfforts(agent))
 		case "/model":
 			// /model sonnet, /model high, /model opus max, /model default.
 			var agent, now string
@@ -1362,17 +1376,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 				return
 			}
 			params["action"] = "model"
-			efforts := relay.AgentEfforts(agent)
-			for _, a := range args[:min(len(args), 2)] {
-				switch {
-				case slices.Contains(efforts, strings.ToLower(a)):
-					params["effort"] = strings.ToLower(a)
-				case params["model"] == nil:
-					params["model"] = a
-				default:
-					params["effort"] = a // "default", or an effort the tool refuses
-				}
-			}
+			modelAndEffort(params, args, relay.AgentEfforts(agent))
 		case "/autopilot":
 			tool = "relay_autopilot"
 			switch {
@@ -1437,30 +1441,47 @@ func (r *Runtime) armNotifyDone() {
 	go r.deliverMessage(msg, false)
 }
 
-// setRelayCadence handles /updates: how often a progress line comes while
-// the agent works ("off", "5m", "15m", "1h"). Turn reports always come.
-// Loop goroutine.
-func (r *Runtime) setRelayCadence(args []string) {
-	var msg string
-	switch {
-	case len(args) == 0:
-		msg = "Say how often: /updates off, /updates 5m, /updates 15m, /updates 1h."
-	case args[0] == "off" || args[0] == "0":
-		r.relayQuiet = 0
-		msg = "No progress lines from now on; you hear when it finishes a turn or needs you."
-	default:
-		d, err := time.ParseDuration(args[0])
-		if err != nil || d < time.Minute {
-			msg = "Use a duration of a minute or more: /updates 5m, /updates 15m, /updates 1h, or /updates off."
-			break
+// modelAndEffort reads a command's "[model] [effort]" into tool
+// parameters: a word that is one of the agent's efforts is the effort, the
+// other is the model, and "default" stands for the agent's own.
+func modelAndEffort(params map[string]any, args, efforts []string) {
+	for _, a := range args[:min(len(args), 2)] {
+		switch {
+		case slices.Contains(efforts, strings.ToLower(a)):
+			params["effort"] = strings.ToLower(a)
+		case params["model"] == nil:
+			params["model"] = a
+		default:
+			params["effort"] = a // "default", or an effort the tool refuses
 		}
-		r.relayQuiet = d
-		msg = "A progress line every " + roundDur(d) + " while it works, plus every turn report."
 	}
-	r.relayQuietSet = r.relayQuietSet || strings.HasPrefix(msg, "No progress") || strings.HasPrefix(msg, "A progress")
-	r.ui.Log("%s", msg)
-	r.publishRelayMeta()
-	go r.deliverMessage(msg, false)
+}
+
+// splitArgs splits a command line on spaces, keeping a double-quoted
+// stretch (a model named "Gemini 3.1 Pro") as one argument.
+func splitArgs(line string) []string {
+	var out []string
+	var cur strings.Builder
+	quoted, any := false, false
+	for _, c := range line {
+		switch {
+		case c == '"':
+			quoted, any = !quoted, true
+		case !quoted && (c == ' ' || c == '\t' || c == '\n' || c == '\r'):
+			if any {
+				out = append(out, cur.String())
+				cur.Reset()
+				any = false
+			}
+		default:
+			cur.WriteRune(c)
+			any = true
+		}
+	}
+	if any {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 func argStr(m map[string]any) func(string) string {
@@ -1499,30 +1520,25 @@ func (r *Runtime) relayThreadMeta() any {
 		return nil
 	}
 	rel := active[0]
-	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "", "updates": "",
+	m := map[string]any{"name": rel.Name, "agent": rel.Agent, "profile": rel.Profile, "label": rel.Label, "state": rel.State, "autopilot": rel.Autopilot != nil, "autopilot_until": "",
 		"target": rel.Target, "attach": "eagent relays attach " + rel.Target, "notify_done": r.relayNotifyDone[rel.Name]}
+	// What it runs (its picks, else its own defaults), and a change that
+	// waits for its turn to end, in words.
+	profile := r.cfg.Relay.RelayProfiles()[rel.Profile]
+	m["model"], m["effort"] = relay.ProfileDefaults(rel.Agent, firstNonEmpty(rel.Model, profile.Model), firstNonEmpty(rel.Effort, profile.Effort))
+	if pick, waiting := r.relayRepick[rel.Name]; waiting {
+		m["pending"] = r.pickText(rel, pick)
+	}
 	var alternatives []string
-	for _, profile := range r.cfg.Relay.RelayProfileNames() {
-		if profile != rel.Profile {
-			alternatives = append(alternatives, profile)
+	for _, name := range r.cfg.Relay.RelayProfileNames() {
+		if name != rel.Profile {
+			alternatives = append(alternatives, name)
 		}
 	}
 	m["switch_profiles"] = alternatives
 
 	if rel.Autopilot != nil {
 		m["autopilot_until"] = rel.Autopilot.Until
-	}
-	if r.relayQuietSet {
-		// What /updates set: "off", or a cadence like "15m". "" is the default.
-		m["updates"] = "off"
-		if d := r.relayQuiet; d > 0 {
-			// The commands' own form: "5m", "15m", "1h".
-			if d%time.Hour == 0 {
-				m["updates"] = fmt.Sprintf("%dh", int(d/time.Hour))
-			} else {
-				m["updates"] = fmt.Sprintf("%dm", int(d/time.Minute))
-			}
-		}
 	}
 	return m
 }

@@ -132,23 +132,31 @@ type Runtime struct {
 	autopilotChecks     map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone     map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
 	relayRepick         map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
-	relayQuiet          time.Duration          // progress cadence the user set with /updates (when relayQuietSet)
-	relayQuietSet       bool
-	toolImagesMu        sync.Mutex
-	memoMu              sync.Mutex
-	memo                map[string]fileMark           // what each caller last read or viewed, to skip repeats
-	toolImages          map[string][]event.Attachment // call id -> pictures for the model (view_image)
-	running             map[string]context.CancelFunc // task id -> cancel
-	waiters             []*waiter
-	timers              map[string]*time.Timer // schedule id -> timer
-	rolling             bool
-	ending              bool
-	endReason           string
-	shutdownOnce        sync.Once
-	exitCode            int
-	awaitingUser        bool
-	lastOrchSeen        int64
-	lastWake            int64 // seq of the newest event that should wake the orchestrator
+	// The narrator's progress checks while work goes on (narratorcheck.go):
+	// what it had seen when the user last heard from it, what the last check
+	// had seen (log seq and relay steps), when a check last ran and last
+	// failed, and the checks that said nothing and are not yet on the record.
+	narrSaidSeen   int64
+	checkSeenSeq   int64
+	checkSeenSteps int
+	checkedAt      time.Time
+	checkFailedAt  time.Time
+	quietChecks    event.NarratorChecksData
+	toolImagesMu   sync.Mutex
+	memoMu         sync.Mutex
+	memo           map[string]fileMark           // what each caller last read or viewed, to skip repeats
+	toolImages     map[string][]event.Attachment // call id -> pictures for the model (view_image)
+	running        map[string]context.CancelFunc // task id -> cancel
+	waiters        []*waiter
+	timers         map[string]*time.Timer // schedule id -> timer
+	rolling        bool
+	ending         bool
+	endReason      string
+	shutdownOnce   sync.Once
+	exitCode       int
+	awaitingUser   bool
+	lastOrchSeen   int64
+	lastWake       int64 // seq of the newest event that should wake the orchestrator
 	// lastArrival is the newest wake that came from outside the harness (a
 	// user message or answer, a schedule firing, a task or notified process
 	// ending). Harness-made wakes (recovery messages, the dossier) advance
@@ -858,6 +866,10 @@ drain:
 		r.narrTicker.Stop()
 	}
 	// Direct writes: the loop is no longer running.
+	if r.quietChecks.Count > 0 {
+		r.appendDirect(event.New(event.NarratorChecks, event.ActorNarrator, r.quietChecks))
+		r.quietChecks = event.NarratorChecksData{}
+	}
 	for _, p := range r.procs.All() {
 		if sp := r.st.Procs[p.Handle]; sp != nil && sp.Status == "running" {
 			ev := event.New(event.ProcExit, sp.Actor, event.ProcExitData{Handle: p.Handle, ExitCode: -1, Reason: "killed", DurationMS: p.Duration().Milliseconds()}).WithTask(sp.Task)
@@ -942,6 +954,11 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 	// Phone keyboards capitalise the first letter: "/Interrupt" is /interrupt.
 	fields[0] = strings.ToLower(fields[0])
 	if relayCommands[fields[0]] {
+		// A model's name can hold spaces; quoted, it is one argument.
+		if quoted := splitArgs(line); len(quoted) > 0 {
+			quoted[0] = fields[0]
+			fields = quoted
+		}
 		r.relayCommand(fields, client)
 		return
 	}
@@ -985,7 +1002,7 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		}
 	case "/help", "/?":
 		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /quit  (anything else is sent to the agent)")
-		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> /autopilot [until 10:00] [order] | off  /updates off|15m  /stop-relay")
+		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}

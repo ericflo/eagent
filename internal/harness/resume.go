@@ -105,6 +105,8 @@ func (r *Runtime) closeInterrupted() {
 			_ = ev.Decode(&d)
 			r.narrLastSaid = d.Text
 			r.narrSaidSeq = ev.Seq
+			r.narrSaidAt = ev.Time
+			r.narrSaidSeen = r.narrLastSeen
 		}
 	}
 	// Continue process handles after replayed ones.

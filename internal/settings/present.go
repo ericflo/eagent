@@ -40,7 +40,7 @@ var projectPlaces = map[string]fieldPlace{
 	"/finalechat/agent":                    {"FinaleChat", "Phone", "Agent name", "Shown next to the thread in the app.", true},
 	"/finalechat/base_url":                 {"FinaleChat", "Phone", "Server URL", "A self-hosted or staging FinaleChat.", true},
 	"/finalechat/token_env":                {"FinaleChat", "Phone", "Token variable", "The environment variable holding the token.", true},
-	"/relay/quiet_seconds":                 {"FinaleChat", "Relayed agents", "Quiet limit (seconds)", "The longest you go without a progress line while a relayed agent works.", true},
+	"/relay/quiet_seconds":                 {"FinaleChat", "Relayed agents", "Quiet limit for relays (seconds)", "Set this only to give relayed agents a different quiet limit from the narrator's. Empty uses the same one.", true},
 }
 
 var routeLabels = map[string]string{

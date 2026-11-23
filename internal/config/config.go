@@ -102,9 +102,8 @@ type Relay struct {
 	// "claude" are always available; a profile here with the same name
 	// replaces the built-in one.
 	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
-	// QuietSeconds is how long the user may go without a progress line while
-	// a relayed agent works (default 900; NarratorQuietSeconds governs
-	// sessions without a relay).
+	// QuietSeconds, when set, replaces NarratorQuietSeconds while a relayed
+	// agent works. Unset, a relay session keeps the same limit as any other.
 	QuietSeconds int `json:"quiet_seconds,omitempty"`
 }
 
@@ -171,14 +170,6 @@ func (r Relay) RelayProfileNames() []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// Quiet is the progress cadence while a relayed agent works.
-func (r Relay) Quiet() int {
-	if r.QuietSeconds > 0 {
-		return r.QuietSeconds
-	}
-	return 900
 }
 
 // Finalechat configures the phone mirror (https://www.finalechat.com).

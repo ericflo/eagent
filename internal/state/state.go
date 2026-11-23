@@ -141,6 +141,9 @@ type State struct {
 	// Relays are the external agents the session runs, by name.
 	Relays     map[string]*Relay
 	RelayOrder []string
+	// NarratorTrim is where the narrator's view of the open subsession
+	// starts when it was shortened; nil shows it all.
+	NarratorTrim *event.NarratorTrimData
 
 	// LastYield is the orchestrator's most recent yield after the last thing
 	// that would wake it (user message, task end, schedule fire...). Nil
@@ -561,6 +564,30 @@ func (s *State) Apply(ev event.Event) {
 		s.Errors = append(s.Errors, d.Where+": "+d.Text)
 	case event.RelayStart, event.RelayInner, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		s.applyRelay(ev)
+	case event.NarratorTrim:
+		var d event.NarratorTrimData
+		if ev.Decode(&d) == nil {
+			s.NarratorTrim = &d
+		}
+	case event.NarratorChecks:
+		var d event.NarratorChecksData
+		if ev.Decode(&d) == nil && d.Count > 0 {
+			key := event.ActorNarrator
+			tot := s.Totals[key]
+			tot.Input += d.Usage.Input
+			tot.Output += d.Usage.Output
+			tot.Cached += d.Usage.Cached
+			tot.Reasoning += d.Usage.Reasoning
+			s.Totals[key] = tot
+			rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
+			ru := s.ByRoute[rk]
+			ru.Input += d.Usage.Input
+			ru.Output += d.Usage.Output
+			ru.Cached += d.Usage.Cached
+			ru.Reasoning += d.Usage.Reasoning
+			s.ByRoute[rk] = ru
+			s.Calls[key] += d.Count
+		}
 	}
 }
 

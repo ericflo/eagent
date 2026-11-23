@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -425,6 +426,14 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 		opts = &DefaultViewOptions
 	}
 	events := s.currentEvents()
+	// A trimmed view starts later: what came before is replaced by a recap
+	// of what the narrator told the user. The cut moves rarely, so the
+	// prompt prefix stays stable between moves.
+	recap := ""
+	if t := s.NarratorTrim; t != nil && len(events) > 0 && t.FromSeq >= events[0].Seq {
+		cut := sort.Search(len(events), func(i int) bool { return events[i].Seq > t.FromSeq })
+		events, recap = events[cut:], t.Recap
+	}
 	results := map[string]event.ToolResultData{}
 	for _, ev := range events {
 		if ev.Type == event.ToolResult && ev.Actor == event.ActorNarrator {
@@ -448,6 +457,9 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 	}
 	var msgs []llm.Message
 	var batch []string
+	if recap != "" {
+		batch = append(batch, recap)
+	}
 	flush := func() {
 		if len(batch) == 0 {
 			return
@@ -503,6 +515,86 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 	batch = append(batch, held...)
 	flush()
 	return msgs
+}
+
+// WithSteer adds a steer to the end of a narrator view exactly as a recorded
+// steer event renders there: joined to the open batch of observations, or as
+// a batch of its own after a narrator turn. A check that ends in silence can
+// then leave the log untouched, and one that speaks records the same steer,
+// so the next prompt still extends this one.
+func WithSteer(msgs []llm.Message, steer string) []llm.Message {
+	if n := len(msgs); n > 0 && msgs[n-1].Role == "user" {
+		last := msgs[n-1]
+		last.Text += "\n\n" + steer
+		return append(msgs[:n-1:n-1], last)
+	}
+	return append(msgs, llm.Message{Role: "user", Text: steer})
+}
+
+// NarratorTrimPoint proposes where a shortened narrator view should start
+// so that about keepChars of its newest content stay: the seq to cut at, and
+// a recap of what the narrator told the user up to there. ok is false when
+// the view is already that short.
+func (s *State) NarratorTrimPoint(keepChars int) (from int64, recap string, ok bool) {
+	events := s.currentEvents()
+	if t := s.NarratorTrim; t != nil && len(events) > 0 && t.FromSeq >= events[0].Seq {
+		events = events[sort.Search(len(events), func(i int) bool { return events[i].Seq > t.FromSeq }):]
+	}
+	size := func(ev event.Event) int {
+		if ev.Actor != event.ActorNarrator {
+			return len(Observe(ev, DefaultViewOptions.ObservationChars))
+		}
+		switch ev.Type {
+		case event.Steer:
+			var d event.SteerData
+			_ = ev.Decode(&d)
+			return len(d.Text)
+		case event.Assistant:
+			var d event.AssistantData
+			_ = ev.Decode(&d)
+			n := len(d.Text)
+			for _, tc := range d.ToolCalls {
+				n += len(tc.Args) + len(tc.Name)
+			}
+			return n
+		case event.ToolResult:
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			return len(d.Output)
+		}
+		return 0
+	}
+	total, cut := 0, -1
+	for i := len(events) - 1; i >= 0; i-- {
+		if total += size(events[i]); total > keepChars {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return 0, "", false
+	}
+	from = events[cut].Seq
+	var said []string
+	for _, ev := range s.currentEvents() {
+		if ev.Seq > from {
+			break
+		}
+		if ev.Type == event.NarratorMessage {
+			var d event.NarratorMessageData
+			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
+				said = append(said, fmt.Sprintf("- %s %s", ev.Time.Local().Format("15:04"), clip(oneLine(d.Text), 400)))
+			}
+		}
+	}
+	if len(said) > 5 {
+		said = said[len(said)-5:]
+	}
+	recap = fmt.Sprintf("[harness] To keep your view short, what happened before %s is no longer shown.", events[cut].Time.Local().Format("15:04:05"))
+	if len(said) > 0 {
+		recap += " Up to then you had told the user, newest last:\n" + strings.Join(said, "\n")
+	}
+	return from, recap, true
 }
 
 // Observe renders one event as the narrator sees it, or "" if it is not

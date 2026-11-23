@@ -329,3 +329,97 @@ func TestAnswerNotesAreMarkedForTheNarrator(t *testing.T) {
 		t.Fatalf("plain note rendered as an answer: %q", got)
 	}
 }
+
+// A progress check shows the narrator a steer that is recorded only if it
+// speaks: WithSteer must render exactly what the recorded steer would.
+func TestWithSteerMatchesARecordedSteer(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
+	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone"}))
+	const steer = "[harness] Progress check while work goes on."
+	shown := WithSteer(Replay(b.events).NarratorView(nil), steer)
+	seen := b.seq
+	// A remark lands while the model answers; then the turn is recorded.
+	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "arrived during the call"}))
+	b.add(event.New(event.TurnStart, event.ActorNarrator, event.TurnData{Reason: "periodic"}))
+	b.add(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
+	b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call("n1", "send_message", `{"text":"hi"}`)}, SeenSeq: seen}))
+	b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: "n1", Name: "send_message", Output: "delivered"}))
+	recorded := Replay(b.events).NarratorView(nil)
+	if len(shown) != 1 || len(recorded) != 4 {
+		t.Fatalf("shown %d messages, recorded %d", len(shown), len(recorded))
+	}
+	if shown[0].Text != recorded[0].Text {
+		t.Fatalf("the model saw\n%q\nbut the log rebuilds\n%q", shown[0].Text, recorded[0].Text)
+	}
+	if !strings.Contains(recorded[3].Text, "arrived during the call") {
+		t.Fatalf("what arrived during the call belongs after the turn: %q", recorded[3].Text)
+	}
+	// With nothing observed since its last turn, the steer stands alone.
+	alone := WithSteer(recorded[:3], steer)
+	if len(alone) != 4 || alone[3].Role != "user" || alone[3].Text != steer {
+		t.Fatalf("steer after a turn = %+v", alone)
+	}
+}
+
+// A trimmed narrator view starts at the cut with a recap of what it told
+// the user, and stays put (so its prefix stays cached) until trimmed again.
+func TestNarratorViewTrim(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
+	for i := 0; i < 6; i++ {
+		id := "n" + string(rune('a'+i))
+		b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "remark " + id + " " + strings.Repeat("x", 300)}))
+		seen := b.seq
+		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
+		b.add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "said " + id}))
+		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
+	}
+	st := Replay(b.events)
+	if _, _, ok := st.NarratorTrimPoint(1 << 20); ok {
+		t.Fatal("a short view was offered a trim")
+	}
+	from, recap, ok := st.NarratorTrimPoint(800)
+	if !ok || from <= 3 || from >= b.seq {
+		t.Fatalf("trim point %d ok=%v", from, ok)
+	}
+	if !strings.Contains(recap, "no longer shown") || !strings.Contains(recap, "said na") {
+		t.Fatalf("recap = %q", recap)
+	}
+	full := st.NarratorView(nil)
+	b.add(event.New(event.NarratorTrim, event.ActorHarness, event.NarratorTrimData{FromSeq: from, Recap: recap}))
+	trimmed := Replay(b.events).NarratorView(nil)
+	if len(trimmed) >= len(full) || trimmed[0].Role != "user" || !strings.HasPrefix(trimmed[0].Text, recap) {
+		t.Fatalf("trimmed view: %d messages (was %d), first %+v", len(trimmed), len(full), trimmed[0])
+	}
+	var all string
+	for _, m := range trimmed {
+		all += m.Text
+	}
+	if strings.Contains(all, "remark na") || !strings.Contains(all, "remark nf") {
+		t.Fatal("the trim kept the oldest remark or dropped the newest")
+	}
+	// New events leave the trimmed prefix as it was.
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "later"}))
+	again := Replay(b.events).NarratorView(nil)
+	for i := 0; i < len(trimmed)-1; i++ {
+		if again[i].Text != trimmed[i].Text {
+			t.Fatalf("message %d changed after an append", i)
+		}
+	}
+}
+
+// Progress checks that said nothing are counted for their tokens only.
+func TestNarratorChecksCountTowardTotals(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.NarratorChecks, event.ActorNarrator, event.NarratorChecksData{Count: 3, Usage: event.Usage{Input: 3000, Output: 30, Cached: 2700}}))
+	st := Replay(b.events)
+	if tot := st.Totals[event.ActorNarrator]; tot.Input != 3000 || tot.Cached != 2700 || st.Calls[event.ActorNarrator] != 3 {
+		t.Fatalf("totals %+v, calls %d", tot, st.Calls[event.ActorNarrator])
+	}
+	for _, m := range st.NarratorView(nil) {
+		if strings.Contains(m.Text, "3000") || m.Role == "assistant" {
+			t.Fatalf("the count leaked into the narrator's view: %+v", m)
+		}
+	}
+}
