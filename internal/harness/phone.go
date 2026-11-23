@@ -306,6 +306,8 @@ func (p *phone) close(reason string) {
 			body = "eagent stopped here and is waiting for you. Resume the session to answer."
 		case "interrupted":
 			body = "eagent was interrupted. Resume the session to continue."
+		case "quit":
+			body = "eagent stopped this session. A reply here resumes it while eagent serve is running."
 		}
 		_, _, _ = p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "session-end", "kind": "session_end", "reason": reason}, ClientKey: p.key("end", reason, strconv.Itoa(p.resumes))})
 	})

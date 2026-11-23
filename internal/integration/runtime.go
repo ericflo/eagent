@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -112,6 +113,18 @@ func decorateSessionView(project string, view *settings.RemoteView, grant contro
 			view.Descriptor.Fields[i].Suggest = &control.Suggest{List: "providers"}
 		}
 	}
+	// Actions the connector's grant does not allow are not offered (the
+	// server would refuse the whole resource).
+	actions := []control.Action{}
+	for _, a := range view.Descriptor.Actions {
+		if slices.Contains(grant.Operations, a.Operation) && slices.Contains(grant.Classes, a.Class) {
+			actions = append(actions, a)
+		}
+	}
+	view.Descriptor.Actions = nil
+	if len(actions) > 0 {
+		view.Descriptor.Actions = actions
+	}
 	canApply, preferences, routes := false, false, false
 	for _, op := range grant.Operations {
 		canApply = canApply || op == "settings.apply"
@@ -139,8 +152,9 @@ func impliedBy(implies, values map[string]any) bool {
 }
 
 // maxSessionResources bounds how many running sessions get a live settings
-// resource at once (the server caps a connector's grants at 50).
-const maxSessionResources = 16
+// resource at once (the server caps a connector's grants at 50). A session
+// past it still runs, but the app does not list it as running.
+const maxSessionResources = 40
 
 // runningSessions lists sessions in the project whose harness is alive right
 // now, proven by a live runtime-status heartbeat. Newest first; only the
@@ -167,9 +181,10 @@ func runningSessions(project string) []string {
 
 // sessionGrants is the grant set the project connector should hold: its
 // project grant, any unrelated grant the server already issued, and one
-// session grant per running session (newest first, bounded). Session grants
-// of sessions that have stopped are dropped, so they never accumulate.
-func sessionGrants(project string, held []control.Grant, projectGrant control.Grant, live []string) []control.Grant {
+// session grant per running session (newest first, bounded), which may stop
+// it when the server supports that. Session grants of sessions that have
+// stopped are dropped, so they never accumulate.
+func sessionGrants(project string, held []control.Grant, projectGrant control.Grant, live []string, canStop bool) []control.Grant {
 	out := []control.Grant{projectGrant}
 	for _, g := range held {
 		if g.Key != projectGrant.Key && !strings.HasPrefix(g.Key, projectGrant.Key+"-session-") {
@@ -181,6 +196,9 @@ func sessionGrants(project string, held []control.Grant, projectGrant control.Gr
 			break
 		}
 		if g, err := runtimecontrol.Grant(project, sid); err == nil {
+			if !canStop {
+				g = runtimecontrol.WithoutStop(g)
+			}
 			out = append(out, g)
 		}
 	}

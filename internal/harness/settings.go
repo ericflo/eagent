@@ -16,6 +16,7 @@ func (r *Runtime) startRuntimeSettings() {
 		r.ui.Log("live settings unavailable: %v", err)
 		return
 	}
+	c.Stop = r.acceptRemoteStop
 	r.runtimeControl = c
 	r.append(event.New("settings.runtime_started", event.ActorHarness, map[string]any{"format": runtimecontrol.Schema, "generation": c.Generation, "values": r.activeSettings, "persistence": "this process only"}))
 }
@@ -35,7 +36,30 @@ func (r *Runtime) pollRuntimeSettings() {
 		if err := r.runtimeControl.Poll(); err != nil {
 			r.ui.Log("live settings: %v", err)
 		}
+		// A stop from the app ends the session the way the web UI's Stop
+		// does, now that the controller has acknowledged it.
+		if r.remoteStop {
+			r.beginShutdown("quit", 0)
+		}
 	}
+}
+
+// acceptRemoteStop records a session.stop the app sent (through the
+// connector) and arranges the shutdown for after this poll. Loop goroutine.
+func (r *Runtime) acceptRemoteStop(q runtimecontrol.Request) error {
+	if r.ending || r.ctx.Err() != nil || r.runtimeControl == nil || q.Proposal.Generation != r.runtimeControl.Generation {
+		return fmt.Errorf("the session is already ending")
+	}
+	previousSeq := r.st.LastSeq()
+	ev := r.append(event.New("session.stop_requested", event.ActorHarness, map[string]any{
+		"command_id": q.ID, "user_id": q.UserID, "proposal_sha256": q.Digest, "generation": q.Proposal.Generation, "resource_key": q.Grant.Key,
+	}))
+	if ev.Seq <= previousSeq {
+		return fmt.Errorf("the stop was not durably recorded")
+	}
+	r.ui.Log("stop requested from FinaleChat")
+	r.remoteStop = true
+	return nil
 }
 
 func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimecontrol.Values, result map[string]any) error {

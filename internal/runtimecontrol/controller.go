@@ -30,9 +30,13 @@ type Outcome struct {
 // Controller methods are owned by the harness loop. Apply is called only on
 // that loop and must record the accepted change through its normal event writer.
 type Controller struct {
-	Project, Session, Generation       string
-	Values                             Values
-	Apply                              func(Request, Values, map[string]any) error
+	Project, Session, Generation string
+	Values                       Values
+	Apply                        func(Request, Values, map[string]any) error
+	// Stop records an accepted session.stop and arranges for the session to
+	// end once Poll returns (Poll's files must stay open until then). Nil
+	// refuses the stop.
+	Stop                               func(Request) error
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
@@ -197,6 +201,9 @@ func (c *Controller) process(q Request) error {
 	if q.Proposal.Operation == "settings.refresh" {
 		return finish("succeeded", map[string]any{"version": view.Snapshot.Version, "runtime_applied": false, "snapshot_publication": "pending"})
 	}
+	if q.Proposal.Operation == StopOperation {
+		return c.stop(q, finish)
+	}
 	if c.Apply == nil {
 		return finish("rejected", map[string]any{"message": "This runtime cannot acknowledge settings changes."})
 	}
@@ -224,4 +231,26 @@ func (c *Controller) process(q Request) error {
 		return err
 	}
 	return c.heartbeat(true)
+}
+
+// stop accepts a session.stop: the runtime reports itself unavailable before
+// acknowledging, so the connector publishes the session as stopped together
+// with the result, and the harness ends the session after this poll.
+func (c *Controller) stop(q Request, finish func(string, map[string]any) error) error {
+	if c.Stop == nil {
+		return finish("rejected", map[string]any{"message": "This runtime cannot be stopped from here."})
+	}
+	if err := writeCommitted(c.started, q.ID, q); err != nil {
+		return err
+	}
+	if !q.Expires.After(time.Now()) {
+		return finish("expired", map[string]any{"message": "The stop expired before it reached the session."})
+	}
+	if err := c.Stop(q); err != nil {
+		return finish("unknown", map[string]any{"message": "The session could not record the stop.", "detail": err.Error()})
+	}
+	if err := c.heartbeat(false); err != nil {
+		return err
+	}
+	return finish("succeeded", map[string]any{"generation": c.Generation, "runtime_applied": true, "message": "Stopping this session."})
 }

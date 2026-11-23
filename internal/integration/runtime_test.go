@@ -38,10 +38,14 @@ type fakeConnectorServer struct {
 	queuedKey   string
 	results     chan map[string]any
 	publication chan string
+	// features is what GET /me reports to the account; descriptors keeps
+	// each resource's latest published descriptor.
+	features    []string
+	descriptors map[string]control.Descriptor
 }
 
 func newFakeConnectorServer(t *testing.T, grants []control.Grant) (*fakeConnectorServer, *httptest.Server) {
-	f := &fakeConnectorServer{t: t, grants: grants, published: map[string][]control.Snapshot{}, results: make(chan map[string]any, 4), publication: make(chan string, 64)}
+	f := &fakeConnectorServer{t: t, grants: grants, published: map[string][]control.Snapshot{}, results: make(chan map[string]any, 4), publication: make(chan string, 64), descriptors: map[string]control.Descriptor{}}
 	srv := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -68,6 +72,13 @@ func (f *fakeConnectorServer) serve(w http.ResponseWriter, r *http.Request) {
 		f.connects = append(f.connects, grants)
 		f.mu.Unlock()
 		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	if auth == "Bearer fc_account" && path == "/api/v1/me" {
+		f.mu.Lock()
+		features := f.features
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"features": features})
 		return
 	}
 	if auth == "Bearer fc_account" {
@@ -104,15 +115,27 @@ func (f *fakeConnectorServer) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{}`))
 	case r.Method == "PUT" && strings.Contains(path, "/resources/"):
 		key := path[strings.LastIndex(path, "/")+1:]
-		granted := false
-		for _, g := range f.grants {
-			granted = granted || g.Key == key
+		var held *control.Grant
+		for i, g := range f.grants {
+			if g.Key == key {
+				held = &f.grants[i]
+			}
 		}
-		if !granted || instance != f.holder {
-			f.t.Errorf("publication of %s: granted=%v instance=%q holder=%q", key, granted, instance, f.holder)
+		if held == nil || instance != f.holder {
+			f.t.Errorf("publication of %s: granted=%v instance=%q holder=%q", key, held != nil, instance, f.holder)
 			w.WriteHeader(403)
 			return
 		}
+		// As the server does: the descriptor must fit the grant held now.
+		rawD, _ := json.Marshal(body["descriptor"])
+		var descriptor control.Descriptor
+		_ = json.Unmarshal(rawD, &descriptor)
+		if err := descriptor.Validate(*held); err != nil {
+			f.t.Errorf("publication of %s refused: %v", key, err)
+			w.WriteHeader(422)
+			return
+		}
+		f.descriptors[key] = descriptor
 		raw, _ := json.Marshal(body["snapshot"])
 		var snap control.Snapshot
 		_ = json.Unmarshal(raw, &snap)
@@ -316,10 +339,10 @@ func TestSessionGrantsAreBoundedAndKeepUnrelatedGrants(t *testing.T) {
 	other := control.Grant{Key: "something-else", Label: "x", Scope: "project", Operations: []string{"settings.apply"}, Classes: []string{"preference"}}
 	stale, _ := runtimecontrol.Grant(project, "1")
 	live := []string{}
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 60; i++ {
 		live = append(live, fmt.Sprint(1800000000000+i))
 	}
-	got := sessionGrants(project, []control.Grant{projectGrant, other, stale}, projectGrant, live)
+	got := sessionGrants(project, []control.Grant{projectGrant, other, stale}, projectGrant, live, false)
 	if len(got) != 2+maxSessionResources-1 || got[0].Key != projectGrant.Key || got[1].Key != other.Key {
 		t.Fatalf("grants = %d %+v", len(got), got[:2])
 	}
@@ -330,6 +353,22 @@ func TestSessionGrantsAreBoundedAndKeepUnrelatedGrants(t *testing.T) {
 	}
 	if !sameGrantKeys(got, append([]control.Grant{}, got...)) || sameGrantKeys(got, got[:len(got)-1]) {
 		t.Fatal("sameGrantKeys")
+	}
+	// Session grants may stop their session only where the server knows
+	// session.stop; the project grant never changes for it.
+	for _, g := range got[2:] {
+		if slicesContain(g.Operations, runtimecontrol.StopOperation) {
+			t.Fatalf("stop granted without server support: %+v", g)
+		}
+	}
+	withStop := sessionGrants(project, []control.Grant{projectGrant, other}, projectGrant, live, true)
+	if len(withStop) != len(got) || sameGrantKeys(withStop, got) || slicesContain(withStop[0].Operations, runtimecontrol.StopOperation) {
+		t.Fatal("stop changed the grant set's shape or the project grant")
+	}
+	for _, g := range withStop[2:] {
+		if !slicesContain(g.Operations, runtimecontrol.StopOperation) || g.Validate() != nil {
+			t.Fatalf("session grant without a valid stop: %+v", g)
+		}
 	}
 }
 
@@ -370,5 +409,126 @@ func TestRunningSessionsDiscoversLiveHeartbeatOnly(t *testing.T) {
 	// but AvailableUntil.After(now) is false.
 	if got := runningSessions(project); len(got) != 0 {
 		t.Fatalf("after shutdown runningSessions = %v, want none", got)
+	}
+}
+
+// Where the server knows session.stop, each running session's grant allows
+// it and its resource offers it; a stop from the app reaches the harness,
+// is acknowledged, and the session is then published as not running.
+func TestProjectConnectorStopsARunningSession(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "on")
+	t.Setenv("FINALECHAT_TOKEN", "fc_account")
+	project := t.TempDir()
+	sess, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stops atomic.Int32
+	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.Stop = func(runtimecontrol.Request) error { stops.Add(1); return nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var ownerMu sync.Mutex
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		for ctx.Err() == nil {
+			ownerMu.Lock()
+			if stops.Load() == 0 {
+				if err := owner.Poll(); err != nil {
+					t.Error(err)
+				}
+			}
+			ownerMu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	projectGrant := (&settings.Service{Project: project}).Grant()
+	liveGrant, _ := runtimecontrol.Grant(project, sess.ID)
+	f, srv := newFakeConnectorServer(t, []control.Grant{projectGrant})
+	f.features = []string{"settings-control.v1", "session-stop.v1"}
+	if err := writeJSONAtomic(config.File(project), map[string]any{"finalechat": map[string]any{"base_url": srv.URL}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(connectorPath(project), connectorConfig{ID: "connector", Secret: "fcc_test", BaseURL: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runConnectorAt(ctx, project, connectorPath(project), t.Logf) }()
+
+	f.waitFor(t, ctx, "the session grant", func() bool { return len(f.connects) > 0 })
+	f.mu.Lock()
+	requested := f.connects[0]
+	f.mu.Unlock()
+	if len(requested) != 2 || requested[1].Key != liveGrant.Key || !slicesContain(requested[1].Operations, runtimecontrol.StopOperation) {
+		t.Fatalf("requested grants = %+v", requested)
+	}
+	f.waitFor(t, ctx, "the session resource with its stop", func() bool {
+		d, ok := f.descriptors[liveGrant.Key]
+		return ok && len(d.Actions) == 1 && d.Actions[0].Operation == runtimecontrol.StopOperation && d.Actions[0].Description != ""
+	})
+
+	view, err := runtimeSnapshot(project, sess.ID, liveGrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := control.Proposal{Operation: runtimecontrol.StopOperation, SchemaVersion: runtimecontrol.Schema, Generation: view.Generation, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{}}
+	raw, _ := json.Marshal(p)
+	q := command{ID: randomID(), UserID: "owner", ResourceID: "resource:" + liveGrant.Key, Proposal: p, Digest: artifact.Digest(raw), ClaimToken: "claim", Expires: time.Now().Add(time.Minute)}
+	f.mu.Lock()
+	f.queued, f.queuedKey = &q, liveGrant.Key
+	f.mu.Unlock()
+	select {
+	case result := <-f.results:
+		if result["status"] != "succeeded" || stops.Load() != 1 {
+			t.Fatalf("stop not acknowledged by the runtime: %+v (stops %d)", result, stops.Load())
+		}
+	case <-ctx.Done():
+		t.Fatal("stop timed out")
+	}
+	// The runtime reported itself gone before acknowledging, so the very
+	// next publication says the session is not running, without the stop.
+	f.waitFor(t, ctx, "the stopped session published", func() bool {
+		all := f.published[liveGrant.Key]
+		return len(all) > 0 && !all[len(all)-1].RuntimeKnown && len(f.descriptors[liveGrant.Key].Actions) == 0
+	})
+	cancel()
+	<-done
+	<-ownerDone
+	ownerMu.Lock()
+	_ = owner.Close()
+	ownerMu.Unlock()
+}
+
+// A server that does not know session.stop is never asked for it, and
+// nothing published offers it.
+func TestProjectConnectorLeavesStopOutForOlderServers(t *testing.T) {
+	project := t.TempDir()
+	sess, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Close()
+	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	full, _ := runtimecontrol.Grant(project, sess.ID)
+	view, err := runtimeSnapshot(project, sess.ID, runtimecontrol.WithoutStop(full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Descriptor.Actions) != 0 || view.Descriptor.Validate(runtimecontrol.WithoutStop(full)) != nil {
+		t.Fatalf("older server offered %+v", view.Descriptor.Actions)
+	}
+	if view, _ = runtimeSnapshot(project, sess.ID, full); len(view.Descriptor.Actions) != 1 || view.Descriptor.Validate(full) != nil {
+		t.Fatalf("stop missing where granted: %+v", view.Descriptor.Actions)
 	}
 }

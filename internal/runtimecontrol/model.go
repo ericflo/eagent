@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -83,13 +84,49 @@ func FromConfig(c config.Config) Values {
 	return v
 }
 
+// StopOperation stops the running session, as Stop in eagent's web UI does.
+// A server that does not know it (no feature session-stop.v1) is asked for
+// the grant without it; see WithoutStop.
+const StopOperation = "session.stop"
+
+// WithoutStop is a session grant for a server that cannot take the stop.
+func WithoutStop(g control.Grant) control.Grant {
+	g.Operations = slices.DeleteFunc(slices.Clone(g.Operations), func(op string) bool { return op == StopOperation })
+	return g
+}
+
+// stopAction is the stop a running session offers. What it says is what the
+// app shows before the user confirms.
+func stopAction(values Values) control.Action {
+	text := "Ends this eagent session now, like Stop in eagent's web UI. A reply here resumes it while eagent serve or connector run is up."
+	names := make([]string, 0, len(values.Relays))
+	for name := range values.Relays {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	who := []string{}
+	for _, name := range names {
+		if w := relay.AgentName(values.Relays[name].Agent); !slices.Contains(who, w) {
+			who = append(who, w)
+		}
+	}
+	switch len(who) {
+	case 0:
+	case 1:
+		text += " " + who[0] + " keeps running in its own terminal; stop it from its controls."
+	default:
+		text += " " + strings.Join(who, " and ") + " keep running in their own terminals; stop them from their controls."
+	}
+	return control.Action{Operation: StopOperation, Label: "Stop session", Description: text, Class: "preference", Parameters: control.Shape{Type: "object"}}
+}
+
 func Grant(project, session string) (control.Grant, error) {
 	if !artifact.ValidPath(session) || strings.Contains(session, "/") || len(session) > 64 {
 		return control.Grant{}, fmt.Errorf("invalid session identity")
 	}
 	projectGrant := (&settings.Service{Project: project}).Grant()
 	return control.Grant{Key: projectGrant.Key + "-session-" + session, Label: filepath.Base(project) + " · Session " + session,
-		Scope: "session", Operations: []string{"settings.apply", "settings.refresh"}, Classes: []string{"preference", "route"}}, nil
+		Scope: "session", Operations: []string{"settings.apply", "settings.refresh", StopOperation}, Classes: []string{"preference", "route"}}, nil
 }
 
 type Status struct {
@@ -231,6 +268,11 @@ func View(project, session, generation string, values Values, available bool) (s
 	if len(suggestions) > 0 {
 		descriptor.Suggestions = suggestions
 	}
+	// Only a running session can be stopped. Publication drops the action
+	// where the connector's grant does not allow it (see integration).
+	if available {
+		descriptor.Actions = []control.Action{stopAction(values)}
+	}
 	return settings.RemoteView{Key: grant.Key, Label: grant.Label, Scope: "session", Generation: generation,
 		Descriptor: descriptor,
 		Snapshot: control.Snapshot{Version: version, Context: project + " · " + session, Saved: active, Effective: effective, RuntimeKnown: available, RuntimeVersion: version,
@@ -244,7 +286,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	if err := proposal.Validate(view.Descriptor, grant); err != nil {
 		return before, err
 	}
-	if proposal.Operation == "settings.refresh" {
+	if proposal.Operation == "settings.refresh" || proposal.Operation == StopOperation {
 		return before, nil
 	}
 	// Copy before mutating: before.Routes is shared with the controller's

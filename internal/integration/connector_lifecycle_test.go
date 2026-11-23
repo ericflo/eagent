@@ -33,6 +33,11 @@ func TestConnectorRetainsIdentityOnRetryAndReleasesOnShutdown(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"connector": map[string]any{"id": "connector", "state": "active", "grants": []any{grant}}})
 					return
 				}
+				if r.URL.Path == "/api/v1/me" {
+					// The connector asks the account which features the server has.
+					_ = json.NewEncoder(w).Encode(map[string]any{"features": []string{}})
+					return
+				}
 				if strings.HasPrefix(r.URL.Path, "/api/v1/settings-resources/") {
 					// The project's settings website is published with the
 					// account credential; this fixture has no artifact store.

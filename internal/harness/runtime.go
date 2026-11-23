@@ -125,6 +125,7 @@ type Runtime struct {
 	summary             summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings      runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl      *runtimecontrol.Controller
+	remoteStop          bool   // the app asked this session to stop; see acceptRemoteStop
 	phone               *phone // Finalechat mirror; nil when off
 	relays              relaySeats
 	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned

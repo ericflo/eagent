@@ -338,6 +338,7 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 	siteVersion := ""
 	var grantRetryAfter, siteRetryAfter time.Time
 	lastGrantRequest := ""
+	canStop := false // the server accepts session.stop (feature session-stop.v1)
 	for ctx.Err() == nil {
 		var status struct {
 			Connector connectorInfo `json:"connector"`
@@ -394,6 +395,16 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 			if account != nil && strings.TrimRight(account.BaseURL, "/") != strings.TrimRight(local.BaseURL, "/") {
 				account = nil
 			}
+			// A server that knows session.stop lets each running session
+			// offer it. Once seen it stays on: a failed check must not
+			// narrow the grants and widen them again a minute later.
+			if account != nil && !canStop {
+				meCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+				if me, err := account.Me(meCtx); err == nil {
+					canStop = me.Has("session-stop.v1")
+				}
+				stop()
+			}
 		}
 		live := runningSessions(project)
 		// The conversations whose settings these are, so the app offers the
@@ -423,7 +434,7 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 		// The account token plus this installation's secret prove the owner's
 		// own connector, so it can change its own grants. The same request is
 		// not repeated for a while if the server does not take it.
-		if want := sessionGrants(project, status.Connector.Grants, *grant, live); account != nil && !sameGrantKeys(want, status.Connector.Grants) {
+		if want := sessionGrants(project, status.Connector.Grants, *grant, live, canStop); account != nil && !sameGrantKeys(want, status.Connector.Grants) {
 			raw, _ := json.Marshal(want)
 			if string(raw) != lastGrantRequest || time.Now().After(grantRetryAfter) {
 				lastGrantRequest, grantRetryAfter = string(raw), time.Now().Add(time.Minute)

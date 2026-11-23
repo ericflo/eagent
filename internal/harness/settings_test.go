@@ -212,3 +212,71 @@ func TestRouteChangesSwapOnlyChangedPicksAndKeepFallbacks(t *testing.T) {
 		}
 	}
 }
+
+// A stop from the app (session.stop through the runtime control) ends the
+// session as the web UI's Stop does, after the runtime acknowledged it.
+func TestRemoteStopEndsTheSession(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	s := newScripted(func(model string, msgs []map[string]any) reply {
+		if model == "narr" {
+			return reply{text: "Waiting for you."}
+		}
+		return reply{text: "Ready when you are."}
+	})
+	defer s.srv.Close()
+	project := t.TempDir()
+	r, err := New(testConfig(s.srv.URL), Options{Project: project, Prompt: "Wait for me", Interactive: true}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	var status runtimecontrol.Status
+	for {
+		if status, err = runtimecontrol.ReadStatus(project, r.sess.ID); err == nil && status.AvailableUntil.After(time.Now()) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("runtime control never started")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	grant, _ := runtimecontrol.Grant(project, r.sess.ID)
+	view, err := runtimecontrol.View(project, r.sess.ID, status.Generation, status.Values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := control.Proposal{Operation: runtimecontrol.StopOperation, SchemaVersion: runtimecontrol.Schema, Generation: status.Generation, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{}}
+	raw, _ := json.Marshal(p)
+	q := runtimecontrol.Request{ID: "stop-from-phone", UserID: "test-owner", Digest: artifact.Digest(raw), Expires: time.Now().Add(10 * time.Second), Proposal: p, Grant: grant}
+	result, err := runtimecontrol.Deliver(ctx, project, r.sess.ID, q, false)
+	if err != nil || result.Status != "succeeded" {
+		t.Fatalf("stop: %+v %v", result, err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("the session did not end after an acknowledged stop")
+	}
+	events, err := store.Read(r.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, reason := false, ""
+	for _, e := range events {
+		switch e.Type {
+		case "session.stop_requested":
+			requested = true
+		case event.SessionEnd:
+			var d event.SessionEndData
+			_ = json.Unmarshal(e.Data, &d)
+			reason = d.Reason
+		}
+	}
+	if !requested || reason != "quit" {
+		t.Fatalf("stop recorded %v, session ended with %q", requested, reason)
+	}
+}
