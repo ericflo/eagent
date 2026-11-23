@@ -101,6 +101,11 @@ func TestRuntimeAcknowledgementDuplicateAndReplacement(t *testing.T) {
 	if next.Generation == c.Generation || next.Values.TaskConcurrency != config.Defaults().TaskConcurrency {
 		t.Fatal("replacement inherited the prior process override")
 	}
+	// A new request for the old generation. Reusing q.ID would read back
+	// its durable acknowledgement instead: the stale delivery above is
+	// "conflicted" by the client when the status file is current, or by the
+	// controller (and acknowledged) when the status file still lagged.
+	q.ID = newID()
 	old, err := Deliver(context.Background(), project, "session", q, false)
 	if err != nil || old.Status != "rejected" || applied.Load() != 1 {
 		t.Fatal("old generation reached its replacement", old, err)

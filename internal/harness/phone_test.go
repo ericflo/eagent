@@ -379,6 +379,32 @@ func fakePhoneConfig(t *testing.T, project, modelURL string, fp *fakePhone) conf
 	return cfg
 }
 
+// questionTrace is what a question test needs on failure: how each
+// question and answer went through the session, what the fake phone holds,
+// and the runtime's log lines.
+func questionTrace(rt *Runtime, fp *fakePhone, ui *fakeUI) string {
+	var b strings.Builder
+	evs, _ := store.Read(rt.sess.Path)
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.NarratorQuestion, event.UserAnswer, event.UserMessage, event.PhoneQuestion:
+			fmt.Fprintf(&b, "event %d %s %s %s\n", ev.Seq, ev.Time.Format("15:04:05.000"), ev.Type, ev.Data)
+		}
+	}
+	fp.mu.Lock()
+	for id, q := range fp.questions {
+		fmt.Fprintf(&b, "phone question %s status=%v meta=%v\n", id, q["status"], q["meta"])
+	}
+	fmt.Fprintf(&b, "phone cancelled %v\n", fp.cancelled)
+	fp.mu.Unlock()
+	ui.mu.Lock()
+	for _, l := range ui.logs {
+		fmt.Fprintf(&b, "log %s\n", l)
+	}
+	ui.mu.Unlock()
+	return b.String()
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -552,8 +578,21 @@ func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 		waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	}
 	ui.input <- "1" // answered in the terminal
-	waitFor(t, "the phone question to be withdrawn", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.cancelled) == 1 })
+	// This wait has timed out on CI runners a few times without
+	// reproducing locally; on a timeout, say which path the answer took.
+	withdrawn := func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.cancelled) >= 1 }
+	for deadline := time.Now().Add(20 * time.Second); !withdrawn(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the phone question to be withdrawn\n%s", questionTrace(rt, fp, ui))
+		}
+	}
 	waitFor(t, "the final message", func() bool { return ui.messageCount() >= 1 })
+	fp.mu.Lock()
+	cancelled := append([]string{}, fp.cancelled...)
+	fp.mu.Unlock()
+	if len(cancelled) != 1 {
+		t.Fatalf("withdrew %v, want the one question\n%s", cancelled, questionTrace(rt, fp, ui))
+	}
 	ui.input <- "/quit"
 	select {
 	case <-done:
