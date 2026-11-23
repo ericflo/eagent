@@ -27,6 +27,10 @@ type Relay struct {
 	LastTurn            string
 	LastTurnAt          time.Time
 	Sends               int
+	// LastSendFrom ("user" or "eagent") and LastSendAt describe the newest
+	// message sent to the agent.
+	LastSendFrom string
+	LastSendAt   time.Time
 	// Undelivered holds sends whose arrival the transcript has not shown
 	// yet, by send id.
 	Undelivered map[string]string
@@ -123,7 +127,7 @@ func (s *State) applyRelay(ev event.Event) {
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
 		if prev != nil {
 			// A restart continues the same relay: its history stays.
-			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.Recent, r.Limit, r.Autopilot = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.Recent, prev.Limit, prev.Autopilot
+			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.LastSendFrom, r.LastSendAt, r.Recent, r.Limit, r.Autopilot = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.LastSendFrom, prev.LastSendAt, prev.Recent, prev.Limit, prev.Autopilot
 			if r.InnerID == "" {
 				r.InnerID = prev.InnerID
 			}
@@ -146,6 +150,7 @@ func (s *State) applyRelay(ev event.Event) {
 		_ = ev.Decode(&d)
 		bump(&s.relaySendSeq, d.ID, "r")
 		r.Sends++
+		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
 		r.Undelivered[d.ID] = d.Text
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
@@ -225,6 +230,9 @@ func (s *State) relayNotification(ev event.Event) string {
 		text := strings.TrimSpace(d.Text)
 		if text == "" {
 			text = "(it ended the turn without a message)"
+		}
+		if d.Idle {
+			text += "\n[It ran nothing in reply to your message. If it is waiting on work of its own (a command, a render, a timer it set, a helper), do not send again: it reports when that work does, and each message only starts another turn like this one. Yield.]"
 		}
 		return head + "\n" + text
 	case event.RelayState:

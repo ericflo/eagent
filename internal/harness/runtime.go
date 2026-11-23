@@ -127,6 +127,7 @@ type Runtime struct {
 	phone               *phone // Finalechat mirror; nil when off
 	relays              relaySeats
 	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
+	autopilotChecks     map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone     map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
 	relayRepick         map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
 	relayQuiet          time.Duration          // progress cadence the user set with /updates (when relayQuietSet)

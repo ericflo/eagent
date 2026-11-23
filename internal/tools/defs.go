@@ -169,7 +169,7 @@ var relayTools = []llm.Tool{
 			"reason":{"type":"string"}
 		},"required":["action"]}`),
 	def("relay_autopilot",
-		"Keep the relayed agent going without the user: when the user says \"keep it going until 10am\", \"until I say stop\", \"keep driving it\", \"don't let it stop\". While it is on you are woken at every turn end: when the agent stops without asking anything, nudge it on with relay_send in the user's spirit (the instruction); when it asks something, decide as the user would (if decide is true) and tell the user what you chose instead of waiting. until is a time (\"10:00\", \"2026-10-28T10:00\", \"8h\") or empty for until the user says stop. off=true ends it.",
+		"Keep the relayed agent going without the user: when the user says \"keep it going until 10am\", \"until I say stop\", \"keep driving it\", \"don't let it stop\". While it is on you are woken at every turn end: when the agent stops without asking anything and has nothing of its own still running, nudge it on with relay_send in the user's spirit (the instruction); when it is waiting on work of its own (a background command, a render, a timer it set), send nothing and yield, since it wakes itself when that work reports (you are woken to look if it stays idle for 10 minutes); when it asks something, decide as the user would (if decide is true) and tell the user what you chose instead of waiting. until is a time (\"10:00\", \"2026-10-28T10:00\", \"8h\") or empty for until the user says stop. off=true ends it.",
 		`{"type":"object","properties":{
 			"relay":{"type":"string"},
 			"instruction":{"type":"string","description":"The standing order, in the user's words where possible."},

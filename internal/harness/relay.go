@@ -241,12 +241,20 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 	case relay.KindProgress:
 		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
 	case relay.KindTurn:
-		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, 20000), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted}))
+		// A turn that answered eagent's own message and ran nothing is an
+		// agent waiting on work of its own; nudging it again only starts
+		// another such turn.
+		idle := false
+		if cur := r.st.Relays[name]; cur != nil {
+			idle = ev.Tools == 0 && !ev.Interrupted && cur.LastSendFrom == "eagent" && cur.LastSendAt.After(cur.LastTurnAt)
+		}
+		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, 20000), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle}))
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
 		// A model or effort change that waited for this turn to end.
 		r.applyWaitingRepick(name)
+		r.armAutopilotCheck(name)
 	case relay.KindLimit:
 		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted}))
 	case relay.KindActivity:
@@ -787,9 +795,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					}
 					d.Until = t.Format(time.RFC3339)
 				}
-				out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on unless it asks something; decide its questions yourself"
+				out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
 				if !d.Decide {
-					out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on unless it asks something; pass its questions to the user"
+					out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
 				}
 				out += "."
 			}
@@ -892,8 +900,48 @@ func autopilotUntil(d event.RelayAutopilotData) string {
 	return "until the user says stop"
 }
 
+// autopilotCheckAfter is how long an agent on autopilot may sit idle, with
+// nothing sent to it, before the orchestrator is woken to look. The
+// orchestrator leaves an agent that is waiting on its own work alone; this
+// catches one that will not wake by itself.
+var autopilotCheckAfter = 10 * time.Minute
+
+// armAutopilotCheck (re)starts the idle check for one relay: if the agent is
+// still idle after its last turn, with autopilot on and nothing sent to it,
+// the orchestrator is woken, and checked again every autopilotCheckAfter
+// while that lasts. Loop goroutine.
+func (r *Runtime) armAutopilotCheck(name string) {
+	if t := r.autopilotChecks[name]; t != nil {
+		t.Stop()
+		delete(r.autopilotChecks, name)
+	}
+	rel := r.st.Relays[name]
+	if rel == nil || !rel.Active() || rel.Autopilot == nil || rel.State != "idle" {
+		return
+	}
+	if r.autopilotChecks == nil {
+		r.autopilotChecks = map[string]*time.Timer{}
+	}
+	turnAt := rel.LastTurnAt
+	r.autopilotChecks[name] = time.AfterFunc(autopilotCheckAfter, func() {
+		r.post(func() {
+			cur := r.st.Relays[name]
+			if r.ending || cur == nil || !cur.Active() || cur.Autopilot == nil || cur.State != "idle" || !cur.LastTurnAt.Equal(turnAt) || cur.LastSendAt.After(turnAt) {
+				return
+			}
+			since := "its last turn"
+			if !turnAt.IsZero() {
+				since = fmt.Sprintf("its last turn %s ago", roundDur(time.Since(turnAt)))
+			}
+			r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot check: %s has been idle since %s, and nothing has been sent to it since.] If what it was waiting on should have reported by now, look with relay_status and nudge it on. If its own work is still running, yield; you will be woken again in %s if it stays idle.", cur.Who(), since, roundDur(autopilotCheckAfter))}))
+			r.armAutopilotCheck(name)
+		})
+	})
+}
+
 // armAutopilots sets a timer for each autopilot deadline; when one passes,
-// the autopilot ends and the orchestrator is told to wrap up. Loop goroutine.
+// the autopilot ends and the orchestrator is told to wrap up. It also
+// restarts each idle check. Loop goroutine.
 func (r *Runtime) armAutopilots() {
 	for name, t := range r.autopilotTimers {
 		t.Stop()
@@ -901,6 +949,16 @@ func (r *Runtime) armAutopilots() {
 	}
 	if r.autopilotTimers == nil {
 		r.autopilotTimers = map[string]*time.Timer{}
+	}
+	names := map[string]bool{}
+	for name := range r.autopilotChecks {
+		names[name] = true
+	}
+	for _, rel := range r.st.ActiveRelays() {
+		names[rel.Name] = true
+	}
+	for name := range names {
+		r.armAutopilotCheck(name)
 	}
 	for _, rel := range r.st.ActiveRelays() {
 		ap := rel.Autopilot
@@ -1078,12 +1136,13 @@ func relaySteer(st *state.State, now time.Time, reason string) string {
 	}
 	for _, rel := range active {
 		if ap := rel.Autopilot; ap != nil {
-			fmt.Fprintf(&b, " Autopilot on for %s %s: when it ends a turn without asking anything, nudge it on with relay_send (%s)", rel.Who(), autopilotUntil(*ap), clipRunes(ap.Instruction, 300))
+			fmt.Fprintf(&b, " Autopilot on for %s %s: when it ends a turn having stopped, with nothing of its own still running, nudge it on with relay_send (%s)", rel.Who(), autopilotUntil(*ap), clipRunes(ap.Instruction, 300))
 			if ap.Decide {
 				b.WriteString("; when it asks something, decide as the user would, answer it with relay_send, and say in a note what you chose. Do not wait for the user.")
 			} else {
 				b.WriteString("; pass its questions to the user.")
 			}
+			fmt.Fprintf(&b, " When it ends a turn waiting on work of its own (a command, a render, a timer it set, a helper), send nothing and yield: it wakes itself when that work reports, and every message starts another turn. You are woken if it stays idle for %s.", roundDur(autopilotCheckAfter))
 		}
 	}
 	b.WriteString(" You are the relay: " + who + " does the work.")

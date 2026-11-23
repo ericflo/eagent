@@ -519,6 +519,10 @@ type RelayTurnData struct {
 	Tools       int      `json:"tools,omitempty"`  // tool calls it made during the turn
 	Images      []string `json:"images,omitempty"` // pictures it made or looked at
 	Interrupted bool     `json:"interrupted,omitempty"`
+	// Idle marks a turn that answered a message eagent itself sent (not
+	// one of the user's) without running any tools: an agent waiting on its
+	// own work.
+	Idle bool `json:"idle,omitempty"`
 }
 
 // RelayLimitData reports the agent's usage budget.

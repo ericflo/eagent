@@ -29,6 +29,9 @@ type fakeSeat struct {
 	killed     bool
 	reply      string
 	interrupts int
+	// waiting makes every reply a turn that runs nothing, as an agent
+	// holding on work of its own answers.
+	waiting bool
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -43,6 +46,10 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 	f.mu.Unlock()
 	f.events <- relay.Event{Kind: relay.KindState, State: "working"}
 	f.events <- relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}
+	if f.waiting {
+		f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 1000}
+		return "typed into Codex", nil
+	}
 	f.events <- relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."}
 	f.events <- relay.Event{Kind: relay.KindActivity, Text: "running gh pr list"}
 	f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}}
@@ -418,6 +425,89 @@ func TestRelayAutopilotNudgesAndSwitchHandsOver(t *testing.T) {
 	st := state.Replay(evs)
 	if st.Relays["codex"].State != "stopped" || st.Relays["claude"].State != "stopped" {
 		t.Fatalf("relays %+v %+v", st.Relays["codex"], st.Relays["claude"])
+	}
+}
+
+// An agent on autopilot that answers eagent's nudge without running
+// anything is waiting on its own work: the orchestrator hears that and
+// leaves it alone, and the idle check wakes it later to look.
+func TestRelayAutopilotLeavesAWaitingAgentAlone(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	old := autopilotCheckAfter
+	autopilotCheckAfter = 500 * time.Millisecond
+	t.Cleanup(func() { autopilotCheckAfter = old })
+	seat := newFakeSeat("Holding on `task-7` (next check 14:05).")
+	seat.waiting = true
+	useFakeRelays(t, seat)
+	var mu sync.Mutex
+	sawHint := false
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		if model != "orch" {
+			if strings.Contains(lastUserText(msgs), "final") || strings.Contains(all, "DECLARED THE WORK DONE") {
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
+			}
+			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+		}
+		switch {
+		case !strings.Contains(all, "Autopilot on for Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_autopilot", `{"instruction":"render the film, then publish"}`)}}
+		case !strings.Contains(all, "(r2)"): // r1 was the brief, forwarded on arrival
+			return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"Keep going: render, then publish."}`)}}
+		case !strings.Contains(all, "[Autopilot check: Codex has been idle"):
+			mu.Lock()
+			sawHint = sawHint || strings.Contains(all, "[It ran nothing in reply to your message.")
+			mu.Unlock()
+			return reply{calls: []event.ToolCall{tc("yield", `{"done":false,"reason":"it is waiting on its render"}`)}}
+		case !strings.Contains(all, "Stopped Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"ok"}`)}}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	ui := &fakeUI{}
+	rt, err := New(testConfig(s.srv.URL), Options{Project: t.TempDir(), Prompt: "Render the film overnight. Keep going until I say stop!", Relay: "codex"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if code := rt.Run(ctx); code != 0 {
+		t.Fatalf("exit %d (the idle check never woke it?): %v", code, ui.logs)
+	}
+	if got := seat.sentTexts(); len(got) != 2 {
+		t.Fatalf("codex got %q, want the brief and one nudge", got)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	var idle []bool
+	checks := 0
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.RelayTurn:
+			var d event.RelayTurnData
+			_ = ev.Decode(&d)
+			idle = append(idle, d.Idle)
+		case event.HarnessMessage:
+			var d event.HarnessMessageData
+			_ = ev.Decode(&d)
+			if strings.HasPrefix(d.Text, "[Autopilot check: Codex has been idle since its last turn") {
+				checks++
+			}
+		}
+	}
+	// The reply to the user's brief is not idle (the user sent it); the
+	// reply to eagent's own nudge is.
+	if len(idle) != 2 || idle[0] || !idle[1] {
+		t.Fatalf("turns idle=%v, want [false true]", idle)
+	}
+	if checks == 0 {
+		t.Fatal("no idle check")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawHint {
+		t.Fatal("the orchestrator never heard the agent was waiting")
 	}
 }
 
