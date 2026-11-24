@@ -367,7 +367,7 @@ type catalogView struct {
 }
 
 func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
-	v := catalogView{Providers: config.Providers, Models: config.Models, EffortOrder: config.EffortOrder, Transports: map[string]string{}, Keys: map[string]bool{}}
+	v := catalogView{Providers: config.AllProviders(s.Project), Models: config.Models, EffortOrder: config.EffortOrder, Transports: map[string]string{}, Keys: map[string]bool{}}
 	for _, p := range []string{llm.ProtocolChat, llm.ProtocolResponses, llm.ProtocolAnthropic} {
 		v.Transports[p] = config.Transport(p)
 	}
@@ -377,10 +377,10 @@ func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
 	s.checksMu.Lock()
 	v.Checks = s.loadChecks()
 	s.checksMu.Unlock()
-	// On-demand live models: refreshes at most once per 24h, and only when
-	// the settings page asks for the catalog — never at startup.
+	// On-demand live models: cloud providers refresh every 6h; registered local
+	// servers refresh every 30s — never at process startup.
 	live := config.LiveModels(r.Context(), s.Project)
-	v.Models = config.MergeLive(config.Models, live.Models)
+	v.Models = config.MergeLiveFor(s.Project, config.Models, live.Models)
 	if !live.FetchedAt.IsZero() {
 		v.LiveFetchedAt = live.FetchedAt.UTC().Format(time.RFC3339)
 	}

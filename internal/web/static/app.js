@@ -610,17 +610,19 @@ async function newSessionDialog(pre = {}) {
   const setPickLabel = (actor, m, p) => { rowLabel[actor].replaceChildren(h('b', null, m ? m.label : '—'), m && m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m ? (p ? p.label : m.provider) : ''} · ${picks[actor] ? picks[actor].model : ''}`)); rowLabel[actor].title = `${m ? m.label : ''} · ${picks[actor] ? picks[actor].model : ''}`; };
   const renderBrowse = () => {
     const q = search.value.trim().toLowerCase();
-    const keyed = p => !!(cat.keys && cat.keys[p.key_env]);
-    const rows = cat.models.map(m => ({m, p: cat.providers.find(pp => pp.id === m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${m.live ? 'live' : ''}`.toLowerCase().includes(q)));
-    rows.sort((x, y) => (keyed(y.p) - keyed(x.p)) || x.p.label.localeCompare(y.p.label) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
+    const keyed = p => !p.key_env || !!(cat.keys && cat.keys[p.key_env]);
+    const rows = cat.models.map(m => ({m, p: cat.providers.find(pp => pp.id === m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${p.engine || ''} ${p.custom ? 'local custom' : ''} ${m.live ? 'live' : ''}`.toLowerCase().includes(q)));
+    rows.sort((x, y) => (!!y.p.custom - !!x.p.custom) || (keyed(y.p) - keyed(x.p)) || x.p.label.localeCompare(y.p.label) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
     browseList.replaceChildren();
     let lastP = null;
     const shown = 150;
     for (const {m, p} of rows.slice(0, shown)) {
-      if (p.label !== lastP) { browseList.append(h('div', {class: 'pgroup'}, p.label + (keyed(p) ? '' : ' · no key in this shell'))); lastP = p.label; }
-      const name = h('span', {class: 'l1'}, h('b', null, m.label), m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m.id}`));
-      const ctx = m.context >= 1e6 ? (m.context / 1e6) + 'M' : Math.round(m.context / 1000) + 'k';
-      const price = h('span', {class: 'pr'}, m.price ? `$${m.price.in} / $${m.price.out}` : '—', h('span', {class: 'sub'}, ` · ${ctx}${m.vision ? ' · vision' : ''}`));
+      const grp = p.label + (p.custom ? ' · local' : (keyed(p) ? '' : ' · no key in this shell'));
+      if (grp !== lastP) { browseList.append(h('div', {class: 'pgroup'}, grp)); lastP = grp; }
+      const name = h('span', {class: 'l1'}, h('b', null, m.label), p.custom ? h('span', {class: 'livetag local'}, p.engine || 'local') : (m.live ? h('span', {class: 'livetag'}, 'live') : null), h('span', {class: 'sub'}, ` · ${m.id}`));
+      const ctx = !m.context ? '' : m.context >= 1e6 ? (m.context / 1e6) + 'M' : Math.round(m.context / 1000) + 'k';
+      const meta = [ctx, m.vision ? 'vision' : ''].filter(Boolean).join(' · ');
+      const price = h('span', {class: 'pr'}, m.price ? `$${m.price.in} / $${m.price.out}` : (p.custom ? 'local' : '—'), meta ? h('span', {class: 'sub'}, ` · ${meta}`) : null);
       const row = h('button', {class: 'prow', onclick: () => {
         const prev = picks[browsing] || {};
         picks[browsing] = {provider: m.provider, model: m.id, effort: prev.effort || ''};

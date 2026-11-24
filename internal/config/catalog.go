@@ -21,12 +21,15 @@ import (
 
 // Provider is one API host.
 type Provider struct {
-	ID       string `json:"id"`
-	Label    string `json:"label"`
-	BaseURL  string `json:"base_url"`
-	Protocol string `json:"protocol"` // default for its models; a model may override
-	KeyEnv   string `json:"key_env"`
-	Note     string `json:"note,omitempty"`
+	ID        string   `json:"id"`
+	Label     string   `json:"label"`
+	BaseURL   string   `json:"base_url"`
+	Protocol  string   `json:"protocol"`            // default for its models; a model may override
+	Protocols []string `json:"protocols,omitempty"` // wire protocols supported by this host when probed
+	KeyEnv    string   `json:"key_env"`             // "" means no key required
+	Note      string   `json:"note,omitempty"`
+	Custom    bool     `json:"custom,omitempty"` // user-registered local or custom server
+	Engine    string   `json:"engine,omitempty"` // detected server engine (lmstudio, loom, llamacpp, vllm, sglang, ollama, ...)
 }
 
 // Price is USD per million tokens.
@@ -41,16 +44,18 @@ type Price struct {
 
 // Model is one model at one provider.
 type Model struct {
-	Provider string   `json:"provider"`
-	ID       string   `json:"id"`
-	Family   string   `json:"family"` // the same model across providers shares a family
-	Label    string   `json:"label"`
-	Protocol string   `json:"protocol,omitempty"` // when it differs from the provider's default
-	Price    *Price   `json:"price,omitempty"`
-	Context  int      `json:"context"`
-	Vision   bool     `json:"vision"`
-	Efforts  []string `json:"efforts,omitempty"` // reasoning efforts known to work here, in order; nil means unchecked
-	Note     string   `json:"note,omitempty"`
+	Provider  string   `json:"provider"`
+	ID        string   `json:"id"`
+	Family    string   `json:"family"` // the same model across providers shares a family
+	Label     string   `json:"label"`
+	Protocol  string   `json:"protocol,omitempty"`  // when it differs from the provider's default
+	Protocols []string `json:"protocols,omitempty"` // wire protocols known to work for this model
+	Price     *Price   `json:"price,omitempty"`
+	Context   int      `json:"context"`
+	MaxOutput int      `json:"max_output,omitempty"`
+	Vision    bool     `json:"vision"`
+	Efforts   []string `json:"efforts,omitempty"` // reasoning efforts known to work here, in order; nil means unchecked
+	Note      string   `json:"note,omitempty"`
 	// Live marks models confirmed present by a provider's /models endpoint at
 	// the last live fetch (see live.go); the static catalog never sets it.
 	Live bool `json:"live,omitempty"`
@@ -222,6 +227,18 @@ func (m Model) ProtocolFor() string {
 		return m.Protocol
 	}
 	if pr, ok := ProviderByID(m.Provider); ok {
+		return pr.Protocol
+	}
+	return llm.ProtocolChat
+}
+
+// ProtocolForProvider resolves the wire protocol for a model against an
+// already-resolved provider (including custom/local servers).
+func (m Model) ProtocolForProvider(pr Provider) string {
+	if m.Protocol != "" {
+		return m.Protocol
+	}
+	if pr.Protocol != "" {
 		return pr.Protocol
 	}
 	return llm.ProtocolChat

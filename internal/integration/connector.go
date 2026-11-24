@@ -71,6 +71,9 @@ type commandJournal struct {
 	SessionStarted bool                `json:"session_started,omitempty"`
 	Applied        *control.Proposal   `json:"applied,omitempty"`
 	Undoes         string              `json:"undoes,omitempty"`
+	ServerEdits    []control.Edit      `json:"server_edits,omitempty"`
+	ConfigEdits    []control.Edit      `json:"config_edits,omitempty"`
+	ServersStarted bool                `json:"servers_started,omitempty"`
 }
 
 type sessionStartIntent struct {
@@ -379,15 +382,12 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 			}
 			return err
 		}
-		view, err := service.RemoteSnapshot(*grant)
-		if err != nil {
-			return err
-		}
 		if time.Since(discovered) > time.Minute {
 			discovered = time.Now()
 			directories = projectDirectories(project)
-			// Keep the providers' model lists current for the phone's
-			// pickers; a fetch happens only when the cache has expired.
+			// Keep the providers' and registered local servers' model lists
+			// current before building the snapshot for the phone's pickers; a
+			// fetch happens only when the cache has expired.
 			refreshCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 			config.LiveModels(refreshCtx, project)
 			stop()
@@ -405,6 +405,10 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 				}
 				stop()
 			}
+		}
+		view, err := service.RemoteSnapshot(*grant)
+		if err != nil {
+			return err
 		}
 		live := runningSessions(project)
 		// The conversations whose settings these are, so the app offers the
@@ -682,7 +686,27 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			if err := q.Proposal.Validate(before.Descriptor, grant); err != nil {
 				return finish("rejected", map[string]any{"message": err.Error()})
 			}
-			return finish("succeeded", map[string]any{"version": before.Snapshot.Version, "runtime_applied": false, "snapshot_publication": "pending"})
+			// Re-probe registered local/custom servers and refresh expired live
+			// model caches outside the file lock so newly loaded models appear
+			// immediately in FinaleChat.
+			editor.Close()
+			refreshCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+			refreshed, srvErrs, _ := config.RefreshAllServers(refreshCtx, s.Project)
+			config.LiveModels(refreshCtx, s.Project)
+			stop()
+			after, err := s.RemoteSnapshot(grant)
+			version := before.Snapshot.Version
+			if err == nil {
+				version = after.Snapshot.Version
+			}
+			resMap := map[string]any{"version": version, "runtime_applied": false, "snapshot_publication": "pending"}
+			if len(refreshed) > 0 {
+				resMap["servers_refreshed"] = len(refreshed)
+			}
+			if len(srvErrs) > 0 {
+				resMap["server_errors"] = srvErrs
+			}
+			return finish("succeeded", resMap)
 		}
 		var prepareErr error
 		switch q.Proposal.Operation {
@@ -715,18 +739,26 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			prepareErr = err
 			journal.Resource = &change
 		default:
-			applied := q.Proposal
-			journal.Applied = &applied
-			desired, etag, _, err := s.Prepare(q.Proposal, grant)
-			prepareErr = err
-			journal.BeforeETag = etag
-			journal.Desired = desired
-			journal.DesiredETag = artifact.Digest([]byte(desired))
-			raw := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
-			if raw == "" {
-				raw = "{}\n"
+			if settings.HasServerEdits(q.Proposal) {
+				if _, err := s.ValidateServerEdits(q.Proposal, grant); err != nil {
+					prepareErr = err
+				} else {
+					journal.ServerEdits, journal.ConfigEdits = settings.SplitServerEdits(q.Proposal)
+				}
+			} else {
+				applied := q.Proposal
+				journal.Applied = &applied
+				desired, etag, _, err := s.Prepare(q.Proposal, grant)
+				prepareErr = err
+				journal.BeforeETag = etag
+				journal.Desired = desired
+				journal.DesiredETag = artifact.Digest([]byte(desired))
+				raw := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+				if raw == "" {
+					raw = "{}\n"
+				}
+				journal.BeforeRaw = &raw
 			}
-			journal.BeforeRaw = &raw
 		}
 		if prepareErr != nil {
 			var conflict *config.ErrConflict
@@ -788,6 +820,45 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
 		return finish("succeeded", map[string]any{"version": q.Proposal.ExpectedVersion, "tested_settings_version": q.Proposal.ExpectedVersion, "route_test": result, "effects": []any{}, "snapshot_publication": "pending"})
+	}
+	if len(journal.ServerEdits) > 0 {
+		if reconcile || journal.ServersStarted {
+			return finish("unknown", map[string]any{"message": "The earlier server update has no confirmed outcome. It was not repeated; refresh settings to inspect the current servers."})
+		}
+		journal.ServersStarted = true
+		if err := writeJSONAtomic(path, journal); err != nil {
+			return journal, err
+		}
+		// Release the config lock while probing server URLs over HTTP.
+		editor.Close()
+		servers, err := s.ApplyServerEdits(ctx, journal.ServerEdits)
+		if err != nil {
+			if ctx.Err() != nil {
+				return finish("unknown", map[string]any{"message": "Probing the server was interrupted."})
+			}
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
+		if len(journal.ConfigEdits) > 0 {
+			mid, err := s.RemoteSnapshot(grant)
+			if err != nil {
+				return finish("unknown", map[string]any{"message": "Servers were updated, but the project configuration could not be reloaded."})
+			}
+			cfgProp := q.Proposal
+			cfgProp.Edits = journal.ConfigEdits
+			cfgProp.ExpectedVersion = mid.Snapshot.Version
+			if _, _, err := s.Apply(ctx, cfgProp, grant); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
+			}
+		}
+		after, err := s.RemoteSnapshot(grant)
+		if err != nil {
+			return finish("unknown", map[string]any{"message": "Servers saved, but project settings could not be resolved."})
+		}
+		effects := make([]map[string]any, 0, len(q.Proposal.Edits))
+		for _, edit := range q.Proposal.Edits {
+			effects = append(effects, map[string]any{"key": edit.Key, "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"})
+		}
+		return finish("succeeded", map[string]any{"previous_version": q.Proposal.ExpectedVersion, "version": after.Snapshot.Version, "servers": servers, "effects": effects, "snapshot_publication": "pending"})
 	}
 	if journal.Resource != nil {
 		before, after, err := journal.Resource.State(editor)

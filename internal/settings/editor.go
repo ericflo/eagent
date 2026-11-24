@@ -54,7 +54,7 @@ func (s *Service) EditorData() (map[string]any, error) {
 	for _, protocol := range []string{llm.ProtocolChat, llm.ProtocolResponses, llm.ProtocolAnthropic} {
 		transports[protocol] = config.Transport(protocol)
 	}
-	out := map[string]any{"format": "eagent.config-editor/v1", "defaults": config.Defaults(), "presets": presets, "bundles": bundles, "catalog": map[string]any{"providers": config.Providers, "models": config.Models, "effort_order": config.EffortOrder, "transports": transports}}
+	out := map[string]any{"format": "eagent.config-editor/v1", "defaults": config.Defaults(), "presets": presets, "bundles": bundles, "catalog": map[string]any{"providers": config.AllProviders(s.Project), "models": config.KnownModels(s.Project), "effort_order": config.EffortOrder, "transports": transports}}
 	raw, err := json.Marshal(out)
 	if err != nil || len(raw) > 8<<20 {
 		return nil, fmt.Errorf("configuration picker data exceeds 8 MiB")

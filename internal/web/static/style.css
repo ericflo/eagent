@@ -413,7 +413,15 @@ select.mini { height: 28px; font-size: 12px; padding: 0 6px; }
 .prow .pl .pnote { font-size: 11.5px; white-space: normal; }
 .prow .pr { flex: none; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .livetag { flex: none; margin-left: 6px; padding: 0 5px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; vertical-align: 1px; }
+.livetag.local { background: var(--ok-soft); color: var(--ok); }
 .liveinfo { padding: 6px 8px 8px; font-size: 11.5px; color: var(--muted); border-bottom: 1px dashed var(--line); margin-bottom: 4px; white-space: normal; }
+.srv-list { display: flex; flex-direction: column; gap: 8px; }
+.srv-row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.srv-main { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 6px; }
+.srv-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.srv-models { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.srv-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.probe-preview { margin: 8px 0; }
 
 .savebar { position: sticky; bottom: 12px; z-index: 20; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(10px); box-shadow: 0 8px 24px rgba(16, 24, 40, .12); margin: 0 auto 16px; max-width: 1208px; }
 .savebar.dirty { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }

@@ -22,12 +22,13 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
-// knownKeyEnvs is the closed list of environment variable names whose
-// presence the UI may learn: the catalog's, plus any already written into
-// the project's configuration or bundles. Never a name typed in a request.
+// KnownKeyEnvs is the closed list of environment variable names whose
+// presence the UI may learn: the catalog's, registered custom servers', plus
+// any already written into the project's configuration or bundles. Never a
+// name typed in a request.
 func (s *Service) KnownKeyEnvs() []string {
 	seen := map[string]bool{}
-	for _, k := range config.KeyEnvs() {
+	for _, k := range config.KeyEnvsFor(s.Project) {
 		seen[k] = true
 	}
 	for _, a := range s.savedActors() {
@@ -66,16 +67,32 @@ func (s *Service) savedActors() []config.Actor {
 	return out
 }
 
-// checkRoutes refuses hosts and key names that neither the catalog nor the
-// saved configuration knows: the only way to add a custom endpoint is by
-// editing the file, never from a browser request.
+// CheckRoutes refuses hosts and key names that neither the catalog, registered
+// servers, nor the saved configuration knows: custom endpoints must be
+// registered explicitly (via servers.json, CLI, or local UI) or written to
+// config.json, never smuggled in via a config save or remote edit.
 func (s *Service) CheckRoutes(cfg config.Config) error {
 	saved := s.savedActors()
 	known := func(a config.Actor) error {
+		trimmed := strings.TrimRight(a.BaseURL, "/")
+		if pr, ok := config.ProviderForURLFor(s.Project, a.BaseURL); ok && pr.Custom {
+			// A registered custom/local server may use no key ("") or its own
+			// registered KeyEnv (or one already saved on that same host), never
+			// an unrelated cloud provider's API key variable.
+			if a.APIKeyEnv == "" || a.APIKeyEnv == pr.KeyEnv {
+				return nil
+			}
+			for _, sa := range saved {
+				if strings.TrimRight(sa.BaseURL, "/") == trimmed && sa.APIKeyEnv == a.APIKeyEnv {
+					return nil
+				}
+			}
+			return fmt.Errorf("%s is not a key variable registered for %s; update the server registration or edit %s", a.APIKeyEnv, pr.Label, config.File(s.Project))
+		}
 		hostOK := config.KnownBaseURL(a.BaseURL)
-		keyOK := config.KnownKeyEnv(a.APIKeyEnv)
+		keyOK := a.APIKeyEnv == "" || config.KnownKeyEnv(a.APIKeyEnv)
 		for _, sa := range saved {
-			if strings.TrimRight(sa.BaseURL, "/") == strings.TrimRight(a.BaseURL, "/") {
+			if strings.TrimRight(sa.BaseURL, "/") == trimmed {
 				hostOK = true
 			}
 			if sa.APIKeyEnv == a.APIKeyEnv {
@@ -83,7 +100,7 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 			}
 		}
 		if !hostOK {
-			return fmt.Errorf("%s is not a catalog provider; custom base URLs are added by editing %s (or EAGENT_*_BASE_URL), not from the browser", a.BaseURL, config.File(s.Project))
+			return fmt.Errorf("%s is not a catalog provider or registered server; register it or edit %s (or EAGENT_*_BASE_URL)", a.BaseURL, config.File(s.Project))
 		}
 		if !keyOK {
 			return fmt.Errorf("%s is not a key variable the catalog or your saved configuration uses; custom key names are added by editing %s", a.APIKeyEnv, config.File(s.Project))

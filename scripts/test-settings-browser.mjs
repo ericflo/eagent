@@ -129,6 +129,14 @@ try {
   assert.equal((await page.evaluate(() => window.proposal)).parameters.name, 'browser-copy');
   await frame.getByRole('button', { name: 'Cancel', exact: true }).click();
 
+  // Adding a local server from the exported FinaleChat editor stages a typed
+  // /add_server_url proposal with zero outbound network requests.
+  await frame.getByRole('button', { name: '+ Add server…', exact: true }).click();
+  await frame.locator('#modal input').first().fill('http://127.0.0.1:8080');
+  await frame.getByRole('button', { name: 'Review & probe in FinaleChat', exact: true }).click();
+  await page.waitForFunction(() => window.proposal?.edits?.[0]?.key === '/add_server_url');
+  assert.deepEqual((await page.evaluate(() => window.proposal)).edits, [{ op: 'set', key: '/add_server_url', value: 'http://127.0.0.1:8080' }]);
+
   // Raw overrides are not a file-write escape hatch; keep new raw drafts too.
   await frame.getByText('Files and raw JSON', { exact: true }).click();
   const raw = frame.getByRole('textbox', { name: 'Known saved overrides' });

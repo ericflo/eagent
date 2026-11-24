@@ -515,3 +515,131 @@ func TestNativeReplayIsSanitisedAndHostBound(t *testing.T) {
 		t.Fatalf("an unrecorded host must not stop replay: %v", items)
 	}
 }
+
+func TestKeylessEndpointsOmitAuthHeaders(t *testing.T) {
+	t.Run("chat", func(t *testing.T) {
+		var auth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"local-m","choices":[{"message":{"content":"ok","reasoning_content":"step"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":1}}}`)
+		}))
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "local-m"})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth != "" {
+			t.Fatalf("expected no Authorization header, got %q", auth)
+		}
+		if resp.Text != "ok" || resp.Reasoning != "step" || resp.Usage.Cached != 2 || resp.Usage.Reasoning != 1 {
+			t.Fatalf("resp = %+v", resp)
+		}
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		var auth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"local-r","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"deep thought"}]},{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"type":"function_call","id":"fc1","call_id":"call_1","name":"ping","arguments":"{\"message\":\"pong\"}"}],"usage":{"input_tokens":12,"output_tokens":7,"output_tokens_details":{"reasoning_tokens":4}}}`)
+		}))
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolResponses, BaseURL: srv.URL, Model: "local-r"})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth != "" {
+			t.Fatalf("expected no Authorization header, got %q", auth)
+		}
+		if resp.Text != "done" || resp.Reasoning != "deep thought" || len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "ping" || resp.Usage.Reasoning != 4 {
+			t.Fatalf("resp = %+v", resp)
+		}
+	})
+
+	t.Run("anthropic", func(t *testing.T) {
+		var key, ver string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key = r.Header.Get("x-api-key")
+			ver = r.Header.Get("anthropic-version")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"local-a","stop_reason":"tool_use","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"calling"},{"type":"tool_use","id":"toolu_1","name":"ping","input":{"message":"pong"}}],"usage":{"input_tokens":10,"output_tokens":6,"cache_read_input_tokens":3}}`)
+		}))
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "local-a"})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key != "" {
+			t.Fatalf("expected no x-api-key header, got %q", key)
+		}
+		if ver != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q", ver)
+		}
+		if resp.Text != "calling" || resp.Reasoning != "hmm" || len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "toolu_1" || resp.Usage.Cached != 3 {
+			t.Fatalf("resp = %+v", resp)
+		}
+	})
+}
+
+func TestResponsesReasoningTextInContentAndAnthropicInlineToolInput(t *testing.T) {
+	t.Run("responses reasoning_text", func(t *testing.T) {
+		srv := sseServer(t, func(w http.ResponseWriter, body map[string]any) {
+			events := []string{
+				`{"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"plan A"}]}}`,
+				`{"type":"response.done","response":{"model":"local-r","status":"completed","output":[{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"plan A"}]},{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+			}
+			for _, e := range events {
+				fmt.Fprintf(w, "data: %s\n\n", e)
+			}
+		})
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolResponses, BaseURL: srv.URL, Model: "local-r"})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Reasoning != "plan A" || resp.Text != "answer" {
+			t.Fatalf("resp = %+v", resp)
+		}
+	})
+
+	t.Run("anthropic inline tool_use input", func(t *testing.T) {
+		srv := sseServer(t, func(w http.ResponseWriter, body map[string]any) {
+			events := []string{
+				`event: message_start`,
+				`data: {"type":"message_start","message":{"model":"local-a","usage":{"input_tokens":8}}}`,
+				``,
+				`event: content_block_start`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"ping","input":{"message":"pong"}}}`,
+				``,
+				`event: content_block_stop`,
+				`data: {"type":"content_block_stop","index":0}`,
+				``,
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":4}}`,
+				``,
+				`event: message_stop`,
+				`data: {"type":"message_stop"}`,
+				``,
+			}
+			fmt.Fprint(w, strings.Join(events, "\n"))
+		})
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolAnthropic, BaseURL: srv.URL, Model: "local-a"})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "ping" {
+			t.Fatalf("tool calls = %+v", resp.ToolCalls)
+		}
+		args, err := ArgsObject(resp.ToolCalls[0].Args)
+		if err != nil || args["message"] != "pong" {
+			t.Fatalf("args = %s err=%v", resp.ToolCalls[0].Args, err)
+		}
+	})
+}

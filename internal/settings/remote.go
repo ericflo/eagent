@@ -102,7 +102,13 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		if strings.HasSuffix(prefix, "/protocol") {
 			field.Shape.Enum = []any{"openai-chat", "openai-responses", "anthropic"}
 		}
+		if strings.HasSuffix(prefix, "/base_url") && prefix != "/finalechat/base_url" {
+			for _, pr := range config.AllProviders(s.Project) {
+				field.Shape.Enum = append(field.Shape.Enum, pr.BaseURL)
+			}
+		}
 		if strings.HasSuffix(prefix, "/api_key_env") {
+			field.Shape.Enum = append(field.Shape.Enum, "")
 			for _, v := range s.KnownKeyEnvs() {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
@@ -138,6 +144,73 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	visit(reflect.TypeOf(config.Config{}), "", 0)
+	// Local & custom model server registration fields, placed in Models so
+	// third-party UIs (like FinaleChat) can add, probe, edit, and remove local
+	// servers without leaving the app.
+	servers, _ := config.LoadServers(s.Project)
+	serverList := make([]any, 0, len(servers))
+	for _, srv := range servers {
+		entry := map[string]any{
+			"id":       srv.ID,
+			"url":      srv.BaseURL,
+			"label":    srv.Label,
+			"protocol": srv.Protocol,
+		}
+		if srv.KeyEnv != "" {
+			entry["key_env"] = srv.KeyEnv
+		}
+		if srv.Note != "" {
+			entry["note"] = srv.Note
+		}
+		serverList = append(serverList, entry)
+	}
+	serverFields := []control.Field{
+		{
+			Key:           "/add_server_url",
+			Label:         "Add server URL",
+			Description:   "Enter any local or custom model server URL (e.g. http://localhost:1234 or http://gpu-box:8000). Saving queries /models and probes Chat Completions, Responses, and Anthropic Messages automatically.",
+			Shape:         control.Shape{Type: "string", MaxLength: 500},
+			Writable:      true,
+			Unset:         true,
+			Class:         "credential_reference",
+			EffectiveWhen: "new_or_resumed_session",
+			Section:       "Models",
+			Group:         "Local servers",
+		},
+		{
+			Key:         "/servers",
+			Label:       "Registered servers",
+			Description: "Local or custom model servers registered in this project. Edit, switch default protocol, or remove entries.",
+			Shape: control.Shape{
+				Type: "array",
+				Items: &control.Shape{
+					Type: "object",
+					Properties: map[string]control.Shape{
+						"id":         {Type: "string", MaxLength: 48},
+						"url":        {Type: "string", MaxLength: 500},
+						"label":      {Type: "string", MaxLength: 120},
+						"protocol":   {Type: "string", MaxLength: 32, Enum: []any{"", "openai-chat", "openai-responses", "anthropic"}},
+						"key_env":    {Type: "string", MaxLength: 120},
+						"note":       {Type: "string", MaxLength: 300},
+						"skip_probe": {Type: "boolean"},
+					},
+					Required: []string{"url"},
+				},
+			},
+			Writable:      true,
+			Unset:         true,
+			Class:         "credential_reference",
+			EffectiveWhen: "new_or_resumed_session",
+			Section:       "Models",
+			Group:         "Local servers",
+			Advanced:      true,
+		},
+	}
+	if len(serverList) > 0 {
+		out.Snapshot.Saved["/servers"] = serverList
+		out.Snapshot.Effective["/servers"] = serverList
+	}
+	out.Descriptor.Fields = append(out.Descriptor.Fields, serverFields...)
 	// The preset comes first among configuration settings: it is the usual choice.
 	if p := slices.IndexFunc(out.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/preset" }); p > 0 {
 		if d := slices.IndexFunc(out.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/default_config" }); d >= 0 && d < p {
@@ -164,6 +237,9 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			contextFiles["bundle:"+name] = artifact.Digest(b)
 		}
 	}
+	if b, err := boundedfile.Read(config.ServersPath(s.Project), 1<<20); err == nil {
+		contextFiles["servers"] = artifact.Digest(b)
+	}
 	// Capability changes must trigger publication even when config bytes stay
 	// unchanged, and must invalidate proposals reviewed against an older form.
 	versionRaw, _ := json.Marshal(map[string]any{"file": res.File.ETag, "effective": effective, "preset": s.Preset, "bundle": s.Bundle, "descriptor": out.Descriptor, "context": contextFiles})
@@ -172,7 +248,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	for _, key := range s.KnownKeyEnvs() {
 		keys[key] = os.Getenv(key) != ""
 	}
-	out.Snapshot.Details = map[string]any{"project": s.Project, "file_etag": res.File.ETag, "sources": res.Sources, "active": res.Active, "keys_present": keys, "context_digests": contextFiles, "prompts": promptViews, "bundles": names}
+	out.Snapshot.Details = map[string]any{"project": s.Project, "file_etag": res.File.ETag, "sources": res.Sources, "active": res.Active, "keys_present": keys, "context_digests": contextFiles, "prompts": promptViews, "bundles": names, "servers": servers}
 	// The effective per-actor routes, so a reader can show what is actually
 	// in force (file overrides included) rather than the preset's own lineup.
 	out.Snapshot.Details["effective_routes"] = map[string]any{
@@ -192,7 +268,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
-	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions()}
+	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions(s.Project)}
 	for _, a := range out.Descriptor.Actions {
 		if a.Operation != "session.start" {
 			continue
@@ -256,6 +332,97 @@ func setPointer(m map[string]any, p string, value any, unset bool) {
 	edit(m, parts)
 }
 
+// HasServerEdits reports whether a settings.apply proposal modifies registered
+// local/custom model servers (/add_server_url or /servers).
+func HasServerEdits(p control.Proposal) bool {
+	if p.Operation != "settings.apply" {
+		return false
+	}
+	for _, e := range p.Edits {
+		if e.Key == "/add_server_url" || e.Key == "/servers" {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitServerEdits separates server-registry edits (/add_server_url, /servers)
+// from config.json edits.
+func SplitServerEdits(p control.Proposal) (serverEdits, configEdits []control.Edit) {
+	for _, e := range p.Edits {
+		if e.Key == "/add_server_url" || e.Key == "/servers" {
+			serverEdits = append(serverEdits, e)
+		} else {
+			configEdits = append(configEdits, e)
+		}
+	}
+	return serverEdits, configEdits
+}
+
+// ValidateServerEdits checks a proposal containing /add_server_url or /servers
+// against the current snapshot and grant without touching disk or network.
+func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (RemoteView, error) {
+	before, err := s.RemoteSnapshot(grant)
+	if err != nil {
+		return RemoteView{}, err
+	}
+	if err := p.Validate(before.Descriptor, grant); err != nil {
+		return RemoteView{}, err
+	}
+	if p.ExpectedVersion != before.Snapshot.Version || p.Generation != "" {
+		return RemoteView{}, &config.ErrConflict{ETag: before.Snapshot.Version}
+	}
+	if p.Operation != "settings.apply" {
+		return RemoteView{}, fmt.Errorf("operation is not a configuration edit")
+	}
+	return before, nil
+}
+
+// ApplyServerEdits executes /servers and /add_server_url edits from a validated
+// proposal (probing new or changed URLs outside any file lock, then atomically
+// updating servers.json and live-models.json). Callers must NOT hold LockEditor.
+func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Edit) ([]config.RegisteredServer, error) {
+	var (
+		hasServers bool
+		specs      []config.SyncServerSpec
+		addURL     string
+	)
+	for _, e := range serverEdits {
+		switch e.Key {
+		case "/servers":
+			hasServers = true
+			if e.Op == "unset" {
+				specs = nil
+				continue
+			}
+			raw, err := json.Marshal(e.Value)
+			if err != nil {
+				return nil, fmt.Errorf("/servers: %w", err)
+			}
+			if err := json.Unmarshal(raw, &specs); err != nil {
+				return nil, fmt.Errorf("/servers: %w", err)
+			}
+		case "/add_server_url":
+			if e.Op == "set" {
+				u, _ := e.Value.(string)
+				addURL = strings.TrimSpace(u)
+			}
+		}
+	}
+	if hasServers {
+		if addURL != "" {
+			specs = append(specs, config.SyncServerSpec{URL: addURL})
+		}
+		return config.SyncServers(ctx, s.Project, specs)
+	}
+	if addURL != "" {
+		if _, err := config.RegisterServer(ctx, s.Project, config.ProbeOptions{URL: addURL}, false); err != nil {
+			return nil, err
+		}
+	}
+	return config.LoadServers(s.Project)
+}
+
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
@@ -284,6 +451,9 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 		}
 	}
 	for _, e := range p.Edits {
+		if e.Key == "/add_server_url" || e.Key == "/servers" {
+			continue
+		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
 	}
 	var candidate []byte
@@ -316,6 +486,27 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 }
 
 func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.Grant) (config.SaveResult, RemoteView, error) {
+	if HasServerEdits(p) {
+		if _, err := s.ValidateServerEdits(p, grant); err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+		serverEdits, configEdits := SplitServerEdits(p)
+		if _, err := s.ApplyServerEdits(ctx, serverEdits); err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+		if len(configEdits) == 0 {
+			after, err := s.RemoteSnapshot(grant)
+			return config.SaveResult{Path: config.ServersPath(s.Project)}, after, err
+		}
+		// Refresh version after server sync so the remaining config edits
+		// validate against the updated server list (e.g. newly added host).
+		mid, err := s.RemoteSnapshot(grant)
+		if err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+		p.Edits = configEdits
+		p.ExpectedVersion = mid.Snapshot.Version
+	}
 	editor, err := config.LockEditor(ctx, s.Project)
 	if err != nil {
 		return config.SaveResult{}, RemoteView{}, err

@@ -3,6 +3,8 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -92,5 +94,72 @@ func TestMissingJournalNeverRepeatsAnUncertainCommand(t *testing.T) {
 	}
 	if _, err := os.Stat(config.File(s.Project)); !os.IsNotExist(err) {
 		t.Fatal("uncertain delivery changed configuration")
+	}
+}
+
+func TestConnectorAddsAndRefreshesLocalServer(t *testing.T) {
+	modelName := "local-v1"
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"` + modelName + `","context_length":65536}]}`))
+		case "/v1/chat/completions", "/v1/responses":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"missing field"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mock.Close()
+
+	s := &settings.Service{Project: t.TempDir()}
+	g := s.Grant()
+	v0, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Add server via connector settings.apply (/add_server_url).
+	p := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   settings.SchemaVersion,
+		ExpectedVersion: v0.Snapshot.Version,
+		Edits:           []control.Edit{{Op: "set", Key: "/add_server_url", Value: mock.URL}},
+	}
+	raw, _ := json.Marshal(p)
+	q := command{ID: randomID(), UserID: "u1", Proposal: p, Digest: artifact.Digest(raw), Expires: time.Now().Add(time.Minute)}
+	res, err := executeCommand(context.Background(), s, g, q, false)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("add server command: status=%s result=%v err=%v", res.Status, res.Result, err)
+	}
+	servers, _ := config.LoadServers(s.Project)
+	if len(servers) != 1 {
+		t.Fatalf("servers = %+v", servers)
+	}
+	// Swap the model on the mock server and invoke settings.refresh.
+	modelName = "local-v2"
+	v1, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := control.Proposal{Operation: "settings.refresh", SchemaVersion: settings.SchemaVersion, ExpectedVersion: v1.Snapshot.Version}
+	rraw, _ := json.Marshal(rp)
+	rq := command{ID: randomID(), UserID: "u1", Proposal: rp, Digest: artifact.Digest(rraw), Expires: time.Now().Add(time.Minute)}
+	rres, err := executeCommand(context.Background(), s, g, rq, false)
+	if err != nil || rres.Status != "succeeded" {
+		t.Fatalf("refresh command: status=%s result=%v err=%v", rres.Status, rres.Result, err)
+	}
+	v2, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range v2.Descriptor.Suggestions["models"] {
+		if m.Value == "local-v2" && m.Group == servers[0].ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("settings.refresh did not discover newly loaded local model: %+v", v2.Descriptor.Suggestions["models"])
 	}
 }

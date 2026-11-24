@@ -2,8 +2,14 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/llm"
 )
 
 func TestParseInterleaved(t *testing.T) {
@@ -25,5 +31,51 @@ func TestParseInterleaved(t *testing.T) {
 	rest, _ = parseInterleaved(fs3, []string{"-p", "--", "--not-a-flag", "prompt"})
 	if strings.Join(rest, " ") != "--not-a-flag prompt" {
 		t.Fatalf("rest=%v", rest)
+	}
+}
+
+func TestCmdServersLifecycle(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, `{"object":"list","data":[{"id":"cli-test-model","context_length":65536}]}`)
+		case "/v1/chat/completions", "/v1/responses":
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"missing field"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mock.Close()
+
+	project := t.TempDir()
+	if code := cmdServers(project, []string{"probe", mock.URL}, serverCLIOpts{}); code != 0 {
+		t.Fatalf("probe exit code = %d", code)
+	}
+	if code := cmdServers(project, []string{"add", mock.URL}, serverCLIOpts{id: "cli-box", label: "CLI Box"}); code != 0 {
+		t.Fatalf("add exit code = %d", code)
+	}
+	if code := cmdServers(project, []string{"list"}, serverCLIOpts{}); code != 0 {
+		t.Fatalf("list exit code = %d", code)
+	}
+	if code := cmdServers(project, []string{"use", "cli-box", "cli-test-model"}, serverCLIOpts{protocol: llm.ProtocolResponses}); code != 0 {
+		t.Fatalf("use exit code = %d", code)
+	}
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatalf("Load after use: %v", err)
+	}
+	if cfg.Orchestrator.BaseURL != mock.URL+"/v1" || cfg.Orchestrator.Model != "cli-test-model" || cfg.Orchestrator.Protocol != llm.ProtocolResponses || cfg.Orchestrator.APIKeyEnv != "" {
+		t.Fatalf("cfg.Orchestrator = %+v", cfg.Orchestrator)
+	}
+	if code := cmdServers(project, []string{"refresh", "cli-box"}, serverCLIOpts{}); code != 0 {
+		t.Fatalf("refresh exit code = %d", code)
+	}
+	if code := cmdServers(project, []string{"remove", "cli-box"}, serverCLIOpts{}); code != 0 {
+		t.Fatalf("remove exit code = %d", code)
+	}
+	if servers, _ := config.LoadServers(project); len(servers) != 0 {
+		t.Fatalf("servers after remove = %+v", servers)
 	}
 }

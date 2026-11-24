@@ -94,15 +94,20 @@ func placeProjectField(f *control.Field) {
 
 func actorName(actor string) string { return strings.ToUpper(actor[:1]) + actor[1:] }
 
-// ModelSuggestions are the models eagent knows of (the built-in catalog and
-// the providers' live lists as last cached), grouped by provider id, for a
-// client to offer as choices. Any model id can still be typed in.
+// ModelSuggestions are the models eagent knows of (registered servers' live
+// models first, then the built-in catalog and cloud providers' live lists as
+// last cached), grouped by provider id, for a client to offer as choices. Any
+// model id can still be typed in.
 func ModelSuggestions(project string) []control.Suggestion {
 	models := config.KnownModels(project)
+	providers := map[string]config.Provider{}
+	for _, pr := range config.AllProviders(project) {
+		providers[pr.ID] = pr
+	}
 	out := make([]control.Suggestion, 0, len(models))
 	// A settings document is capped at 256 KiB; the list keeps to 160 KiB,
 	// so a provider listing thousands of models cannot crowd out the
-	// settings themselves. The catalog's models come first.
+	// settings themselves. Registered local models and the catalog come first.
 	budget := 160 << 10
 	for _, m := range models {
 		if m.ID == "" || len(m.ID) > 500 {
@@ -115,9 +120,18 @@ func ModelSuggestions(project string) []control.Suggestion {
 		var detail []string
 		if m.Price != nil {
 			detail = append(detail, fmt.Sprintf("$%g / $%g per M", m.Price.In, m.Price.Out))
+		} else if pr := providers[m.Provider]; pr.Custom {
+			if pr.Engine != "" {
+				detail = append(detail, pr.Engine)
+			} else {
+				detail = append(detail, "local")
+			}
 		}
 		if m.Context > 0 {
 			detail = append(detail, tokens(m.Context)+" context")
+		}
+		if m.Vision && providers[m.Provider].Custom {
+			detail = append(detail, "vision")
 		}
 		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: m.Provider, Detail: clip(strings.Join(detail, " · "), 300)}
 		if budget -= len(sug.Value) + len(sug.Label) + len(sug.Group) + len(sug.Detail) + 48; budget < 0 {
@@ -128,11 +142,17 @@ func ModelSuggestions(project string) []control.Suggestion {
 	return out
 }
 
-// ProviderSuggestions name the providers a route can use.
-func ProviderSuggestions() []control.Suggestion {
-	out := make([]control.Suggestion, 0, len(config.Providers))
-	for _, pr := range config.Providers {
-		out = append(out, control.Suggestion{Value: pr.ID, Label: pr.Label})
+// ProviderSuggestions name the providers a route can use, including any
+// project-registered local or custom servers.
+func ProviderSuggestions(project string) []control.Suggestion {
+	providers := config.AllProviders(project)
+	out := make([]control.Suggestion, 0, len(providers))
+	for _, pr := range providers {
+		detail := ""
+		if pr.Custom {
+			detail = strings.TrimPrefix(strings.TrimPrefix(pr.BaseURL, "https://"), "http://")
+		}
+		out = append(out, control.Suggestion{Value: pr.ID, Label: clip(pr.Label, 200), Detail: clip(detail, 300)})
 	}
 	return out
 }
@@ -172,10 +192,10 @@ func ConfigSuggestions(project string) []control.Suggestion {
 		cfg, err := config.LoadBundleWithFile(project, preset, bundle, file)
 		if err == nil {
 			s.Detail = clip(lineup(project, cfg), 300)
-			s.Implies = startImplies(cfg)
+			s.Implies = startImplies(project, cfg)
 			if bundle == "" {
 				group = "Presets"
-				if pr, ok := config.ProviderForURL(cfg.Orchestrator.BaseURL); ok {
+				if pr, ok := config.ProviderForURLFor(project, cfg.Orchestrator.BaseURL); ok {
 					group = pr.Label
 				}
 			}
@@ -199,7 +219,7 @@ func PresetSuggestions(project string) []control.Suggestion {
 		if cfg, err := config.LoadBundleWithFile(project, name, "", map[string]json.RawMessage{}); err == nil {
 			s.Detail = clip(lineup(project, cfg), 300)
 			s.Implies = projectImplies(cfg)
-			if pr, ok := config.ProviderForURL(cfg.Orchestrator.BaseURL); ok {
+			if pr, ok := config.ProviderForURLFor(project, cfg.Orchestrator.BaseURL); ok {
 				s.Group = pr.Label
 			}
 		}
@@ -251,7 +271,7 @@ func SessionConfigSuggestions(project string) []control.Suggestion {
 // GLM-5.3 Flash working, DeepSeek V4.1 Flash narrating".
 func lineup(project string, cfg config.Config) string {
 	name := func(a config.Actor) string {
-		if pr, ok := config.ProviderForURL(a.BaseURL); ok {
+		if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
 			if m, _, ok := config.ResolveLiveModel(project, pr.ID, a.Model); ok && m.Label != "" {
 				return m.Label
 			}
@@ -262,10 +282,10 @@ func lineup(project string, cfg config.Config) string {
 }
 
 // startImplies maps a configuration onto session.start's per-actor inputs.
-func startImplies(cfg config.Config) map[string]any {
+func startImplies(project string, cfg config.Config) map[string]any {
 	out := map[string]any{}
 	for actor, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
-		for k, v := range routeInputs(a) {
+		for k, v := range routeInputs(project, a) {
 			out[actor+"_"+k] = v
 		}
 	}
@@ -274,9 +294,9 @@ func startImplies(cfg config.Config) map[string]any {
 
 // routeInputs are an actor route's provider, model and effort, each only
 // when it is one session.start accepts.
-func routeInputs(a config.Actor) map[string]string {
+func routeInputs(project string, a config.Actor) map[string]string {
 	out := map[string]string{}
-	if pr, ok := config.ProviderForURL(a.BaseURL); ok {
+	if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
 		out["provider"] = pr.ID
 	}
 	if a.Model != "" && len(a.Model) <= 200 {

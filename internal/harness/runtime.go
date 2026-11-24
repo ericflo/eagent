@@ -320,7 +320,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runtime{
 		cfg: cfg, opts: opts, ui: ui, sess: sess, st: st,
-		activeSettings: runtimecontrol.FromConfig(cfg),
+		activeSettings: runtimecontrol.FromConfigFor(opts.Project, cfg),
 		procs:          procs.NewManager(),
 		files:          tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
 		bashEnv:        writeBashEnv(opts.Project),

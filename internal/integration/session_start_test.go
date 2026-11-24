@@ -7,6 +7,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -466,5 +467,58 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	if len(sv.Descriptor.Suggestions["providers"]) != len(config.Providers) {
 		t.Fatalf("providers = %+v", sv.Descriptor.Suggestions["providers"])
+	}
+}
+
+func TestSessionStartAndRuntimeSupportRegisteredLocalServer(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"local-gemma","context_length":131072}]}`))
+		case "/v1/chat/completions":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"messages required"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mock.Close()
+
+	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no cloud provider call expected") })
+	reg, err := config.RegisterServer(context.Background(), s.Project, config.ProbeOptions{
+		URL: mock.URL, ID: "my-local", Label: "My Local",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got SessionRequest
+	restore := SetSessionStarter(func(_ context.Context, _ string, req SessionRequest) (SessionStart, error) {
+		got = req
+		return SessionStart{ID: "1788000000099", Host: "in_process", Interactive: true}, nil
+	})
+	defer restore()
+
+	q := sessionStartCommand(t, s, g, "Test local model")
+	q.Proposal.Parameters["orchestrator_provider"] = "my-local"
+	q.Proposal.Parameters["orchestrator_model"] = "local-gemma"
+	raw, _ := json.Marshal(q.Proposal)
+	q.Digest = artifact.Digest(raw)
+	res, err := executeCommand(context.Background(), s, g, q, false)
+	if err != nil || res.Status != "succeeded" {
+		t.Fatalf("session.start with local server: status=%s result=%v err=%v", res.Status, res.Result, err)
+	}
+	if got.Routes["orchestrator"].Provider != "my-local" || got.Routes["orchestrator"].Model != "local-gemma" {
+		t.Fatalf("routes = %+v", got.Routes)
+	}
+	// Detached spawn carries explicit empty EAGENT_ORCHESTRATOR_API_KEY_ENV= so
+	// child process overrides the default preset's TOGETHER_API_KEY.
+	cmd, err := spawnCommand(s.Project, got, filepath.Join(s.Project, "announce"))
+	if err != nil {
+		t.Fatalf("spawnCommand: %v", err)
+	}
+	if !slices.Contains(cmd.Env, "EAGENT_ORCHESTRATOR_API_KEY_ENV=") || !slices.Contains(cmd.Env, "EAGENT_ORCHESTRATOR_BASE_URL="+reg.Server.BaseURL) {
+		t.Fatalf("detached env missing keyless local overrides: %v", cmd.Env)
 	}
 }

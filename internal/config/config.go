@@ -782,7 +782,7 @@ func applyEnv(cfg *Config) {
 		if v := os.Getenv("EAGENT_" + name + "_BASE_URL"); v != "" {
 			a.BaseURL = v
 		}
-		if v := os.Getenv("EAGENT_" + name + "_API_KEY_ENV"); v != "" {
+		if v, ok := os.LookupEnv("EAGENT_" + name + "_API_KEY_ENV"); ok {
 			a.APIKeyEnv = v
 		}
 		if v := os.Getenv("EAGENT_" + name + "_REASONING_EFFORT"); v != "" {
@@ -851,11 +851,15 @@ func (c Config) Validate() error {
 	return errors.New(strings.Join(errs, "; "))
 }
 
-// Endpoint builds the wire endpoint, reading the key from the environment.
+// Endpoint builds the wire endpoint, reading the key from the environment
+// when APIKeyEnv is set (an empty APIKeyEnv means no key is needed).
 func (a Actor) Endpoint() (llm.Endpoint, error) {
-	key := os.Getenv(a.APIKeyEnv)
-	if key == "" {
-		return llm.Endpoint{}, fmt.Errorf("%s is not set (needed for %s); export it, or pick another route with --preset or .agents/eagent/config.json", a.APIKeyEnv, a.Model)
+	var key string
+	if a.APIKeyEnv != "" {
+		key = os.Getenv(a.APIKeyEnv)
+		if key == "" {
+			return llm.Endpoint{}, fmt.Errorf("%s is not set (needed for %s); export it, or pick another route with --preset or .agents/eagent/config.json", a.APIKeyEnv, a.Model)
+		}
 	}
 	ep := llm.Endpoint{
 		Protocol:        a.Protocol,

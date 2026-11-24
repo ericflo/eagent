@@ -214,7 +214,11 @@ func EnvOverrides() map[string]string {
 	for name, ptr := range map[string]string{"ORCHESTRATOR": "/orchestrator", "TASK": "/task", "NARRATOR": "/narrator"} {
 		for suffix, field := range map[string]string{"MODEL": "model", "PROTOCOL": "protocol", "BASE_URL": "base_url", "API_KEY_ENV": "api_key_env", "REASONING_EFFORT": "reasoning_effort", "MAX_TOKENS": "max_tokens", "REPLAY_REASONING": "replay_reasoning"} {
 			v := "EAGENT_" + name + "_" + suffix
-			if os.Getenv(v) != "" {
+			if suffix == "API_KEY_ENV" {
+				if _, ok := os.LookupEnv(v); ok {
+					out[ptr+"/"+field] = v
+				}
+			} else if os.Getenv(v) != "" {
 				out[ptr+"/"+field] = v
 			}
 		}
@@ -706,10 +710,16 @@ func actorProblems(path string, a Actor, depth int) []Problem {
 	} else if u, err := url.Parse(a.BaseURL); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		add("error", path+"/base_url", "url", "base_url must be an http(s) URL")
 	} else if u.Scheme == "http" && !isLoopback(u.Hostname()) {
-		add("warning", path+"/base_url", "plain_http", "base_url uses plain http; the key travels unencrypted")
+		if a.APIKeyEnv != "" {
+			add("warning", path+"/base_url", "plain_http", "base_url uses plain http; the key travels unencrypted")
+		} else {
+			add("warning", path+"/base_url", "plain_http", "base_url uses plain http; traffic travels unencrypted")
+		}
 	}
 	if a.APIKeyEnv == "" {
-		add("error", path+"/api_key_env", "required", "api_key_env is required")
+		if pr, ok := ProviderForURL(a.BaseURL); ok && pr.KeyEnv != "" {
+			add("warning", path+"/api_key_env", "missing_key_env", fmt.Sprintf("no api_key_env set; %s usually requires %s", pr.Label, pr.KeyEnv))
+		}
 	} else if !keyEnvPattern.MatchString(a.APIKeyEnv) {
 		add("error", path+"/api_key_env", "name", "api_key_env must look like an environment variable name")
 	}

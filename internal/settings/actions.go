@@ -287,7 +287,7 @@ func (s *Service) sessionStartAction(text func(int) control.Shape, choices func(
 	}
 	inputs := []control.Input{configInput}
 	var providers []string
-	for _, pr := range config.Providers {
+	for _, pr := range config.AllProviders(s.Project) {
 		providers = append(providers, pr.ID)
 	}
 	for _, actor := range StartActors {
@@ -299,7 +299,7 @@ func (s *Service) sessionStartAction(text func(int) control.Shape, choices func(
 		model := control.Input{Name: actor + "_model", Label: "Model", Group: name, Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}, When: eagentOnly}
 		effort := control.Input{Name: actor + "_effort", Label: "Reasoning effort", Group: name, When: eagentOnly}
 		if err == nil {
-			route := routeInputs(map[string]config.Actor{"orchestrator": project.Orchestrator, "task": project.Task, "narrator": project.Narrator}[actor])
+			route := routeInputs(s.Project, map[string]config.Actor{"orchestrator": project.Orchestrator, "task": project.Task, "narrator": project.Narrator}[actor])
 			for in, key := range map[*control.Input]string{&provider: "provider", &model: "model", &effort: "effort"} {
 				if v, ok := route[key]; ok {
 					in.Default = v

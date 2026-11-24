@@ -65,10 +65,14 @@ type Route struct {
 }
 
 func FromConfig(c config.Config) Values {
+	return FromConfigFor("", c)
+}
+
+func FromConfigFor(project string, c config.Config) Values {
 	v := Values{TaskConcurrency: c.TaskConcurrency, NarratorTickSeconds: c.NarratorTickSeconds, NarratorQuietSeconds: c.NarratorQuietSeconds, Routes: map[string]Route{}}
 	for actor, a := range map[string]config.Actor{"orchestrator": c.Orchestrator, "task": c.Task, "narrator": c.Narrator} {
 		pid := ""
-		if pr, ok := config.ProviderForURL(a.BaseURL); ok {
+		if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
 			pid = pr.ID
 		}
 		v.Routes[actor] = Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
@@ -201,10 +205,11 @@ func View(project, session, generation string, values Values, available bool) (s
 	}
 
 	// Per-actor model routes, editable live: provider (enum of catalog
-	// providers), model id (free string, validated at apply time against the
-	// catalog and the live model cache), and reasoning effort.
+	// providers and registered custom servers), model id (free string,
+	// validated at apply time against the catalog and live cache), and
+	// reasoning effort.
 	providerEnum := []any{}
-	for _, pr := range config.Providers {
+	for _, pr := range config.AllProviders(project) {
 		providerEnum = append(providerEnum, pr.ID)
 	}
 	effortEnum := []any{}
@@ -322,7 +327,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if err != nil {
 			return before, fmt.Errorf("configuration %s: %w", name, err)
 		}
-		for actor, rt := range FromConfig(cfg).Routes {
+		for actor, rt := range FromConfigFor(project, cfg).Routes {
 			routes[actor] = rt
 			touched[actor] = true
 		}
@@ -419,7 +424,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if err != nil {
 			return before, err
 		}
-		if os.Getenv(picked.APIKeyEnv) == "" {
+		if picked.APIKeyEnv != "" && os.Getenv(picked.APIKeyEnv) == "" {
 			return before, fmt.Errorf("%s is not set where this session runs, so the %s cannot use %s", picked.APIKeyEnv, actor, rt.Provider)
 		}
 	}

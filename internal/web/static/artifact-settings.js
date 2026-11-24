@@ -31,7 +31,7 @@
     for (const part of parts.slice(0, -1)) at = at[part] ||= {};
     at[parts.at(-1)] = clone(value);
   }
-  function expand(flat) { const value = {}; for (const [key, item] of Object.entries(flat || {})) assign(value, key, item); return value; }
+  function expand(flat) { const value = {}; for (const [key, item] of Object.entries(flat || {})) { if (key === '/servers' || key === '/add_server_url') continue; assign(value, key, item); } return value; }
   function flatten(value, prefix = '', out = {}) {
     if (value && typeof value === 'object' && !Array.isArray(value)) for (const [key, item] of Object.entries(value)) flatten(item, prefix + '/' + key, out);
     else out[prefix] = value;
@@ -86,12 +86,93 @@
     if (!edits.length) throw new Error('There are no writable changes to review.');
     return edits;
   }
+  function liveCatalog() {
+    const base = clone(data.catalog);
+    const liveServers = Array.isArray(resource?.snapshot?.details?.servers) ? resource.snapshot.details.servers : null;
+    if (liveServers) {
+      const customProviders = liveServers.map(s => ({
+        id: s.id, label: s.label || s.id, base_url: String(s.base_url || '').replace(/\/+$/, ''),
+        protocol: s.protocol || 'openai-chat', protocols: s.protocols || [], key_env: s.key_env || '',
+        note: s.note || '', custom: true, engine: s.engine || '',
+      }));
+      const customIDs = new Set(customProviders.map(p => p.id));
+      base.providers = [...customProviders, ...(base.providers || []).filter(p => !p.custom)];
+      const existingCustomModels = new Map();
+      for (const m of (base.models || [])) if (customIDs.has(m.provider)) existingCustomModels.set(`${m.provider}|${m.id}`, m);
+      const customModels = [];
+      const seen = new Set();
+      for (const sug of (resource?.descriptor?.suggestions?.models || [])) {
+        if (!customIDs.has(sug.group)) continue;
+        const k = `${sug.group}|${sug.value}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        const existing = existingCustomModels.get(k);
+        if (existing) { customModels.push(existing); continue; }
+        const pr = customProviders.find(p => p.id === sug.group);
+        customModels.push({
+          provider: sug.group, id: sug.value, family: sug.value, label: sug.label || sug.value,
+          protocol: pr?.protocol || 'openai-chat', protocols: pr?.protocols || [], note: sug.detail || '', live: true,
+        });
+      }
+      base.models = [...customModels, ...(base.models || []).filter(m => !base.providers.some(p => p.id === m.provider && p.custom) && !customIDs.has(m.provider) && (data.catalog.providers || []).some(p => p.id === m.provider && !p.custom))];
+    }
+    return { ...base, keys: resource.snapshot.details?.keys_present || {}, checks: {} };
+  }
+  function currentServerSpecs() {
+    const saved = resource?.snapshot?.effective?.['/servers'] || resource?.snapshot?.saved?.['/servers'];
+    if (Array.isArray(saved)) return clone(saved);
+    return (liveCatalog().providers || []).filter(p => p.custom).map(p => {
+      const entry = { id: p.id, url: p.base_url, label: p.label, protocol: p.protocol || 'openai-chat' };
+      if (p.key_env) entry.key_env = p.key_env;
+      if (p.note) entry.note = p.note;
+      return entry;
+    });
+  }
+  function serverSpecFromBody(body, idOverride) {
+    const entry = { url: String(body.url || '').trim() };
+    const id = idOverride || String(body.id || '').trim();
+    if (id) entry.id = id;
+    if (body.label && String(body.label).trim()) entry.label = String(body.label).trim();
+    if (body.protocol && String(body.protocol).trim()) entry.protocol = String(body.protocol).trim();
+    if (body.key_env && String(body.key_env).trim()) entry.key_env = String(body.key_env).trim();
+    if (body.note && String(body.note).trim()) entry.note = String(body.note).trim();
+    if (body.skip_probe) entry.skip_probe = true;
+    return entry;
+  }
   async function api(path, options = {}) {
     const url = new URL(path, 'https://artifact.invalid'), method = options.method || 'GET';
     try {
       const body = options.body ? JSON.parse(options.body) : {};
       if (method === 'GET' && url.pathname === '/api/config') return configView();
-      if (method === 'GET' && url.pathname === '/api/catalog') return { ...data.catalog, keys: resource.snapshot.details?.keys_present || {}, checks: {} };
+      if (method === 'GET' && url.pathname === '/api/catalog') return liveCatalog();
+      if (method === 'GET' && url.pathname === '/api/servers') return { servers: resource?.snapshot?.details?.servers || [] };
+      if (method === 'POST' && url.pathname === '/api/servers') {
+        const entry = serverSpecFromBody(body);
+        if (!entry.url) throw new Error('Server URL is required.');
+        const simpleURLOnly = !entry.id && !entry.label && !entry.protocol && !entry.key_env && !entry.note && !entry.skip_probe && canEdit('/add_server_url');
+        if (simpleURLOnly) {
+          return await stage({ operation: 'settings.apply', edits: [{ op: 'set', key: '/add_server_url', value: entry.url }] }, { reloadAlways: true });
+        }
+        const next = [...currentServerSpecs(), entry];
+        return await stage({ operation: 'settings.apply', edits: [{ op: 'set', key: '/servers', value: next }] }, { reloadAlways: true });
+      }
+      if (method === 'PUT' && url.pathname.startsWith('/api/servers/')) {
+        const id = decodeURIComponent(url.pathname.slice('/api/servers/'.length));
+        const list = currentServerSpecs();
+        const idx = list.findIndex(s => s.id === id);
+        if (idx < 0) throw new Error('Server not found: ' + id);
+        list[idx] = serverSpecFromBody(body, id);
+        return await stage({ operation: 'settings.apply', edits: [{ op: 'set', key: '/servers', value: list }] }, { reloadAlways: true });
+      }
+      if (method === 'DELETE' && url.pathname.startsWith('/api/servers/')) {
+        const id = decodeURIComponent(url.pathname.slice('/api/servers/'.length));
+        const next = currentServerSpecs().filter(s => s.id !== id);
+        const edit = next.length ? { op: 'set', key: '/servers', value: next } : { op: 'unset', key: '/servers' };
+        return await stage({ operation: 'settings.apply', edits: [edit] }, { reloadAlways: true });
+      }
+      if (method === 'POST' && (url.pathname === '/api/servers/refresh' || (url.pathname.startsWith('/api/servers/') && url.pathname.endsWith('/probe')))) {
+        return await stage({ operation: 'settings.refresh' }, { reloadAlways: true });
+      }
       if (method === 'GET' && url.pathname.startsWith('/api/config/presets/')) {
         const name = decodeURIComponent(url.pathname.slice('/api/config/presets/'.length));
         if (url.searchParams.get('kind') !== 'bundle' && Object.hasOwn(data.presets, name)) return { name, config: clone(data.presets[name]) };
@@ -108,7 +189,7 @@
         const cfg = clone(body.config), base = body.base_preset ? data.presets[body.base_preset] : data.defaults;
         if (!base) throw new Error('The base preset is unavailable in this archive.');
         const baseValues = flatten(base), loaded = resource.snapshot.effective, desired = clone(resource.snapshot.saved), form = flatten(cfg);
-        const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset']);
+        const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url']);
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
           if (omitted.has(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
@@ -182,7 +263,8 @@
     for (let attempt = 0; attempt < 20 && !stopped; attempt++) {
       try {
         const current = await finale.settings.read();
-        if (current.resource.snapshot.version !== command.proposal.expected_version) {
+        const changed = current.resource.snapshot.version !== command.proposal.expected_version;
+        if (changed || (meta.reloadAlways && attempt >= 1)) {
           if (meta.draftToken === draftToken()) {
             await clear();
             resource = current.resource; editable = !!current.editable; window.EagentConfig.reset(); await window.EagentConfig.render(); message('Saved. Showing the connector’s current defaults.');

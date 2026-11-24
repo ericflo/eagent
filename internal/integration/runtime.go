@@ -86,7 +86,7 @@ func decorateSessionView(project string, view *settings.RemoteView, grant contro
 	if view.Descriptor.Suggestions == nil {
 		view.Descriptor.Suggestions = map[string][]control.Suggestion{}
 	}
-	for name, list := range map[string][]control.Suggestion{"configs": configs, "models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions()} {
+	for name, list := range map[string][]control.Suggestion{"configs": configs, "models": settings.ModelSuggestions(project), "providers": settings.ProviderSuggestions(project)} {
 		view.Descriptor.Suggestions[name] = list
 	}
 	for i, f := range view.Descriptor.Fields {

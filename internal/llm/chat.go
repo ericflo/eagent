@@ -43,9 +43,11 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 	if e := c.Endpoint.ReasoningEffort; e != "" {
 		body["reasoning_effort"] = e
 	}
-	resp, err := c.post(ctx, "/chat/completions", body, map[string]string{
-		"Authorization": "Bearer " + c.Endpoint.APIKey,
-	})
+	var headers map[string]string
+	if c.Endpoint.APIKey != "" {
+		headers = map[string]string{"Authorization": "Bearer " + c.Endpoint.APIKey}
+	}
+	resp, err := c.post(ctx, "/chat/completions", body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +350,12 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		Usage *struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			PromptDetails    *struct {
+				Cached int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionDetails *struct {
+				Reasoning int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
@@ -382,8 +390,20 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		}
 		out.ToolCalls = append(out.ToolCalls, event.ToolCall{ID: id, Name: tc.Function.Name, Args: normalizeArgs(tc.Function.Arguments)})
 	}
+	if len(out.ToolCalls) == 0 && ch.FinishReason != "length" {
+		if parsed, rest := ParseTextToolCalls(out.Text); len(parsed) > 0 {
+			out.ToolCalls = parsed
+			out.Text = rest
+		}
+	}
 	if body.Usage != nil {
 		out.Usage.Input, out.Usage.Output = body.Usage.PromptTokens, body.Usage.CompletionTokens
+		if body.Usage.PromptDetails != nil {
+			out.Usage.Cached = body.Usage.PromptDetails.Cached
+		}
+		if body.Usage.CompletionDetails != nil {
+			out.Usage.Reasoning = body.Usage.CompletionDetails.Reasoning
+		}
 	}
 	switch ch.FinishReason {
 	case "length":

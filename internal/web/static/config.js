@@ -10,7 +10,8 @@ const ACTORS = [
   {key: 'narrator', name: 'Narrator', role: 'Talks to you: acknowledges requests, reports progress, asks questions. It speaks often, so keep it fast.'},
 ];
 const EFFORT_HELP = {
-  none: 'No reasoning parameter is sent. The model answers directly; fastest and cheapest.',
+  default: 'No reasoning_effort field is sent; the model or server default applies.',
+  none: 'Turns reasoning off (or sends no thinking block where supported).',
   minimal: 'Barely any thinking before answering.',
   low: 'A little thinking. Good for narration and routine tasks.',
   medium: 'Balanced. The usual choice for task workers.',
@@ -18,6 +19,8 @@ const EFFORT_HELP = {
   xhigh: 'Very long thinking. Only worth it for hard problems.',
   max: 'The model thinks as long as it wants.',
 };
+const PROTO_LABELS = {'openai-chat': 'Chat Completions', 'openai-responses': 'Responses', 'anthropic': 'Anthropic Messages'};
+const ENGINE_LABELS = {lmstudio: 'LM Studio', loom: 'Loom', llamacpp: 'llama.cpp', vllm: 'vLLM', sglang: 'SGLang', ollama: 'Ollama'};
 const LABELS = {
   '/task_concurrency': 'task concurrency', '/max_task_turns': 'max task calls', '/max_orchestrator_calls_per_turn': 'max orchestrator calls per turn',
   '/narrator_tick_seconds': 'narrator tick', '/narrator_quiet_seconds': 'narrator quiet limit', '/rollover_tokens': 'fresh-context threshold',
@@ -33,7 +36,7 @@ let E = null;
 
 // ---- state -------------------------------------------------------------------------------
 const clone = v => JSON.parse(JSON.stringify(v));
-function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; if (!c.finalechat) c.finalechat = {}; return c; }
+function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; delete c.servers; delete c.add_server_url; if (!c.finalechat) c.finalechat = {}; return c; }
 function flatten(v, prefix = '', out = {}) {
   if (v && typeof v === 'object' && !Array.isArray(v)) { for (const key of Object.keys(v)) flatten(v[key], prefix + '/' + key, out); }
   else out[prefix] = JSON.stringify(v);
@@ -113,21 +116,29 @@ function lookup(a) { const p = providerOf(a.base_url); return p ? E.cat.models.f
 function protocolOf(m) { const p = E.cat.providers.find(x => x.id === m.provider); return m.protocol || (p && p.protocol) || 'openai-chat'; }
 function effortsFor(a) { const m = lookup(a); if (m && m.efforts && m.efforts.length) return {list: m.efforts, checked: true}; return {list: E.cat.effort_order, checked: false}; }
 function keyPresent(env) { return !!E.c.keys[env]; }
-function priceLine(m) {
+function keyReady(env) { return !env || !!E.c.keys[env]; }
+function priceLine(m, prov) {
+  if (prov && prov.custom) {
+    const parts = [ENGINE_LABELS[prov.engine] ? `${ENGINE_LABELS[prov.engine]} · local server` : 'custom server'];
+    if (m && m.context) parts.push(`${ctx(m.context)} context`);
+    if (m && m.vision) parts.push('sees images');
+    if (m && m.note) parts.push(m.note);
+    return parts.join(' · ');
+  }
   if (!m) return 'not in any catalog: sessions will show as unpriced';
   const parts = [];
   if (m.price) parts.push(`$${trimNum(m.price.in)} in · $${trimNum(m.price.out)} out per M tokens${m.price.nominal ? ' (list price)' : ''}${m.live ? ' (live)' : ''}`);
   else parts.push(m.live ? 'listed live by the provider, price unknown: sessions will show as unpriced' : 'price unknown');
-  parts.push(`${ctx(m.context)} context`);
+  if (m.context) parts.push(`${ctx(m.context)} context`);
   if (m.vision) parts.push('sees images');
   return parts.join(' · ');
 }
-const ctx = n => n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
+const ctx = n => !n ? '' : n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`;
 const trimNum = n => n >= 10 ? n.toFixed(0) : n >= 1 ? n.toFixed(2).replace(/\.?0+$/, '') : n.toFixed(3).replace(/\.?0+$/, '');
 function checkFor(a, effort) { return E.cat.checks[`${trimSlash(a.base_url)}|${a.model}|${effort}`]; }
 function setModel(a, m) {
   const p = E.cat.providers.find(x => x.id === m.provider);
-  a.base_url = p.base_url; a.protocol = protocolOf(m); a.api_key_env = p.key_env; a.model = m.id;
+  a.base_url = p.base_url; a.protocol = protocolOf(m); a.api_key_env = p.key_env || ''; a.model = m.id;
   if (m.context) a.context_tokens = m.context;
   if (m.efforts && m.efforts.length && !m.efforts.includes(a.reasoning_effort || 'none')) {
     a.reasoning_effort = m.efforts.includes('medium') ? 'medium' : m.efforts[Math.floor(m.efforts.length / 2)];
@@ -175,12 +186,14 @@ function draw() {
     const tab = E.tab || 'Models';
     body.append(h('nav', {class:'settings-tabs', 'aria-label':'Settings categories'}, ...['Models','Behavior','Prompts','Advanced'].map(name => h('button', {'aria-pressed':String(tab===name), onclick:()=>{E.tab=name;draw();}}, name))));
     body.append(h('div',{class:'settings-intro'},h('h2',null,tab==='Models'?'Choose how your agent thinks':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give your agent direction':'Fine-tune your setup'),h('p',null,tab==='Models'?'Pick a model and reasoning effort for each role.':tab==='Behavior'?'Adjust session limits, narration, and phone updates.':tab==='Prompts'?'Customize the instructions behind each role.':'Presets, saved configurations, and detailed overrides.')));
-    if(tab==='Models') body.append(h('div',{class:'routes'},...ACTORS.map(routeCard)));
+    if(tab==='Models') { const sc = serversCard(); if (sc) body.append(sc); body.append(h('div',{class:'routes'},...ACTORS.map(routeCard))); }
     if(tab==='Behavior') body.append(sessionCard(),narratorCard(),phoneCard());
     if(tab==='Prompts') body.append(promptsCard());
     if(tab==='Advanced') body.append(quickStart(),advancedCard());
   } else {
   body.append(quickStart());
+  const sc = serversCard();
+  if (sc) body.append(sc);
   body.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
   body.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
   body.append(h('div', {class: 'grid2'}, phoneCard(), promptsCard()));
@@ -271,6 +284,201 @@ function keepPinned() {
   if (X.canEdit && !X.canEdit('/preset')) E.base = E.loadedBase;
 }
 
+// ---- local & custom servers ----------------------------------------------------------------
+function customServers() { return (E.cat.providers || []).filter(p => p.custom); }
+function modelsForProvider(id) { return (E.cat.models || []).filter(m => m.provider === id); }
+function canManageServers() { return !X.remote || (!X.readOnly?.() && (!X.canEdit || X.canEdit('/servers') || X.canEdit('/add_server_url'))); }
+function serversCard() {
+  const servers = customServers();
+  const canManage = canManageServers();
+  const canRefresh = !X.remote || (!X.readOnly?.() && canAction('settings.refresh'));
+  const head = h('h3', null, 'Local & custom servers', h('span', {class: 'grow'}),
+    servers.length && canRefresh ? h('button', {class: 'ghost small', onclick: refreshAllServers}, X.remote ? 'Review refresh' : 'Refresh all') : null,
+    canManage ? h('button', {class: 'small primary', onclick: () => serverDialog(null)}, '+ Add server…') : null);
+  const intro = h('p', {class: 'sub'}, X.remote
+    ? 'Register any local or custom server URL (llama.cpp, vLLM, SGLang, LM Studio, Loom, Ollama, etc.). Saving asks your local eagent connector to query /models and probe Chat Completions, Responses, and Anthropic Messages automatically.'
+    : 'Register any OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages server (llama.cpp, vLLM, SGLang, LM Studio, Loom, Ollama, etc.). eagent inspects /models and probes supported API kinds automatically.');
+  const rows = servers.map(s => {
+    const ms = modelsForProvider(s.id);
+    const err = E.cat.live_errors && E.cat.live_errors[s.id];
+    const ready = keyReady(s.key_env);
+    const protos = (s.protocols && s.protocols.length) ? s.protocols : [s.protocol || 'openai-chat'];
+    const useAll = ms.length && !lockedField('/orchestrator/model') && !lockedField('/task/model') && !lockedField('/narrator/model')
+      ? h('button', {class: 'small', title: `Use ${ms[0].id} on ${s.label} for orchestrator, task, and narrator`, onclick: () => {
+          for (const actor of ACTORS) {
+            setModel(E.cfg[actor.key], ms[0]);
+            E.cfg[actor.key].protocol = s.protocol || protocolOf(ms[0]);
+            if (E.cfg[actor.key].protocol !== 'openai-responses') delete E.cfg[actor.key].replay_reasoning;
+          }
+          if (ms[0].context && E.cfg.rollover_tokens > Math.floor(ms[0].context * 0.85)) {
+            E.cfg.rollover_tokens = Math.max(20000, Math.floor(ms[0].context * 0.75));
+          }
+          rerender();
+          toast(`loaded ${ms[0].id} for all actors (press Save to apply)`);
+        }}, 'Use for all')
+      : null;
+    const protoEl = canManage
+      ? h('select', {class: 'mini', title: 'Default wire API protocol for this server', onchange: async ev => {
+          const next = ev.target.value;
+          try {
+            const r = await api(`/api/servers/${encodeURIComponent(s.id)}`, {method: 'PUT', body: JSON.stringify({url: s.base_url, protocol: next, key_env: s.key_env || '', label: s.label, note: s.note || '', skip_probe: true})});
+            if (r && r.staged) { toast('Ready for review in FinaleChat. Tap Save to update the server protocol.'); return; }
+            await reloadCatalogKeepDraft();
+            toast(`${s.label} default API set to ${PROTO_LABELS[next] || next}`);
+          } catch (e) { toast(e.message, 'bad'); draw(); }
+        }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: (s.protocol || 'openai-chat') === p}, `${PROTO_LABELS[p]}${protos.includes(p) ? ' ✓' : ''}`)))
+      : h('span', {class: 'badge mono'}, PROTO_LABELS[s.protocol] || s.protocol || 'openai-chat');
+    const modelChips = ms.length
+      ? h('div', {class: 'srv-models'}, ...ms.slice(0, 8).map(m => h('span', {class: 'badge mono', title: `${m.id}${m.context ? ' · ' + ctx(m.context) + ' ctx' : ''}${m.vision ? ' · vision' : ''}`}, m.id, m.context ? ` · ${ctx(m.context)}` : '', m.vision ? ' · vision' : '')), ms.length > 8 ? h('span', {class: 'sub'}, `+${ms.length - 8} more`) : null)
+      : h('div', {class: 'sub'}, err ? h('span', {class: 'warn-text'}, err) : 'No models discovered yet.');
+    return h('div', {class: 'srv-row'},
+      h('div', {class: 'srv-main'},
+        h('div', {class: 'srv-title'},
+          h('span', {class: 'kdot' + (ready && !err ? ' on' : '')}),
+          h('b', null, s.label),
+          h('code', {class: 'inline'}, s.id),
+          s.engine ? h('span', {class: 'livetag'}, ENGINE_LABELS[s.engine] || s.engine) : h('span', {class: 'livetag'}, 'local'),
+          h('span', {class: 'sub'}, s.base_url),
+          s.key_env ? h('span', {class: 'sub' + (ready ? '' : ' warn-text')}, ` · $${s.key_env}${ready ? ' (set)' : ' (not set)'}`) : h('span', {class: 'sub'}, ' · no key')),
+        modelChips),
+      h('div', {class: 'srv-actions'},
+        protoEl,
+        useAll,
+        canRefresh ? h('button', {class: 'ghost small', onclick: () => probeExistingServer(s)}, 'Probe') : null,
+        canManage ? h('button', {class: 'ghost small', onclick: () => serverDialog(s)}, 'Edit') : null,
+        canManage ? h('button', {class: 'ghost small', onclick: () => removeServer(s)}, 'Remove') : null));
+  });
+  return h('div', {class: 'card servers-card'}, head, intro,
+    rows.length ? h('div', {class: 'srv-list'}, ...rows) : h('div', {class: 'sub'}, canManage ? 'No local or custom servers registered yet. Click “+ Add server…” to enter a URL and probe it.' : 'No local or custom servers registered in this project yet.'));
+}
+async function reloadCatalogKeepDraft() {
+  const [c, cat] = await Promise.all([api('/api/config'), api('/api/catalog')]);
+  E.c = c; E.cat = cat;
+  draw();
+}
+async function probeExistingServer(s) {
+  try {
+    if (!X.remote) toast(`probing ${s.label}…`);
+    const r = await api(`/api/servers/${encodeURIComponent(s.id)}/probe`, {method: 'POST', body: '{}'});
+    if (r && r.staged) { toast('Ready for review in FinaleChat. Tap Save to re-probe local servers.'); return; }
+    await reloadCatalogKeepDraft();
+    toast(`${r.server.label}: ${(r.models || []).length} model${(r.models || []).length === 1 ? '' : 's'} · ${(r.server.protocols || [r.server.protocol]).join(', ')}`);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function refreshAllServers() {
+  try {
+    if (!X.remote) toast('refreshing local servers…');
+    const r = await api('/api/servers/refresh', {method: 'POST', body: '{}'});
+    if (r && r.staged) { toast('Ready for review in FinaleChat. Tap Save to re-probe local servers.'); return; }
+    await reloadCatalogKeepDraft();
+    const okCount = Object.keys(r.servers || {}).length, errCount = Object.keys(r.errors || {}).length;
+    toast(`refreshed ${okCount} server${okCount === 1 ? '' : 's'}${errCount ? ` (${errCount} unreachable)` : ''}`, errCount && !okCount ? 'bad' : '');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function removeServer(s) {
+  if (!X.remote && !confirm(`Remove registered server "${s.label}" (${s.base_url})?`)) return;
+  try {
+    const r = await api(`/api/servers/${encodeURIComponent(s.id)}`, {method: 'DELETE'});
+    if (r && r.staged) { toast(`Staged removal of ${s.label}. Tap Save in FinaleChat to confirm.`); return; }
+    await reloadCatalogKeepDraft();
+    toast(`removed ${s.label}`);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+function serverDialog(existing) {
+  const isEdit = !!existing;
+  const urlIn = h('input', {class: 'search', style: 'flex:1;min-width:260px', value: existing ? existing.base_url : '', placeholder: 'http://localhost:8080 or http://gpu-box:8000/v1'});
+  const keyIn = h('input', {class: 'search', style: 'min-width:180px', value: existing ? (existing.key_env || '') : '', placeholder: 'optional, e.g. VLLM_API_KEY'});
+  const protoSel = h('select', null,
+    h('option', {value: '', selected: !existing}, 'Auto-detect via probe'),
+    ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: existing && existing.protocol === p}, `${PROTO_LABELS[p]} (${p})`)));
+  const labelIn = h('input', {class: 'search', style: 'flex:1;min-width:180px', value: existing ? existing.label : '', placeholder: 'auto-filled on probe'});
+  const idIn = h('input', {class: 'search', style: 'min-width:160px', value: existing ? existing.id : '', disabled: isEdit, placeholder: 'auto-generated slug'});
+  const skipChk = h('input', {type: 'checkbox', checked: false});
+  const preview = h('div', {class: 'probe-preview'});
+  const status = h('span', {class: 'sub'});
+  let lastProbe = null;
+
+  function renderPreview(res) {
+    lastProbe = res;
+    const s = res.server;
+    const protos = s.protocols || [];
+    const ms = res.models || [];
+    if (!labelIn.value.trim()) labelIn.value = s.label || '';
+    if (!isEdit && !idIn.value.trim()) idIn.value = s.id || '';
+    if (!protoSel.value && s.protocol) protoSel.value = s.protocol;
+    const protoBtns = h('div', {class: 'seg'}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => {
+      const supported = protos.includes(p);
+      return h('button', {type: 'button', class: (protoSel.value === p ? 'on' : '') + (supported ? ' tool_call' : ''), onclick: () => { protoSel.value = p; renderPreview(res); }},
+        h('span', {class: 'e'}, PROTO_LABELS[p]),
+        h('span', {class: 'ann'}, supported ? '✓ probed' : 'not detected'));
+    }));
+    preview.replaceChildren(
+      h('div', {class: 'banner'},
+        h('div', {class: 'row', style: 'margin:0 0 6px'},
+          h('b', null, s.label),
+          s.engine ? h('span', {class: 'livetag'}, ENGINE_LABELS[s.engine] || s.engine) : null,
+          h('code', {class: 'inline'}, s.base_url)),
+        h('div', {class: 'sub', style: 'margin-bottom:6px'}, 'Supported API kinds (click to choose default):'),
+        protoBtns,
+        h('div', {class: 'sub', style: 'margin-top:8px'}, ms.length
+          ? `${ms.length} model${ms.length === 1 ? '' : 's'} discovered:`
+          : 'No models returned by /models yet.'),
+        ms.length ? h('div', {class: 'srv-models', style: 'margin-top:4px'}, ...ms.slice(0, 12).map(m =>
+          h('span', {class: 'badge mono'}, m.id, m.context ? ` · ${ctx(m.context)}` : '', m.vision ? ' · vision' : '', m.efforts && m.efforts.length ? ` · ${m.efforts.length} efforts` : ''))) : null,
+        ...(res.warnings || []).map(w => h('div', {class: 'problem warning'}, w))));
+  }
+
+  const probeBtn = !X.remote ? h('button', {type: 'button', onclick: async () => {
+    const rawURL = urlIn.value.trim();
+    if (!rawURL) { status.textContent = 'Enter a server URL first.'; return; }
+    probeBtn.disabled = true; status.textContent = 'Probing /models and API endpoints…';
+    try {
+      const r = await api('/api/servers/probe', {method: 'POST', body: JSON.stringify({url: rawURL, protocol: protoSel.value, key_env: keyIn.value.trim(), id: isEdit ? existing.id : idIn.value.trim(), label: labelIn.value.trim()})});
+      status.textContent = 'Probe succeeded.';
+      renderPreview(r);
+    } catch (e) { status.textContent = e.message; preview.replaceChildren(h('div', {class: 'problem error'}, e.message)); }
+    finally { probeBtn.disabled = false; }
+  }}, 'Probe server') : null;
+
+  const saveBtn = h('button', {type: 'button', class: 'primary', onclick: async () => {
+    const rawURL = urlIn.value.trim();
+    if (!rawURL) { status.textContent = 'Enter a server URL first.'; return; }
+    saveBtn.disabled = true; if (probeBtn) probeBtn.disabled = true;
+    status.textContent = X.remote ? 'Staging for review…' : (skipChk.checked ? 'Saving…' : 'Probing and saving…');
+    try {
+      const body = {url: rawURL, protocol: protoSel.value, key_env: keyIn.value.trim(), id: isEdit ? existing.id : idIn.value.trim(), label: labelIn.value.trim(), skip_probe: skipChk.checked};
+      const r = isEdit
+        ? await api(`/api/servers/${encodeURIComponent(existing.id)}`, {method: 'PUT', body: JSON.stringify(body)})
+        : await api('/api/servers', {method: 'POST', body: JSON.stringify(body)});
+      closeModal();
+      if (r && r.staged) {
+        toast('Ready for review in FinaleChat. Tap Save to probe and register this server.');
+        return;
+      }
+      await reloadCatalogKeepDraft();
+      const count = (r.models || []).length;
+      toast(`${isEdit ? 'Updated' : 'Registered'} ${r.server.label}${count ? ` · ${count} model${count === 1 ? '' : 's'}` : ''}`);
+    } catch (e) { status.textContent = e.message; saveBtn.disabled = false; if (probeBtn) probeBtn.disabled = false; }
+  }}, X.remote ? (isEdit ? 'Review server change' : 'Review & probe in FinaleChat') : (isEdit ? 'Save changes' : 'Add server'));
+
+  urlIn.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); (probeBtn || saveBtn).click(); } });
+  showModal(h('div', null,
+    h('h2', null, isEdit ? `Edit server · ${existing.id}` : 'Add local or custom model server'),
+    h('p', {class: 'sub'}, X.remote
+      ? 'Enter any server URL reachable from your eagent machine. When you tap Save in FinaleChat, your local connector queries /models and probes Chat Completions, Responses, and Anthropic Messages automatically.'
+      : 'Enter any server URL (with or without /v1). eagent checks /models and probes Chat Completions (/chat/completions), OpenAI Responses (/responses), and Anthropic Messages (/messages).'),
+    field('Server URL', [urlIn, probeBtn], [h('span', {class: 'src'}, 'Examples: http://localhost:8080 (llama.cpp), http://localhost:1234 (LM Studio), http://gpu-box:8000 (vLLM / SGLang)')]),
+    preview,
+    h('div', {class: 'fields'},
+      field('Default API protocol', [protoSel], [h('span', {class: 'src'}, 'Per-actor protocol can still be switched independently')]),
+      field('API key env variable (optional)', [keyIn], [h('span', {class: 'src'}, 'Leave blank for local servers without authentication')]),
+      field('Display name (optional)', [labelIn], []),
+      field('Server ID (optional)', [idIn], [h('span', {class: 'src'}, 'Used in CLI and FinaleChat provider lists')])),
+    h('label', {class: 'check', style: 'margin-top:6px'}, skipChk, 'Register without probing (if the server is currently offline)'),
+    h('div', {class: 'foot'}, status, h('span', {style: 'flex:1'}), h('button', {type: 'button', onclick: closeModal}, 'Cancel'), saveBtn)));
+  urlIn.focus();
+}
+
 // ---- route cards ---------------------------------------------------------------------------
 function routeCard(actor) {
   const a = E.cfg[actor.key];
@@ -283,20 +491,44 @@ function routeCard(actor) {
 
   // Model
   const pickBtn = h('button', {class: 'pick', disabled: locked('model') || locked('base_url'), onclick: () => openPicker(card, a, actor.key, false)},
-    h('span', {class: 'pk'}, h('span', {class: 'kdot' + (keyPresent(a.api_key_env) ? ' on' : '')}), h('b', null, m ? m.label : a.model), h('span', {class: 'sub'}, prov ? prov.label : a.base_url.replace(/^https?:\/\//, ''))), h('span', {class: 'caret'}, '▾'));
-  const same = actor.key !== 'orchestrator' && !locked('model') ? h('button', {class: 'link', title: 'Copy the orchestrator\'s provider, model, and effort', onclick: () => { const o = E.cfg.orchestrator; Object.assign(a, {base_url: o.base_url, protocol: o.protocol, api_key_env: o.api_key_env, model: o.model, reasoning_effort: o.reasoning_effort, context_tokens: o.context_tokens}); rerender(); }}, 'same as orchestrator') : null;
+    h('span', {class: 'pk'}, h('span', {class: 'kdot' + (keyReady(a.api_key_env) ? ' on' : '')}), h('b', null, m ? m.label : a.model), h('span', {class: 'sub'}, prov ? prov.label : a.base_url.replace(/^https?:\/\//, ''))), h('span', {class: 'caret'}, '▾'));
+  const same = actor.key !== 'orchestrator' && !locked('model') ? h('button', {class: 'link', title: 'Copy the orchestrator\'s provider, model, and effort', onclick: () => { const o = E.cfg.orchestrator; Object.assign(a, {base_url: o.base_url, protocol: o.protocol, api_key_env: o.api_key_env, model: o.model, reasoning_effort: o.reasoning_effort, context_tokens: o.context_tokens}); if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, 'same as orchestrator') : null;
   card.append(field('Model', [pickBtn], [h('span', {class: 'notes-row'}, srcNode(ptr('model')), same), ...problemNodes(ptr('model'))]));
-  card.append(h('div', {class: 'sub price'}, priceLine(m), !keyPresent(a.api_key_env) ? h('span', {class: 'warn-text'}, ` · $${a.api_key_env} is not set in this shell`) : null));
+  card.append(h('div', {class: 'sub price'}, priceLine(m, prov),
+    a.api_key_env && !keyPresent(a.api_key_env) ? h('span', {class: 'warn-text'}, ` · $${a.api_key_env} is not set in this shell`)
+      : !a.api_key_env && (!prov || prov.custom) ? h('span', null, ' · no key required') : null));
+
+  // Inline API endpoint selector for custom/local or multi-protocol servers
+  if (prov && (prov.custom || (prov.protocols && prov.protocols.length > 1))) {
+    const supported = (m && m.protocols && m.protocols.length) ? m.protocols : (prov.protocols || []);
+    const pseg = h('div', {class: 'seg' + (supported.length ? ' annotated' : '')});
+    for (const p of ['openai-chat', 'openai-responses', 'anthropic']) {
+      const ok = supported.includes(p);
+      pseg.append(h('button', {class: (a.protocol === p ? 'on' : '') + (ok ? ' tool_call' : ''), disabled: locked('protocol'), title: E.cat.transports[p] || p, onclick: () => {
+        a.protocol = p;
+        if (a.protocol !== 'openai-responses') delete a.replay_reasoning;
+        rerender();
+      }}, h('span', {class: 'e'}, PROTO_LABELS[p]), supported.length ? h('span', {class: 'ann'}, ok ? '✓' : '—') : null));
+    }
+    card.append(field('API endpoint', [pseg], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]));
+  }
 
   // Effort
   const {list, checked} = effortsFor(a);
-  const cur = a.reasoning_effort || (a.protocol === 'openai-chat' ? '' : 'none');
-  const anyCheck = list.some(e => checkFor(a, e));
+  const showDefault = a.protocol === 'openai-chat' && !checked;
+  const displayList = showDefault ? ['default', ...list] : list;
+  const cur = a.reasoning_effort || (a.protocol === 'openai-chat' ? (showDefault ? 'default' : '') : 'none');
+  const anyCheck = list.some(e => checkFor(a, e)) || (showDefault && checkFor(a, ''));
   const seg = h('div', {class: 'seg' + (checked ? '' : ' unchecked') + (anyCheck ? ' annotated' : '')});
-  for (const e of list) {
-    const chk = checkFor(a, e);
-    const on = cur === e || (e === 'none' && cur === '');
-    seg.append(h('button', {class: (on ? 'on' : '') + (chk ? ' ' + chk.status : ''), disabled: locked('reasoning_effort'), title: EFFORT_HELP[e] + (chk ? `\nLast test: ${checkText(chk, true)}` : ''), onclick: () => { a.reasoning_effort = e === 'none' && a.protocol === 'openai-chat' ? '' : e; rerender(); }},
+  for (const e of displayList) {
+    const chk = checkFor(a, e === 'default' ? '' : e);
+    const on = cur === e || (!showDefault && e === 'none' && cur === '');
+    seg.append(h('button', {class: (on ? 'on' : '') + (chk ? ' ' + chk.status : ''), disabled: locked('reasoning_effort'), title: (EFFORT_HELP[e] || '') + (chk ? `\nLast test: ${checkText(chk, true)}` : ''), onclick: () => {
+      if (e === 'default') a.reasoning_effort = '';
+      else if (e === 'none' && a.protocol === 'openai-chat' && !(checked && list.includes('none')) && !showDefault) a.reasoning_effort = '';
+      else a.reasoning_effort = e;
+      rerender();
+    }},
       h('span', {class: 'e'}, e), anyCheck ? h('span', {class: 'ann'}, chk ? checkText(chk) : '') : null));
   }
   const testing = E.tests[actor.key] && E.tests[actor.key].busy;
@@ -321,8 +553,8 @@ function routeCard(actor) {
     num('context_tokens', 'Context window', 'what the harness assumes when deciding to start a fresh context'),
     a.protocol === 'openai-responses' ? field('Replay reasoning', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: a.replay_reasoning !== false, disabled: locked('replay_reasoning'), onchange: ev => { if (ev.target.checked) delete a.replay_reasoning; else a.replay_reasoning = false; rerender(); }}), 'keep the model\'s reasoning items across turns (recommended; keeps the prompt cache warm)')], [srcNode(ptr('replay_reasoning'))]) : null,
     field('Protocol', [h('select', {disabled: locked('protocol'), onchange: ev => { a.protocol = ev.target.value; if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: a.protocol === p}, `${p} · ${E.cat.transports[p] || ''}`)))], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]),
-    field('Provider address', [h('select', {disabled: locked('base_url'), onchange: ev => { a.base_url = ev.target.value; const p = providerOf(a.base_url); if (p) { a.api_key_env = p.key_env; if (!lookup(a)) a.protocol = p.protocol; } rerender(); }}, ...providerOptions(a.base_url))], [srcNode(ptr('base_url')), h('span', {class: 'src'}, 'Custom addresses are added by editing the file; the browser can only choose catalog providers.'), ...problemNodes(ptr('base_url'))]),
-    field('Key variable', [h('select', {disabled: locked('api_key_env'), onchange: ev => { a.api_key_env = ev.target.value; rerender(); }}, ...keyOptions(a.api_key_env))], [srcNode(ptr('api_key_env')), h('span', {class: 'src'}, 'Only the variable name is stored; keys never leave your shell.'), ...problemNodes(ptr('api_key_env'))]),
+    field('Provider address', [h('select', {disabled: locked('base_url'), onchange: ev => { a.base_url = ev.target.value; const p = providerOf(a.base_url); if (p) { a.api_key_env = p.key_env || ''; if (!lookup(a)) a.protocol = p.protocol; } rerender(); }}, ...providerOptions(a.base_url))], [srcNode(ptr('base_url')), h('span', {class: 'src'}, 'Register custom or local servers above; catalog and registered servers appear here.'), ...problemNodes(ptr('base_url'))]),
+    field('Key variable', [h('select', {disabled: locked('api_key_env'), onchange: ev => { a.api_key_env = ev.target.value; rerender(); }}, ...keyOptions(a.api_key_env))], [srcNode(ptr('api_key_env')), h('span', {class: 'src'}, 'Only the variable name is stored; leave empty for keyless local servers.'), ...problemNodes(ptr('api_key_env'))]),
   ));
   card.append(det);
   return card;
@@ -335,7 +567,10 @@ function providerOptions(current) {
 function keyOptions(current) {
   const names = Object.keys(E.c.keys).sort();
   if (current && !names.includes(current)) names.unshift(current);
-  return names.map(n => h('option', {value: n, selected: n === current}, `${n}${E.c.keys[n] ? ' · set' : ' · not set'}`));
+  return [
+    h('option', {value: '', selected: !current}, '(none — no key required)'),
+    ...names.map(n => h('option', {value: n, selected: n === current}, `${n}${E.c.keys[n] ? ' · set' : ' · not set'}`)),
+  ];
 }
 function field(lbl, controls, notes) {
   return h('div', {class: 'field'}, h('label', null, lbl), h('div', {class: 'ctl'}, ...controls.filter(Boolean)), h('div', {class: 'notes'}, ...notes.filter(Boolean)));
@@ -379,10 +614,12 @@ async function runTest(key, effort, route) {
 }
 async function runAll(key) {
   const a = E.cfg[key];
-  const {list} = effortsFor(a);
-  for (const e of list) {
+  const {list, checked} = effortsFor(a);
+  const showDefault = a.protocol === 'openai-chat' && !checked;
+  const efforts = showDefault ? ['default', ...list] : list;
+  for (const e of efforts) {
     E.tests[key] = {busy: true, result: E.tests[key] && E.tests[key].result}; rerender();
-    const ro = e === 'none' && a.protocol === 'openai-chat' ? '' : e;
+    const ro = e === 'default' ? '' : (e === 'none' && a.protocol === 'openai-chat' && !(checked && list.includes('none')) && !showDefault ? '' : e);
     try {
       const r = await api('/api/config/test', {method: 'POST', body: JSON.stringify({actor: a, route: 'primary', effort: ro})});
       E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage.output, reasoning: r.usage.reasoning, error: r.error, at: r.at};
@@ -405,11 +642,20 @@ function fallbackLine(card, a, key) {
   const fm = lookup(fb);
   const inert = trimSlash(fb.base_url) === trimSlash(a.base_url) && fb.model === a.model;
   const sameProv = !inert && trimSlash(fb.base_url) === trimSlash(a.base_url);
-  const {list} = effortsFor(fb);
-  const sel = h('select', {class: 'mini', disabled: lockedField(`/${key}/fallback/reasoning_effort`), onchange: ev => { fb.reasoning_effort = ev.target.value === 'none' && fb.protocol === 'openai-chat' ? '' : ev.target.value; rerender(); }}, ...list.map(e => h('option', {value: e, selected: (fb.reasoning_effort || (fb.protocol === 'openai-chat' ? '' : 'none')) === e || (e === 'none' && !fb.reasoning_effort)}, e)));
+  const {list, checked} = effortsFor(fb);
+  const showDefault = fb.protocol === 'openai-chat' && !checked;
+  const displayList = showDefault ? ['default', ...list] : list;
+  const cur = fb.reasoning_effort || (fb.protocol === 'openai-chat' ? (showDefault ? 'default' : '') : 'none');
+  const sel = h('select', {class: 'mini', disabled: lockedField(`/${key}/fallback/reasoning_effort`), onchange: ev => {
+    const v = ev.target.value;
+    if (v === 'default') fb.reasoning_effort = '';
+    else if (v === 'none' && fb.protocol === 'openai-chat' && !(checked && list.includes('none')) && !showDefault) fb.reasoning_effort = '';
+    else fb.reasoning_effort = v;
+    rerender();
+  }}, ...displayList.map(e => h('option', {value: e, selected: cur === e || (!showDefault && e === 'none' && cur === '')}, e)));
   const t = E.tests[key + ':fb'];
   return h('div', {class: 'fb has'}, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'Fallback'),
-      h('button', {class: 'pick mini', disabled: locked, onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'kdot' + (keyPresent(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
+      h('button', {class: 'pick mini', disabled: locked, onclick: () => openPicker(card, a, key, true)}, h('span', {class: 'kdot' + (keyReady(fb.api_key_env) ? ' on' : '')}), h('b', null, fm ? fm.label : fb.model), h('span', {class: 'sub'}, providerLabel(fb.base_url)), h('span', {class: 'caret'}, '▾')),
       h('span', {class: 'sub'}, 'effort'), sel,
       h('button', {class: 'ghost small', disabled: t && t.busy || !canAction('route.test'), onclick: () => runTest(key, null, 'fallback').then(() => {})}, X.remote ? 'review test' : 'test'),
       h('button', {class: 'ghost small', disabled: locked, onclick: () => { delete a.fallback; rerender(); }}, 'remove')),
@@ -424,7 +670,7 @@ function suggestFallback(a) {
   const m = lookup(a);
   if (!m) return null;
   const alts = E.cat.models.filter(x => x.family === m.family && x.provider !== m.provider);
-  const withKey = alts.filter(x => { const p = E.cat.providers.find(pp => pp.id === x.provider); return p && keyPresent(p.key_env); });
+  const withKey = alts.filter(x => { const p = E.cat.providers.find(pp => pp.id === x.provider); return p && keyReady(p.key_env); });
   const pick = withKey[0] || null;
   if (!pick) return null;
   const fb = {protocol: '', base_url: '', model: '', api_key_env: '', reasoning_effort: a.reasoning_effort, max_tokens: a.max_tokens};
@@ -445,27 +691,30 @@ function openPicker(card, a, key, forFallback) {
   function fill() {
     const q = input.value.trim().toLowerCase();
     const provOf = id => E.cat.providers.find(p => p.id === id);
-    let rows = E.cat.models.map(m => ({m, p: provOf(m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${(m.note || '')}${m.live ? ' live' : ''}`.toLowerCase().includes(q)));
-    // Keyed providers first, then by family, then by price.
-    rows.sort((x, y) => (keyPresent(y.p.key_env) - keyPresent(x.p.key_env)) || x.m.family.localeCompare(y.m.family) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
+    let rows = E.cat.models.map(m => ({m, p: provOf(m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${p.engine || ''} ${p.custom ? 'local custom' : ''} ${(m.note || '')}${m.live ? ' live' : ''}`.toLowerCase().includes(q)));
+    // Registered local/custom servers first, then keyed cloud providers, then by family & price.
+    rows.sort((x, y) => (!!y.p.custom - !!x.p.custom) || (keyReady(y.p.key_env) - keyReady(x.p.key_env)) || (x.p.custom ? x.p.label.localeCompare(y.p.label) || x.m.id.localeCompare(y.m.id) : x.m.family.localeCompare(y.m.family) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9))));
     list.replaceChildren();
     if (E.cat.live_fetched_at) {
       const errs = Object.entries(E.cat.live_errors || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
       list.append(h('div', {class: 'liveinfo', title: errs || undefined},
-        `live provider lists · fetched ${E.cat.live_fetched_at}${E.cat.live_refreshed ? ' (refreshed just now)' : ''}${E.cat.live_stale ? ' (refresh failed, showing cache)' : ''} · re-fetched when this page is opened if older than 24h`));
+        `live provider lists · fetched ${E.cat.live_fetched_at}${E.cat.live_refreshed ? ' (refreshed just now)' : ''}${E.cat.live_stale ? ' (refresh failed, showing cache)' : ''}`));
     }
-    let lastFam = null, lastKeyed = null;
-    for (const {m, p} of rows.slice(0, E.cat.live_fetched_at ? 400 : 80)) {
-      const keyed = keyPresent(p.key_env);
+    let lastGroup = null, lastKeyed = null;
+    for (const {m, p} of rows.slice(0, E.cat.live_fetched_at ? 400 : 120)) {
+      const keyed = keyReady(p.key_env);
       if (lastKeyed !== null && keyed !== lastKeyed) list.append(h('div', {class: 'pgroup dim'}, 'providers without a key in this shell'));
       lastKeyed = keyed;
-      if (m.family !== lastFam) { list.append(h('div', {class: 'pgroup'}, m.family)); lastFam = m.family; }
+      const grp = p.custom ? `${p.label} · local` : m.family;
+      if (grp !== lastGroup) { list.append(h('div', {class: 'pgroup'}, grp)); lastGroup = grp; }
       const sel = trimSlash(p.base_url) === trimSlash(target.base_url) && m.id === target.model;
+      const ctxStr = m.context ? ctx(m.context) : '';
+      const meta = [ctxStr, m.vision ? 'vision' : ''].filter(Boolean).join(' · ');
       list.append(h('button', {class: 'prow' + (sel ? ' on' : '') + (keyed ? '' : ' nokey'), onclick: () => choose(m)},
-        h('span', {class: 'kdot' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub pnote'}, m.note) : null),
-        h('span', {class: 'pr'}, m.price ? `$${trimNum(m.price.in)} / $${trimNum(m.price.out)}` : '—', h('span', {class: 'sub'}, ` · ${ctx(m.context)}${m.vision ? ' · vision' : ''}`))));
+        h('span', {class: 'kdot' + (keyed ? ' on' : '')}), h('span', {class: 'pl'}, h('span', {class: 'l1'}, h('b', null, m.label), p.custom ? h('span', {class: 'livetag local'}, ENGINE_LABELS[p.engine] || 'local') : (m.live ? h('span', {class: 'livetag'}, 'live') : null), h('span', {class: 'sub'}, ` · ${p.label}${m.protocol && m.protocol !== p.protocol ? ' · ' + m.protocol : ''}`)), m.note ? h('span', {class: 'sub pnote'}, m.note) : null),
+        h('span', {class: 'pr'}, m.price ? `$${trimNum(m.price.in)} / $${trimNum(m.price.out)}` : (p.custom ? 'local' : '—'), meta ? h('span', {class: 'sub'}, ` · ${meta}`) : null)));
     }
-    if (!rows.length) list.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches. Models the providers list live appear here automatically; others are added by editing the project file.'));
+    if (!rows.length) list.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches. Add a local server above to probe its models automatically.'));
   }
   input.addEventListener('input', fill);
   input.addEventListener('keydown', ev => { if (ev.key === 'Escape') { ev.stopPropagation(); close(); } if (ev.key === 'Enter') { const first = list.querySelector('.prow'); if (first) first.click(); } });

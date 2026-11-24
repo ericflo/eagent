@@ -151,7 +151,10 @@ func (s *Service) TestRoute(parent context.Context, b RouteTestRequest) (RouteTe
 		return res, parent.Err()
 	}
 	clean := func(text string, max int) string {
-		text = strings.ReplaceAll(strings.ReplaceAll(text, ep.APIKey, "[redacted]"), "\n", " ")
+		if ep.APIKey != "" {
+			text = strings.ReplaceAll(text, ep.APIKey, "[redacted]")
+		}
+		text = strings.ReplaceAll(text, "\n", " ")
 		if len(text) > max {
 			text = text[:max] + "…"
 		}

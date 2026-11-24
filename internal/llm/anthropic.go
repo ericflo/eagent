@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -76,10 +78,13 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			body["output_config"] = map[string]any{"effort": e}
 		}
 	}
-	resp, err := c.post(ctx, "/messages", body, map[string]string{
-		"x-api-key":         c.Endpoint.APIKey,
+	headers := map[string]string{
 		"anthropic-version": "2023-06-01",
-	})
+	}
+	if c.Endpoint.APIKey != "" {
+		headers["x-api-key"] = c.Endpoint.APIKey
+	}
+	resp, err := c.post(ctx, "/messages", body, headers)
 	if err != nil {
 		var ae *APIError
 		if mayProbe && thinking && errors.As(err, &ae) && ae.Status == 400 && anthropicFlavourRejected(ae.Body, budgeted) {
@@ -94,6 +99,9 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			return out, nil
 		}
 		return nil, err
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		return c.anthropicNonStreaming(resp)
 	}
 
 	type block struct {
@@ -161,7 +169,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			if frame.ContentBlock == nil {
 				return nil
 			}
-			b := &block{Type: frame.ContentBlock.Type, ID: frame.ContentBlock.ID, Name: frame.ContentBlock.Name}
+			b := &block{Type: frame.ContentBlock.Type, ID: frame.ContentBlock.ID, Name: frame.ContentBlock.Name, Input: frame.ContentBlock.Input}
 			for len(blocks) <= frame.Index {
 				blocks = append(blocks, nil)
 			}
@@ -238,6 +246,9 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			}
 		case "tool_use":
 			raw := strings.TrimSpace(b.partial.String())
+			if raw == "" && len(b.Input) > 0 {
+				raw = strings.TrimSpace(string(b.Input))
+			}
 			if raw == "" {
 				raw = "{}"
 			}
@@ -353,6 +364,99 @@ func anthropicMessages(req Request, host string) []map[string]any {
 		}
 	}
 	return msgs
+}
+
+// anthropicNonStreaming parses a plain Anthropic Messages JSON body for
+// compatible servers that ignore stream=true.
+func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
+	var body struct {
+		Type       string `json:"type"`
+		Model      string `json:"model"`
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			Data      string          `json:"data"`
+		} `json:"content"`
+		Usage *struct {
+			Input      int `json:"input_tokens"`
+			Output     int `json:"output_tokens"`
+			CacheRead  int `json:"cache_read_input_tokens"`
+			CacheWrite int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+		Error *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
+	}
+	if body.Error != nil {
+		return nil, &APIError{Status: 502, Body: body.Error.Type + ": " + body.Error.Message}
+	}
+	out := &Response{Model: body.Model}
+	var text, reasoning strings.Builder
+	native := make([]map[string]any, 0, len(body.Content))
+	for _, b := range body.Content {
+		switch b.Type {
+		case "text":
+			text.WriteString(b.Text)
+			if strings.TrimSpace(b.Text) != "" {
+				native = append(native, map[string]any{"type": "text", "text": b.Text})
+			}
+		case "tool_use":
+			inRaw := strings.TrimSpace(string(b.Input))
+			if inRaw == "" {
+				inRaw = "{}"
+			}
+			args := normalizeArgs(inRaw)
+			out.ToolCalls = append(out.ToolCalls, event.ToolCall{ID: b.ID, Name: b.Name, Args: args})
+			var input any = json.RawMessage(`{}`)
+			if json.Valid([]byte(inRaw)) && strings.HasPrefix(inRaw, "{") {
+				input = json.RawMessage(inRaw)
+			}
+			native = append(native, map[string]any{"type": "tool_use", "id": b.ID, "name": b.Name, "input": input})
+		case "thinking":
+			reasoning.WriteString(b.Thinking)
+			native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+		case "redacted_thinking":
+			native = append(native, map[string]any{"type": "redacted_thinking", "data": b.Data})
+		}
+	}
+	out.Text = text.String()
+	out.Reasoning = reasoning.String()
+	if nat, err := json.Marshal(native); err == nil {
+		out.Native = nat
+	}
+	if body.Usage != nil {
+		out.Usage.Input = body.Usage.Input + body.Usage.CacheRead + body.Usage.CacheWrite
+		out.Usage.Cached = body.Usage.CacheRead
+		out.Usage.Output = body.Usage.Output
+	}
+	switch body.StopReason {
+	case "max_tokens":
+		out.Stop = "length"
+	case "tool_use":
+		out.Stop = "tool_calls"
+	default:
+		if len(out.ToolCalls) > 0 {
+			out.Stop = "tool_calls"
+		} else {
+			out.Stop = "stop"
+		}
+	}
+	return out, nil
 }
 
 // anthropicFlavourRejected reports a 400 that is about the thinking

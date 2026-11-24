@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -44,9 +46,11 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 	if req.CacheKey != "" {
 		body["prompt_cache_key"] = req.CacheKey
 	}
-	resp, err := c.post(ctx, "/responses", body, map[string]string{
-		"Authorization": "Bearer " + c.Endpoint.APIKey,
-	})
+	var headers map[string]string
+	if c.Endpoint.APIKey != "" {
+		headers = map[string]string{"Authorization": "Bearer " + c.Endpoint.APIKey}
+	}
+	resp, err := c.post(ctx, "/responses", body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -56,70 +60,94 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 	var final json.RawMessage
 	var failure *APIError
 	incomplete := ""
-	err = c.readSSE(ctx, resp, func(ev sseEvent) error {
-		var frame struct {
-			Type     string          `json:"type"`
-			Delta    string          `json:"delta"`
-			Item     json.RawMessage `json:"item"`
-			Response json.RawMessage `json:"response"`
-			Error    *struct {
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		defer resp.Body.Close()
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		if err != nil {
+			return nil, err
+		}
+		var probe struct {
+			Status string `json:"status"`
+			Error  *struct {
 				Message string `json:"message"`
-				Code    any    `json:"code"`
 			} `json:"error"`
-			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(ev.Data, &frame); err != nil {
-			return nil
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 		}
-		switch frame.Type {
-		case "response.output_text.delta":
-			obs.text(frame.Delta)
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			obs.reasoning(frame.Delta)
-		case "response.output_item.added":
-			var it struct {
-				Type string `json:"type"`
-				Name string `json:"name"`
-			}
-			if json.Unmarshal(frame.Item, &it) == nil && it.Type == "function_call" {
-				obs.toolCall(it.Name)
-			}
-		case "response.output_item.done":
-			items = append(items, frame.Item)
-		case "response.completed":
-			final = frame.Response
-		case "response.incomplete":
-			final = frame.Response
+		if probe.Error != nil && probe.Error.Message != "" {
+			return nil, &APIError{Status: 502, Body: probe.Error.Message}
+		}
+		if probe.Status == "incomplete" {
 			incomplete = "incomplete"
-		case "response.failed":
-			final = frame.Response
-			msg := "response failed"
-			var r struct {
-				Error *struct {
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if json.Unmarshal(frame.Response, &r) == nil && r.Error != nil {
-				msg = r.Error.Message
-			}
-			failure = &APIError{Status: 502, Body: msg}
-		case "error":
-			msg := frame.Message
-			if frame.Error != nil {
-				msg = frame.Error.Message
-			}
-			failure = &APIError{Status: 502, Body: msg}
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if failure != nil {
-		return nil, failure
-	}
-	if len(final) == 0 {
-		return nil, ErrTruncatedStream
+		final = raw
+	} else {
+		err = c.readSSE(ctx, resp, func(ev sseEvent) error {
+			var frame struct {
+				Type     string          `json:"type"`
+				Delta    string          `json:"delta"`
+				Item     json.RawMessage `json:"item"`
+				Response json.RawMessage `json:"response"`
+				Error    *struct {
+					Message string `json:"message"`
+					Code    any    `json:"code"`
+				} `json:"error"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(ev.Data, &frame); err != nil {
+				return nil
+			}
+			switch frame.Type {
+			case "response.output_text.delta":
+				obs.text(frame.Delta)
+			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+				obs.reasoning(frame.Delta)
+			case "response.output_item.added":
+				var it struct {
+					Type string `json:"type"`
+					Name string `json:"name"`
+				}
+				if json.Unmarshal(frame.Item, &it) == nil && it.Type == "function_call" {
+					obs.toolCall(it.Name)
+				}
+			case "response.output_item.done":
+				items = append(items, frame.Item)
+			case "response.completed", "response.done":
+				final = frame.Response
+			case "response.incomplete":
+				final = frame.Response
+				incomplete = "incomplete"
+			case "response.failed":
+				final = frame.Response
+				msg := "response failed"
+				var r struct {
+					Error *struct {
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if json.Unmarshal(frame.Response, &r) == nil && r.Error != nil {
+					msg = r.Error.Message
+				}
+				failure = &APIError{Status: 502, Body: msg}
+			case "error":
+				msg := frame.Message
+				if frame.Error != nil {
+					msg = frame.Error.Message
+				}
+				failure = &APIError{Status: 502, Body: msg}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if failure != nil {
+			return nil, failure
+		}
+		if len(final) == 0 {
+			return nil, ErrTruncatedStream
+		}
 	}
 
 	// Prefer the authoritative output list from the final response.
@@ -190,11 +218,26 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 		case "function_call":
 			out.ToolCalls = append(out.ToolCalls, event.ToolCall{ID: it.CallID, Name: it.Name, Args: normalizeArgs(it.Args)})
 		case "reasoning":
+			wrote := false
 			for _, s := range it.Summary {
+				if s.Text == "" {
+					continue
+				}
 				if reasoning.Len() > 0 {
 					reasoning.WriteString("\n")
 				}
 				reasoning.WriteString(s.Text)
+				wrote = true
+			}
+			if !wrote {
+				for _, ct := range it.Content {
+					if (ct.Type == "reasoning_text" || ct.Type == "text") && ct.Text != "" {
+						if reasoning.Len() > 0 {
+							reasoning.WriteString("\n")
+						}
+						reasoning.WriteString(ct.Text)
+					}
+				}
 			}
 		}
 		cleaned = append(cleaned, sanitizeNativeArgs(stripStatus(raw)))

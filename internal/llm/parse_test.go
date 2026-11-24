@@ -197,3 +197,21 @@ func TestToolCallScanIsLinear(t *testing.T) {
 		t.Fatalf("calls = %d", len(calls))
 	}
 }
+
+func TestXMLInvokeToolCallFallback(t *testing.T) {
+	text := `Checking now. <tool_call> <function_calls> <invoke name="ping"> <parameter name="message" string="true">42</parameter> <parameter name="count">3</parameter> </invoke> </function_calls> </tool_call>`
+	calls, rest := ParseTextToolCalls(text)
+	if len(calls) != 1 || calls[0].Name != "ping" {
+		t.Fatalf("calls = %+v", calls)
+	}
+	args, err := ArgsObject(calls[0].Args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["message"] != "42" || args["count"] != float64(3) {
+		t.Fatalf("args = %#v", args)
+	}
+	if rest != "Checking now." {
+		t.Fatalf("rest = %q", rest)
+	}
+}

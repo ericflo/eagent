@@ -71,6 +71,12 @@ Usage:
   eagent config list                 built-in presets and the project's named bundles
   eagent config save NAME [desc]     save the effective configuration as a named bundle
   eagent config show NAME            print a bundle's effective configuration
+  eagent servers                     list registered local/custom model servers
+  eagent servers add URL [flags]     probe and register a local/custom model server
+  eagent servers probe URL [flags]   probe a server's /models and API kinds without saving
+  eagent servers refresh [ID]        re-probe one or all registered servers
+  eagent servers remove ID           unregister a server
+  eagent servers use ID [MODEL]      point the project's actors at a registered server
   eagent prompts [export|show NAME]  list, export, or print the actor prompts
   eagent view <id> [--actor narrator|orchestrator|task --task tN] [--until SEQ]
                                      print the exact prompt an actor would receive (for prompt work)
@@ -118,32 +124,39 @@ func run(args []string) int {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	var (
-		batch    = fs.Bool("p", false, "non-interactive")
-		cont     = fs.Bool("c", false, "continue latest session")
-		verbose  = fs.Bool("v", false, "verbose")
-		jsonOut  = fs.Bool("json", false, "json output")
-		dir      = fs.String("C", "", "project directory")
-		preset   = fs.String("preset", "", "model preset")
-		bundle   = fs.String("config", "", "named config bundle")
-		addr     = fs.String("addr", "127.0.0.1:7331", "serve: listen address")
-		serveAt  = fs.String("serve", "", "serve the web UI while running")
-		answer   = fs.String("answer", "", "answer to the pending question")
-		startDir = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
-		relayTo  = fs.String("relay", "", "start the new session as a relay to this profile")
-		relayMdl = fs.String("relay-model", "", "the relayed agent's model (default: the profile's, else the agent's own)")
-		relayEff = fs.String("relay-effort", "", "the relayed agent's reasoning effort (default: the profile's, else the agent's own)")
-		showRaw  = fs.Bool("raw", false, "show raw events")
-		actor    = fs.String("actor", "", "filter by actor")
-		task     = fs.String("task", "", "filter by task id")
-		until    = fs.Int64("until", 0, "view: only events up to this seq")
-		asJSON   = fs.Bool("as-json", false, "view: machine-readable output")
-		live     = fs.Bool("live", false, "doctor: make a small live call per actor")
-		write    = fs.Bool("write", false, "config: write config.json")
-		output   = fs.String("output", "", "artifact export/restore: new destination directory")
-		recreate = fs.Bool("recreate", false, "artifact publish: explicitly recreate a deleted archive")
-		allFlag  = fs.Bool("all", false, "summarize: every session in the project")
-		dryRun   = fs.Bool("dry-run", false, "summarize: print the new title and summary without sending them")
-		helpFlag = fs.Bool("h", false, "help")
+		batch     = fs.Bool("p", false, "non-interactive")
+		cont      = fs.Bool("c", false, "continue latest session")
+		verbose   = fs.Bool("v", false, "verbose")
+		jsonOut   = fs.Bool("json", false, "json output")
+		dir       = fs.String("C", "", "project directory")
+		preset    = fs.String("preset", "", "model preset")
+		bundle    = fs.String("config", "", "named config bundle")
+		addr      = fs.String("addr", "127.0.0.1:7331", "serve: listen address")
+		serveAt   = fs.String("serve", "", "serve the web UI while running")
+		answer    = fs.String("answer", "", "answer to the pending question")
+		startDir  = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
+		relayTo   = fs.String("relay", "", "start the new session as a relay to this profile")
+		relayMdl  = fs.String("relay-model", "", "the relayed agent's model (default: the profile's, else the agent's own)")
+		relayEff  = fs.String("relay-effort", "", "the relayed agent's reasoning effort (default: the profile's, else the agent's own)")
+		showRaw   = fs.Bool("raw", false, "show raw events")
+		actor     = fs.String("actor", "", "filter by actor")
+		task      = fs.String("task", "", "filter by task id")
+		until     = fs.Int64("until", 0, "view: only events up to this seq")
+		asJSON    = fs.Bool("as-json", false, "view: machine-readable output")
+		live      = fs.Bool("live", false, "doctor: make a small live call per actor")
+		write     = fs.Bool("write", false, "config: write config.json")
+		output    = fs.String("output", "", "artifact export/restore: new destination directory")
+		recreate  = fs.Bool("recreate", false, "artifact publish: explicitly recreate a deleted archive")
+		allFlag   = fs.Bool("all", false, "summarize: every session in the project")
+		dryRun    = fs.Bool("dry-run", false, "summarize: print the new title and summary without sending them")
+		srvID     = fs.String("id", "", "servers: custom server id")
+		srvLabel  = fs.String("label", "", "servers: custom server display label")
+		srvProto  = fs.String("protocol", "", "servers: wire protocol (openai-chat, openai-responses, anthropic)")
+		srvKeyEnv = fs.String("key-env", "", "servers: optional API key environment variable name")
+		srvNote   = fs.String("note", "", "servers: optional note")
+		srvEffort = fs.String("effort", "", "servers use: reasoning effort")
+		noProbe   = fs.Bool("no-probe", false, "servers add: register without probing first")
+		helpFlag  = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
 	rest, err := parseInterleaved(fs, args)
@@ -175,7 +188,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -205,6 +218,11 @@ func run(args []string) int {
 		return cmdDoctor(project, *preset, *bundle, *live)
 	case "config":
 		return cmdConfig(project, *preset, *bundle, *write, rest)
+	case "servers":
+		return cmdServers(project, rest, serverCLIOpts{
+			id: *srvID, label: *srvLabel, protocol: *srvProto, keyEnv: *srvKeyEnv,
+			note: *srvNote, effort: *srvEffort, noProbe: *noProbe, asJSON: *jsonOut,
+		})
 	case "prompts":
 		return cmdPrompts(project, rest)
 	case "serve":
@@ -844,7 +862,7 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 					System:    "Reply with a single tool call.",
 					Messages:  []llm.Message{{Role: "user", Text: "Call ping with message=\"pong\"."}},
 					Tools:     []llm.Tool{{Name: "ping", Description: "Ping.", Parameters: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`)}},
-					MaxTokens: 200,
+					MaxTokens: 4096,
 				}, nil)
 				cancel()
 				switch {
@@ -871,6 +889,29 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	check("orchestrator", cfg.Orchestrator)
 	check("task", cfg.Task)
 	check("narrator", cfg.Narrator)
+	if servers, err := config.LoadServers(project); err == nil && len(servers) > 0 {
+		fmt.Println("registered servers:")
+		for _, s := range servers {
+			protos := s.Protocol
+			if len(s.Protocols) > 0 {
+				protos = strings.Join(s.Protocols, ", ")
+			}
+			line := fmt.Sprintf("  ✓ %-12s %s (%s)", s.ID, s.BaseURL, protos)
+			if live {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				res, perr := config.ProbeServer(ctx, config.ProbeOptions{
+					URL: s.BaseURL, Protocol: s.Protocol, KeyEnv: s.KeyEnv, ID: s.ID, Label: s.Label,
+				})
+				cancel()
+				if perr != nil {
+					line = fmt.Sprintf("  ! %-12s %s: %v", s.ID, s.BaseURL, clip(perr.Error(), 160))
+				} else {
+					line += fmt.Sprintf(" · %d live model%s", len(res.Models), pluralS(len(res.Models)))
+				}
+			}
+			fmt.Println(line)
+		}
+	}
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		if _, err := lookPath("bash"); err != nil {
 			ok = false

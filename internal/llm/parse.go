@@ -9,7 +9,13 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-var argKeyValue = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+var (
+	argKeyValue  = regexp.MustCompile(`(?s)<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+	xmlInvokeTag = regexp.MustCompile(`(?s)<invoke\s+name="([^"]+)"[^>]*>(.*?)</invoke>`)
+	xmlParamTag  = regexp.MustCompile(`(?s)<parameter\s+([^>]*)>(.*?)</parameter>`)
+	xmlAttrName  = regexp.MustCompile(`name="([^"]+)"`)
+	xmlAttrStr   = regexp.MustCompile(`string="true"`)
+)
 
 // toolCallBlocks finds every <tool_call> block and returns, per block, the
 // indices {start, end, bodyStart, bodyEnd}. A block ends at its
@@ -115,9 +121,16 @@ func ParseTextToolCalls(text string) ([]event.ToolCall, string) {
 		rest.WriteString(text[last:m[0]])
 		last = m[1]
 		body := strings.TrimSpace(text[m[2]:m[3]])
-		if body == "" || (!strings.Contains(body, "<arg_key>") && !strings.HasPrefix(body, "{") && strings.ContainsAny(body, " \n")) {
+		if body == "" || (!strings.Contains(body, "<arg_key>") && !strings.Contains(body, "<invoke ") && !strings.HasPrefix(body, "{") && strings.ContainsAny(body, " \n")) {
 			// Prose that merely mentions the tag, not a call.
 			rest.WriteString(text[m[0]:m[1]])
+			continue
+		}
+		if xmlCalls := parseXMLInvokeToolCalls(body); len(xmlCalls) > 0 {
+			for _, tc := range xmlCalls {
+				tc.ID = fmt.Sprintf("%s%d", prefix, len(calls)+1)
+				calls = append(calls, tc)
+			}
 			continue
 		}
 		if tc, ok := parseJSONToolCall(body); ok {
@@ -146,6 +159,40 @@ func ParseTextToolCalls(text string) ([]event.ToolCall, string) {
 	}
 	rest.WriteString(text[last:])
 	return calls, strings.TrimSpace(rest.String())
+}
+
+func parseXMLInvokeToolCalls(body string) []event.ToolCall {
+	if !strings.Contains(body, "<invoke ") {
+		return nil
+	}
+	matches := xmlInvokeTag.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	var out []event.ToolCall
+	for _, m := range matches {
+		name := strings.TrimSpace(m[1])
+		if name == "" {
+			continue
+		}
+		args := map[string]any{}
+		for _, pm := range xmlParamTag.FindAllStringSubmatch(m[2], -1) {
+			nm := xmlAttrName.FindStringSubmatch(pm[1])
+			if len(nm) < 2 {
+				continue
+			}
+			k := strings.TrimSpace(nm[1])
+			v := strings.TrimSpace(pm[2])
+			if xmlAttrStr.MatchString(pm[1]) {
+				args[k] = v
+			} else {
+				args[k] = coerceValue(v)
+			}
+		}
+		raw, _ := json.Marshal(args)
+		out = append(out, event.ToolCall{Name: name, Args: raw})
+	}
+	return out
 }
 
 func parseJSONToolCall(body string) (event.ToolCall, bool) {

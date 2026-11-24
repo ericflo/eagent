@@ -36,7 +36,10 @@ func PickRoute(project string, a Actor, providerID, modelID, effort string) (Act
 		}
 	}
 	if a.BaseURL != pr.BaseURL || a.Model != m.ID {
-		a.Protocol, a.BaseURL, a.Model, a.APIKeyEnv, a.Fallback = m.ProtocolFor(), pr.BaseURL, m.ID, pr.KeyEnv, nil
+		a.Protocol, a.BaseURL, a.Model, a.APIKeyEnv, a.Fallback = m.ProtocolForProvider(pr), pr.BaseURL, m.ID, pr.KeyEnv, nil
+		if m.Context > 0 {
+			a.ContextTokens = m.Context
+		}
 	}
 	switch {
 	case effort != "":
@@ -74,7 +77,7 @@ func NearestEffort(offered []string, want string) string {
 
 // providerFor finds the provider for a model named without one.
 func providerFor(project string, a Actor, modelID string) (string, error) {
-	if pr, ok := ProviderForURL(a.BaseURL); ok {
+	if pr, ok := ProviderForURLFor(project, a.BaseURL); ok {
 		if _, _, ok := ResolveLiveModel(project, pr.ID, modelID); ok {
 			return pr.ID, nil
 		}
@@ -95,12 +98,28 @@ func providerFor(project string, a Actor, modelID string) (string, error) {
 	}
 }
 
-// KnownModels are the models a pick can name: the built-in catalog plus the
-// providers' live lists as last cached. It never touches the network.
+// KnownModels are the models a pick can name: registered local/custom
+// servers' live models first, then the built-in catalog overlaid with the
+// cloud providers' live lists as last cached. It never touches the network.
 func KnownModels(project string) []Model {
 	var live []Model
 	if c := readLiveCache(project); c != nil {
 		live = c.Models
 	}
-	return MergeLive(Models, live)
+	customIDs := map[string]bool{}
+	for _, pr := range CustomProviders(project) {
+		customIDs[pr.ID] = true
+	}
+	if len(customIDs) == 0 {
+		return MergeLive(Models, live)
+	}
+	var custom, cloud []Model
+	for _, m := range live {
+		if customIDs[m.Provider] {
+			custom = append(custom, m)
+		} else {
+			cloud = append(cloud, m)
+		}
+	}
+	return append(custom, MergeLive(Models, cloud)...)
 }
