@@ -74,6 +74,7 @@ type commandJournal struct {
 	ServerEdits    []control.Edit      `json:"server_edits,omitempty"`
 	ConfigEdits    []control.Edit      `json:"config_edits,omitempty"`
 	ServersStarted bool                `json:"servers_started,omitempty"`
+	SavePreset     string              `json:"save_preset,omitempty"`
 }
 
 type sessionStartIntent struct {
@@ -522,6 +523,10 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 			return err
 		}
 		delete(published, claimed.Resource.Key) // publish the new snapshot after durable acknowledgement
+		if claimed.Resource.Key != grant.Key {
+			// A running session may save a reusable preset; refresh project defaults too.
+			delete(published, grant.Key)
+		}
 	}
 	return ctx.Err()
 }
@@ -739,20 +744,37 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			prepareErr = err
 			journal.Resource = &change
 		default:
-			if settings.HasServerEdits(q.Proposal) {
+			serverEdits, savePreset, hasSavePreset, configEdits := settings.SplitSpecialEdits(q.Proposal)
+			if hasSavePreset {
+				savePreset, prepareErr = settings.ValidateSavePresetName(savePreset)
+			}
+			switch {
+			case prepareErr != nil:
+			case len(serverEdits) > 0:
 				if _, err := s.ValidateServerEdits(q.Proposal, grant); err != nil {
 					prepareErr = err
 				} else {
-					journal.ServerEdits, journal.ConfigEdits = settings.SplitServerEdits(q.Proposal)
+					journal.ServerEdits, journal.ConfigEdits = serverEdits, configEdits
+					if hasSavePreset {
+						journal.SavePreset = savePreset
+					}
 				}
-			} else {
+			case len(configEdits) == 0 && hasSavePreset:
+				change, err := s.PrepareSavePreset(editor, q.Proposal, grant)
+				prepareErr = err
+				journal.Resource = &change
+			default:
 				applied := q.Proposal
+				applied.Edits = configEdits
 				journal.Applied = &applied
 				desired, etag, _, err := s.Prepare(q.Proposal, grant)
 				prepareErr = err
 				journal.BeforeETag = etag
 				journal.Desired = desired
 				journal.DesiredETag = artifact.Digest([]byte(desired))
+				if hasSavePreset {
+					journal.SavePreset = savePreset
+				}
 				raw := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
 				if raw == "" {
 					raw = "{}\n"
@@ -838,13 +860,17 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			}
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
-		if len(journal.ConfigEdits) > 0 {
+		if len(journal.ConfigEdits) > 0 || journal.SavePreset != "" {
 			mid, err := s.RemoteSnapshot(grant)
 			if err != nil {
 				return finish("unknown", map[string]any{"message": "Servers were updated, but the project configuration could not be reloaded."})
 			}
 			cfgProp := q.Proposal
-			cfgProp.Edits = journal.ConfigEdits
+			edits := append([]control.Edit{}, journal.ConfigEdits...)
+			if journal.SavePreset != "" {
+				edits = append(edits, control.Edit{Op: "set", Key: "/save_preset", Value: journal.SavePreset})
+			}
+			cfgProp.Edits = edits
 			cfgProp.ExpectedVersion = mid.Snapshot.Version
 			if _, _, err := s.Apply(ctx, cfgProp, grant); err != nil {
 				return finish("rejected", map[string]any{"message": err.Error()})
@@ -895,6 +921,11 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 	default:
 		return finish("conflicted", map[string]any{"message": "The local file changed while this command was pending."})
 	}
+	if journal.SavePreset != "" {
+		if _, err := s.SaveEffectiveAsPreset(editor, journal.SavePreset); err != nil {
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
+	}
 	after, err := s.RemoteSnapshot(grant)
 	if err != nil {
 		return finish("unknown", map[string]any{"message": "File saved, but its effective defaults could not be resolved."})
@@ -906,6 +937,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 	}
 	for _, edit := range applied.Edits {
 		effects = append(effects, map[string]any{"key": edit.Key, "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"})
+	}
+	if journal.SavePreset != "" {
+		effects = append(effects, map[string]any{"key": "bundle:" + journal.SavePreset, "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"})
 	}
 	return finish("succeeded", map[string]any{"previous_version": q.Proposal.ExpectedVersion, "version": after.Snapshot.Version, "effects": effects, "snapshot_publication": "pending"})
 }

@@ -139,3 +139,67 @@ func TestPresetOrchestratorsThinkHardest(t *testing.T) {
 		}
 	}
 }
+
+func TestSavedPresetResolvesViaPresetFlagRejectsBuiltInAndClearsFallback(t *testing.T) {
+	dir := t.TempDir()
+	// Project file uses openai-high (which carries OpenRouter fallbacks on all 3 actors).
+	if err := os.MkdirAll(filepath.Dir(File(dir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(File(dir), []byte(`{"preset":"openai-high"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Built-in preset names and aliases cannot be overwritten by a saved preset.
+	localCfg := Defaults()
+	localCfg.Orchestrator = Actor{Protocol: "openai-chat", BaseURL: "http://127.0.0.1:1234/v1", Model: "local/model", ReasoningEffort: "high", MaxTokens: 8192, ContextTokens: 131072}
+	localCfg.Task = localCfg.Orchestrator
+	localCfg.Narrator = localCfg.Orchestrator
+	for _, reserved := range []string{"glm", "openai-high", "anthropic"} {
+		if _, err := SaveBundle(dir, reserved, "clash", localCfg); err == nil {
+			t.Fatalf("expected built-in preset name %q to be rejected", reserved)
+		}
+	}
+
+	if _, err := SaveBundle(dir, "my-local", "all local", localCfg); err != nil {
+		t.Fatal(err)
+	}
+	// Loading via --preset (Load) OR --config (LoadBundle) resolves the saved preset
+	// and explicitly clears openai-high's inherited OpenRouter fallbacks.
+	viaPreset, err := Load(dir, "my-local")
+	if err != nil {
+		t.Fatalf("Load(my-local): %v", err)
+	}
+	if viaPreset.Name != "my-local" || viaPreset.Orchestrator.Model != "local/model" || viaPreset.Orchestrator.Fallback != nil || viaPreset.Task.Fallback != nil || viaPreset.Narrator.Fallback != nil {
+		t.Fatalf("viaPreset leaked fallback or wrong model: %+v", viaPreset)
+	}
+	// EAGENT_PRESET resolves a saved preset too, overriding default_config.
+	if _, err := SaveBundle(dir, "other", "other", Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(File(dir), []byte(`{"preset":"openai-high","default_config":"other"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EAGENT_PRESET", "my-local")
+	viaEnv, err := Load(dir, "")
+	if err != nil || viaEnv.Name != "my-local" || viaEnv.Orchestrator.Model != "local/model" {
+		t.Fatalf("EAGENT_PRESET saved preset: %v %+v", err, viaEnv)
+	}
+	t.Setenv("EAGENT_PRESET", "")
+
+	res := Resolve(dir, "my-local", "")
+	if res.LoadError != "" || res.Active.Kind != "bundle" || res.Active.Name != "my-local" || res.Effective.Orchestrator.Fallback != nil {
+		t.Fatalf("Resolve(my-local): %+v", res)
+	}
+
+	// DeleteBundle guards the active default_config and deletes non-default presets.
+	if err := DeleteBundle(dir, "other"); err == nil {
+		t.Fatal("deleted active default_config")
+	}
+	if err := DeleteBundle(dir, "my-local"); err != nil {
+		t.Fatalf("DeleteBundle(my-local): %v", err)
+	}
+	if _, err := os.Stat(BundlePath(dir, "my-local")); !os.IsNotExist(err) {
+		t.Fatal("deleted preset file still exists")
+	}
+}

@@ -566,3 +566,43 @@ func TestStartSessionRejectsBadRoutePick(t *testing.T) {
 		t.Fatalf("bad route pick: status %d want 400: %s", w.Code, w.Body)
 	}
 }
+
+func TestSaveAndDeleteBundleEndpoints(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := config.Defaults()
+	cfg.TaskConcurrency = 6
+	w := do(s, "POST", "/api/config/bundles", map[string]any{"name": "my-preset", "description": "six workers", "config": cfg}, nil)
+	if w.Code != 200 {
+		t.Fatalf("POST bundle = %d %s", w.Code, w.Body)
+	}
+	// Built-in name collision rejected.
+	w = do(s, "POST", "/api/config/bundles", map[string]any{"name": "glm", "config": cfg}, nil)
+	if w.Code != 400 {
+		t.Fatalf("built-in collision = %d want 400: %s", w.Code, w.Body)
+	}
+	// Set as default_config; deletion must be refused while active.
+	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg, "default_config": "my-preset"}, nil)
+	if w.Code != 200 {
+		t.Fatalf("set default = %d %s", w.Code, w.Body)
+	}
+	w = do(s, "DELETE", "/api/config/bundles/my-preset", nil, nil)
+	if w.Code != 409 {
+		t.Fatalf("delete active default = %d want 409: %s", w.Code, w.Body)
+	}
+	// Clear default_config, then delete succeeds.
+	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg, "default_config": ""}, nil)
+	if w.Code != 200 {
+		t.Fatalf("clear default = %d %s", w.Code, w.Body)
+	}
+	w = do(s, "DELETE", "/api/config/bundles/my-preset", nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("delete bundle = %d %s", w.Code, w.Body)
+	}
+	if _, err := os.Stat(config.BundlePath(project, "my-preset")); !os.IsNotExist(err) {
+		t.Fatal("deleted bundle file still exists")
+	}
+	w = do(s, "DELETE", "/api/config/bundles/my-preset", nil, nil)
+	if w.Code != 404 {
+		t.Fatalf("delete missing bundle = %d want 404: %s", w.Code, w.Body)
+	}
+}

@@ -443,6 +443,12 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			}
 			continue
 		}
+		if f.Key == "/save_preset" {
+			if f.Section != "Models" || f.Group != "Configuration" || !f.Writable {
+				t.Errorf("save_preset field = %+v", f)
+			}
+			continue
+		}
 		if route && (f.Section != "Models" || f.Group == "" || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
 			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
 		}

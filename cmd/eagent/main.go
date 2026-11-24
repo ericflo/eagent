@@ -68,9 +68,13 @@ Usage:
   eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, tasks, tool calls, config
   eagent doctor [--live]             check configuration and credentials
   eagent config                      print the effective configuration
-  eagent config list                 built-in presets and the project's named bundles
-  eagent config save NAME [desc]     save the effective configuration as a named bundle
-  eagent config show NAME            print a bundle's effective configuration
+  eagent config list                 built-in presets and the project's saved presets
+  eagent config save NAME [desc]     save the effective configuration as a named preset
+  eagent config show NAME            print a preset's effective configuration
+  eagent config use NAME|default     set (or clear) the project's default preset
+  eagent config delete NAME          delete a saved preset
+  eagent presets [list|save|show|use|delete]
+                                     manage built-in and saved presets (shorthand for config)
   eagent servers                     list registered local/custom model servers
   eagent servers add URL [flags]     probe and register a local/custom model server
   eagent servers probe URL [flags]   probe a server's /models and API kinds without saving
@@ -88,12 +92,12 @@ Flags (before positional arguments):
   -v            verbose: show every tool call and model response
   --json        emit narrator output as JSON lines on stdout
   -C <dir>      project directory (default: current directory)
-  --preset <n>  built-in model preset: glm (default), astra, deepseek, qwen,
-                mistral, muse, muse-open, beam, deepseek-1017, or a provider tier:
-                openai-high|med|low, openrouter-high|med|low, anthropic-high|med,
-                deepinfra-high|med|low, fireworks-high|med|low,
-                opencode-high|med|low, nous-high|med|low
-  --config <n>  named bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
+  --preset <n>  built-in or saved preset name (or EAGENT_PRESET); built-ins:
+                glm (default), astra, deepseek, qwen, mistral, muse, muse-open,
+                beam, deepseek-1017, or a provider tier: openai-high|med|low,
+                openrouter-high|med|low, anthropic-high|med, deepinfra-high|med|low,
+                fireworks-high|med|low, opencode-high|med|low, nous-high|med|low
+  --config <n>  saved preset / bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
   --cwd <dir>   start a new session's commands in this directory (default: the project)
   --relay <p>   start the new session as a relay to this profile (antigravity, codex, claude, or one in config)
@@ -188,7 +192,7 @@ func run(args []string) int {
 	cmd := ""
 	if len(rest) > 0 {
 		switch rest[0] {
-		case "sessions", "show", "replay", "resume", "doctor", "config", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
+		case "sessions", "show", "replay", "resume", "doctor", "config", "presets", "preset", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
 			rest = rest[1:]
 		}
@@ -217,6 +221,11 @@ func run(args []string) int {
 	case "doctor":
 		return cmdDoctor(project, *preset, *bundle, *live)
 	case "config":
+		return cmdConfig(project, *preset, *bundle, *write, rest)
+	case "presets", "preset":
+		if len(rest) == 0 {
+			rest = []string{"list"}
+		}
 		return cmdConfig(project, *preset, *bundle, *write, rest)
 	case "servers":
 		return cmdServers(project, rest, serverCLIOpts{
@@ -958,9 +967,9 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Printf("\nproject bundles in %s:\n", config.BundlesDir(project))
+		fmt.Printf("\nsaved presets in %s:\n", config.BundlesDir(project))
 		if len(names) == 0 {
-			fmt.Println("  (none yet; create one with: eagent config save NAME \"description\")")
+			fmt.Println("  (none yet; create one with: eagent presets save NAME \"description\")")
 		}
 		for _, name := range names {
 			b, err := config.LoadBundle(project, "", name)
@@ -974,22 +983,58 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			}
 			fmt.Printf("  %s%-10s %s\n", mark, name, describe(b))
 		}
-		fmt.Println("\nselect with --config NAME, EAGENT_CONFIG=NAME, or \"default_config\" in .agents/eagent/config.json")
+		fmt.Println("\nselect with --preset NAME, --config NAME, EAGENT_CONFIG=NAME, or `eagent presets use NAME`")
 		return 0
 	case "save":
 		if len(args) < 1 {
-			return fail(errors.New("usage: eagent config save NAME [description]"))
+			return fail(errors.New("usage: eagent presets save NAME [description]"))
 		}
 		cfg, err := config.LoadBundle(project, preset, bundle)
 		if err != nil {
 			return fail(err)
 		}
+		cfg.Preset = ""
 		path, err := config.SaveBundle(project, args[0], strings.Join(args[1:], " "), cfg)
 		if err != nil {
 			return fail(err)
 		}
 		fmt.Println("saved", path)
-		fmt.Printf("use it with: eagent --config %s ...   (or EAGENT_CONFIG=%s)\n", args[0], args[0])
+		fmt.Printf("use it with: eagent --preset %s ...   (or --config %s, or `eagent presets use %s`)\n", args[0], args[0], args[0])
+		return 0
+	case "delete", "rm":
+		if len(args) < 1 {
+			return fail(errors.New("usage: eagent presets delete NAME"))
+		}
+		if err := config.DeleteBundle(project, args[0]); err != nil {
+			return fail(err)
+		}
+		fmt.Printf("deleted preset %s\n", args[0])
+		return 0
+	case "use":
+		if len(args) < 1 {
+			return fail(errors.New("usage: eagent presets use NAME|default"))
+		}
+		target := strings.TrimSpace(args[0])
+		edits := map[string]json.RawMessage{}
+		switch {
+		case target == "default" || target == "none" || target == "-":
+			edits["default_config"] = nil
+		default:
+			if canon, ok := config.ResolvePreset(target); ok {
+				edits["preset"], _ = json.Marshal(canon)
+				edits["default_config"] = nil
+			} else {
+				if _, err := config.LoadBundle(project, "", target); err != nil {
+					return fail(err)
+				}
+				edits["default_config"], _ = json.Marshal(target)
+			}
+		}
+		res, err := config.SaveFile(project, edits, "", false)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Printf("updated %s\n", res.Path)
 		return 0
 	case "show":
 		if len(args) < 1 {
@@ -998,7 +1043,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		bundle = args[0]
 	case "":
 	default:
-		return fail(fmt.Errorf("unknown config command %q (list, save, show)", sub))
+		return fail(fmt.Errorf("unknown config command %q (list, save, show, use, delete)", sub))
 	}
 	cfg, err := config.LoadBundle(project, preset, bundle)
 	if err != nil {

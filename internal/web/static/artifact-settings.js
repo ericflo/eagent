@@ -31,7 +31,7 @@
     for (const part of parts.slice(0, -1)) at = at[part] ||= {};
     at[parts.at(-1)] = clone(value);
   }
-  function expand(flat) { const value = {}; for (const [key, item] of Object.entries(flat || {})) { if (key === '/servers' || key === '/add_server_url') continue; assign(value, key, item); } return value; }
+  function expand(flat) { const value = {}; for (const [key, item] of Object.entries(flat || {})) { if (key === '/servers' || key === '/add_server_url' || key === '/save_preset') continue; assign(value, key, item); } return value; }
   function flatten(value, prefix = '', out = {}) {
     if (value && typeof value === 'object' && !Array.isArray(value)) for (const [key, item] of Object.entries(value)) flatten(item, prefix + '/' + key, out);
     else out[prefix] = value;
@@ -189,7 +189,7 @@
         const cfg = clone(body.config), base = body.base_preset ? data.presets[body.base_preset] : data.defaults;
         if (!base) throw new Error('The base preset is unavailable in this archive.');
         const baseValues = flatten(base), loaded = resource.snapshot.effective, desired = clone(resource.snapshot.saved), form = flatten(cfg);
-        const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url']);
+        const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url', '/save_preset']);
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
           if (omitted.has(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
@@ -215,8 +215,8 @@
         if (!selected || !current || canonical(routeIdentity(selected)) !== canonical(routeIdentity(current))) throw new Error('Save this model route before testing it remotely. Each test uses the reviewed saved route.');
         return await stage({ operation: 'route.test', parameters: { actor, route, effort: body.effort ?? selected.reasoning_effort ?? '' } }, { routeKey: actor, route });
       }
-      if (method === 'POST' && url.pathname === '/api/config/bundles') return await stage({ operation: 'bundle.save', parameters: { name: body.name, description: body.description || '', config_json: JSON.stringify(body.config) } });
-      if (method === 'POST' && url.pathname === '/api/config/delete-bundle') return await stage({ operation: 'bundle.delete', parameters: { name: body.name } });
+      if (method === 'POST' && url.pathname === '/api/config/bundles') return await stage({ operation: 'bundle.save', parameters: { name: body.name, description: body.description || '', config_json: JSON.stringify(body.config) } }, { bundleSave: { name: body.name, description: body.description || '', config: clone(body.config) } });
+      if (method === 'POST' && url.pathname === '/api/config/delete-bundle') return await stage({ operation: 'bundle.delete', parameters: { name: body.name } }, { bundleDelete: body.name });
       if (method === 'POST' && url.pathname === '/api/config/default-bundle') {
         if (!canEdit('/default_config')) throw new Error('The default configuration is read only.');
         if (body.name && !configView().bundles.some(bundle => bundle.name === body.name)) throw new Error('Select a registered named configuration.');
@@ -265,6 +265,11 @@
         const current = await finale.settings.read();
         const changed = current.resource.snapshot.version !== command.proposal.expected_version;
         if (changed || (meta.reloadAlways && attempt >= 1)) {
+          if (meta.bundleSave) {
+            const digest = current.resource.snapshot.details?.context_digests?.['bundle:' + meta.bundleSave.name];
+            if (digest) data.bundles[meta.bundleSave.name] = { config: { ...meta.bundleSave.config, name: meta.bundleSave.name, description: meta.bundleSave.description }, sha256: digest };
+          }
+          if (meta.bundleDelete) delete data.bundles[meta.bundleDelete];
           if (meta.draftToken === draftToken()) {
             await clear();
             resource = current.resource; editable = !!current.editable; window.EagentConfig.reset(); await window.EagentConfig.render(); message('Saved. Showing the connector’s current defaults.');

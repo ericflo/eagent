@@ -2,10 +2,14 @@ package harness
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/llm"
@@ -62,6 +66,8 @@ func TestParseSummary(t *testing.T) {
 		{`{"title": "Fence repainting", "summary": "Two coats on."}`, "Fence repainting", "Two coats on.", true},
 		{"```json\n{\"title\":\"A\",\"summary\":\"B\"}\n```", "A", "B", true},
 		{`Here it is: {"title":"A","description":"B"} Hope that helps.`, "A", "B", true},
+		{`<think>Return {"title", "summary"} format.</think>{"title":"Local report","summary":"Checked repos. Done."}`, "Local report", "Checked repos. Done.", true},
+		{`Using {"format":"json"} as requested: {"title":"Clean","summary":"Parsed last object."}`, "Clean", "Parsed last object.", true},
 		{`{"title":"","summary":"only a summary"}`, "", "only a summary", true},
 		{`{"title":"","summary":""}`, "", "", false},
 		{`Fence repainting`, "", "", false},
@@ -513,6 +519,43 @@ func TestSummarizeStoredSession(t *testing.T) {
 	}
 	if after := len(mustRead(t, path)); after != before {
 		t.Fatalf("summarize wrote to the session log: %d events, was %d", after, before)
+	}
+}
+
+func TestSummaryClientLowersReasoningForLocalModelsSupportingNone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[{"id":"local-flex","supported_reasoning_levels":["none","minimal","low","medium","high"]},{"id":"local-strict","supported_reasoning_levels":["low","medium","high"]}]}`)
+		case "/v1/chat/completions":
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"messages required"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	project := t.TempDir()
+	reg, err := config.RegisterServer(context.Background(), project, config.ProbeOptions{URL: srv.URL, ID: "local-box"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flex := llm.NewClient(llm.Endpoint{Protocol: llm.ProtocolChat, BaseURL: reg.Server.BaseURL, Model: "local-flex", ReasoningEffort: "low"})
+	gotFlex := summaryClient(project, flex)
+	if gotFlex.Endpoint.ReasoningEffort != "none" {
+		t.Fatalf("local-flex summary effort = %q, want none", gotFlex.Endpoint.ReasoningEffort)
+	}
+	// Original narrator client is untouched.
+	if flex.Endpoint.ReasoningEffort != "low" {
+		t.Fatalf("original client mutated to %q", flex.Endpoint.ReasoningEffort)
+	}
+	// A local model that only supports low/medium/high keeps low.
+	strict := llm.NewClient(llm.Endpoint{Protocol: llm.ProtocolChat, BaseURL: reg.Server.BaseURL, Model: "local-strict", ReasoningEffort: "low"})
+	gotStrict := summaryClient(project, strict)
+	if gotStrict.Endpoint.ReasoningEffort != "low" {
+		t.Fatalf("local-strict summary effort = %q, want low", gotStrict.Endpoint.ReasoningEffort)
 	}
 }
 

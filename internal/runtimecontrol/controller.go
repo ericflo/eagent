@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
@@ -207,6 +208,14 @@ func (c *Controller) process(q Request) error {
 	if c.Apply == nil {
 		return finish("rejected", map[string]any{"message": "This runtime cannot acknowledge settings changes."})
 	}
+	presetName := SavePresetName(q.Proposal)
+	var presetCfg config.Config
+	if presetName != "" {
+		presetCfg, err = ConfigFromValues(c.Project, values)
+		if err != nil {
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
+	}
 	after, _ := View(c.Project, c.Session, c.Generation, values, true)
 	effects := []map[string]any{}
 	for _, edit := range q.Proposal.Edits {
@@ -216,12 +225,22 @@ func (c *Controller) process(q Request) error {
 			}
 		}
 	}
-	result := map[string]any{"previous_version": view.Snapshot.Version, "version": after.Snapshot.Version, "generation": c.Generation, "effects": effects, "snapshot_publication": "pending", "message": "Applied to this runtime. Project defaults are unchanged."}
+	msg := "Applied to this runtime. Project defaults are unchanged."
+	if presetName != "" {
+		effects = append(effects, map[string]any{"key": "bundle:" + presetName, "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"})
+		msg = fmt.Sprintf("Saved preset %q and applied to this session.", presetName)
+	}
+	result := map[string]any{"previous_version": view.Snapshot.Version, "version": after.Snapshot.Version, "generation": c.Generation, "effects": effects, "snapshot_publication": "pending", "message": msg}
 	if err := writeCommitted(c.started, q.ID, q); err != nil {
 		return err
 	}
 	if !q.Expires.After(time.Now()) {
 		return finish("expired", map[string]any{"message": "The runtime request expired before application."})
+	}
+	if presetName != "" {
+		if _, err := config.SaveBundle(c.Project, presetName, "", presetCfg); err != nil {
+			return finish("unknown", map[string]any{"message": "Could not save the preset.", "detail": err.Error()})
+		}
 	}
 	if err := c.Apply(q, values, result); err != nil {
 		return finish("unknown", map[string]any{"message": "The runtime could not durably acknowledge this change.", "detail": err.Error()})

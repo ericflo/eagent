@@ -3,7 +3,9 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"text/template"
@@ -31,7 +33,7 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		if err := dec.Decode(&cfg); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
 		}
-		cfg.Name, cfg.Instructions = "", ""
+		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
 		cfg, err = config.LoadBundle(s.Project, "", b.From)
 		if err != nil {
@@ -62,6 +64,31 @@ func (s *Service) SaveBundle(ctx context.Context, b BundleRequest) (string, erro
 		return "", &Error{Status: 400, Message: err.Error()}
 	}
 	return path, nil
+}
+
+func (s *Service) DeleteBundle(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if !config.ValidBundleName(name) {
+		return &Error{Status: 400, Message: "bundle names use letters, digits, '-', '_' and '.' only"}
+	}
+	editor, err := config.LockEditor(ctx, s.Project)
+	if err != nil {
+		return err
+	}
+	defer editor.Close()
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	if res.Active.Kind == "bundle" && res.Active.Name == name || res.Effective.DefaultConfig == name {
+		return &Error{Status: 409, Message: "select a different default before deleting its preset"}
+	}
+	path, err := editor.RelatedPath("bundle", name)
+	if err != nil {
+		return &Error{Status: 400, Message: err.Error()}
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return &Error{Status: 404, Message: fmt.Sprintf("no saved preset named %q", name)}
+	}
+	_, err = editor.WriteRelated("bundle", name, nil, true)
+	return err
 }
 
 func PromptName(raw string) (string, error) {

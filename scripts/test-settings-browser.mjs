@@ -25,7 +25,7 @@ try {
   const viewer = await readFile(path.join(archive, 'index.html'));
   const parent = `<!doctype html><iframe title="Settings" sandbox="allow-scripts" style="width:100%;height:96vh" src="/settings"></iframe><script>
     window.fixture=${JSON.stringify({resource, manifest, files}).replaceAll('<', '\\u003c')};
-    window.calls=[]; window.proposals=[]; window.proposal=null; window.editable=true; window.inspection=null;
+    window.calls=[]; window.proposals=[]; window.proposal=null; window.editable=true; window.presentation=''; window.inspection=null;
     window.anchor=null; window.revealed=null;
     document.querySelector('iframe').onload=()=>{
       const channel=new MessageChannel(); window.bridge=channel.port1; const nonce='fixture-nonce';
@@ -37,8 +37,9 @@ try {
         else if(m.method==='artifact.view-state.write') { window.inspection=m.params; result={saved:true}; }
         else if(m.method==='artifact.anchor') result=window.anchor;
         else if(m.method==='thread.reveal') { window.revealed=m.params; result={available:true}; }
-        else if(m.method==='settings.read') result={resource:fixture.resource,editable};
+        else if(m.method==='settings.read') result={resource:fixture.resource,editable,presentation:window.presentation};
         else if(m.method==='settings.propose') { if(!editable) error='Read only'; else {proposal=m.params; if(proposal) proposals.push(proposal); result={staged:!!proposal};} }
+        else if(m.method==='settings.clear') { proposal=null; result={ok:true}; }
         else error='Unsupported method: '+m.method;
         bridge.postMessage({nonce,id:m.id,result,error});
       };
@@ -165,8 +166,32 @@ try {
   assert.equal(await frame.getByRole('button', { name: 'Review route test', exact: true }).first().isDisabled(), true);
   assert.deepEqual(errors, []);
   assert.deepEqual(outbound, []);
-  assert.ok((await page.evaluate(() => window.calls)).every(method => ['settings.read', 'settings.propose', 'artifact.manifest', 'artifact.read'].includes(method)));
-  console.log('PASS exported shared editor, typed proposals, raw/prompt/bundle controls, read-only grants, route results, late acknowledgements, no external requests');
+  assert.ok((await page.evaluate(() => window.calls)).every(method => ['settings.read', 'settings.propose', 'settings.clear', 'artifact.manifest', 'artifact.read'].includes(method)));
+
+  // In FinaleChat's embedded thread sheet (presentation: "thread"), saveBar is
+  // hidden but "+ Save as preset…" is directly available on the Models tab and
+  // completing bundle.save renders the newly saved preset chip cleanly.
+  await page.evaluate(() => { window.editable = true; window.presentation = 'thread'; window.proposal = null; document.querySelector('iframe').src = '/settings?thread=1'; });
+  await frame.getByRole('button', { name: '+ Save as preset…', exact: true }).waitFor();
+  await frame.getByRole('button', { name: '+ Save as preset…', exact: true }).click();
+  await frame.getByPlaceholder('name, e.g. eric-fast').fill('thread-preset');
+  await frame.getByRole('button', { name: 'Review bundle change', exact: true }).click();
+  await page.waitForFunction(() => window.proposal?.operation === 'bundle.save' && window.proposal?.parameters?.name === 'thread-preset');
+  assert.equal(await frame.locator('#modal').evaluate(el => el.classList.contains('hidden')), true, 'threadControls modal stayed open over FinaleChat footer');
+  proposal = await page.evaluate(() => window.proposal);
+  await page.evaluate(p => {
+    fixture.resource.snapshot.version = 'v4';
+    fixture.resource.snapshot.details.bundles = [...(fixture.resource.snapshot.details.bundles || []), 'thread-preset'];
+    fixture.resource.snapshot.details.context_digests['bundle:thread-preset'] = 'digest-thread-preset';
+    complete(p);
+  }, proposal);
+  await frame.getByRole('button', { name: 'Advanced', exact: true }).click();
+  const newChip = frame.getByRole('button', { name: 'thread-preset', exact: true });
+  await newChip.waitFor();
+  assert.equal(await newChip.evaluate(el => el.classList.contains('bad')), false, 'newly saved preset chip rendered as invalid');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(outbound, []);
+  console.log('PASS exported shared editor, typed proposals, raw/prompt/bundle controls, threadControls preset saving, read-only grants, route results, late acknowledgements, no external requests');
 
   await page.evaluate(() => { document.querySelector('iframe').src = '/viewer'; });
   await frame.locator('#until:not([disabled])').waitFor();

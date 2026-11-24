@@ -36,7 +36,7 @@ let E = null;
 
 // ---- state -------------------------------------------------------------------------------
 const clone = v => JSON.parse(JSON.stringify(v));
-function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; delete c.servers; delete c.add_server_url; if (!c.finalechat) c.finalechat = {}; return c; }
+function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; delete c.servers; delete c.add_server_url; delete c.save_preset; if (!c.finalechat) c.finalechat = {}; return c; }
 function flatten(v, prefix = '', out = {}) {
   if (v && typeof v === 'object' && !Array.isArray(v)) { for (const key of Object.keys(v)) flatten(v[key], prefix + '/' + key, out); }
   else out[prefix] = JSON.stringify(v);
@@ -185,7 +185,12 @@ function draw() {
   if (X.threadControls) {
     const tab = E.tab || 'Models';
     body.append(h('nav', {class:'settings-tabs', 'aria-label':'Settings categories'}, ...['Models','Behavior','Prompts','Advanced'].map(name => h('button', {'aria-pressed':String(tab===name), onclick:()=>{E.tab=name;draw();}}, name))));
-    body.append(h('div',{class:'settings-intro'},h('h2',null,tab==='Models'?'Choose how your agent thinks':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give your agent direction':'Fine-tune your setup'),h('p',null,tab==='Models'?'Pick a model and reasoning effort for each role.':tab==='Behavior'?'Adjust session limits, narration, and phone updates.':tab==='Prompts'?'Customize the instructions behind each role.':'Presets, saved configurations, and detailed overrides.')));
+    body.append(h('div',{class:'settings-intro'},
+      h('div',{class:'settings-intro-row'},
+        h('div',null,
+          h('h2',null,tab==='Models'?'Choose how your agent thinks':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give your agent direction':'Fine-tune your setup'),
+          h('p',null,tab==='Models'?'Pick a model and reasoning effort for each role.':tab==='Behavior'?'Adjust session limits, narration, and phone updates.':tab==='Prompts'?'Customize the instructions behind each role.':'Presets, saved configurations, and detailed overrides.')),
+        tab==='Models' && canAction('bundle.save') ? h('button',{class:'small',onclick:saveBundleDialog,title:'Save this setup as a reusable named preset'},'+ Save as preset…') : null)));
     if(tab==='Models') { const sc = serversCard(); if (sc) body.append(sc); body.append(h('div',{class:'routes'},...ACTORS.map(routeCard))); }
     if(tab==='Behavior') body.append(sessionCard(),narratorCard(),phoneCard());
     if(tab==='Prompts') body.append(promptsCard());
@@ -236,10 +241,34 @@ function repairBanner() {
 function quickStart() {
   const chips = E.c.presets.map(p => chip(p, 'preset'));
   const bchips = E.c.bundles.map(b => chip(b, 'bundle'));
-  return h('div', {class: 'card quick'}, h('h3', null, 'Start from', h('span', {class: 'grow'}), h('span', {class: 'sub'}, 'Loads a setup into the form; nothing is saved until you press Save.')),
+  return h('div', {class: 'card quick'}, h('h3', null, 'Start from', h('span', {class: 'grow'}), h('span', {class: 'sub'}, 'Loads a setup into the form; nothing is saved until you press Save.'),
+      canAction('bundle.save') ? h('button', {class: 'small', onclick: saveBundleDialog, title: 'Save the current form setup as a reusable named preset'}, '+ Save as preset…') : null),
     h('div', {class: 'chips'}, ...chips, h('button', {class: 'chip-btn', title: 'The built-in defaults, before any preset', onclick: () => loadInto('', null)}, 'defaults')),
-    bchips.length ? h('div', {class: 'chips bundles'}, h('span', {class: 'sub'}, 'bundles'), ...bchips) : null,
-    X.remote ? bundleActions() : null);
+    bchips.length ? h('div', {class: 'chips bundles'}, h('span', {class: 'sub'}, 'saved presets'), ...bchips) : null,
+    X.remote ? bundleActions() : (E.c.bundles.length ? localBundleActions() : null));
+}
+function localBundleActions() {
+  const current = E.c.resolution.file.default_config || '';
+  const selected = h('select', {'aria-label': 'Default saved preset'}, h('option', {value: '', selected: !current}, 'project defaults'), ...E.c.bundles.map(b => h('option', {value: b.name, selected: b.name === current}, b.name)));
+  const removal = h('select', {'aria-label': 'Saved preset to delete'}, ...E.c.bundles.map(b => h('option', {value: b.name}, b.name)));
+  return h('details', null, h('summary', null, 'Manage saved presets'),
+    h('p', {class: 'sub'}, 'Pick a saved preset as the project default for new sessions, or delete ones you no longer need.'),
+    h('div', {class: 'row'}, selected, h('button', {onclick: async () => {
+      try {
+        await api('/api/config', {method: 'PUT', body: JSON.stringify({config: E.loaded, base_preset: E.loadedBase, mode: E.mode, if_match: E.etag, default_config: selected.value})});
+        toast(selected.value ? `default preset set to ${selected.value}` : 'default preset cleared');
+        await load(); rerender();
+      } catch (e) { toast(e.message, 'bad'); }
+    }}, 'Set default')),
+    h('div', {class: 'row'}, removal, h('button', {onclick: async () => {
+      const target = removal.value;
+      if (!target || !confirm(`Delete saved preset "${target}"?`)) return;
+      try {
+        await api(`/api/config/bundles/${encodeURIComponent(target)}`, {method: 'DELETE'});
+        toast(`preset ${target} deleted`);
+        await load(); rerender();
+      } catch (e) { toast(e.message, 'bad'); }
+    }}, 'Delete preset')));
 }
 function bundleActions() {
   const current = E.c.resolution.file.default_config || '';
@@ -854,14 +883,34 @@ function conflictDialog(body) {
 }
 function saveBundleDialog() {
   const name = h('input', {class: 'search', placeholder: 'name, e.g. eric-fast'});
-  const desc = h('input', {class: 'search', placeholder: 'what it is for', style: 'flex:1;min-width:200px'});
+  const desc = h('input', {class: 'search', placeholder: 'what it is for (optional)', style: 'flex:1;min-width:200px'});
   const status = h('span', {class: 'sub'});
-  const go = h('button', {class: 'primary', onclick: async () => {
-    try { const cfg = clone(E.cfg); cfg.preset = E.base || undefined; const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify({name: name.value.trim(), description: desc.value.trim(), config: cfg})}); if (r.staged) { status.textContent = 'Ready for review in FinaleChat. The bundle has not changed yet.'; return; } closeModal(); toast(`bundle ${r.name} saved`); await load(); rerender(); }
-    catch (e) { status.textContent = e.message; }
-  }}, X.remote ? 'Review bundle change' : 'Save bundle');
-  showModal(h('div', null, h('h2', null, 'Save as bundle'), h('p', {class: 'sub'}, 'A bundle is a named copy of this setup in ', h('code', {class: 'inline'}, shortPath(E.c.files.bundles)), '. Commit it so teammates can start sessions with it; pick it per session with ', h('code', {class: 'inline'}, '--config NAME'), '.'),
-    h('div', {class: 'row'}, name, desc), h('div', {class: 'foot'}, status, h('span', {style: 'flex:1'}), h('button', {onclick: closeModal}, 'Cancel'), go)));
+  const submit = async () => {
+    const n = name.value.trim();
+    if (!n) { status.textContent = 'Enter a preset name first.'; name.focus(); return; }
+    try {
+      const cfg = clone(E.cfg);
+      const r = await api('/api/config/bundles', {method: 'POST', body: JSON.stringify({name: n, description: desc.value.trim(), config: cfg})});
+      if (r.staged) {
+        if (X.threadControls) {
+          closeModal();
+          toast(`Ready to save preset “${n}”. Tap Save named configuration below.`);
+          return;
+        }
+        status.textContent = 'Ready for review in FinaleChat. The bundle has not changed yet.';
+        return;
+      }
+      closeModal();
+      toast(`preset ${r.name} saved`);
+      await load(); rerender();
+    } catch (e) { status.textContent = e.message; }
+  };
+  const go = h('button', {class: 'primary', onclick: submit}, X.remote ? 'Review bundle change' : 'Save preset');
+  for (const input of [name, desc]) input.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); void submit(); } });
+  showModal(h('div', null, h('h2', null, 'Save as preset'),
+    h('p', {class: 'sub'}, 'Saves a named copy of this setup in ', h('code', {class: 'inline'}, shortPath(E.c.files.bundles)), '. Pick it from New Session, FinaleChat, or the CLI with ', h('code', {class: 'inline'}, '--preset NAME'), ' / ', h('code', {class: 'inline'}, '--config NAME'), '.'),
+    h('div', {class: 'row'}, name, desc),
+    h('div', {class: 'foot'}, status, h('span', {style: 'flex:1'}), h('button', {onclick: closeModal}, 'Cancel'), go)));
   name.focus();
 }
 

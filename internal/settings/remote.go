@@ -218,6 +218,23 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			out.Descriptor.Fields = slices.Insert(slices.Delete(out.Descriptor.Fields, p, p+1), d, preset)
 		}
 	}
+	savePresetField := control.Field{
+		Key:           "/save_preset",
+		Label:         "Save as new preset",
+		Description:   "Type a name (letters, digits, '-', '_', '.') and tap Save to save this configuration as a reusable preset in this project.",
+		Shape:         control.Shape{Type: "string", MaxLength: 64},
+		Writable:      true,
+		Unset:         true,
+		Class:         "permissions",
+		EffectiveWhen: "new_or_resumed_session",
+		Section:       "Models",
+		Group:         "Configuration",
+	}
+	if d := slices.IndexFunc(out.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/default_config" }); d >= 0 {
+		out.Descriptor.Fields = slices.Insert(out.Descriptor.Fields, d+1, savePresetField)
+	} else {
+		out.Descriptor.Fields = append(out.Descriptor.Fields, savePresetField)
+	}
 	out.Descriptor.Actions = s.Actions(s.Grant())
 	contextFiles := map[string]string{}
 	promptViews := map[string]any{}
@@ -283,6 +300,15 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			}
 		}
 	}
+	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < 8 {
+		out.Descriptor.Suggestions["bundles"] = bundleSugs
+		for i := range out.Descriptor.Fields {
+			if out.Descriptor.Fields[i].Key == "/default_config" {
+				out.Descriptor.Fields[i].Suggest = &control.Suggest{List: "bundles"}
+				break
+			}
+		}
+	}
 	if err := out.Descriptor.Validate(grant); err != nil {
 		return out, err
 	}
@@ -332,6 +358,22 @@ func setPointer(m map[string]any, p string, value any, unset bool) {
 	edit(m, parts)
 }
 
+// ValidateSavePresetName checks that a user-entered preset name is valid and
+// does not collide with a built-in preset name or alias.
+func ValidateSavePresetName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", fmt.Errorf("preset name is required")
+	}
+	if !config.ValidBundleName(name) {
+		return "", fmt.Errorf("bundle names use letters, digits, '-', '_' and '.' only")
+	}
+	if _, builtIn := config.ResolvePreset(name); builtIn {
+		return "", fmt.Errorf("%q is a built-in preset name; choose a different name", name)
+	}
+	return name, nil
+}
+
 // HasServerEdits reports whether a settings.apply proposal modifies registered
 // local/custom model servers (/add_server_url or /servers).
 func HasServerEdits(p control.Proposal) bool {
@@ -349,14 +391,101 @@ func HasServerEdits(p control.Proposal) bool {
 // SplitServerEdits separates server-registry edits (/add_server_url, /servers)
 // from config.json edits.
 func SplitServerEdits(p control.Proposal) (serverEdits, configEdits []control.Edit) {
+	serverEdits, _, _, configEdits = SplitSpecialEdits(p)
+	return serverEdits, configEdits
+}
+
+// SplitSpecialEdits separates virtual action fields (/add_server_url, /servers,
+// /save_preset) from ordinary config.json edits.
+func SplitSpecialEdits(p control.Proposal) (serverEdits []control.Edit, savePreset string, hasSavePreset bool, configEdits []control.Edit) {
 	for _, e := range p.Edits {
-		if e.Key == "/add_server_url" || e.Key == "/servers" {
+		switch e.Key {
+		case "/add_server_url", "/servers":
 			serverEdits = append(serverEdits, e)
-		} else {
+		case "/save_preset":
+			if e.Op == "set" {
+				s, _ := e.Value.(string)
+				savePreset = strings.TrimSpace(s)
+				hasSavePreset = true
+			}
+		default:
 			configEdits = append(configEdits, e)
 		}
 	}
-	return serverEdits, configEdits
+	return serverEdits, savePreset, hasSavePreset, configEdits
+}
+
+// PrepareSavePreset prepares a journalable bundle write for a settings.apply
+// proposal that snapshots the project's current effective configuration via
+// /save_preset (with no other edits).
+func (s *Service) PrepareSavePreset(editor *config.Editor, p control.Proposal, grant control.Grant) (ResourceChange, error) {
+	var change ResourceChange
+	if _, err := s.ValidateServerEdits(p, grant); err != nil {
+		return change, err
+	}
+	_, rawName, hasSavePreset, _ := SplitSpecialEdits(p)
+	if !hasSavePreset {
+		return change, fmt.Errorf("preset name is required")
+	}
+	name, err := ValidateSavePresetName(rawName)
+	if err != nil {
+		return change, err
+	}
+	cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle)
+	if err != nil {
+		return change, err
+	}
+	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
+	if err := cfg.Validate(); err != nil {
+		return change, err
+	}
+	if err := s.CheckRoutes(cfg); err != nil {
+		return change, err
+	}
+	after, err := config.BundleBytes(name, "", cfg)
+	if err != nil {
+		return change, err
+	}
+	path, err := editor.RelatedPath("bundle", name)
+	if err != nil {
+		return change, err
+	}
+	before, err := boundedfile.Read(path, 1<<20)
+	if err != nil && !os.IsNotExist(err) {
+		return change, err
+	}
+	if len(before) > 1<<20 {
+		return change, fmt.Errorf("resource exceeds 1 MiB")
+	}
+	return ResourceChange{
+		Kind:         "bundle",
+		Name:         name,
+		Before:       before,
+		BeforeExists: err == nil,
+		After:        after,
+		AfterExists:  true,
+	}, nil
+}
+
+// SaveEffectiveAsPreset writes the project's current effective configuration
+// as a standalone named preset while the caller holds editor's lock.
+func (s *Service) SaveEffectiveAsPreset(editor *config.Editor, name string) (string, error) {
+	name, err := ValidateSavePresetName(name)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle)
+	if err != nil {
+		return "", err
+	}
+	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
+	if err := cfg.Validate(); err != nil {
+		return "", err
+	}
+	if err := s.CheckRoutes(cfg); err != nil {
+		return "", err
+	}
+	return editor.SaveBundle(name, "", cfg)
 }
 
 // ValidateServerEdits checks a proposal containing /add_server_url or /servers
@@ -454,6 +583,15 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 		if e.Key == "/add_server_url" || e.Key == "/servers" {
 			continue
 		}
+		if e.Key == "/save_preset" {
+			if e.Op == "set" {
+				rawName, _ := e.Value.(string)
+				if _, err = ValidateSavePresetName(rawName); err != nil {
+					return
+				}
+			}
+			continue
+		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
 	}
 	var candidate []byte
@@ -486,25 +624,35 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 }
 
 func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.Grant) (config.SaveResult, RemoteView, error) {
-	if HasServerEdits(p) {
+	serverEdits, savePreset, hasSavePreset, configEdits := SplitSpecialEdits(p)
+	if hasSavePreset {
+		var err error
+		if savePreset, err = ValidateSavePresetName(savePreset); err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+	}
+	if len(serverEdits) > 0 {
 		if _, err := s.ValidateServerEdits(p, grant); err != nil {
 			return config.SaveResult{}, RemoteView{}, err
 		}
-		serverEdits, configEdits := SplitServerEdits(p)
 		if _, err := s.ApplyServerEdits(ctx, serverEdits); err != nil {
 			return config.SaveResult{}, RemoteView{}, err
 		}
-		if len(configEdits) == 0 {
+		if len(configEdits) == 0 && !hasSavePreset {
 			after, err := s.RemoteSnapshot(grant)
 			return config.SaveResult{Path: config.ServersPath(s.Project)}, after, err
 		}
-		// Refresh version after server sync so the remaining config edits
-		// validate against the updated server list (e.g. newly added host).
+		// Refresh version after server sync so remaining edits validate
+		// against the updated server list (e.g. newly added host).
 		mid, err := s.RemoteSnapshot(grant)
 		if err != nil {
 			return config.SaveResult{}, RemoteView{}, err
 		}
-		p.Edits = configEdits
+		remaining := append([]control.Edit{}, configEdits...)
+		if hasSavePreset {
+			remaining = append(remaining, control.Edit{Op: "set", Key: "/save_preset", Value: savePreset})
+		}
+		p.Edits = remaining
 		p.ExpectedVersion = mid.Snapshot.Version
 	}
 	editor, err := config.LockEditor(ctx, s.Project)
@@ -512,6 +660,17 @@ func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.G
 		return config.SaveResult{}, RemoteView{}, err
 	}
 	defer editor.Close()
+	if len(configEdits) == 0 && hasSavePreset {
+		change, err := s.PrepareSavePreset(editor, p, grant)
+		if err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+		if err := change.Apply(editor); err != nil {
+			return config.SaveResult{}, RemoteView{}, err
+		}
+		after, err := s.RemoteSnapshot(grant)
+		return config.SaveResult{Path: config.BundlePath(s.Project, change.Name)}, after, err
+	}
 	raw, etag, _, err := s.Prepare(p, grant)
 	if err != nil {
 		return config.SaveResult{}, RemoteView{}, err
@@ -519,6 +678,11 @@ func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.G
 	result, err := editor.SaveRaw(raw, etag, true)
 	if err != nil {
 		return result, RemoteView{}, err
+	}
+	if hasSavePreset {
+		if _, err := s.SaveEffectiveAsPreset(editor, savePreset); err != nil {
+			return result, RemoteView{}, err
+		}
 	}
 	after, err := s.RemoteSnapshot(grant)
 	return result, after, err

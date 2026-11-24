@@ -298,6 +298,7 @@ select { max-width: 100%; }
 .cfg-head .where .dot-sep { color: var(--dim); }
 .warn-text { color: var(--warn); }
 .cfgpage .card { margin-bottom: 14px; }
+.settings-intro-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .cfgpage .card h3 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plist2 { display: flex; flex-direction: column; gap: 2px; }
 .prompt-row { height: auto; min-height: 34px; padding: 6px 8px; border: 0; box-shadow: none; background: transparent; border-radius: 8px; justify-content: flex-start; gap: 10px; white-space: normal; text-align: left; flex-wrap: wrap; }

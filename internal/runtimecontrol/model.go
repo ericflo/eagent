@@ -222,11 +222,13 @@ func View(project, session, generation string, values Values, available bool) (s
 	for _, name := range settings.ConfigChoices(project) {
 		configs = append(configs, name)
 	}
-	configField := control.Field{Key: "/config", Label: "Configuration", Description: "Choosing one sets every actor's provider, model and effort to what it runs in this project. This session only.", Section: "Models", Shape: control.Shape{Type: "string", Enum: configs}, Writable: available, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+	configField := control.Field{Key: "/config", Label: "Configuration", Description: "Choosing one sets every actor's provider, model and effort to what it runs in this project. This session only.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", Enum: configs}, Writable: available, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+	savePresetField := control.Field{Key: "/save_preset", Label: "Save as new preset", Description: "Type a name (letters, digits, '-', '_', '.') and tap Save to save this session's lineup as a reusable preset in this project.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", MaxLength: 64}, Writable: available, Unset: true, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
 	if !available {
-		configField.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
+		configField.LockedReason = locked
+		savePresetField.LockedReason = locked
 	}
-	fields = append(fields, configField)
+	fields = append(fields, configField, savePresetField)
 	active["/config"] = values.Config
 	for _, actor := range []string{"orchestrator", "task", "narrator"} {
 		rt := values.Routes[actor]
@@ -309,6 +311,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		}
 	}
 	touched := map[string]bool{}
+	savePreset := ""
 	// A configuration chosen sets every route to what it runs here; route
 	// edits in the same proposal then apply on top of it.
 	for _, edit := range proposal.Edits {
@@ -335,6 +338,21 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	}
 	for _, edit := range proposal.Edits {
 		if edit.Key == "/config" {
+			continue
+		}
+		if edit.Key == "/save_preset" {
+			if edit.Op == "unset" {
+				continue
+			}
+			if edit.Op != "set" {
+				return before, fmt.Errorf("unsupported edit %q", edit.Op)
+			}
+			rawName, _ := edit.Value.(string)
+			name, err := settings.ValidateSavePresetName(rawName)
+			if err != nil {
+				return before, err
+			}
+			savePreset = name
 			continue
 		}
 		if rest, ok := strings.CutPrefix(edit.Key, "/relays/"); ok {
@@ -430,6 +448,67 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	}
 	before.Routes = routes
 	before.Relays = relays
+	if savePreset != "" {
+		before.Config = "bundle:" + savePreset
+	}
 	before.Revision++
 	return before, nil
+}
+
+// SavePresetName returns the trimmed preset name when a proposal sets
+// /save_preset, or "" otherwise.
+func SavePresetName(p control.Proposal) string {
+	for _, edit := range p.Edits {
+		if edit.Key == "/save_preset" && edit.Op == "set" {
+			s, _ := edit.Value.(string)
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
+
+// ConfigFromValues constructs a standalone Config representing a running
+// session's current model lineup and runtime settings so it can be saved as a
+// reusable project preset.
+func ConfigFromValues(project string, values Values) (config.Config, error) {
+	cfg, err := config.LoadBundle(project, "", "")
+	if err != nil {
+		cfg = config.Defaults()
+	}
+	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
+	if values.TaskConcurrency > 0 {
+		cfg.TaskConcurrency = values.TaskConcurrency
+	}
+	if values.NarratorTickSeconds > 0 {
+		cfg.NarratorTickSeconds = values.NarratorTickSeconds
+	}
+	if values.NarratorQuietSeconds >= 0 {
+		cfg.NarratorQuietSeconds = values.NarratorQuietSeconds
+	}
+	actors := map[string]*config.Actor{
+		"orchestrator": &cfg.Orchestrator,
+		"task":         &cfg.Task,
+		"narrator":     &cfg.Narrator,
+	}
+	for name, ptr := range actors {
+		rt, ok := values.Routes[name]
+		if !ok || rt.Provider == "" || rt.Model == "" {
+			continue
+		}
+		picked, err := config.PickRoute(project, *ptr, rt.Provider, rt.Model, rt.Effort)
+		if err != nil {
+			return cfg, fmt.Errorf("%s: %w", name, err)
+		}
+		if strings.TrimRight(picked.BaseURL, "/") != strings.TrimRight(ptr.BaseURL, "/") || picked.Model != ptr.Model {
+			picked.Fallback = nil
+		}
+		*ptr = picked
+	}
+	if err := cfg.Validate(); err != nil {
+		return cfg, err
+	}
+	if err := (&settings.Service{Project: project}).CheckRoutes(cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }

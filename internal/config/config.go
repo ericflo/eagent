@@ -611,23 +611,69 @@ func SaveBundle(project, name, description string, cfg Config) (string, error) {
 	return editor.SaveBundle(name, description, cfg)
 }
 
+// DeleteBundle removes a saved configuration from the project unless it is
+// currently the project's default_config.
+func DeleteBundle(project, name string) error {
+	if !validName(name) {
+		return fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+	}
+	editor, err := LockEditor(context.Background(), project)
+	if err != nil {
+		return err
+	}
+	defer editor.Close()
+	res := Resolve(project, "", "")
+	if res.Effective.DefaultConfig == name {
+		return fmt.Errorf("select a different default before deleting %q", name)
+	}
+	if _, err := os.Stat(BundlePath(project, name)); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("no saved preset %q in %s", name, BundlesDir(project))
+	}
+	_, err = editor.WriteRelated("bundle", name, nil, true)
+	return err
+}
+
 // BundleBytes prepares a named configuration without writing it. Remote
 // connectors can journal this exact intent before crossing the writer boundary.
 func BundleBytes(name, description string, cfg Config) ([]byte, error) {
 	if !validName(name) {
 		return nil, fmt.Errorf("bundle names use letters, digits, '-', '_' and '.' only")
 	}
+	if _, builtIn := ResolvePreset(name); builtIn {
+		return nil, fmt.Errorf("%q is a built-in preset name; choose a different name", name)
+	}
 	cfg.Name = name
 	if description != "" {
 		cfg.Description = description
 	}
 	cfg.DefaultConfig = ""
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return append(raw, '\n'), nil
+	// Spell out "fallback": null when an actor has no fallback so loading this
+	// saved preset on top of a project file whose preset carries fallbacks
+	// (such as openai-high) clears them instead of inheriting them.
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	for actorName, actor := range map[string]Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
+		if actor.Fallback == nil {
+			if m, ok := obj[actorName].(map[string]any); ok {
+				m["fallback"] = nil
+			}
+		}
+	}
+	pretty, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(pretty, '\n'), nil
 }
+
+// ValidBundleName reports whether name is a safe saved preset / bundle name.
+func ValidBundleName(name string) bool { return validName(name) }
 
 func validName(name string) bool {
 	if name == "" || len(name) > 64 {
@@ -669,6 +715,21 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
 	cfg := Defaults()
 	var err error
+	// Explicit --preset / EAGENT_PRESET may name either a built-in preset or a
+	// saved preset in .agents/eagent/configs/<name>.json.
+	explicitPreset := preset
+	if explicitPreset == "" {
+		explicitPreset = os.Getenv("EAGENT_PRESET")
+	}
+	if bundle == "" && explicitPreset != "" {
+		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
+			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
+				bundle = explicitPreset
+				preset = ""
+				explicitPreset = ""
+			}
+		}
+	}
 	if bundle == "" {
 		bundle = os.Getenv("EAGENT_CONFIG")
 	}
@@ -701,7 +762,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	}
 	// Preset precedence: flag > env > bundle > file.
 	if preset == "" {
-		preset = os.Getenv("EAGENT_PRESET")
+		preset = explicitPreset
 	}
 	if preset == "" {
 		if raw, ok := bundleCfg["preset"]; ok {

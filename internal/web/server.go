@@ -118,6 +118,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/servers/{id}/probe", s.guard(s.refreshServer))
 	s.mux.HandleFunc("DELETE /api/servers/{id}", s.guard(s.deleteServer))
 	s.mux.HandleFunc("POST /api/config/bundles", s.guard(s.saveBundle))
+	s.mux.HandleFunc("DELETE /api/config/bundles/{name}", s.guard(s.deleteBundle))
 	s.mux.HandleFunc("GET /api/prompts/{name}", s.getPrompt)
 	s.mux.HandleFunc("PUT /api/prompts/{name}", s.guard(s.putPrompt))
 	s.mux.HandleFunc("DELETE /api/prompts/{name}", s.guard(s.deletePrompt))
@@ -819,12 +820,26 @@ func (s *Server) saveBundle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("name is required"))
 		return
 	}
+	name := strings.TrimSpace(b.Name)
 	path, err := s.settingsService().SaveBundle(r.Context(), b)
 	if err != nil {
 		writeSettingsError(w, err)
 		return
 	}
-	writeJSON(w, map[string]any{"path": path, "name": b.Name})
+	writeJSON(w, map[string]any{"path": path, "name": name})
+}
+
+func (s *Server) deleteBundle(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeErr(w, 400, errors.New("name is required"))
+		return
+	}
+	if err := s.settingsService().DeleteBundle(r.Context(), name); err != nil {
+		writeSettingsError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"deleted": name})
 }
 
 // promptName resolves a URL segment to one of the known prompt files, so no

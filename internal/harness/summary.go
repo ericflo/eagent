@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/llm"
@@ -44,7 +46,7 @@ var (
 	summaryTalkGap    = 5 * time.Minute  // between summaries prompted by progress the user heard
 	summaryLongGap    = 15 * time.Minute // a refresh while one long turn goes on
 	summaryRetry      = 2 * time.Minute  // after a failed call, doubling up to summaryLongGap
-	summaryTimeout    = 2 * time.Minute  // one call
+	summaryTimeout    = 10 * time.Minute // one call (IdleTimeout still fails hung streams in 2m; local GPUs may queue)
 	summaryFinalWait  = 45 * time.Second // the call a batch session waits for before it ends
 	summaryAttachWait = 20 * time.Second // how long the first summary waits for the phone thread
 	summaryAttachPoll = 500 * time.Millisecond
@@ -224,7 +226,7 @@ func (r *Runtime) startSummary() {
 	project := filepath.Base(r.projectPath())
 	in := summaryInput(r.st, project, time.Now())
 	seen := r.st.LastSeq()
-	client := r.narrClient
+	client := summaryClient(r.opts.Project, r.narrClient)
 	system := r.prompts.Render("THREAD-SUMMARY.md", nil)
 	r.wg.Add(1)
 	go func() {
@@ -239,7 +241,7 @@ func (r *Runtime) startSummary() {
 			}
 			if err != nil {
 				k.fails++
-				if k.fails == 1 && ctx.Err() == nil {
+				if k.fails == 1 && r.ctx.Err() == nil {
 					r.ui.Log("thread summary: %s; the title and summary keep their last values until a call succeeds", shortErr(err))
 				}
 				r.armSummary(time.Now().Add(min(summaryRetry<<min(k.fails-1, 3), summaryLongGap)))
@@ -374,28 +376,81 @@ func summarize(ctx context.Context, client *llm.Client, system, input string) (s
 	return out, errors.New("the model did not return a title and summary")
 }
 
+// summaryClient returns base, or a shallow variant with reasoning disabled
+// ("none" or "minimal") when base targets a registered local/custom model that
+// explicitly advertises that effort level. On shared local GPUs, skipping
+// hundreds of reasoning tokens keeps thread titles fast and avoids starving
+// the orchestrator.
+func summaryClient(project string, base *llm.Client) *llm.Client {
+	if base == nil || project == "" {
+		return base
+	}
+	ep := base.Endpoint
+	pr, ok := config.ProviderForURLFor(project, ep.BaseURL)
+	if !ok || !pr.Custom {
+		return base
+	}
+	m, _, ok := config.ResolveLiveModel(project, pr.ID, ep.Model)
+	if !ok || len(m.Efforts) == 0 {
+		return base
+	}
+	want := ""
+	switch {
+	case slices.Contains(m.Efforts, "none"):
+		want = "none"
+	case slices.Contains(m.Efforts, "minimal"):
+		want = "minimal"
+	default:
+		return base
+	}
+	if ep.ReasoningEffort == want {
+		return base
+	}
+	ep.ReasoningEffort = want
+	c := llm.NewClient(ep)
+	c.HTTP = base.HTTP
+	c.IdleTimeout = base.IdleTimeout
+	c.CallTimeout = base.CallTimeout
+	c.MaxAttempts = base.MaxAttempts
+	c.UserAgent = base.UserAgent
+	return c
+}
+
 // parseSummary reads the JSON object out of a reply that may wrap it in a
-// code fence or a sentence.
+// code fence, thinking tags, or prose containing earlier braces.
 func parseSummary(text string) (title, summary string, ok bool) {
-	i, j := strings.IndexByte(text, '{'), strings.LastIndexByte(text, '}')
-	if i < 0 || j <= i {
-		return "", "", false
+	decodeAt := func(s string) (string, string, bool) {
+		var v struct {
+			Title       string `json:"title"`
+			Summary     string `json:"summary"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(strings.NewReader(s)).Decode(&v); err != nil {
+			return "", "", false
+		}
+		if v.Summary == "" {
+			v.Summary = v.Description
+		}
+		if strings.TrimSpace(v.Title) == "" && strings.TrimSpace(v.Summary) == "" {
+			return "", "", false
+		}
+		return v.Title, v.Summary, true
 	}
-	var v struct {
-		Title       string `json:"title"`
-		Summary     string `json:"summary"`
-		Description string `json:"description"`
+	// Strip <think>...</think> blocks emitted inline by some local servers.
+	if end := strings.LastIndex(strings.ToLower(text), "</think>"); end >= 0 {
+		if t, s, ok := parseSummary(text[end+len("</think>"):]); ok {
+			return t, s, true
+		}
 	}
-	if err := json.Unmarshal([]byte(text[i:j+1]), &v); err != nil {
-		return "", "", false
+	for i := len(text) - 1; i >= 0; i-- {
+		if text[i] != '{' {
+			continue
+		}
+		if t, s, ok := decodeAt(text[i:]); ok {
+			return t, s, true
+		}
 	}
-	if v.Summary == "" {
-		v.Summary = v.Description
-	}
-	if strings.TrimSpace(v.Title) == "" && strings.TrimSpace(v.Summary) == "" {
-		return "", "", false
-	}
-	return v.Title, v.Summary, true
+	return "", "", false
 }
 
 // summaryInput is what the summary call reads: the title and summary as they
@@ -621,7 +676,7 @@ func SummarizeSession(ctx context.Context, model *llm.Client, set *prompts.Set, 
 	// to set unless someone pinned it.
 	st.TitleRevisions = 0
 	res.Input = summaryInput(st, base, time.Now())
-	out, err := summarize(ctx, model, set.Render("THREAD-SUMMARY.md", nil), res.Input)
+	out, err := summarize(ctx, summaryClient(project, model), set.Render("THREAD-SUMMARY.md", nil), res.Input)
 	res.Usage = out.Usage
 	if err != nil {
 		return res, err

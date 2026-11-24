@@ -163,3 +163,68 @@ func TestConnectorAddsAndRefreshesLocalServer(t *testing.T) {
 		t.Fatalf("settings.refresh did not discover newly loaded local model: %+v", v2.Descriptor.Suggestions["models"])
 	}
 }
+
+func TestConnectorSavePresetStandaloneCombinedAndUndo(t *testing.T) {
+	s := &settings.Service{Project: t.TempDir()}
+	g := s.Grant()
+	v0, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Standalone /save_preset runs through journal.Resource and offers undo.
+	p1 := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   settings.SchemaVersion,
+		ExpectedVersion: v0.Snapshot.Version,
+		Edits:           []control.Edit{{Op: "set", Key: "/save_preset", Value: "snap-1"}},
+	}
+	raw1, _ := json.Marshal(p1)
+	q1 := command{ID: randomID(), UserID: "u1", Proposal: p1, Digest: artifact.Digest(raw1), Expires: time.Now().Add(time.Minute)}
+	res1, err := executeCommand(context.Background(), s, g, q1, false)
+	if err != nil || res1.Status != "succeeded" {
+		t.Fatalf("standalone save_preset: status=%s result=%v err=%v", res1.Status, res1.Result, err)
+	}
+	if _, err := os.Stat(config.BundlePath(s.Project, "snap-1")); err != nil {
+		t.Fatalf("snap-1 not written: %v", err)
+	}
+	if _, ok := res1.Result["undo"].(map[string]any); !ok {
+		t.Fatalf("expected undo offer on standalone /save_preset: %#v", res1.Result)
+	}
+
+	// 2. Combined config edit + /save_preset saves both without leaking save_preset
+	// into config.json or undo.
+	v1, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2 := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   settings.SchemaVersion,
+		ExpectedVersion: v1.Snapshot.Version,
+		Edits: []control.Edit{
+			{Op: "set", Key: "/task_concurrency", Value: float64(8)},
+			{Op: "set", Key: "/save_preset", Value: "snap-8"},
+		},
+	}
+	raw2, _ := json.Marshal(p2)
+	q2 := command{ID: randomID(), UserID: "u1", Proposal: p2, Digest: artifact.Digest(raw2), Expires: time.Now().Add(time.Minute)}
+	res2, err := executeCommand(context.Background(), s, g, q2, false)
+	if err != nil || res2.Status != "succeeded" {
+		t.Fatalf("combined save_preset: status=%s result=%v err=%v", res2.Status, res2.Result, err)
+	}
+	loaded, err := config.Load(s.Project, "snap-8")
+	if err != nil || loaded.TaskConcurrency != 8 {
+		t.Fatalf("snap-8 = %+v err=%v", loaded, err)
+	}
+	rawCfg, _ := os.ReadFile(config.File(s.Project))
+	if string(rawCfg) == "" || config.Resolve(s.Project, "", "").Effective.TaskConcurrency != 8 {
+		t.Fatalf("config.json = %s", rawCfg)
+	}
+	// Undo reverses the config.json edit cleanly (and does not choke on /save_preset).
+	undo := reviewedUndo(t, s, g, res2)
+	executeExpected(t, s, g, undo, "succeeded")
+	if got := config.Resolve(s.Project, "", "").Effective.TaskConcurrency; got != config.Defaults().TaskConcurrency {
+		t.Fatalf("after undo task_concurrency = %d", got)
+	}
+}

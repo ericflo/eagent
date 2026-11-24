@@ -49,13 +49,14 @@ type Resolution struct {
 
 // FileState describes .agents/eagent/config.json.
 type FileState struct {
-	Path        string   `json:"path"`
-	Exists      bool     `json:"exists"`
-	Raw         string   `json:"raw,omitempty"`
-	ETag        string   `json:"etag"`             // sha256 of the exact bytes; "" when absent
-	Preset      string   `json:"preset,omitempty"` // the preset the file itself names, if any
-	ParseError  string   `json:"parse_error,omitempty"`
-	UnknownKeys []string `json:"unknown_keys,omitempty"`
+	Path          string   `json:"path"`
+	Exists        bool     `json:"exists"`
+	Raw           string   `json:"raw,omitempty"`
+	ETag          string   `json:"etag"`                     // sha256 of the exact bytes; "" when absent
+	Preset        string   `json:"preset,omitempty"`         // the preset the file itself names, if any
+	DefaultConfig string   `json:"default_config,omitempty"` // the saved preset the file names as default, if any
+	ParseError    string   `json:"parse_error,omitempty"`
+	UnknownKeys   []string `json:"unknown_keys,omitempty"`
 }
 
 // Resolve loads a configuration the way LoadBundle does while recording
@@ -97,9 +98,25 @@ func Resolve(project, preset, bundle string) Resolution {
 			if raw, ok := fileMap["preset"]; ok {
 				_ = json.Unmarshal(raw, &res.File.Preset)
 			}
+			if raw, ok := fileMap["default_config"]; ok {
+				_ = json.Unmarshal(raw, &res.File.DefaultConfig)
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		res.LoadError = err.Error()
+	}
+	explicitPreset := preset
+	if explicitPreset == "" {
+		explicitPreset = os.Getenv("EAGENT_PRESET")
+	}
+	if bundle == "" && explicitPreset != "" {
+		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
+			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
+				bundle = explicitPreset
+				preset = ""
+				explicitPreset = ""
+			}
+		}
 	}
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
@@ -120,7 +137,7 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	if preset == "" {
-		preset = os.Getenv("EAGENT_PRESET")
+		preset = explicitPreset
 	}
 	if preset == "" && bundleMap != nil {
 		if raw, ok := bundleMap["preset"]; ok {

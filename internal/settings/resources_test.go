@@ -130,3 +130,111 @@ func TestDefaultConfigMustBeLoadable(t *testing.T) {
 		t.Fatalf("a loadable default_config was refused: %v", err)
 	}
 }
+
+func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
+	project := t.TempDir()
+	s := &Service{Project: project}
+	g := s.Grant()
+
+	v0, err := s.RemoteSnapshot(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundField := false
+	for _, f := range v0.Descriptor.Fields {
+		if f.Key == "/save_preset" {
+			foundField = true
+			if f.Section != "Models" || f.Group != "Configuration" || f.Class != "permissions" || !f.Writable {
+				t.Fatalf("/save_preset field = %+v", f)
+			}
+		}
+	}
+	if !foundField {
+		t.Fatal("descriptor missing /save_preset field")
+	}
+
+	// Built-in preset name collision is rejected.
+	clash := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   SchemaVersion,
+		ExpectedVersion: v0.Snapshot.Version,
+		Edits:           []control.Edit{{Op: "set", Key: "/save_preset", Value: "openai-high"}},
+	}
+	if _, _, err := s.Apply(context.Background(), clash, g); err == nil {
+		t.Fatal("accepted built-in preset name via /save_preset")
+	}
+
+	// Narrow grant without permissions cannot save a preset.
+	narrow := g
+	narrow.Classes = []string{"preference"}
+	standalone := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   SchemaVersion,
+		ExpectedVersion: v0.Snapshot.Version,
+		Edits:           []control.Edit{{Op: "set", Key: "/save_preset", Value: "my-baseline"}},
+	}
+	if _, _, err := s.Apply(context.Background(), standalone, narrow); err == nil {
+		t.Fatal("narrow grant bypassed permissions check on /save_preset")
+	}
+
+	// Standalone /save_preset writes the bundle without creating config.json.
+	_, v1, err := s.Apply(context.Background(), standalone, g)
+	if err != nil {
+		t.Fatalf("standalone /save_preset: %v", err)
+	}
+	if v1.Snapshot.Version == v0.Snapshot.Version {
+		t.Fatal("saving preset did not advance snapshot version")
+	}
+	if _, err := os.Stat(config.File(project)); !os.IsNotExist(err) {
+		t.Fatal("standalone /save_preset unexpectedly created config.json")
+	}
+	// /default_config unlocks and carries bundle suggestions.
+	if len(v1.Descriptor.Suggestions["bundles"]) != 1 || v1.Descriptor.Suggestions["bundles"][0].Value != "my-baseline" {
+		t.Fatalf("bundles suggestions = %+v", v1.Descriptor.Suggestions["bundles"])
+	}
+	for _, f := range v1.Descriptor.Fields {
+		if f.Key == "/default_config" {
+			if !f.Writable || f.Suggest == nil || f.Suggest.List != "bundles" {
+				t.Fatalf("/default_config after save = %+v", f)
+			}
+		}
+	}
+
+	// Combined config edit + /save_preset updates config.json (without save_preset)
+	// and saves the updated configuration as the new preset.
+	combined := control.Proposal{
+		Operation:       "settings.apply",
+		SchemaVersion:   SchemaVersion,
+		ExpectedVersion: v1.Snapshot.Version,
+		Edits: []control.Edit{
+			{Op: "set", Key: "/task_concurrency", Value: float64(7)},
+			{Op: "set", Key: "/save_preset", Value: "fast-seven"},
+		},
+	}
+	_, v2, err := s.Apply(context.Background(), combined, g)
+	if err != nil {
+		t.Fatalf("combined edit + /save_preset: %v", err)
+	}
+	rawCfg, err := os.ReadFile(config.File(project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawCfg), "save_preset") {
+		t.Fatalf("config.json leaked save_preset key: %s", rawCfg)
+	}
+	loaded, err := config.Load(project, "fast-seven")
+	if err != nil || loaded.TaskConcurrency != 7 {
+		t.Fatalf("saved preset fast-seven = %+v err=%v", loaded, err)
+	}
+	if _, exists := v2.Snapshot.Saved["/save_preset"]; exists {
+		t.Fatal("/save_preset should remain unset after saving")
+	}
+
+	// DeleteBundle cleans up the saved preset.
+	if err := s.DeleteBundle(context.Background(), "fast-seven"); err != nil {
+		t.Fatalf("DeleteBundle: %v", err)
+	}
+	if err := s.DeleteBundle(context.Background(), "fast-seven"); err == nil {
+		t.Fatal("DeleteBundle succeeded on missing preset")
+	}
+}

@@ -21,7 +21,7 @@ type fieldPlace struct {
 
 var projectPlaces = map[string]fieldPlace{
 	"/preset":                              {"Models", "Configuration", "Preset", "The built-in lineup of models new sessions start from. Choosing one sets every actor's models to it.", false},
-	"/default_config":                      {"Models", "Configuration", "Saved configuration", "A configuration saved in this project that new sessions start from instead.", false},
+	"/default_config":                      {"Models", "Configuration", "Saved preset", "A preset saved in this project that new sessions start from instead.", false},
 	"/task_concurrency":                    {"Behavior", "Work", "Tasks at once", "How many task workers run at the same time.", false},
 	"/max_task_turns":                      {"Behavior", "Work", "Turns per task", "Model calls a task may make before it is stopped.", false},
 	"/max_orchestrator_calls_per_turn":     {"Behavior", "Work", "Orchestrator calls before a nudge", "After this many tool calls in a row the orchestrator is asked to delegate, wait, or yield.", true},
@@ -191,7 +191,11 @@ func ConfigSuggestions(project string) []control.Suggestion {
 		}
 		cfg, err := config.LoadBundleWithFile(project, preset, bundle, file)
 		if err == nil {
-			s.Detail = clip(lineup(project, cfg), 300)
+			detail := lineup(project, cfg)
+			if bundle != "" && cfg.Description != "" {
+				detail += " — " + cfg.Description
+			}
+			s.Detail = clip(detail, 300)
 			s.Implies = startImplies(project, cfg)
 			if bundle == "" {
 				group = "Presets"
@@ -203,6 +207,33 @@ func ConfigSuggestions(project string) []control.Suggestion {
 			group = "Presets"
 		}
 		s.Group = group
+		out = append(out, s)
+	}
+	return out
+}
+
+// BundleSuggestions describe each saved preset in this project with its model
+// lineup (and optional description) for the /default_config picker. They omit
+// Implies so /preset remains the sole governing field on Project defaults.
+func BundleSuggestions(project string) []control.Suggestion {
+	names, err := config.ListBundles(project)
+	if err != nil || len(names) == 0 {
+		return nil
+	}
+	out := make([]control.Suggestion, 0, len(names))
+	for _, name := range names {
+		s := control.Suggestion{Value: name, Label: name, Group: "Saved in this project"}
+		cfg, err := config.BundleAlone(project, name)
+		if err != nil {
+			cfg, err = config.LoadBundle(project, "", name)
+		}
+		if err == nil {
+			detail := lineup(project, cfg)
+			if cfg.Description != "" {
+				detail += " — " + cfg.Description
+			}
+			s.Detail = clip(detail, 300)
+		}
 		out = append(out, s)
 	}
 	return out
