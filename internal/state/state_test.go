@@ -423,3 +423,50 @@ func TestNarratorChecksCountTowardTotals(t *testing.T) {
 		}
 	}
 }
+
+// A dismissed question is closed with nothing decided: the orchestrator is
+// not woken, an answer is not recorded, and both readers are told in words
+// that it was not an answer. The dismissal stands (no asking again) until
+// the user writes or the orchestrator yields anew.
+func TestDismissClosesQuestionWithoutWaking(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "paint it"}))                                                        // 3
+	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 3}))  // 4
+	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "yield", Output: "ok"}))                         // 5
+	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting for the colour"}))                               // 6
+	b.add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Which colour?", Options: []string{"red"}})) // 7
+	st := Replay(b.events)
+	if st.Question == nil || st.DismissalStands() {
+		t.Fatalf("before the dismissal: question=%v stands=%v", st.Question, st.DismissalStands())
+	}
+	dismiss := b.add(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: "q1", Source: "finalechat"})) // 8
+	st = Replay(b.events)
+	if st.Question != nil {
+		t.Fatalf("the question is still pending: %+v", st.Question)
+	}
+	if !st.Idle() {
+		t.Fatal("a dismissal must not wake the orchestrator")
+	}
+	if st.LastUserSeq != 3 {
+		t.Fatalf("a dismissal is not something the user said: LastUserSeq = %d", st.LastUserSeq)
+	}
+	if !st.DismissalStands() {
+		t.Fatal("the dismissal should stand while nothing has moved")
+	}
+	if got := Observe(dismiss, 200); !strings.Contains(got, "USER dismissed q1 without answering") || !strings.Contains(got, "Do not ask it again") {
+		t.Fatalf("narrator's view of the dismissal = %q", got)
+	}
+	view := st.OrchestratorView()
+	last := view[len(view)-1].Text
+	if !strings.Contains(last, "dismissed question q1 without answering") || !strings.Contains(last, "not an answer and not a go-ahead") {
+		t.Fatalf("orchestrator's view ends with %q", last)
+	}
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "make it green"})) // 9
+	st = Replay(b.events)
+	if st.DismissalStands() {
+		t.Fatal("the dismissal no longer stands once the user has written")
+	}
+	if st.Idle() {
+		t.Fatal("the user's message wakes the orchestrator")
+	}
+}

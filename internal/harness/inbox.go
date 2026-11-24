@@ -22,7 +22,7 @@ func InboxDir(sessionPath string) string { return filepath.Join(sessionPath, "in
 
 // InboxMessage is one dropped file.
 type InboxMessage struct {
-	Type       string `json:"type"` // message | answer | stop
+	Type       string `json:"type"` // message | answer | dismiss | stop
 	Text       string `json:"text,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 	From       string `json:"from,omitempty"` // free-form origin, e.g. "web"
@@ -107,6 +107,8 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 			r.ui.Idle(false)
 			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments}))
 		}
+	case "dismiss":
+		r.dismissQuestion(msg.QuestionID, msg.From)
 	case "message", "":
 		if text == "" && len(msg.Attachments) == 0 {
 			return

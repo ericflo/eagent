@@ -25,28 +25,30 @@ import (
 // fakePhone is a minimal Finalechat: one thread, messages, questions, and
 // the long-poll shape the runtime relies on.
 type fakePhone struct {
-	srv           *httptest.Server
-	mu            sync.Mutex
-	messages      []map[string]any
-	questions     map[string]map[string]any
-	posts         []map[string]any // bodies of POST …/messages
-	asks          []map[string]any // bodies of POST …/questions
-	cancelled     []string
-	seq           int
-	remote        bool
-	cond          *sync.Cond
-	files         map[string]fakeFile // attachment id -> bytes served to the agent
-	uploaded      []fakeFile          // files the agent posted
-	features      []string            // what /me advertises
-	activity      []map[string]any    // bodies of POST …/activity
-	cleared       int                 // DELETE …/activity calls
-	keys          map[string]string   // client_key -> message id
-	dupes         int                 // posts answered from a known key
-	metas         []map[string]any    // PATCH thread meta bodies
-	patches       []map[string]any    // PATCH thread bodies (retitles)
-	latency       time.Duration       // added to every request, to imitate a real network
-	anchorUnknown bool                // every GET …/messages answers at once with an unknown anchor
-	gets          int                 // GET …/messages calls
+	srv       *httptest.Server
+	mu        sync.Mutex
+	messages  []map[string]any
+	questions map[string]map[string]any
+	posts     []map[string]any // bodies of POST …/messages
+	asks      []map[string]any // bodies of POST …/questions
+	cancelled []string
+	// dismissedByToken lists questions closed through POST …/dismiss.
+	dismissedByToken []string
+	seq              int
+	remote           bool
+	cond             *sync.Cond
+	files            map[string]fakeFile // attachment id -> bytes served to the agent
+	uploaded         []fakeFile          // files the agent posted
+	features         []string            // what /me advertises
+	activity         []map[string]any    // bodies of POST …/activity
+	cleared          int                 // DELETE …/activity calls
+	keys             map[string]string   // client_key -> message id
+	dupes            int                 // posts answered from a known key
+	metas            []map[string]any    // PATCH thread meta bodies
+	patches          []map[string]any    // PATCH thread bodies (retitles)
+	latency          time.Duration       // added to every request, to imitate a real network
+	anchorUnknown    bool                // every GET …/messages answers at once with an unknown anchor
+	gets             int                 // GET …/messages calls
 	// The thread's title and summary as the app would show them, with the
 	// service's pin rule: what the user wrote stays, whatever a token sends.
 	title, desc             string
@@ -244,6 +246,21 @@ func (f *fakePhone) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		w.WriteHeader(201)
 		_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}})
+	case strings.HasPrefix(path, "/api/v1/questions/") && strings.HasSuffix(path, "/dismiss"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/questions/"), "/dismiss")
+		f.mu.Lock()
+		q := f.questions[id]
+		if q == nil || q["status"] != "pending" {
+			f.mu.Unlock()
+			w.WriteHeader(409)
+			_, _ = w.Write([]byte(`{"error":{"code":"already_resolved","message":"resolved"}}`))
+			return
+		}
+		q["status"] = "dismissed"
+		f.dismissedByToken = append(f.dismissedByToken, id)
+		f.cond.Broadcast()
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"question": q})
 	case strings.HasPrefix(path, "/api/v1/questions/") && strings.HasSuffix(path, "/cancel"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/questions/"), "/cancel")
 		f.mu.Lock()
@@ -1387,19 +1404,26 @@ func TestGitBranch(t *testing.T) {
 }
 
 // A "user" message posted with a token (another agent's mirror) is not the
-// user speaking; a dismissed question is answered with the standing
-// instruction to decide, and the session goes on to finish.
-func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
+// user speaking. A question dismissed on the phone is closed and nothing
+// else: no answer is recorded, the orchestrator is not woken, and the batch
+// session keeps listening. What the user writes next is an ordinary
+// message, and the orchestrator reads it knowing nothing was decided.
+func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	t.Setenv("EAGENT_TEST_FC", "fc_test")
 	project := t.TempDir()
+	var mu sync.Mutex
+	sawNotice := false
 	brain := func(model string, msgs []map[string]any) reply {
 		all := allText(msgs)
 		switch model {
 		case "orch":
 			switch {
-			case strings.Contains(all, "dismissed this question"):
-				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"decided blue"}`)}}
+			case strings.Contains(all, "make it green"):
+				mu.Lock()
+				sawNotice = strings.Contains(all, "dismissed question q1 without answering") && strings.Contains(all, "nothing was decided")
+				mu.Unlock()
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"painted green"}`)}}
 			default:
 				return reply{calls: []event.ToolCall{
 					tc("note", `{"text":"I need the user to pick a colour: red or blue."}`),
@@ -1408,10 +1432,10 @@ func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
 			}
 		default:
 			switch {
-			case strings.Contains(all, "Went with blue"):
+			case strings.Contains(all, "Painted it green"):
 				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
-			case strings.Contains(all, "decided blue"):
-				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Went with blue."}`)}}
+			case strings.Contains(all, "painted green"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Painted it green."}`)}}
 			case strings.Contains(all, "pick a colour") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
 				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
 			default:
@@ -1440,9 +1464,32 @@ func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
 		t.Fatalf("session ended (%d) on a token-origin message", code)
 	case <-time.After(1500 * time.Millisecond):
 	}
+	orchBefore := s.count("orch")
 	if !fp.dismiss() {
 		t.Fatal("nothing to dismiss")
 	}
+	// The dismissal wakes nobody and ends nothing: the session waits for
+	// what the user writes instead.
+	select {
+	case code := <-done:
+		t.Fatalf("session ended (%d) on the dismissal", code)
+	case <-time.After(2500 * time.Millisecond):
+	}
+	if got := s.count("orch"); got != orchBefore {
+		t.Fatalf("the dismissal woke the orchestrator: %d calls before, %d after", orchBefore, got)
+	}
+	if n := fp.pendingQuestions(); n != 0 {
+		t.Fatalf("%d question(s) open after the dismissal", n)
+	}
+	waitFor(t, "the phone to say the session is waiting for a message", func() bool {
+		for _, a := range fp.statuses() {
+			if a["text"] == "Waiting for your next message" {
+				return true
+			}
+		}
+		return false
+	})
+	fp.userReply("actually, make it green")
 	select {
 	case code := <-done:
 		if code != 0 {
@@ -1450,14 +1497,15 @@ func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
 			t.Fatalf("exit %d logs=%v", code, logs)
 		}
 	case <-time.After(25 * time.Second):
-		t.Fatal("session did not finish after the dismissal")
+		t.Fatal("session did not finish after the user's message")
 	}
 	evs, _ := store.Read(rt.sess.Path)
 	st := state.Replay(evs)
 	if st.EndReason != "done" {
 		t.Fatalf("end reason = %s", st.EndReason)
 	}
-	var answers []event.UserAnswerData
+	var dismissals []event.UserDismissData
+	var green []event.UserMessageData
 	for _, ev := range evs {
 		switch ev.Type {
 		case event.UserMessage:
@@ -1466,17 +1514,295 @@ func TestPhoneIgnoresTokenOriginAndHonoursDismissal(t *testing.T) {
 			if strings.Contains(d.Text, "red") {
 				t.Fatalf("a token-origin message became user input: %+v", d)
 			}
+			if strings.Contains(d.Text, "green") {
+				green = append(green, d)
+			}
 		case event.UserAnswer:
 			var d event.UserAnswerData
 			_ = ev.Decode(&d)
-			answers = append(answers, d)
+			t.Fatalf("an answer was recorded for a dismissed question: %+v", d)
+		case event.UserDismiss:
+			var d event.UserDismissData
+			_ = ev.Decode(&d)
+			dismissals = append(dismissals, d)
 		}
 	}
-	if len(answers) != 1 || answers[0].Source != "finalechat" || answers[0].Text != dismissedAnswer {
-		t.Fatalf("answers = %+v", answers)
+	if len(dismissals) != 1 || dismissals[0].QuestionID != "q1" || dismissals[0].Source != "finalechat" {
+		t.Fatalf("dismissals = %+v", dismissals)
+	}
+	if len(green) != 1 || green[0].Source != "finalechat" {
+		t.Fatalf("the message after the dismissal = %+v", green)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawNotice {
+		t.Fatal("the orchestrator was not told the question was dismissed with nothing decided")
 	}
 	if got := fp.postsWhere(func(p map[string]any) bool { return p["body"] == "red" }); len(got) != 0 {
 		t.Fatalf("the token message was mirrored back: %v", got)
+	}
+}
+
+// After a dismissal the narrator cannot put the question back: ask_user is
+// refused until the user writes or the orchestrator moves. When the time
+// the question had runs out, the batch session ends still waiting for the
+// user, having asked once.
+func TestPhoneDismissedQuestionIsNotAskedAgain(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			return reply{calls: []event.ToolCall{
+				tc("note", `{"text":"I need the user to pick a colour: red or blue."}`),
+				tc("yield", `{"done":false,"reason":"waiting for the colour decision"}`),
+			}}
+		default:
+			switch {
+			case strings.Contains(all, "not asked:"):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "USER dismissed"):
+				// A narrator that tries to ask again anyway.
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Red or blue, then?","options":["red","blue"]}`)}}
+			case strings.Contains(all, "pick a colour") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
+	cfg.Finalechat.QuestionTimeoutSeconds = 4
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	if !fp.dismiss() {
+		t.Fatal("nothing to dismiss")
+	}
+	select {
+	case code := <-done:
+		if code != 2 {
+			_, _, logs := ui.snapshot()
+			t.Fatalf("exit %d logs=%v", code, logs)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("session did not end once the question's time ran out")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	st := state.Replay(evs)
+	if st.EndReason != "awaiting-input" {
+		t.Fatalf("end reason = %s", st.EndReason)
+	}
+	asked, refused := 0, false
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.NarratorQuestion:
+			asked++
+		case event.UserAnswer:
+			t.Fatal("an answer was recorded for a dismissed question")
+		case event.ToolResult:
+			var d event.ToolResultData
+			_ = ev.Decode(&d)
+			if d.Name == "ask_user" && d.IsError && strings.Contains(d.Output, "not asked:") {
+				refused = true
+			}
+		}
+	}
+	if asked != 1 || !refused {
+		t.Fatalf("asked %d time(s), second ask refused = %v", asked, refused)
+	}
+	fp.mu.Lock()
+	cards := len(fp.questions)
+	fp.mu.Unlock()
+	if cards != 1 {
+		t.Fatalf("%d cards were posted to the phone, want 1", cards)
+	}
+	if st.Question != nil {
+		t.Fatalf("the dismissed question is still pending: %+v", st.Question)
+	}
+}
+
+// A card dismissed while the session was not running: the message that
+// resumes the session is a message, not the answer to the question the
+// user closed, and the question is not put back on the phone.
+func TestPhoneDismissedWhileSessionWasDown(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	s := newScripted(colourBrain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: false, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan int)
+	go func() { done <- rt.Run(runCtx) }()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	waitFor(t, "the card to be recorded", func() bool {
+		evs, _ := store.Read(rt.sess.Path)
+		for _, ev := range evs {
+			if ev.Type == event.PhoneQuestion {
+				return true
+			}
+		}
+		return false
+	})
+	stop() // the process goes away with the question still open
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("first run did not stop")
+	}
+	if !fp.dismiss() {
+		t.Fatal("nothing to dismiss")
+	}
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: false, Prompt: "actually, make it green", PromptSource: "finalechat"}, ui, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := rt2.Run(ctx); code != 0 {
+		_, _, logs := ui.snapshot()
+		t.Fatalf("resumed exit %d logs=%v", code, logs)
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	dismissals, messages, asked := 0, 0, 0
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.NarratorQuestion:
+			asked++
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			t.Fatalf("the resuming message was taken for the answer to a dismissed question: %+v", d)
+		case event.UserDismiss:
+			dismissals++
+		case event.UserMessage:
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if strings.Contains(d.Text, "green") {
+				messages++
+			}
+		}
+	}
+	if dismissals != 1 || messages != 1 || asked != 1 {
+		t.Fatalf("dismissals = %d, messages = %d, questions asked = %d", dismissals, messages, asked)
+	}
+	fp.mu.Lock()
+	cards := len(fp.questions)
+	fp.mu.Unlock()
+	if cards != 1 || fp.pendingQuestions() != 0 {
+		t.Fatalf("%d card(s) on the phone, %d pending; want the one dismissed card", cards, fp.pendingQuestions())
+	}
+}
+
+// /dismiss in the terminal closes the open question the same way, and the
+// card on the phone closes as dismissed with it. The next line typed is a
+// message, not the answer.
+func TestSlashDismissClosesQuestionAndPhoneCard(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	brain := func(model string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch model {
+		case "orch":
+			if strings.Contains(all, "make it green") {
+				return reply{calls: []event.ToolCall{tc("yield", `{"done":true,"reason":"painted green"}`)}}
+			}
+			return reply{calls: []event.ToolCall{
+				tc("note", `{"text":"I need the user to pick a colour: red or blue."}`),
+				tc("yield", `{"done":false,"reason":"waiting for the colour decision"}`),
+			}}
+		default:
+			switch {
+			case strings.Contains(all, "Painted it green"):
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			case strings.Contains(all, "painted green"):
+				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Painted it green."}`)}}
+			case strings.Contains(all, "pick a colour") && !strings.Contains(all, "asked;") && !strings.Contains(all, "asked on"):
+				return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Which colour?","options":["red","blue"]}`)}}
+			default:
+				return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
+			}
+		}
+	}
+	s := newScripted(brain)
+	defer s.srv.Close()
+	fp := newFakePhone(false)
+	defer fp.srv.Close()
+	cfg := fakePhoneConfig(t, project, s.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string)}
+	rt, err := New(cfg, Options{Project: project, Interactive: true, Prompt: "paint it"}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	done := make(chan int)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	orchBefore := s.count("orch")
+	ui.input <- "/dismiss"
+	waitFor(t, "the card to close as dismissed", func() bool {
+		fp.mu.Lock()
+		defer fp.mu.Unlock()
+		return len(fp.dismissedByToken) == 1
+	})
+	time.Sleep(1500 * time.Millisecond)
+	if got := s.count("orch"); got != orchBefore {
+		t.Fatalf("/dismiss woke the orchestrator: %d calls before, %d after", orchBefore, got)
+	}
+	ui.input <- "actually, make it green"
+	waitFor(t, "the report", func() bool {
+		return len(fp.postsWhere(func(p map[string]any) bool { return p["body"] == "Painted it green." })) == 1
+	})
+	ui.input <- "/quit"
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("session did not quit")
+	}
+	evs, _ := store.Read(rt.sess.Path)
+	dismissals, messages := 0, 0
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.UserAnswer:
+			t.Fatal("the line typed after /dismiss was taken for the answer")
+		case event.UserDismiss:
+			dismissals++
+		case event.UserMessage:
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			if strings.Contains(d.Text, "green") {
+				messages++
+			}
+		}
+	}
+	if dismissals != 1 || messages != 1 {
+		t.Fatalf("dismissals = %d, messages after = %d", dismissals, messages)
+	}
+	if len(fp.cancelled) != 0 {
+		t.Fatalf("the card was withdrawn instead of dismissed: %v", fp.cancelled)
 	}
 }
 

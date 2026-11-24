@@ -207,7 +207,7 @@ type Question struct {
 	Options       []Option       `json:"options"`
 	AllowFreeform bool           `json:"allow_freeform"`
 	MultiSelect   bool           `json:"multi_select"`
-	Status        string         `json:"status"` // pending | answered | cancelled | expired
+	Status        string         `json:"status"` // pending | answered | cancelled | expired | dismissed
 	Answer        *Answer        `json:"answer"`
 	Meta          map[string]any `json:"meta"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -598,6 +598,18 @@ func (c *Client) Question(ctx context.Context, id string, wait int) (Question, e
 // an error.
 func (c *Client) Cancel(ctx context.Context, id string) error {
 	err := c.do(ctx, http.MethodPost, "/api/v1/questions/"+url.PathEscape(id)+"/cancel", nil, map[string]any{}, nil, 0)
+	var e *Error
+	if errors.As(err, &e) && (e.Code == "already_resolved" || e.Status == 409) {
+		return nil
+	}
+	return err
+}
+
+// Dismiss closes a pending question on the user's behalf, with no answer
+// (they dismissed it somewhere other than the app). Already-resolved
+// questions are not an error.
+func (c *Client) Dismiss(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodPost, "/api/v1/questions/"+url.PathEscape(id)+"/dismiss", nil, map[string]any{}, nil, 0)
 	var e *Error
 	if errors.As(err, &e) && (e.Code == "already_resolved" || e.Status == 409) {
 		return nil

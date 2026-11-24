@@ -135,7 +135,7 @@ func (r *Runtime) noteSummary(ev event.Event) {
 			return // a turn that only said "still waiting" is not news
 		}
 		due = notBefore(summaryTurnGap)
-	case event.Yield, event.RelayEnd, event.NarratorQuestion:
+	case event.Yield, event.RelayEnd, event.NarratorQuestion, event.UserDismiss:
 		due = notBefore(summaryTurnGap)
 	case event.TaskEnd:
 		var d event.TaskEndData

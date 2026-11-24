@@ -326,6 +326,13 @@ func (s *State) renderUserAnswer(ev event.Event, d event.UserAnswerData, questio
 	})
 }
 
+// DismissNotice is what the orchestrator reads when the user closed a
+// question without answering. It arrives with whatever wakes the
+// orchestrator next; the dismissal itself wakes nobody.
+func DismissNotice(questionID string) string {
+	return fmt.Sprintf("[The user dismissed question %s without answering. That is not an answer and not a go-ahead: nothing was decided. Do not pick an option for them, do not carry on with what the question was holding up, and do not ask it again. Go by what they write next.]", questionID)
+}
+
 // clientSource is the capsule's source ("" when the client sent none), so
 // templates can name the client without touching the event's Source.
 func clientSource(c *clientcaps.Caps) string {
@@ -367,6 +374,10 @@ func (s *State) orchestratorNotification(ev event.Event) string {
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
 		return s.renderUserAnswer(ev, d, "")
+	case event.UserDismiss:
+		var d event.UserDismissData
+		_ = ev.Decode(&d)
+		return DismissNotice(d.QuestionID)
 	case event.TaskEnd:
 		var d event.TaskEndData
 		_ = ev.Decode(&d)
@@ -623,6 +634,10 @@ func Observe(ev event.Event, maxChars int) string {
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s USER answered %s: %s%s", ts, d.QuestionID, d.Text, attachmentBrief(d.Attachments))
+	case event.UserDismiss:
+		var d event.UserDismissData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s USER dismissed %s without answering: nothing was decided. Do not ask it again; they will write when they are ready.", ts, d.QuestionID)
 	case event.Assistant:
 		if ev.Actor != event.ActorOrchestrator {
 			return "" // task-worker internals are not the narrator's business

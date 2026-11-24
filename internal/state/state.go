@@ -134,7 +134,10 @@ type State struct {
 	Schedules     map[string]*Schedule
 	ScheduleOrder []string
 	Question      *Question // pending, or nil
-	Notes         []Note
+	// LastDismissSeq is the seq of the latest user.dismiss (a question the
+	// user closed without answering), 0 if none.
+	LastDismissSeq int64
+	Notes          []Note
 	// WorkDirs holds each actor's current working directory once a cd of
 	// its own moved it off Cwd, keyed "orchestrator" or by task id.
 	WorkDirs map[string]string
@@ -419,6 +422,16 @@ func (s *State) Apply(ev event.Event) {
 				s.Question = nil
 			}
 		}
+	case event.UserDismiss:
+		// The question is over, with nothing decided. No wake: the
+		// orchestrator stays where it was until the user writes.
+		var d event.UserDismissData
+		_ = ev.Decode(&d)
+		if s.Question != nil && (d.QuestionID == "" || s.Question.ID == d.QuestionID) {
+			s.Question.Done = true
+			s.Question = nil
+			s.LastDismissSeq = ev.Seq
+		}
 	case event.Assistant:
 		var d event.AssistantData
 		_ = ev.Decode(&d)
@@ -661,6 +674,15 @@ func (s *State) ContextTokens(actor string) int {
 // Idle reports whether the orchestrator has yielded and nothing has arrived
 // since to wake it.
 func (s *State) Idle() bool { return s.LastYield != nil }
+
+// DismissalStands reports that the user closed the last question without
+// answering and nothing has moved since: they have not written, and the
+// orchestrator is still stopped where it was when the question was asked.
+// Asking again would put back the card they just closed.
+func (s *State) DismissalStands() bool {
+	return s.LastDismissSeq > 0 && s.Question == nil && s.LastUserSeq < s.LastDismissSeq &&
+		s.LastYield != nil && s.LastYield.Seq < s.LastDismissSeq
+}
 
 // Summary renders a short status for humans.
 func (s *State) Summary() string {

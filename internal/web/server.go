@@ -101,6 +101,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/attachments/{name}", s.getAttachment)
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.guard(s.postMessage))
 	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.guard(s.postAnswer))
+	s.mux.HandleFunc("POST /api/sessions/{id}/dismiss", s.guard(s.postDismiss))
 	s.mux.HandleFunc("POST /api/sessions/{id}/stop", s.guard(s.postStop))
 	s.mux.HandleFunc("POST /api/sessions/{id}/resume", s.guard(s.postResume))
 	s.mux.HandleFunc("GET /api/config", s.getConfig)
@@ -549,6 +550,31 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": "resumed"})
+}
+
+// postDismiss closes the session's open question with no answer. Nothing
+// is sent to the agent; it stays where it was until the user writes. Only
+// a running session can be told: one that is stopped has nobody waiting.
+func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
+	info, err := s.resolve(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 404, err)
+		return
+	}
+	b, err := readBody(r)
+	if err != nil {
+		writeErr(w, 400, err)
+		return
+	}
+	if !alive(info.Path) && !s.isHosted(info.ID) {
+		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
+		return
+	}
+	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]any{"delivered": "inbox"})
 }
 
 func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {

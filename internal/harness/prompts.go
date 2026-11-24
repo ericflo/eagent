@@ -189,6 +189,9 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 			b.WriteString(" The orchestrator is waiting and the user is not present to answer; the session will end so they can resume later. Tell the user exactly what is needed from them and what state the work is in.")
 		}
 	}
+	if st.DismissalStands() {
+		b.WriteString(" The user dismissed your last question without answering. That is not an answer: nothing was decided, and they will write when they are ready. Do not ask it again, do not ask it in other words, and do not tell them what will be assumed.")
+	}
 	if !interactive && !phone {
 		b.WriteString(" This is a non-interactive session: ask_user cannot receive an answer, so prefer send_message.")
 	} else if !interactive {

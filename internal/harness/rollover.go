@@ -158,6 +158,10 @@ func (r *Runtime) carriedOver() string {
 			var d event.UserAnswerData
 			_ = ev.Decode(&d)
 			parts = append(parts, fmt.Sprintf("The user answered question %s (%q): %s", d.QuestionID, firstLine(r.st.QuestionText(d.QuestionID), 200), d.Text))
+		case event.UserDismiss:
+			var d event.UserDismissData
+			_ = ev.Decode(&d)
+			parts = append(parts, fmt.Sprintf("The user dismissed question %s (%q) without answering: nothing was decided, so do not choose for them and do not ask it again.", d.QuestionID, firstLine(r.st.QuestionText(d.QuestionID), 200)))
 		case event.UserMessage:
 			// The message that woke the orchestrator may be the very thing
 			// that tipped the context over; it must not vanish into the

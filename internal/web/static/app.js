@@ -283,8 +283,8 @@ function renderChat(pane) {
 function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
   pend.innerHTML = '';
-  if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o)));
-  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer.' : 'Delivered to the running session; the agent reads it at its next step.') : 'The session is not running; sending a message resumes it here.';
+  if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o)), ...(d.alive && !ARCHIVE ? [h('button', {class: 'ghost', title: 'Close the question without answering. Nothing is sent to the agent.', onclick: dismissQuestion}, 'Dismiss')] : []));
+  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer. Dismiss closes the question and sends nothing.' : 'Delivered to the running session; the agent reads it at its next step.') : 'The session is not running; sending a message resumes it here.';
 }
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
@@ -294,6 +294,7 @@ async function send() {
     else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
   } catch (e) { toast(e.message, 'bad'); }
 }
+async function dismissQuestion() { try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
 async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
 
 // What a thread.title event changed, in words: the session's own summary
@@ -317,11 +318,13 @@ function chatNode(ev) {
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
     case 'thread.title': return titleNotice(d) ? h('div', {class: 'notice'}, titleNotice(d)) : null;
     case 'cwd.change': return (ev.actor === 'orchestrator' && !ev.task) ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
+    case 'user.dismiss': return h('div', {class: 'notice'}, 'you dismissed the question' + srcLabel(d.source) + ' · nothing was sent to the agent');
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
+      const dismissed = S.events.find(e => e.type === 'user.dismiss' && e.data && e.data.question_id === d.id);
       return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
         h('div', {class: 'qcard'}, h('div', {class: 'text', html: md(d.text)}),
-          answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o))))));
+          answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : dismissed ? h('div', {class: 'answered'}, 'dismissed without an answer') : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o))))));
     }
     case 'session.start': { const m = d.models || {}; return h('div', {class: 'notice'}, `session started ${fmtDate(ev.ts)} · ${['orchestrator', 'task', 'narrator'].map(a => (m[a] || '?').split('/').pop()).join(' / ')}` + (d.config ? ` · ${d.config}` : '')); }
     case 'session.resume': return h('div', {class: 'notice'}, 'session resumed ' + fmtDate(ev.ts) + (d.closed && d.closed.length ? ' · ' + d.closed.join('; ') : ''));

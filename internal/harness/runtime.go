@@ -84,6 +84,10 @@ type Runtime struct {
 	files   tools.Files
 	archive tools.Archive
 
+	// listenUntil is how long a batch session keeps listening after the
+	// user dismissed a question (the question's own deadline).
+	listenUntil time.Time
+
 	// Each actor has an ordered list of routes (primary, then fallbacks)
 	// and a current client; completeActor advances the client when a route
 	// turns out to be unroutable. Clients are read and swapped under sync.
@@ -283,6 +287,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
+	r.settleDismissedWhileAway()
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil {
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
@@ -770,6 +775,10 @@ func (r *Runtime) maybeEnd() {
 		// the answer (or the question's expiry) instead of ending.
 		return
 	}
+	if r.listeningAfterDismissal() {
+		// They closed the question to say something else; wait for it.
+		return
+	}
 	// Batch: give the narrator a final word, then end.
 	if !r.narrFinal {
 		r.narrFinal = true
@@ -933,6 +942,72 @@ func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts
 	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts}))
 }
 
+// dismissQuestion closes the open question with no answer. Nothing is sent
+// to the orchestrator and nobody is woken: the session stays where it was
+// until the user writes. A batch session keeps listening for that message
+// for as long as it would have waited for the answer. Loop goroutine only.
+func (r *Runtime) dismissQuestion(qid, source string) {
+	q := r.st.Question
+	if q == nil || (qid != "" && q.ID != qid) {
+		return
+	}
+	asked := time.Now()
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		if r.st.Events[i].Seq == q.Seq {
+			asked = r.st.Events[i].Time
+			break
+		}
+	}
+	r.listenUntil = asked.Add(time.Duration(r.cfg.Finalechat.QuestionTimeout()) * time.Second)
+	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: source}))
+	r.ui.Log("question %s dismissed without an answer; nothing was sent to the agent", q.ID)
+}
+
+// settleDismissedWhileAway records a dismissal the session was not running
+// to hear: the user closed the open question's card on the phone while the
+// session was down. Without this, what they wrote next (the message that
+// resumes the session) would be taken for the answer. It is one short call,
+// made only when a question is open and has a card; if the service cannot
+// be reached the question stays open. Called before the loop starts.
+func (r *Runtime) settleDismissedWhileAway() {
+	q := r.st.Question
+	if q == nil {
+		return
+	}
+	card := ""
+	for _, ev := range r.st.Events {
+		if ev.Type == event.PhoneQuestion {
+			var d event.PhoneQuestionData
+			_ = ev.Decode(&d)
+			if d.QuestionID == q.ID {
+				card = d.CardID
+			}
+		}
+	}
+	fc := r.cfg.Finalechat
+	if card == "" || !fc.Wanted() || finalechat.Disabled() {
+		return
+	}
+	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
+	if !ok {
+		return
+	}
+	client.UserAgent = "eagent/" + Version
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if got, err := client.Question(ctx, card, 0); err != nil || got.Status != "dismissed" {
+		return
+	}
+	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: "finalechat"}))
+}
+
+// listeningAfterDismissal reports that the user closed a question a while
+// ago and a batch session is still giving them the question's time to
+// write instead. Loop goroutine only.
+func (r *Runtime) listeningAfterDismissal() bool {
+	return r.phone != nil && r.st.DismissalStands() && time.Now().Before(r.listenUntil)
+}
+
 func optionIndex(line string, options []string) int {
 	if len(options) == 0 {
 		return -1
@@ -965,6 +1040,16 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
 		r.beginShutdown("quit", 0)
+	case "/dismiss":
+		if q := r.st.Question; q != nil {
+			source := ""
+			if client != nil {
+				source = client.Source
+			}
+			r.dismissQuestion(q.ID, source)
+		} else {
+			r.ui.Log("no question is open")
+		}
 	case "/status", "/s":
 		r.ui.Log("%s", r.st.Summary())
 	case "/tasks":
@@ -1001,7 +1086,7 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 			r.ui.Log("no schedules")
 		}
 	case "/help", "/?":
-		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /quit  (anything else is sent to the agent)")
+		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /dismiss /quit  (anything else is sent to the agent)")
 		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])

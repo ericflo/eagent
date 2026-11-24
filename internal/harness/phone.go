@@ -56,11 +56,12 @@ type phone struct {
 	posted     map[string]bool   // message ids we created (skipped on poll)
 	questions  map[string]string // eagent question id -> finalechat question id
 	fromPhone  map[string]string // finalechat question id -> eagent question id
+	open       map[string]string // cards being watched: finalechat question id -> eagent question id
 	lastID     string            // newest message id seen, for the poll
 	mirrored   map[int64]string  // user message seq -> the thread message mirroring it
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
 	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
-	gone       map[string]bool   // eagent question ids cancelled or expired on the phone
+	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
 	threadID   string
 	threadSeen bool
 }
@@ -93,7 +94,7 @@ func (r *Runtime) startPhone() {
 		timeout: fc.QuestionTimeout(), mirror: fc.Mirror(),
 		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
-		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, gone: map[string]bool{},
+		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{},
 	}
 	r.phone = p
 	p.wg.Add(1)
@@ -437,6 +438,24 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				}
 			}
 		})
+	case event.UserDismiss:
+		// Dismissed with /dismiss (terminal, web, or typed on the phone): the
+		// card closes as dismissed too. One the user closed on the card
+		// itself is already resolved, which Dismiss treats as done.
+		var d event.UserDismissData
+		_ = ev.Decode(&d)
+		qid := d.QuestionID
+		p.mu.Lock()
+		p.gone[qid] = true
+		p.mu.Unlock()
+		p.enqueue(func(ctx context.Context) {
+			p.mu.Lock()
+			fid := p.questions[qid]
+			p.mu.Unlock()
+			if fid != "" {
+				_ = p.client.Dismiss(ctx, fid)
+			}
+		})
 	case event.RelayStart, event.RelayState, event.RelayTurn, event.RelayAutopilot, event.RelayEnd:
 		// The thread header shows the relayed agent and what it is doing.
 		if ev.Type == event.RelayState {
@@ -522,6 +541,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.mu.Lock()
 		p.questions[qid] = q.ID
 		p.fromPhone[q.ID] = qid
+		p.open[q.ID] = qid
 		p.mu.Unlock()
 		cardID := q.ID
 		r.post(func() {
@@ -742,6 +762,7 @@ func (p *phone) poll(r *Runtime) {
 				})
 				continue
 			}
+			p.settleDismissals(r)
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
 			phoneID := m.ID
@@ -829,11 +850,44 @@ func capsFromMeta(meta map[string]any) *clientcaps.Caps {
 	return c
 }
 
-// watchQuestion notices when a phone question is cancelled or expires, so a
-// batch session waiting on it can stop waiting. Answers arrive through the
-// message poll.
+// dismissed records that the user closed a card without answering. Safe to
+// call twice for one question (the watch and the message poll both notice).
+func (p *phone) dismissed(r *Runtime, qid string) {
+	p.mu.Lock()
+	p.gone[qid] = true
+	p.mu.Unlock()
+	r.post(func() { r.handleInbox(InboxMessage{Type: "dismiss", QuestionID: qid, From: "finalechat"}) })
+}
+
+// settleDismissals asks the service about every card still thought open and
+// records any the user has dismissed. The message poll calls it before it
+// delivers a plain message: the watch usually hears of a dismissal first,
+// but when it is behind (a dropped long-poll), what the user wrote after
+// closing the card must not be taken for the card's answer.
+func (p *phone) settleDismissals(r *Runtime) {
+	p.mu.Lock()
+	open := map[string]string{}
+	for fid, qid := range p.open {
+		open[fid] = qid
+	}
+	p.mu.Unlock()
+	for fid, qid := range open {
+		if q, err := p.client.Question(p.ctx, fid, 0); err == nil && q.Status == "dismissed" {
+			p.dismissed(r, qid)
+		}
+	}
+}
+
+// watchQuestion notices when a phone question is dismissed, cancelled or
+// expires, so a batch session waiting on it can stop waiting. Answers
+// arrive through the message poll.
 func (p *phone) watchQuestion(r *Runtime, fid, qid string) {
 	defer p.wg.Done()
+	defer func() {
+		p.mu.Lock()
+		delete(p.open, fid)
+		p.mu.Unlock()
+	}()
 	var floor time.Duration
 	for p.ctx.Err() == nil {
 		start := time.Now()
@@ -871,17 +925,9 @@ func (p *phone) watchQuestion(r *Runtime, fid, qid string) {
 		case "answered":
 			return
 		case "dismissed":
-			// The user declined from the phone: the question is over, and the
-			// orchestrator hears that it must decide for itself.
-			p.mu.Lock()
-			p.gone[qid] = true
-			p.mu.Unlock()
-			r.post(func() {
-				if r.st.Question == nil || r.st.Question.ID != qid {
-					return
-				}
-				r.handleInbox(InboxMessage{Type: "answer", Text: dismissedAnswer, QuestionID: qid, From: "finalechat"})
-			})
+			// The user closed the card: the question is over and nothing was
+			// decided. Nobody is woken; the session waits for what they write.
+			p.dismissed(r, qid)
 			return
 		default: // cancelled | expired
 			p.mu.Lock()

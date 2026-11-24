@@ -1276,6 +1276,8 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 	switch cmd := strings.ToLower(fields[0]); {
 	case relayCommands[cmd]:
 		return false
+	case cmd == "/dismiss" && r.st.Question != nil:
+		return false // closes eagent's own open question
 	case cmd == "/quit" || cmd == "/exit" || cmd == "/q" || cmd == "/kill":
 		return false
 	case cmd == "/status" || cmd == "/s" || cmd == "/tasks" || cmd == "/procs" || cmd == "/schedules" || cmd == "/help" || cmd == "/?":

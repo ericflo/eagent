@@ -161,7 +161,7 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 	// simply not started yet (a fresh interactive session before the first
 	// message). Idle() alone misses the second case and used to leave a
 	// phantom "Working" on the phone.
-	if r.opts.Interactive {
+	if r.opts.Interactive || r.listeningAfterDismissal() {
 		return finalechat.Activity{Text: "Waiting for your next message", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
 	return finalechat.Activity{} // a batch session with nothing left is about to end
@@ -325,10 +325,6 @@ func featureSet(list []string) map[string]bool {
 	}
 	return out
 }
-
-// dismissedAnswer is what the orchestrator hears when the user declines a
-// question from the phone: the user acted, so it reads as their reply.
-const dismissedAnswer = "I dismissed this question from my phone without answering. Use your best judgement (the cautious option if anything is at stake) and tell me what you chose."
 
 // ---- redaction -----------------------------------------------------------------------
 

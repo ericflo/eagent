@@ -154,6 +154,10 @@ func Summarize(ev event.Event, max int) string {
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
 		body = d.Text
+	case event.UserDismiss:
+		var d event.UserDismissData
+		_ = ev.Decode(&d)
+		body = "dismissed " + d.QuestionID + " without answering"
 	case event.Assistant:
 		var d event.AssistantData
 		_ = ev.Decode(&d)

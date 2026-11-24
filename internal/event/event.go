@@ -35,6 +35,7 @@ const (
 
 	UserMessage = "user.message"
 	UserAnswer  = "user.answer"
+	UserDismiss = "user.dismiss" // the user closed a narrator question without answering it
 
 	TurnStart  = "turn.start"
 	TurnEnd    = "turn.end"
@@ -224,6 +225,13 @@ type UserAnswerData struct {
 	Source      string           `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
 	Client      *clientcaps.Caps `json:"client,omitempty"`
 	Attachments []Attachment     `json:"attachments,omitempty"`
+}
+
+// UserDismissData closes a narrator question with no answer. It is not a
+// reply: nothing is decided and no actor is woken by it.
+type UserDismissData struct {
+	QuestionID string `json:"question_id"`
+	Source     string `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
 }
 
 // TurnData brackets one actor turn (one or more model calls).

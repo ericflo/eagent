@@ -283,6 +283,13 @@ func (r *Runtime) narratorTurn(reason string, check *progressCheck) string {
 						}
 					}
 				}
+				var stands bool
+				r.sync(func() { stands = r.st.DismissalStands() })
+				if stands {
+					// Asking again would put back the card they just closed.
+					r.recordToolResult(event.ActorNarrator, "", tc, "not asked: the user dismissed your last question without answering and has not written since. Nothing was decided. Do not ask again; they will write when they are ready.", true)
+					continue
+				}
 				var id string
 				r.sync(func() {
 					id = r.st.NextQuestionID()
