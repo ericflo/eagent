@@ -1132,31 +1132,56 @@ func limitLine(who string, d event.RelayLimitData) string {
 	return s
 }
 
-// relaySteer is the relay line of the orchestrator's steer. Loop goroutine.
-func relaySteer(st *state.State, now time.Time, reason string) string {
+// relayAutopilotSignature summarizes active autopilot settings so mid-turn
+// calls detect when relay_autopilot was just enabled or changed. Loop goroutine.
+func relayAutopilotSignature(st *state.State) string {
 	if !st.RelayMode() {
+		return ""
+	}
+	var b strings.Builder
+	for _, rel := range st.ActiveRelays() {
+		if ap := rel.Autopilot; ap != nil {
+			fmt.Fprintf(&b, "%s:%t:%s:%s;", rel.Name, ap.Decide, ap.Until, ap.Instruction)
+		}
+	}
+	return b.String()
+}
+
+// relaySteer is the relay line of the orchestrator's steer. On routine
+// mid-turn calls (wake == false) it emits only when autopilot just changed,
+// avoiding repetitive boilerplate between tool calls. Loop goroutine.
+func relaySteer(st *state.State, now time.Time, reason string, wake, autopilotChanged bool) string {
+	if !st.RelayMode() {
+		return ""
+	}
+	if !wake && !autopilotChanged {
 		return ""
 	}
 	active := st.ActiveRelays()
 	if len(active) == 0 {
+		if !wake {
+			return ""
+		}
 		return " Relay: stopped. If the user wants it back, relay_start or relay_control restart."
 	}
 	var b strings.Builder
-	for _, rel := range active {
-		fmt.Fprintf(&b, " Relay: %s in %s is %s for %s", rel.Who(), rel.Dir, rel.State, roundDur(now.Sub(rel.StateSince)))
-		if n := len(rel.Undelivered); n > 0 {
-			fmt.Fprintf(&b, ", %d message(s) awaiting confirmation", n)
+	if wake {
+		for _, rel := range active {
+			fmt.Fprintf(&b, " Relay: %s in %s is %s for %s", rel.Who(), rel.Dir, rel.State, roundDur(now.Sub(rel.StateSince)))
+			if n := len(rel.Undelivered); n > 0 {
+				fmt.Fprintf(&b, ", %d message(s) awaiting confirmation", n)
+			}
+			b.WriteString(".")
 		}
-		b.WriteString(".")
-	}
-	who := active[0].Who()
-	if reason == "user message" {
-		if id := forwardedAs(st, active[0].Name, st.LastUserSeq); id != "" {
-			b.WriteString(" The user's latest message already went to " + who + " verbatim (" + id + "), the moment it arrived. Add context with relay_send only if it lacks something it needs; otherwise yield.")
-		} else if userAddressedEagent(st, st.LastUserSeq) {
-			b.WriteString(" The user's latest message is addressed to you, not to " + who + ": do it yourself, then go back to relaying.")
-		} else {
-			b.WriteString(" Forward the user's latest message with relay_forward (verbatim) unless it only asks about the relay; answer that from relay_status in a note.")
+		who := active[0].Who()
+		if reason == "user message" {
+			if id := forwardedAs(st, active[0].Name, st.LastUserSeq); id != "" {
+				b.WriteString(" The user's latest message already went to " + who + " verbatim (" + id + "), the moment it arrived. Add context with relay_send only if it lacks something it needs; otherwise yield.")
+			} else if userAddressedEagent(st, st.LastUserSeq) {
+				b.WriteString(" The user's latest message is addressed to you, not to " + who + ": do it yourself, then go back to relaying.")
+			} else {
+				b.WriteString(" Forward the user's latest message with relay_forward (verbatim) unless it only asks about the relay; answer that from relay_status in a note.")
+			}
 		}
 	}
 	for _, rel := range active {
@@ -1170,7 +1195,9 @@ func relaySteer(st *state.State, now time.Time, reason string) string {
 			fmt.Fprintf(&b, " When it ends a turn waiting on work of its own (a command, a render, a timer it set, a helper), send nothing and yield: it wakes itself when that work reports, and every message starts another turn. You are woken if it stays idle for %s.", roundDur(autopilotCheckAfter))
 		}
 	}
-	b.WriteString(" You are the relay: " + who + " does the work.")
+	if wake {
+		b.WriteString(" You are the relay: " + active[0].Who() + " does the work.")
+	}
 	return b.String()
 }
 

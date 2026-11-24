@@ -961,12 +961,12 @@ func (p *phone) isRemote() bool {
 	return p.remote
 }
 
-// PhoneStatus is the one-line description of the mirror given to the
-// narrator and shown by `eagent view`.
-func PhoneStatus(remote bool) string {
-	if remote {
-		return "The user reads you on their phone and has said they are away from the terminal (remote mode)"
-	}
+// PhoneStatus is the static one-line description of the mirror placed in the
+// narrator's system prompt and shown by `eagent view`. It does not depend on
+// RemoteMode so the narrator's cached system-prompt prefix is never busted when
+// Me() finishes at startup or RemoteMode toggles mid-session; remote-mode state
+// is surfaced in the observation stream via event.PhoneThread.
+func PhoneStatus() string {
 	return "The user also reads you on their phone"
 }
 

@@ -350,10 +350,10 @@ func TestTruncatedStreamIsRetried(t *testing.T) {
 }
 
 func TestMalformedArgsAreSanitisedOnReplay(t *testing.T) {
-	msgs := chatMessages(Request{Messages: []Message{
+	msgs, _ := chatMessages(Request{Messages: []Message{
 		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "delegate", Args: normalizeArgs("{")}}},
 		{Role: "tool", Results: []ToolResult{{CallID: "c1", Output: "rejected"}}},
-	}})
+	}}, true, "")
 	fn := msgs[0]["tool_calls"].([]map[string]any)[0]["function"].(map[string]any)
 	if !json.Valid([]byte(fn["arguments"].(string))) {
 		t.Fatalf("replayed arguments are not valid JSON: %s", fn["arguments"])
@@ -642,4 +642,201 @@ func TestResponsesReasoningTextInContentAndAnthropicInlineToolInput(t *testing.T
 			t.Fatalf("args = %s err=%v", resp.ToolCalls[0].Args, err)
 		}
 	})
+}
+
+func TestChatReasoningReplayPromptCacheKeyAndFallbacks(t *testing.T) {
+	longThink := strings.Repeat("step ", 1000) // > 4000 chars, must stay untruncated in Native
+
+	t.Run("streaming capture and same-host replay", func(t *testing.T) {
+		var bodies []map[string]any
+		srv := sseServer(t, func(w http.ResponseWriter, body map[string]any) {
+			bodies = append(bodies, body)
+			part1, _ := json.Marshal(longThink[:2500])
+			part2, _ := json.Marshal(longThink[2500:])
+			chunks := []string{
+				`{"model":"local-r","choices":[{"index":0,"delta":{"reasoning_content":` + string(part1) + `}}]}`,
+				`{"choices":[{"index":0,"delta":{"reasoning_content":` + string(part2) + `,"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]}`,
+				`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10}}`,
+			}
+			for _, ch := range chunks {
+				fmt.Fprintf(w, "data: %s\n\n", ch)
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		})
+		defer srv.Close()
+
+		c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "local-r", ReplayReasoning: true})
+		resp, err := c.Complete(context.Background(), Request{
+			CacheKey: "sess-1-orch",
+			Messages: []Message{{Role: "user", Text: "list files"}},
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Reasoning != longThink {
+			t.Fatalf("reasoning len=%d want %d", len(resp.Reasoning), len(longThink))
+		}
+		var nat chatNative
+		if err := json.Unmarshal(resp.Native, &nat); err != nil || nat.ReasoningContent != longThink || nat.Reasoning != "" {
+			t.Fatalf("native = %s err=%v", resp.Native, err)
+		}
+		if bodies[0]["prompt_cache_key"] != "sess-1-orch" {
+			t.Fatalf("prompt_cache_key = %v", bodies[0]["prompt_cache_key"])
+		}
+
+		// Same host + replay enabled => reasoning_content replayed verbatim.
+		req2 := Request{Messages: []Message{
+			{Role: "user", Text: "list files"},
+			{Role: "assistant", ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: ProtocolChat, NativeHost: srv.URL},
+			{Role: "tool", Results: []ToolResult{{CallID: "c1", Output: "a.go"}}},
+		}}
+		msgs, replayed := chatMessages(req2, true, srv.URL)
+		if !replayed || msgs[1]["reasoning_content"] != longThink {
+			t.Fatalf("expected reasoning_content replay: replayed=%v got=%v", replayed, msgs[1]["reasoning_content"])
+		}
+		// Disabled => omitted.
+		msgsNo, replayedNo := chatMessages(req2, false, srv.URL)
+		if replayedNo || msgsNo[1]["reasoning_content"] != nil {
+			t.Fatalf("expected no replay when disabled: replayed=%v msg=%v", replayedNo, msgsNo[1])
+		}
+		// Different host => omitted.
+		msgsHost, replayedHost := chatMessages(req2, true, "http://other.local:1234/v1")
+		if replayedHost || msgsHost[1]["reasoning_content"] != nil {
+			t.Fatalf("expected no replay on different host: replayed=%v msg=%v", replayedHost, msgsHost[1])
+		}
+	})
+
+	t.Run("non-streaming capture with reasoning field", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"harmony","choices":[{"message":{"role":"assistant","content":"hi","reasoning":"thought chain"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+		}))
+		defer srv.Close()
+		c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "harmony", ReplayReasoning: true})
+		resp, err := c.Complete(context.Background(), Request{Messages: []Message{{Role: "user", Text: "hi"}}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var nat chatNative
+		if err := json.Unmarshal(resp.Native, &nat); err != nil || nat.Reasoning != "thought chain" || nat.ReasoningContent != "" {
+			t.Fatalf("native = %s err=%v", resp.Native, err)
+		}
+		msgs, replayed := chatMessages(Request{Messages: []Message{
+			{Role: "user", Text: "hi"},
+			{Role: "assistant", Text: "hi", Native: resp.Native, NativeProtocol: ProtocolChat, NativeHost: srv.URL},
+			{Role: "user", Text: "next"},
+		}}, true, srv.URL)
+		if !replayed || msgs[1]["reasoning"] != "thought chain" || msgs[1]["reasoning_content"] != nil {
+			t.Fatalf("replayed=%v msg=%v", replayed, msgs[1])
+		}
+	})
+
+	t.Run("strict server 400 fallback for cache key and reasoning replay", func(t *testing.T) {
+		var calls int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			if _, has := body["prompt_cache_key"]; has {
+				w.WriteHeader(400)
+				fmt.Fprint(w, `{"error":{"message":"unknown parameter: prompt_cache_key"}}`)
+				return
+			}
+			for _, m := range body["messages"].([]any) {
+				if _, has := m.(map[string]any)["reasoning_content"]; has {
+					w.WriteHeader(422)
+					fmt.Fprint(w, `{"error":{"message":"extra inputs are not permitted: reasoning_content"}}`)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"model":"strict","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+		}))
+		defer srv.Close()
+
+		c := NewClient(Endpoint{Protocol: ProtocolChat, BaseURL: srv.URL, Model: "strict", ReplayReasoning: true})
+		c.MaxAttempts = 1
+		nat, _ := json.Marshal(chatNative{ReasoningContent: "thinking"})
+		req := Request{
+			CacheKey: "ck-1",
+			Messages: []Message{
+				{Role: "user", Text: "a"},
+				{Role: "assistant", Text: "b", Native: nat, NativeProtocol: ProtocolChat, NativeHost: srv.URL},
+				{Role: "user", Text: "c"},
+			},
+		}
+		resp, err := c.Complete(context.Background(), req, nil)
+		if err != nil || resp.Text != "ok" {
+			t.Fatalf("resp=%+v err=%v", resp, err)
+		}
+		if calls != 3 || !c.chatNoCacheKey.Load() || !c.chatNoReplayReasoning.Load() {
+			t.Fatalf("calls=%d noCacheKey=%v noReplay=%v", calls, c.chatNoCacheKey.Load(), c.chatNoReplayReasoning.Load())
+		}
+		// Latched flags mean the next call succeeds in a single HTTP request.
+		before := calls
+		if _, err := c.Complete(context.Background(), req, nil); err != nil {
+			t.Fatal(err)
+		}
+		if calls != before+1 {
+			t.Fatalf("expected 1 request after latching, got %d", calls-before)
+		}
+	})
+}
+
+func TestAnthropicCacheControlBreakpoints(t *testing.T) {
+	hasCC := func(msg map[string]any) (int, bool) {
+		blocks := msg["content"].([]map[string]any)
+		for i, b := range blocks {
+			if b["cache_control"] != nil {
+				return i, true
+			}
+		}
+		return -1, false
+	}
+
+	// Single user message still receives a breakpoint (no 1-turn cache miss).
+	one := anthropicMessages(Request{Messages: []Message{{Role: "user", Text: "hello"}}}, "")
+	if idx, ok := hasCC(one[0]); !ok || idx != 0 {
+		t.Fatalf("single message missing cache_control: %v", one)
+	}
+
+	// Multi-turn places breakpoints on BOTH msgs[len-2] and msgs[len-1],
+	// skipping trailing thinking blocks.
+	nativeWithTrailingThinking := json.RawMessage(`[
+		{"type":"text","text":"answer"},
+		{"type":"thinking","thinking":"hmm","signature":"sig"}
+	]`)
+	multi := anthropicMessages(Request{Messages: []Message{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", Native: nativeWithTrailingThinking, NativeProtocol: ProtocolAnthropic},
+		{Role: "user", Text: "q2"},
+	}}, "")
+	if len(multi) != 3 {
+		t.Fatalf("len=%d want 3", len(multi))
+	}
+	if _, ok := hasCC(multi[0]); ok {
+		t.Fatalf("msgs[0] should not carry cache_control: %v", multi[0])
+	}
+	if idx, ok := hasCC(multi[1]); !ok || idx != 0 {
+		t.Fatalf("msgs[1] should place cache_control on text block 0 (skipping thinking): idx=%d ok=%v msg=%v", idx, ok, multi[1])
+	}
+	if idx, ok := hasCC(multi[2]); !ok || idx != 0 {
+		t.Fatalf("msgs[2] should carry cache_control: idx=%d ok=%v msg=%v", idx, ok, multi[2])
+	}
+
+	// Assistant turn with only a thinking block must NOT get cache_control on thinking.
+	onlyThinking := json.RawMessage(`[{"type":"thinking","thinking":"only","signature":"sig"}]`)
+	thOnly := anthropicMessages(Request{Messages: []Message{
+		{Role: "user", Text: "q1"},
+		{Role: "assistant", Native: onlyThinking, NativeProtocol: ProtocolAnthropic},
+		{Role: "user", Text: "q2"},
+	}}, "")
+	if _, ok := hasCC(thOnly[1]); ok {
+		t.Fatalf("thinking-only message must not carry cache_control: %v", thOnly[1])
+	}
+	if _, ok := hasCC(thOnly[2]); !ok {
+		t.Fatalf("final user message should still carry cache_control: %v", thOnly[2])
+	}
 }

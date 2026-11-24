@@ -351,17 +351,33 @@ func anthropicMessages(req Request, host string) []map[string]any {
 			push("user", content)
 		}
 	}
-	// Cache breakpoint on the last block of the final message so the whole
-	// history is reusable next turn (the steering message is appended after
-	// this by the caller, inside the same final user message).
-	if len(msgs) >= 2 {
-		prev := msgs[len(msgs)-2]["content"].([]map[string]any)
-		if len(prev) > 0 {
-			last := prev[len(prev)-1]
-			if last["type"] != "thinking" && last["type"] != "redacted_thinking" {
-				last["cache_control"] = map[string]any{"type": "ephemeral"}
+	// Cache breakpoints on the final message and (when present) the one before
+	// it so both normal multi-turn loops (extending msgs[len-1]) and unrecorded
+	// checks (replacing msgs[len-1] while keeping msgs[len-2]) hit the cache.
+	// Along with system and the last tool, this stays within Anthropic's
+	// four-breakpoint limit.
+	markCacheable := func(msg map[string]any) {
+		blocks, _ := msg["content"].([]map[string]any)
+		for i := len(blocks) - 1; i >= 0; i-- {
+			b := blocks[i]
+			t, _ := b["type"].(string)
+			if t == "thinking" || t == "redacted_thinking" {
+				continue
 			}
+			if t == "text" {
+				if s, _ := b["text"].(string); s == "" {
+					continue
+				}
+			}
+			b["cache_control"] = map[string]any{"type": "ephemeral"}
+			return
 		}
+	}
+	if len(msgs) >= 1 {
+		markCacheable(msgs[len(msgs)-1])
+	}
+	if len(msgs) >= 2 {
+		markCacheable(msgs[len(msgs)-2])
 	}
 	return msgs
 }

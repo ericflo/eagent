@@ -678,16 +678,11 @@ func (r *Runtime) waitTool(c caller, taskIDs, handles []string, timeoutSeconds i
 	}
 }
 
-// toolListFor returns the tool list an actor is allowed to use.
-func (r *Runtime) toolListFor(actor string) []llm.Tool {
-	switch actor {
-	case event.ActorOrchestrator:
-		return r.orchTools
-	case event.ActorTask:
-		return r.taskTools
-	default:
-		return r.narrTools
-	}
+// orchestratorTools returns the orchestrator's active tool list for the current
+// session mode (relay tools beyond relay_start join on relay start; session
+// archive tools join after rollover). Loop goroutine.
+func (r *Runtime) orchestratorTools() []llm.Tool {
+	return tools.OrchestratorToolsFor(r.st.RelayMode(), len(r.st.Subsessions) > 1)
 }
 
 // recordAssistant appends the model response as an event and returns it.
@@ -696,9 +691,6 @@ func (r *Runtime) recordAssistant(actor, task string, resp *llm.Response, seenSe
 		Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 		ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
 		ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: seenSeq, Stop: resp.Stop,
-	}
-	if resp.Protocol == llm.ProtocolChat {
-		data.Native = nil // chat replays from text + tool calls
 	}
 	var ev event.Event
 	r.sync(func() { ev = r.append(event.New(event.Assistant, actor, data).WithTask(task)) })
@@ -720,11 +712,6 @@ func (r *Runtime) recordToolResult(actor, task string, tc event.ToolCall, out st
 	r.sync(func() {
 		r.append(event.New(event.ToolResult, actor, event.ToolResultData{CallID: tc.ID, Name: tc.Name, Output: out, IsError: isErr, Images: images}).WithTask(task))
 	})
-}
-
-// unknownToolResult rejects tools an actor does not have.
-func (r *Runtime) allowed(actor string, name string) bool {
-	return tools.Has(r.toolListFor(actor), name)
 }
 
 // jsonPreview renders arguments compactly for traces.

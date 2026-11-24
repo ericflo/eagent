@@ -58,12 +58,15 @@ var (
 )
 
 // narratorTrimAt is the narrator prompt size, in tokens, at which a relay
-// session's narrator view is shortened; narratorKeepChars is about how much
-// of its newest content stays. The view moves in rare steps, not with every
+// session's narrator view is shortened; narratorTrimAtNonRelay is the higher
+// threshold for non-relay sessions (which keep the original user request in
+// the trim recap for the final report). narratorKeepChars is about how much
+// of the newest content stays. The view moves in rare steps, not with every
 // call, so the cached prefix survives between them.
 var (
-	narratorTrimAt    = 40_000
-	narratorKeepChars = 48_000
+	narratorTrimAt         = 40_000
+	narratorTrimAtNonRelay = 60_000
+	narratorKeepChars      = 48_000
 )
 
 // noteStep records a step the agent took.
@@ -200,13 +203,16 @@ func (r *Runtime) flushQuietChecks() {
 	r.append(event.New(event.NarratorChecks, event.ActorNarrator, d))
 }
 
-// maybeTrimNarrator shortens a relay session's narrator view once its
-// prompt has grown past narratorTrimAt tokens. A relay's narrator passes on
-// what the agent reports as it comes and owes no report of the whole, so
-// what it said long ago can go. Other sessions keep everything for their
-// final report, and start afresh when the orchestrator does. Loop goroutine.
+// maybeTrimNarrator shortens the narrator view once its prompt grows past the
+// trim threshold (40k tokens for relay sessions, 60k for regular sessions),
+// replacing older observations with a compact recap so the prompt does not grow
+// unboundedly across long sessions. Loop goroutine.
 func (r *Runtime) maybeTrimNarrator(promptTokens int) {
-	if r.ending || promptTokens < narratorTrimAt || !r.st.RelayMode() {
+	limit := narratorTrimAtNonRelay
+	if r.st.RelayMode() {
+		limit = narratorTrimAt
+	}
+	if r.ending || promptTokens < limit {
 		return
 	}
 	from, recap, ok := r.st.NarratorTrimPoint(narratorKeepChars)
@@ -291,7 +297,6 @@ func (s checkSteer) text() string {
 	if len(s.inflight) > 0 {
 		fmt.Fprintf(&b, "In flight right now: %s. ", strings.Join(s.inflight, "; "))
 	}
-	b.WriteString("These lines and the log above them are all that is known about the work: describe only steps, checks and files that appear there, and if a call has not returned you do not know what it is doing. ")
 	switch {
 	case s.last == "":
 		fmt.Fprintf(&b, "The user has heard nothing from you in the %s since they asked: tell them now, in two or three sentences, what you understood the job to be and how it is being done.", roundDur(s.quiet))
@@ -301,9 +306,6 @@ func (s checkSteer) text() string {
 		fmt.Fprintf(&b, "The user has heard nothing for %s while work kept going: send a progress line now. Two or three sentences: what got done since you last spoke, what is happening now, anything that went wrong. Name the files, commands and numbers.", roundDur(s.quiet))
 	default:
 		fmt.Fprintf(&b, "The user last heard from you %s ago. Tell them what has happened since, in a sentence or two, with the files, commands and numbers that matter. Hold only if all of it is still the step you last described, or too slight to be worth a sentence yet.", roundDur(s.quiet))
-	}
-	if s.last != "" {
-		fmt.Fprintf(&b, " Your last message to the user (do not repeat it): %q", clipTail(s.last, 400))
 	}
 	b.WriteString(" Respond with exactly one tool call: send_message or hold.")
 	return b.String()

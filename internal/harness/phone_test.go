@@ -1031,7 +1031,7 @@ func TestWorkerAndNarratorRoutesFallBack(t *testing.T) {
 		case "task":
 			return reply{calls: []event.ToolCall{tc("complete_task", `{"status":"completed","summary":"built it"}`)}}
 		default:
-			if strings.Contains(all, "built") && !strings.Contains(all, "Done.") {
+			if strings.Contains(all, "built") && !strings.Contains(all, "delivered") {
 				return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done."}`)}}
 			}
 			return reply{calls: []event.ToolCall{tc("hold", `{}`)}}
@@ -1197,21 +1197,26 @@ func TestOrchestratorEditNudge(t *testing.T) {
 	}
 	evs, _ := store.Read(rt.sess.Path)
 	var steers []string
+	var toolResults int
+	nudgedAt := -1
 	for _, ev := range evs {
+		if ev.Type == event.ToolResult && ev.Actor == event.ActorOrchestrator {
+			toolResults++
+		}
 		if ev.Type == event.Steer && ev.Actor == event.ActorOrchestrator {
 			var d event.SteerData
 			_ = ev.Decode(&d)
 			steers = append(steers, d.Text)
+			if nudgedAt < 0 && strings.Contains(d.Text, "Delegate what remains") {
+				nudgedAt = toolResults
+			}
 		}
 	}
-	if len(steers) < orchestratorEditNudge+1 {
-		t.Fatalf("steers = %d", len(steers))
+	if nudgedAt < 0 {
+		t.Fatalf("no edit nudge emitted (steers=%v)", steers)
 	}
-	if strings.Contains(steers[1], "Delegate what remains") {
-		t.Fatal("nudged too early")
-	}
-	if !strings.Contains(steers[len(steers)-1], "Delegate what remains") {
-		t.Fatalf("no nudge in the last steer: %s", steers[len(steers)-1])
+	if nudgedAt < orchestratorEditNudge {
+		t.Fatalf("nudged too early: after %d tool calls", nudgedAt)
 	}
 }
 

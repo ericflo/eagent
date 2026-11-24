@@ -27,9 +27,11 @@ type Actor struct {
 	Model           string `json:"model"`
 	APIKeyEnv       string `json:"api_key_env"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	// ReplayReasoning sends OpenAI Responses models their encrypted
-	// reasoning back on later calls, as OpenAI recommends for tool loops.
-	// On by default; false trades continuity for smaller prompts.
+	// ReplayReasoning sends models their prior reasoning back on later
+	// calls (encrypted reasoning on OpenAI Responses; reasoning_content /
+	// reasoning on OpenAI Chat Completions) to preserve tool-loop continuity
+	// and prefix caching. On by default; false trades continuity for smaller
+	// prompts.
 	ReplayReasoning *bool `json:"replay_reasoning,omitempty"`
 	MaxTokens       int   `json:"max_tokens,omitempty"`
 	// ContextTokens is the model's usable window; the orchestrator rolls

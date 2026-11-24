@@ -441,8 +441,17 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 	// of what the narrator told the user. The cut moves rarely, so the
 	// prompt prefix stays stable between moves.
 	recap := ""
+	phoneRemote := false
 	if t := s.NarratorTrim; t != nil && len(events) > 0 && t.FromSeq >= events[0].Seq {
 		cut := sort.Search(len(events), func(i int) bool { return events[i].Seq > t.FromSeq })
+		for _, ev := range events[:cut] {
+			if ev.Type == event.PhoneThread {
+				var d event.PhoneThreadData
+				if ev.Decode(&d) == nil {
+					phoneRemote = d.RemoteMode
+				}
+			}
+		}
 		events, recap = events[cut:], t.Recap
 	}
 	results := map[string]event.ToolResultData{}
@@ -513,7 +522,22 @@ func (s *State) NarratorView(opts *ViewOptions) []llm.Message {
 		if ev.Actor == event.ActorNarrator {
 			continue // its own tool results, rendered above
 		}
-		obs := Observe(ev, opts.ObservationChars)
+		var obs string
+		if ev.Type == event.PhoneThread {
+			var d event.PhoneThreadData
+			if ev.Decode(&d) == nil {
+				ts := ev.Time.Local().Format("15:04:05")
+				if d.RemoteMode && !phoneRemote {
+					phoneRemote = true
+					obs = fmt.Sprintf("%s phone remote mode is on (the user is away from the terminal)", ts)
+				} else if !d.RemoteMode && phoneRemote {
+					phoneRemote = false
+					obs = fmt.Sprintf("%s phone remote mode is off (the user is back at the terminal)", ts)
+				}
+			}
+		} else {
+			obs = Observe(ev, opts.ObservationChars)
+		}
 		if obs == "" {
 			continue
 		}
@@ -587,9 +611,16 @@ func (s *State) NarratorTrimPoint(keepChars int) (from int64, recap string, ok b
 	}
 	from = events[cut].Seq
 	var said []string
+	var opening string
 	for _, ev := range s.currentEvents() {
 		if ev.Seq > from {
 			break
+		}
+		if opening == "" && !s.RelayMode() && ev.Type == event.UserMessage {
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
+				opening = clip(oneLine(d.Text), 400)
+			}
 		}
 		if ev.Type == event.NarratorMessage {
 			var d event.NarratorMessageData
@@ -602,6 +633,9 @@ func (s *State) NarratorTrimPoint(keepChars int) (from int64, recap string, ok b
 		said = said[len(said)-5:]
 	}
 	recap = fmt.Sprintf("[harness] To keep your view short, what happened before %s is no longer shown.", events[cut].Time.Local().Format("15:04:05"))
+	if opening != "" {
+		recap += " Original user request: " + opening + "."
+	}
 	if len(said) > 0 {
 		recap += " Up to then you had told the user, newest last:\n" + strings.Join(said, "\n")
 	}
@@ -664,10 +698,16 @@ func Observe(ev event.Event, maxChars int) string {
 			return "" // covered by their own events
 		}
 		label := "result"
+		limit := maxChars
 		if d.IsError {
 			label = "error"
+		} else {
+			switch d.Name {
+			case "bash", "bash_poll", "read_file", "list_dir", "session_read", "session_search":
+				limit = min(maxChars, 500)
+			}
 		}
-		return fmt.Sprintf("%s   %s %s: %s", ts, d.Name, label, clip(d.Output, maxChars))
+		return fmt.Sprintf("%s   %s %s: %s", ts, d.Name, label, clip(d.Output, limit))
 	case event.Note:
 		var d event.NoteData
 		_ = ev.Decode(&d)
@@ -711,7 +751,7 @@ func Observe(ev event.Event, maxChars int) string {
 		}
 		var d event.ProcStartData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s   started %s: %s", ts, d.Handle, clip(d.Command, 300))
+		return fmt.Sprintf("%s   started %s", ts, d.Handle)
 	case event.ProcExit:
 		if ev.Actor != event.ActorOrchestrator {
 			return ""
@@ -744,6 +784,13 @@ func Observe(ev event.Event, maxChars int) string {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s %s now using %s (%s)", ts, d.Actor, d.Model, d.Reason)
+	case event.PhoneThread:
+		var d event.PhoneThreadData
+		_ = ev.Decode(&d)
+		if d.RemoteMode {
+			return fmt.Sprintf("%s phone remote mode is on (the user is away from the terminal)", ts)
+		}
+		return ""
 	case event.RelayStart, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		return observeRelay(ev, maxChars, ts)
 	}

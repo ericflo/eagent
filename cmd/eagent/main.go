@@ -1200,7 +1200,7 @@ func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
 		}
 		phone := ""
 		if st.Phone != nil {
-			phone = harness.PhoneStatus(st.Phone.RemoteMode)
+			phone = harness.PhoneStatus()
 		}
 		system = set.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone})
 		msgs = st.NarratorView(nil)

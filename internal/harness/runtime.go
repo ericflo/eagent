@@ -98,8 +98,6 @@ type Runtime struct {
 	taskClient *llm.Client
 	narrClient *llm.Client
 
-	orchTools []llm.Tool
-	taskTools []llm.Tool
 	narrTools []llm.Tool
 	prompts   *prompts.Set
 
@@ -325,8 +323,6 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		files:          tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
 		bashEnv:        writeBashEnv(opts.Project),
 		archive:        tools.Archive{Path: sess.Path},
-		orchTools:      tools.OrchestratorTools(),
-		taskTools:      tools.TaskTools(),
 		narrTools:      tools.NarratorTools(),
 		loop:           make(chan func(), 1024),
 		ctx:            ctx, stop: cancel,
@@ -544,7 +540,7 @@ func (r *Runtime) append(ev event.Event) event.Event {
 
 // noteWake tracks which events should wake whom.
 func (r *Runtime) noteWake(ev event.Event) {
-	if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
+	if ev.Actor != event.ActorNarrator && ev.Type != event.PhoneThread && state.Observe(ev, 100) != "" {
 		r.narrWorthy = ev.Seq
 	}
 	if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {

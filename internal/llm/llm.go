@@ -40,9 +40,10 @@ type Endpoint struct {
 	// ReasoningEffort is passed through where the provider supports it
 	// ("none", "low", "medium", "high"). Empty means provider default.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	// ReplayReasoning sends a Responses API model its own encrypted
-	// reasoning items back on later calls (OpenAI's recommendation for tool
-	// loops; the harness turns it on by default).
+	// ReplayReasoning sends a model its own reasoning back on later turns
+	// (encrypted reasoning items on OpenAI Responses; reasoning_content on
+	// OpenAI Chat Completions) so multi-turn prefix caches stay intact.
+	// On by default.
 	ReplayReasoning bool `json:"replay_reasoning,omitempty"`
 	MaxTokens       int  `json:"max_tokens,omitempty"`
 	// Headers are extra request headers (e.g. OpenRouter attribution).
@@ -283,6 +284,12 @@ type Client struct {
 	// rejectsImages remembers that this model refused pictures, so later
 	// calls send the text alone instead of re-uploading and re-failing.
 	rejectsImages atomic.Bool
+	// chatNoCacheKey remembers that this Chat Completions endpoint rejected
+	// prompt_cache_key, so later calls omit it.
+	chatNoCacheKey atomic.Bool
+	// chatNoReplayReasoning remembers that this Chat Completions endpoint
+	// rejected assistant reasoning_content/reasoning on input.
+	chatNoReplayReasoning atomic.Bool
 }
 
 // NewClient returns a client with sensible defaults.

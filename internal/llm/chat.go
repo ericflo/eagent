@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,12 +17,26 @@ import (
 // nonce makes synthetic ids unique across responses.
 func nonce() string { return fmt.Sprintf("%x", time.Now().UnixNano()%0xFFFFFFF) }
 
+// chatNative holds provider-specific assistant reasoning for openai-chat
+// replay so prefix caches survive across turns on servers whose chat template
+// renders thinking in history (Loom, vLLM, SGLang, llama.cpp, DeepSeek).
+type chatNative struct {
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Reasoning        string `json:"reasoning,omitempty"`
+}
+
 // chat implements OpenAI-style Chat Completions with streaming. This is the
 // route for Together AI (GLM, DeepSeek) and any OpenAI-compatible server.
 func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Response, error) {
+	return c.chatTry(ctx, req, obs, 2)
+}
+
+func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallbacks int) (*Response, error) {
+	replayReasoning := c.Endpoint.ReplayReasoning && !c.chatNoReplayReasoning.Load()
+	msgs, replayedReasoning := chatMessages(req, replayReasoning, c.Endpoint.BaseURL)
 	body := map[string]any{
 		"model":          c.Endpoint.Model,
-		"messages":       chatMessages(req),
+		"messages":       msgs,
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"max_tokens":     c.maxTokens(req),
@@ -43,12 +58,40 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 	if e := c.Endpoint.ReasoningEffort; e != "" {
 		body["reasoning_effort"] = e
 	}
+	sentCacheKey := false
+	if req.CacheKey != "" && !c.chatNoCacheKey.Load() {
+		body["prompt_cache_key"] = req.CacheKey
+		sentCacheKey = true
+	}
 	var headers map[string]string
 	if c.Endpoint.APIKey != "" {
 		headers = map[string]string{"Authorization": "Bearer " + c.Endpoint.APIKey}
 	}
 	resp, err := c.post(ctx, "/chat/completions", body, headers)
 	if err != nil {
+		var ae *APIError
+		if fallbacks > 0 && errors.As(err, &ae) && (ae.Status == 400 || ae.Status == 422) {
+			if sentCacheKey && chatFieldRejected(ae.Body, "prompt_cache_key") {
+				c.chatNoCacheKey.Store(true)
+				return c.chatTry(ctx, req, obs, fallbacks-1)
+			}
+			if replayedReasoning && (chatFieldRejected(ae.Body, "reasoning_content") || chatFieldRejected(ae.Body, "reasoning")) {
+				c.chatNoReplayReasoning.Store(true)
+				return c.chatTry(ctx, req, obs, fallbacks-1)
+			}
+			// Generic unknown-field error (e.g. strict schema validation):
+			// shed prompt_cache_key first, then reasoning replay.
+			if chatGenericExtraFieldError(ae.Body) {
+				if sentCacheKey {
+					c.chatNoCacheKey.Store(true)
+					return c.chatTry(ctx, req, obs, fallbacks-1)
+				}
+				if replayedReasoning {
+					c.chatNoReplayReasoning.Store(true)
+					return c.chatTry(ctx, req, obs, fallbacks-1)
+				}
+			}
+		}
 		return nil, err
 	}
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
@@ -61,12 +104,13 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 		args     strings.Builder
 	}
 	var (
-		text      strings.Builder
-		reasoning strings.Builder
-		calls     = map[int]*partial{}
-		out       = &Response{}
-		finish    string
-		lastIdx   int // for deltas that carry no index: continue the last call unless a new one is announced
+		text           strings.Builder
+		reasoning      strings.Builder
+		reasoningField string
+		calls          = map[int]*partial{}
+		out            = &Response{}
+		finish         string
+		lastIdx        int // for deltas that carry no index: continue the last call unless a new one is announced
 	)
 	err = c.readSSE(ctx, resp, func(ev sseEvent) error {
 		data := strings.TrimSpace(string(ev.Data))
@@ -132,9 +176,13 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 			}
 			if r := ch.Delta.ReasoningContent; r != nil && *r != "" {
 				reasoning.WriteString(*r)
+				reasoningField = "reasoning_content"
 				obs.reasoning(*r)
 			} else if r := ch.Delta.Reasoning; r != nil && *r != "" {
 				reasoning.WriteString(*r)
+				if reasoningField == "" {
+					reasoningField = "reasoning"
+				}
 				obs.reasoning(*r)
 			}
 			for _, tc := range ch.Delta.ToolCalls {
@@ -200,6 +248,9 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 	}
 	out.Text = text.String()
 	out.Reasoning = reasoning.String()
+	if out.Reasoning != "" {
+		out.Native = encodeChatNative(reasoningField, out.Reasoning)
+	}
 	if len(out.ToolCalls) == 0 && finish != "length" {
 		if parsed, rest := ParseTextToolCalls(out.Text); len(parsed) > 0 {
 			out.ToolCalls = parsed
@@ -224,8 +275,10 @@ func (c *Client) chat(ctx context.Context, req Request, obs *Observer) (*Respons
 }
 
 // chatMessages renders provider-neutral history as chat-completions messages.
-func chatMessages(req Request) []map[string]any {
+// It also reports whether any assistant message carried replayed reasoning.
+func chatMessages(req Request, replayReasoning bool, host string) ([]map[string]any, bool) {
 	var msgs []map[string]any
+	replayedReasoning := false
 	if req.System != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": req.System})
 	}
@@ -249,6 +302,18 @@ func chatMessages(req Request) []map[string]any {
 				am["content"] = m.Text
 			} else {
 				am["content"] = nil
+			}
+			if replayReasoning && len(m.Native) > 0 && m.NativeProtocol == ProtocolChat && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+				var cn chatNative
+				if json.Unmarshal(m.Native, &cn) == nil {
+					if cn.ReasoningContent != "" {
+						am["reasoning_content"] = cn.ReasoningContent
+						replayedReasoning = true
+					} else if cn.Reasoning != "" {
+						am["reasoning"] = cn.Reasoning
+						replayedReasoning = true
+					}
+				}
 			}
 			if len(m.ToolCalls) > 0 {
 				var tcs []map[string]any
@@ -275,7 +340,39 @@ func chatMessages(req Request) []map[string]any {
 			}
 		}
 	}
-	return msgs
+	return msgs, replayedReasoning
+}
+
+func encodeChatNative(field, reasoning string) json.RawMessage {
+	if reasoning == "" {
+		return nil
+	}
+	var cn chatNative
+	if field == "reasoning" {
+		cn.Reasoning = reasoning
+	} else {
+		cn.ReasoningContent = reasoning
+	}
+	b, err := json.Marshal(cn)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func chatFieldRejected(body, field string) bool {
+	b := strings.ToLower(body)
+	return strings.Contains(b, field)
+}
+
+func chatGenericExtraFieldError(body string) bool {
+	b := strings.ToLower(body)
+	for _, k := range []string{"unknown field", "unrecognized", "extra_forbidden", "extra inputs are not permitted", "additional properties", "unexpected field", "unsupported parameter"} {
+		if strings.Contains(b, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // argsString renders tool-call arguments as the JSON string the wire wants.
@@ -379,9 +476,12 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 	if ch.Message.Content != nil {
 		out.Text = *ch.Message.Content
 	}
-	out.Reasoning = ch.Message.ReasoningContent
-	if out.Reasoning == "" {
+	if ch.Message.ReasoningContent != "" {
+		out.Reasoning = ch.Message.ReasoningContent
+		out.Native = encodeChatNative("reasoning_content", out.Reasoning)
+	} else if ch.Message.Reasoning != "" {
 		out.Reasoning = ch.Message.Reasoning
+		out.Native = encodeChatNative("reasoning", out.Reasoning)
 	}
 	for n, tc := range ch.Message.ToolCalls {
 		id := tc.ID

@@ -87,7 +87,7 @@ func (r *Runtime) closeInterrupted() {
 	}
 	r.lastOrchSeen = 0
 	for _, ev := range r.st.Events {
-		if ev.Actor != event.ActorNarrator && state.Observe(ev, 100) != "" {
+		if ev.Actor != event.ActorNarrator && ev.Type != event.PhoneThread && state.Observe(ev, 100) != "" {
 			r.narrWorthy = ev.Seq
 		}
 		if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {

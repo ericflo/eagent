@@ -144,7 +144,7 @@ func (r *Runtime) narratorTurn(reason string, check *progressCheck) string {
 	r.sync(func() {
 		mustSpeak = r.narrSaidSeq <= r.st.LastUserSeq
 		if r.phone != nil {
-			phoneLine = PhoneStatus(r.phone.isRemote())
+			phoneLine = PhoneStatus()
 		}
 		relayWho = r.relayWho()
 		if check != nil {

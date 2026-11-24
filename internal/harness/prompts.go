@@ -61,71 +61,85 @@ func (r *Runtime) facts() string {
 
 // ---- steering ------------------------------------------------------------
 
-// steerOrchestrator is appended as the final user message and never
-// persisted, so the cached prefix stays intact.
+// steerOrchestrator produces a compact steering note when there is dynamic
+// state the orchestrator needs (wake status, changed working directory,
+// running tasks/processes/schedules, relay status, edit/loop/context warnings).
+// On routine mid-turn tool calls with nothing actionable to add, it returns ""
+// so no synthetic user message is injected between tool results and the next
+// assistant turn (saving tokens and preserving interleaved thinking).
 // orchestratorEditNudge is how many direct file edits earn the reminder.
 const orchestratorEditNudge = 8
 
-func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls, maxCalls int, workDir, project string) string {
+func steerOrchestrator(st *state.State, now time.Time, ctxTokens, rolloverTokens int, reason string, calls, maxCalls int, workDir, lastSteerDir, project string, autopilotChanged bool) string {
+	var body strings.Builder
+	wake := calls == 1
+	if workDir != "" && workDir != project && (wake || workDir != lastSteerDir) {
+		fmt.Fprintf(&body, " Working directory: %s (a cd that stuck; the project root is %s).", workDir, project)
+	}
+	if wake {
+		running := st.RunningTasks()
+		if len(running) > 0 {
+			var ids []string
+			for _, t := range running {
+				ids = append(ids, fmt.Sprintf("%s (%s, %s)", t.ID, t.Status, since(t.Created, now)))
+			}
+			fmt.Fprintf(&body, " Tasks in flight: %s.", strings.Join(ids, ", "))
+		}
+		if procs := st.RunningProcs(); len(procs) > 0 {
+			var hs []string
+			for _, p := range procs {
+				if p.Actor == "orchestrator" && p.Task == "" {
+					hs = append(hs, p.Handle)
+				}
+			}
+			if len(hs) > 0 {
+				fmt.Fprintf(&body, " Your processes still running: %s.", strings.Join(hs, ", "))
+			}
+		}
+		if sc := st.ActiveSchedules(); len(sc) > 0 {
+			var ss []string
+			for _, s := range sc {
+				ss = append(ss, fmt.Sprintf("%s %q", s.ID, s.Spec))
+			}
+			fmt.Fprintf(&body, " Schedules: %s.", strings.Join(ss, ", "))
+		}
+	}
+	if edits := st.OrchestratorEdits(); edits >= orchestratorEditNudge && (wake || edits == orchestratorEditNudge || (edits-orchestratorEditNudge)%4 == 0) {
+		fmt.Fprintf(&body, " You have written or edited files yourself %d times in this context; implementation is the task worker's job and costs far less there. Delegate what remains with `delegate` and keep to reading, verifying, and one-line fixes.", edits)
+	}
+	if rolloverTokens > 0 && ctxTokens >= rolloverTokens*70/100 {
+		fmt.Fprintf(&body, " Context: %dk of %dk tokens before a dossier reset.", ctxTokens/1000, rolloverTokens/1000)
+	}
+	if maxCalls > 0 && calls >= maxCalls {
+		fmt.Fprintf(&body, " You have made %d consecutive calls this turn; if you are looping or polling, delegate or use wait/yield instead.", calls)
+	}
+	if rs := relaySteer(st, now, reason, wake, autopilotChanged); rs != "" {
+		body.WriteString(rs)
+	}
+	if body.Len() == 0 {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s]", now.Local().Format("15:04:05"))
 	if reason != "" {
 		fmt.Fprintf(&b, " wake: %s.", reason)
 	}
-	if workDir != "" && workDir != project {
-		fmt.Fprintf(&b, " Working directory: %s (a cd that stuck; the project root is %s).", workDir, project)
-	}
-	running := st.RunningTasks()
-	if len(running) > 0 {
-		var ids []string
-		for _, t := range running {
-			ids = append(ids, fmt.Sprintf("%s (%s, %s)", t.ID, t.Status, since(t.Created, now)))
-		}
-		fmt.Fprintf(&b, " Tasks in flight: %s.", strings.Join(ids, ", "))
-	}
-	if procs := st.RunningProcs(); len(procs) > 0 {
-		var hs []string
-		for _, p := range procs {
-			if p.Actor == "orchestrator" && p.Task == "" {
-				hs = append(hs, p.Handle)
-			}
-		}
-		if len(hs) > 0 {
-			fmt.Fprintf(&b, " Your processes still running: %s.", strings.Join(hs, ", "))
-		}
-	}
-	if edits := st.OrchestratorEdits(); edits >= orchestratorEditNudge {
-		fmt.Fprintf(&b, " You have written or edited files yourself %d times in this context; implementation is the task worker's job and costs far less there. Delegate what remains with `delegate` and keep to reading, verifying, and one-line fixes.", edits)
-	}
-	if sc := st.ActiveSchedules(); len(sc) > 0 {
-		var ss []string
-		for _, s := range sc {
-			ss = append(ss, fmt.Sprintf("%s %q", s.ID, s.Spec))
-		}
-		fmt.Fprintf(&b, " Schedules: %s.", strings.Join(ss, ", "))
-	}
-	if ctxTokens > 0 {
-		fmt.Fprintf(&b, " Context: %dk of %dk tokens before a dossier reset.", ctxTokens/1000, rolloverTokens/1000)
-	}
-	if maxCalls > 0 && calls >= maxCalls {
-		fmt.Fprintf(&b, " You have made %d consecutive calls this turn; if you are looping or polling, delegate or use wait/yield instead.", calls)
-	}
-	b.WriteString(relaySteer(st, now, reason))
-	b.WriteString(" Continue. Respond with tool calls; your text is not shown to the user.")
+	b.WriteString(body.String())
 	return b.String()
 }
 
 func steerTask(t *state.Task, turn, maxTurns int, now time.Time, workDir, project string) string {
+	remaining := maxTurns - turn
+	if remaining > 10 {
+		return ""
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[harness %s] Task %s, call %d of %d.", now.Local().Format("15:04:05"), t.ID, turn, maxTurns)
-	switch remaining := maxTurns - turn; {
-	case remaining <= 0:
+	if remaining <= 0 {
 		b.WriteString(" THIS IS YOUR LAST CALL. Call complete_task now with an honest report: what is done, what is verified, what is not. Any other tool call will be discarded and the task will be reported as failed.")
 		return b.String()
-	case remaining <= 10:
-		fmt.Fprintf(&b, " Only %d calls remain: stop expanding scope, finish the essential piece, and call complete_task with an honest report of what is done and what is not.", remaining)
 	}
-	b.WriteString(" Respond with tool calls; call complete_task when finished.")
+	fmt.Fprintf(&b, " Only %d calls remain: stop expanding scope, finish the essential piece, and call complete_task with an honest report of what is done and what is not.", remaining)
 	return b.String()
 }
 
@@ -193,15 +207,15 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 		b.WriteString(" The user dismissed your last question without answering. That is not an answer: nothing was decided, and they will write when they are ready. Do not ask it again, do not ask it in other words, and do not tell them what will be assumed.")
 	}
 	if !interactive && !phone {
-		b.WriteString(" This is a non-interactive session: ask_user cannot receive an answer, so prefer send_message.")
+		b.WriteString(" Non-interactive: use send_message (ask_user cannot receive an answer).")
 	} else if !interactive {
-		b.WriteString(" This session has no terminal, but the user reads you on their phone: ask_user works and the answer arrives as a user message.")
+		b.WriteString(" No terminal, phone mirror active: ask_user works via phone.")
 	}
 	if running := st.RunningTasks(); len(running) > 0 {
 		fmt.Fprintf(&b, " %d task(s) are still running.", len(running))
 	}
 	if len(inflight) > 0 {
-		fmt.Fprintf(&b, " In flight right now: %s. These lines are the whole of what is known about the work in progress: describe only steps, checks, and files that appear in them or in the log, and if a call has not returned you do not know what it is doing. If something has run for more than a minute or two, tell the user which one, by name, how long, and that the wait is expected.", strings.Join(inflight, "; "))
+		fmt.Fprintf(&b, " In flight right now: %s. These lines are the whole of what is known; if something has run over a minute or two, tell the user which one, by name, and how long.", strings.Join(inflight, "; "))
 	}
 	if reason != wakeFinal && reason != wakeDone && reason != wakeUser && !st.Ended {
 		// A relayed agent in a turn is work going on, though the
@@ -215,9 +229,6 @@ func steerNarrator(st *state.State, now time.Time, reason string, interactive, p
 		case lastMessage != "":
 			fmt.Fprintf(&b, " The user last heard from you %s ago.", roundDur(quietFor))
 		}
-	}
-	if lastMessage != "" {
-		fmt.Fprintf(&b, " Your last message to the user (do not repeat it): %q", clipTail(lastMessage, 400))
 	}
 	b.WriteString(" Respond with exactly one tool call.")
 	return b.String()

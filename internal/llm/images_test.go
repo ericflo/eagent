@@ -24,7 +24,7 @@ func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
 	req := Request{Messages: []Message{{Role: "user", Text: "look", Images: []Image{{Path: img, MediaType: "image/png"}}}}}
 
 	// Chat completions: a content array with an image_url data URL.
-	msgs := chatMessages(req)
+	msgs, _ := chatMessages(req, false, "")
 	parts, ok := msgs[0]["content"].([]map[string]any)
 	if !ok || len(parts) != 2 || parts[1]["type"] != "image_url" || !strings.HasPrefix(parts[1]["image_url"].(map[string]any)["url"].(string), "data:image/png;base64,") {
 		t.Fatalf("chat content = %v", msgs[0]["content"])
@@ -37,8 +37,8 @@ func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
 	}
 	// A missing file is skipped, leaving text only.
 	gone := Request{Messages: []Message{{Role: "user", Text: "look", Images: []Image{{Path: filepath.Join(dir, "nope.png")}}}}}
-	if parts := chatMessages(gone)[0]["content"].([]map[string]any); len(parts) != 1 {
-		t.Fatalf("missing image should be skipped: %v", parts)
+	if goneMsgs, _ := chatMessages(gone, false, ""); len(goneMsgs[0]["content"].([]map[string]any)) != 1 {
+		t.Fatalf("missing image should be skipped: %v", goneMsgs[0]["content"])
 	}
 
 	// A model that rejects images gets the text alone on a second try.

@@ -9,6 +9,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/tools"
 )
 
 // startQueuedTasks launches workers up to the concurrency limit. Loop only.
@@ -77,6 +78,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 	if t.Kind == "dossier" {
 		maxTurns = max(maxTurns, 40)
 	}
+	toolList := tools.TaskToolsFor(t.Kind)
 	textOnly := 0
 	lastText := ""   // the worker's last words, for the out-of-turns messages
 	streakText := "" // words within the current run of tool-less replies
@@ -104,8 +106,14 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 				return
 			}
 			steer = steerTask(cur, turn, maxTurns, time.Now(), r.workDir(t.ID), r.projectPath())
-			r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: steer}).WithTask(t.ID))
+			if steer != "" {
+				r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: steer}).WithTask(t.ID))
+			}
 			msgs = r.st.TaskView(t.ID)
+			if steer == "" && len(msgs) > 0 && msgs[len(msgs)-1].Role == "assistant" {
+				r.append(event.New(event.Steer, event.ActorTask, event.SteerData{Text: "[harness] Continue."}).WithTask(t.ID))
+				msgs = r.st.TaskView(t.ID)
+			}
 			seenSeq = r.st.LastSeq()
 			// The call is bracketed in the log so the narrator can say how long
 			// the worker's current call has been running, from evidence.
@@ -116,7 +124,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 		}
 		req := llm.Request{
 			System:   r.taskSystem(),
-			Messages: msgs, Tools: r.taskTools, CacheKey: r.sess.ID + "-task-" + t.ID,
+			Messages: msgs, Tools: toolList, CacheKey: r.sess.ID + "-task-" + t.ID,
 		}
 		resp, err := r.completeActor(ctx, event.ActorTask, t.ID, req)
 		r.sync(func() {
@@ -164,7 +172,7 @@ func (r *Runtime) runTask(ctx context.Context, t state.Task) (status, summary st
 				r.recordToolResult(event.ActorTask, t.ID, tc, "interrupted", true)
 				continue
 			}
-			if !r.allowed(event.ActorTask, tc.Name) {
+			if !tools.Has(toolList, tc.Name) {
 				r.recordToolResult(event.ActorTask, t.ID, tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 				continue
 			}

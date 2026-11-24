@@ -470,3 +470,67 @@ func TestDismissClosesQuestionWithoutWaking(t *testing.T) {
 		t.Fatal("the user's message wakes the orchestrator")
 	}
 }
+
+func TestNarratorPhoneRemoteModeObserveAndToggle(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "hi"}))
+	// Initial connect with remote_mode=false adds no noise.
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: false}))
+	v0 := Replay(b.events).NarratorView(nil)
+	if strings.Contains(v0[0].Text, "remote mode") {
+		t.Fatalf("initial non-remote phone thread should stay silent: %q", v0[0].Text)
+	}
+	// Turning remote mode on surfaces once in observations.
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: true}))
+	v1 := Replay(b.events).NarratorView(nil)
+	if !strings.Contains(v1[0].Text, "phone remote mode is on") {
+		t.Fatalf("missing remote mode on notice: %q", v1[0].Text)
+	}
+	// Turning remote mode back off surfaces once.
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: false}))
+	v2 := Replay(b.events).NarratorView(nil)
+	if !strings.Contains(v2[0].Text, "phone remote mode is off") {
+		t.Fatalf("missing remote mode off notice: %q", v2[0].Text)
+	}
+}
+
+func TestNarratorObserveDedupAndToolResultCap(t *testing.T) {
+	procEv := event.New(event.ProcStart, event.ActorOrchestrator, event.ProcStartData{Handle: "p1", Command: "go test -v ./..."})
+	procEv.Time = time.Now()
+	if got := Observe(procEv, 1500); !strings.HasSuffix(got, "started p1") || strings.Contains(got, "go test") {
+		t.Fatalf("ProcStart should not repeat the command: %q", got)
+	}
+
+	big := strings.Repeat("a", 1200)
+	bashOK := event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "bash", Output: big})
+	bashOK.Time = time.Now()
+	if got := Observe(bashOK, 1500); len(got) > 560 {
+		t.Fatalf("non-error bash ToolResult should be capped around 500 chars, got len=%d", len(got))
+	}
+	bashErr := event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c2", Name: "bash", Output: big, IsError: true})
+	bashErr.Time = time.Now()
+	if got := Observe(bashErr, 1500); len(got) < 1200 {
+		t.Fatalf("error ToolResult should keep full maxChars, got len=%d", len(got))
+	}
+}
+
+func TestNarratorTrimPreservesOpeningRequestForNonRelay(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "Build a fast prefix-cached server"}))
+	for i := 0; i < 6; i++ {
+		id := "n" + string(rune('a'+i))
+		b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone " + id + " " + strings.Repeat("z", 350)}))
+		seen := b.seq
+		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
+		b.add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "said " + id}))
+		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
+	}
+	st := Replay(b.events)
+	_, recap, ok := st.NarratorTrimPoint(800)
+	if !ok {
+		t.Fatal("expected non-relay trim point")
+	}
+	if !strings.Contains(recap, "Original user request: Build a fast prefix-cached server.") {
+		t.Fatalf("non-relay recap should preserve opening user request: %q", recap)
+	}
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/tools"
 )
 
 // startOrchestratorTurn launches a turn goroutine. Loop goroutine only.
@@ -86,21 +87,40 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 	// harness already reminded it once.
 	userTurn := reason == "user message"
 	routed, unroutedNudged := false, false
+	lastSteerDir := ""
+	lastAutopilot := ""
 	for {
 		if ctx.Err() != nil {
 			return "interrupted"
 		}
 		calls++
 		var msgs []llm.Message
+		var toolList []llm.Tool
 		var seenSeq int64
 		var steer, system string
 		r.sync(func() {
-			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls, r.cfg.MaxOrchestratorCallsPerTurn, r.workDir(""), r.projectPath())
-			r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: steer}))
+			workDir := r.workDir("")
+			project := r.projectPath()
+			if calls == 1 {
+				lastSteerDir = project
+			}
+			apSig := relayAutopilotSignature(r.st)
+			apChanged := calls > 1 && apSig != lastAutopilot && apSig != ""
+			steer = steerOrchestrator(r.st, time.Now(), r.st.ContextTokens(event.ActorOrchestrator), r.cfg.RolloverTokens, reason, calls, r.cfg.MaxOrchestratorCallsPerTurn, workDir, lastSteerDir, project, apChanged)
+			lastSteerDir = workDir
+			lastAutopilot = apSig
+			if steer != "" {
+				r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: steer}))
+			}
 			msgs = r.st.OrchestratorView()
+			if steer == "" && len(msgs) > 0 && msgs[len(msgs)-1].Role == "assistant" {
+				r.append(event.New(event.Steer, event.ActorOrchestrator, event.SteerData{Text: "[harness] Continue."}))
+				msgs = r.st.OrchestratorView()
+			}
 			seenSeq = r.st.LastSeq()
 			r.orchCallAt = time.Now()
 			system = r.orchestratorSystem()
+			toolList = r.orchestratorTools()
 		})
 		if len(msgs) == 0 {
 			return "nothing to do"
@@ -108,7 +128,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 		reason = ""
 		req := llm.Request{
 			System:   system,
-			Messages: msgs, Tools: r.orchTools, CacheKey: r.sess.ID + "-orchestrator",
+			Messages: msgs, Tools: toolList, CacheKey: r.sess.ID + "-orchestrator",
 		}
 		resp, err := r.completeOrchestrator(ctx, req)
 		if err != nil {
@@ -174,7 +194,7 @@ func (r *Runtime) orchestratorTurn(reason string) string {
 				r.recordToolResult(event.ActorOrchestrator, "", tc, "interrupted", true)
 				continue
 			}
-			if !r.allowed(event.ActorOrchestrator, tc.Name) {
+			if !tools.Has(toolList, tc.Name) {
 				r.recordToolResult(event.ActorOrchestrator, "", tc, fmt.Sprintf("unknown tool %q", tc.Name), true)
 				continue
 			}
