@@ -173,7 +173,13 @@ type relayLaunch struct {
 	replaces, endOld string
 	old              relaySeat
 	held             []heldSend
-	launch           func(relay.Spec, string, bool) (relaySeat, relay.Started, error)
+	// wasActive: the relay it replaces was running when this began (a
+	// restart can also bring back one that was stopped). stopped is why
+	// the relay was stopped while this ran (relay_control stop, Stop
+	// session); the new agent is then not kept. Both under relays.mu.
+	wasActive bool
+	stopped   string
+	launch    func(relay.Spec, string, bool) (relaySeat, relay.Started, error)
 
 	seat    relaySeat
 	started relay.Started
@@ -221,6 +227,9 @@ func (r *Runtime) prepareLaunch(profile, dir, name string, resume bool, pick rel
 // news is not taken for the new one's. Loop goroutine.
 func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	job.replaces = replaces
+	if rel := r.st.Relays[replaces]; replaces != "" && rel != nil && rel.Active() {
+		job.wasActive = true
+	}
 	r.relays.mu.Lock()
 	if r.relays.launching == nil {
 		r.relays.launching = map[string]*relayLaunch{}
@@ -254,12 +263,15 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, held []heldSend, err
 		}
 	}
 	held, job.held = job.held, nil
+	stopped := job.stopped
 	r.relays.mu.Unlock()
 	err = job.err
-	if err == nil && job.replaces != "" && job.endOld == "" {
-		if rel := r.st.Relays[job.replaces]; rel == nil || !rel.Active() {
-			// Stopped while it started again: it stays stopped.
-			err = fmt.Errorf("%s was stopped while it started again", job.replaces)
+	if err == nil {
+		rel := r.st.Relays[job.replaces]
+		gone := job.replaces != "" && job.endOld == "" && job.wasActive && (rel == nil || !rel.Active())
+		if stopped != "" || gone {
+			// Stopped while it started (again): it stays stopped.
+			err = fmt.Errorf("%s was stopped while it started", firstNonEmpty(job.replaces, job.name))
 			seat := job.seat
 			go func() { _ = seat.Kill() }()
 		}
@@ -297,6 +309,19 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, held []heldSend, err
 	r.syncRelaySettings()
 	r.watchSeat(job.name, job.seat)
 	return job.name, held, nil
+}
+
+// stopLaunches marks the starts under way for a relay name (every one,
+// for "") as stopped: what they launch is killed when it is up rather
+// than kept. Loop goroutine.
+func (r *Runtime) stopLaunches(name, reason string) {
+	r.relays.mu.Lock()
+	defer r.relays.mu.Unlock()
+	for n, job := range r.relays.launching {
+		if name == "" || n == name {
+			job.stopped = reason
+		}
+	}
 }
 
 // holdSend keeps a send for a relay that is starting (again), to type once
@@ -502,6 +527,7 @@ func (r *Runtime) reattachRelays() []string {
 // Other ways a session ends leave them running for a resume to pick up.
 // Loop goroutine.
 func (r *Runtime) stopSession(reason string) {
+	r.stopLaunches("", reason)
 	for _, rel := range r.st.ActiveRelays() {
 		if seat := r.relays.get(rel.Name); seat != nil {
 			if err := seat.Kill(); err != nil {
@@ -1029,6 +1055,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				r.relays.drop(rel.Name, seat)
 			}
 			r.sync(func() {
+				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
 				r.armAutopilots()
 			})
