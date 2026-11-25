@@ -20,6 +20,16 @@ func r4Count(texts []string, s string) int {
 	return n
 }
 
+// r4CodexTurned waits until Codex's reply to the task is on the record.
+func r4CodexTurned(t *testing.T, rt *Runtime) {
+	t.Helper()
+	waitFor(t, "Codex's turn on the record", func() bool {
+		n := 0
+		rt.sync(func() { n = rt.st.Relays["codex"].Turns })
+		return n == 1
+	})
+}
+
 // r4Chain starts with Codex given the task, then runs steps (each a
 // switch to a profile or a restart of the relay now running) whose agents
 // never become ready, so none of their briefs is typed; the correction is
@@ -42,6 +52,7 @@ func r4Chain(t *testing.T, steps []string) (typed []string, said []string) {
 	waitFor(t, "the task typed into Codex", func() bool {
 		return len(seats[0].(*lingerSeat).sentTexts()) == 1
 	})
+	r4CodexTurned(t, rt)
 	current := "codex"
 	var outs []<-chan string
 	for i, step := range steps {
@@ -161,6 +172,7 @@ func TestPlainSwitchTypesTheSameBrief(t *testing.T) {
 	rt := newLaunchRuntime(t)
 	userSays(t, rt, r4Task)
 	waitFor(t, "the task typed", func() bool { return len(old.sentTexts()) == 1 })
+	r4CodexTurned(t, rt)
 	var dir string
 	rt.sync(func() { dir = rt.st.Relays["codex"].Dir })
 	out := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
