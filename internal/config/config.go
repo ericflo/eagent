@@ -355,9 +355,11 @@ func AutoRolloverWithin(window, maxTokens, fixed int) int {
 	if room <= 0 {
 		return n
 	}
+	// In hundreds: on a window this small a thousand is a good part of
+	// the room the conversation has.
 	limit := max(fixed, 0) + room*3/4
-	if limit/1000*1000 > max(fixed, 0) {
-		limit = limit / 1000 * 1000
+	if limit/100*100 > max(fixed, 0) {
+		limit = limit / 100 * 100
 	}
 	return min(n, limit)
 }

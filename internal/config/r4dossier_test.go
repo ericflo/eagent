@@ -18,8 +18,8 @@ func TestAutoRolloverWithinFitsSmallWindowsOnly(t *testing.T) {
 	if got <= 7300 || got >= 16384-2048 {
 		t.Fatalf("a 16,384-token window with a 2,048-token reply restarts at %d", got)
 	}
-	if got != 12000 {
-		t.Fatalf("restarts at %d, want 12000 (three quarters of the room past the fixed part)", got)
+	if got != 12500 {
+		t.Fatalf("restarts at %d, want 12500 (three quarters of the room past the fixed part, in hundreds)", got)
 	}
 	// A window too small for the fixed part: nothing can be made to fit.
 	if got := AutoRolloverWithin(8192, 2048, 7300); got != AutoRollover(8192, 2048) {

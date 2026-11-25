@@ -130,6 +130,7 @@ type Runtime struct {
 	relayOps sync.WaitGroup
 
 	turns          turnState             // the model loop (loop.go); loop-owned
+	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
 	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl *runtimecontrol.Controller
@@ -428,6 +429,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		// so no client is sent a picture the record says was refused.
 		req = req.WithRefused(known)
 		resp, err := client.Complete(ctx, req, obs)
+		r.calibrate(who, req, resp, err)
 		// Pictures the provider would not take, whether the call then
 		// went through without them or failed for another reason.
 		// Written down, so the conversation is rendered without them by

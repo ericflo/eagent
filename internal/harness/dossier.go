@@ -145,7 +145,91 @@ func (r *Runtime) rolloverTokens() int {
 	}
 	window, reply := r.window()
 	_, fixed := r.inputRoom()
+	if _, small := r.room(); small {
+		fixed = r.provider(fixed)
+	}
 	return config.AutoRolloverWithin(window, reply, fixed)
+}
+
+// A small route's sizes are held against what its provider counts, which
+// can be well above eagent's estimate (llm.EstimateTokens): lists of line
+// numbers, file names and JSON split into many more tokens than prose. The
+// ratio is learned from eagent's own calls (calibrate): the provider's
+// reported prompt size over the estimate of the same request, and, where a
+// provider reports no sizes, from a request the estimate said fit and the
+// provider refused as too long. Until a call has taught it (the first call
+// of a run, a provider that reports nothing and has refused nothing) the
+// ratio is 1. It is never taken below 1, so a provider that counts less
+// than the estimate leaves the sizes as the estimate gives them, nor above
+// 4. Ordinary routes never use it.
+const (
+	scaleUnit = 1000
+	scaleMax  = 4 * scaleUnit
+)
+
+// scale is the ratio learned so far, in thousandths. Loop goroutine only.
+func (r *Runtime) scale() int {
+	return max(r.tokenScale, scaleUnit)
+}
+
+// provider is an estimate in the provider's count; estimate is the
+// reverse. Loop goroutine only.
+func (r *Runtime) provider(est int) int    { return est * r.scale() / scaleUnit }
+func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale() }
+
+// calibrate learns from one of eagent's calls how its provider counts
+// against the estimate (see scale). Any goroutine: what it learns is
+// applied on the loop. A request with pictures teaches nothing (the
+// estimate does not see them), nor one too small to measure by.
+func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err error) {
+	if who != event.ActorEagent {
+		return
+	}
+	est := llm.EstimateTokens(req.System) + toolTokens()
+	for _, m := range req.Messages {
+		if len(m.Images) > 0 {
+			return
+		}
+		est += llm.EstimateTokens(m.Text)
+		for _, c := range m.ToolCalls {
+			est += llm.EstimateTokens(c.Name + string(c.Args))
+		}
+		for _, res := range m.Results {
+			est += llm.EstimateTokens(res.Output)
+		}
+	}
+	if est < 1000 {
+		return
+	}
+	var ae *llm.APIError
+	switch {
+	case err == nil && resp != nil && resp.Usage.Input > 0:
+		k := min(resp.Usage.Input*scaleUnit/est, scaleMax)
+		r.post(func() { r.tokenScale = k })
+	case errors.As(err, &ae) && ae.ContextOverflow():
+		// Refused as too long: the provider counts at least the room it
+		// has for input in this request. A tenth more is held back, as
+		// the refusal says only that it was over.
+		r.post(func() {
+			input, _ := r.inputRoom()
+			if k := min(input*scaleUnit*11/10/est, scaleMax); k > r.scale() {
+				r.tokenScale = k
+			}
+		})
+	}
+}
+
+// smallBudget is how a small route's room is shared out, in the
+// provider's count: span is what the conversation may fill past the system
+// prompt and the tools before it restarts (the threshold, or what the
+// window takes as input if that is less), of which the dossier takes at
+// most a third and what is carried over whole at most a sixth, which
+// leaves at least half for the conversation to grow in. Loop goroutine
+// only.
+func (r *Runtime) smallBudget() (span, dossier, carry int) {
+	input, fixed := r.inputRoom()
+	span = max(0, min(r.rolloverTokens(), input)-r.provider(fixed))
+	return span, span / 3, span / 6
 }
 
 // inputRoom is what one request on the route in use can hold as input (its
@@ -197,7 +281,12 @@ func (r *Runtime) needsDossier() bool {
 		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
-			r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
+			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
+				input, fixed := r.inputRoom()
+				r.ui.Log("this model's window leaves %d tokens for a request, and its provider counts eagent's system prompt and tools alone as about %d of them, so no restart can make room; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md", input, r.provider(fixed))
+			} else {
+				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
+			}
 			// The user is told, once: it is theirs to fix, and nothing
 			// else will say why eagent grows slower and dearer.
 			if !r.toldFull() {
@@ -225,7 +314,10 @@ func (r *Runtime) restartFull(limit int) bool {
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
 		fixed += llm.EstimateTokens(v[0].Text)
 	}
-	return fixed >= limit
+	// Room for one message beside the opening, in the provider's count:
+	// without it another restart could only open on the same full prompt.
+	span, _, carry := r.smallBudget()
+	return span <= 0 || r.provider(fixed)+carry >= limit
 }
 
 // fullNotice opens the message that tells the user the conversation cannot
@@ -357,6 +449,11 @@ func (r *Runtime) dossierFromFiles(job *dossierJob, reason string) {
 	// thousand tokens to spare: on a small route its oldest lines give way
 	// (session_search finds them), so the pass can be written at all.
 	input, fixed := r.inputRoom()
+	if _, small := r.room(); small {
+		// The provider's count, brought back to the estimate's.
+		input = r.estimate(input)
+		data.Files = r.fileTableChained("")
+	}
 	used := fixed + llm.EstimateTokens(r.prompts.Render("DOSSIER.md", data)) + 1000
 	for _, m := range msgs {
 		used += llm.EstimateTokens(m.Text)
@@ -377,11 +474,11 @@ const dossierUnseenBytes = 80_000
 // the dossier (dossierBody) and room to go on before the next restart.
 // Loop goroutine only.
 func (r *Runtime) carryBytes() int {
-	room, small := r.room()
-	if !small {
+	if _, small := r.room(); !small {
 		return dossierUnseenBytes
 	}
-	return room / 6 * 7 / 2
+	_, _, carry := r.smallBudget()
+	return r.estimate(carry) * 7 / 2
 }
 
 // smallRoom is the room below which a route is small: what a request can
@@ -396,6 +493,13 @@ func (r *Runtime) room() (int, bool) {
 	input, fixed := r.inputRoom()
 	room := max(0, input-fixed)
 	return room, room < smallRoom
+}
+
+// smallRoute reports that the route in use is small (room). Loop
+// goroutine only.
+func (r *Runtime) smallRoute() bool {
+	_, small := r.room()
+	return small
 }
 
 // unseenBytes sizes what the record holds after the last look. Loop
@@ -758,13 +862,16 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 	room, small := r.room()
 	limit := room / 2
 	if small {
-		limit = room / 3
+		_, d, _ := r.smallBudget()
+		limit = r.estimate(d)
 	}
 	body := strings.TrimSpace(text) + "\n\n" + r.dossierFacts(job.covers, next)
 	if llm.EstimateTokens(body) <= limit {
 		return body
 	}
+	level := 0
 	for i, lim := range factLevels[1:] {
+		level = i + 1
 		if by == "harness" && !job.adopt {
 			switch {
 			case i < 2:
@@ -778,7 +885,17 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 			break
 		}
 	}
-	r.ui.Log("dossier: the model's window leaves the dossier about %d tokens; its facts give the older messages and turn ends by place (%d tokens)", limit, llm.EstimateTokens(body))
+	n := llm.EstimateTokens(body)
+	switch file, line, _, linked := r.chainLink(); {
+	case level == len(factLevels)-1 && n > limit:
+		r.ui.Log("dossier: written at its narrowest and still %d tokens (by eagent's estimate) of the %d it may take; the briefing itself is most of it", n, limit)
+	case level == len(factLevels)-1:
+		r.ui.Log("dossier: written at its narrowest (%d tokens of %d): what came before is left to the briefing at %s:%d, and the rest is given by place", n, limit, file, line)
+	case factLevels[level].chain && linked:
+		r.ui.Log("dossier: the model's window leaves the dossier about %d tokens; it leaves the record before %s:%d to the briefing there and gives older messages by place (%d tokens)", limit, file, line, n)
+	default:
+		r.ui.Log("dossier: the model's window leaves the dossier about %d tokens; its facts give the older messages and turn ends by place (%d tokens)", limit, n)
+	}
 	return body
 }
 
@@ -1203,9 +1320,14 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 // between in a line each, the newest midLines of them, the rest by place;
 // the latest turns turn ends, and with turnPlaces the earlier ones by
 // place (else they are left to session_search, as they always were).
+//
+// With chain, what came before the briefing the conversation opened with
+// is left to that briefing (chainLink): the files before it as one range,
+// and only the agents, messages and turn ends since it. With ranges, runs
+// of consecutive places are written as one (lines 9-14).
 type factLimits struct {
 	head, tail, chars, midLines, midChars, turns int
-	turnPlaces                                   bool
+	turnPlaces, chain, ranges                    bool
 }
 
 // factLevels are the bounds a dossier's facts are written within, widest
@@ -1215,13 +1337,74 @@ type factLimits struct {
 // middle messages give way first, to their places, then the latest are
 // fewer and shorter, and the agent's turn ends the same. Nothing given up
 // is left without its file and line.
+//
+// From the third level on, the record before the conversation's own
+// briefing is left to that briefing, which maps it (chainLink): each
+// briefing covers everything before it, by its own lists or by the one it
+// points at in turn, back to the start. So the narrowest level does not
+// grow with the record: it holds one conversation's worth of places and
+// the pointer.
 var factLevels = []factLimits{
-	{dossierUserHead, dossierUserTail, dossierUserChars, dossierUserMidLines, dossierUserMidChars, dossierTurns, false},
-	{dossierUserHead, dossierUserTail, dossierUserChars, 40, dossierUserMidChars, dossierTurns, true},
-	{dossierUserHead, 10, 600, 0, dossierUserMidChars, 10, true},
-	{1, 3, 300, 0, dossierUserMidChars, 3, true},
-	{1, 1, 200, 0, dossierUserMidChars, 1, true},
-	{0, 0, 0, 0, 0, 0, true},
+	{dossierUserHead, dossierUserTail, dossierUserChars, dossierUserMidLines, dossierUserMidChars, dossierTurns, false, false, false},
+	{dossierUserHead, dossierUserTail, dossierUserChars, 40, dossierUserMidChars, dossierTurns, true, false, true},
+	{dossierUserHead, dossierUserTail, dossierUserChars, 40, dossierUserMidChars, dossierTurns, true, true, true},
+	{dossierUserHead, 10, 600, 0, dossierUserMidChars, 10, true, true, true},
+	{1, 3, 300, 0, dossierUserMidChars, 3, true, true, true},
+	{1, 1, 200, 0, dossierUserMidChars, 1, true, true, true},
+	{0, 0, 0, 0, 0, 0, true, true, true},
+}
+
+// factsHeader opens the facts of every dossier the one loop writes.
+const factsHeader = "FROM EAGENT'S OWN RECORDS"
+
+// chainLink is the briefing the conversation opened with, as a place,
+// when it can stand for the record before it: one the one loop wrote
+// (by the model or by the harness, as a rollover or an upgrade), with its
+// facts, which say what it covers. Such a briefing lists every file, agent
+// and message from the user up to the last event it took in, or points at
+// the briefing before it for those, and so on back to the start. A
+// briefing the earlier design wrote carries no facts and is not one.
+// Called while the next dossier is written (the new file is open and not
+// yet briefed, so the conversation is still the old one) or asked for.
+// Loop goroutine only.
+func (r *Runtime) chainLink() (file string, line int, covers int64, ok bool) {
+	conv := r.st.Conversation()
+	if conv == nil || !conv.Briefed {
+		return "", 0, 0, false
+	}
+	for _, ev := range r.st.Events {
+		if ev.Seq < conv.StartSeq || ev.Type != event.Dossier {
+			continue
+		}
+		var d event.DossierData
+		if ev.Source.File == "" || ev.Decode(&d) != nil || d.TaskID != "" || !(d.CoversSeq > 0 || d.CoversNone) || !strings.Contains(d.Text, factsHeader) {
+			return "", 0, 0, false
+		}
+		return ev.Source.File, ev.Source.Line, d.CoversSeq, true
+	}
+	return "", 0, 0, false
+}
+
+// fileTableChained is fileTable with the files before the one the
+// conversation's briefing sits in given as one range, left to that
+// briefing, which lists them (chainLink). Loop goroutine only.
+func (r *Runtime) fileTableChained(opens string) string {
+	full := r.fileTable(opens)
+	file, line, _, ok := r.chainLink()
+	if !ok {
+		return full
+	}
+	files := r.recordFiles()
+	cut := 0
+	for cut < len(files) && files[cut].name != file {
+		cut++
+	}
+	rows := strings.Split(full, "\n")
+	if cut == 0 || cut == len(files) || len(rows) != len(files) {
+		return full
+	}
+	head := fmt.Sprintf("- %s to %s, %d files: the record before the briefing at %s:%d, which lists each of them (or names the briefing before it that does); session_read opens any of their lines", files[0].name, files[cut-1].name, cut, file, line)
+	return head + "\n" + strings.Join(rows[cut:], "\n")
 }
 
 // recordPlace is a line of a record file.
@@ -1230,19 +1413,30 @@ type recordPlace struct {
 	n    int
 }
 
-// byPlace lists places by file alone: "- WHAT, F lines 3, 9".
-func byPlace(b *strings.Builder, what string, places []recordPlace) {
+// byPlace lists places by file alone: "- WHAT, F lines 3, 9", or with
+// ranges "- WHAT, F lines 3-5, 9" for runs of consecutive lines.
+func byPlace(b *strings.Builder, what string, places []recordPlace, ranges bool) {
 	var file string
-	for i, p := range places {
+	for i := 0; i < len(places); i++ {
+		p := places[i]
+		end := i
+		for ranges && end+1 < len(places) && places[end+1].file == p.file && places[end+1].n == places[end].n+1 {
+			end++
+		}
+		at := fmt.Sprint(p.n)
+		if end > i {
+			at = fmt.Sprintf("%d-%d", p.n, places[end].n)
+		}
+		i = end
 		if p.file != file {
-			if i > 0 {
+			if file != "" {
 				b.WriteString("\n")
 			}
 			file = p.file
-			fmt.Fprintf(b, "- %s, %s lines %d", what, file, p.n)
+			fmt.Fprintf(b, "- %s, %s lines %s", what, file, at)
 			continue
 		}
-		fmt.Fprintf(b, ", %d", p.n)
+		fmt.Fprintf(b, ", %s", at)
 	}
 	if len(places) > 0 {
 		b.WriteString("\n")
@@ -1252,17 +1446,33 @@ func byPlace(b *strings.Builder, what string, places []recordPlace) {
 // dossierFactsWith is dossierFacts within lim. Loop goroutine only.
 func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "---\nFROM EAGENT'S OWN RECORDS (exact, as of %s)\n", r.when(time.Now()))
+	fmt.Fprintf(&b, "---\n"+factsHeader+" (exact, as of %s)\n", r.when(time.Now()))
+	var since int64 // with chain: what came before is left to the briefing named here
+	if lim.chain {
+		if file, line, covers, ok := r.chainLink(); ok {
+			since = covers
+			fmt.Fprintf(&b, "\nEARLIER: the record before the briefing at %s:%d is mapped by it. It lists every file, agent, message from the user and turn end up to then, or names the briefing before it that does, and so on back to the start: read it with session_read to go further back. Below is what came after it.\n", file, line)
+		}
+	}
 
 	b.WriteString("\nTHE RECORD'S FILES, oldest first (session_read opens any file:line; session_search searches them all)\n")
-	b.WriteString(r.fileTable(opens) + "\n")
+	if lim.chain {
+		b.WriteString(r.fileTableChained(opens) + "\n")
+	} else {
+		b.WriteString(r.fileTable(opens) + "\n")
+	}
 
 	b.WriteString("\nAGENTS\n")
 	if len(r.st.RelayOrder) == 0 {
 		b.WriteString("(none has been started)\n")
 	}
+	earlier := 0
 	for _, name := range r.st.RelayOrder {
 		rel := r.st.Relays[name]
+		if since > 0 && !rel.Active() && rel.StartSeq <= since {
+			earlier++ // stopped, and in the briefing named above
+			continue
+		}
 		fmt.Fprintf(&b, "- %s: %s (profile %s) in %s; terminal %s %s", rel.Name, firstNonEmpty(rel.Label, rel.Who()), rel.Profile, rel.Dir, rel.Host, rel.Target)
 		if rel.Model != "" || rel.Effort != "" {
 			fmt.Fprintf(&b, "; model %s", firstNonEmpty(rel.Model, "its own default"))
@@ -1296,6 +1506,9 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 			fmt.Fprintf(&b, "  Usage: %s\n", limitLine(rel.Who(), *rel.Limit))
 		}
 	}
+	if earlier > 0 {
+		fmt.Fprintf(&b, "(%d more, stopped, are in the briefing named above)\n", earlier)
+	}
 
 	type line struct {
 		head, text, file string
@@ -1305,6 +1518,9 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 	for _, ev := range r.st.Events {
 		if ev.Seq > covers {
 			break
+		}
+		if ev.Seq <= since {
+			continue
 		}
 		at := r.when(ev.Time)
 		if src := ev.Source.String(); src != "" {
@@ -1395,7 +1611,7 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 			for _, m := range mid[:places] {
 				at = append(at, recordPlace{m.file, m.n})
 			}
-			byPlace(&b, "by place only", at)
+			byPlace(&b, "by place only", at, lim.ranges)
 		}
 		for _, m := range mid[places:] {
 			fmt.Fprintf(&b, "- [%s] %s\n", m.head, clipRunes(oneLine(m.text, lim.midChars), lim.midChars))
@@ -1423,7 +1639,7 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 					at = append(at, recordPlace{m.file, m.n})
 				}
 			}
-			byPlace(&b, "earlier turn ends by place", at)
+			byPlace(&b, "earlier turn ends by place", at, lim.ranges)
 		}
 		for _, m := range turns {
 			fmt.Fprintf(&b, "- [%s] %s\n", m.head, m.text)
