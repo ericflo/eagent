@@ -646,7 +646,14 @@ func (r *Runtime) maybeEnd() {
 		r.ui.Idle(r.st.Waiting())
 		return
 	}
-	if len(r.st.ActiveRelays()) > 0 {
+	// unanswerable: a question is open, and nobody can answer it while the
+	// session runs: there is no terminal and no phone. eagent was told
+	// that asking ends such a session until the user resumes it (the
+	// prompt, and ask_user's own result), so it ends even with an agent
+	// running. The agent keeps running in its own terminal, and the
+	// resumed session picks it up.
+	unanswerable := r.st.Question != nil && r.phone == nil
+	if len(r.st.ActiveRelays()) > 0 && !unanswerable {
 		return
 	}
 	if len(r.st.ActiveSchedules()) > 0 {

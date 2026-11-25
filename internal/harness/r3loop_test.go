@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // refusedSends returns the results of send_message calls that were refused
@@ -225,5 +227,32 @@ func TestPhoneSaysTheSessionIsBeingRereadDuringADossier(t *testing.T) {
 	release()
 	if !shown {
 		t.Fatalf("the phone never said the session was being reread; it showed %v", fp.statuses())
+	}
+}
+
+// A session with no terminal and no phone cannot be answered while it
+// runs. eagent is told that asking ends such a session until the user
+// resumes it, and so it does, with exit 2, while the agent goes on running
+// in its own terminal for the resumed session to pick up.
+func TestAQuestionNobodyCanAnswerEndsTheSessionAndLeavesTheAgent(t *testing.T) {
+	rt, ui, seat := batchExit(t, 2, brief, "Both are ready. Merge to main, or open a pull request?", func(_ string, msgs []map[string]any) reply {
+		if strings.Contains(lastUserText(msgs), "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" {
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
+		}
+		return hold()
+	})
+	if ui.askedCount() != 1 {
+		t.Fatalf("the question was shown %d times", ui.askedCount())
+	}
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.Replay(evs)
+	if st.EndReason != "awaiting-input" || st.Question == nil {
+		t.Fatalf("end reason %q, question %v; want awaiting-input with the question open", st.EndReason, st.Question)
+	}
+	if seat.wasKilled() || len(st.ActiveRelays()) != 1 {
+		t.Fatalf("the agent was stopped (killed %v, %d active): it has to be there for the resumed session", seat.wasKilled(), len(st.ActiveRelays()))
 	}
 }
