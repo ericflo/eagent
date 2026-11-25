@@ -60,6 +60,11 @@ type Options struct {
 	// Answer can supply. It travels into the appended user.message or
 	// user.answer event so caps survive a resume.
 	PromptClient *clientcaps.Caps
+	// PromptPhoneID, PromptRoute and PromptDelivery are, for a Prompt the
+	// user sent from the phone, that thread message's id and the composer's
+	// "to eagent / to the agent" and "queue / interrupt / after this turn"
+	// choices, as a running session reads them off the message.
+	PromptPhoneID, PromptRoute, PromptDelivery string
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string

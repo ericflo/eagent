@@ -24,6 +24,10 @@ type PhoneMessage struct {
 	ID          string
 	Text        string
 	Attachments []event.Attachment
+	// Meta is the message's own meta, where the app puts the composer's
+	// route and delivery and the client's capabilities; the session that
+	// takes the message reads them there, as it does when it is running.
+	Meta map[string]any
 }
 
 // ResumeHost is a long-lived process that can reopen finished sessions.
