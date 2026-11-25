@@ -67,10 +67,15 @@ var (
 	// The pass reads for dossierPassTime; then the model is told to write
 	// with what it has, and the writing has dossierWriteTime more. That is
 	// one deadline for the whole pass (every call, the wait before a call
-	// is made again, the writing): at it the harness writes the briefing.
-	// One failed call is made again after dossierErrorPause.
+	// is made again, the writing). The writing time is two calls long: a
+	// call begun in the reading time runs its full time (it may be the
+	// model writing its briefing unasked), and a writing call asked for
+	// after it still has a call's time of its own. A pass that reaches the
+	// deadline with a draft in hand keeps the draft; with none, the
+	// harness writes the briefing. One failed call is made again after
+	// dossierErrorPause.
 	dossierPassTime   = 15 * time.Minute
-	dossierWriteTime  = 4 * time.Minute
+	dossierWriteTime  = 2 * dossierTimeout
 	dossierErrorPause = 5 * time.Second
 )
 
@@ -386,13 +391,24 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 	lookedAt, dropped := 0, false
 	// readEnd is when the writer is told to write; passEnd is when the pass
 	// is over whatever it is doing. A call made before the writer is told
-	// may run at most half the writing time past readEnd, so a lookup that
-	// is slow to come back cannot take the writing's time.
+	// may run at most half the writing time past readEnd (a whole call,
+	// so nothing that was going to finish is cut off), which leaves a
+	// writing call asked for after it the other half.
 	readEnd := time.Now().Add(dossierPassTime)
 	passEnd := readEnd.Add(dossierWriteTime)
+	// settle ends a pass that cannot go on: its time ran out, or the model
+	// failed twice. A draft that was sent back for another try is kept as
+	// it stands, as one that came back wrong twice is: a briefing with a
+	// thin or partly wrong map still beats the harness's.
+	settle := func() dossierResult {
+		if !res.ok && len(res.text) >= dossierMinChars {
+			res.ok, res.noMap = true, noMapReason(res.text, job.lines)
+		}
+		return res
+	}
 	for res.calls < dossierMaxCalls {
 		bound := passEnd
-		if !last {
+		if !last && !rejected {
 			bound = readEnd.Add(dossierWriteTime / 2)
 		}
 		deadline := time.Now().Add(dossierTimeout)
@@ -408,9 +424,9 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			}
 			if deadline.Equal(bound) && !time.Now().Before(bound) {
 				// The pass's time ran out during the call.
-				if last {
+				if last || rejected {
 					r.ui.Log("dossier: the pass ran out of time before a briefing was written")
-					return res
+					return settle()
 				}
 				last = true
 				msgs = withNote(msgs, "[eagent] The time for looking things up is over, and your last call was cut off. Write the briefing now from what is above, as your whole reply, with no tool call.")
@@ -439,10 +455,10 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 					r.ui.Log("dossier: the conversation is too long to write in; writing from the record")
 					continue
 				}
-				return res
+				return settle()
 			}
 			if retried || time.Now().Add(dossierErrorPause).After(passEnd) {
-				return res
+				return settle()
 			}
 			// One hiccup does not cost the session its map: the call is
 			// made once more before the harness writes what it can.
