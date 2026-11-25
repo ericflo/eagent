@@ -43,6 +43,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 	sendSeq := map[string]int64{}
 	var receipts []relayReceipt
 	phoneIDs := map[int64]string{}
+	mirrored := map[int64]string{} // terminal and web messages: the thread message showing each
 	active := map[string]bool{}
 	set := func(seq int64, status string) {
 		for i := range receipts {
@@ -64,6 +65,11 @@ func (p *phone) loadReceipts(r *Runtime) {
 				if !active[d.Name] {
 					delete(active, d.Name)
 				}
+			}
+		case event.PhoneMirror:
+			var d event.PhoneMirrorData
+			if ev.Decode(&d) == nil && d.Seq > 0 {
+				mirrored[d.Seq] = d.MessageID
 			}
 		case event.UserMessage:
 			var d event.UserMessageData
@@ -99,6 +105,13 @@ func (p *phone) loadReceipts(r *Runtime) {
 	}
 	if len(receipts) > maxReceipts {
 		receipts = receipts[len(receipts)-maxReceipts:]
+	}
+	for i := range receipts {
+		// The copy of a terminal or web message is recorded after the
+		// message (once its post returns), so it is matched here.
+		if receipts[i].phoneID == "" {
+			receipts[i].phoneID = mirrored[receipts[i].seq]
+		}
 	}
 	p.mu.Lock()
 	if p.sendSeq == nil {

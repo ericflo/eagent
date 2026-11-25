@@ -179,6 +179,11 @@ func (r *Runtime) startPhone() {
 	host, _ := os.Hostname()
 	meta := routeMeta(r)
 	meta["project"], meta["cwd"], meta["host"] = project, workDir, host
+	// The agent as it is now. The header and controls otherwise wait for
+	// its next change of state, which may never come: one that exited
+	// while eagent was stopped, or that finished its turn meanwhile, would
+	// show as still working. nil clears an agent that is gone.
+	meta["relay"] = r.relayThreadMeta()
 	// The first call proves the token and learns the account's settings,
 	// creates the thread, and anchors the reply poll on a message we own.
 	p.enqueue(func(ctx context.Context) {
@@ -252,6 +257,9 @@ func (r *Runtime) startPhone() {
 			p.mirror1(promptSeq, msg.ID) // so that its receipt has a message to sit under
 		}
 		p.mu.Unlock()
+		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
+			p.recordMirror(r, promptSeq, msg.ID)
+		}
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
@@ -266,6 +274,9 @@ func (r *Runtime) startPhone() {
 					p.mirror1(promptSeq, m2.ID)
 				}
 				p.mu.Unlock()
+				if promptSeq > 0 {
+					p.recordMirror(r, promptSeq, m2.ID)
+				}
 			}
 		}
 		// Thread meta the app renders as chips: where the session runs and on what.
@@ -301,6 +312,14 @@ func (r *Runtime) startPhone() {
 	// is queued behind the post above, which gives the message its id.
 	if promptSeq > 0 {
 		for _, ev := range r.st.Events {
+			if ev.Seq == promptSeq && ev.Type == event.UserMessage {
+				// Held for eagent: userMessage set no receipt, there being
+				// no mirror yet.
+				var d event.UserMessageData
+				if ev.Decode(&d) == nil && d.Held != "" && len(r.st.ActiveRelays()) > 0 {
+					p.setReceipt(r, promptSeq, "eagent")
+				}
+			}
 			if ev.Seq > promptSeq && (ev.Type == event.RelaySend || ev.Type == event.RelayDelivered) {
 				p.observeRelay(r, ev)
 			}
@@ -336,6 +355,18 @@ func (p *phone) withdrawAnswered(r *Runtime, evs []event.Event) {
 		for _, fid := range cards {
 			_ = p.client.Cancel(ctx, fid) // already resolved is fine
 		}
+	})
+}
+
+// recordMirror writes down which thread message shows a user message, so a
+// resumed session still knows where that message's receipt goes. Not with
+// p.mu held: it waits for room on the loop.
+func (p *phone) recordMirror(r *Runtime, seq int64, id string) {
+	r.post(func() {
+		if r.ending {
+			return
+		}
+		r.append(event.New(event.PhoneMirror, event.ActorHarness, event.PhoneMirrorData{Seq: seq, MessageID: id}))
 	})
 }
 
@@ -580,6 +611,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				}
 				p.mirrored[ev.Seq] = msg.ID
 				p.mu.Unlock()
+				p.recordMirror(r, ev.Seq, msg.ID)
 			}
 		})
 	}
