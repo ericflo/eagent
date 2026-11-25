@@ -256,3 +256,95 @@ func TestAQuestionNobodyCanAnswerEndsTheSessionAndLeavesTheAgent(t *testing.T) {
 		t.Fatalf("the agent was stopped (killed %v, %d active): it has to be there for the resumed session", seat.wasKilled(), len(st.ActiveRelays()))
 	}
 }
+
+// A reply that is sent back for another try is a call of the conversation
+// like any other. When it is the first call after a restart, its prompt is
+// the conversation's first prompt: the guard against restarting a
+// conversation that was too long from the start must go by it, and not by
+// the next call's, which carries the exchange on top. And what the running
+// session counts is what a resumed one would read back from the record.
+func TestASentBackFirstCallIsTheConversationsFirstCall(t *testing.T) {
+	var prompt atomic.Int64
+	var stage, passes atomic.Int32
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	brain := func(_ string, msgs []map[string]any) reply {
+		if ask := dossierRequest(msgs); ask != "" {
+			p := places(ask)
+			r := reply{text: briefing(p[:min(len(p), 4)])}
+			if passes.Add(1) == 2 {
+				r.block = gate // held, so the test can look at the conversation it closes
+			}
+			return r
+		}
+		switch stage.Load() {
+		case 1:
+			// The first call of the restarted conversation: under the
+			// limit, and plain text, so it is sent back.
+			stage.Store(2)
+			return reply{text: "Codex is idle.", prompt: 19_000}
+		case 2:
+			// The second carries the exchange and is over the limit.
+			stage.Store(3)
+			r := say("Codex is idle.")
+			r.prompt = 21_000
+			return r
+		}
+		r := hold()
+		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
+			r = say("Here.")
+		}
+		if p := prompt.Swap(0); p > 0 {
+			r.prompt = int(p)
+		}
+		return r
+	}
+	s := startSession(t, brief, brain, nil)
+	t.Cleanup(release)
+	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	s.settled()
+	prompt.Store(21_000)
+	s.type_("@e hello")
+	s.waitFor("the first dossier", func() bool { return len(s.dossiers()) == 1 })
+	s.settled()
+
+	stage.Store(1)
+	said := s.ui.messageCount()
+	s.type_("@e what is Codex doing?")
+	s.waitFor("the answer in the new conversation", func() bool { return s.ui.messageCount() > said })
+	// The conversation grew past the limit, so the next thing to weigh
+	// restarts it again. The user is not told that a restart cannot help:
+	// it started under the limit.
+	s.type_("@e and now?")
+	gaveUp := func() bool {
+		for _, m := range s.ui.said() {
+			if strings.HasPrefix(m, fullNotice) {
+				return true
+			}
+		}
+		return false
+	}
+	s.waitFor("the second dossier pass", func() bool { return passes.Load() == 2 || gaveUp() })
+	if gaveUp() {
+		t.Fatal("the user was told a restart cannot help, in a conversation that started under the limit")
+	}
+	// While the pass is held: what the running session counts for the
+	// conversation, and what a resumed one would read back.
+	var calls, first int
+	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, s.rt.turns.firstPrompt })
+	if first != 19_000 || calls < 2 {
+		t.Fatalf("the conversation counts %d calls and a first prompt of %d, want at least 2 and 19000", calls, first)
+	}
+	evs, err := store.Read(s.rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again turnState
+	again.init(state.Replay(evs))
+	if again.subCalls != calls || again.firstPrompt != first {
+		t.Fatalf("a resumed session would count %d calls and a first prompt of %d; the running one has %d and %d", again.subCalls, again.firstPrompt, calls, first)
+	}
+	release()
+	s.waitFor("the second dossier", func() bool { return len(s.dossiers()) == 2 })
+}

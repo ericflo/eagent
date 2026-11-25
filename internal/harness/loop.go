@@ -1012,11 +1012,8 @@ func (r *Runtime) looked(seen int64, promptTokens int, w wake) {
 	}
 	if promptTokens > 0 {
 		t.promptTokens = promptTokens
-		if t.subCalls == 0 {
-			t.firstPrompt = promptTokens
-		}
 	}
-	t.subCalls++
+	r.called(promptTokens)
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
@@ -1027,9 +1024,24 @@ func (r *Runtime) looked(seen int64, promptTokens int, w wake) {
 	}
 }
 
+// called counts one answered call of the conversation in the current
+// file, and keeps the size of its first prompt. The rollover guard
+// (needsDossier) reads both, and a resumed session rebuilds them from the
+// record (turnState.init), so every call that is recorded there, alone or
+// in a batch of silent ones, is counted here. Loop goroutine.
+func (r *Runtime) called(promptTokens int) {
+	t := &r.turns
+	if promptTokens > 0 && t.subCalls == 0 {
+		t.firstPrompt = promptTokens
+	}
+	t.subCalls++
+}
+
 // noteSilent keeps the cost of a call that left no record, to be put in
 // the log in one line with the others. seen is 0 for a reply that was sent
-// back for another try: it weighed nothing yet. Loop goroutine.
+// back for another try: it weighed nothing yet, but it was a call of the
+// conversation, and when it was the first, its prompt is the first prompt
+// (the next call's carries the exchange on top). Loop goroutine.
 func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	t := &r.turns
 	t.silent.Count++
@@ -1047,6 +1059,8 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	if seen > 0 {
 		t.silent.SeenSeq = seen
 		r.looked(seen, resp.Usage.Input, w)
+	} else {
+		r.called(resp.Usage.Input)
 	}
 	if t.silent.Count >= 20 {
 		r.flushSilent()
