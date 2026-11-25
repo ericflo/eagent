@@ -340,10 +340,12 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	out.Descriptor.Actions = s.Actions(grant)
 	// A descriptor holds at most suggestionLists lists. Presets, the summarizer's
-	// modes and eagent's own model list always have theirs; each agent's
-	// models take one while there is room, and an input whose list does not
-	// fit is left to typing. eagent's model list keeps to what the agents'
-	// lists leave of its budget.
+	// modes, eagent's own model list and the providers (which name the groups
+	// every model picker shows) always have theirs; each agent's models take
+	// one while there is room, and an input whose list does not fit is left
+	// to typing. eagent's model list keeps to what the agents' lists leave of
+	// its budget. Saved presets' list comes last: /default_config offers
+	// their names without it.
 	out.Descriptor.Suggestions = map[string][]control.Suggestion{"presets": PresetSuggestions(s.Project), "summarizer_modes": SummarizerModeSuggestions()}
 	relayBytes := 0
 	for ai := range out.Descriptor.Actions {
@@ -357,7 +359,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				continue
 			}
 			if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
-				if len(out.Descriptor.Suggestions) >= suggestionLists-1 {
+				if len(out.Descriptor.Suggestions) >= suggestionLists-2 {
 					in.Suggest = nil
 					continue
 				}
@@ -370,22 +372,20 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Suggestions["models"] = projectModelSuggestions(s.Project, modelListBudget-relayBytes)
+	// The providers name the groups models come in, by address: a reader
+	// shows "Together AI", not its URL.
+	out.Descriptor.Suggestions["providers"] = providerAddressSuggestions(s.Project, baseURLs)
+	for i := range out.Descriptor.Fields {
+		if f := &out.Descriptor.Fields[i]; strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url" {
+			f.Suggest = &control.Suggest{List: "providers"}
+		}
+	}
 	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < suggestionLists {
 		out.Descriptor.Suggestions["bundles"] = bundleSugs
 		for i := range out.Descriptor.Fields {
 			if out.Descriptor.Fields[i].Key == "/default_config" {
 				out.Descriptor.Fields[i].Suggest = &control.Suggest{List: "bundles"}
 				break
-			}
-		}
-	}
-	// The providers name the groups models come in, by address; while there
-	// is room for the list, a reader shows "Together AI", not its URL.
-	if len(out.Descriptor.Suggestions) < suggestionLists {
-		out.Descriptor.Suggestions["providers"] = providerAddressSuggestions(s.Project, baseURLs)
-		for i := range out.Descriptor.Fields {
-			if f := &out.Descriptor.Fields[i]; strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url" {
-				f.Suggest = &control.Suggest{List: "providers"}
 			}
 		}
 	}
