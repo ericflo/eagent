@@ -255,11 +255,7 @@ func EnvOverrides() map[string]string {
 		}
 	}
 	for suffix, field := range routeEnvFields {
-		if suffix == "REASONING_EFFORT" {
-			set("/model/"+field, "EAGENT_REASONING_EFFORT")
-		} else {
-			set("/model/"+field, "EAGENT_"+suffix, "EAGENT_ORCHESTRATOR_"+suffix)
-		}
+		set("/model/"+field, "EAGENT_"+suffix, "EAGENT_ORCHESTRATOR_"+suffix)
 		set("/summarizer/model/"+field, "EAGENT_SUMMARIZER_"+suffix)
 	}
 	set("/summarizer/mode", "EAGENT_SUMMARIZER_MODE")

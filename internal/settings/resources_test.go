@@ -243,3 +243,93 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 		t.Fatal("DeleteBundle succeeded on missing preset")
 	}
 }
+
+// An override of a retired prompt (NARRATOR.md and the rest) is read by
+// nothing. The editors can see it and delete it, and never create or save
+// one.
+func TestRetiredPromptOverridesCanOnlyBeDeleted(t *testing.T) {
+	if !slices.Equal(config.RetiredPromptNames, prompts.Retired) {
+		t.Fatalf("config.RetiredPromptNames %v != prompts.Retired %v", config.RetiredPromptNames, prompts.Retired)
+	}
+	ctx := context.Background()
+	s := &Service{Project: t.TempDir()}
+	if err := os.MkdirAll(prompts.Dir(s.Project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) string {
+		t.Helper()
+		path := filepath.Join(prompts.Dir(s.Project), name)
+		if err := os.WriteFile(path, []byte("Never say 'great news'."), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	exists := func(path string) bool { _, err := os.Stat(path); return err == nil }
+
+	// Never written: not by the web editor's path, not through the editor.
+	for _, name := range prompts.Retired {
+		if _, err := s.SavePrompt(ctx, name, "new text", false); err == nil || !strings.Contains(err.Error(), "can only be deleted") {
+			t.Fatalf("SavePrompt %s: %v", name, err)
+		}
+		if exists(filepath.Join(prompts.Dir(s.Project), name)) {
+			t.Fatalf("%s was created", name)
+		}
+	}
+	editor, err := config.LockEditor(ctx, s.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editor.WriteRelated("prompt", "NARRATOR.md", []byte("x"), false); err == nil {
+		t.Fatal("WriteRelated wrote a retired prompt")
+	}
+	editor.Close()
+
+	// The web editor's delete (PromptName accepts the short name too).
+	path := write("NARRATOR.md")
+	name, err := PromptName("narrator")
+	if err != nil || name != "NARRATOR.md" {
+		t.Fatalf("PromptName: %q %v", name, err)
+	}
+	if _, err := s.SavePrompt(ctx, name, "", true); err != nil || exists(path) {
+		t.Fatalf("delete: %v (still there: %v)", err, exists(path))
+	}
+
+	// The phone: listed, not editable; prompt.reset deletes it; prompt.set
+	// is refused; and the deletion cannot be undone into a write.
+	path = write("ORCHESTRATOR.md")
+	view, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := view.Snapshot.Details["prompts"].(map[string]any)["ORCHESTRATOR.md"].(map[string]any)
+	if entry == nil || entry["retired"] != true || entry["editable"] != false {
+		t.Fatalf("snapshot entry = %v", entry)
+	}
+	editor, err = config.LockEditor(ctx, s.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer editor.Close()
+	set := control.Proposal{Operation: "prompt.set", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"name": "ORCHESTRATOR.md", "text": "changed"}}
+	if _, err := s.PrepareResource(editor, set, s.Grant()); err == nil {
+		t.Fatal("prompt.set accepted a retired prompt")
+	}
+	reset := control.Proposal{Operation: "prompt.reset", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"name": "ORCHESTRATOR.md"}}
+	change, err := s.PrepareResource(editor, reset, s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := change.Apply(editor); err != nil || exists(path) {
+		t.Fatalf("reset: %v (still there: %v)", err, exists(path))
+	}
+	if _, err := change.Inverse(); err == nil {
+		t.Fatal("undo of a retired override's deletion would write it back")
+	}
+	after, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, listed := after.Snapshot.Details["prompts"].(map[string]any)["ORCHESTRATOR.md"]; listed || after.Snapshot.Version == view.Snapshot.Version {
+		t.Fatalf("after reset: listed %v, version changed %v", listed, after.Snapshot.Version != view.Snapshot.Version)
+	}
+}

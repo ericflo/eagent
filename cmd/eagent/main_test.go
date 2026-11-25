@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 )
 
@@ -77,5 +78,52 @@ func TestCmdServersLifecycle(t *testing.T) {
 	}
 	if servers, _ := config.LoadServers(project); len(servers) != 0 {
 		t.Fatalf("servers after remove = %+v", servers)
+	}
+}
+
+// `eagent view --actor X` (and --task) are accepted and said to be ignored.
+func TestViewIgnoredFlags(t *testing.T) {
+	var b strings.Builder
+	viewIgnoredFlags(&b, "", "")
+	if b.String() != "" {
+		t.Fatalf("no flags: %q", b.String())
+	}
+	viewIgnoredFlags(&b, "narrator", "")
+	if b.String() != "eagent view: there is one conversation now, so --actor is ignored\n" {
+		t.Fatalf("--actor: %q", b.String())
+	}
+	b.Reset()
+	viewIgnoredFlags(&b, "orchestrator", "t3")
+	if b.String() != "eagent view: there is one conversation now, so --actor and --task are ignored\n" {
+		t.Fatalf("both: %q", b.String())
+	}
+	// Both flags still parse rather than failing with "flag provided but not
+	// defined".
+	if code := run([]string{"view", "--actor", "narrator", "--task", "t1", "-C", t.TempDir()}); code == 64 {
+		t.Fatal("view --actor/--task was a usage error")
+	}
+}
+
+// A batch run that names an agent may start without a prompt (as on main).
+func TestBatchNeedsPrompt(t *testing.T) {
+	if !batchNeedsPrompt("", "") || batchNeedsPrompt("", "claude") || batchNeedsPrompt("fix it", "") {
+		t.Fatal("batchNeedsPrompt")
+	}
+}
+
+// The takeover of an older session by the one-loop eagent shows in
+// `eagent show`, like a rollover does.
+func TestTranscriptLineSubsessions(t *testing.T) {
+	for reason, want := range map[string]string{
+		"rollover": "subsession   3 (s2.jsonl) after context rollover",
+		"upgrade":  "subsession   3 (s2.jsonl) continued by the one-loop eagent from a briefing",
+	} {
+		ev := event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "s2.jsonl", Index: 2, Reason: reason})
+		if got := transcriptLine(ev); !strings.HasSuffix(got, want) {
+			t.Errorf("%s: %q", reason, got)
+		}
+	}
+	if got := transcriptLine(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "s0.jsonl", Reason: "new"})); got != "" {
+		t.Errorf("new: %q", got)
 	}
 }

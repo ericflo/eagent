@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
@@ -59,6 +61,11 @@ func (change ResourceChange) Inverse() (control.Proposal, error) {
 	switch change.Kind {
 	case "prompt":
 		p.Operation = "prompt.reset"
+		if change.BeforeExists && slices.Contains(prompts.Retired, change.Name) {
+			// Undo would write the override back, and a retired prompt's
+			// override can only be deleted.
+			return p, fmt.Errorf("a deleted override of a retired prompt cannot be restored")
+		}
 		if change.BeforeExists {
 			p.Operation = "prompt.set"
 			p.Parameters["text"] = string(change.Before)

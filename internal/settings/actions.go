@@ -31,7 +31,8 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 		{Operation: "settings.undo", Label: "Undo reviewed settings change", Class: "preference", Parameters: object(map[string]control.Shape{"command_id": text(80), "restore_sha256": text(64)}, "command_id", "restore_sha256")},
 		{Operation: "route.test", Label: "Test saved model route", Class: "cost", Parameters: object(map[string]control.Shape{"target": choices([]string{"model", "summarizer"}), "route": choices([]string{"primary", "fallback"}), "effort": text(32)}, "target")},
 		{Operation: "prompt.set", Label: "Save prompt override", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names), "text": text(32768)}, "name", "text")},
-		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names)}, "name")},
+		// A retired prompt's override can be reset (deleted), never set.
+		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(append(append([]string{}, prompts.Names...), prompts.Retired...))}, "name")},
 		{Operation: "bundle.save", Label: "Save named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64), "description": text(1024), "from": text(64), "config_json": text(32768)}, "name")},
 		{Operation: "bundle.delete", Label: "Delete named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64)}, "name")},
 		// Starting a session spends model credit and runs commands on the
@@ -88,7 +89,8 @@ func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, gra
 	switch p.Operation {
 	case "prompt.set", "prompt.reset":
 		change.Kind = "prompt"
-		if !slices.Contains(prompts.Names, name) {
+		retired := slices.Contains(prompts.Retired, name)
+		if !slices.Contains(prompts.Names, name) && !(retired && p.Operation == "prompt.reset") {
 			return change, fmt.Errorf("unknown prompt")
 		}
 		if p.Operation == "prompt.set" {

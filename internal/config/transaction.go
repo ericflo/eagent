@@ -48,6 +48,14 @@ func (e *Editor) SaveRaw(raw, ifMatch string, checkMatch bool) (SaveResult, erro
 	return saveRaw(e.project, raw, ifMatch, checkMatch)
 }
 
+// promptNames are the prompt files a project may override (prompts.Names).
+var promptNames = []string{"EAGENT.md", "PERSONA.md", "USER_MESSAGE.md", "USER_ANSWER.md", "DOSSIER.md", "THREAD-SUMMARY.md"}
+
+// RetiredPromptNames are the prompt files of the three-actor design
+// (prompts.Retired). A project's override of one is read by nothing now; the
+// settings editors may delete one but never write one.
+var RetiredPromptNames = []string{"ORCHESTRATOR.md", "NARRATOR.md", "RELAY.md", "TASK-WORKER.md", "FACTS.md", "COMPACTION-DOSSIER.md"}
+
 // RelatedPath resolves only the project's registered bundle and prompt
 // resources. Wire protocols never accept an arbitrary local destination.
 func (e *Editor) RelatedPath(kind, name string) (string, error) {
@@ -57,7 +65,7 @@ func (e *Editor) RelatedPath(kind, name string) (string, error) {
 			return BundlePath(e.project, name), nil
 		}
 	case "prompt":
-		if slices.Contains([]string{"EAGENT.md", "PERSONA.md", "USER_MESSAGE.md", "USER_ANSWER.md", "DOSSIER.md", "THREAD-SUMMARY.md"}, name) {
+		if slices.Contains(promptNames, name) || slices.Contains(RetiredPromptNames, name) {
 			return filepath.Join(e.project, ".agents/eagent/prompts", name), nil
 		}
 	}
@@ -70,6 +78,9 @@ func (e *Editor) WriteRelated(kind, name string, raw []byte, remove bool) (strin
 	path, err := e.RelatedPath(kind, name)
 	if err != nil {
 		return "", err
+	}
+	if kind == "prompt" && !remove && slices.Contains(RetiredPromptNames, name) {
+		return "", fmt.Errorf("%s is no longer read; its override can only be deleted", name)
 	}
 	if len(raw) > 1<<20 {
 		return "", fmt.Errorf("settings resource exceeds 1 MiB")
