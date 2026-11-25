@@ -339,3 +339,35 @@ func TestRegistry(t *testing.T) {
 		t.Fatalf("dialogs %v", names)
 	}
 }
+
+// A label is made on eagent's loop at every start, restart and reattach of
+// an agent. pi's models read as their ids, so naming one never runs
+// `pi --list-models` (a subprocess of up to eight seconds).
+func TestPiLabelNeverRunsPi(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	script := "#!/bin/sh\ntouch " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+	piCatalog.Lock()
+	saved, savedRetry := piCatalog.models, piCatalog.retry
+	piCatalog.models, piCatalog.retry = nil, time.Time{}
+	piCatalog.Unlock()
+	defer func() {
+		piCatalog.Lock()
+		piCatalog.models, piCatalog.retry = saved, savedRetry
+		piCatalog.Unlock()
+	}()
+	if got := ModelLabel("pi", "", "anthropic/claude-x"); got != "anthropic/claude-x" {
+		t.Fatalf("ModelLabel = %q", got)
+	}
+	if got := Label("pi", "", "anthropic/claude-x", "high"); got != "Pi · anthropic/claude-x high" {
+		t.Fatalf("Label = %q", got)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("naming a model ran pi")
+	}
+}

@@ -25,7 +25,7 @@ type ViewOptions struct {
 }
 
 // DefaultViewOptions are used when nil is passed.
-var DefaultViewOptions = ViewOptions{RemarkChars: 1500, ReportChars: 6000}
+var DefaultViewOptions = ViewOptions{RemarkChars: 1500, ReportChars: 20000}
 
 // QuestionText returns the text of a question by id, with its options,
 // searching every subsession; "" when unknown.

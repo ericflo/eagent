@@ -325,7 +325,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 	}
 	st.SetPrompts(r.prompts)
 	for _, p := range prompts.Ignored(opts.Project) {
-		ui.Log("%s is no longer read: eagent has one prompt now (EAGENT.md, with PERSONA.md). Move what you still want into an override of those.", p)
+		ui.Log("%s is no longer read: eagent has one prompt now (EAGENT.md, with PERSONA.md). Move what you still want into an override of those, then remove the file (the settings page lists it under Prompts).", p)
 	}
 	routes, err := cfg.Model.Routes()
 	if err != nil {
@@ -515,6 +515,11 @@ func (r *Runtime) append(ev event.Event) event.Event {
 // Run drives the session until it ends or ctx is cancelled. It returns the
 // process exit code.
 func (r *Runtime) Run(ctx context.Context) int {
+	if n := len(r.cfg.Migrated); n > 0 {
+		// Said once per run, in one line: the list is long and is the same
+		// every time until the configuration is brought up to date.
+		r.ui.Log("this project's configuration still has %d setting(s) of the eagent that ran three models; each was carried over, changed or dropped. `eagent config` lists them.", n)
+	}
 	r.startRuntimeSettings()
 	defer r.stopRuntimeSettings()
 	// The publisher re-reads the project config from disk and resolves its

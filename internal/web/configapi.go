@@ -182,6 +182,11 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 			v.Prompts = append(v.Prompts, promptView{Name: name, Source: set.Source[name]})
 		}
 	}
+	// Overrides of prompts the three-model eagent had. Nothing reads them;
+	// they are listed so they can be looked over and removed.
+	for _, path := range prompts.Ignored(s.Project) {
+		v.Prompts = append(v.Prompts, promptView{Name: filepath.Base(path), Source: path, Retired: true})
+	}
 	fc := res.Effective.Finalechat
 	switch client, found := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL); {
 	case !fc.Wanted():

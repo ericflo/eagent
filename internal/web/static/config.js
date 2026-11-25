@@ -846,8 +846,18 @@ function phoneCard() {
 function promptsCard() {
   const HELP = {'EAGENT.md': 'what eagent does: passing your words on, watching the agent, answering its terminal, telling you how it goes', 'PERSONA.md': 'eagent\'s voice', 'USER_MESSAGE.md': 'how a message you write is put to eagent', 'USER_ANSWER.md': 'how your answer to a question is put to eagent', 'DOSSIER.md': 'the briefing written before a fresh conversation', 'THREAD-SUMMARY.md': 'how a session\'s title and summary in the thread list are written'};
   return h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('p', {class: 'sub'}, 'The instructions eagent works from. Click one to read or edit it; edits are saved as project overrides.'),
-    h('div', {class: 'plist2'}, ...E.c.prompts.map(p => h('button', {class: 'prompt-row', onclick: () => X.promptEditor(p.name)},
+    h('div', {class: 'plist2'}, ...E.c.prompts.map(p => p.retired ? h('button', {class: 'prompt-row', onclick: () => removeRetiredPrompt(p.name)},
+      h('code', {class: 'inline'}, p.name), h('span', {class: 'badge blocked'}, 'no longer read'), h('span', {class: 'sub'}, 'An override from the eagent that ran three models. Nothing reads it now. Click to remove it.')) : h('button', {class: 'prompt-row', onclick: () => X.promptEditor(p.name)},
       h('code', {class: 'inline'}, p.name), h('span', {class: 'badge' + (p.source === 'built-in' ? '' : ' completed')}, p.source === 'built-in' ? 'built-in' : 'override'), h('span', {class: 'sub'}, HELP[p.name] || '')))));
+}
+async function removeRetiredPrompt(name) {
+  if (!confirm(`Remove the override of ${name}? eagent has one prompt now (EAGENT.md, with PERSONA.md), and nothing reads this file. Removing it cannot be undone from here.`)) return;
+  try {
+    const r = await api(`/api/prompts/${encodeURIComponent(name)}`, {method: 'DELETE'});
+    if (r && r.staged) { toast('Ready for review in FinaleChat.'); return; }
+    toast(`${name} removed`);
+    await reloadCatalogKeepDraft();
+  } catch (e) { toast(e.message, 'bad'); }
 }
 function advancedCard() {
   const res = E.c.resolution;

@@ -47,7 +47,7 @@
     });
     const project = details.project || snapshot.context || '';
     const agents = (field('/relay/default')?.schema?.enum || []).map(name => ({ name: String(name) }));
-    return { project, defaults: data.defaults, presets, bundles, agents, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source })), keys: details.keys_present || {}, running: [], server: {},
+    return { project, defaults: data.defaults, presets, bundles, agents, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source, retired: !!value.retired })), keys: details.keys_present || {}, running: [], server: {},
       files: { config: project + '/.agents/eagent/config.json', bundles: project + '/.agents/eagent/configs', prompts: project + '/.agents/eagent/prompts' },
       phone: { state: effective.finalechat?.enabled === false ? 'disabled' : 'configured', detail: 'Mirror defaults are shown here. Live chat delivery and credentials remain with the integration.' },
       resolution: { effective, sources: details.sources || {}, active: details.active || { kind: '', name: '' }, preset: effective.preset || '', file: { exists: !!details.file_etag, etag: snapshot.version, raw: JSON.stringify(saved, null, 2), preset: saved.preset || '', default_config: saved.default_config || '', path: project + '/.agents/eagent/config.json', unknown_keys: [] } } };
@@ -211,7 +211,9 @@
         const target = body.target, route = body.route || 'primary';
         if (!['model', 'summarizer'].includes(target) || !['primary', 'fallback'].includes(route)) throw new Error('Select a saved model route.');
         const effective = expand(resource.snapshot.effective);
-        const saved = target === 'model' ? effective.model : effective.summarizer?.model;
+        // A dedicated summarizer with no model of its own uses the session's.
+        const own = effective.summarizer?.model;
+        const saved = target === 'model' ? effective.model : (own?.model ? own : effective.model);
         const selected = route === 'fallback' ? body.model?.fallback : body.model, current = route === 'fallback' ? saved?.fallback : saved;
         const routeIdentity = value => Object.fromEntries(Object.entries(value || {}).filter(([key]) => !['reasoning_effort', 'fallback'].includes(key)));
         if (!selected || !current || canonical(routeIdentity(selected)) !== canonical(routeIdentity(current))) throw new Error('Save this model route before testing it remotely. Each test uses the reviewed saved route.');

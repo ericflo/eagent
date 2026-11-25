@@ -315,6 +315,9 @@ var piEfforts = []string{"off", "minimal", "low", "medium", "high", "xhigh", "ma
 
 func (piAgent) efforts() []string { return slices.Clone(piEfforts) }
 
+// plainModelIDs: pi's models are provider/model ids with no other label.
+func (piAgent) plainModelIDs() {}
+
 // defaults are settings.json's defaultProvider/defaultModel and
 // defaultThinkingLevel.
 func (piAgent) defaults() (string, string) {

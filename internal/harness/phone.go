@@ -235,6 +235,9 @@ func (r *Runtime) startPhone() {
 		p.posted[msg.ID] = true
 		p.lastID = msg.ID
 		p.threadID = thread.ID
+		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
+			p.mirror1(promptSeq, msg.ID) // so that its receipt has a message to sit under
+		}
 		p.mu.Unlock()
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
@@ -244,6 +247,9 @@ func (r *Runtime) startPhone() {
 				p.mu.Lock()
 				p.posted[m2.ID] = true
 				p.lastID = m2.ID
+				if promptSeq > 0 {
+					p.mirror1(promptSeq, m2.ID)
+				}
 				p.mu.Unlock()
 			}
 		}
@@ -274,6 +280,26 @@ func (r *Runtime) startPhone() {
 		go p.poll(r)
 		go p.keeper(r)
 	})
+	// The message the session was started or resumed with is passed to
+	// the agent as it is recorded, before this mirror exists. Its receipt
+	// (sent, delivered) is taken from the record; the patch that shows it
+	// is queued behind the post above, which gives the message its id.
+	if promptSeq > 0 {
+		for _, ev := range r.st.Events {
+			if ev.Seq > promptSeq && (ev.Type == event.RelaySend || ev.Type == event.RelayDelivered) {
+				p.observeRelay(r, ev)
+			}
+		}
+	}
+}
+
+// mirror1 notes the thread message that shows a user message of the
+// record. The caller holds p.mu.
+func (p *phone) mirror1(seq int64, id string) {
+	if p.mirrored == nil {
+		p.mirrored = map[int64]string{}
+	}
+	p.mirrored[seq] = id
 }
 
 // enqueue schedules an outbound call; drops it if the mirror is closing.

@@ -683,6 +683,7 @@ func TestSystemPromptKeepsTheRulesOfTheOldPrompts(t *testing.T) {
 	for _, want := range []string{
 		// what eagent does itself, and what it cannot
 		"You have no shell and no file tools",
+		"you have not seen it: never describe it from its name",
 		"A message kept for you always gets an answer or an action from you",
 		"one short line that it reached the agent is enough",
 		// answering about the session

@@ -333,8 +333,14 @@ var (
 	// eagentPhrases mark a message as meant for eagent, wherever they stand.
 	eagentPhrases = sync.OnceValue(func() []string {
 		return append([]string{"not for relay", "not for the relay", "not to relay", "don't relay", "do not relay", "not for the agent", "this can be you", "between you and me", "can be you and not relayed"},
-			agentPhrases("not for {}", "you, not {}", "you (not {})")...)
+			agentPhrases("you (not {})")...)
 	})
+	// eagentNamePhrases and metaNamePhrases are the same two kinds of
+	// phrase ending in an agent's name. They count only where the name is
+	// a whole word (namesAgent): agents have short names ("pi"), and
+	// "update pip" or "not for pictures" is work for the agent.
+	eagentNamePhrases = sync.OnceValue(func() []string { return agentPhrases("not for {}", "you, not {}") })
+	metaNamePhrases   = sync.OnceValue(func() []string { return agentPhrases("restart {}", "upgrade {}", "update {}") })
 	// metaPhrases mark a short message as a question or an order about the
 	// session rather than work for the agent.
 	metaPhrases = sync.OnceValue(func() []string {
@@ -345,9 +351,34 @@ var (
 			"what did you send", "did you send", "send me the prompt", "is this you", "are both screens", "you're a relay", "you are a relay", "are you there",
 			"restart the session", "restart the agent", "restart it", "upgrade and then restart", "update and then restart",
 			"close the screen", "kill the screen", "kill screen", "close out the screen", "stop monitoring", "stop polling", "stop updating", "stop the updates", "updates every", "update me every", "give me updates", "regular updates", "less often", "more often",
-		}, agentPhrases("what is {} doing", "what's {} doing", "whats {} doing", "you have {} doing", "restart {}", "upgrade {}", "update {}")...)
+		}, agentPhrases("what is {} doing", "what's {} doing", "whats {} doing", "you have {} doing")...)
 	})
 )
+
+// namesAgent reports that l holds phrase, which ends in an agent's name,
+// with the name as a whole word: "update pi" and "restart codex, please",
+// but not "update pip", "restart pipeline" or the start of a file's name
+// ("update claude.md").
+func namesAgent(l, phrase string) bool {
+	word := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' }
+	for from := 0; from < len(l); {
+		i := strings.Index(l[from:], phrase)
+		if i < 0 {
+			return false
+		}
+		end := from + i + len(phrase)
+		switch {
+		case end == len(l):
+			return true
+		case word(l[end]):
+		case (l[end] == '.' || l[end] == '-' || l[end] == '/') && end+1 < len(l) && word(l[end+1]):
+		default:
+			return true
+		}
+		from += i + 1
+	}
+	return false
+}
 
 // addressedToEagent reports a user message meant for eagent itself rather
 // than the agent.
@@ -360,6 +391,11 @@ func addressedToEagent(text string) bool {
 	}
 	for _, phrase := range eagentPhrases() {
 		if strings.Contains(l, phrase) {
+			return true
+		}
+	}
+	for _, phrase := range eagentNamePhrases() {
+		if namesAgent(l, phrase) {
 			return true
 		}
 	}
@@ -377,6 +413,11 @@ func relayMeta(text string) bool {
 	}
 	for _, phrase := range metaPhrases() {
 		if strings.Contains(l, phrase) {
+			return true
+		}
+	}
+	for _, phrase := range metaNamePhrases() {
+		if namesAgent(l, phrase) {
 			return true
 		}
 	}

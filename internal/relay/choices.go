@@ -97,6 +97,9 @@ func ModelLabel(agent, project, model string) string {
 	if a == nil {
 		return model
 	}
+	if _, ok := a.(plainModels); ok {
+		return model
+	}
 	for _, c := range a.models(project) {
 		if c.ID == model && c.Label != "" {
 			return a.modelLabel(c)
@@ -104,6 +107,12 @@ func ModelLabel(agent, project, model string) string {
 	}
 	return model
 }
+
+// plainModels marks an agent whose models read as their ids: a label never
+// needs its list. pi's list comes from a subprocess of up to eight
+// seconds, and labels are made on eagent's loop at every start, restart and
+// reattach.
+type plainModels interface{ plainModelIDs() }
 
 // ProfileDefaults resolves a relay's overrides against its native defaults.
 func ProfileDefaults(agent, model, effort string) (string, string) {

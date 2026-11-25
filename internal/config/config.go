@@ -316,7 +316,7 @@ func Defaults() Config {
 		TickSeconds:     30,
 		QuietSeconds:    180,
 		RolloverTokens:  64_000,
-		ReportMaxChars:  6000,
+		ReportMaxChars:  20000,
 		Finalechat:      Finalechat{Artifacts: true},
 	}
 }

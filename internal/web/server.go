@@ -797,6 +797,9 @@ type bundleView struct {
 type promptView struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
+	// Retired marks an override of a prompt nothing reads any more: it
+	// can be removed, not edited.
+	Retired bool `json:"retired,omitempty"`
 }
 
 func modelsLine(c config.Config) string {
