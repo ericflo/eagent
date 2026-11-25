@@ -463,8 +463,15 @@ func summaryActor(ev event.Event) string {
 // rendered (renderActor): a call id alone does not say which call, because
 // some providers use the same ids in every response, and an earlier call's
 // result would pass for the result of a later call that never got one.
+//
+// Only the newest reply's calls are listed. A result written now lands
+// after that reply and can answer nothing earlier, so a call of an older
+// reply that never got one (a log from before results were paired with
+// their reply, whose resume took an earlier result with the same id for
+// it) stays as it is: listing it would write another result, and wake
+// eagent as if cut off mid-turn, on every resume.
 func (s *State) DanglingCalls(actor string) []event.ToolCall {
-	var out, open []event.ToolCall // open: the latest reply's calls still without a result
+	var open []event.ToolCall // the latest reply's calls still without a result
 	for _, ev := range s.Events {
 		if ev.Actor != actor || ev.Task != "" {
 			continue
@@ -473,7 +480,6 @@ func (s *State) DanglingCalls(actor string) []event.ToolCall {
 		case event.Assistant:
 			var d event.AssistantData
 			_ = ev.Decode(&d)
-			out = append(out, open...)
 			open = append([]event.ToolCall(nil), d.ToolCalls...)
 		case event.ToolResult:
 			var d event.ToolResultData
@@ -486,7 +492,7 @@ func (s *State) DanglingCalls(actor string) []event.ToolCall {
 			}
 		}
 	}
-	return append(out, open...)
+	return open
 }
 
 // ContextTokens is the size of eagent's last recorded prompt.
