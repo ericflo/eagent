@@ -152,16 +152,13 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
 		ran := false
 		r.sync(func() {
 			ran = true
-			name, held, err := r.finishLaunch(job)
-			if err != nil {
+			if _, err := r.finishLaunch(job); err != nil {
 				r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + who + " again with " + text + ": " + err.Error()}))
 				r.ui.Log("relay %s: %v", job.name, err)
-				return
 			}
-			go r.sendHeld(name, job.seat, held)
 		})
-		if !ran && job.err == nil {
-			_ = job.seat.Kill() // the session ended meanwhile: nothing would watch it
+		if !ran {
+			r.abandonLaunch(job) // the session ended meanwhile: nothing would watch it
 		}
 	}()
 	return nil
