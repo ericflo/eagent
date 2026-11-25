@@ -307,6 +307,17 @@ func (piAgent) poll(s *Seat, _ time.Time) {
 	}
 }
 
+// reportedDialog is the dialog the extension says pi waits on (its
+// ui_prompt_start, cleared at ui_prompt_end): the seat shows the relay
+// blocked on it until it ends.
+func (piAgent) reportedDialog(s *Seat) string {
+	st, ok := readPiStatus(s.spec.StatusFile)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(st.Prompt)
+}
+
 // ---- choices ------------------------------------------------------------------
 
 // piEfforts are pi's thinking levels (--thinking), clamped by pi to what
@@ -461,13 +472,11 @@ func (p *piParser) line(raw []byte) []obs {
 			_ = json.Unmarshal(ev.Data, &d)
 			p.exact = true
 			return p.settled(d.Aborted, at)
-		case piPromptEntry:
-			var d struct {
-				Title string `json:"title"`
-			}
-			_ = json.Unmarshal(ev.Data, &d)
-			return []obs{{kind: "progress", text: "(pi is waiting on a dialog: " + oneLine(d.Title, 120) + "; see relay_screen)", at: at}}
 		}
+		// piPromptEntry is left alone here: the status file says when a
+		// dialog is up and when it ends (reportedDialog), and the seat
+		// holds the relay blocked meanwhile. As progress it made pi look
+		// busy instead.
 		return nil
 	case "message":
 	default:

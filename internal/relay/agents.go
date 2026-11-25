@@ -103,6 +103,14 @@ type poller interface {
 	poll(s *Seat, now time.Time)
 }
 
+// dialogReporter is an agent that says itself when it waits on a dialog
+// (pi's extension writes it into its status file). The seat reads it on
+// every tick, also before a transcript exists, and holds the relay blocked
+// until the dialog ends. It returns the dialog's title, "" when none is up.
+type dialogReporter interface {
+	reportedDialog(s *Seat) string
+}
+
 // agentBase gives an agent the default for every optional method. An
 // agent embeds it and overrides what differs.
 type agentBase struct{}
@@ -194,12 +202,15 @@ func Installed(agent string) bool {
 }
 
 // AgentOf reads which agent a relay runs from its name ("codex-2" runs
-// codex), for relays found running without their session's log. The
-// longest agent name that starts it wins; "" when none does.
+// codex), for relays found running without their session's log: the name
+// is the agent's, or the agent's followed by "-" and more. The longest
+// such agent name wins; "" when none does, so a custom profile named
+// "pipeline" is not taken for pi.
 func AgentOf(relayName string) string {
 	best := ""
 	for _, a := range Agents() {
-		if strings.HasPrefix(relayName, a.Name()) && len(a.Name()) > len(best) {
+		n := a.Name()
+		if (relayName == n || strings.HasPrefix(relayName, n+"-")) && len(n) > len(best) {
 			best = a.Name()
 		}
 	}
