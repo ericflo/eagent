@@ -141,6 +141,54 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 	return nil
 }
 
+// CheckRemoteRoutes is CheckRoutes for a configuration an edit from a
+// connector would put in force, before being the one in force now. Beyond
+// known hosts and known key names, each route must pair them the way the
+// local user has: no key, the address's own provider's key variable, or a
+// pairing of that address and variable already in force or in the saved
+// files. So a remote edit never sends one provider's key to another, in one
+// edit or several, nor by moving an address while the environment pins the
+// key variable.
+func (s *Service) CheckRemoteRoutes(cfg, before config.Config) error {
+	if err := s.CheckRoutes(cfg); err != nil {
+		return err
+	}
+	type pair struct{ host, key string }
+	trusted := map[pair]bool{}
+	for _, a := range s.savedRoutes() {
+		trusted[pair{strings.TrimRight(a.BaseURL, "/"), a.APIKeyEnv}] = true
+	}
+	for _, a := range configRoutes(before) {
+		for cur := &a; cur != nil; cur = cur.Fallback {
+			trusted[pair{strings.TrimRight(cur.BaseURL, "/"), cur.APIKeyEnv}] = true
+		}
+	}
+	for name, a := range configRoutes(cfg) {
+		for cur := &a; cur != nil; cur = cur.Fallback {
+			host := strings.TrimRight(cur.BaseURL, "/")
+			if cur.APIKeyEnv == "" || trusted[pair{host, cur.APIKeyEnv}] {
+				continue
+			}
+			pr, ok := config.ProviderForURLFor(s.Project, cur.BaseURL)
+			if ok && (pr.Custom || pr.KeyEnv == cur.APIKeyEnv) {
+				continue // a registered server's key CheckRoutes has checked
+			}
+			who := cur.BaseURL
+			if ok {
+				who = pr.Label
+			}
+			why := fmt.Sprintf("pairing them is done in eagent's own web UI or %s", config.File(s.Project))
+			for ptr, v := range config.EnvOverrides() {
+				if strings.HasSuffix(ptr, "/api_key_env") {
+					why = "$" + v + " sets the key variable in eagent's shell, so the address cannot move from here"
+				}
+			}
+			return fmt.Errorf("%s: %s is not the key variable for %s; %s", name, cur.APIKeyEnv, who, why)
+		}
+	}
+	return nil
+}
+
 type Request struct {
 	Config      json.RawMessage `json:"config"`
 	BasePreset  string          `json:"base_preset"`    // the preset the file should build on; "" for none

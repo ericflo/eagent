@@ -113,6 +113,11 @@ func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, gra
 			if err != nil {
 				return change, err
 			}
+			// A bundle can become the default from here, so its routes pair
+			// keys with addresses only as a remote edit may.
+			if err := s.CheckRemoteRoutes(cfg, config.Resolve(s.Project, s.Preset, s.Bundle).Effective); err != nil {
+				return change, err
+			}
 			change.After, err = config.BundleBytes(name, request.Description, cfg)
 			if err != nil {
 				return change, err
