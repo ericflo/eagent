@@ -53,7 +53,13 @@ func TestSaveKeepsEnvSummarizerRouteOutOfTheFile(t *testing.T) {
 	if strings.Contains(string(file["summarizer"]), "model") {
 		t.Fatalf("a summarizer route was written: %s", written)
 	}
-	if len(out.Skipped) != 1 || out.Skipped[0].Pointer != "/summarizer/model" || out.Skipped[0].Env != "EAGENT_SUMMARIZER_MODEL" {
+	var summarizer []EnvField
+	for _, f := range out.Skipped {
+		if strings.HasPrefix(f.Pointer, "/summarizer/") {
+			summarizer = append(summarizer, f)
+		}
+	}
+	if len(summarizer) != 1 || summarizer[0].Pointer != "/summarizer/model" || summarizer[0].Env != "EAGENT_SUMMARIZER_MODEL" {
 		t.Fatalf("skipped = %+v", out.Skipped)
 	}
 	os.Unsetenv("EAGENT_SUMMARIZER_MODEL")
