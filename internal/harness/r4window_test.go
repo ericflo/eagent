@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -207,15 +208,15 @@ func r4SmallWindow(t *testing.T, perRound int) int {
 		}
 	}
 	for _, ev := range users {
-		if !r4Points(d.Text, ev.Source.File, ev.Source.Line) {
-			t.Fatalf("the latest briefing does not point at %s (of %d messages before it):\n%s", ev.Source, len(users), d.Text)
+		if _, ok := r4Follow(t, s.rt, d.Text, ev.Source.File, ev.Source.Line); !ok {
+			t.Fatalf("the latest briefing does not lead to %s (of %d messages before it):\n%s", ev.Source, len(users), d.Text)
 		}
 	}
 	return refused
 }
 
 // r4Points reports that a dossier names file:line, whole or in a list of
-// places by file.
+// places by file (one by one, or as a run "9-14").
 func r4Points(text, file string, line int) bool {
 	if strings.Contains(text, fmt.Sprintf("%s:%d]", file, line)) || strings.Contains(text, fmt.Sprintf("%s:%d ", file, line)) {
 		return true
@@ -223,7 +224,13 @@ func r4Points(text, file string, line int) bool {
 	for _, l := range strings.Split(text, "\n") {
 		if i := strings.Index(l, file+" lines "); i >= 0 {
 			for _, n := range strings.Split(l[i+len(file)+7:], ", ") {
-				if strings.TrimSpace(n) == fmt.Sprint(line) {
+				from, to, _ := strings.Cut(strings.TrimSpace(n), "-")
+				if to == "" {
+					to = from
+				}
+				a, _ := strconv.Atoi(from)
+				b, _ := strconv.Atoi(to)
+				if a <= line && line <= b {
 					return true
 				}
 			}

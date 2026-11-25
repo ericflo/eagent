@@ -98,6 +98,8 @@ type reply struct {
 	status int    // an HTTP error instead of a reply
 	body   string // its body
 	finish string // the finish reason, when not the usual one ("length")
+	// noUsage: the provider reports no sizes at all.
+	noUsage bool
 }
 
 var tcSeq atomic.Int64
@@ -176,6 +178,10 @@ func newScripted(brain func(model string, msgs []map[string]any) reply) *scripte
 			prompt = 1000
 		}
 		usage, _ := json.Marshal(map[string]any{"choices": []any{}, "usage": map[string]any{"prompt_tokens": prompt, "completion_tokens": 10}})
+		if rep.noUsage {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
 		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", usage)
 	}))
 	return s
