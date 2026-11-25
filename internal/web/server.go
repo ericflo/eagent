@@ -201,14 +201,12 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 // summarizeState summarizes an already-folded log.
 func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary {
 	sum := projection.Summary(projectionInfo(info), st)
-	s.mu.Lock()
-	_, sum.Hosted = s.running[info.ID]
-	s.mu.Unlock()
+	sum.Hosted = s.hostedBusy(info.ID) != nil
 	sum.Alive = sum.Hosted || alive(info.Path)
 	switch {
 	case sum.Alive && st.Question != nil:
 		sum.Status = "awaiting-input"
-	case sum.Alive && st.Waiting():
+	case sum.Alive && s.idle(info.ID, st):
 		sum.Status = "idle"
 	case sum.Alive:
 		sum.Status = "running"
@@ -216,6 +214,36 @@ func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary
 		sum.Status = "interrupted"
 	}
 	return sum
+}
+
+// hostedBusy reports, for a session this process runs, whether eagent is in
+// the middle of something the log does not show yet: a model call that has
+// not acted, or a briefing being written for a fresh conversation. It is nil
+// for a session run elsewhere.
+func (s *Server) hostedBusy(id string) *bool {
+	s.mu.Lock()
+	h, ok := s.running[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	busy := false
+	if h != nil && h.ui != nil {
+		live := h.ui.status()
+		busy = live.Busy || live.Compacting
+	}
+	return &busy
+}
+
+// idle says nothing more is expected until the user writes: the log shows
+// no open turn of eagent's and no agent starting, working or stopped on a
+// dialog, and (for a session hosted here) eagent is not thinking or writing
+// a briefing.
+func (s *Server) idle(id string, st *state.State) bool {
+	if b := s.hostedBusy(id); b != nil && *b {
+		return false
+	}
+	return projection.Idle(st)
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -248,6 +276,7 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 	d := projection.Detail(projectionInfo(info), st)
 	sum := s.summarizeState(info, st)
 	d.SessionSummary = sum
+	d.Idle = s.idle(info.ID, st)
 	s.mu.Lock()
 	if h := s.running[info.ID]; h != nil {
 		live := h.ui.status()
@@ -264,7 +293,7 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 // liveFromLog is the status of a session another process runs, as far as
 // its log tells: an open turn of eagent's, and what each agent is doing.
 func liveFromLog(st *state.State) *harness.Status {
-	live := harness.Status{Busy: st.Turns[event.ActorEagent] > 0, ContextTokens: st.ContextTokens(), Waiting: st.Waiting() && st.Turns[event.ActorEagent] == 0 && st.Question == nil, Phone: st.Phone != nil}
+	live := harness.Status{Busy: st.Turns[event.ActorEagent] > 0, ContextTokens: st.ContextTokens(), Waiting: projection.Idle(st) && st.Question == nil, Phone: st.Phone != nil}
 	if live.Busy {
 		live.BusyFor = time.Since(st.TurnSince[event.ActorEagent]).Round(time.Second).String()
 	}

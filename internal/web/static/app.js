@@ -28,7 +28,7 @@ const fmtTime = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocal
 const rel = (ts, start) => { const ms = new Date(ts) - start; if (isNaN(ms)) return ''; const s = Math.max(0, ms) / 1000; const m = Math.floor(s / 60); return m >= 60 ? `+${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}` : `+${m}:${(s%60).toFixed(1).padStart(4,'0')}`; };
 const fmtDate = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}); };
 const k = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n ?? 0);
-const dur = ms => ms >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%3600000)/60000)}m` : ms >= 60000 ? `${Math.floor(ms/60000)}m${Math.round((ms%60000)/1000)}s` : ms >= 1000 ? (ms/1000).toFixed(1)+'s' : `${ms}ms`;
+const dur = ms => (ms = Math.round(ms)) >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%3600000)/60000)}m` : ms >= 60000 ? `${Math.floor(ms/60000)}m${Math.round((ms%60000)/1000)}s` : ms >= 1000 ? (ms/1000).toFixed(1)+'s' : `${ms}ms`;
 const money = usd => usd >= 1 ? '$' + usd.toFixed(2) : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '<$0.01' : '$0';
 const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) && d.getFullYear() > 1 ? d : null; };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
@@ -93,7 +93,8 @@ document.addEventListener('click', e => {
 });
 
 // ---- state ------------------------------------------------------------------
-const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: !ARCHIVE && localStorage.getItem('eagent.activity') === '1', filters: new Set(), search: '' };
+function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
 
 let lastHash = location.hash;
 function route() {
@@ -106,7 +107,7 @@ function route() {
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (parts[0] === 'config') { S.sid = null; S.tab = 'config'; }
-  else if (parts[0] === 's' && parts[1]) { if (S.sid !== parts[1]) { S.open.clear(); S.closed.clear(); } S.sid = parts[1]; S.tab = parts[2] || 'chat'; }
+  else if (parts[0] === 's' && parts[1]) { if (S.sid !== parts[1]) { S.open.clear(); S.closed.clear(); } S.sid = parts[1]; S.tab = TABS.includes(parts[2]) ? parts[2] : 'chat'; }
   else { S.sid = null; S.tab = 'home'; }
   render();
 }
@@ -269,7 +270,7 @@ function renderLive() {
     if (live.Compacting) parts.push('eagent writing a briefing for a fresh conversation');
     else if (live.Busy) parts.push('eagent thinking' + (live.BusyFor ? ' · ' + live.BusyFor : ''));
     else if (d.question) parts.push('waiting for your answer');
-    else if (d.idle) parts.push('waiting for you');
+    else if (d.idle) parts.push(d.done ? 'done, waiting for you' : 'waiting for you');
     for (const a of live.Agents || []) parts.push(`${a.Who || a.Name} ${a.State}`);
     if (!parts.length) parts.push('running');
   } else parts.push(`session ${d.status}`);
@@ -305,12 +306,21 @@ function renderChat(pane) {
       h('button', {class: 'primary', type: 'submit'}, 'Send')),
     h('div', {class: 'hint'},
       h('span', {id: 'hint'}),
-      h('label', {class: 'toggle'}, h('input', {type: 'checkbox', checked: S.showActivity, onchange: e => { S.showActivity = e.target.checked; localStorage.setItem('eagent.activity', S.showActivity ? '1' : '0'); renderTab(); }}), 'show activity'))));
+      h('label', {class: 'toggle'}, h('input', {type: 'checkbox', checked: activityShown(), onchange: e => setActivity(e.target.checked)}), 'show activity'))));
   pane.replaceChildren(scroll, composer);
   scroll.scrollTop = scroll.scrollHeight;
   updateComposer();
   renderLive();
   // No autofocus: the single-key shortcuts must keep working on the default tab; "/" focuses the composer.
+}
+// An older session's tasks, notes and processes are its history: its
+// activity shows unless the user turned it off for older sessions.
+function activityShown() { return S.detail && S.detail.legacy ? S.showLegacyActivity : S.showActivity; }
+function setActivity(on) {
+  const legacy = !!(S.detail && S.detail.legacy);
+  if (legacy) S.showLegacyActivity = on; else S.showActivity = on;
+  try { localStorage.setItem(legacy ? 'eagent.activity.legacy' : 'eagent.activity', on ? '1' : '0'); } catch (e) {}
+  renderTab();
 }
 function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
@@ -361,7 +371,8 @@ function chatNode(ev) {
     case 'session.start': { const m = d.models || {}; const models = m.eagent ? 'eagent on ' + shortModel(m.eagent) : m.orchestrator ? ['orchestrator', 'task', 'narrator'].map(a => shortModel(m[a]) || '?').join(' / ') : ''; return h('div', {class: 'notice'}, `session started ${fmtDate(ev.ts)}` + (models ? ` · ${models}` : '') + (d.config ? ` · ${d.config}` : '')); }
     case 'session.resume': return h('div', {class: 'notice'}, 'session resumed ' + fmtDate(ev.ts) + (d.closed && d.closed.length ? ' · ' + d.closed.join('; ') : ''));
     case 'session.end': return h('div', {class: 'notice'}, `session ended (${d.reason}) ${fmtDate(ev.ts)}`);
-    case 'subsession.start': return d.reason === 'rollover' ? h('div', {class: 'notice'}, `fresh conversation (subsession ${d.index + 1}); a briefing carried over`) : null;
+    case 'subsession.start': return d.reason === 'rollover' ? h('div', {class: 'notice'}, `fresh conversation (subsession ${d.index + 1}); a briefing carried over`)
+      : d.reason === 'upgrade' ? h('div', {class: 'notice'}, `the current eagent took this older session over here (subsession ${d.index + 1}); it continues from a briefing written from the record above`) : null;
     case 'relay.start': return h('div', {class: 'notice'}, `${agentWho(d.name, d)} ${d.resumed ? 'resumed' : 'started'} in ${d.dir}` + (d.model || d.effort ? ` · ${[shortModel(d.model), d.effort].filter(Boolean).join(' ')}` : ''));
     case 'relay.end': return h('div', {class: 'notice'}, `${agentWho(d.name)} stopped`);
     case 'relay.turn': {
@@ -381,7 +392,7 @@ function chatNode(ev) {
     case 'relay.autopilot': return h('div', {class: 'notice'}, d.off ? `autopilot off for ${agentWho(d.name)}` : `autopilot on for ${agentWho(d.name)}` + (d.until ? ` until ${fmtDate(d.until)}` : '') + (d.instruction ? ': ' + clip(d.instruction, 160) : ''));
     case 'error': return h('div', {class: 'act bad'}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, 'error'), h('span', null, clip(d.where + ': ' + d.text, 200)));
   }
-  if (!S.showActivity) return null;
+  if (!activityShown()) return null;
   switch (ev.type) {
     case 'route': return act(ev, '', 'route', `${d.actor} → ${d.model}`);
     case 'dossier': return act(ev, '', 'fresh conversation', 'briefing written; eagent continues from it');
@@ -393,6 +404,16 @@ function chatNode(ev) {
     case 'relay.progress': return act(ev, '', agentWho(d.name), d.text);
     case 'relay.state': return act(ev, '', agentWho(d.name), d.state + (d.detail ? ': ' + d.detail : ''));
     case 'harness.message': return act(ev, '', 'notice', d.text);
+  }
+  switch (ev.type) {
+    case 'note': return act(ev, 'note', d.answer ? 'answer' : 'note', d.text);
+    case 'task.create': return act(ev, '', d.kind === 'dossier' ? 'notes for a fresh context' : 'delegated ' + d.id, d.title + (d.description ? ': ' + d.description : ''));
+    case 'task.start': return act(ev, '', `${ev.task || d.id} started`, '');
+    case 'task.end': return act(ev, d.status === 'completed' ? 'ok' : 'bad', `${d.id} ${d.status}`, d.summary);
+    case 'yield': return act(ev, d.done ? 'ok' : '', d.done ? 'done' : 'waiting', d.reason);
+    case 'proc.start': return act(ev, '', `${d.handle} started` + (ev.task ? ' · ' + ev.task : ''), '$ ' + d.command);
+    case 'proc.exit': return act(ev, d.exit_code === 0 ? '' : 'bad', `${d.handle} ${d.reason}`, `exit ${d.exit_code}` + (d.duration_ms ? ' after ' + dur(d.duration_ms) : '') + (d.tail ? ' · ' + d.tail : ''));
+    case 'proc.pid': return null;
   }
   if (LEGACY_TYPES.has(ev.type)) return act(ev, '', ev.type + (ev.task ? ' ' + ev.task : ''), legacyText(d));
   return null;
@@ -467,6 +488,10 @@ function schedulesOf(evs) {
   return [...by.values()];
 }
 
+// isBoundary says an event starts a fresh conversation: a rollover, or the
+// current eagent taking an older session over.
+const isBoundary = e => e.type === 'subsession.start' && e.data && (e.data.reason === 'rollover' || e.data.reason === 'upgrade');
+
 // isMain says an event is eagent's own (or, in an old session, the
 // orchestrator's outside any task).
 const isMain = e => e.actor === 'eagent' || (e.actor === 'orchestrator' && !e.task);
@@ -506,7 +531,7 @@ function chartsCard(d, paneW) {
   const ticks = narrow ? 3 : 6;
   for (let i = 0; i <= ticks; i++) { const t = start + span * i / ticks; g.append(svg('line', {x1: x(t), x2: x(t), y1: top - 4, y2: height, class: 'grid'}), svg('text', {x: x(t), y: 12, class: 'tick', 'text-anchor': i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}, dur(t - start))); }
   // rollover markers
-  for (const e of evs) if (e.type === 'subsession.start' && e.data.reason === 'rollover') { const xx = x(new Date(e.ts).getTime()); g.append(svg('line', {x1: xx, x2: xx, y1: top - 4, y2: height, class: 'rollover'}), svg('title', null, 'fresh conversation')); }
+  for (const e of evs) if (isBoundary(e)) { const xx = x(new Date(e.ts).getTime()); g.append(svg('line', {x1: xx, x2: xx, y1: top - 4, y2: height, class: 'rollover'}), svg('title', null, e.data.reason === 'upgrade' ? 'taken over by the current eagent' : 'fresh conversation')); }
   rows.forEach((r, i) => {
     const y = top + i * RH;
     g.append(svg('text', {x: LW - 6, y: y + 13, class: 'label', 'text-anchor': 'end'}, r.label));
@@ -519,7 +544,7 @@ function chartsCard(d, paneW) {
     const SH = 70, ST = 16, maxIn = Math.max(...calls.map(c => c.data.usage.input), 1);
     const sy = v => ST + (SH - 6) * (1 - v / maxIn);
     spark = svg('svg', {viewBox: `0 0 ${W} ${SH + 18}`, class: 'spark', preserveAspectRatio: 'none'});
-    for (const e of evs) if (e.type === 'subsession.start' && e.data.reason === 'rollover') { const xx = x(new Date(e.ts).getTime()); spark.append(svg('line', {x1: xx, x2: xx, y1: ST - 4, y2: SH + 4, class: 'rollover'})); }
+    for (const e of evs) if (isBoundary(e)) { const xx = x(new Date(e.ts).getTime()); spark.append(svg('line', {x1: xx, x2: xx, y1: ST - 4, y2: SH + 4, class: 'rollover'})); }
     let path = '', prevSub = null;
     for (const c of calls) { const t = new Date(c.ts).getTime(); const px = x(t), py = sy(c.data.usage.input); const sub = c.file; path += (path && sub === prevSub ? ' L' : ' M') + px.toFixed(1) + ' ' + py.toFixed(1); prevSub = sub; }
     spark.append(svg('path', {d: path.trim(), class: 'line'}));
@@ -576,6 +601,7 @@ function summary(ev) {
     case 'tool.result': return `${d.name}${d.is_error ? ' ERROR' : ''} → ${clip(d.output, 200)}`;
     case 'user.message': case 'narrator.message': case 'narrator.question': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
     case 'cwd.change': return 'working directory → ' + d.path;
+    case 'turn.start': case 'turn.end': return d.reason || '';
     case 'thread.title': return titleNotice(d) || 'summary checked: nothing to change';
     case 'relay.start': return `${d.name} (${d.agent}) in ${d.dir}` + (d.model ? ` · ${d.model}` : '') + (d.effort ? ` ${d.effort}` : '');
     case 'relay.send': return `→ ${d.name} ${d.mode} from ${d.from}: ${clip(d.text, 200)}`;
@@ -586,7 +612,12 @@ function summary(ev) {
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;
     case 'proc.exit': return `${d.handle} ${d.reason} exit=${d.exit_code}`;
-    case 'yield': return (d.done ? 'DONE: ' : 'waiting: ') + d.reason;
+    case 'yield': return (d.done ? 'DONE: ' : 'waiting: ') + (d.reason || '');
+    case 'note': return clip(d.text, 240);
+    case 'task.start': return `${d.id || ev.task} started`;
+    case 'proc.pid': return `${d.handle} pid ${d.pid}`;
+    case 'narrator.trim': return `narrator conversation trimmed from #${d.from_seq}` + (d.recap ? ': ' + clip(d.recap, 200) : '');
+    case 'subsession.start': return `${d.file} (${d.reason})`;
     default: return clip(JSON.stringify(d), 200);
   }
 }
@@ -695,9 +726,9 @@ if (ARCHIVE) {
     render(pane, detail, events, tab) {
       S.sid = detail.id; S.detail = {...detail, alive: false}; S.events = events;
       S.tab = tab; S.search = ''; S.filters.clear();
-      if (tab === 'chat') renderChat(pane);
-      else if (tab === 'usage') renderUsage(pane);
-      else renderTimeline(pane);
+      if (tab === 'usage') renderUsage(pane);
+      else if (tab === 'timeline') renderTimeline(pane);
+      else renderChat(pane);
     },
   };
   return;

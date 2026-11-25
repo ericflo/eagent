@@ -77,8 +77,15 @@ type SessionDetail struct {
 	// Agents are the coding agents the session runs.
 	Agents   []AgentView     `json:"agents"`
 	Question *state.Question `json:"question,omitempty"`
+	// Schedules are the timers that will fire again.
+	Schedules []ScheduleView `json:"schedules"`
 	// Idle says nothing more is expected until the user writes.
-	Idle        bool        `json:"idle"`
+	Idle bool `json:"idle"`
+	// Done and LastReason are how an old session (one from before eagent
+	// was one loop) stopped: its orchestrator's last yield. Both are absent
+	// for any other session.
+	Done        *bool       `json:"done,omitempty"`
+	LastReason  string      `json:"last_reason,omitempty"`
 	Usage       []UsageView `json:"usage"`
 	Context     int         `json:"context_tokens"`
 	Files       []string    `json:"files"`
@@ -174,7 +181,7 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	switch {
 	case !st.Ended && st.Question != nil:
 		sum.Status = "awaiting-input"
-	case !st.Ended && st.Waiting():
+	case !st.Ended && Idle(st):
 		sum.Status = "idle"
 	case !st.Ended:
 		sum.Status = "running"
@@ -188,8 +195,12 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 
 func Detail(info Metadata, st *state.State) *SessionDetail {
 	sum := Summary(info, st)
-	d := &SessionDetail{SessionSummary: sum, Idle: st.Waiting(), LastSeq: st.LastSeq(), Context: st.ContextTokens(), Interactive: st.Interactive, Phone: st.Phone}
+	d := &SessionDetail{SessionSummary: sum, Idle: Idle(st), LastSeq: st.LastSeq(), Context: st.ContextTokens(), Interactive: st.Interactive, Phone: st.Phone}
 	d.Question = st.Question
+	if done, reason, ok := LegacyClose(st); ok {
+		d.Done, d.LastReason = &done, reason
+	}
+	d.Schedules = schedulesOf(st)
 	d.Agents = []AgentView{}
 	for _, name := range st.RelayOrder {
 		r := st.Relays[name]

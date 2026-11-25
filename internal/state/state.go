@@ -544,6 +544,13 @@ func (s *State) Summary() string {
 	}
 	if sc := s.ActiveSchedules(); len(sc) > 0 {
 		fmt.Fprintf(&b, "timers: %d\n", len(sc))
+		for _, x := range sc {
+			next := "unknown"
+			if !x.Next.IsZero() {
+				next = s.clock(x.Next)
+			}
+			fmt.Fprintf(&b, "  %s %s %q next %s\n", x.ID, x.Kind, x.Spec, next)
+		}
 	}
 	fmt.Fprintf(&b, "context: %s tokens", humanInt(s.ContextTokens()))
 	fmt.Fprintf(&b, "\n%s", s.UsageLine())
