@@ -101,7 +101,7 @@ A progress look where nothing is worth saying therefore costs a cached read of t
 | `schedule`, `cancel_schedule` | A timer that wakes eagent later with a note to itself. A session with a timer set stays alive. |
 | `view_image` | Look at a picture the agent made or the user sent. The file must be where the session works, or one an agent or the user named. |
 | `update_thread` | The thread's title and summary. |
-| `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters. |
+| `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters; a line longer than that is read in pieces, each result saying which `offset` reads on. |
 
 ## The dossier
 

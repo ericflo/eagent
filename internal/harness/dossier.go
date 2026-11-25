@@ -477,8 +477,13 @@ func (r *Runtime) dossierLookup(c event.ToolCall, read *int, budget int, res *do
 		out, err = r.archive.Search(str("query"), str("file"), num("max_results", 40))
 	} else {
 		raw, _ := args["raw"].(bool)
-		res.consulted = append(res.consulted, fmt.Sprintf("read %s:%d-%d", str("file"), num("from", 1), num("to", 0)))
-		out, err = r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, dossierReadChars)
+		offset := num("offset", -1)
+		place := fmt.Sprintf("read %s:%d-%d", str("file"), num("from", 1), num("to", 0))
+		if offset >= 0 {
+			place = fmt.Sprintf("read %s:%d from offset %d", str("file"), num("from", 1), offset)
+		}
+		res.consulted = append(res.consulted, place)
+		out, err = r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, offset, dossierReadChars)
 	}
 	if err != nil {
 		return err.Error(), true

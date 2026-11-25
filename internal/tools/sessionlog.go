@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -19,8 +20,12 @@ type Archive struct {
 }
 
 // Read renders lines from..to (1-based, inclusive) of one file. Each line is
-// prefixed with file:line so it can be cited.
-func (a Archive) Read(file string, from, to int, raw bool, maxChars int) (string, error) {
+// prefixed with file:line so it can be cited. A result holds whole lines up
+// to maxChars; a line too long for one result on its own is cut, on a rune
+// boundary, and the result says which offset reads on. With offset >= 0 it
+// reads line from alone, whole (the readable form is not shortened), from
+// that offset into its text: the way to every byte of a line, however long.
+func (a Archive) Read(file string, from, to int, raw bool, offset, maxChars int) (string, error) {
 	if strings.ContainsAny(file, "/\\") || !strings.HasSuffix(file, ".jsonl") {
 		return "", fmt.Errorf("file must be one of the session's record files, named like 1788740857293.jsonl")
 	}
@@ -40,20 +45,79 @@ func (a Archive) Read(file string, from, to int, raw bool, maxChars int) (string
 	if from > len(evs) {
 		return fmt.Sprintf("%s has only %d lines", file, len(evs)), nil
 	}
+	if offset >= 0 {
+		return readPiece(file, evs[from-1], raw, offset, maxChars), nil
+	}
 	var b strings.Builder
 	for _, ev := range evs[from-1 : to] {
+		var entry string
 		if raw {
-			line, _ := json.Marshal(ev)
-			fmt.Fprintf(&b, "%s:%d %s\n", file, ev.Source.Line, line)
+			entry = fmt.Sprintf("%s:%d %s\n", file, ev.Source.Line, wholeLine(ev, true))
 		} else {
-			fmt.Fprintf(&b, "%s:%d %s\n", file, ev.Source.Line, Summarize(ev, 400))
+			entry = fmt.Sprintf("%s:%d %s", file, ev.Source.Line, Summarize(ev, 400))
+			if len(Summarize(ev, 0)) > 400 {
+				entry += fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", ev.Source.Line)
+			}
+			entry += "\n"
 		}
-		if maxChars > 0 && b.Len() > maxChars {
-			fmt.Fprintf(&b, "[... output limit reached at line %d of %d; call again with from=%d ...]\n", ev.Source.Line, len(evs), ev.Source.Line+1)
+		if maxChars <= 0 || b.Len()+len(entry) <= maxChars {
+			b.WriteString(entry)
+			continue
+		}
+		if b.Len() > 0 {
+			// The next line is read whole by the next call.
+			fmt.Fprintf(&b, "[... output limit reached before line %d of %d; call again with from=%d ...]\n", ev.Source.Line, len(evs), ev.Source.Line)
 			break
 		}
+		// One line longer than a whole result: its first piece.
+		b.WriteString(readPiece(file, ev, raw, 0, maxChars))
+		break
 	}
 	return b.String(), nil
+}
+
+// wholeLine is one event as session_read renders it whole: its JSON, or
+// the readable form not shortened.
+func wholeLine(ev event.Event, raw bool) string {
+	if raw {
+		line, _ := json.Marshal(ev)
+		return string(line)
+	}
+	return Summarize(ev, 0)
+}
+
+// readPiece renders the piece of one line that starts at offset (a byte
+// offset into wholeLine, moved back to a rune boundary) and fits in
+// maxChars, and says how to read on when more remains.
+func readPiece(file string, ev event.Event, raw bool, offset, maxChars int) string {
+	text, line := wholeLine(ev, raw), ev.Source.Line
+	rawArg := ""
+	if raw {
+		rawArg = " raw=true"
+	}
+	if offset >= len(text) {
+		return fmt.Sprintf("%s:%d is %d long in this form; offset %d is past its end, so there is nothing more to read (from=%d offset=0%s reads it from the start)\n", file, line, len(text), offset, line, rawArg)
+	}
+	for offset > 0 && !utf8.RuneStart(text[offset]) {
+		offset--
+	}
+	head := fmt.Sprintf("%s:%d [offset %d of %d] ", file, line, offset, len(text))
+	end := len(text)
+	if maxChars > 0 {
+		// Room for the note that says how to read on.
+		room := max(maxChars-len(head)-200, 256)
+		if offset+room < end {
+			end = offset + room
+			for end > offset && !utf8.RuneStart(text[end]) {
+				end--
+			}
+		}
+	}
+	out := head + text[offset:end] + "\n"
+	if end < len(text) {
+		out += fmt.Sprintf("[... line %d goes on: %d of %d shown so far; call again with from=%d offset=%d%s for the rest ...]\n", line, end, len(text), line, end, rawArg)
+	}
+	return out
 }
 
 // MaxSearchResults is the most one search returns, whatever was asked for.
@@ -75,6 +139,7 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	// into a prompt.
 	maxResults = min(maxResults, MaxSearchResults)
 	q := strings.ToLower(query)
+	match := regexp.MustCompile("(?i)" + regexp.QuoteMeta(query))
 	var b strings.Builder
 	n := 0
 	for _, e := range entries {
@@ -91,7 +156,7 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 			if !strings.Contains(hay, q) {
 				continue
 			}
-			fmt.Fprintf(&b, "%s:%d %s\n", name, ev.Source.Line, Summarize(ev, 300))
+			fmt.Fprintf(&b, "%s:%d %s%s\n", name, ev.Source.Line, Summarize(ev, 300), matchAt(ev, match))
 			n++
 			if n >= maxResults {
 				fmt.Fprintf(&b, "[... %d results shown; narrow the query or set a file ...]\n", n)
@@ -103,6 +168,31 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 		return "no matches", nil
 	}
 	return b.String(), nil
+}
+
+// matchAt says, for a hit the result line shortens, where in the line the
+// match is and what session_read takes to show it: "" for a short line.
+func matchAt(ev event.Event, match *regexp.Regexp) string {
+	whole, line := Summarize(ev, 0), ev.Source.Line
+	if len(whole) <= 300 {
+		return ""
+	}
+	for _, raw := range []bool{false, true} {
+		text := wholeLine(ev, raw)
+		if loc := match.FindStringIndex(text); loc != nil {
+			// A little before the match, so it is read in context.
+			at := max(0, loc[0]-200)
+			for at > 0 && !utf8.RuneStart(text[at]) {
+				at--
+			}
+			rawArg := ""
+			if raw {
+				rawArg = " raw=true"
+			}
+			return fmt.Sprintf(" [shortened; the match is read with from=%d offset=%d%s]", line, at, rawArg)
+		}
+	}
+	return fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", line)
 }
 
 // Summarize renders one event as a compact human-readable line.
