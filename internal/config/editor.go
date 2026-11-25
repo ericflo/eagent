@@ -365,6 +365,16 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 			}
 		case "model", "summarizer":
 			diff := diffObjects(h, w)
+			// A route whose model the file changes takes the new model's
+			// window unless the file names one (followModel), so a window
+			// shown for it is written even when it equals the base's.
+			if _, changed := diff["model"]; changed && k == "model" {
+				if _, named := diff["context_tokens"]; !named {
+					if cw := object(w)["context_tokens"]; cw != nil {
+						diff["context_tokens"] = cw
+					}
+				}
+			}
 			if len(diff) == 0 {
 				out[k] = nil
 			} else {
