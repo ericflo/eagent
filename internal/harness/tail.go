@@ -26,14 +26,47 @@ type relayStep struct {
 	text string
 	at   time.Time
 	n    int // how many times in a row
+	// times are when the latest repeats came, oldest first, so a run
+	// that goes on past a moment counts as movement after it and is
+	// counted from it. Only kept for a run of more than one.
+	times []time.Time
 }
 
 // relayStepsKept bounds the steps remembered per relay; relayStepsShown the
-// steps one tail lists.
+// steps one tail lists; relayRepeatsKept the times remembered of one run.
 const (
-	relayStepsKept  = 80
-	relayStepsShown = 30
+	relayStepsKept   = 80
+	relayStepsShown  = 30
+	relayRepeatsKept = 256
 )
+
+// last is when the step last came.
+func (st relayStep) last() time.Time {
+	if len(st.times) > 0 {
+		return st.times[len(st.times)-1]
+	}
+	return st.at
+}
+
+// since is the part of a run that came after a moment: whole when it began
+// after it, else the repeats after it, from the first of them. ok is false
+// when none came after it. Of a run longer than the times kept, the
+// repeats whose times were let go are counted as before the moment when it
+// falls among them, so the count never claims more than happened since.
+func (st relayStep) since(t time.Time) (relayStep, bool) {
+	if st.at.After(t) {
+		st.times = nil // the caller's copy; noteStep reuses the array
+		return st, true
+	}
+	if !st.last().After(t) {
+		return relayStep{}, false
+	}
+	i := len(st.times)
+	for i > 0 && st.times[i-1].After(t) {
+		i--
+	}
+	return relayStep{text: st.text, at: st.times[i], n: len(st.times) - i}, true
+}
 
 // stepsFrom is the moment from which a relay's remembered steps are its
 // own and new: after since, and after the agent that held its name before
@@ -58,7 +91,15 @@ func (s *relaySeats) noteStep(name, text string, at time.Time) {
 	}
 	list := s.steps[name]
 	if n := len(list); n > 0 && list[n-1].text == text {
-		list[n-1].n++
+		st := &list[n-1]
+		if st.times == nil {
+			st.times = []time.Time{st.at}
+		}
+		st.n++
+		st.times = append(st.times, at)
+		if len(st.times) > relayRepeatsKept {
+			st.times = append(st.times[:0], st.times[len(st.times)-relayRepeatsKept:]...)
+		}
 	} else {
 		list = append(list, relayStep{text: text, at: at, n: 1})
 	}
@@ -75,8 +116,8 @@ func (s *relaySeats) stepsSince(name string, since time.Time) []relayStep {
 	defer s.mu.Unlock()
 	var out []relayStep
 	for _, st := range s.steps[name] {
-		if st.at.After(since) {
-			out = append(out, st)
+		if part, ok := st.since(since); ok {
+			out = append(out, part)
 		}
 	}
 	return out
@@ -88,7 +129,7 @@ func (s *relaySeats) stepped(since time.Time) (total int, after bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, list := range s.steps {
-		if n := len(list); n > 0 && list[n-1].at.After(since) {
+		if n := len(list); n > 0 && list[n-1].last().After(since) {
 			after = true
 		}
 	}
