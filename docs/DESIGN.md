@@ -67,9 +67,9 @@ Every call sends the same four things:
 3. **The conversation**, rendered from the log by `state.View`: the dossier if there is one, then what the user wrote, what the agent reported, what eagent said and did.
 4. **The tail**: a last message written for this call only. It says what time it is, why the model was woken, what each agent is doing right now, and any standing order.
 
-The model answers with tool calls. `hold` means nothing needs saying. A tool that only looks (`relay_screen`, `session_search`, `session_read`, `view_image`) gives the model another call in the same turn to use what it saw, and so does an action on the agent (`relay_start`, `relay_control`, `relay_autopilot`), so the model can say how it went. If something arrives while a turn is running, the turn's next call gets a new tail that names it; nothing is marked as seen before the model was shown it. A turn is at most `max_calls_per_turn` (30) calls. If that limit stops a turn while the agent is still stuck on its screen, the model gets one more go, and after that the user is told how to reach the terminal.
+The model answers with tool calls. `hold` means nothing needs saying. A tool that only looks (`relay_screen`, `session_search`, `session_read`, `view_image`) gives the model another call in the same turn to use what it saw, and so does an action on the agent (`relay_start`, `relay_control`, `relay_autopilot`), so the model can say how it went. If something arrives while a turn is running, the turn's next call gets a new tail that names it; nothing is marked as seen before the model was shown it. Each reply is recorded with the newest event its call was shown, and the renderer puts anything newer after that reply, so every later prompt has each line where the model first saw it. A turn is at most `max_calls_per_turn` (30) calls. If that limit stops a turn while the agent is still stuck on its screen, the model gets one more go, and after that the user is told how to reach the terminal.
 
-A reply is sent back once, off the record, when it cannot stand: text with no tool call (nobody would see it), a reply cut off by the output limit, a message that names eagent's internals to the user, silence on a message addressed to eagent or on an answer to its question, silence on the closing look when the user is owed a last word.
+A reply is sent back once, off the record, when it cannot stand: text with no tool call (nobody would see it), a reply cut off by the output limit, a message that names eagent's internals to the user, silence on a message addressed to eagent or on an answer to its question, silence on the closing look when the user is owed a last word. A reply that did something else instead (it set the title and nothing more) is told the same, once. The second try is given the conversation the first one had, plus the reply and the reason.
 
 **What is recorded.** When the model acts, the turn goes into the log: the tail it was given (a `steer` event), its reply, the results. When it holds, nothing is recorded but a running count of the tokens spent (`narrator.checks`). A quiet look leaves the conversation exactly as it was.
 
@@ -81,9 +81,9 @@ Providers cache a prompt by its prefix. eagent is built so that each call's prom
 - The conversation is rendered from the log, which only grows. Nothing in it is rewritten or summarised in place.
 - Everything that changes from call to call is in the tail, which is last. A tail is kept in the log only when the model acted on it, so a kept tail becomes part of the stable prefix and a discarded one costs nothing later.
 - **Every call is the same request apart from its messages**: one model, one reasoning effort, one output ceiling, one tool list, one cache key (the session id). Engines render the effort into the prompt or key the cache on it, so a different effort for a different kind of call would throw the cache away. Tests hold this (`TestRequestPrefixIsByteStableAcrossLooksAndTurns`).
-- On Anthropic the cache breakpoints sit on the last two stable blocks, so replacing the tail does not move them.
+- On Anthropic the cache breakpoints sit on the last two stable blocks, so replacing the tail does not move them. Anthropic finds an earlier cache entry only about twenty blocks behind a breakpoint, so when more than that arrived since the last call a third breakpoint sits where that call left its entry. The system prompt's breakpoint covers the tools, which keeps a request within the four it may carry.
 
-A progress look where nothing is worth saying therefore costs a cached read of the conversation and a few output tokens.
+A progress look where nothing is worth saying therefore costs a cached read of the conversation, plus what the model writes before it holds. Output is never cached, and how much a model thinks before a `hold` follows the session's effort and the model: little on some, a good deal on others. `model.reasoning_effort` is the setting for it. A look is made only when the agent is working and there is news since eagent last looked, at the earliest 45 seconds after it last spoke; a tick with nothing new makes no call.
 
 ## The tools
 
@@ -99,9 +99,9 @@ A progress look where nothing is worth saying therefore costs a cached read of t
 | `relay_control` | Keys for a dialog, interrupt, restart, upgrade, change model, switch agent, stop. |
 | `relay_autopilot` | Set or end a standing order. |
 | `schedule`, `cancel_schedule` | A timer that wakes eagent later with a note to itself. A session with a timer set stays alive. |
-| `view_image` | Look at a picture the agent made or the user sent. |
+| `view_image` | Look at a picture the agent made or the user sent. The file must be where the session works, reported by an agent, or named by the user. |
 | `update_thread` | The thread's title and summary. |
-| `session_search`, `session_read` | Find and read lines anywhere in the session's record. |
+| `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters. |
 
 ## The dossier
 
@@ -113,14 +113,14 @@ How it is written (`dossier.go`):
 
 - The model that has been following the session writes it, at the end of the conversation it already has, so the request reuses the cached prompt.
 - It is given a table of every file and an index of the whole record by place: everything before its last dossier in outline (the user's words, the agent's turn ends, where each earlier dossier sits) and the stretch since line by line.
-- It studies the record before writing. During the pass only `session_search` and `session_read` run, up to 40 calls, and how much it may read back follows the room in the model's window (between 60,000 and 300,000 characters; up to 600,000 when it works from the files alone). The lookups are part of the writing and are not recorded.
+- It studies the record before writing. During the pass only `session_search` and `session_read` run, up to 40 calls, and how much it may read back follows the room in the model's window (up to 300,000 characters; up to 600,000 when it works from the files alone). A conversation that leaves room for less than 60,000 is not written in: the writer works from the files instead. The lookups are part of the writing and are not recorded.
 - It is told to rebuild from the record every time. Earlier dossiers are sources to read and check against the lines they cite, not text to carry forward.
 - The harness checks the result: it must be a real text, cite at least three places, and every citation must point at a line that exists. A dossier that fails is sent back once with what was wrong. Places that still do not exist are named in the dossier so nothing sends the reader to a missing line. A text that comes back a second time without a map is kept as a summary and labelled as one, in its first lines and in the notice above it; it is never passed off as a map.
 - After the model's text the harness adds what it knows exactly, each with its place: the table of files; every agent with its terminal, model and effort; every message the user sent (the first three and the latest 25 word for word, each one between in a line, and in a session with more than 150 between, the oldest by place); the latest turns the agent finished; an open question.
-- One failed model call during the pass is made again. If the model still cannot write one, the harness writes the dossier from its records. It has no judgement in it, but every place is still there.
+- One failed model call during the pass is made again. A call the provider refuses as too long is not repeated as it was: the lookups that did not fit are taken out and the model writes without them, and if the conversation itself does not fit, the model writes from the files. If the model still cannot write one, the harness writes the dossier from its records. It has no judgement in it, but every place is still there.
 - The pass is bounded: 40 calls and 15 minutes, after which the model is told to write with what it has. While it runs eagent says nothing else; the phone's status line says the session is being reread, and messages still go straight to the agent.
 - If the provider refused the conversation as too long, the writer works from the files alone, starting from the dossier the current file opened with.
-- What arrives while the dossier is being written still goes to the agent at once and is in the new conversation. So is whatever set the restart off: a message or a turn end that no look had taken in yet is shown whole after the dossier, pictures included.
+- What arrives while the dossier is being written still goes to the agent at once and is in the new conversation. So is whatever set the restart off: a message or a turn end that no look had taken in yet is shown whole after the dossier, pictures included. eagent's own calls from the replaced conversation are not shown again; the dossier was written with them in view.
 
 If the prompt is over the limit on the first call after a restart (the dossier and the project's standing instructions alone are too much), restarting again cannot help. The user is told once per restart, with what to change.
 
