@@ -477,27 +477,6 @@ func ValidateSavePresetName(raw string) (string, error) {
 	return name, nil
 }
 
-// HasServerEdits reports whether a settings.apply proposal modifies registered
-// local/custom model servers (/add_server_url or /servers).
-func HasServerEdits(p control.Proposal) bool {
-	if p.Operation != "settings.apply" {
-		return false
-	}
-	for _, e := range p.Edits {
-		if e.Key == "/add_server_url" || e.Key == "/servers" {
-			return true
-		}
-	}
-	return false
-}
-
-// SplitServerEdits separates server-registry edits (/add_server_url, /servers)
-// from config.json edits.
-func SplitServerEdits(p control.Proposal) (serverEdits, configEdits []control.Edit) {
-	serverEdits, _, _, configEdits = SplitSpecialEdits(p)
-	return serverEdits, configEdits
-}
-
 // SplitSpecialEdits separates virtual action fields (/add_server_url, /servers,
 // /save_preset) from ordinary config.json edits.
 func SplitSpecialEdits(p control.Proposal) (serverEdits []control.Edit, savePreset string, hasSavePreset bool, configEdits []control.Edit) {

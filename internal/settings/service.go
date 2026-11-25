@@ -357,13 +357,6 @@ func replaceIn(obj map[string]json.RawMessage, segs []string, val json.RawMessag
 	return had
 }
 
-func orDefault(v, d string) string {
-	if v == "" {
-		return d
-	}
-	return v
-}
-
 type RawRequest struct {
 	Raw     string  `json:"raw"`
 	IfMatch *string `json:"if_match"`

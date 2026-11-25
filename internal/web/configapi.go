@@ -297,12 +297,6 @@ func writeSettingsError(w http.ResponseWriter, err error) {
 	}
 	writeErr(w, 500, err)
 }
-func orDefault(v, d string) string {
-	if v == "" {
-		return d
-	}
-	return v
-}
 
 // ---- live route test -------------------------------------------------------------------
 
