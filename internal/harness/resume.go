@@ -13,6 +13,7 @@ import (
 // the three-actor design is given a briefing to continue from. Called
 // before the loop starts.
 func (r *Runtime) closeInterrupted() {
+	r.finishOpening() // first: whatever is written next belongs in the new file
 	// The agents run in terminals of their own and survive eagent stopping;
 	// pick them up again, and say which are gone.
 	closed := r.reattachRelays()

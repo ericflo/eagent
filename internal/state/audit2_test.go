@@ -10,7 +10,7 @@ import (
 // State-level tests for the fixes made after the second behaviour audit.
 
 // Upgraded is true once a subsession opened for the takeover of a log of the
-// three-actor design exists, and not before.
+// three-actor design exists with its dossier, and not before.
 func TestAudit2UpgradedFollowsTheUpgradeSubsession(t *testing.T) {
 	b := newBuilder()
 	b.add(event.New(event.Assistant, event.LegacyOrchestrator, event.AssistantData{Text: "drafting", Usage: event.Usage{Input: 900, Output: 20}}))
@@ -20,6 +20,10 @@ func TestAudit2UpgradedFollowsTheUpgradeSubsession(t *testing.T) {
 	}
 	b.add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "resumed by an eagent with one loop", NextFile: "2.jsonl"}))
 	b.add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "upgrade"}))
+	if st := Replay(b.events); st.Upgraded() {
+		t.Fatal("upgraded before the upgrade's dossier was written")
+	}
+	b.add(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "briefing", CoversSeq: 1}))
 	if st := Replay(b.events); !st.Upgraded() {
 		t.Fatal("not upgraded after the upgrade subsession")
 	}

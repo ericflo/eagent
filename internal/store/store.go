@@ -215,6 +215,19 @@ func Open(path string, lastSeq int64, now time.Time) (*Session, error) {
 		return nil, err
 	}
 	current := files[len(files)-1]
+	if len(files) > 1 {
+		if fi, err := os.Stat(filepath.Join(path, current)); err == nil && fi.Size() == 0 {
+			// The next subsession's file was made (CreateSubsession) and
+			// the run stopped before anything was written to it. It holds
+			// nothing, and a file of the record begins with its
+			// subsession.start: it is let go, and the session goes on where
+			// its record does (a restart left half-done is finished by the
+			// harness).
+			if err := os.Remove(filepath.Join(path, current)); err == nil {
+				current = files[len(files)-2]
+			}
+		}
+	}
 	if err := s.repairTail(filepath.Join(path, current)); err != nil {
 		s.Close()
 		return nil, err
@@ -364,9 +377,10 @@ func (s *Session) NewSubsession(now time.Time) (string, error) {
 func (s *Session) NewSubsessionName(now time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now = s.after(now)
 	name := NewID(now) + ".jsonl"
 	for i := 0; ; i++ {
-		if _, err := os.Stat(filepath.Join(s.Path, name)); errors.Is(err, os.ErrNotExist) && name != s.current {
+		if _, err := os.Stat(filepath.Join(s.Path, name)); errors.Is(err, os.ErrNotExist) && name > s.current {
 			return name, nil
 		}
 		now = now.Add(time.Millisecond)
@@ -386,10 +400,13 @@ func (s *Session) NewSubsessionName(now time.Time) (string, error) {
 func (s *Session) CreateSubsession(now time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now = s.after(now)
 	s.dropPending()
 	name := NewID(now) + ".jsonl"
 	for i := 0; ; i++ {
-		if name != s.current {
+		// After the current file in name order too, which is the order
+		// the record is read in, even when the clock was set back.
+		if name > s.current {
 			f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
 			if err == nil {
 				s.pending, s.pendingName = f, name
@@ -405,6 +422,16 @@ func (s *Session) CreateSubsession(now time.Time) (string, error) {
 			return "", errors.New("could not allocate a subsession name")
 		}
 	}
+}
+
+// after is now, or the first moment whose file name sorts after the
+// current file's when the clock reads earlier than that file's name (it was
+// set back): the record is read in the order its file names sort.
+func (s *Session) after(now time.Time) time.Time {
+	if ms, err := strconv.ParseInt(strings.TrimSuffix(s.current, ".jsonl"), 10, 64); err == nil && now.UnixMilli() <= ms {
+		return time.UnixMilli(ms + 1)
+	}
+	return now
 }
 
 // dropPending lets go of a file CreateSubsession made that was never

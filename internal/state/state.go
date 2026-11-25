@@ -39,6 +39,11 @@ type Subsession struct {
 	Dossier    string
 	CoversSeq  int64
 	CoversNone bool
+	// Restart: the one loop opened it from a dossier (reason rollover or
+	// upgrade), so its dossier comes right after its start. Briefed: that
+	// dossier is in the record. A restart that is not briefed was stopped
+	// before it finished (see Conversation).
+	Restart, Briefed bool
 }
 
 // State is everything derived from the log.
@@ -401,7 +406,10 @@ func (s *State) Apply(ev event.Event) {
 		if cur := s.Current(); cur != nil && cur.EndSeq == 0 {
 			cur.EndSeq = ev.Seq - 1
 		}
-		s.Subsessions = append(s.Subsessions, Subsession{Index: d.Index, File: d.File, Reason: d.Reason, StartSeq: ev.Seq})
+		// The earlier design's rollover opened a file whose dossier a task
+		// wrote later, if at all; only the one loop's open with one.
+		restart := d.Reason == "upgrade" || d.Reason == "rollover" && (!s.Legacy() || s.Upgraded())
+		s.Subsessions = append(s.Subsessions, Subsession{Index: d.Index, File: d.File, Reason: d.Reason, StartSeq: ev.Seq, Restart: restart})
 		// A fresh conversation: the prompt size starts over.
 		s.LastUsage = map[string]event.Usage{}
 	case event.SubsessionEnd:
@@ -412,7 +420,7 @@ func (s *State) Apply(ev event.Event) {
 		var d event.DossierData
 		_ = ev.Decode(&d)
 		if cur := s.Current(); cur != nil {
-			cur.Dossier = d.Text
+			cur.Dossier, cur.Briefed = d.Text, true
 			cur.CoversSeq, cur.CoversNone = d.CoversSeq, d.CoversNone && d.CoversSeq == 0
 		}
 		if d.Usage != nil {
@@ -572,14 +580,37 @@ func (s *State) Legacy() bool {
 
 // Upgraded reports that a log written by the three-actor design has been
 // taken over by the one loop: it continued in a subsession opened from a
-// dossier written from the old record.
+// dossier written from the old record. An upgrade stopped before its
+// dossier was written has not taken it over.
 func (s *State) Upgraded() bool {
 	for _, sub := range s.Subsessions {
-		if sub.Reason == "upgrade" {
+		if sub.Reason == "upgrade" && sub.Briefed {
 			return true
 		}
 	}
 	return false
+}
+
+// Unfinished reports that the newest subsession is a restart that was
+// stopped before its dossier was written: the record has its start and no
+// briefing. Its file is not the conversation yet (Conversation); the
+// session finishes the restart before anything else.
+func (s *State) Unfinished() bool {
+	cur := s.Current()
+	return cur != nil && cur.Restart && !cur.Briefed
+}
+
+// Conversation is the subsession eagent's conversation is rendered from:
+// the newest one, unless restarts were stopped before their dossier was
+// written, and then the newest before them. Its events run on through the
+// unfinished ones, so nothing recorded since is left out.
+func (s *State) Conversation() *Subsession {
+	for i := len(s.Subsessions) - 1; i >= 0; i-- {
+		if sub := &s.Subsessions[i]; !sub.Restart || sub.Briefed {
+			return sub
+		}
+	}
+	return s.Current()
 }
 
 // Waiting reports that nothing more is expected until the user writes: no

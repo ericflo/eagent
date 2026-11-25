@@ -124,6 +124,10 @@ How it is written (`dossier.go`):
 
 If the prompt is over the limit on the first call after a restart (the dossier and the project's standing instructions alone are too much), restarting again cannot help. The user is told once per restart, with what to change.
 
+**Small windows.** Everything above is sized against what a request on the route in use can hold: its window less the reply ceiling, less the system prompt and the tools. On every ordinary cloud model that changes nothing. On a small local route (a 16k window, say) the restart comes at three quarters of the room past the system prompt and tools, the dossier takes at most a third of it, and what is carried over whole at most a sixth. When the facts would not fit, the older messages and turn ends give way first, to their `file:line` places, then the latest are fewer and shorter; nothing is left without its place. The index a pass from the files is given loses its oldest lines the same way (session_search finds them), so the pass can still be written.
+
+**A restart that was stopped.** If eagent stops in the middle of a restart, the next run finishes it before anything else. An empty next file is let go; a closed file with no next one has that file begun; a new file with no dossier yet is not the conversation: the conversation stays the one it was replacing, with everything since, until the dossier is written. A session of the earlier design whose takeover stopped before its dossier is taken over again.
+
 **Sessions from the earlier design.** A log written when eagent ran three models stays as it is and stays readable in every viewer. When such a session is resumed, the first thing the loop does is write a dossier from its files (the old dossiers among them) and continue in a new file. The old model replies are never rendered into the new conversation.
 
 ## Title and summary
@@ -150,7 +154,7 @@ Starting an agent, starting it again and handing over to another one can take a 
 |---|---|---|
 | `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. `context_tokens` follows the model: a file, bundle or environment variable that names another model without a window of its own gets that model's, from the catalog or the provider's cached list. |
 | `summarizer` | `{"mode": "inline"}` | Or `dedicated`, with its own `model`. |
-| `rollover_tokens` | 0 | Prompt size at which the conversation restarts from a dossier. 0 follows the model in use: half its context window, in whole thousands, and it moves if the model changes mid-session. A number fixes it. |
+| `rollover_tokens` | 0 | Prompt size at which the conversation restarts from a dossier. 0 follows the model in use: half its context window, in whole thousands (less on a small window, see the dossier), and it moves if the model changes mid-session. A number fixes it. |
 | `tick_seconds` | 30 | How often to check for something new while the agent works. |
 | `quiet_seconds` | 180 | Longest silence while the agent works. 0 turns the limit off. |
 | `max_calls_per_turn` | 30 | Calls on one wake. |
