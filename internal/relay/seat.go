@@ -732,7 +732,8 @@ func (s *Seat) checkScreen(now time.Time) {
 	}
 	since := now.Sub(s.stateAt)
 	s.mu.Unlock()
-	if state == "starting" && looksReady(screen) {
+	ready := s.ready(screen)
+	if state == "starting" && ready {
 		// Codex draws a ready-looking screen for a moment before its trust
 		// prompt appears: ready only counts when it holds across two looks.
 		s.mu.Lock()
@@ -749,7 +750,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
-	} else if state == "blocked" && looksReady(screen) && !s.dialogShowing() {
+	} else if state == "blocked" && ready && !s.dialogShowing() {
 		s.setState("idle", "")
 	}
 }
@@ -833,6 +834,24 @@ func looksReady(screen string) bool {
 		}
 	}
 	return false
+}
+
+// readyReporter is an agent whose own hook says whether it waits at its
+// prompt (pi's status file); known is false when it says nothing usable.
+type readyReporter interface {
+	reportedReady(s *Seat) (ready, known bool)
+}
+
+// ready says whether the agent waits at its prompt: what its hook reports,
+// when it reports anything, and otherwise what the screen looks like. A
+// screen can look ready while the agent works (pi always draws its footer).
+func (s *Seat) ready(screen string) bool {
+	if rr, ok := s.agent.(readyReporter); ok {
+		if ready, known := rr.reportedReady(s); known {
+			return ready
+		}
+	}
+	return looksReady(screen)
 }
 
 // sessionStarter is an agent that can say how many entries a transcript

@@ -208,12 +208,34 @@ func (piAgent) afterTurn(s *Seat, id, text string) error {
 // while pi worked (and not yet read) back into the editor; the seat's
 // stuck-send check presses Enter on them, or they go with the next message.
 
-var piFooter = regexp.MustCompile(`\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmMgG]? \(`)
+// piFooter is the context use in pi's footer: "0.4%/1.0M (auto)", without
+// "(auto)" when auto-compaction is off (then padding and the model, or the
+// line's end), and "?" for the percentage after a compaction.
+var piFooter = regexp.MustCompile(`(?m)(?:^|\s)(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmMgG]?(?: \(auto\)|  |[ \t]*$)`)
 
-// ready matches pi's footer (context use, "0.4%/1.0M (auto)") or the key
-// hints at the top of a fresh screen.
+// ready matches pi's footer or the key hints at the top of a fresh screen.
+// pi draws its footer all the time, working or showing its own selectors,
+// so this is only the fallback for a pi whose status file says nothing
+// (reportedReady).
 func (piAgent) ready(screen string) bool {
 	return piFooter.MatchString(screen) || strings.Contains(screen, "escape interrupt · ctrl+c/ctrl+d clear/exit")
+}
+
+// reportedReady is what the extension's status file says: idle with no
+// dialog open is ready, working is not. Without a status file, or with a
+// state it does not know, the screen decides.
+func (piAgent) reportedReady(s *Seat) (ready, known bool) {
+	st, ok := readPiStatus(s.spec.StatusFile)
+	if !ok {
+		return false, false
+	}
+	switch st.State {
+	case "idle":
+		return strings.TrimSpace(st.Prompt) == "", true
+	case "working":
+		return false, true
+	}
+	return false, false
 }
 
 func (piAgent) dialogs() []dialog {
