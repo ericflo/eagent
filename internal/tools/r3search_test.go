@@ -223,3 +223,12 @@ func TestReadFollowsFileLinesPastABlankLine(t *testing.T) {
 		t.Errorf("search fourth: %v", r3Hits(t, a, "fourth"))
 	}
 }
+
+// An event from before eagent was one loop matches on the words its
+// readable form gives it, as before.
+func TestSearchFindsLegacyEventsByTheirReadableWords(t *testing.T) {
+	a := r3Archive(t, event.Event{Type: event.LegacyTaskStart, Actor: "harness", Task: "t1", Data: json.RawMessage(`{"id":"t1"}`)})
+	if hits := r3Hits(t, a, "t1 started"); len(hits) != 1 {
+		t.Errorf("search \"t1 started\": %v", hits)
+	}
+}
