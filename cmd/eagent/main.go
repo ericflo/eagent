@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -508,6 +509,46 @@ func cmdSessions(project string) int {
 // checking what the summary prompt produces (--dry-run). It reads logs and
 // never writes them. With --json each line carries the old title and
 // summary too, so a run can be undone by hand.
+// routeChain is a route and its fallbacks for calls made side by side: all
+// use the current one, and the first to find it unroutable moves them all
+// to the next.
+type routeChain struct {
+	mu      sync.Mutex
+	routes  []llm.Endpoint
+	clients []*llm.Client
+	at      int
+}
+
+func newRouteChain(routes []llm.Endpoint) *routeChain {
+	c := &routeChain{routes: routes}
+	for _, ep := range routes {
+		c.clients = append(c.clients, llm.NewClient(ep))
+	}
+	return c
+}
+
+func (c *routeChain) current() *llm.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clients[c.at]
+}
+
+// next moves past failed, reporting whether another route is left to try.
+// A call that failed on a route already left behind just tries the current.
+func (c *routeChain) next(failed *llm.Client) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.clients[c.at] != failed {
+		return true
+	}
+	if c.at+1 >= len(c.clients) {
+		return false
+	}
+	c.at++
+	fmt.Fprintf(os.Stderr, "summarizer: %s is unavailable; switching to %s\n", c.routes[c.at-1], c.routes[c.at])
+	return true
+}
+
 func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, asJSON, verbose bool) int {
 	if all == (len(refs) > 0) {
 		return fail(errors.New("usage: eagent summarize <session-id>... | --all [--dry-run] [--json]"))
@@ -524,7 +565,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 	if err != nil {
 		return fail(fmt.Errorf("summarizer: %w", err))
 	}
-	model := llm.NewClient(routes[0])
+	models := newRouteChain(routes)
 	set, err := prompts.Load(project)
 	if err != nil {
 		return fail(err)
@@ -569,7 +610,18 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
-			res, err := harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
+			var res harness.SessionSummary
+			var err error
+			for {
+				model := models.current()
+				res, err = harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
+				// A route that cannot serve the model at all (no access,
+				// no credits) gives way to the configured fallback.
+				var ae *llm.APIError
+				if !errors.As(err, &ae) || !ae.Unroutable() || !models.next(model) {
+					break
+				}
+			}
 			done <- outcome{res, err}
 		}(results[i], info)
 	}
