@@ -2,8 +2,11 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +16,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/tools"
 )
 
 // Tests for what a read of the whole branch found in the loop: lines that
@@ -472,5 +476,71 @@ func TestFullConversationWarningIsPerConversation(t *testing.T) {
 	s.rt.sync(func() { logged = s.rt.turns.futileLogged })
 	if logged {
 		t.Fatal("the new conversation still counts as warned about")
+	}
+}
+
+// view_image is the one way eagent reads a file. A picture it looks at
+// goes to the model's provider and a copy is kept in the session, so it is
+// held to the rule a sent file is held to: where the session works, or
+// named by an agent or by the user. A model talked into it by something on
+// the agent's screen cannot read pictures elsewhere on the machine.
+func TestViewImageStaysWhereTheSessionWorks(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	outside := filepath.Join(t.TempDir(), "private.png")
+	if err := os.WriteFile(outside, tinyPNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(s.rt.opts.Project, "innocent.png")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	view := func(path string) (string, bool, []event.Attachment) {
+		calls := &turnCalls{}
+		args, _ := json.Marshal(map[string]string{"path": path})
+		out, isErr, _ := s.rt.runTool(context.Background(), calls, tc("view_image", string(args)))
+		return out, isErr, calls.images
+	}
+	for _, path := range []string{outside, link, "innocent.png"} {
+		out, isErr, images := view(path)
+		if !isErr || len(images) != 0 || !strings.Contains(out, "outside the project") {
+			t.Fatalf("view_image %s: error=%v images=%d: %s", path, isErr, len(images), out)
+		}
+	}
+	if copies, _ := filepath.Glob(filepath.Join(s.rt.sess.Path, "attachments", "view-*")); len(copies) != 0 {
+		t.Fatalf("a refused picture was copied into the session: %v", copies)
+	}
+	// The user naming the file is leave to look at it.
+	s.type_("@e what is in " + outside + "?")
+	s.waitFor("the message", func() bool { return len(s.events(event.UserMessage)) == 1 })
+	s.settled()
+	if out, isErr, images := view(outside); isErr || len(images) != 1 {
+		t.Fatalf("a picture the user named: error=%v images=%d: %s", isErr, len(images), out)
+	}
+}
+
+// A search of the record stays in every later prompt, like a read, so it
+// is bounded however many results the model asks for.
+func TestSessionSearchIsBoundedInTheLoop(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.rt.sync(func() {
+		for i := 0; i < 400; i++ {
+			s.rt.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: fmt.Sprintf("step %d ", i) + strings.Repeat("e", 600)}))
+		}
+	})
+	s.settled()
+	out, isErr, _ := s.rt.runTool(context.Background(), &turnCalls{}, tc("session_search", `{"query":"e","max_results":50000}`))
+	if isErr {
+		t.Fatal(out)
+	}
+	if len(out) > loopReadChars+1000 || !strings.Contains(out, "narrow the query") {
+		t.Fatalf("a search for 50000 results returned %d characters", len(out))
+	}
+	// The record's own search never returns more than its limit.
+	all, err := s.rt.archive.Search("e", "", 50000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(all, "\n"); n > tools.MaxSearchResults+1 {
+		t.Fatalf("the search returned %d lines; the limit is %d", n, tools.MaxSearchResults)
 	}
 }

@@ -134,6 +134,10 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		if err != nil {
 			return err.Error(), true, true
 		}
+		if len(out) > loopReadChars+400 {
+			// Like a read, a search stays in every later prompt.
+			out = clipRunes(out, loopReadChars) + "\n[... cut here; narrow the query or set a file ...]"
+		}
 		return out, false, true
 
 	case tools.ViewImage:

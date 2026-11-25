@@ -281,6 +281,9 @@ type Client struct {
 	// anthropicBudgeted remembers whether this model wants the older
 	// budget-style thinking parameter instead of adaptive thinking.
 	anthropicBudgeted atomic.Bool
+	// anthropicCached is the number of cacheable blocks in the last
+	// conversation Anthropic took from this client (anthropicBridge).
+	anthropicCached atomic.Int64
 	// rejectsImages remembers that this model refused pictures, so later
 	// calls send the text alone instead of re-uploading and re-failing.
 	rejectsImages atomic.Bool

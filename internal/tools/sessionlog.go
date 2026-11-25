@@ -56,6 +56,9 @@ func (a Archive) Read(file string, from, to int, raw bool, maxChars int) (string
 	return b.String(), nil
 }
 
+// MaxSearchResults is the most one search returns, whatever was asked for.
+const MaxSearchResults = 200
+
 // Search finds events whose rendered form contains query (case-insensitive).
 func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	if strings.TrimSpace(query) == "" {
@@ -68,6 +71,9 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	if maxResults <= 0 {
 		maxResults = 40
 	}
+	// A result is a line of up to 300 characters, and the whole list goes
+	// into a prompt.
+	maxResults = min(maxResults, MaxSearchResults)
 	q := strings.ToLower(query)
 	var b strings.Builder
 	n := 0

@@ -24,9 +24,11 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 // call, not just one per client, gets its retry).
 func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
+	messages := anthropicMessages(req, c.Endpoint.BaseURL)
+	cached := anthropicBridge(messages, int(c.anthropicCached.Load()))
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
-		"messages":   anthropicMessages(req, c.Endpoint.BaseURL),
+		"messages":   messages,
 		"stream":     true,
 		"max_tokens": maxTokens,
 	}
@@ -45,7 +47,10 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 				"description":  t.Description,
 				"input_schema": t.Parameters,
 			}
-			if i == len(req.Tools)-1 {
+			// Tools are rendered before the system prompt, so the
+			// breakpoint at its end covers them too. They get one of the
+			// four a request may carry only when there is no system prompt.
+			if i == len(req.Tools)-1 && req.System == "" {
 				tool["cache_control"] = map[string]any{"type": "ephemeral"}
 			}
 			tools = append(tools, tool)
@@ -58,10 +63,10 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		thinking = true
 		if budgeted {
 			// Older models: explicit budget.
-			budget, known := map[string]int{"low": 2048, "medium": 8192, "high": 24576}[e]
+			budget, known := map[string]int{"minimal": 1024, "low": 2048, "medium": 8192, "high": 24576, "xhigh": 32768, "max": 49152}[e]
 			if !known {
 				// Never quietly turn an unknown effort into medium.
-				return nil, fmt.Errorf("reasoning effort %q is not one this model accepts (none, low, medium, high)", e)
+				return nil, fmt.Errorf("reasoning effort %q is not one this model accepts (none, minimal, low, medium, high, xhigh, max)", e)
 			}
 			// The budget must be at least 1024 and strictly below max_tokens;
 			// when the ceiling leaves no room, send no thinking at all rather
@@ -100,6 +105,9 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		}
 		return nil, err
 	}
+	// The request was taken: its breakpoints are where the next call's
+	// cache entries are.
+	c.anthropicCached.Store(int64(cached))
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
 		return c.anthropicNonStreaming(resp)
 	}
@@ -357,8 +365,19 @@ func anthropicMessages(req Request, host string) []map[string]any {
 	// next call carries a different one in its place) hits it at the second.
 	// Adjacent user messages were merged above, so the block before the
 	// last is usually inside the same message, not the message before.
-	// Along with system and the last tool, this stays within Anthropic's
-	// four-breakpoint limit.
+	// With the one on the system prompt (which covers the tools) and the
+	// one anthropicBridge may add, this stays within Anthropic's limit of
+	// four breakpoints.
+	stable := anthropicStable(msgs)
+	for i := len(stable) - 1; i >= 0 && i >= len(stable)-2; i-- {
+		stable[i]["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	return msgs
+}
+
+// anthropicStable lists the content blocks of a conversation that can carry
+// a cache breakpoint, in order.
+func anthropicStable(msgs []map[string]any) []map[string]any {
 	var stable []map[string]any
 	for _, m := range msgs {
 		blocks, _ := m["content"].([]map[string]any)
@@ -374,10 +393,29 @@ func anthropicMessages(req Request, host string) []map[string]any {
 			stable = append(stable, b)
 		}
 	}
-	for i := len(stable) - 1; i >= 0 && i >= len(stable)-2; i-- {
-		stable[i]["cache_control"] = map[string]any{"type": "ephemeral"}
+	return stable
+}
+
+// anthropicLookback is how far behind a breakpoint Anthropic looks for an
+// earlier cache entry: 20 positions, less a margin.
+const anthropicLookback = 18
+
+// anthropicBridge keeps a long step between two calls on the cache, and
+// returns how many blocks this conversation has for the next call to pass
+// back as prev. A breakpoint finds an earlier entry only a short way behind
+// it, so when more blocks than that were added since the last call (a
+// chatty agent, a burst of events or pictures) the two breakpoints at the
+// end would find nothing and the whole conversation would be written to
+// the cache again. The last call left an entry at the block before its
+// final one, which is in this conversation whether or not that call's end
+// was recorded: a breakpoint there is read from the cache, and only what
+// came after it is new.
+func anthropicBridge(msgs []map[string]any, prev int) int {
+	stable := anthropicStable(msgs)
+	if at := prev - 2; at >= 0 && len(stable)-1-at > anthropicLookback {
+		stable[at]["cache_control"] = map[string]any{"type": "ephemeral"}
 	}
-	return msgs
+	return len(stable)
 }
 
 // anthropicNonStreaming parses a plain Anthropic Messages JSON body for

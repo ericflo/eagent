@@ -262,6 +262,18 @@ func (r *Runtime) viewImage(p string) (event.Attachment, error) {
 	if err != nil {
 		return event.Attachment{}, err
 	}
+	// Looking at a picture sends its bytes to the model's provider and
+	// keeps a copy in the session, from where it could be attached to a
+	// message. eagent has no other way to read a file, so this is held to
+	// the rule a sent file is: the picture is where the session works, an
+	// agent reported it, or the user named it. Symlinks are followed
+	// before the check.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	if !r.sendable(abs) && !r.userNamed(abs) {
+		return event.Attachment{}, fmt.Errorf("%s is outside the project and the agent's folder, and neither the agent nor the user named it. Ask the user for the path if they want you to look at it", p)
+	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		return event.Attachment{}, fmt.Errorf("%s: %v", p, shortErr(err))
@@ -377,6 +389,44 @@ func findByName(root, name string, maxDepth int) string {
 		return nil
 	})
 	return best
+}
+
+// userNamed reports whether the user wrote this path in a message of
+// their own (as an absolute path or one under ~): their word is leave to
+// look at it wherever it is. Not on the loop goroutine.
+func (r *Runtime) userNamed(abs string) bool {
+	var texts []string
+	r.sync(func() {
+		for _, ev := range r.st.Events {
+			if ev.Type != event.UserMessage && ev.Type != event.UserAnswer {
+				continue
+			}
+			var d struct {
+				Text string `json:"text"`
+			}
+			if ev.Decode(&d) == nil && strings.ContainsAny(d.Text, "/~") {
+				texts = append(texts, d.Text)
+			}
+		}
+	})
+	for _, text := range texts {
+		for _, word := range strings.Fields(text) {
+			word = strings.Trim(word, "\"'`()[]<>,;:!?")
+			if !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") {
+				continue
+			}
+			for _, cand := range []string{word, strings.TrimRight(word, ".")} {
+				path := filepath.Clean(relay.ExpandHome(cand))
+				if real, err := filepath.EvalSymlinks(path); err == nil {
+					path = real
+				}
+				if path == abs {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // sendable reports whether an already-resolved absolute path may be sent
