@@ -302,8 +302,10 @@ func TestFreshLaunchDropsAnEarlierAgentsSpool(t *testing.T) {
 // piExtensionDriver runs the embedded extension under node against a
 // stand-in for pi's extension API. pi.sendUserMessage returns nothing and
 // reports a refusal only as an extension error, so the stand-in either
-// starts a run (agent_start, then agent_settled) or does nothing, as pi
-// does when it throws. Each call is printed as a JSON line.
+// takes the message (the input hook, then after PREFLIGHT_MS a run:
+// agent_start, agent_settled) or does nothing, as pi does when it throws
+// because it is compacting. pi reports idle until the run starts. Each
+// call is printed as a JSON line.
 const piExtensionDriver = `import { pathToFileURL } from "node:url";
 const handlers = {};
 const accept = process.env.ACCEPT === "1";
@@ -313,10 +315,11 @@ const pi = {
 	sendUserMessage(text, options) {
 		console.log(JSON.stringify({ text, deliverAs: (options && options.deliverAs) || "" }));
 		if (!accept) return;
+		handlers.input && handlers.input({ type: "input", text, source: "extension" }, ctx);
 		setTimeout(() => {
 			handlers.agent_start && handlers.agent_start({});
 			setTimeout(() => handlers.agent_settled && handlers.agent_settled({ aborted: false }), 50);
-		}, 20);
+		}, Number(process.env.PREFLIGHT_MS || 20));
 	},
 };
 const ext = await import(pathToFileURL(process.argv[2]).href);
@@ -337,7 +340,7 @@ type piHandOver struct {
 // runPiExtension starts the extension with a spool holding one message
 // and returns the spool, a function that lists what it holds, and one that
 // waits for the run to end and returns the hand-overs.
-func runPiExtension(t *testing.T, accept bool, run time.Duration) (func() []string, func() []piHandOver) {
+func runPiExtension(t *testing.T, accept bool, run time.Duration, env ...string) (func() []string, func() []piHandOver) {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -359,6 +362,7 @@ func runPiExtension(t *testing.T, accept bool, run time.Duration) (func() []stri
 	if accept {
 		cmd.Env = append(cmd.Env, "ACCEPT=1")
 	}
+	cmd.Env = append(cmd.Env, env...)
 	var out strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {

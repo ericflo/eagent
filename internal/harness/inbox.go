@@ -113,7 +113,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		if text == "" && len(msg.Attachments) == 0 {
 			return
 		}
-		if strings.HasPrefix(text, "/") && !r.relayPassthrough(text, msg.From) {
+		if r.ownCommand(text, msg.From) {
 			r.slashCommandFrom(text, msg.Client)
 			return
 		}
@@ -126,6 +126,22 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		}
 		r.onInputFrom(text, msg.From, msg.Client, msg.Attachments...)
 	}
+}
+
+// ownCommand reports whether a line the user wrote is a command for eagent
+// itself and not words for the agent or for eagent's model. With an agent
+// running, a slash word eagent does not own is the agent's. With none, it
+// is a command (an unknown one gets "try /help") unless a question is
+// open: then anything that is not one of eagent's commands is the answer,
+// which may well begin with a slash (a path). Loop goroutine.
+func (r *Runtime) ownCommand(line, source string) bool {
+	if !strings.HasPrefix(line, "/") || r.relayPassthrough(line, source) {
+		return false
+	}
+	if r.st.Question != nil && len(r.st.ActiveRelays()) == 0 && !eagentCommand(line) {
+		return false
+	}
+	return true
 }
 
 // eagentCommand reports whether a line that starts with "/" is one of

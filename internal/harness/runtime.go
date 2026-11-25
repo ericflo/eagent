@@ -834,7 +834,7 @@ func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts
 	if line == "" && len(atts) == 0 {
 		return
 	}
-	if strings.HasPrefix(line, "/") && !r.relayPassthrough(line, source) {
+	if r.ownCommand(line, source) {
 		r.slashCommandFrom(line, client)
 		return
 	}

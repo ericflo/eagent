@@ -84,6 +84,8 @@ export default function (pi: any) {
 	// and a refusal (a prompt while pi compacts, no model) shows only as an
 	// extension error, so the claimed files stay until pi starts the run
 	// that carries them; if it stays idle instead, they go back to wait.
+	// seen: pi passed the hand-over to the input hook, which is the first
+	// thing it does with a message it has not refused outright.
 	let handing: any = null;
 	let tries = 0;
 	let retryAt = 0;
@@ -162,7 +164,7 @@ export default function (pi: any) {
 		if (prompting || handing || Date.now() < retryAt) return;
 		const { text, files } = take();
 		if (!files.length) return;
-		handing = { files, at: Date.now() };
+		handing = { files, at: Date.now(), text, seen: false };
 		if (!text) {
 			handed();
 			return;
@@ -188,7 +190,16 @@ export default function (pi: any) {
 		timer = setInterval(() => {
 			try {
 				const idle = status.state === "idle" && ctx.isIdle() && !ctx.hasPendingMessages();
-				if (idle && handing && Date.now() - handing.at > 5000) giveBack();
+				// A message pi refused outright (it was compacting) never
+				// reached the input hook: it goes back after 5 s. One that
+				// did is being prepared for its run (other extensions'
+				// hooks, a login check that may go to the network), and
+				// pi reports idle all that time. Handing it over again
+				// then would run it twice, so it is given much longer:
+				// pi either starts the run or gives up on it (no model,
+				// no key).
+				const wait = handing && handing.seen ? 120000 : 5000;
+				if (idle && handing && Date.now() - handing.at > wait) giveBack();
 				if (idle) deliver();
 			} catch {}
 		}, 1000);
@@ -196,6 +207,10 @@ export default function (pi: any) {
 	});
 	pi.on("session_shutdown", () => {
 		clearInterval(timer);
+	});
+	pi.on("input", (event: any) => {
+		// Returns nothing: the message goes on as it is.
+		if (handing && event && event.source === "extension" && event.text === handing.text) handing.seen = true;
 	});
 	pi.on("agent_start", () => {
 		handed();

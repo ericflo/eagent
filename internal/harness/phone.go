@@ -328,32 +328,45 @@ func (r *Runtime) startPhone() {
 }
 
 // withdrawAnswered closes the phone cards of questions that evs (what the
-// message that resumed the session recorded) answered: the cards were
-// posted by an earlier run, so this one does not know them except from
-// the record. Loop goroutine.
+// message that resumed the session recorded) answered or dismissed: the
+// cards were posted by an earlier run, so this one does not know them
+// except from the record. An answered card is withdrawn; a dismissed one
+// closes as dismissed, as it does while a session runs. Loop goroutine.
 func (p *phone) withdrawAnswered(r *Runtime, evs []event.Event) {
-	var cards []string
-	for _, ev := range evs {
-		if ev.Type != event.UserAnswer {
-			continue
-		}
-		var d event.UserAnswerData
-		if ev.Decode(&d) != nil {
-			continue
-		}
+	cardsOf := func(qid string) []string {
+		var out []string
 		for _, q := range r.st.Events {
 			var c event.PhoneQuestionData
-			if q.Type == event.PhoneQuestion && q.Decode(&c) == nil && c.QuestionID == d.QuestionID && c.CardID != "" {
-				cards = append(cards, c.CardID)
+			if q.Type == event.PhoneQuestion && q.Decode(&c) == nil && c.QuestionID == qid && c.CardID != "" {
+				out = append(out, c.CardID)
+			}
+		}
+		return out
+	}
+	var answered, dismissed []string
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			if ev.Decode(&d) == nil {
+				answered = append(answered, cardsOf(d.QuestionID)...)
+			}
+		case event.UserDismiss:
+			var d event.UserDismissData
+			if ev.Decode(&d) == nil {
+				dismissed = append(dismissed, cardsOf(d.QuestionID)...)
 			}
 		}
 	}
-	if len(cards) == 0 {
+	if len(answered)+len(dismissed) == 0 {
 		return
 	}
 	p.enqueue(func(ctx context.Context) {
-		for _, fid := range cards {
+		for _, fid := range answered {
 			_ = p.client.Cancel(ctx, fid) // already resolved is fine
+		}
+		for _, fid := range dismissed {
+			_ = p.client.Dismiss(ctx, fid) // already resolved is fine
 		}
 	})
 }

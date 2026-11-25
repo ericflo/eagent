@@ -220,6 +220,9 @@ type heldSend struct {
 	// on is the relay the send is on the record for, when it waits in a
 	// start that may hand it to another (a switch).
 	on string
+	// brief marks a switch's handoff brief: written for the agent that
+	// switch started, and no use to another that takes over from it.
+	brief bool
 }
 
 // sendResult is how typing one send went.
@@ -547,9 +550,17 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		id := r.st.NextRelaySendID()
 		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
-		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone})
+		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true})
 	}
 	for _, h := range held {
+		if h.brief && job.brief != "" {
+			// The brief of the switch before this one, never typed: it
+			// introduced the agent this switch has just replaced, and the
+			// new agent has a brief of its own. That switch is told its
+			// brief did not go in.
+			h.done <- sendResult{err: fmt.Errorf("%s took over before the brief was typed", job.name)}
+			continue
+		}
 		if h.on != "" && h.on != job.name && !h.barrier {
 			// A send on the record for the relay this one took over from
 			// is the new agent's from now on: who sent it last, what the
@@ -558,6 +569,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				d.Name = job.name
 				r.append(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: d, Prev: h.on}))
 			}
+		}
+		if !h.barrier {
+			// It is this relay's on the record now: a later restart or
+			// switch moves it on from here, not from where it began.
+			h.on = job.name
 		}
 		queue = append(queue, h)
 	}

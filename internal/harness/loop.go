@@ -445,8 +445,8 @@ func (r *Runtime) oweAnswer(seq int64) {
 
 // oweReminder arranges one later call about the user's answer at seq,
 // which a turn with no call left held on without being told that nobody
-// else has seen it. A message kept for eagent that is already owed comes
-// first, and its calls are told of the answer too. Loop goroutine.
+// else has seen it. Nothing is arranged while a message kept for eagent is
+// already owed: its retries come first. Loop goroutine.
 func (r *Runtime) oweReminder(seq int64) {
 	t := &r.turns
 	if t.owed != 0 {
