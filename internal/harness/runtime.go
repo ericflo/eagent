@@ -131,7 +131,9 @@ type Runtime struct {
 	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
-	relayRepick     map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
+	// startFailed: the last attempt to start an agent failed (startRelay).
+	startFailed bool
+	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
 	ending       bool
 	endReason    string
@@ -191,6 +193,7 @@ func (r *Runtime) startFirstRelay() {
 	if profile == "" {
 		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "no coding agent is installed on this machine (looked for " + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")"}))
 		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] No agent could be started: none of the coding agents eagent knows is installed here. Tell the user which to install (Claude Code, Codex, Antigravity or pi), in one message."}))
+		r.startFailed = true
 		return
 	}
 	pick := relayPick{strings.TrimSpace(r.opts.RelayModel), strings.TrimSpace(r.opts.RelayEffort)}
@@ -672,7 +675,7 @@ func (r *Runtime) maybeEnd() {
 	// and says so (the phone's closing note and the exit code follow the
 	// reason): a question is open or was dismissed and never taken up, the
 	// model could not be reached, or no agent could be started at all.
-	if r.st.Question != nil || down || r.st.DismissalStands() || len(r.st.RelayOrder) == 0 {
+	if r.st.Question != nil || down || r.st.DismissalStands() || (len(r.st.RelayOrder) == 0 && r.startFailed) {
 		r.beginShutdown("awaiting-input", 2)
 		return
 	}

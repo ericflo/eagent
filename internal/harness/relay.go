@@ -148,7 +148,11 @@ func (r *Runtime) checkRelayPick(profile string, pick relayPick) error {
 // startRelay launches an agent in a terminal of its own, with the session's
 // model and effort picks. resume continues the named relay's
 // own session (a restart). Loop goroutine (or before the loop starts).
-func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayPick) (string, error) {
+func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayPick) (_ string, err error) {
+	// A session with no terminal that ends without ever having had an
+	// agent, after a start that failed, did not do what it was started
+	// for (maybeEnd).
+	defer func() { r.startFailed = err != nil }()
 	if name == "" {
 		name = profile
 		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active(); i++ {
@@ -178,6 +182,7 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayP
 	if err != nil {
 		return "", err
 	}
+	r.summary.final = false // a session with an agent started is not ending
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
 		Name: name, Profile: profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: dir,
 		Host: started.Host, Target: started.Target, Command: started.Command, InnerID: started.InnerID, Resumed: resume && innerID != "",

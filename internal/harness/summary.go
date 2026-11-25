@@ -141,6 +141,10 @@ func (r *Runtime) noteSummary(ev event.Event) {
 	var due time.Time
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer:
+		// The user is here: a session that was writing its last summary
+		// is not ending after all. The next ending gets one of its own,
+		// and until then no turn carries the last summary's time limit.
+		k.final = false
 		due = now.Add(summaryUserDelay)
 		if r.st.SummarySeq == 0 {
 			due = now.Add(summaryFirstDelay)

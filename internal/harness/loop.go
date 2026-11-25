@@ -605,9 +605,10 @@ func (r *Runtime) turn(w wake) {
 	var mustSpeak, answered bool
 	var held, covered int64
 	who := "the agent"
+	stopped := func() string { return stopReason(ctx) }
 	for call := 1; call <= maxCalls; call++ {
 		if ctx.Err() != nil {
-			end = "interrupted"
+			end = stopped()
 			break
 		}
 		var msgs []llm.Message
@@ -616,7 +617,7 @@ func (r *Runtime) turn(w wake) {
 			fresh := tail == ""
 			if !fresh && tailKept {
 				if k, ok := r.dueWake(); ok {
-					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded}
+					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
@@ -652,12 +653,8 @@ func (r *Runtime) turn(w wake) {
 		resp, err := r.complete(ctx, event.ActorEagent, req, r.observer())
 		r.ui.Stream("", "")
 		if err != nil {
-			if ctx.Err() != nil && r.ctx.Err() == nil && w.wait > 0 {
-				end = "timeout" // the row keeps the summary it had
-				break
-			}
 			if ctx.Err() != nil && !w.final {
-				end = "interrupted"
+				end = stopped() // on a timeout the row keeps the summary it had
 				break
 			}
 			r.sync(func() {
@@ -717,10 +714,10 @@ func (r *Runtime) turn(w wake) {
 			case held > 0 && !reminded && !tc.handled:
 				reminded = true
 				back = "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + ". Holding is not an answer to a message addressed to you."
-			case answered && !remindedAnswer:
+			case answered && !remindedAnswer && !tc.handled:
 				remindedAnswer = true
 				back = "The user's answer has reached nobody but you. If " + who + " is waiting on it, give it to " + who + " with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next. Hold again only if the answer needs nothing done."
-			case mustSpeak && !remindedFinal:
+			case mustSpeak && !remindedFinal && !tc.spoke:
 				remindedFinal = true
 				back = "Holding is not allowed here: the session is ending and the user is owed a last word. Send the final report now with send_message."
 			}
@@ -774,9 +771,10 @@ func (r *Runtime) turn(w wake) {
 			if ctx.Err() == nil {
 				out, isErr, more = r.runTool(ctx, tc, c)
 			} else {
-				// Decided and not done: the turn was cut off, and says so,
-				// so that a resumed session takes it up again (resume.go).
-				end = "interrupted"
+				// Decided and not done. When the session was stopped under
+				// it the turn was cut off, and says so, so that a resumed
+				// session takes it up again (resume.go).
+				end = stopped()
 			}
 			images := tc.images
 			tc.images = nil
@@ -785,7 +783,13 @@ func (r *Runtime) turn(w wake) {
 			})
 			again = again || more
 		}
-		if !again || end == "interrupted" {
+		if w.final && mustSpeak {
+			// The closing word belongs to a session that is ending. One
+			// that started an agent in this very turn is not: nothing is
+			// owed, and nothing may say "nothing is running now".
+			r.sync(func() { mustSpeak = len(r.st.ActiveRelays()) == 0 })
+		}
+		if !again || end == "interrupted" || end == "timeout" {
 			break
 		}
 		if call == maxCalls {
@@ -814,6 +818,17 @@ func (r *Runtime) turn(w wake) {
 			r.fallbackFinal()
 		}
 	})
+}
+
+// stopReason names why a turn whose context is done ended: its own time
+// ran out (the closing word's minute, the last summary's 45 seconds), or
+// the session was stopped under it. Only the second is a turn cut off,
+// which a resume takes up again (resume.go).
+func stopReason(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "interrupted"
 }
 
 // keepsThread reports an update_thread call that sets nothing: the model's
