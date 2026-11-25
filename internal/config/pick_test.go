@@ -51,3 +51,19 @@ func TestNearestEffort(t *testing.T) {
 		}
 	}
 }
+
+// An empty effort sends none; picking another model with no effort named
+// keeps it empty, where an effort the model lacks moves to the nearest.
+func TestPickRouteKeepsAnEmptyEffortEmpty(t *testing.T) {
+	project := t.TempDir()
+	base := ModelRoute{Protocol: "openai-chat", BaseURL: "https://api.together.xyz/v1", Model: "zai-org/GLM-5.3", APIKeyEnv: "TOGETHER_API_KEY"}
+	for _, model := range []string{"z-ai/glm-5.3", "openai/gpt-6-astra"} {
+		a, err := PickRoute(project, base, "openrouter", model, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.ReasoningEffort != "" {
+			t.Fatalf("%s: effort %q", model, a.ReasoningEffort)
+		}
+	}
+}
