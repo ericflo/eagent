@@ -612,7 +612,6 @@ func TestAudit2ThreadAskedAgainThenTakenAsKept(t *testing.T) {
 // than summaryRetry after the call that said nothing, even when the
 // summary's own timer came due while that call ran.
 func TestAudit2ThreadReaskWaitsItsGap(t *testing.T) {
-	t.Skip("GAP: summary.go:185 summaryDue sets threadDue without checking notBefore, so a timer that came due during the unanswered call asks again at once")
 	// The first ask takes longer than summaryFirstDelay, so the timer the
 	// user's message armed comes due while it runs.
 	_, times := audit2ThreadAsks(t, 4*summaryFirstDelay)
@@ -650,7 +649,6 @@ func TestAudit2SessionReadIsBounded(t *testing.T) {
 
 // A raw session_read of one line longer than loopReadChars is cut too.
 func TestAudit2SessionReadRawLineIsBounded(t *testing.T) {
-	t.Skip("GAP: a raw read of one long line is not cut: tools/sessionlog.go:51 checks the bound only after a whole line, and toolcalls.go:121 does not clip")
 	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
 	var file string
 	var line int

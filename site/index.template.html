@@ -125,7 +125,7 @@
           <p class="eyebrow">
             <span class="status-dot"></span> OPEN SOURCE. ONE GO BINARY.
           </p>
-          <h1 id="hero-title">A go-between<br /><span>for your agent.</span></h1>
+          <h1 id="hero-title">Your agent.<br /><span>Your call.</span></h1>
           <p class="hero-description">
             eagent runs a coding agent you already use (Codex, Claude Code,
             Antigravity, pi, or your own profile) in a terminal and stands
@@ -155,7 +155,9 @@
               <svg class="icon"><use href="#i-copy" /></svg>
             </button>
           </div>
-          <p class="hero-footnote">From a terminal, a browser, or your phone.</p>
+          <p class="hero-footnote">
+            From a terminal, a browser, or your phone.
+          </p>
         </div>
         <div
           class="hero-art"
@@ -344,8 +346,8 @@
             </text>
           </svg>
           <div class="art-coordinate coordinate-bottom">
-            <span class="art-cross">+</span> ONE MODEL. ONE EFFORT. ONE
-            RECORD. <span class="art-cross">+</span>
+            <span class="art-cross">+</span> ONE MODEL. ONE EFFORT. ONE RECORD.
+            <span class="art-cross">+</span>
           </div>
         </div>
       </section>
@@ -361,9 +363,7 @@
         </div>
         <div>
           <span class="principle-number">01</span
-          ><span
-            >Model loop<br /><strong>One model, one effort.</strong></span
-          >
+          ><span>Model loop<br /><strong>One model, one effort.</strong></span>
         </div>
         <div>
           <svg class="principle-icon" viewBox="0 0 40 40" aria-hidden="true">
@@ -520,9 +520,7 @@
                 >
                   <span>02</span
                   ><span
-                    >eagent watches<small
-                      >Transcript → new steps</small
-                    ></span
+                    >eagent watches<small>Transcript → new steps</small></span
                   ><svg class="icon" aria-hidden="true">
                     <use href="#i-arrow" />
                   </svg>
@@ -553,8 +551,7 @@
                   data-step="dialog"
                 >
                   <span>04</span
-                  ><span
-                    >A stuck dialog<small>Screen → keys</small></span
+                  ><span>A stuck dialog<small>Screen → keys</small></span
                   ><svg class="icon" aria-hidden="true">
                     <use href="#i-arrow" />
                   </svg>
@@ -719,9 +716,9 @@
                   </p>
                 </div>
                 <div class="log-footer">
-                  <span class="status-dot"></span>Your messages, the agent&rsquo;s
-                  reports and what eagent says all go into the session&rsquo;s
-                  log.
+                  <span class="status-dot"></span>Your messages, the
+                  agent&rsquo;s reports and what eagent says all go into the
+                  session&rsquo;s log.
                 </div>
               </div>
             </div>
@@ -783,10 +780,10 @@
             <template id="step-ask-content">
               <h4>A question that is yours.</h4>
               <p>
-                When the agent asks something or offers choices, eagent asks
-                you in plain words, with the choices as options. Your answer
-                goes back to the agent. On autopilot, eagent decides the way
-                you would and tells you what it chose.
+                When the agent asks something or offers choices, eagent asks you
+                in plain words, with the choices as options. Your answer goes
+                back to the agent. On autopilot, eagent decides the way you
+                would and tells you what it chose.
               </p>
               <p class="handoff-output">
                 <span>TO YOU</span>The fork, what each branch changes, and the
@@ -922,10 +919,10 @@
             <h3>Standing orders<br />and timers.</h3>
             <p>
               A standing order makes eagent send the agent on at every stop,
-              toward what is still missing, and decide its questions the way
-              you would. When the deadline passes, eagent stops nudging and
-              reports what happened. Timers wake eagent later with a note it
-              left itself.
+              toward what is still missing, and decide its questions the way you
+              would. When the deadline passes, eagent stops nudging and reports
+              what happened. Timers wake eagent later with a note it left
+              itself.
             </p>
             <div
               class="process-list"
@@ -955,10 +952,10 @@
           <h2>Pick eagent&rsquo;s<br />own model.</h2>
           <p>
             eagent&rsquo;s loop runs on one model, with an optional fallback
-            route for when the first is unroutable. Each preset names one
-            model. With no preset, eagent uses {{DEFAULT_MODEL}}. A local or
-            custom server works too: <code>eagent servers add URL</code> probes
-            it and registers it.
+            route for when the first is unroutable. Each preset names one model.
+            With no preset, eagent uses {{DEFAULT_MODEL}}. A local or custom
+            server works too: <code>eagent servers add URL</code> probes it and
+            registers it.
           </p>
           <p>
             The agent keeps its own model. Choose it with
@@ -1018,9 +1015,8 @@
             <code>/switch claude</code> hands the work to another agent in the
             same folder, with a brief of your instructions and the last report.
             A custom profile goes under <code>relay.profiles</code> in the
-            project config. A new kind of agent is one Go file that
-            implements the agent interface, plus a line in the built-in
-            profiles.
+            project config. A new kind of agent is one Go file that implements
+            the agent interface, plus a line in the built-in profiles.
           </p>
         </div>
         <ul class="agent-list" aria-label="Agents that ship with eagent">
@@ -1095,8 +1091,8 @@
             With <a href="https://www.finalechat.com">FinaleChat</a>, each
             session appears on your phone with its messages, questions with
             buttons, the agent&rsquo;s screen and settings. You can start a new
-            session there too. Messages land quietly. Questions always buzz,
-            and so does finished work or a blocked agent.
+            session there too. Messages land quietly. Questions always buzz, and
+            so does finished work or a blocked agent.
             <code>/notify-done</code> buzzes when the current turn ends.
           </p>
           <p>
@@ -1110,8 +1106,8 @@
             <svg class="icon"><use href="#i-up-right" /></svg
           ></a>
           <div class="phone-optional">
-            <span class="status-dot"></span>Set <code>FINALECHAT_TOKEN</code>
-            or run <code>finalechat login</code> to turn it on.<br /><code
+            <span class="status-dot"></span>Set <code>FINALECHAT_TOKEN</code> or
+            run <code>finalechat login</code> to turn it on.<br /><code
               >EAGENT_FINALECHAT=off</code
             >
             turns all outbound integration traffic off.
@@ -1127,7 +1123,7 @@
             <div class="phone-app">
               <span aria-hidden="true">‹</span>
               <div>
-                <strong>PR merges and dependency pass</strong
+                <strong>Dependency pass</strong
                 ><span>~/src/storefront · codex</span>
               </div>
               <span class="phone-avatar"
@@ -1143,13 +1139,13 @@
                 <span class="status-dot"></span>Delivered to Codex
               </div>
               <p class="phone-message phone-agent">
-                Still in the test run: <code>go test -race ./...</code> has
-                been going for seven minutes. It doesn&rsquo;t look stuck,
-                it&rsquo;s just a slow suite.
+                Still in the test run: <code>go test -race ./...</code> has been
+                going for seven minutes. It doesn&rsquo;t look stuck, it&rsquo;s
+                just a slow suite.
               </p>
               <div class="phone-message phone-agent phone-question">
-                Codex wants to know whether to take the new major version of
-                the router or stay on the current one.
+                Codex wants to know whether to take the new major version of the
+                router or stay on the current one.
                 <span class="phone-choices"
                   ><span>Take it</span><span>Stay</span></span
                 >
@@ -1186,8 +1182,7 @@
         <a
           class="text-link"
           href="https://github.com/ericflo/eagent/blob/main/docs/FINALECHAT-INTEGRATIONS.md#portable-archives"
-          >Read about archives
-          <svg class="icon"><use href="#i-up-right" /></svg
+          >Read about archives <svg class="icon"><use href="#i-up-right" /></svg
         ></a>
       </section>
 
@@ -1338,7 +1333,9 @@
                 <dd>Watch or type into a running agent yourself.</dd>
               </div>
               <div>
-                <dt><code>eagent sessions</code>, <code>show &lt;id&gt;</code></dt>
+                <dt>
+                  <code>eagent sessions</code>, <code>show &lt;id&gt;</code>
+                </dt>
                 <dd>What has run here, and a readable transcript.</dd>
               </div>
             </dl>
@@ -1386,8 +1383,7 @@
           <p class="eyebrow">A LITTLE MORE CONTEXT</p>
           <h2>Questions.</h2>
           <a class="text-link" href="https://github.com/ericflo/eagent#readme"
-            >Read the README
-            <svg class="icon"><use href="#i-up-right" /></svg
+            >Read the README <svg class="icon"><use href="#i-up-right" /></svg
           ></a>
         </div>
         <div class="faq-list">
@@ -1416,10 +1412,10 @@
             </summary>
             <p>
               eagent is free, open-source software under the MIT license. You
-              pay your provider for eagent&rsquo;s own model, and the agent
-              runs on its own account as it would without eagent. The web page
-              shows the session&rsquo;s token usage and cost. Looks where
-              nothing changed make no model call at all.
+              pay your provider for eagent&rsquo;s own model, and the agent runs
+              on its own account as it would without eagent. The web page shows
+              the session&rsquo;s token usage and cost. Looks where nothing
+              changed make no model call at all.
             </p>
           </details>
           <details>
@@ -1468,8 +1464,8 @@
             </summary>
             <p>
               Your messages still reach the agent, since forwarding happens
-              before any model call. A failed call is retried after 5 seconds,
-              a minute, then 5, 15 and 30 minutes, then hourly. After the second
+              before any model call. A failed call is retried after 5 seconds, a
+              minute, then 5, 15 and 30 minutes, then hourly. After the second
               failure eagent tells you it cannot reach its model. A configured
               fallback route takes over when the first is unroutable, for
               example with a bad key or no credits.
@@ -1480,10 +1476,10 @@
               Can I change how eagent talks?<span aria-hidden="true">+</span>
             </summary>
             <p>
-              Yes. Ask for more or fewer updates and it does that from then
-              on. <code>eagent prompts export</code> copies its prompts into
-              the project, where you can edit them, and <code>persona</code> in
-              the config replaces its voice. <code>quiet_seconds</code> sets the
+              Yes. Ask for more or fewer updates and it does that from then on.
+              <code>eagent prompts export</code> copies its prompts into the
+              project, where you can edit them, and <code>persona</code> in the
+              config replaces its voice. <code>quiet_seconds</code> sets the
               longest silence while the agent works.
             </p>
           </details>
@@ -1496,8 +1492,7 @@
           <a class="button button-primary" href="#get-started"
             >Get started <svg class="icon"><use href="#i-arrow" /></svg></a
           ><a class="text-link" href="https://github.com/ericflo/eagent"
-            ><svg class="icon"><use href="#i-github" /></svg>Read the
-            source</a
+            ><svg class="icon"><use href="#i-github" /></svg>Read the source</a
           >
         </div>
         <div class="closing-orbits" aria-hidden="true">
@@ -1529,7 +1524,8 @@
           </div>
           <div>
             <span>UNDER THE HOOD</span
-            ><a href="https://github.com/ericflo/eagent/blob/main/docs/DESIGN.md"
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/DESIGN.md"
               >How eagent works</a
             ><a
               href="https://github.com/ericflo/eagent/blob/main/docs/EVENTS.md"
@@ -1553,7 +1549,8 @@
       </div>
       <div class="footer-bottom">
         <span
-          >Made by <a href="https://github.com/ericflo">Eric Florenzano</a> &amp;
+          >Made by
+          <a href="https://github.com/ericflo">Eric Florenzano</a> &amp;
           contributors.</span
         ><a href="https://github.com/ericflo/eagent/blob/main/LICENSE"
           >Open source · MIT license

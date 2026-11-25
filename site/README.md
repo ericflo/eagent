@@ -74,43 +74,58 @@ resource requests.
 
 ## Content and design
 
-The visual identity uses warm paper and charcoal, with orange for the
-orchestrator, sage for the worker, and pale yellow for the narrator. The
-hero's orbital drawing, dossier, event strip, and phone are native SVG/CSS.
-The actor diagram changes active nodes, connection direction, and task states
-with the walkthrough tabs. The recovery diagram shows how `seen_seq` preserves
-causal order when task reports arrive during a model call. The page respects reduced motion, pauses offscreen animation, and supports
-keyboard navigation, native disclosure panels, and a focus-managed image
-dialog.
+The page describes eagent as it is now: it runs a coding agent (Codex,
+Claude Code, Antigravity, pi, or a custom profile) in a terminal and stands
+between it and you. Every claim on it should trace to the README,
+`docs/DESIGN.md`, the prompts in `internal/prompts/`, the CLI usage text, or
+the code.
 
-Keep the illustrations labeled as illustrations. The actual application
-screenshots and game output come from the repository's published docs.
+The visual identity uses warm paper and charcoal, with orange for eagent,
+sage for the agent, and pale yellow for labels on connections. The hero's
+orbital drawing, the session-directory and prompt diagrams, the dossier, and
+the phone are native SVG/CSS. The turn walkthrough has six steps (your words,
+watching, a progress line, a stuck dialog, the turn's end, a question for
+you); each tab changes the active parties, the connections between them,
+their direction, and their labels. The page respects reduced motion, pauses
+offscreen animation, and supports keyboard navigation and native disclosure
+panels.
+
+Keep illustrations labeled as illustrations. The phone conversation and the
+file names in the log diagram are illustrative; commands shown on the page
+come from the README and `eagent help`. The old web UI screenshots
+(`assets/web-*.png`) and Neon Brickles images show the earlier three-actor
+design and are no longer used.
 
 | Content | Source of truth |
 | --- | --- |
-| Installation, CLI, feature overview | [README](../README.md), [CLI](../cmd/eagent/main.go) |
-| Example models, presets, reasoning effort, fallbacks | [Configuration](../internal/config/config.go) |
-| Three roles and context model | [Design specification](../docs/DESIGN-SPEC.md), [actor prompts](../internal/prompts/) |
-| Replay and committed events | [Event schema](../docs/EVENTS.md), [state views](../internal/state/views.go) |
-| Dossiers and rollover | [Rollover implementation](../internal/harness/rollover.go) |
-| Original Neon Brickles run: ~\$1.20, 29 minutes, 74 + 9 checks | [README run report](../README.md#what-it-did-on-a-real-task) |
-| GLM and Anthropic-high examples | [Breakout grid](../docs/breakout-grid.md), [recorded data](../docs/grid/results.json) |
-| Playable 16-game grid gallery, comparison table, cards | [Recorded data](../docs/grid/results.json) (costs, durations, rubric, tests, entries, play notes), [staged builds](../docs/grid/builds/) (Vite `dist/` prefix stripped at stage time; `builds-v1/` holds the archived v1 builds and is excluded from staging), [screenshots](../docs/grid/) (`<preset>-{desktop,mobile}.png` thumbnails); September 2026 runs plus phase-3 resumes and heroes, methodology alongside the gallery |
+| Installation, CLI, in-session commands | [README](../README.md), [CLI usage](../cmd/eagent/main.go) |
+| The design: routing, looks, caching, dossier, retries | [How eagent works](../docs/DESIGN.md) |
+| What eagent says and when | [EAGENT.md](../internal/prompts/EAGENT.md), [PERSONA.md](../internal/prompts/PERSONA.md) |
+| Presets, models, reasoning effort, fallbacks | [Configuration](../internal/config/) |
+| Event log and replay | [Event schema](../docs/EVENTS.md), [store](../internal/store/store.go) |
 | Phone, archives, and settings | [Integration documentation](../docs/FINALECHAT-INTEGRATIONS.md) |
+| Breakout variance page (earlier design) | [Variance data](../docs/grid/variance.json), [staged builds](../docs/grid/builds-variance/) |
 
 The build runs [`scripts/site-data`](../scripts/site-data/main.go), which reads
 `config.Defaults`, `config.Presets`, `config.PresetNames`, and the model/provider
-catalog in [`internal/config`](../internal/config/). It generates the dropdown,
-example actor cards, provider list, setup commands, and embedded JSON for interactive selection.
-It never loads local configuration or API keys. Do not maintain a separate
-preset catalog in HTML or JavaScript. `examples.json` chooses existing preset
-names for the site: OpenRouter first, followed by OpenCode, OpenAI, and Anthropic.
-Their actual routes are always exported from Go. Configuration changes trigger the Pages
-workflow, and browser tests compare every displayed route with a fresh export.
+catalog in [`internal/config`](../internal/config/). Each preset names one
+model for eagent's loop (the `eagent` route; a dedicated summarizer route is
+exported too but not shown). The build generates the dropdown, the example
+model, the built-in default, the provider list, setup commands, and embedded
+JSON for interactive selection. It never loads local configuration or API
+keys. Do not maintain a separate preset catalog in HTML or JavaScript.
+`examples.json` chooses existing preset names for the site. Commands omit
+`--preset` when the example is the built-in default. Browser tests compare
+every displayed route with a fresh export.
 
-Prices and scores on the page describe
-documented September 2026 runs, rather than current estimates or universal
-performance claims. Keep the run date and methodology link alongside them.
+## Earlier design
+
+The Breakout grid (sixteen presets building one game) and its variance annex
+were run when eagent did the work itself with an orchestrator, task workers
+and a narrator. The main page no longer shows them; it links to them only
+under "Earlier design" in the footer. The variance page opens with a banner
+saying which design it documents. The sixteen grid games are still staged
+under `games/<preset>/` so existing links keep working.
 
 Space Grotesk, DM Sans, and IBM Plex Mono are self-hosted under the SIL Open
 Font License. Their license files are included in `assets/fonts/`.

@@ -122,6 +122,11 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		if err != nil {
 			return err.Error(), true, true
 		}
+		if len(out) > loopReadChars+2000 {
+			// The reader stops between lines; one line can be longer than
+			// the whole bound (a pasted message read raw).
+			out = clipRunes(out, loopReadChars) + "\n[... cut here; this line is longer than one read may return ...]"
+		}
 		return out, false, true
 	case tools.SessionSearch:
 		out, err := r.archive.Search(str("query"), str("file"), num("max_results", 40))

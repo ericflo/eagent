@@ -198,6 +198,13 @@ func (r *Runtime) summaryDue(at time.Time) {
 		return
 	}
 	if k.inline {
+		if time.Now().Before(k.notBefore) {
+			// The model was asked and said nothing: it is asked again
+			// when that wait is over, not when an older timer happens to
+			// come due.
+			r.armSummary(k.notBefore)
+			return
+		}
 		// The next call is asked about them; with nothing else going on,
 		// that is a call of its own (loop.go).
 		k.last = time.Now()
@@ -265,6 +272,9 @@ func (r *Runtime) threadAsked(answered bool) {
 		return
 	}
 	k.notBefore = time.Now().Add(min(summaryRetry<<min(k.fails-1, 3), summaryLongGap))
+	// A timer that came due while that call ran has already asked for the
+	// next one. It waits too.
+	r.turns.threadDue = false
 	if !r.ending {
 		r.armSummary(k.notBefore)
 	}

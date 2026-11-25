@@ -714,7 +714,7 @@ func (r *Runtime) turn(w wake) {
 			case strings.TrimSpace(resp.Text) != "" && len(resp.ToolCalls) == 0 && !nudged:
 				nudged = true
 				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
-			case held > 0 && !reminded:
+			case held > 0 && !reminded && !tc.handled:
 				reminded = true
 				back = "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + ". Holding is not an answer to a message addressed to you."
 			case answered && !remindedAnswer:
