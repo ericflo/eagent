@@ -346,20 +346,33 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	return fmt.Sprintf("typed into %s", label), nil
 }
 
+// ErrClosed is a send to a seat that was closed or killed (the relay was
+// stopped, restarted or switched) before its text could be typed. It is
+// not the agent's failure: the harness decides where such a send goes.
+var ErrClosed = errors.New("the agent's terminal was closed before the message could be typed")
+
 // waitReady blocks while the agent is still on its startup screens, so a
 // message is never typed into a trust prompt.
 func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		s.mu.Lock()
-		state := s.state
+		state, closed := s.state, s.closed
 		s.mu.Unlock()
+		if closed {
+			// Nothing watches this seat any more, so its state is stale and
+			// it is no longer the relay's terminal.
+			return state, ErrClosed
+		}
 		switch state {
 		case "starting":
 			if time.Now().After(deadline) {
 				return state, errors.New("the agent is still starting; check relay_screen")
 			}
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-time.After(300 * time.Millisecond):
+			case <-s.stop:
+			}
 			continue
 		case "blocked":
 			return state, errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
