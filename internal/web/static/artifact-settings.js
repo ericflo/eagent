@@ -102,16 +102,18 @@
       for (const m of (base.models || [])) if (customIDs.has(m.provider)) existingCustomModels.set(`${m.provider}|${m.id}`, m);
       const customModels = [];
       const seen = new Set();
+      // A model's group is its provider's address (base_url).
+      const providerOf = group => customProviders.find(p => p.id === group || p.base_url === String(group || '').replace(/\/+$/, ''));
       for (const sug of (resource?.descriptor?.suggestions?.models || [])) {
-        if (!customIDs.has(sug.group)) continue;
-        const k = `${sug.group}|${sug.value}`;
+        const pr = providerOf(sug.group);
+        if (!pr) continue;
+        const k = `${pr.id}|${sug.value}`;
         if (seen.has(k)) continue;
         seen.add(k);
         const existing = existingCustomModels.get(k);
         if (existing) { customModels.push(existing); continue; }
-        const pr = customProviders.find(p => p.id === sug.group);
         customModels.push({
-          provider: sug.group, id: sug.value, family: sug.value, label: sug.label || sug.value,
+          provider: pr.id, id: sug.value, family: sug.value, label: sug.label || sug.value,
           protocol: pr?.protocol || 'openai-chat', protocols: pr?.protocols || [], note: sug.detail || '', live: true,
         });
       }
@@ -191,8 +193,17 @@
         if (!base) throw new Error('The base preset is unavailable in this archive.');
         const baseValues = flatten(base), loaded = resource.snapshot.effective, desired = clone(resource.snapshot.saved), form = flatten(cfg);
         const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url', '/save_preset']);
+        // Relay profiles name programs to run: a captured bundle may carry
+        // them, and they stay as config.json has them.
+        const kept = key => omitted.has(key) || key.startsWith('/relay/profiles/');
+        // A fallback the preset gives cannot be removed by unsetting its
+        // fields: say so rather than save as if it were gone.
+        for (const route of ['/model', '/summarizer/model']) {
+          const has = values => Object.keys(values).some(key => key.startsWith(route + '/fallback/'));
+          if (has(loaded) && !has(form) && !has(resource.snapshot.saved)) throw new Error('The fallback this route has comes from its preset and cannot be removed from FinaleChat. Remove it in the local editor, or pick another model.');
+        }
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
-          if (omitted.has(key)) continue;
+          if (kept(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
           if (!canEdit(key)) continue;
           if (body.mode !== 'pin' && canonical(form[key]) === canonical(loaded[key]) && body.base_preset === (resource.snapshot.saved['/preset'] || '')) continue;

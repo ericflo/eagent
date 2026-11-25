@@ -480,7 +480,7 @@ func TestSessionViewReadsNaturally(t *testing.T) {
 		}
 	}
 	want := []string{
-		"Model: Provider", "Model: Model", "Model: Reasoning effort",
+		"eagent: Provider", "eagent: Model", "eagent: Reasoning effort",
 		"Progress: Seconds between progress looks", "Progress: Longest silence while the agent works",
 		"Claude Code: Model", "Claude Code: Reasoning effort",
 		"Configuration: Configuration", "Configuration: Save as new preset",
@@ -506,7 +506,7 @@ func TestSessionViewReadsNaturally(t *testing.T) {
 	for _, f := range view.Descriptor.Fields {
 		groups[f.Group]++
 	}
-	if groups["Model"] != 3 || groups["Summarizer"] != 3 {
+	if groups["eagent"] != 3 || groups["Summarizer"] != 3 {
 		t.Fatalf("groups = %v", groups)
 	}
 	// Choosing a configuration keeps the session's summarizer route, set to

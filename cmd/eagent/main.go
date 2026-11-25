@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -163,7 +164,8 @@ func run(args []string) int {
 		helpFlag  = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
-	rest, err := parseInterleaved(fs, args)
+	// Arguments after "--" are the prompt's words, never a command.
+	rest, commands, err := parseArgs(fs, args)
 	if err != nil {
 		return 64 // EX_USAGE
 	}
@@ -172,10 +174,10 @@ func run(args []string) int {
 		return 0
 	}
 	harness.Version = version
-	if len(rest) == 2 && rest[0] == "relay-agy-status" {
+	if commands > 0 && len(rest) == 2 && rest[0] == "relay-agy-status" {
 		return relay.WriteAntigravityStatus(rest[1], os.Stdin, os.Stdout)
 	}
-	if len(rest) > 0 && rest[0] == "relay-hook" {
+	if commands > 0 && rest[0] == "relay-hook" {
 		// Claude Code's Stop hook for a relay: fast, and silent unless it
 		// has messages to hand over.
 		if len(rest) < 2 {
@@ -190,7 +192,7 @@ func run(args []string) int {
 	}
 
 	cmd := ""
-	if len(rest) > 0 {
+	if commands > 0 {
 		switch rest[0] {
 		case "sessions", "show", "replay", "resume", "doctor", "config", "presets", "preset", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
@@ -398,22 +400,42 @@ func viewIgnoredFlags(w io.Writer, actor, task string) {
 // `eagent show <id> --raw` and `eagent resume <id> --answer yes` both work.
 // A literal `--` ends flag parsing.
 func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	rest, _, err := parseArgs(fs, args)
+	return rest, err
+}
+
+// parseArgs is parseInterleaved that also says how many of the positional
+// arguments came before a "--". Everything after "--" is positional, flags
+// included: a prompt that starts with "-" or reads "help" stays a prompt.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, int, error) {
 	var positional []string
+	before := -1
 	for len(args) > 0 {
 		if args[0] == "--" {
+			before = len(positional)
 			positional = append(positional, args[1:]...)
 			break
 		}
 		if err := fs.Parse(args); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		args = fs.Args()
+		rest := fs.Args()
+		// flag.Parse stops at a "--" and drops it.
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			before = len(positional)
+			positional = append(positional, rest...)
+			break
+		}
+		args = rest
 		if len(args) > 0 {
 			positional = append(positional, args[0])
 			args = args[1:]
 		}
 	}
-	return positional, nil
+	if before < 0 {
+		before = len(positional)
+	}
+	return positional, before, nil
 }
 
 func readAll(f *os.File) ([]byte, error) {
@@ -487,6 +509,46 @@ func cmdSessions(project string) int {
 // checking what the summary prompt produces (--dry-run). It reads logs and
 // never writes them. With --json each line carries the old title and
 // summary too, so a run can be undone by hand.
+// routeChain is a route and its fallbacks for calls made side by side: all
+// use the current one, and the first to find it unroutable moves them all
+// to the next.
+type routeChain struct {
+	mu      sync.Mutex
+	routes  []llm.Endpoint
+	clients []*llm.Client
+	at      int
+}
+
+func newRouteChain(routes []llm.Endpoint) *routeChain {
+	c := &routeChain{routes: routes}
+	for _, ep := range routes {
+		c.clients = append(c.clients, llm.NewClient(ep))
+	}
+	return c
+}
+
+func (c *routeChain) current() *llm.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clients[c.at]
+}
+
+// next moves past failed, reporting whether another route is left to try.
+// A call that failed on a route already left behind just tries the current.
+func (c *routeChain) next(failed *llm.Client) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.clients[c.at] != failed {
+		return true
+	}
+	if c.at+1 >= len(c.clients) {
+		return false
+	}
+	c.at++
+	fmt.Fprintf(os.Stderr, "summarizer: %s is unavailable; switching to %s\n", c.routes[c.at-1], c.routes[c.at])
+	return true
+}
+
 func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, asJSON, verbose bool) int {
 	if all == (len(refs) > 0) {
 		return fail(errors.New("usage: eagent summarize <session-id>... | --all [--dry-run] [--json]"))
@@ -503,7 +565,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 	if err != nil {
 		return fail(fmt.Errorf("summarizer: %w", err))
 	}
-	model := llm.NewClient(routes[0])
+	models := newRouteChain(routes)
 	set, err := prompts.Load(project)
 	if err != nil {
 		return fail(err)
@@ -548,7 +610,18 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
-			res, err := harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
+			var res harness.SessionSummary
+			var err error
+			for {
+				model := models.current()
+				res, err = harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
+				// A route that cannot serve the model at all (no access,
+				// no credits) gives way to the configured fallback.
+				var ae *llm.APIError
+				if !errors.As(err, &ae) || !ae.Unroutable() || !models.next(model) {
+					break
+				}
+			}
 			done <- outcome{res, err}
 		}(results[i], info)
 	}

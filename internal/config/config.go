@@ -768,16 +768,16 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		apply(&cfg)
 		cfg.Preset = preset
 	}
-	if err := overlay(&cfg, fileCfg, File(project)); err != nil {
+	if err := overlay(project, &cfg, fileCfg, File(project)); err != nil {
 		return cfg, err
 	}
 	if bundle != "" {
-		if err := overlay(&cfg, bundleCfg, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle)); err != nil {
 			return cfg, err
 		}
 		cfg.Name = bundle
 	}
-	applyEnv(&cfg)
+	applyEnv(project, &cfg)
 	normalize(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
@@ -808,8 +808,9 @@ func readJSONMap(path string) (map[string]json.RawMessage, error) {
 
 // overlay merges a JSON object into cfg, carrying over any keys of the
 // three-actor design first. Route objects merge field by field so a bundle
-// can change just a model name.
-func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
+// can change just a model name; a route whose model the object changes
+// without naming its context window gets the new model's (followModel).
+func overlay(project string, cfg *Config, m map[string]json.RawMessage, source string) error {
 	if len(m) == 0 {
 		return nil
 	}
@@ -817,11 +818,56 @@ func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
 	for _, n := range notes {
 		cfg.Migrated = append(cfg.Migrated, filepath.Base(source)+": "+n)
 	}
+	mainBefore, summarizerBefore := chainModels(&cfg.Model), chainModels(cfg.Summarizer.Model)
 	raw, _ := json.Marshal(m)
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		return fmt.Errorf("%s: %w", source, err)
 	}
+	followModel(project, &cfg.Model, mainBefore, m["model"])
+	followModel(project, cfg.Summarizer.Model, summarizerBefore, object(m["summarizer"])["model"])
 	return nil
+}
+
+// chainModels lists the model of a route and of each of its fallbacks.
+func chainModels(a *ModelRoute) []string {
+	var out []string
+	for cur := a; cur != nil; cur = cur.Fallback {
+		out = append(out, cur.Model)
+	}
+	return out
+}
+
+// followModel gives each route of a chain whose model changed from before
+// the new model's context window (0 when it is not known), unless layer,
+// the route object that changed it, names a context window itself. A
+// window is the model's: one kept from the model before would be wrong.
+//
+// A null in layer clears what the layers below set: the editor writes one
+// where it leaves a field empty that the preset sets, such as an effort of
+// "" (send none, the provider's default) under a preset's "high".
+func followModel(project string, a *ModelRoute, before []string, layer json.RawMessage) {
+	obj := object(layer)
+	null := func(k string) bool { v, ok := obj[k]; return ok && string(v) == "null" }
+	for i, cur := 0, a; cur != nil; i, cur = i+1, cur.Fallback {
+		prev := ""
+		if i < len(before) {
+			prev = before[i]
+		}
+		_, window := obj["context_tokens"]
+		switch {
+		case cur.Model != prev && (!window || null("context_tokens")):
+			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
+		case null("context_tokens"):
+			cur.ContextTokens = 0
+		}
+		if null("reasoning_effort") {
+			cur.ReasoningEffort = ""
+		}
+		if null("max_tokens") {
+			cur.MaxTokens = 0
+		}
+		obj = object(obj["fallback"])
+	}
 }
 
 // envFirst returns the first of the named variables that is set and not
@@ -874,7 +920,19 @@ func applyRouteEnv(a *ModelRoute, prefix string, legacy ...string) {
 	}
 }
 
-func applyEnv(cfg *Config) {
+// summarizerEnv names the first EAGENT_SUMMARIZER_* variable that sets a
+// field of the summarizer's route, or "" when none does.
+func summarizerEnv() string {
+	for _, suffix := range []string{"MODEL", "PROTOCOL", "BASE_URL", "API_KEY_ENV", "REASONING_EFFORT", "MAX_TOKENS", "REPLAY_REASONING"} {
+		name := "EAGENT_SUMMARIZER_" + suffix
+		if _, ok := os.LookupEnv(name); (ok && suffix == "API_KEY_ENV") || os.Getenv(name) != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func applyEnv(project string, cfg *Config) {
 	if value, err := strconv.ParseBool(os.Getenv("EAGENT_FINALECHAT_ARTIFACTS")); err == nil {
 		cfg.Finalechat.Artifacts = value
 	}
@@ -883,7 +941,11 @@ func applyEnv(cfg *Config) {
 	// does its effort: the one model does the orchestrator's work. The
 	// narrator's and the task worker's variables are not read; each one set
 	// gets a note.
+	prev := cfg.Model.Model
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
+	if cfg.Model.Model != prev {
+		cfg.Model.ContextTokens = KnownContext(project, cfg.Model.BaseURL, cfg.Model.Model)
+	}
 	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
 		cfg.Model.ReasoningEffort = v
 	}
@@ -891,13 +953,19 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {
 		cfg.Summarizer.Mode = v
 	}
-	if os.Getenv("EAGENT_SUMMARIZER_MODEL") != "" || cfg.Summarizer.Model != nil {
+	// Any EAGENT_SUMMARIZER_* route variable gives the summarizer a route of
+	// its own: the one written, else a copy of the main model's to change.
+	if summarizerEnv() != "" || cfg.Summarizer.Model != nil {
 		route := cfg.Summarizer.Route(cfg.Model)
 		route.Fallback = nil
 		if cfg.Summarizer.Model != nil {
 			route = *cfg.Summarizer.Model
 		}
+		prev := route.Model
 		applyRouteEnv(&route, "SUMMARIZER_")
+		if route.Model != prev {
+			route.ContextTokens = KnownContext(project, route.BaseURL, route.Model)
+		}
 		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
 			route.ReasoningEffort = v
 		}

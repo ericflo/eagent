@@ -191,7 +191,7 @@ func TestRemoteApplyRegistersEditsAndRemovesLocalServers(t *testing.T) {
 	if err != nil || len(servers) != 1 || servers[0].BaseURL != srv.URL+"/v1" {
 		t.Fatalf("servers after /add_server_url = %+v err=%v", servers, err)
 	}
-	if !slices.ContainsFunc(v1.Descriptor.Suggestions["models"], func(s control.Suggestion) bool { return s.Value == "local-coder" && s.Group == servers[0].ID }) {
+	if !slices.ContainsFunc(v1.Descriptor.Suggestions["models"], func(s control.Suggestion) bool { return s.Value == "local-coder" && s.Group == servers[0].BaseURL }) {
 		t.Fatalf("suggestions missing newly probed local model: %+v", v1.Descriptor.Suggestions["models"])
 	}
 

@@ -19,6 +19,12 @@ import (
 
 const SchemaVersion = "eagent.project-settings/v2"
 
+// suggestionLists is how many suggestion lists a project settings document
+// carries: eight, what FinaleChat accepted before its limit was raised to
+// 16. Documents keep to it until FinaleChat with the higher limit is the
+// one in use, though the protocol (control.Descriptor.Validate) takes 16.
+const suggestionLists = 8
+
 type RemoteView struct {
 	Key        string             `json:"key"`
 	Label      string             `json:"label"`
@@ -52,6 +58,17 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	dedicated := res.Effective.Summarizer.Mode == config.SummarizerDedicated
 	out := RemoteView{Key: grant.Key, Label: grant.Label, Scope: grant.Scope, Descriptor: control.Descriptor{Format: control.Format, SchemaVersion: SchemaVersion, AdapterVersion: "1", Fields: []control.Field{}}, Snapshot: control.Snapshot{Context: s.Project, Saved: map[string]any{}, Effective: map[string]any{}, RuntimeKnown: false}}
+	// The addresses a route may use: the providers', then any written in
+	// the project's configuration by hand, which a save keeps.
+	var baseURLs []any
+	for _, pr := range config.AllProviders(s.Project) {
+		baseURLs = append(baseURLs, pr.BaseURL)
+	}
+	for _, a := range s.savedRoutes() {
+		if a.BaseURL != "" && !slices.ContainsFunc(baseURLs, func(v any) bool { return strings.TrimRight(v.(string), "/") == strings.TrimRight(a.BaseURL, "/") }) {
+			baseURLs = append(baseURLs, a.BaseURL)
+		}
+	}
 	var visit func(reflect.Type, string, int)
 	visit = func(t reflect.Type, prefix string, depth int) {
 		if depth > 5 {
@@ -65,10 +82,6 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				field := t.Field(i)
 				name := strings.Split(field.Tag.Get("json"), ",")[0]
 				if name == "" || name == "-" || (prefix == "" && (name == "name" || name == "description")) {
-					continue
-				}
-				// The summarizer's own route matters only when it is dedicated.
-				if prefix == "/summarizer" && name == "model" && !dedicated {
 					continue
 				}
 				visit(field.Type, prefix+"/"+name, depth+1)
@@ -104,9 +117,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			field.Shape.Enum = []any{"openai-chat", "openai-responses", "anthropic"}
 		}
 		if strings.HasSuffix(prefix, "/base_url") && prefix != "/finalechat/base_url" {
-			for _, pr := range config.AllProviders(s.Project) {
-				field.Shape.Enum = append(field.Shape.Enum, pr.BaseURL)
-			}
+			field.Shape.Enum = baseURLs
 		}
 		if strings.HasSuffix(prefix, "/api_key_env") {
 			field.Shape.Enum = append(field.Shape.Enum, "")
@@ -136,15 +147,24 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			}
 		}
 		// A route's model offers the models eagent knows of, registered
-		// servers' first; any other id can still be typed.
-		if prefix == "/model/model" || prefix == "/summarizer/model/model" {
-			field.Suggest = &control.Suggest{List: "models"}
+		// servers' first, each in the group of its provider's address: picking
+		// one at another provider sets the route's base_url with it, and
+		// applying the pick gives the route the rest of that provider's
+		// settings (routePicks). Any other id can still be typed.
+		if route, ok := strings.CutSuffix(prefix, "/model"); ok && (route == "/model" || route == "/summarizer/model") {
+			field.Suggest = &control.Suggest{List: "models", GroupBy: route + "/base_url"}
 		}
 		if prefix == "/summarizer/mode" {
 			field.Shape.Enum = []any{config.SummarizerInline, config.SummarizerDedicated}
 			field.Suggest = &control.Suggest{List: "summarizer_modes"}
 		}
 		placeProjectField(&field)
+		// The summarizer's own route matters only when it is dedicated: it
+		// is described either way, so choosing dedicated can give it one,
+		// and kept out of the way until then.
+		if strings.HasPrefix(prefix, "/summarizer/model/") && !dedicated {
+			field.Advanced = true
+		}
 		if prefix == "/default_config" && len(field.Shape.Enum) == 0 {
 			field.Advanced, field.Writable = true, false
 			if field.LockedReason == "" {
@@ -319,7 +339,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
-	// A descriptor holds at most eight lists. Presets, the summarizer's
+	// A descriptor holds at most suggestionLists lists. Presets, the summarizer's
 	// modes and eagent's own model list always have theirs; each agent's
 	// models take one while there is room, and an input whose list does not
 	// fit is left to typing. eagent's model list keeps to what the agents'
@@ -337,7 +357,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				continue
 			}
 			if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
-				if len(out.Descriptor.Suggestions) >= 7 {
+				if len(out.Descriptor.Suggestions) >= suggestionLists-1 {
 					in.Suggest = nil
 					continue
 				}
@@ -349,13 +369,23 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			}
 		}
 	}
-	out.Descriptor.Suggestions["models"] = modelSuggestionsWithin(s.Project, modelListBudget-relayBytes)
-	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < 8 {
+	out.Descriptor.Suggestions["models"] = projectModelSuggestions(s.Project, modelListBudget-relayBytes)
+	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < suggestionLists {
 		out.Descriptor.Suggestions["bundles"] = bundleSugs
 		for i := range out.Descriptor.Fields {
 			if out.Descriptor.Fields[i].Key == "/default_config" {
 				out.Descriptor.Fields[i].Suggest = &control.Suggest{List: "bundles"}
 				break
+			}
+		}
+	}
+	// The providers name the groups models come in, by address; while there
+	// is room for the list, a reader shows "Together AI", not its URL.
+	if len(out.Descriptor.Suggestions) < suggestionLists {
+		out.Descriptor.Suggestions["providers"] = providerAddressSuggestions(s.Project, baseURLs)
+		for i := range out.Descriptor.Fields {
+			if f := &out.Descriptor.Fields[i]; strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url" {
+				f.Suggest = &control.Suggest{List: "providers"}
 			}
 		}
 	}
@@ -445,27 +475,6 @@ func ValidateSavePresetName(raw string) (string, error) {
 		return "", fmt.Errorf("%q is a built-in preset name; choose a different name", name)
 	}
 	return name, nil
-}
-
-// HasServerEdits reports whether a settings.apply proposal modifies registered
-// local/custom model servers (/add_server_url or /servers).
-func HasServerEdits(p control.Proposal) bool {
-	if p.Operation != "settings.apply" {
-		return false
-	}
-	for _, e := range p.Edits {
-		if e.Key == "/add_server_url" || e.Key == "/servers" {
-			return true
-		}
-	}
-	return false
-}
-
-// SplitServerEdits separates server-registry edits (/add_server_url, /servers)
-// from config.json edits.
-func SplitServerEdits(p control.Proposal) (serverEdits, configEdits []control.Edit) {
-	serverEdits, _, _, configEdits = SplitSpecialEdits(p)
-	return serverEdits, configEdits
 }
 
 // SplitSpecialEdits separates virtual action fields (/add_server_url, /servers,
@@ -649,6 +658,19 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	if values, err = fileValues(res.File.Raw); err != nil {
 		return
 	}
+	// A dedicated summarizer with no route written calls the main model's.
+	// An edit of its route starts from that one, so a model picked alone
+	// keeps the provider it is reached by.
+	if _, written := pointerValue(values, "/summarizer/model"); !written && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
+		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
+	}) {
+		seed := res.Effective.Model
+		seed.Fallback = nil
+		var route map[string]any
+		raw, _ := json.Marshal(seed)
+		_ = json.Unmarshal(raw, &route)
+		setPointer(values, "/summarizer/model", route, false)
+	}
 	for _, e := range p.Edits {
 		if e.Key == "/add_server_url" || e.Key == "/servers" {
 			continue
@@ -663,6 +685,9 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 			continue
 		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
+	}
+	if err = s.routePicks(values, p.Edits, res.Effective, before.Descriptor); err != nil {
+		return
 	}
 	var candidate []byte
 	candidate, err = json.MarshalIndent(values, "", "  ")
@@ -692,6 +717,88 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	raw = string(candidate)
 	return
 }
+
+// routePicks gives a route whose model or base_url a proposal changes the
+// rest of what that model at that provider takes, the way a pick in the
+// local editor does: its protocol, key variable, an effort it accepts, and
+// the new model's context window (routePickFields). A field the proposal
+// sets itself, or one the connector may not write, is left as it is. A
+// model no list knows keeps the rest of the route, and its window becomes
+// unknown. The fallback is kept, as the local editor keeps it.
+func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, d control.Descriptor) error {
+	writable := map[string]bool{}
+	for _, f := range d.Fields {
+		writable[f.Key] = f.Writable
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	var file map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return err
+	}
+	after, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
+	if err != nil && after.Model.Model == "" {
+		return nil // reported once the edits are applied
+	}
+	summarizer := prior.Summarizer.Route(prior.Model)
+	if prior.Summarizer.Model == nil {
+		summarizer.Fallback = nil
+	}
+	for _, r := range []struct {
+		ptr           string
+		before, after config.ModelRoute
+	}{
+		{"/model", prior.Model, after.Model},
+		{"/summarizer/model", summarizer, after.Summarizer.Route(after.Model)},
+	} {
+		set := map[string]bool{}
+		for _, e := range edits {
+			if leaf, ok := strings.CutPrefix(e.Key, r.ptr+"/"); ok {
+				set[leaf] = true
+			}
+		}
+		if !set["model"] && !set["base_url"] {
+			continue
+		}
+		if r.after.Model == r.before.Model && strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
+			continue
+		}
+		give := func(leaf string, v any) {
+			if !set[leaf] && writable[r.ptr+"/"+leaf] {
+				setPointer(values, r.ptr+"/"+leaf, v, v == nil)
+			}
+		}
+		// The window is the new model's: what the file says for the old
+		// one goes, and loading names the new one's (or 0, unknown).
+		give("context_tokens", nil)
+		pr, ok := config.ProviderForURLFor(s.Project, r.after.BaseURL)
+		if !ok {
+			continue
+		}
+		picked, err := config.PickRoute(s.Project, r.before, pr.ID, r.after.Model, "")
+		if err != nil {
+			continue // a model no list knows: the rest of the route stays
+		}
+		if picked.Protocol != r.after.Protocol {
+			give("protocol", picked.Protocol)
+		}
+		if picked.APIKeyEnv != r.after.APIKeyEnv {
+			give("api_key_env", picked.APIKeyEnv)
+		}
+		if picked.ReasoningEffort != r.after.ReasoningEffort {
+			give("reasoning_effort", picked.ReasoningEffort)
+		}
+	}
+	return nil
+}
+
+// routePickFields are the fields of a route routePicks may give values to.
+var routePickFields = []string{"protocol", "api_key_env", "reasoning_effort", "context_tokens"}
+
+// routeLeaves are the fields of a route of its own, without its fallback.
+var routeLeaves = []string{"protocol", "base_url", "model", "api_key_env", "reasoning_effort", "replay_reasoning", "max_tokens", "context_tokens"}
 
 func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.Grant) (config.SaveResult, RemoteView, error) {
 	serverEdits, savePreset, hasSavePreset, configEdits := SplitSpecialEdits(p)

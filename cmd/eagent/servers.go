@@ -242,6 +242,8 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 			picked.APIKeyEnv = pr.KeyEnv
 			picked.Protocol = pr.Protocol
 			picked.Fallback = nil
+			// No list gives this model's window: unknown, not the old model's.
+			picked.ContextTokens = 0
 			if opts.effort != "" {
 				picked.ReasoningEffort = opts.effort
 			}
@@ -251,7 +253,9 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 	}
 	if opts.protocol != "" {
 		picked.Protocol = opts.protocol
-		if picked.Protocol != llm.ProtocolResponses {
+		// Chat Completions and Responses both read replay_reasoning;
+		// Anthropic Messages has no such setting.
+		if picked.Protocol == llm.ProtocolAnthropic {
 			picked.ReplayReasoning = nil
 		}
 	}

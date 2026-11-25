@@ -294,12 +294,25 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	if res, err := executeCommand(context.Background(), s, g, q, false); err != nil || res.Status != "rejected" || got.Relay != "" {
 		t.Fatalf("unknown profile: %s %v %#v", res.Status, res.Result, got)
 	}
-	var names []string
-	for _, p := range relayProfiles(t.TempDir()) {
-		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
-	}
-	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex,pi/pi" {
-		t.Fatalf("advertised profiles %v", names)
+	// The agents come in the order a session prefers them, the one it
+	// would start first.
+	installed := agentInstalled
+	defer func() { agentInstalled = installed }()
+	for _, c := range []struct {
+		installed []string
+		want      string
+	}{
+		{nil, "claude/claude,codex/codex,antigravity/antigravity,pi/pi"},
+		{[]string{"codex", "pi"}, "codex/codex,claude/claude,antigravity/antigravity,pi/pi"},
+	} {
+		agentInstalled = func(agent string) bool { return slices.Contains(c.installed, agent) }
+		var names []string
+		for _, p := range relayProfiles(t.TempDir()) {
+			names = append(names, p["name"].(string)+"/"+p["agent"].(string))
+		}
+		if strings.Join(names, ",") != c.want {
+			t.Fatalf("installed %v: advertised profiles %v", c.installed, names)
+		}
 	}
 }
 
@@ -311,6 +324,14 @@ func TestSpawnCommandCarriesTheAgentPicks(t *testing.T) {
 	cmd, _ := spawnCommand(project, SessionRequest{Prompt: "go", Relay: "claude", RelayModel: "sonnet", RelayEffort: "high"}, filepath.Join(project, "announce"))
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--relay claude --relay-model sonnet --relay-effort high") {
 		t.Fatalf("relay args = %v", cmd.Args)
+	}
+	// The prompt is the last argument, after "--": a bullet or a command's
+	// name is still the first message.
+	for _, prompt := range []string{"- fix login", "help", "--version"} {
+		cmd, _ := spawnCommand(project, SessionRequest{Prompt: prompt}, filepath.Join(project, "announce"))
+		if n := len(cmd.Args); n < 2 || cmd.Args[n-2] != "--" || cmd.Args[n-1] != prompt {
+			t.Fatalf("args for %q = %v", prompt, cmd.Args)
+		}
 	}
 }
 
@@ -407,8 +428,9 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			}
 			continue
 		}
-		// eagent's card is called "Model", so its model field may say so too.
-		if route && (f.Section != "Models" || f.Group == "" || f.Group != "Model" && strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
+		// A reader puts the card's name before the label, so a label does
+		// not repeat it ("eagent model", never "Model model").
+		if route && (f.Section != "Models" || f.Group == "" || f.Group == f.Label || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
 			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
 		}
 		if strings.HasSuffix(f.Key, "/provider") && (f.Suggest == nil || f.Suggest.List != "providers") {

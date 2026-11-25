@@ -32,7 +32,7 @@ try {
     // Legacy rows show by default, in words.
     const acts = await page.locator('#pane .act').allInnerTexts();
     const text = acts.join('\n');
-    for (const want of ['delegated t1', 'Review the tokenizer', 't1 completed', 'found one off-by-one bug in peek', 'note', 'starting with the tokenizer', 'p1 started', 'go test ./parser', 'p1 exited', 'done', 'reviewed the tokenizer and fixed peek']) {
+    for (const want of ['narrator trimmed', 'told the user the tokenizer review began', 'delegated t1', 'Review the tokenizer', 't1 completed', 'found one off-by-one bug in peek', 'note', 'starting with the tokenizer', 'p1 started', 'go test ./parser', 'p1 exited', 'done', 'reviewed the tokenizer and fixed peek']) {
       assert.ok(text.includes(want), `activity is missing ${JSON.stringify(want)}:\n${text}`);
     }
     assert.ok(await page.locator('label.toggle input').isChecked(), 'the activity toggle is off for an old session');
@@ -57,10 +57,24 @@ try {
     await open(upgraded, 'chat');
     const notices = (await page.locator('#pane .notice').allInnerTexts()).join('\n');
     assert.match(notices, /the current eagent took this older session over here \(subsession 2\)/);
+    // An agent's state other than a stop or an exit is activity.
+    assert.match((await page.locator('#pane .act').allInnerTexts()).join('\n'), /working/);
     await shot('fixture-upgraded-chat');
     // An unknown tab falls back to the chat as well.
     await open(upgraded, 'nonsense');
     assert.ok(await page.locator('#pane .msg').count() > 0, 'an unknown tab opened a blank pane');
+  } else if (mode === 'config') {
+    // "New session with this" on the configuration page starts on the
+    // project's own configuration.
+    let started = null;
+    await page.route('**/api/sessions', route => { if (route.request().method() !== 'POST') return route.continue(); started = route.request().postDataJSON(); return route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"not in this test"}' }); });
+    await page.goto(`${base}/#/config`);
+    await page.getByRole('button', { name: 'New session with this', exact: true }).click();
+    await page.getByText('It runs on the project\'s configuration as saved.', { exact: true }).waitFor();
+    await page.locator('#modal textarea').fill('hello');
+    await page.getByRole('button', { name: 'Start', exact: true }).click();
+    for (let i = 0; i < 50 && !started; i++) await page.waitForTimeout(100);
+    assert.equal(started?.use_project, true, JSON.stringify(started));
   } else {
     for (const id of sessions) {
       for (const tab of ['chat', 'timeline', 'usage']) {

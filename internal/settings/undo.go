@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -22,9 +23,31 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	if err != nil {
 		return inverse, err
 	}
+	keys := []string{}
 	for _, edit := range original.Edits {
-		value, exists := pointerValue(before, edit.Key)
-		reverse := control.Edit{Key: edit.Key, Op: "unset"}
+		keys = append(keys, edit.Key)
+	}
+	// Applying a pick of a route's model also set the fields that go with it
+	// (routePicks), and an edit of a dedicated summarizer with no route of
+	// its own wrote it one: those are put back too.
+	for _, route := range []string{"/model", "/summarizer/model"} {
+		picked := slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == route+"/model" || e.Key == route+"/base_url" })
+		extra := []string{}
+		if picked {
+			extra = routePickFields
+		}
+		if _, had := pointerValue(before, route); !had && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
+			extra = routeLeaves
+		}
+		for _, leaf := range extra {
+			if !slices.Contains(keys, route+"/"+leaf) {
+				keys = append(keys, route+"/"+leaf)
+			}
+		}
+	}
+	for _, key := range keys {
+		value, exists := pointerValue(before, key)
+		reverse := control.Edit{Key: key, Op: "unset"}
 		if exists && value != nil {
 			reverse.Op, reverse.Value = "set", value
 		}
