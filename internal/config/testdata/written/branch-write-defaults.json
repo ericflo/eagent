@@ -1,0 +1,22 @@
+{
+  "model": {
+    "protocol": "openai-chat",
+    "base_url": "https://api.together.xyz/v1",
+    "model": "zai-org/GLM-5.3",
+    "api_key_env": "TOGETHER_API_KEY",
+    "reasoning_effort": "high",
+    "max_tokens": 32768,
+    "context_tokens": 200000
+  },
+  "summarizer": {
+    "mode": "inline"
+  },
+  "max_calls_per_turn": 30,
+  "tick_seconds": 30,
+  "quiet_seconds": 180,
+  "rollover_tokens": 0,
+  "report_max_chars": 20000,
+  "finalechat": {
+    "artifacts": true
+  }
+}

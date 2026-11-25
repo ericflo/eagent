@@ -1,0 +1,60 @@
+{
+  "allow_outside_project": false,
+  "bash_timeout_seconds": 600,
+  "bash_wait_seconds": 20,
+  "description": "GPT-6 Astra orchestrating, GPT-6.1 Sol working, GPT-6 Luna narrating",
+  "finalechat": {},
+  "max_orchestrator_calls_per_turn": 30,
+  "max_task_turns": 150,
+  "name": "mine",
+  "narrator": {
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "context_tokens": 1050000,
+    "fallback": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1",
+      "context_tokens": 1050000,
+      "max_tokens": 4096,
+      "model": "openai/gpt-6-luna",
+      "protocol": "openai-responses",
+      "reasoning_effort": "low"
+    },
+    "max_tokens": 4096,
+    "model": "gpt-6-luna",
+    "protocol": "openai-responses",
+    "reasoning_effort": "low"
+  },
+  "narrator_quiet_seconds": 180,
+  "narrator_tick_seconds": 30,
+  "orchestrator": {
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "context_tokens": 1050000,
+    "fallback": null,
+    "max_tokens": 32768,
+    "model": "gpt-6-astra",
+    "protocol": "openai-responses"
+  },
+  "rollover_tokens": 300000,
+  "task": {
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://api.openai.com/v1",
+    "context_tokens": 1050000,
+    "fallback": {
+      "api_key_env": "OPENROUTER_API_KEY",
+      "base_url": "https://openrouter.ai/api/v1",
+      "context_tokens": 1050000,
+      "max_tokens": 32768,
+      "model": "openai/gpt-6.1-sol",
+      "protocol": "openai-responses",
+      "reasoning_effort": "high"
+    },
+    "max_tokens": 32768,
+    "model": "gpt-6.1-sol",
+    "protocol": "openai-responses",
+    "reasoning_effort": "high"
+  },
+  "task_concurrency": 3,
+  "tool_output_max_chars": 24000
+}
