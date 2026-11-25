@@ -125,18 +125,14 @@ func decorateSessionView(project string, view *settings.RemoteView, grant contro
 	if len(actions) > 0 {
 		view.Descriptor.Actions = actions
 	}
-	canApply, preferences, routes := false, false, false
-	for _, op := range grant.Operations {
-		canApply = canApply || op == "settings.apply"
-	}
-	for _, class := range grant.Classes {
-		preferences = preferences || class == "preference"
-		routes = routes || class == "route"
-	}
-	if !canApply || (!preferences && !routes) {
-		for i := range view.Descriptor.Fields {
-			view.Descriptor.Fields[i].Writable = false
-			view.Descriptor.Fields[i].LockedReason = "This connector has no approval to apply preferences."
+	// Each field is writable only under a grant of its own class: a reader
+	// refuses the whole resource for a writable field it may not grant.
+	canApply := slices.Contains(grant.Operations, "settings.apply")
+	for i := range view.Descriptor.Fields {
+		f := &view.Descriptor.Fields[i]
+		if !canApply || !slices.Contains(grant.Classes, f.Class) {
+			f.Writable = false
+			f.LockedReason = "This connector has no approval to apply these settings."
 		}
 	}
 }

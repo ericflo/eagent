@@ -34,8 +34,13 @@ const (
 // routeOrder is the order route cards are shown in.
 var routeOrder = []string{RouteEagent, RouteSummarizer}
 
-// routeLabels are what each route's card is called.
-var routeLabels = map[string]string{RouteEagent: "Model", RouteSummarizer: "Summarizer"}
+// routeLabels are what each route's card is called. A reader puts the card's
+// name before a field's label ("eagent model", "Summarizer reasoning
+// effort"), so eagent's card is named for eagent, not "Model".
+var routeLabels = map[string]string{RouteEagent: "eagent", RouteSummarizer: "Summarizer"}
+
+// routeNames name each route in a sentence.
+var routeNames = map[string]string{RouteEagent: "eagent's model", RouteSummarizer: "the summarizer"}
 
 type Values struct {
 	Revision uint64 `json:"revision"`
@@ -461,16 +466,16 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	// all edits are merged. Untouched routes pass through as they were.
 	for key := range touched {
 		rt := routes[key]
-		label := strings.ToLower(routeLabels[key])
+		label := routeNames[key]
 		if rt.Provider == "" || rt.Model == "" {
-			return before, fmt.Errorf("the %s needs both a provider and a model", label)
+			return before, fmt.Errorf("%s needs both a provider and a model", label)
 		}
 		picked, err := config.PickRoute(project, config.ModelRoute{}, rt.Provider, rt.Model, rt.Effort)
 		if err != nil {
 			return before, err
 		}
 		if picked.APIKeyEnv != "" && os.Getenv(picked.APIKeyEnv) == "" {
-			return before, fmt.Errorf("%s is not set where this session runs, so the %s cannot use %s", picked.APIKeyEnv, label, rt.Provider)
+			return before, fmt.Errorf("%s is not set where this session runs, so %s cannot use %s", picked.APIKeyEnv, label, rt.Provider)
 		}
 	}
 	before.Routes = routes
@@ -516,7 +521,7 @@ func ConfigFromValues(project string, values Values) (config.Config, error) {
 		}
 		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, rt.Effort)
 		if err != nil {
-			return base, false, fmt.Errorf("%s: %w", strings.ToLower(routeLabels[key]), err)
+			return base, false, fmt.Errorf("%s: %w", routeNames[key], err)
 		}
 		if strings.TrimRight(picked.BaseURL, "/") != strings.TrimRight(base.BaseURL, "/") || picked.Model != base.Model {
 			picked.Fallback = nil
@@ -533,6 +538,10 @@ func ConfigFromValues(project string, values Values) (config.Config, error) {
 	}
 	if ok {
 		cfg.Summarizer = config.Summarizer{Mode: config.SummarizerDedicated, Model: &picked}
+	} else {
+		// A session with no summarizer route keeps its summaries inline,
+		// whatever config.json says now.
+		cfg.Summarizer = config.Summarizer{Mode: config.SummarizerInline}
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, err

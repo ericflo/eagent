@@ -407,8 +407,9 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			}
 			continue
 		}
-		// eagent's card is called "Model", so its model field may say so too.
-		if route && (f.Section != "Models" || f.Group == "" || f.Group != "Model" && strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
+		// A reader puts the card's name before the label, so a label does
+		// not repeat it ("eagent model", never "Model model").
+		if route && (f.Section != "Models" || f.Group == "" || f.Group == f.Label || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
 			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
 		}
 		if strings.HasSuffix(f.Key, "/provider") && (f.Suggest == nil || f.Suggest.List != "providers") {
