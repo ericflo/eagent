@@ -403,9 +403,14 @@ func (p *phone) mirror1(seq int64, id string) {
 func (p *phone) enqueue(fn func(context.Context)) bool {
 	select {
 	case p.queue <- fn:
-		p.mu.Lock()
-		p.dropping = false
-		p.mu.Unlock()
+		// A stretch of drops is over when the queue has really drained,
+		// not when a slow phone took one post and left room for one more:
+		// that would say the same thing again for every post it takes.
+		if len(p.queue) <= cap(p.queue)/2 {
+			p.mu.Lock()
+			p.dropping = false
+			p.mu.Unlock()
+		}
 		return true
 	default:
 		p.mu.Lock()

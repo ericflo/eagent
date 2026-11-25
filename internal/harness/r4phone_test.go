@@ -197,3 +197,37 @@ func TestQuestionTheFullQueueDroppedDoesNotKeepTheSessionWaiting(t *testing.T) {
 		t.Fatalf("nothing said about the lost card: %q", q.logged())
 	}
 }
+
+// A phone that is slow, not down, takes one post now and then: the queue
+// stays about full, one item gets in and the next is dropped. That is one
+// stretch of dropping, said once, until the queue has really drained.
+func TestASlowPhoneIsSaidToBeDroppingOncePerStretch(t *testing.T) {
+	q := newQueuePhone(t, 8)
+	q.fill(0)
+	said := func() int {
+		return strings.Count(q.logged(), "updates to the thread are being dropped")
+	}
+	q.p.enqueue(func(context.Context) {})
+	if said() != 1 {
+		t.Fatalf("a full queue was said %d times, want once", said())
+	}
+	for i := 0; i < 3; i++ {
+		(<-q.p.queue)(context.Background()) // the phone takes one
+		if !q.p.enqueue(func(context.Context) {}) {
+			t.Fatal("a free slot was not used")
+		}
+		if q.p.enqueue(func(context.Context) {}) {
+			t.Fatal("a full queue took an item")
+		}
+	}
+	if said() != 1 {
+		t.Fatalf("one stretch of dropping was said %d times, want once", said())
+	}
+	q.drain()
+	q.p.enqueue(func(context.Context) {})
+	q.fill(0)
+	q.p.enqueue(func(context.Context) {})
+	if said() != 2 {
+		t.Fatalf("a new stretch after the queue drained was said %d times in all, want 2", said())
+	}
+}
