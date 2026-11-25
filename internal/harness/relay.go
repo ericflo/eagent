@@ -65,6 +65,10 @@ type relaySeats struct {
 	// queues are the sends waiting to be typed into each seat, in the
 	// order they were accepted (enqueueSend).
 	queues map[relaySeat]*sendQueue
+	// stopping are the terminals relay_control stop is closing, by relay
+	// name, each closed when it is gone. Both share a terminal name, so a
+	// start under that name waits for it rather than racing the kill.
+	stopping map[string]chan struct{}
 }
 
 type relayActivity struct {
@@ -180,12 +184,15 @@ type relayLaunch struct {
 	// is closed once that send is settled: a send cut off by the old
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
-	held    []heldSend
+	// afterStop, when a stop of the relay with this name is still closing
+	// its terminal, is closed once it is gone.
+	afterStop <-chan struct{}
+	held      []heldSend
 	// brief, for a switch, is the handoff brief, typed into the new agent
 	// before anything that waited for it; briefAuto marks its send as the
 	// harness's own. briefDone hears how typing it went, and drained when
 	// what waited during the launch has been typed too.
-	brief              string
+	brief, briefID     string
 	briefAuto          bool
 	briefDone, drained chan sendResult
 	// wasActive: the relay it replaces was running when this began (a
@@ -406,6 +413,9 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 		r.relays.launching = map[string]*relayLaunch{}
 	}
 	r.relays.launching[job.name] = job
+	if ch := r.relays.stopping[job.name]; ch != nil {
+		job.afterStop = ch
+	}
 	if replaces != "" {
 		r.relays.launching[replaces] = job
 		job.old = r.relays.seats[replaces]
@@ -434,6 +444,9 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 func (job *relayLaunch) run() {
 	if job.old != nil {
 		_ = job.old.Kill()
+	}
+	if job.afterStop != nil {
+		<-job.afterStop // the stop's kill is bounded: 30 s for the watcher
 	}
 	if job.oldIdle != nil {
 		// The send the old agent was waiting to type stops waiting once its
@@ -532,6 +545,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	var queue []heldSend
 	if job.brief != "" {
 		id := r.st.NextRelaySendID()
+		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone})
 	}
@@ -634,12 +648,18 @@ func (r *Runtime) launchOffLoop(prepare func() (*relayLaunch, error)) (string, e
 }
 
 // relaunch starts a relay again on its own session with its picks, from a
-// tool's goroutine; what waited for it is typed in after.
-func (r *Runtime) relaunch(name string) (string, error) {
+// tool's goroutine; what waited for it is typed in after. check, when set,
+// can refuse on the loop goroutine, against the relay as it is then.
+func (r *Runtime) relaunch(name string, check func(*state.Relay) error) (string, error) {
 	return r.launchOffLoop(func() (*relayLaunch, error) {
 		rel := r.st.Relays[name]
 		if rel == nil {
 			return nil, fmt.Errorf("no agent named %q here", name)
+		}
+		if check != nil {
+			if err := check(rel); err != nil {
+				return nil, err
+			}
 		}
 		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
 		if err != nil {
@@ -1224,17 +1244,28 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			return "Keys sent. The screen now:\n" + strings.TrimRight(screen, "\n"), false
 		case "restart":
-			started, err := r.relaunch(rel.Name)
+			started, err := r.relaunch(rel.Name, nil)
 			if err != nil {
 				return "Could not restart: " + err.Error(), true
 			}
 			return r.relayStatusText(started, "Restarted, continuing its own session."), false
 		case "upgrade":
+			// The upgrade runs for minutes with the agent still working; if
+			// it is stopped or handed over meanwhile, it stays so.
+			wasActive := false
+			if !r.onLoop(func() { wasActive = r.st.Relays[rel.Name].Active() }) {
+				return errEnding.Error(), true
+			}
 			out, uerr := upgradeAgent(rel.Agent)
 			if uerr != nil {
 				return "The upgrade failed, so nothing was restarted: " + uerr.Error() + "\n" + out, true
 			}
-			started, err := r.relaunch(rel.Name)
+			started, err := r.relaunch(rel.Name, func(cur *state.Relay) error {
+				if wasActive && !cur.Active() {
+					return fmt.Errorf("%s was stopped while it upgraded, so it stays stopped", cur.Who())
+				}
+				return nil
+			})
 			if err != nil {
 				return "Upgraded, but the restart failed: " + err.Error() + "\n" + out, true
 			}
@@ -1245,6 +1276,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return "switch: say which profile to hand over to (" + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")", true
 			}
 			briefDone, drained := make(chan sendResult, 1), make(chan sendResult, 1)
+			var sw *relayLaunch
 			// The old agent is stopped and the new one launched off the loop
 			// goroutine; the old one ends on the record just before the new
 			// one starts.
@@ -1255,16 +1287,20 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				if err := r.checkRelayPick(profile, pick); err != nil {
 					return nil, err
 				}
-				job, err := r.prepareLaunch(profile, rel.Dir, "", false, pick)
+				// The relay as it is now: a restart since it was looked up
+				// has a newer record (its last report, its sends).
+				cur := r.st.Relays[rel.Name]
+				job, err := r.prepareLaunch(profile, cur.Dir, "", false, pick)
 				if err != nil {
 					return nil, err
 				}
-				if r.relays.launch(rel.Name) != nil {
-					return nil, fmt.Errorf("%s is starting again; wait for it", rel.Who())
+				if r.relays.launch(cur.Name) != nil {
+					return nil, fmt.Errorf("%s is starting again; wait for it", cur.Who())
 				}
 				job.endOld = "handed over to " + profile
-				job.brief, job.briefAuto, job.briefDone, job.drained = r.handoffBrief(rel), auto, briefDone, drained
-				r.beginLaunch(job, rel.Name)
+				job.brief, job.briefAuto, job.briefDone, job.drained = r.handoffBrief(cur), auto, briefDone, drained
+				r.beginLaunch(job, cur.Name)
+				sw = job
 				return job, nil
 			})
 			if err != nil {
@@ -1275,6 +1311,11 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			berr := r.awaitSend(briefDone).err
 			r.awaitSend(drained)
 			if berr != nil {
+				// On the record like any send that failed: it wakes eagent,
+				// and the new relay stops waiting for its arrival.
+				r.sync(func() {
+					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Detail: clipRunes(berr.Error(), 2000)}))
+				})
 				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
 			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false
@@ -1285,8 +1326,11 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			var msg string
 			ran := r.onLoop(func() {
-				// "default" clears that pick; the other one is kept.
-				next := relayPick{rel.Model, rel.Effort}
+				// "default" clears that pick; the other one is kept. The
+				// relay as it is now: a restart since it was looked up
+				// may have changed its picks.
+				cur := r.st.Relays[rel.Name]
+				next := relayPick{cur.Model, cur.Effort}
 				if p, ok := r.relayRepick[rel.Name]; ok {
 					next = p
 				}
@@ -1314,26 +1358,42 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			// The terminal that is the relay's now, not the one read
 			// above: a restart may have finished in between, and its new
 			// agent is the one to stop.
+			// It ends on the record in the same step: a restart asked for
+			// while the kill runs then starts from a stopped relay, and the
+			// end is never recorded over the agent that restart brings up.
 			var current relaySeat
+			var killed chan struct{}
 			if !r.onLoop(func() {
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
 					// The session's end waits for the kill, so the agent
-					// is not left running once the record says stopped.
+					// is not left running once the record says stopped; a
+					// start under this name waits for it too (beginLaunch).
 					r.relayOps.Add(1)
+					killed = make(chan struct{})
+					r.relays.mu.Lock()
+					if r.relays.stopping == nil {
+						r.relays.stopping = map[string]chan struct{}{}
+					}
+					r.relays.stopping[rel.Name] = killed
+					r.relays.mu.Unlock()
 				}
 				r.stopLaunches(rel.Name, "stopped")
+				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
+				r.armAutopilots()
 			}) {
 				return errEnding.Error(), true
 			}
 			if current != nil {
 				_ = current.Kill()
+				r.relays.mu.Lock()
+				if r.relays.stopping[rel.Name] == killed {
+					delete(r.relays.stopping, rel.Name)
+				}
+				r.relays.mu.Unlock()
+				close(killed)
 				r.relayOps.Done()
 			}
-			r.sync(func() {
-				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
-				r.armAutopilots()
-			})
 			return "Stopped " + rel.Who() + ".", false
 		}
 		return fmt.Sprintf("unknown action %q", action), true
@@ -1397,7 +1457,7 @@ const maxRecordedReport = 1 << 20
 var keysSettle = 700 * time.Millisecond
 
 // upgradeAgent runs the agent CLI's own updater.
-func upgradeAgent(agent string) (string, error) {
+var upgradeAgent = func(agent string) (string, error) {
 	argv, err := relay.UpgradeCommand(agent)
 	if err != nil {
 		return "", err
@@ -1890,7 +1950,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 				}
 			})
 			if len(args) == 0 {
-				r.tell(now+" Change it with /model <model> [effort], e.g. /model sonnet high, or /model default for its own. It restarts on the same conversation, after the turn it's on.", false)
+				r.tell(now+" Change it with /model <model> [effort], e.g. /model sonnet high; /model default goes back to its own model and keeps the effort, /model default default to its own model and effort. It restarts on the same conversation, after the turn it's on.", false)
 				return
 			}
 			params["action"] = "model"

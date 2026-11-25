@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -313,4 +314,166 @@ func TestMessageHeldDuringASwitchIsTheNewAgentsOwn(t *testing.T) {
 	if !isErr || !strings.Contains(text, "already went") {
 		t.Fatalf("relay_forward of A to the new agent: %q", text)
 	}
+}
+
+// A handoff brief that could not be typed is on the record as not
+// delivered, like any other send that fails, so eagent is woken and the
+// new relay does not wait for it for ever.
+func TestFailedHandoffBriefIsRecordedUndelivered(t *testing.T) {
+	old, next := &lingerSeat{newFakeSeat("one")}, newFakeSeat("two")
+	next.sendErr = errors.New("the pane is gone")
+	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
+	rt := newLaunchRuntime(t)
+	out := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	if text := recv(t, out, "switch"); !strings.Contains(text, "could not be typed") {
+		t.Fatalf("switch: %q", text)
+	}
+	brief := lastSendID(rt)
+	waitFor(t, "the brief recorded undelivered", func() bool {
+		d, failed := failedDeliveries(rt)[brief]
+		return failed && d.Name == "claude" && strings.Contains(d.Detail, "pane is gone")
+	})
+	rt.sync(func() {
+		if n := len(rt.st.Relays["claude"].Undelivered); n != 0 {
+			t.Errorf("the new relay still waits for %d send(s)", n)
+		}
+	})
+}
+
+// slowKillSeat is a fake agent whose terminal takes a while to close.
+type slowKillSeat struct {
+	*fakeSeat
+	killing chan struct{}
+	finish  chan struct{}
+}
+
+func (s *slowKillSeat) Kill() error {
+	close(s.killing)
+	<-s.finish
+	return s.fakeSeat.Kill()
+}
+
+// A stop whose kill is slow, and a restart asked for meanwhile: the stop is
+// on the record before the restart begins, and the restart waits for the
+// old terminal to be gone, so it is the restarted agent that runs and the
+// record says so (it used to end up stopped on the record while it ran).
+func TestStopThenRestartLeavesTheRestartedAgentRunning(t *testing.T) {
+	old := &slowKillSeat{fakeSeat: newFakeSeat("one"), killing: make(chan struct{}), finish: make(chan struct{})}
+	next := newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
+	rt := newLaunchRuntime(t)
+	stopped := relayToolAsync(rt, map[string]any{"action": "stop"})
+	<-old.killing
+	restarted := relayToolAsync(rt, map[string]any{"action": "restart", "relay": "codex"})
+	time.Sleep(100 * time.Millisecond)
+	close(old.finish)
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, stopped, "stop")
+	if text := recv(t, restarted, "restart"); !strings.Contains(text, "Restarted") {
+		t.Fatalf("restart: %q", text)
+	}
+	rt.sync(func() {
+		rel := rt.st.Relays["codex"]
+		if !rel.Active() || rt.relays.get("codex") != relaySeat(next) {
+			t.Errorf("after stop then restart: active %v, watched %v", rel.Active(), rt.relays.get("codex") != nil)
+		}
+		last := ""
+		for _, ev := range rt.st.Events {
+			if ev.Type == event.RelayStart || ev.Type == event.RelayEnd {
+				last = ev.Type
+			}
+		}
+		if last != event.RelayStart {
+			t.Errorf("the record ends with %s", last)
+		}
+	})
+}
+
+// An upgrade takes minutes. If the agent is stopped, or handed over to
+// another, while it runs, it is not brought back afterwards.
+func TestUpgradeDoesNotBringBackAnAgentStoppedMeanwhile(t *testing.T) {
+	for _, how := range []string{"stop", "switch"} {
+		t.Run(how, func(t *testing.T) {
+			g := useGatedLaunches(t, []relaySeat{&lingerSeat{newFakeSeat("one")}, newFakeSeat("two"), newFakeSeat("three")}, nil)
+			upgrading, finish := make(chan struct{}), make(chan struct{})
+			oldUpgrade := upgradeAgent
+			upgradeAgent = func(string) (string, error) {
+				close(upgrading)
+				<-finish
+				return "codex 9.9.9", nil
+			}
+			t.Cleanup(func() { upgradeAgent = oldUpgrade })
+			rt := newLaunchRuntime(t)
+			upgraded := relayToolAsync(rt, map[string]any{"action": "upgrade"})
+			<-upgrading
+			if how == "stop" {
+				recv(t, relayToolAsync(rt, map[string]any{"action": "stop", "relay": "codex"}), "stop")
+			} else {
+				out := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude", "relay": "codex"})
+				g.waitEntered(t)
+				g.release <- struct{}{}
+				recv(t, out, "switch")
+			}
+			close(finish)
+			text := recv(t, upgraded, "upgrade")
+			if !strings.Contains(text, "stays stopped") {
+				t.Errorf("upgrade: %q", text)
+			}
+			rt.sync(func() {
+				if rel := rt.st.Relays["codex"]; rel.Active() {
+					t.Error("the upgrade brought the stopped agent back")
+				}
+				if n := len(rt.st.ActiveRelays()); n > 1 {
+					t.Errorf("%d agents run", n)
+				}
+			})
+			g.mu.Lock()
+			launches := len(g.specs)
+			g.mu.Unlock()
+			if want := map[string]int{"stop": 1, "switch": 2}[how]; launches != want {
+				t.Errorf("%d launches, want %d", launches, want)
+			}
+		})
+	}
+}
+
+// "/model default" goes back to the agent's own model and keeps the effort
+// picked (TestModelCommand); its help says so, and says how to go back to
+// both: "/model default default".
+func TestModelDefaultCommandGoesBackToBothDefaults(t *testing.T) {
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rel := rt.st.Relays["codex"]
+		rel.Model, rel.Effort = "gpt-6.2-astra", "high"
+		rt.relayCommand([]string{"/model", "default", "default"}, nil)
+	})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	waitFor(t, "the restart recorded", func() bool {
+		n := 0
+		rt.sync(func() {
+			for _, ev := range rt.st.Events {
+				if ev.Type == event.RelayStart {
+					n++
+				}
+			}
+		})
+		return n == 2
+	})
+	rt.sync(func() {
+		if rel := rt.st.Relays["codex"]; rel.Model != "" || rel.Effort != "" {
+			t.Errorf("after /model default default: model %q, effort %q", rel.Model, rel.Effort)
+		}
+	})
+	ui := rt.ui.(*fakeUI)
+	rt.sync(func() { rt.relayCommand([]string{"/model"}, nil) })
+	waitFor(t, "the help", func() bool {
+		said := strings.Join(ui.said(), "|")
+		return strings.Contains(said, "/model default goes back to its own model and keeps the effort") && strings.Contains(said, "/model default default")
+	})
 }
