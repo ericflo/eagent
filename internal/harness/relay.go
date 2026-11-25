@@ -281,6 +281,23 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 	}
 }
 
+// awaitSend waits for a queued send to be typed, or for the session to
+// end: a send that was moved into a start the session's end cut short may
+// never be settled, and its tool call must not wait for it for ever.
+func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
+	select {
+	case res := <-done:
+		return res
+	case <-r.closed:
+		select {
+		case res := <-done:
+			return res
+		default:
+		}
+		return sendResult{err: fmt.Errorf("the session is ending")}
+	}
+}
+
 // settleSend tells a send's waiter how it went, or records a failure as
 // undelivered when nobody waits. Any goroutine.
 func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
@@ -1019,7 +1036,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		if seat == nil {
 			return rel.Who() + " is not running; restart it with relay_control restart.", true
 		}
-		res := <-done
+		res := r.awaitSend(done)
 		how, err := res.how, res.err
 		if err != nil {
 			r.sync(func() {
@@ -1143,8 +1160,8 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			// The brief is typed first, then what the user sent during the
 			// handover (finishLaunch queued both, in that order).
-			berr := (<-briefDone).err
-			<-drained
+			berr := r.awaitSend(briefDone).err
+			r.awaitSend(drained)
 			if berr != nil {
 				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
