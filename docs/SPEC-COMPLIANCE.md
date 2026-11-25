@@ -71,7 +71,7 @@ are exactly as specified: `zai-org/GLM-5.3-Flash` and
 
 | Requirement | Status |
 |---|---|
-| New subsession file when the orchestrator hits its limit | Met: threshold `rollover_tokens` (default 150k) read from provider usage after every call; also forced by a provider context-overflow error |
+| New subsession file when the orchestrator hits its limit | Met: threshold `rollover_tokens` (by default half the model's context window) read from provider usage after every call; also forced by a provider context-overflow error |
 | Orchestrator pauses | Met: no orchestrator turn starts while `rolling` |
 | Task worker gets the directory of all subsessions | Met: the dossier task lists the files and has `session_list`, `session_read`, `session_search` |
 | Dossier is a brief plus a map into the logs | Met: required `file:line` citations; rejected and retried once without them; harness-built fallback if the retry fails |

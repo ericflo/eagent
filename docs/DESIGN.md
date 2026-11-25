@@ -105,7 +105,7 @@ A progress look where nothing is worth saying therefore costs a cached read of t
 
 ## The dossier
 
-The conversation grows with everything that happens. When its prompt reaches `rollover_tokens` (64,000), or the provider refuses it as too long, it is restarted: the current file is closed, a new one is opened, and the new conversation begins with a **dossier**. The restart happens at the first quiet moment after the limit is passed, while the prompt is still in the provider's cache, so the user's next message does not wait for it.
+The conversation grows with everything that happens. When its prompt fills half the context window of the model in use (100,000 tokens on a 200k model, 500,000 on a 1M model), or the provider refuses it as too long, it is restarted: the current file is closed, a new one is opened, and the new conversation begins with a **dossier**. The restart happens at the first quiet moment after the limit is passed, while the prompt is still in the provider's cache, so the user's next message does not wait for it.
 
 A dossier is two things. It says where the session stands (what the user wants, where the work is, what was decided, what is open, what the user last heard). And it is a **map**: for every topic that matters, the places in the record, as `file:line`, where the source can be read. The record itself is never shortened, and the model keeps `session_search` and `session_read`, so when the user comes back to something old the model goes to the lines the map names and reads them. The map covers the whole session, across every file, and each file opens with the dossier that was written when it began, so earlier maps stay reachable too.
 
@@ -148,7 +148,7 @@ What the agent says and does is read from its own transcript, not scraped from t
 |---|---|---|
 | `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. |
 | `summarizer` | `{"mode": "inline"}` | Or `dedicated`, with its own `model`. |
-| `rollover_tokens` | 64000 | Prompt size at which the conversation restarts from a dossier. |
+| `rollover_tokens` | 0 | Prompt size at which the conversation restarts from a dossier. 0 follows the model in use: half its context window, in whole thousands, and it moves if the model changes mid-session. A number fixes it. |
 | `tick_seconds` | 30 | How often to check for something new while the agent works. |
 | `quiet_seconds` | 180 | Longest silence while the agent works. 0 turns the limit off. |
 | `max_calls_per_turn` | 30 | Calls on one wake. |
@@ -196,6 +196,6 @@ eagent used to run an orchestrator, task workers and a narrator. The one loop do
 
 | | Before | Now | Why |
 |---|---|---|---|
-| `rollover_tokens` default | 150,000 | 64,000 | Every look re-reads the conversation from cache, so its length is the price of each look. A dossier loses nothing, since the record is kept whole and mapped. |
+| `rollover_tokens` default | 150,000 (300,000 in eleven presets) | Half the model's context window: 100,000 on a 200k model, 500,000 on a 1M model | The size follows what the model can hold. The other half is room for the reply and for the dossier pass, which is now written inside the conversation it replaces and reads the record on top of it. |
 | Reasoning effort | Orchestrator `xhigh` (or `high`), narrator `low` | One for every call: the orchestrator's | A call's effort is part of what the cache is keyed on, so the frequent looks the narrator made at `low` now run at the one effort too. |
 | Output ceiling | Per actor | 32,768 for every call | Same reason. |

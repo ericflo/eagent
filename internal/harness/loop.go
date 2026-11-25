@@ -981,7 +981,7 @@ func (r *Runtime) turnFailed(err error) {
 		// second refusal takes the ordinary path below.
 		r.ui.Log("eagent: the model refused the prompt as too long (%s); restarting the conversation from a dossier", shortErr(err))
 		t.overflowed = true
-		t.promptTokens = max(t.promptTokens, r.cfg.RolloverTokens)
+		t.promptTokens = max(t.promptTokens, r.rolloverTokens())
 		return
 	}
 	t.failures++

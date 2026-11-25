@@ -39,8 +39,8 @@ type ModelRoute struct {
 	// prompts.
 	ReplayReasoning *bool `json:"replay_reasoning,omitempty"`
 	MaxTokens       int   `json:"max_tokens,omitempty"`
-	// ContextTokens is the model's usable window. The session starts a new
-	// subsession long before it, at RolloverTokens.
+	// ContextTokens is the model's usable window. The conversation restarts
+	// from a dossier before it fills: by default at half of it (Rollover).
 	ContextTokens int `json:"context_tokens,omitempty"`
 	// Fallback is tried when the primary route is unroutable (bad key, no
 	// access to the model, exhausted credits).
@@ -103,7 +103,9 @@ type Config struct {
 	// while the agent works. 0 disables the limit.
 	QuietSeconds int `json:"quiet_seconds"`
 	// RolloverTokens is the prompt size at which the conversation is
-	// restarted from a dossier in a new subsession.
+	// restarted from a dossier in a new subsession. 0, the default, follows
+	// the model in use: half its context window (AutoRollover). A number
+	// fixes it whatever the model.
 	RolloverTokens int `json:"rollover_tokens"`
 	// ReportMaxChars bounds how much of an agent's turn report eagent's own
 	// prompt carries. The user always gets the whole report.
@@ -312,6 +314,38 @@ func presetEffort(baseURL, model string) string {
 	return best
 }
 
+// AutoRollover is the prompt size at which a conversation restarts from a
+// dossier when rollover_tokens is not set: half the context window of the
+// model in use, in whole thousands. Half is what the conversation may fill.
+// The rest is the room a call needs for its reply and the dossier pass
+// needs to read the record it maps, on top of the conversation it is
+// written in. A small window with a large reply ceiling gets less than
+// half, so that pass still fits; nothing gets under 20,000.
+func AutoRollover(window, maxTokens int) int {
+	if window <= 0 {
+		window = 200_000
+	}
+	n := window / 2
+	if room := window - maxTokens - rolloverReserve; n > room {
+		n = room
+	}
+	return max(n/1000*1000, 20_000)
+}
+
+// rolloverReserve is what a restart needs beside the conversation and the
+// reply: 8,000 tokens of slack and the least the dossier pass reads of the
+// record (60,000 characters, about 25,000 tokens with a fifth held back).
+const rolloverReserve = 8_000 + 25_000
+
+// Rollover is the prompt size at which this configuration's conversation
+// restarts: the number it sets, or AutoRollover for its model.
+func (c Config) Rollover() int {
+	if c.RolloverTokens > 0 {
+		return c.RolloverTokens
+	}
+	return AutoRollover(c.Model.ContextTokens, c.Model.MaxTokens)
+}
+
 // glmDescription describes the built-in defaults, which the "glm" preset names.
 const glmDescription = "GLM-5.3 (Together AI)"
 
@@ -325,7 +359,6 @@ func Defaults() Config {
 		MaxCallsPerTurn: 30,
 		TickSeconds:     30,
 		QuietSeconds:    180,
-		RolloverTokens:  64_000,
 		ReportMaxChars:  20000,
 		Finalechat:      Finalechat{Artifacts: true},
 	}

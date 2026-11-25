@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
@@ -18,7 +19,8 @@ import (
 // The dossier.
 //
 // The conversation grows with everything that happens. When its prompt
-// reaches rollover_tokens it is restarted, and the next subsession opens
+// reaches half the model's context window (or the rollover_tokens a
+// configuration fixes) it is restarted, and the next subsession opens
 // with a dossier instead of the history. The record itself is never
 // shortened: every subsession file stays on disk, and session_search and
 // session_read reach all of it.
@@ -82,17 +84,51 @@ const (
 // holds and the room it needs to write, within fixed bounds. Loop
 // goroutine only.
 func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
-	window := r.cfg.Model.ContextTokens
-	if window <= 0 {
-		window = 200_000
-	}
+	window, reply := r.window()
 	limit := dossierReadMax
 	if fresh {
 		limit, promptTokens = dossierFreshMax, 8000
 	}
-	free := window - promptTokens - r.cfg.Model.MaxTokens - 8000
+	free := window - promptTokens - reply - 8000
 	// About three characters of the record to a token, with a fifth held back.
 	return max(dossierReadMin, min(limit, free*3*4/5))
+}
+
+// window is the context window of the model eagent's calls go to right now,
+// and the reply ceiling of those calls: the configured model's, the one a
+// runtime setting picked, or a fallback's once the route has moved to it.
+// Loop goroutine only.
+func (r *Runtime) window() (tokens, reply int) {
+	tokens, reply = r.cfg.Model.ContextTokens, r.cfg.Model.MaxTokens
+	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
+		ep := m.client.Endpoint
+		for cur := &m.conf; cur != nil; cur = cur.Fallback {
+			if cur.BaseURL == ep.BaseURL && cur.Model == ep.Model {
+				tokens, reply = cur.ContextTokens, cur.MaxTokens
+				break
+			}
+		}
+		if tokens <= 0 {
+			if known, ok := config.Lookup(ep.BaseURL, ep.Model); ok {
+				tokens = known.Context
+			}
+		}
+	}
+	if tokens <= 0 {
+		tokens = 200_000
+	}
+	return tokens, reply
+}
+
+// rolloverTokens is the prompt size at which the conversation restarts from
+// a dossier: the number the configuration fixes, or by default half the
+// window of the model in use (config.AutoRollover), so it moves with the
+// model. Loop goroutine only.
+func (r *Runtime) rolloverTokens() int {
+	if n := r.cfg.RolloverTokens; n > 0 {
+		return n
+	}
+	return config.AutoRollover(r.window())
 }
 
 // needsDossier reports that the conversation should be restarted from a
@@ -106,11 +142,11 @@ func (r *Runtime) needsDossier() bool {
 	if t.adopt {
 		return true // a session of the three-actor design: see resume.go
 	}
-	limit := r.cfg.RolloverTokens
-	if !t.overflowed && (limit <= 0 || r.contextTokens() < limit) {
+	limit := r.rolloverTokens()
+	if !t.overflowed && r.contextTokens() < limit {
 		return false
 	}
-	if cur := r.st.Current(); cur != nil && cur.Reason == "rollover" && ((limit > 0 && t.firstPrompt >= limit) || (t.overflowed && t.subCalls == 0)) {
+	if cur := r.st.Current(); cur != nil && cur.Reason == "rollover" && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) {
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
 		// Restarting again would only rebuild the same prompt.

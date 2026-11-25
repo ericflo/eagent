@@ -248,3 +248,56 @@ var mainOrchestratorEffort = map[string]string{
 	"nous-high": "high", "nous-med": "high", "nous-low": "high",
 	"deepseek": "high", "qwen": "xhigh", "muse": "xhigh", "mistral": "high", "muse-open": "xhigh", "beam": "xhigh", "deepseek-1017": "high",
 }
+
+// With rollover_tokens not set, the conversation restarts at half the
+// model's context window, in whole thousands: less where a small window
+// with a large reply ceiling would leave the restart no room, and never
+// under 20,000. No preset fixes a number.
+func TestRolloverFollowsTheContextWindow(t *testing.T) {
+	for _, c := range []struct{ window, maxTokens, want int }{
+		{200_000, 32768, 100_000},
+		{1_000_000, 32768, 500_000},
+		{1_048_576, 32768, 524_000},
+		{1_050_000, 32768, 525_000},
+		{128_000, 32768, 62_000}, // half is 64,000; the reply and the restart need the rest
+		{64_000, 32768, 20_000},
+		{32_000, 4096, 20_000},
+		{0, 32768, 100_000}, // an unknown window is read as 200,000
+	} {
+		if got := AutoRollover(c.window, c.maxTokens); got != c.want {
+			t.Errorf("AutoRollover(%d, %d) = %d, want %d", c.window, c.maxTokens, got, c.want)
+		}
+	}
+	d := Defaults()
+	if d.RolloverTokens != 0 || d.Rollover() != 100_000 {
+		t.Fatalf("defaults: rollover_tokens %d, restarts at %d", d.RolloverTokens, d.Rollover())
+	}
+	for _, name := range PresetNames() {
+		c := Defaults()
+		Presets[name](&c)
+		if c.RolloverTokens != 0 {
+			t.Errorf("%s fixes rollover_tokens at %d", name, c.RolloverTokens)
+		}
+		if want := c.Model.ContextTokens / 2 / 1000 * 1000; c.Rollover() != want {
+			t.Errorf("%s (window %d) restarts at %d, want %d", name, c.Model.ContextTokens, c.Rollover(), want)
+		}
+	}
+	d.RolloverTokens = 150_000
+	if d.Rollover() != 150_000 {
+		t.Fatalf("a configured number gave %d", d.Rollover())
+	}
+	// 0 is valid (it means "follow the model"); a number under 20,000 is not.
+	ok, low := Defaults(), Defaults()
+	low.RolloverTokens = 19_999
+	has := func(c Config) bool {
+		for _, p := range c.Problems() {
+			if p.Path == "/rollover_tokens" && p.Severity == "error" {
+				return true
+			}
+		}
+		return false
+	}
+	if has(ok) || !has(low) {
+		t.Fatalf("validation: 0 flagged=%v, 19999 flagged=%v", has(ok), has(low))
+	}
+}

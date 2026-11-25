@@ -82,12 +82,12 @@ Details: [docs/FINALECHAT-INTEGRATIONS.md](docs/FINALECHAT-INTEGRATIONS.md).
   "preset": "anthropic-med",
   "model": { "reasoning_effort": "high" },
   "relay": { "default": "claude" },
-  "rollover_tokens": 64000,
   "quiet_seconds": 180
 }
 ```
 
 - One model, with an optional fallback route. It runs at one reasoning effort for every call, so the provider's prompt cache keeps hitting: `xhigh` by default, or the highest the model offers below `max`.
+- The conversation restarts from a dossier when it fills half the model's context window. `rollover_tokens` fixes a number instead.
 - `summarizer` keeps the thread's title and summary: in the same loop by default, or on a small model of its own (`"mode": "dedicated"`).
 - `.agents/eagent/INSTRUCTIONS.md` holds standing instructions for the project (`AGENTS.md` is read when there is none).
 - `eagent prompts export` copies the prompts into the project, where you can edit them.

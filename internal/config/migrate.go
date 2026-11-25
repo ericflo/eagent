@@ -92,7 +92,7 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 //   - task, narrator, and the settings of the task worker and the shell tools
 //     are dropped.
 //   - rollover_tokens keeps its value; a file that does not name it is told
-//     that the default changed.
+//     that the default now follows the model's context window.
 func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []string) {
 	if !HasLegacyKeys(m) {
 		return m, nil
@@ -197,8 +197,8 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 		}
 	}
 	if _, ok := out["rollover_tokens"]; !ok {
-		notes = append(notes, "rollover_tokens is not set in this file, so the default is now "+strconv.Itoa(Defaults().RolloverTokens)+
-			" where it was "+strconv.Itoa(legacyRolloverTokens)+" ("+strconv.Itoa(legacyPresetRolloverTokens)+" in some presets); set rollover_tokens to keep the old value")
+		notes = append(notes, "rollover_tokens is not set in this file, so the conversation now restarts at half the model's context window where the default was "+
+			strconv.Itoa(legacyRolloverTokens)+" ("+strconv.Itoa(legacyPresetRolloverTokens)+" in some presets); set rollover_tokens to fix a number")
 	}
 	return out, notes
 }

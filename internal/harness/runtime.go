@@ -79,6 +79,9 @@ type Options struct {
 type modelRoute struct {
 	routes []llm.Endpoint
 	client *llm.Client
+	// conf is the configured chain the routes came from: it knows each
+	// model's context window and reply ceiling, which an endpoint does not.
+	conf config.ModelRoute
 }
 
 // Runtime is one live session.
@@ -335,7 +338,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		cancel()
 		return nil, fmt.Errorf("model: %w", err)
 	}
-	r.models[event.ActorEagent] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorEagent)}
+	r.models[event.ActorEagent] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorEagent), conf: cfg.Model}
 	if cfg.Summarizer.Mode == config.SummarizerDedicated {
 		routes, err := cfg.Summarizer.Route(cfg.Model).Routes()
 		if err != nil {

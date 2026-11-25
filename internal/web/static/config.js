@@ -587,7 +587,7 @@ function routeCard(slot, top) {
   if(X.threadControls) det.append(fallbackLine(card, a, slot));
   det.append(h('div', {class: 'adv'},
     num('max_tokens', 'Max output tokens', 'per call; reasoning counts toward it on most providers'),
-    num('context_tokens', 'Context window', 'the model\'s usable window; the conversation restarts long before it, at the rollover threshold'),
+    num('context_tokens', 'Context window', 'the model\'s usable window; the conversation restarts from a dossier at half of it unless a rollover number is set'),
     a.protocol === 'openai-responses' ? field('Replay reasoning', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: a.replay_reasoning !== false, disabled: locked('replay_reasoning'), onchange: ev => { if (ev.target.checked) delete a.replay_reasoning; else a.replay_reasoning = false; rerender(); }}), 'keep the model\'s reasoning items across turns (recommended; keeps the prompt cache warm)')], [srcNode(ptr('replay_reasoning'))]) : null,
     field('Protocol', [h('select', {disabled: locked('protocol'), onchange: ev => { a.protocol = ev.target.value; if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: a.protocol === p}, `${p} · ${E.cat.transports[p] || ''}`)))], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]),
     field('Provider address', [h('select', {disabled: locked('base_url'), onchange: ev => { a.base_url = ev.target.value; const p = providerOf(a.base_url); if (p) { a.api_key_env = p.key_env || ''; if (!lookup(a)) a.protocol = p.protocol; } rerender(); }}, ...providerOptions(a.base_url))], [srcNode(ptr('base_url')), h('span', {class: 'src'}, 'Register custom or local servers above; catalog and registered servers appear here.'), ...problemNodes(ptr('base_url'))]),
@@ -795,6 +795,23 @@ function numField(f, lbl, help, attrs) {
   const locked = lockedField(ptr);
   return field(lbl, [h('input', Object.assign({type: 'number', value: E.cfg[f] ?? '', disabled: locked, onchange: ev => { const v = parseInt(ev.target.value, 10); if (!isNaN(v)) E.cfg[f] = v; rerender(); }}, attrs || {}))], [srcNode(ptr), help ? h('span', {class: 'src'}, help) : null, ...problemNodes(ptr)]);
 }
+// rolloverField sets the prompt size at which the conversation restarts
+// from a dossier. Left blank it follows the model: half its context window.
+function rolloverField() {
+  const ptr = '/rollover_tokens';
+  const m = E.cfg.model || {};
+  const auto = autoRollover(m.context_tokens, m.max_tokens);
+  const input = h('input', {type: 'number', min: 20000, step: 10000, value: E.cfg.rollover_tokens || '', placeholder: `${auto.toLocaleString('en-US')} (half the model's window)`,
+    'aria-label': 'Context rollover', disabled: lockedField(ptr),
+    onchange: ev => { const v = parseInt(ev.target.value, 10); E.cfg.rollover_tokens = isNaN(v) ? 0 : v; rerender(); }});
+  return field('Context rollover', [input], [srcNode(ptr), h('span', {class: 'src'}, 'at this prompt size eagent writes a dossier and continues from it in a fresh conversation; blank follows the model'), ...problemNodes(ptr)]);
+}
+// autoRollover is config.AutoRollover (internal/config/config.go): half the
+// window in whole thousands, less where the reply ceiling leaves no room.
+function autoRollover(win, maxTok) {
+  const w = win > 0 ? win : 200000;
+  return Math.max(Math.floor(Math.min(w / 2, w - (maxTok || 0) - 33000) / 1000) * 1000, 20000);
+}
 // agentCard picks the coding agent a session starts when it is not told
 // which.
 function agentCard() {
@@ -819,7 +836,7 @@ function behaviorCard() {
       numField('tick_seconds', 'Look at progress every', 'seconds between progress looks while the agent works; a look with nothing new costs no model call', {min: 5}),
       numField('quiet_seconds', 'Longest silence', 'seconds you go without a progress line while the agent works; 0 turns the limit off', {min: 0}),
       numField('max_calls_per_turn', 'Calls per turn', 'model calls eagent may make each time it wakes: a look at the screen, a key press, another look', {min: 1}),
-      numField('rollover_tokens', 'Context rollover', 'at this prompt size eagent writes a briefing and continues from it in a fresh conversation', {min: 20000, step: 10000}),
+      rolloverField(),
       numField('report_max_chars', 'Report kept', 'characters of the agent\'s turn report eagent itself reads; you always get the whole report', {min: 500, step: 500}),
       field('Voice', [h('textarea', {rows: 4, disabled: locked, placeholder: 'How eagent should sound. Leave empty for the built-in voice (warm, plain, no catchphrases).', onchange: ev => { E.cfg.persona = ev.target.value; if (!E.cfg.persona) delete E.cfg.persona; rerender(); }}, E.cfg.persona || '')], [srcNode('/persona'), h('span', {class: 'src'}, 'Replaces the persona prompt for new sessions. The full prompts are under Prompts.'), ...problemNodes('/persona')])));
 }

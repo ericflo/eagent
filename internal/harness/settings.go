@@ -118,6 +118,7 @@ type routeSwap struct {
 	who  string
 	pick runtimecontrol.Route
 	eps  []llm.Endpoint
+	conf config.ModelRoute // the route as configured: window and reply ceiling
 }
 
 // routeChanges resolves the models whose pick changed. One whose pick did
@@ -144,7 +145,7 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", who, err)
 		}
-		out = append(out, routeSwap{who: who, pick: pick, eps: eps})
+		out = append(out, routeSwap{who: who, pick: pick, eps: eps, conf: a})
 	}
 	return out, nil
 }
@@ -163,7 +164,7 @@ func (r *Runtime) configRoute(who string) config.ModelRoute {
 // chip. A new model has no cache of the conversation, so its first call
 // pays for the whole prompt once.
 func (r *Runtime) swapRoute(sw routeSwap) {
-	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who)}
+	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),

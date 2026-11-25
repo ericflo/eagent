@@ -471,7 +471,7 @@ func TestMigrateLegacyNotesEveryChange(t *testing.T) {
 		"tool_output_max_chars was dropped: eagent has no shell or file tools now",
 		"allow_outside_project was dropped: eagent has no file tools now",
 		"max_orchestrator_calls_per_turn is now max_calls_per_turn, and it is now where a turn stops (it was only a reminder)",
-		"rollover_tokens is not set in this file, so the default is now 64000 where it was 150000 (300000 in some presets); set rollover_tokens to keep the old value",
+		"rollover_tokens is not set in this file, so the conversation now restarts at half the model's context window where the default was 150000 (300000 in some presets); set rollover_tokens to fix a number",
 	} {
 		if !hasNote(notes, want) {
 			t.Errorf("no note %q in %v", want, notes)

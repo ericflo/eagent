@@ -28,7 +28,7 @@ var projectPlaces = map[string]fieldPlace{
 	"/tick_seconds":                        {"Behavior", "Progress", "Seconds between progress looks", "How often eagent considers telling you how the work is going.", false},
 	"/quiet_seconds":                       {"Behavior", "Progress", "Longest silence while the agent works", "In seconds: the longest you go without a progress line. 0 turns the limit off.", false},
 	"/max_calls_per_turn":                  {"Behavior", "Work", "Calls per turn", "Model calls eagent may make each time it wakes: a look at the screen, a key press, another look.", true},
-	"/rollover_tokens":                     {"Behavior", "Work", "Context rollover (tokens)", "At this prompt size eagent restarts its conversation from a dossier: where things stand, with a map of where everything is in the session's record.", true},
+	"/rollover_tokens":                     {"Behavior", "Work", "Context rollover (tokens)", "At this prompt size eagent restarts its conversation from a dossier: where things stand, with a map of where everything is in the session's record. 0 follows the model: half its context window.", true},
 	"/report_max_chars":                    {"Behavior", "Work", "Report kept (characters)", "How much of the agent's report eagent itself reads. You always get the whole report.", true},
 	"/finalechat/enabled":                  {"FinaleChat", "Phone", "Mirror to the phone", "Off stops mirroring even with a token; on makes a missing token an error.", false},
 	"/finalechat/mirror_input":             {"FinaleChat", "Phone", "Show terminal messages", "Copies what you type in the terminal or web UI into the thread.", false},

@@ -751,8 +751,8 @@ func (c Config) Problems() []Problem {
 	if c.QuietSeconds < 0 {
 		add("error", "/quiet_seconds", "min", "quiet_seconds cannot be negative (0 disables the limit)")
 	}
-	if c.RolloverTokens < 20_000 {
-		add("error", "/rollover_tokens", "min", "rollover_tokens must be at least 20000")
+	if c.RolloverTokens != 0 && c.RolloverTokens < 20_000 {
+		add("error", "/rollover_tokens", "min", "rollover_tokens must be at least 20000, or 0 to follow the model's context window")
 	}
 	if w := c.Model.ContextTokens; w > 0 && float64(c.RolloverTokens) > 0.9*float64(w) {
 		add("warning", "/rollover_tokens", "near_window", fmt.Sprintf("rollover_tokens (%d) is within 10%% of the model's context window (%d); the context can overflow before the dossier is written", c.RolloverTokens, w))
