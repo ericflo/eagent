@@ -533,6 +533,14 @@ func (c *routeChain) current() *llm.Client {
 	return c.clients[c.at]
 }
 
+// currentRoute is the route the calls use now: after a fallback took over,
+// the fallback's.
+func (c *routeChain) currentRoute() llm.Endpoint {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.routes[c.at]
+}
+
 // next moves past failed, reporting whether another route is left to try.
 // A call that failed on a route already left behind just tries the current.
 func (c *routeChain) next(failed *llm.Client) bool {
@@ -676,7 +684,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 		}
 	}
 	if !asJSON {
-		fmt.Printf("%d session%s, %d thread%s updated, %d tokens in / %d out on %s\n", len(sessions), pluralS(len(sessions)), sent, pluralS(sent), usage.Input, usage.Output, routes[0].Model)
+		fmt.Printf("%d session%s, %d thread%s updated, %d tokens in / %d out on %s\n", len(sessions), pluralS(len(sessions)), sent, pluralS(sent), usage.Input, usage.Output, models.currentRoute().Model)
 	}
 	return code
 }
@@ -1003,6 +1011,13 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	for _, m := range cfg.Migrated {
 		fmt.Printf("older configuration: %s\n", m)
 	}
+	// The load already failed on the configuration's errors; its warnings
+	// are what the editor would show.
+	for _, p := range cfg.Problems() {
+		if p.Severity != "error" {
+			fmt.Printf("  ! config %s: %s\n", strings.TrimPrefix(p.Path, "/"), p.Message)
+		}
+	}
 	check := func(name string, a config.ModelRoute) {
 		routes, err := a.Routes()
 		if err != nil {
@@ -1108,6 +1123,28 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	} else if !anyAgent {
 		ok = false
 		fmt.Println("  ✗ no agent is installed; a session needs one")
+	}
+	// A prompt override that does not parse stops every session at its
+	// start; an override of a prompt of the three-model design is read by
+	// nothing.
+	fmt.Println("prompts:")
+	if set, err := prompts.Load(project); err != nil {
+		ok = false
+		fmt.Printf("  ✗ %v\n", err)
+	} else {
+		overridden := false
+		for _, name := range prompts.Names {
+			if src := set.Source[name]; src != "built-in" {
+				overridden = true
+				fmt.Printf("  ✓ %-17s %s\n", name, src)
+			}
+		}
+		if !overridden {
+			fmt.Println("  ✓ built-in (no overrides in " + prompts.Dir(project) + ")")
+		}
+	}
+	for _, p := range prompts.Ignored(project) {
+		fmt.Printf("  ! %s is no longer read: eagent runs one model now (`eagent prompts` lists the prompts it reads)\n", p)
 	}
 	if servers, err := config.LoadServers(project); err == nil && len(servers) > 0 {
 		fmt.Println("registered servers:")
@@ -1226,7 +1263,14 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			return fail(errors.New("usage: eagent presets use NAME|default"))
 		}
 		target := strings.TrimSpace(args[0])
+		editor, err := config.LockEditor(context.Background(), project)
+		if err != nil {
+			return fail(err)
+		}
+		defer editor.Close()
+		file := config.Resolve(project, "", "").File
 		edits := map[string]json.RawMessage{}
+		dropped := ""
 		switch {
 		case target == "default" || target == "none" || target == "-":
 			edits["default_config"] = nil
@@ -1234,6 +1278,18 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			if canon, ok := config.ResolvePreset(target); ok {
 				edits["preset"], _ = json.Marshal(canon)
 				edits["default_config"] = nil
+				// The preset's model is what this chooses: a model the
+				// file names would run instead of it, so it goes. The
+				// file's effort and reply ceiling stay.
+				if file.Raw != "" {
+					var m map[string]json.RawMessage
+					if err := json.Unmarshal([]byte(file.Raw), &m); err != nil {
+						return fail(fmt.Errorf("%s: %w", file.Path, err))
+					}
+					var rest map[string]json.RawMessage
+					rest, dropped = config.DropModelChoice(m)
+					edits["model"] = rest["model"]
+				}
 			} else {
 				if _, err := config.LoadBundle(project, "", target); err != nil {
 					return fail(err)
@@ -1241,11 +1297,14 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 				edits["default_config"], _ = json.Marshal(target)
 			}
 		}
-		res, err := config.SaveFile(project, edits, "", false)
+		res, err := editor.SaveFile(edits, file.ETag, true)
 		if err != nil {
 			return fail(err)
 		}
 		fmt.Printf("updated %s\n", res.Path)
+		if dropped != "" {
+			fmt.Printf("  the model the file named (%s) was removed, so %s's model runs; the previous file is in %s.bak\n", dropped, target, res.Path)
+		}
 		return 0
 	case "show":
 		if len(args) < 1 {

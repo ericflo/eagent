@@ -808,20 +808,40 @@ func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessag
 	if _, ok := ResolvePreset(preset); !ok {
 		return Defaults(), fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 	}
-	migrated, _ := MigrateLegacy(file)
-	rest := make(map[string]json.RawMessage, len(migrated))
-	for k, v := range migrated {
-		if k != "default_config" && k != "preset" {
-			rest[k] = v
-		}
-	}
-	if route := object(rest["model"]); route != nil {
-		for _, k := range []string{"protocol", "base_url", "model", "api_key_env", "context_tokens", "fallback"} {
-			delete(route, k)
-		}
-		rest["model"], _ = json.Marshal(route)
-	}
+	rest, _ := DropModelChoice(file)
+	delete(rest, "default_config")
+	delete(rest, "preset")
 	return LoadBundleWithFile(project, preset, "", rest)
+}
+
+// modelChoiceFields are the fields of a route that say which model it is
+// and where it is reached: what choosing a preset chooses.
+var modelChoiceFields = []string{"protocol", "base_url", "model", "api_key_env", "context_tokens", "fallback"}
+
+// DropModelChoice returns a configuration object, carried over to today's
+// keys, without the model its route names or where it is reached, so a
+// preset under it decides them; the route's other settings (its effort,
+// its reply ceiling) stay. dropped is the model it named, "" when none.
+func DropModelChoice(file map[string]json.RawMessage) (out map[string]json.RawMessage, dropped string) {
+	migrated, _ := MigrateLegacy(file)
+	out = make(map[string]json.RawMessage, len(migrated))
+	for k, v := range migrated {
+		out[k] = v
+	}
+	route := object(out["model"])
+	if route == nil {
+		return out, ""
+	}
+	_ = json.Unmarshal(route["model"], &dropped)
+	for _, k := range modelChoiceFields {
+		delete(route, k)
+	}
+	if len(route) == 0 {
+		delete(out, "model")
+	} else {
+		out["model"], _ = json.Marshal(route)
+	}
+	return out, dropped
 }
 
 // normalize spells out what an empty setting means: an empty summarizer
