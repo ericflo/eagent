@@ -15,9 +15,10 @@ import (
 
 // The status line: what the session is doing right now, shown on the phone
 // as a typing indicator with a timer. It is derived from the runtime's own
-// state after every event, written at most every few seconds, refreshed
-// while it stays the same so it never lapses mid-work, and cleared when the
-// session ends. It never creates a thread and never notifies anyone.
+// state whenever the loop has run, written at most every few seconds,
+// refreshed while it stays the same so it never lapses mid-work, and
+// cleared when the session ends. It never creates a thread and never
+// notifies anyone.
 
 const (
 	statusMinGap      = 2500 * time.Millisecond // between writes

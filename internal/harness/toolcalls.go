@@ -16,6 +16,11 @@ import (
 type turnCalls struct {
 	wake  wake
 	spoke bool // a message or a question went out in this turn
+	// said: a message or a question went out in the reply whose calls are
+	// being run. One reply sends one message; a later reply of the same
+	// turn (it looked at something, or the user wrote meanwhile) may
+	// speak again.
+	said bool
 	// handled: the turn answered the user or did something with the agent,
 	// so a message kept for eagent has not been left lying.
 	handled bool
@@ -55,7 +60,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		if text == "" {
 			return "text is required", true, true
 		}
-		if tc.spoke {
+		if tc.said {
 			return "not sent: one message per reply. Say it all in one next time.", true, false
 		}
 		atts, err := r.messageAttachments(args["attachments"])
@@ -66,7 +71,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		// The closing word of a session always buzzes.
 		important = important || tc.wake.final
 		r.sync(func() { r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts}) })
-		tc.spoke, tc.handled = true, true
+		tc.spoke, tc.said, tc.handled = true, true, true
 		if len(atts) > 0 {
 			return fmt.Sprintf("delivered with %d attachment(s)", len(atts)), false, false
 		}
@@ -104,7 +109,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return refused, true, false
 		}
 		r.ui.Ask(id, text, opts)
-		tc.spoke, tc.handled = true, true
+		tc.spoke, tc.said, tc.handled = true, true, true
 		switch {
 		case r.opts.Interactive:
 			return "asked; the answer will appear as a message from the user", false, false

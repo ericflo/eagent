@@ -159,10 +159,12 @@ func (r *Runtime) needsDossier() bool {
 	if !t.overflowed && r.contextTokens() < limit {
 		return false
 	}
-	if cur := r.st.Current(); cur != nil && cur.Reason == "rollover" && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) {
+	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) {
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
-		// Restarting again would only rebuild the same prompt.
+		// Restarting again would only rebuild the same prompt. A session
+		// of the earlier design picked up from a dossier ("upgrade") is in
+		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
 			r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
@@ -369,6 +371,23 @@ func mapProblem(text string, lines map[string]int) string {
 	return strings.Join(why, "; and ")
 }
 
+// draftBeats reports whether draft a is the one to keep over b, when
+// neither passed. One long enough to be a briefing beats one that is not;
+// then the one whose map cites more places that exist; then the fuller
+// one. Length alone would keep a long draft that cites nothing over the
+// rewrite that put the map right but for one place.
+func draftBeats(a, b string, lines map[string]int) bool {
+	if al, bl := len(a) >= dossierMinChars, len(b) >= dossierMinChars; al != bl {
+		return al
+	}
+	an, _ := checkCitations(a, lines)
+	bn, _ := checkCitations(b, lines)
+	if an != bn {
+		return an > bn
+	}
+	return len(a) > len(b)
+}
+
 // noMapReason says why a text kept after it was sent back is a summary and
 // not a map ("" when it is a map, if a partly wrong one).
 func noMapReason(text string, lines map[string]int) string {
@@ -451,7 +470,9 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 					// long: from the files, as after a refused turn.
 					r.sync(func() { r.dossierFromFiles(&job, dossierRefused) })
 					msgs = job.msgs[:len(job.msgs):len(job.msgs)]
-					read, last, lookedAt, dropped = 0, false, 0, false
+					// A new request: it gets its own send-back. A draft
+					// already in hand stays one to choose from.
+					read, last, lookedAt, dropped, rejected = 0, false, 0, false, false
 					r.ui.Log("dossier: the conversation is too long to write in; writing from the record")
 					continue
 				}
@@ -505,7 +526,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		if len(text) < dossierMinChars {
 			why = fmt.Sprintf("it is too short to be a briefing (%d characters)", len(text))
 		}
-		if len(text) > len(res.text) || why == "" {
+		if why == "" || draftBeats(text, res.text, job.lines) {
 			res.text, res.bad = text, bad
 		}
 		if why == "" {
@@ -616,7 +637,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	next, err := r.openSubsession(endReason, startReason, job.tokens)
 	if err != nil {
-		r.ui.Log("dossier: %v; the conversation continues as it is for now", err)
+		r.ui.Log("dossier: %v; the conversation continues as it is for now (the briefing that was written, %d calls, is not kept)", err, res.calls)
 		t.dossierFailedAt = time.Now()
 		return
 	}
@@ -639,7 +660,10 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 // openSubsession ends the current subsession file and starts the next.
 // Loop goroutine (or before the loop starts).
 func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (string, error) {
-	next, err := r.sess.NewSubsessionName(time.Now())
+	// The next file is made before the record says this one has ended: a
+	// session that cannot make it (a full disk, a directory it may no
+	// longer write) keeps its conversation and its record as they are.
+	next, err := r.sess.CreateSubsession(time.Now())
 	if err != nil {
 		return "", err
 	}

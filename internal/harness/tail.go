@@ -394,6 +394,23 @@ func (r *Runtime) noticeTail() string {
 // answer: the oldest such message and every one kept for it since. alone
 // says the call was made for this only.
 func (r *Runtime) owedTail(who string, alone bool) string {
+	clock := func(t time.Time) string { return t.In(r.st.Location()).Format("15:04") }
+	if r.turns.owedAnswer {
+		// Not a message kept for eagent but the user's answer to its
+		// question, held on with nothing done.
+		lead := "Also: the"
+		if alone {
+			lead = "The"
+		}
+		for _, ev := range r.st.Events {
+			if ev.Seq != r.turns.owed || ev.Type != event.UserAnswer {
+				continue
+			}
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			return fmt.Sprintf("%s user answered your question at %s (%q) and nothing has been done with the answer: it has reached nobody but you. If %s is waiting on it, give it to %s with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next. Hold only if the answer needs nothing done.", lead, clock(ev.Time), clipRunes(oneLine(d.Text, 300), 300), who, who)
+		}
+	}
 	type kept struct {
 		text string
 		at   time.Time
@@ -412,7 +429,6 @@ func (r *Runtime) owedTail(who string, alone bool) string {
 	if alone {
 		lead = "The"
 	}
-	clock := func(t time.Time) string { return t.In(r.st.Location()).Format("15:04") }
 	const tailEnd = "kept for you, so nobody else will answer. Answer now with send_message, or pass it on with relay_forward if it is for %s."
 	if len(list) <= 1 {
 		var k kept

@@ -619,6 +619,13 @@ func (r *Runtime) publishStatus() {
 		s.Agents = append(s.Agents, AgentStatus{Name: rel.Name, Who: rel.Who(), State: rel.State})
 	}
 	r.ui.Status(s)
+	if r.phone != nil {
+		// The phone's status line follows the same state. Starting a model
+		// call or a dossier pass records nothing, and a call turns into a
+		// long one with no event at all, so the line cannot be worked out
+		// only when something is recorded (phone.observe).
+		r.phone.noteState(r)
+	}
 }
 
 // maybeEnd decides whether the session is finished. A session with an
@@ -640,7 +647,14 @@ func (r *Runtime) maybeEnd() {
 		r.ui.Idle(r.st.Waiting())
 		return
 	}
-	if len(r.st.ActiveRelays()) > 0 {
+	// unanswerable: a question is open, and nobody can answer it while the
+	// session runs: there is no terminal and no phone. eagent was told
+	// that asking ends such a session until the user resumes it (the
+	// prompt, and ask_user's own result), so it ends even with an agent
+	// running. The agent keeps running in its own terminal, and the
+	// resumed session picks it up.
+	unanswerable := r.st.Question != nil && r.phone == nil
+	if len(r.st.ActiveRelays()) > 0 && !unanswerable {
 		return
 	}
 	if len(r.st.ActiveSchedules()) > 0 {
