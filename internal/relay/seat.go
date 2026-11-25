@@ -480,6 +480,15 @@ func (s *Seat) watch() {
 				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
 				first := s.transcript == ""
+				if _, ok := s.agent.(sessionStarter); ok && first && !s.followed && s.inner != "" && inner != s.inner {
+					// The agent left the session it was started on before
+					// the seat found any transcript (pi's /resume before its
+					// first message). The one it is on holds history the
+					// seat never saw live: decide where its news begins as
+					// for a move the seat saw.
+					s.sinceKept = s.since
+					s.since, s.followed, s.onAt = s.moveCut(), true, time.Time{}
+				}
 				s.transcript, s.inner = path, inner
 				exact := false
 				if s.followed {
@@ -536,7 +545,10 @@ func (s *Seat) watch() {
 				return
 			}
 		}
-		if pl, ok := s.agent.(poller); ok && tail != nil {
+		if pl, ok := s.agent.(poller); ok {
+			// Also before any transcript is found: a sighting of the agent
+			// on the session it was started on dates a move made before
+			// its first message.
 			pl.poll(s, now)
 		}
 		if dr, ok := s.agent.(dialogReporter); ok {
@@ -857,6 +869,14 @@ func (s *Seat) follow(id string) {
 	if !s.followed {
 		s.sinceKept = s.since
 	}
+	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, s.moveCut(), time.Time{}
+}
+
+// moveCut is where news begins in a transcript the agent moved to, when the
+// agent cannot say: just before it was last seen on the session it left,
+// never earlier than sinceKept, "now" without a sighting. The caller holds
+// s.mu and has set sinceKept.
+func (s *Seat) moveCut() time.Time {
 	cut := time.Now()
 	if !s.onAt.IsZero() && s.onAt.Before(cut) {
 		cut = s.onAt.Add(-time.Millisecond)
@@ -864,7 +884,7 @@ func (s *Seat) follow(id string) {
 	if cut.Before(s.sinceKept) {
 		cut = s.sinceKept
 	}
-	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, cut, time.Time{}
+	return cut
 }
 
 func removePending(list []*pending, x *pending) []*pending {
