@@ -246,6 +246,7 @@ func run(args []string) int {
 		if len(rest) < 1 {
 			return fail(errors.New("usage: eagent view <session-id> [--until SEQ]"))
 		}
+		viewIgnoredFlags(os.Stderr, *actor, *task)
 		return cmdView(project, rest[0], *until, *asJSON)
 	}
 
@@ -308,7 +309,7 @@ func run(args []string) int {
 			raw, _ := readAll(os.Stdin)
 			opts.Prompt = strings.TrimSpace(string(raw))
 		}
-		if opts.Prompt == "" {
+		if batchNeedsPrompt(opts.Prompt, opts.Relay) {
 			return fail(errors.New("a non-interactive run needs a prompt: eagent -p \"...\" (stdin is not a terminal)"))
 		}
 	}
@@ -367,6 +368,30 @@ func run(args []string) int {
 	}
 	term.Close(fmt.Sprintf("session %s ended (%s) · %s", rt.SessionID(), st.EndReason, st.UsageLine()))
 	return code
+}
+
+// batchNeedsPrompt reports whether a non-interactive run is missing its
+// prompt. One that names an agent (--relay, or `eagent relay NAME`) may start
+// it with none: the session starts the agent and waits.
+func batchNeedsPrompt(prompt, relay string) bool { return prompt == "" && relay == "" }
+
+// viewIgnoredFlags says, on w, that `eagent view` ignores --actor and
+// --task: the three-model design had a prompt per actor and per task, and
+// there is one conversation now.
+func viewIgnoredFlags(w io.Writer, actor, task string) {
+	var given []string
+	if actor != "" {
+		given = append(given, "--actor")
+	}
+	if task != "" {
+		given = append(given, "--task")
+	}
+	switch len(given) {
+	case 1:
+		fmt.Fprintf(w, "eagent view: there is one conversation now, so %s is ignored\n", given[0])
+	case 2:
+		fmt.Fprintf(w, "eagent view: there is one conversation now, so %s and %s are ignored\n", given[0], given[1])
+	}
 }
 
 // parseInterleaved accepts flags anywhere on the command line, so
@@ -687,8 +712,13 @@ func transcriptLine(ev event.Event) string {
 	case event.SubsessionStart:
 		var d event.SubsessionStartData
 		_ = ev.Decode(&d)
-		if d.Reason == "rollover" {
+		switch d.Reason {
+		case "rollover":
 			return fmt.Sprintf("%s subsession   %d (%s) after context rollover", ts, d.Index+1, d.File)
+		case "upgrade":
+			// An older session continued by the one-loop eagent, from a
+			// briefing written from its record.
+			return fmt.Sprintf("%s subsession   %d (%s) continued by the one-loop eagent from a briefing", ts, d.Index+1, d.File)
 		}
 	case event.Dossier:
 		var d event.DossierData
@@ -890,8 +920,10 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	} else {
 		fmt.Printf("finalechat: on (token from %s; --live checks it)\n", c.Source)
 	}
+	// Keys and environment variables of the three-model design: what was
+	// carried over, what changed, and what is no longer read.
 	for _, m := range cfg.Migrated {
-		fmt.Printf("carried over from an older configuration: %s\n", m)
+		fmt.Printf("older configuration: %s\n", m)
 	}
 	check := func(name string, a config.ModelRoute) {
 		routes, err := a.Routes()

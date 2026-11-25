@@ -51,17 +51,20 @@ func TestMigrateLegacyOrchestratorAndNarrator(t *testing.T) {
 	if err := json.Unmarshal(out["model"], &model); err != nil {
 		t.Fatal(err)
 	}
-	if model.Model != "o/model" || model.BaseURL != "https://o.example/v1" || model.ReasoningEffort != "medium" {
+	// Two different efforts: neither is written, down the fallbacks too, so
+	// the preset's applies.
+	if model.Model != "o/model" || model.BaseURL != "https://o.example/v1" || model.ReasoningEffort != "" {
 		t.Fatalf("model = %+v", model)
 	}
-	if model.Fallback == nil || model.Fallback.Model != "o/fb" || model.Fallback.ReasoningEffort != "medium" ||
-		model.Fallback.Fallback == nil || model.Fallback.Fallback.ReasoningEffort != "medium" {
-		t.Fatalf("fallbacks must run at the narrator's effort: %+v", model.Fallback)
+	if model.Fallback == nil || model.Fallback.Model != "o/fb" || model.Fallback.ReasoningEffort != "" ||
+		model.Fallback.Fallback == nil || model.Fallback.Fallback.ReasoningEffort != "" {
+		t.Fatalf("fallbacks must carry no effort: %+v", model.Fallback)
 	}
 	if string(out["persona"]) != `"terse"` {
 		t.Fatalf("persona = %s", out["persona"])
 	}
-	for _, n := range []string{"orchestrator is now model", "narrator was dropped", "task was dropped"} {
+	for _, n := range []string{"orchestrator is now model", "narrator was dropped", "task was dropped",
+		"orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (medium) differ"} {
 		if !hasNote(notes, n) {
 			t.Errorf("no note %q in %v", n, notes)
 		}
@@ -77,7 +80,7 @@ func TestMigrateLegacyOrchestratorAloneKeepsItsEffort(t *testing.T) {
 	if string(m["reasoning_effort"]) != `"xhigh"` || string(object(m["fallback"])["reasoning_effort"]) != `"xhigh"` {
 		t.Fatalf("model = %s", out["model"])
 	}
-	if len(notes) != 1 || !hasNote(notes, "orchestrator is now model") || !hasNote(notes, "its reasoning effort stays xhigh, now for every call") {
+	if !hasNote(notes, "orchestrator is now model") || !hasNote(notes, "its reasoning effort stays xhigh, now for every call") || hasNote(notes, "narrator.reasoning_effort") {
 		t.Fatalf("notes = %v", notes)
 	}
 	project := t.TempDir()
@@ -126,16 +129,16 @@ func TestMigrateLegacyRenamesAndQuietSeconds(t *testing.T) {
 
 func TestMigrateLegacyDropsKeys(t *testing.T) {
 	in := `{"persona": "x"`
-	for _, k := range legacyDropped {
-		in += `, "` + k + `": 1`
+	for _, d := range legacyDropped {
+		in += `, "` + d.key + `": 1`
 	}
 	out, notes := MigrateLegacy(rawObject(t, in+"}"))
 	if len(out) != 1 || string(out["persona"]) != `"x"` {
 		t.Fatalf("out = %v", out)
 	}
-	for _, k := range legacyDropped {
-		if !hasNote(notes, k+" was dropped") {
-			t.Errorf("no note for %s: %v", k, notes)
+	for _, d := range legacyDropped {
+		if !hasNote(notes, d.key+" was dropped: "+d.why) {
+			t.Errorf("no note for %s: %v", d.key, notes)
 		}
 	}
 }
@@ -154,7 +157,7 @@ func TestMigrateLegacyLeavesCurrentObjectsAlone(t *testing.T) {
 	if canonString(out["model"]) != `{"model":"new"}` || out["orchestrator"] != nil || len(out) != 1 {
 		t.Fatalf("out = %v", out)
 	}
-	if hasNote(notes, "orchestrator is now model") {
+	if hasNote(notes, "orchestrator is now model") || !hasNote(notes, "orchestrator was ignored: the file also has model, which is used") {
 		t.Fatalf("notes = %v", notes)
 	}
 }
@@ -208,10 +211,15 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 			"config.json: task_concurrency was dropped",
 			"config.json: max_task_turns was dropped",
 			"config.json: allow_outside_project was dropped",
+			"config.json: orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (medium) differ",
 		} {
 			if !hasNote(notes, n) {
 				t.Errorf("%s: no note %q in %v", name, n, notes)
 			}
+		}
+		// The file names rollover_tokens, so the changed default is not news.
+		if hasNote(notes, "rollover_tokens") {
+			t.Errorf("%s: rollover note for a file that names it: %v", name, notes)
 		}
 	}
 	cfg, err := Load(project, "")
@@ -227,11 +235,13 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err = LoadBundle(project, "", "old")
-	if err != nil || cfg.Model.ReasoningEffort != "high" || cfg.Model.Model != "claude-fable-5-1" || !hasNote(cfg.Migrated, "old.json: the narrator's reasoning effort is now model.reasoning_effort") {
+	// The narrator's effort alone is not carried over: the effort stays the
+	// preset's.
+	if err != nil || cfg.Model.ReasoningEffort != want.Model.ReasoningEffort || cfg.Model.Model != "claude-fable-5-1" || !hasNote(cfg.Migrated, "old.json: narrator.reasoning_effort (high) is not carried over") {
 		t.Fatalf("bundle: %v %+v %v", err, cfg.Model, cfg.Migrated)
 	}
 	alone, err := BundleAlone(project, "old")
-	if err != nil || alone.Model.ReasoningEffort != "high" {
+	if err != nil || alone.Model.ReasoningEffort == "high" {
 		t.Fatalf("BundleAlone: %v %+v", err, alone.Model)
 	}
 }
@@ -243,7 +253,7 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 	t.Setenv("EAGENT_PRESET", "")
 	t.Setenv("EAGENT_CONFIG", "")
 	writeConfig(t, project, `{
-  "orchestrator": {"model": "custom/model"},
+  "orchestrator": {"model": "custom/model", "reasoning_effort": "high"},
   "narrator": {"reasoning_effort": "high"},
   "narrator_tick_seconds": 20,
   "task_concurrency": 3,
@@ -394,4 +404,212 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// One effort for every call: the rules for an older file's two efforts.
+func TestMigrateLegacyEffortRules(t *testing.T) {
+	const narratorAlone = "narrator.reasoning_effort (low) is not carried over: the one model does the orchestrator's work too. Set model.reasoning_effort to choose a level."
+	for _, c := range []struct {
+		name, in, effort, note string // effort "" means none is written
+	}{
+		{"both, equal", `{"orchestrator": {"model": "m", "reasoning_effort": "high"}, "narrator": {"reasoning_effort": "high"}}`, "high", "its reasoning effort stays high"},
+		{"both, different", `{"orchestrator": {"model": "m", "reasoning_effort": "xhigh"}, "narrator": {"reasoning_effort": "low"}}`, "",
+			"orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (low) differ and one model has one effort, so neither is carried over and the preset's effort applies. Set model.reasoning_effort to choose a level."},
+		{"orchestrator alone", `{"orchestrator": {"model": "m", "reasoning_effort": "xhigh"}, "narrator": {"model": "n"}}`, "xhigh", "its reasoning effort stays xhigh, now for every call"},
+		{"narrator alone", `{"orchestrator": {"model": "z-ai/glm-5.3"}, "narrator": {"reasoning_effort": "low"}}`, "", narratorAlone},
+		{"narrator alone, no orchestrator", `{"narrator": {"reasoning_effort": "low"}}`, "", narratorAlone},
+		{"neither", `{"orchestrator": {"model": "m"}, "narrator": {"model": "n"}}`, "", "orchestrator is now model"},
+	} {
+		out, notes := MigrateLegacy(rawObject(t, c.in))
+		model := object(out["model"])
+		got := ""
+		if raw, ok := model["reasoning_effort"]; ok {
+			got = strings.Trim(string(raw), `"`)
+		}
+		if got != c.effort {
+			t.Errorf("%s: effort = %q, want %q (model %s)", c.name, got, c.effort, out["model"])
+		}
+		if !hasNote(notes, c.note) {
+			t.Errorf("%s: no note %q in %v", c.name, c.note, notes)
+		}
+	}
+	// End to end: the narrator's low never becomes the effort of every call;
+	// the preset's applies.
+	project := t.TempDir()
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	writeConfig(t, project, `{"orchestrator": {"model": "z-ai/glm-5.3"}, "narrator": {"reasoning_effort": "low"}}`)
+	cfg, err := Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.ReasoningEffort != Defaults().Model.ReasoningEffort || !hasNote(cfg.Migrated, "config.json: "+narratorAlone) {
+		t.Fatalf("effort = %q notes %v", cfg.Model.ReasoningEffort, cfg.Migrated)
+	}
+}
+
+// Every key of an older file that is dropped or changes meaning says so.
+func TestMigrateLegacyNotesEveryChange(t *testing.T) {
+	_, notes := MigrateLegacy(rawObject(t, `{"orchestrator": {"model": "m"}, "narrator": {}, "task": {}, "task_concurrency": 3, "max_task_turns": 9,
+		"bash_wait_seconds": 1, "bash_timeout_seconds": 2, "tool_output_max_chars": 3, "allow_outside_project": true, "max_orchestrator_calls_per_turn": 40}`))
+	for _, want := range []string{
+		"narrator was dropped: one model does the talking now",
+		"task was dropped: there are no task workers now",
+		"task_concurrency was dropped: there are no task workers now",
+		"max_task_turns was dropped: there are no task workers now",
+		"bash_wait_seconds was dropped: eagent has no shell tool now",
+		"bash_timeout_seconds was dropped: eagent has no shell tool now",
+		"tool_output_max_chars was dropped: eagent has no shell or file tools now",
+		"allow_outside_project was dropped: eagent has no file tools now",
+		"max_orchestrator_calls_per_turn is now max_calls_per_turn, and it is now where a turn stops (it was only a reminder)",
+		"rollover_tokens is not set in this file, so the default is now 64000 where it was 150000 (300000 in some presets); set rollover_tokens to keep the old value",
+	} {
+		if !hasNote(notes, want) {
+			t.Errorf("no note %q in %v", want, notes)
+		}
+	}
+	for _, n := range notes {
+		if strings.Contains(n, "\n") {
+			t.Errorf("a note is more than one line: %q", n)
+		}
+	}
+	// A file that names rollover_tokens keeps it and hears nothing about it;
+	// a current file gets no notes at all.
+	if _, notes := MigrateLegacy(rawObject(t, `{"task": {}, "rollover_tokens": 150000}`)); hasNote(notes, "rollover_tokens") {
+		t.Errorf("rollover note for a file that names it: %v", notes)
+	}
+	if _, notes := MigrateLegacy(rawObject(t, `{"model": {"model": "m"}}`)); notes != nil {
+		t.Errorf("notes for a current file: %v", notes)
+	}
+}
+
+// An old reminder threshold above what max_calls_per_turn allows must not
+// keep eagent from starting; the new key itself is still checked.
+func TestMigrateLegacyClampsCallsPerTurn(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	writeConfig(t, project, `{"max_orchestrator_calls_per_turn": 500, "rollover_tokens": 150000}`)
+	cfg, err := Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxCallsPerTurn != 200 || !hasNote(cfg.Migrated, "max_orchestrator_calls_per_turn (500) is above 200, the most max_calls_per_turn allows, so it is 200") {
+		t.Fatalf("max_calls_per_turn = %d notes %v", cfg.MaxCallsPerTurn, cfg.Migrated)
+	}
+	writeConfig(t, project, `{"max_orchestrator_calls_per_turn": 45}`)
+	if cfg, err := Load(project, ""); err != nil || cfg.MaxCallsPerTurn != 45 || hasNote(cfg.Migrated, "is above 200") {
+		t.Fatalf("45: %v %d %v", err, cfg.MaxCallsPerTurn, cfg.Migrated)
+	}
+	writeConfig(t, project, `{"max_calls_per_turn": 500}`)
+	if _, err := Load(project, ""); err == nil || !strings.Contains(err.Error(), "max_calls_per_turn must be between 1 and 200") {
+		t.Fatalf("max_calls_per_turn 500 loaded: %v", err)
+	}
+	// Today's key wins over the old one, which is noted as ignored.
+	out, notes := MigrateLegacy(rawObject(t, `{"max_calls_per_turn": 20, "max_orchestrator_calls_per_turn": 500}`))
+	if string(out["max_calls_per_turn"]) != "20" || !hasNote(notes, "max_orchestrator_calls_per_turn was ignored: the file also has max_calls_per_turn") {
+		t.Fatalf("out %v notes %v", out, notes)
+	}
+}
+
+// The orchestrator's effort variable is a fallback for EAGENT_REASONING_EFFORT,
+// and every variable of the three-actor design that does nothing now is
+// named, never with its value.
+func TestLegacyEnvVars(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	t.Setenv("EAGENT_REASONING_EFFORT", "")
+	t.Setenv("EAGENT_ORCHESTRATOR_REASONING_EFFORT", "xhigh")
+	cfg, err := Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.ReasoningEffort != "xhigh" || EnvOverrides()["/model/reasoning_effort"] != "EAGENT_ORCHESTRATOR_REASONING_EFFORT" {
+		t.Fatalf("effort = %q source %q", cfg.Model.ReasoningEffort, EnvOverrides()["/model/reasoning_effort"])
+	}
+	t.Setenv("EAGENT_REASONING_EFFORT", "low")
+	if cfg, _ := Load(project, ""); cfg.Model.ReasoningEffort != "low" || EnvOverrides()["/model/reasoning_effort"] != "EAGENT_REASONING_EFFORT" {
+		t.Fatalf("EAGENT_REASONING_EFFORT must win: %q", cfg.Model.ReasoningEffort)
+	}
+
+	const secret = "value-that-must-not-appear"
+	var retired []string
+	for _, prefix := range []string{"EAGENT_NARRATOR_", "EAGENT_TASK_"} {
+		for _, suffix := range []string{"MODEL", "PROTOCOL", "BASE_URL", "API_KEY_ENV", "REASONING_EFFORT", "MAX_TOKENS", "REPLAY_REASONING"} {
+			retired = append(retired, prefix+suffix)
+		}
+	}
+	retired = append(retired, "EAGENT_TASK_CONCURRENCY")
+	for _, name := range retired {
+		t.Setenv(name, secret)
+	}
+	// Still read: not noted.
+	t.Setenv("EAGENT_NARRATOR_TICK_SECONDS", "15")
+	t.Setenv("EAGENT_NARRATOR_QUIET_SECONDS", "60")
+	cfg, err = Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range retired {
+		if !hasNote(cfg.Migrated, name+" is set but no longer read") {
+			t.Errorf("no note naming %s", name)
+		}
+	}
+	for _, n := range cfg.Migrated {
+		if strings.Contains(n, secret) {
+			t.Errorf("a note carries a variable's value (note withheld)")
+		}
+		if strings.Contains(n, "TICK_SECONDS") || strings.Contains(n, "QUIET_SECONDS") {
+			t.Errorf("a variable still read is noted: %s", strings.SplitN(n, " ", 2)[0])
+		}
+	}
+	if len(cfg.Migrated) != len(retired) {
+		t.Errorf("%d notes for %d variables", len(cfg.Migrated), len(retired))
+	}
+	// An empty key variable meant "no key needed", so it counts as set; an
+	// empty model did nothing, so it does not.
+	for _, name := range retired {
+		t.Setenv(name, "")
+	}
+	cfg, _ = Load(project, "")
+	if !hasNote(cfg.Migrated, "EAGENT_NARRATOR_API_KEY_ENV is set") || hasNote(cfg.Migrated, "EAGENT_NARRATOR_MODEL") {
+		t.Errorf("empty variables: %d notes", len(cfg.Migrated))
+	}
+}
+
+// Project instructions: INSTRUCTIONS.md, else the project's AGENTS.md, as
+// in the three-actor design.
+func TestLoadInstructionsFallsBackToAgentsMD(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	if cfg, err := Load(project, ""); err != nil || cfg.Instructions != "" {
+		t.Fatalf("none: %v %q", err, cfg.Instructions)
+	}
+	if err := os.WriteFile(filepath.Join(project, "AGENTS.md"), []byte("\n  run make test  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := Load(project, ""); cfg.Instructions != "run make test" {
+		t.Fatalf("AGENTS.md: %q", cfg.Instructions)
+	}
+	own := filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md")
+	if err := os.MkdirAll(filepath.Dir(own), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte("  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := Load(project, ""); cfg.Instructions != "run make test" {
+		t.Fatalf("an empty INSTRUCTIONS.md must fall through: %q", cfg.Instructions)
+	}
+	if err := os.WriteFile(own, []byte("use the staging cluster"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := Load(project, ""); cfg.Instructions != "use the staging cluster" {
+		t.Fatalf("INSTRUCTIONS.md: %q", cfg.Instructions)
+	}
+	if res := Resolve(project, "", ""); res.Effective.Instructions != "use the staging cluster" {
+		t.Fatalf("Resolve: %q", res.Effective.Instructions)
+	}
 }

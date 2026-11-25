@@ -115,8 +115,10 @@ type Config struct {
 	Finalechat Finalechat `json:"finalechat"`
 	// Relay configures the coding agents eagent can run.
 	Relay Relay `json:"relay,omitzero"`
-	// Instructions is loaded from .agents/eagent/INSTRUCTIONS.md: notes for
-	// eagent itself. (The agent reads the project's AGENTS.md on its own.)
+	// Instructions is the project's instructions for the agent's work, read
+	// from .agents/eagent/INSTRUCTIONS.md or, when that is missing or empty,
+	// the project's AGENTS.md. eagent is shown them so it can pass them on
+	// when they are relevant.
 	Instructions string `json:"-"`
 	// Migrated lists what was carried over from keys of the three-actor
 	// design when this configuration was read, for `eagent doctor`.
@@ -323,6 +325,9 @@ func Defaults() Config {
 // (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
 // within one provider; glm is the default.
 //
+// Each preset runs the model its orchestrator ran in the three-actor design,
+// on the same route (presets_test.go holds the list).
+//
 // Every preset runs at one effort for every call: medium, or the nearest
 // the model offers (see loopEffort and presetEffort). It always thinks,
 // never none.
@@ -337,12 +342,12 @@ var Presets = map[string]func(*Config){
 		c.Model = openaiRoute("gpt-6-astra")
 	},
 	"openai-med": func(c *Config) {
-		c.Description = "GPT-6.1 Sol (OpenAI, OpenRouter fallback)"
-		c.Model = openaiRoute("gpt-6.1-sol")
+		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6-astra")
 	},
 	"openai-low": func(c *Config) {
-		c.Description = "GPT-6 Luna (OpenAI, OpenRouter fallback)"
-		c.Model = openaiRoute("gpt-6-luna")
+		c.Description = "GPT-6.1 Sol (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6.1-sol")
 	},
 	"openrouter-high": func(c *Config) {
 		c.Description = "Kimi K3 (OpenRouter)"
@@ -831,13 +836,15 @@ func applyEnv(cfg *Config) {
 		cfg.Finalechat.Artifacts = value
 	}
 	// EAGENT_MODEL, EAGENT_PROTOCOL, EAGENT_BASE_URL, ... The orchestrator's
-	// old names still name the model. The one model has one effort, and the
-	// old names each set a different one, so neither is read for it:
-	// EAGENT_REASONING_EFFORT sets it.
+	// old names still name the model when the new ones are unset, and so
+	// does its effort: the one model does the orchestrator's work. The
+	// narrator's and the task worker's variables are not read; each one set
+	// gets a note.
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
-	if v := os.Getenv("EAGENT_REASONING_EFFORT"); v != "" {
+	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
 		cfg.Model.ReasoningEffort = v
 	}
+	cfg.Migrated = append(cfg.Migrated, retiredEnvNotes()...)
 	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {
 		cfg.Summarizer.Mode = v
 	}
@@ -879,12 +886,48 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-// loadInstructions reads the project's notes for eagent itself. The agent
-// eagent runs reads AGENTS.md on its own, so that file is not eagent's.
+// retiredEnvNotes names each variable of the three-actor design that is set
+// and no longer has any effect. A variable's value is never part of a note.
+func retiredEnvNotes() []string {
+	var notes []string
+	for _, actor := range []struct{ prefix, why string }{
+		{"EAGENT_NARRATOR_", "one model does every call now"},
+		{"EAGENT_TASK_", "there are no task workers now"},
+	} {
+		for _, suffix := range []string{"MODEL", "PROTOCOL", "BASE_URL", "API_KEY_ENV", "REASONING_EFFORT", "MAX_TOKENS", "REPLAY_REASONING"} {
+			if envSet(actor.prefix + suffix) {
+				notes = append(notes, actor.prefix+suffix+" is set but no longer read: "+actor.why)
+			}
+		}
+	}
+	if envSet("EAGENT_TASK_CONCURRENCY") {
+		notes = append(notes, "EAGENT_TASK_CONCURRENCY is set but no longer read: there are no task workers now")
+	}
+	return notes
+}
+
+// envSet reports whether a variable would have had an effect in the
+// three-actor design: set and not empty, or set at all for a key variable
+// (empty meant no key is needed).
+func envSet(name string) bool {
+	v, ok := os.LookupEnv(name)
+	if strings.HasSuffix(name, "_API_KEY_ENV") {
+		return ok
+	}
+	return v != ""
+}
+
+// loadInstructions reads the project's instructions for the agent's work:
+// .agents/eagent/INSTRUCTIONS.md, or the project's AGENTS.md when that is
+// missing or empty.
 func loadInstructions(project string) string {
-	name := filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md")
-	if raw, err := boundedfile.Read(name, 1<<20); err == nil && strings.TrimSpace(string(raw)) != "" {
-		return strings.TrimSpace(string(raw))
+	for _, name := range []string{
+		filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md"),
+		filepath.Join(project, "AGENTS.md"),
+	} {
+		if raw, err := boundedfile.Read(name, 1<<20); err == nil && strings.TrimSpace(string(raw)) != "" {
+			return strings.TrimSpace(string(raw))
+		}
 	}
 	return ""
 }

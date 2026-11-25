@@ -264,6 +264,21 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			promptViews[name] = entry
 		}
 	}
+	// Overrides of retired prompts are read by nothing; they are listed so
+	// they can be reset (deleted), and are never editable.
+	for _, path := range prompts.Ignored(s.Project) {
+		name := filepath.Base(path)
+		raw, err := boundedfile.Read(path, 1<<20)
+		if err != nil {
+			continue
+		}
+		contextFiles["prompt:"+name] = artifact.Digest(raw)
+		entry := map[string]any{"source": path, "size": len(raw), "editable": false, "retired": true}
+		if len(raw) <= 32768 {
+			entry["text"] = string(raw)
+		}
+		promptViews[name] = entry
+	}
 	names, _ := config.ListBundles(s.Project)
 	for _, name := range names {
 		if b, err := boundedfile.Read(config.BundlePath(s.Project, name), 1<<20); err == nil {

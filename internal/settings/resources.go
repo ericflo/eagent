@@ -91,9 +91,12 @@ func (s *Service) DeleteBundle(ctx context.Context, name string) error {
 	return err
 }
 
+// PromptName resolves a prompt's name as the editors spell it. A retired
+// prompt's name resolves too, so its override can be deleted; SavePrompt
+// refuses to write one.
 func PromptName(raw string) (string, error) {
 	name := strings.ToUpper(strings.TrimSuffix(raw, ".md")) + ".md"
-	if slices.Contains(prompts.Names, name) {
+	if slices.Contains(prompts.Names, name) || slices.Contains(prompts.Retired, name) {
 		return name, nil
 	}
 	return "", &Error{Status: 404, Message: fmt.Sprintf("unknown prompt %s", raw)}
@@ -116,6 +119,9 @@ func (s *Service) SavePrompt(ctx context.Context, name, text string, remove bool
 	name, err := PromptName(name)
 	if err != nil {
 		return "", err
+	}
+	if !remove && slices.Contains(prompts.Retired, name) {
+		return "", &Error{Status: 400, Message: name + " is no longer read; its override can only be deleted"}
 	}
 	if !remove {
 		if err := ValidatePrompt(name, text); err != nil {

@@ -199,7 +199,9 @@ func TestRemoteEditsMigrateLegacyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Snapshot.Saved["/model/model"] != "z-ai/glm-5.3" || view.Snapshot.Saved["/model/reasoning_effort"] != "medium" || view.Snapshot.Saved["/tick_seconds"] != float64(20) {
+	// The narrator's effort alone is not carried over: the one model makes
+	// the orchestrator's decisions too.
+	if _, has := view.Snapshot.Saved["/model/reasoning_effort"]; has || view.Snapshot.Saved["/model/model"] != "z-ai/glm-5.3" || view.Snapshot.Saved["/tick_seconds"] != float64(20) {
 		t.Fatalf("saved = %v", view.Snapshot.Saved)
 	}
 	p := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/model/reasoning_effort", Value: "high"}}}
