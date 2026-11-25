@@ -1164,9 +1164,11 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 		return false
 	case cmd == "/dismiss" && r.st.Question != nil:
 		return false // closes eagent's own open question
-	case cmd == "/quit" || cmd == "/exit" || cmd == "/q":
+	case cmd == "/quit" || cmd == "/exit" || cmd == "/q" || cmd == "/kill":
+		// /kill stopped a process of eagent's own. That is gone, and the
+		// word must never be typed into an agent out of habit.
 		return false
-	case cmd == "/status" || cmd == "/s" || cmd == "/schedules" || cmd == "/help" || cmd == "/?":
+	case cmd == "/status" || cmd == "/s" || cmd == "/tasks" || cmd == "/procs" || cmd == "/schedules" || cmd == "/help" || cmd == "/?":
 		return source != ""
 	}
 	return true

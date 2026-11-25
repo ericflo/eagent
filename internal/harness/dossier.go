@@ -61,6 +61,10 @@ var (
 	dossierMinCites = 3                // fewer places than this is not a map
 	dossierMaxCalls = 40               // lookups plus the writing
 	dossierRetry    = 10 * time.Minute // after the files could not be rotated
+	// The whole pass: past this the model is told to write with what it
+	// has. One failed call is made again after dossierErrorPause.
+	dossierPassTime   = 15 * time.Minute
+	dossierErrorPause = 5 * time.Second
 )
 
 // Bounds on what one dossier pass may read back from the record.
@@ -115,11 +119,37 @@ func (r *Runtime) needsDossier() bool {
 			r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			// The user is told, once: it is theirs to fix, and nothing
 			// else will say why eagent grows slower and dearer.
-			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My conversation is full again right after I restarted it from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."})
+			if !r.toldFull() {
+				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My conversation is full again right after I restarted it from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."})
+			}
 		}
 		return false
 	}
 	return true
+}
+
+// fullNotice opens the message that tells the user the conversation cannot
+// be made shorter by restarting it.
+const fullNotice = "My conversation is full again right after I restarted it"
+
+// toldFull reports that the user was already told so since the
+// conversation was last restarted. The record remembers it, so a session
+// that is stopped and resumed does not say (and buzz) it again every run.
+func (r *Runtime) toldFull() bool {
+	cur := r.st.Current()
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if cur != nil && ev.Seq < cur.StartSeq {
+			break
+		}
+		if ev.Type == event.Message {
+			var d event.MessageData
+			if ev.Decode(&d) == nil && d.Auto && strings.HasPrefix(d.Text, fullNotice) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dossierJob is what one dossier pass works from, gathered on the loop.
@@ -134,6 +164,7 @@ type dossierJob struct {
 
 // dossierResult is what a pass came back with.
 type dossierResult struct {
+	noMap     string // why the text kept is not a map, when it is not
 	text      string
 	ok        bool
 	usage     event.Usage
@@ -150,6 +181,13 @@ func (r *Runtime) startDossier() {
 	t.busy, t.compacting, t.callAt = true, true, time.Now()
 	r.flushSilent()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
+	if _, due := r.dueWake(); due && t.seen < job.covers {
+		// Something arrived that no look has taken in yet: the message
+		// or the turn end that set this restart off. The briefing does
+		// not stand in for it. The new conversation shows it whole, with
+		// its pictures, because it starts after the last thing seen.
+		job.covers = t.seen
+	}
 	data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex()}
 	var msgs []llm.Message
 	switch {
@@ -217,16 +255,29 @@ func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 // recorded. It runs on its own goroutine.
 func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 	msgs := job.msgs[:len(job.msgs):len(job.msgs)]
-	read, rejected := 0, false
+	read, rejected, retried, last := 0, false, false, false
+	started := time.Now()
 	for res.calls < dossierMaxCalls {
 		ctx, cancel := context.WithTimeout(r.ctx, dossierTimeout)
 		resp, err := r.complete(ctx, event.ActorEagent, llm.Request{System: r.system, Messages: msgs, Tools: r.toolset, CacheKey: r.sess.ID}, nil)
 		cancel()
 		if err != nil {
-			if r.ctx.Err() == nil {
-				r.ui.Log("dossier: model call failed: %s", shortErr(err))
+			if r.ctx.Err() != nil {
+				return res
 			}
-			return res
+			r.ui.Log("dossier: model call failed: %s", shortErr(err))
+			if retried || time.Since(started) > dossierPassTime {
+				return res
+			}
+			// One hiccup does not cost the session its map: the call is
+			// made once more before the harness writes what it can.
+			retried = true
+			select {
+			case <-time.After(dossierErrorPause):
+			case <-r.ctx.Done():
+				return res
+			}
+			continue
 		}
 		res.calls++
 		res.usage.Input += resp.Usage.Input
@@ -243,7 +294,13 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 				results.Results = append(results.Results, llm.ToolResult{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr})
 			}
 			msgs = append(msgs, results)
-			if res.calls == dossierMaxCalls-1 {
+			if last {
+				break // told to write and looked things up again instead
+			}
+			if res.calls == dossierMaxCalls-1 || time.Since(started) > dossierPassTime {
+				// The pass is bounded in calls and in time: while it runs
+				// eagent says nothing else to the user.
+				last = true
 				msgs = append(msgs, llm.Message{Role: "user", Text: "[eagent] That was the last lookup. Write the briefing now, as your whole reply, with no tool call."})
 			}
 			continue
@@ -269,8 +326,11 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		if rejected {
 			// Twice wrong. A text with a thin or partly wrong map still
 			// beats none: it is kept when it reads as a briefing, with the
-			// wrong places named.
+			// wrong places named, and one with no map is labelled as that.
 			res.ok = len(res.text) >= dossierMinChars
+			if n, _ := checkCitations(res.text, job.lines); n < dossierMinCites {
+				res.noMap = fmt.Sprintf("it cites %d places in the record", n)
+			}
 			return res
 		}
 		rejected = true
@@ -278,6 +338,9 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		msgs = append(msgs, llm.Message{Role: "user", Text: "[eagent] That cannot be used: " + why + ". Write the whole briefing again, all six parts, as plain text."})
 	}
 	res.ok = len(res.text) >= dossierMinChars
+	if n, _ := checkCitations(res.text, job.lines); res.ok && n < dossierMinCites {
+		res.noMap = fmt.Sprintf("it cites %d places in the record", n)
+	}
 	return res
 }
 
@@ -331,6 +394,13 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 		// call failed: the harness writes what it can. The map below is
 		// still whole, since it comes from the record.
 		by, text = "harness", r.fallbackBriefing(res.text)
+	case res.noMap != "":
+		// Never passed off as a map: the next conversation is told what
+		// it is holding, at the top, and the notice above it says the same.
+		text = "(eagent checked this briefing and it is not a map: " + res.noMap + ", after being sent back once. Read it as a summary. The places are in the facts at the end, which list every message from the user and every turn the agent finished with its file:line, and session_search finds the rest.)\n\n" + text
+		if len(res.bad) > 0 {
+			text += "\n\n(These places it cites do not exist in the record, so disregard them: " + strings.Join(res.bad, ", ") + ")"
+		}
 	case len(res.bad) > 0:
 		text += "\n\n(eagent checked the places cited above. These do not exist in the record, so disregard them: " + strings.Join(res.bad, ", ") + ")"
 	}
@@ -347,7 +417,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	// The facts are written now that the next file is open, so the table
 	// of files shows the closed one whole and says where this dossier sits.
 	body := strings.TrimSpace(text) + "\n\n" + r.dossierFacts(job.covers, next)
-	d := event.DossierData{Text: body, CoversSeq: job.covers, By: by, ElapsedMS: res.elapsed.Milliseconds(), Calls: res.calls, Consulted: res.consulted}
+	d := event.DossierData{Text: body, CoversSeq: job.covers, By: by, NoMap: by == "eagent" && res.noMap != "", ElapsedMS: res.elapsed.Milliseconds(), Calls: res.calls, Consulted: res.consulted}
 	if res.usage != (event.Usage{}) {
 		d.Usage = &res.usage
 	}
@@ -661,6 +731,10 @@ const (
 	dossierUserTail  = 25   // and the latest
 	dossierUserChars = 1500 // of each
 	dossierTurns     = 20   // the latest turn ends
+	// The messages between the first and the latest: one line each, the
+	// newest dossierUserMidLines of them; older ones by place alone.
+	dossierUserMidChars = 240
+	dossierUserMidLines = 150
 )
 
 // dossierFacts is the part of a dossier the harness writes from the record,
@@ -682,6 +756,12 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 	for _, name := range r.st.RelayOrder {
 		rel := r.st.Relays[name]
 		fmt.Fprintf(&b, "- %s: %s (profile %s) in %s; terminal %s %s", rel.Name, firstNonEmpty(rel.Label, rel.Who()), rel.Profile, rel.Dir, rel.Host, rel.Target)
+		if rel.Model != "" || rel.Effort != "" {
+			fmt.Fprintf(&b, "; model %s", firstNonEmpty(rel.Model, "its own default"))
+			if rel.Effort != "" {
+				fmt.Fprintf(&b, ", effort %s", rel.Effort)
+			}
+		}
 		if rel.InnerID != "" {
 			fmt.Fprintf(&b, "; its own session %s", rel.InnerID)
 		}
@@ -709,7 +789,10 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 		}
 	}
 
-	type line struct{ head, text string }
+	type line struct {
+		head, text, file string
+		n                int
+	}
 	var user, turns []line
 	for _, ev := range r.st.Events {
 		if ev.Seq > covers {
@@ -732,14 +815,14 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 			if d.Held != "" {
 				text += " (kept for you: " + d.Held + ")"
 			}
-			user = append(user, line{at, text})
+			user = append(user, line{at, text, ev.Source.File, ev.Source.Line})
 		case event.UserAnswer:
 			var d event.UserAnswerData
 			if ev.Decode(&d) != nil {
 				continue
 			}
 			q := clipRunes(oneLine(r.st.QuestionText(d.QuestionID), 200), 200)
-			user = append(user, line{at, fmt.Sprintf("(answering %q) %s", q, d.Text)})
+			user = append(user, line{at, fmt.Sprintf("(answering %q) %s", q, d.Text), ev.Source.File, ev.Source.Line})
 		case event.RelayTurn:
 			var d event.RelayTurnData
 			if ev.Decode(&d) != nil {
@@ -763,28 +846,64 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 			if report == "" {
 				report = "(no message)"
 			}
-			turns = append(turns, line{at, head + ": " + clipRunes(oneLine(report, 200), 200)})
+			turns = append(turns, line{head: at, text: head + ": " + clipRunes(oneLine(report, 200), 200)})
 		}
 	}
 
-	fmt.Fprintf(&b, "\nTHE USER'S MESSAGES, word for word, oldest first (%d in all)\n", len(user))
+	// Every message the user sent is here, so that no instruction given
+	// in the middle of a long session depends on the model having kept it:
+	// the first few and the latest word for word, the ones between in a
+	// line each. In a session with more of those than the lines can hold,
+	// the oldest of them are given by place alone.
+	if len(user) > dossierUserHead+dossierUserTail {
+		fmt.Fprintf(&b, "\nTHE USER'S MESSAGES, oldest first (%d in all: the first %d and the latest %d word for word, the ones between in a line each)\n", len(user), dossierUserHead, dossierUserTail)
+	} else {
+		fmt.Fprintf(&b, "\nTHE USER'S MESSAGES, word for word, oldest first (%d in all)\n", len(user))
+	}
 	if len(user) == 0 {
 		b.WriteString("(none yet)\n")
 	}
-	for i, m := range user {
-		if len(user) > dossierUserHead+dossierUserTail {
-			if i == dossierUserHead {
-				fmt.Fprintf(&b, "(%d more in between; session_search finds them)\n", len(user)-dossierUserHead-dossierUserTail)
-			}
-			if i >= dossierUserHead && i < len(user)-dossierUserTail {
-				continue
-			}
-		}
+	whole := func(m line) {
 		text := strings.TrimSpace(m.text)
 		if len(text) > dossierUserChars {
 			text = clipRunes(text, dossierUserChars) + " (cut here; the whole message is at the place cited)"
 		}
 		fmt.Fprintf(&b, "- [%s] %s\n", m.head, strings.ReplaceAll(text, "\n", "\n  "))
+	}
+	head, tail := user, []line(nil)
+	var mid []line
+	if len(user) > dossierUserHead+dossierUserTail {
+		head, mid, tail = user[:dossierUserHead], user[dossierUserHead:len(user)-dossierUserTail], user[len(user)-dossierUserTail:]
+	}
+	for _, m := range head {
+		whole(m)
+	}
+	if len(mid) > 0 {
+		places := max(0, len(mid)-dossierUserMidLines)
+		fmt.Fprintf(&b, "(the %d between, in a line each; session_read at the place gives the whole message)\n", len(mid))
+		if places > 0 {
+			// By place alone, grouped by file.
+			var file string
+			for i, m := range mid[:places] {
+				if m.file != file {
+					if i > 0 {
+						b.WriteString("\n")
+					}
+					file = m.file
+					fmt.Fprintf(&b, "- by place only, %s lines %d", file, m.n)
+					continue
+				}
+				fmt.Fprintf(&b, ", %d", m.n)
+			}
+			b.WriteString("\n")
+		}
+		for _, m := range mid[places:] {
+			fmt.Fprintf(&b, "- [%s] %s\n", m.head, clipRunes(oneLine(m.text, dossierUserMidChars), dossierUserMidChars))
+		}
+		fmt.Fprintf(&b, "(the latest %d, word for word)\n", len(tail))
+	}
+	for _, m := range tail {
+		whole(m)
 	}
 
 	if len(turns) > 0 {

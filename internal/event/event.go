@@ -371,6 +371,10 @@ type DossierData struct {
 	// By is who wrote the body: "eagent" (the model, on its cached prompt)
 	// or "harness" (built from the log alone, when the model could not).
 	By string `json:"by,omitempty"`
+	// NoMap marks a body by the model that was kept although it cites too
+	// few places in the record to be a map (it was sent back once and
+	// came back the same). The body says so in its first lines.
+	NoMap bool `json:"no_map,omitempty"`
 	// Usage and ElapsedMS account for the model calls that wrote it, Calls
 	// says how many there were, and Consulted lists what the writer looked
 	// up in the record first ("read 1788740857293.jsonl:40-90", "search

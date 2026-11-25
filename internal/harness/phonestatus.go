@@ -111,15 +111,27 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 	if text, ok := r.relayActivityLine(); ok {
 		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
 	}
+	if r.turns.compacting {
+		// The conversation is being restarted from a dossier, which takes
+		// minutes and during which eagent says nothing else.
+		return finalechat.Activity{Text: "Rereading the session so far, to carry on with a clear head", Kind: "thinking", TTLSeconds: statusTTL}
+	}
 	if r.turns.busy {
-		text := "Thinking"
+		text := "Thinking about the next step"
 		if !r.turns.callAt.IsZero() && now.Sub(r.turns.callAt) > 45*time.Second {
-			text = "Still thinking"
+			text = "Still thinking (a long think or a long reply)"
 		}
 		return finalechat.Activity{Text: text, Kind: "thinking", TTLSeconds: statusTTL}
 	}
 	if r.st.Question != nil {
 		return finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL}
+	}
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State == "blocked" {
+			// Stopped on a dialog on its own screen: it waits on a person,
+			// and the line says on what.
+			return finalechat.Activity{Text: rel.Who() + " is stopped on a prompt on its screen", Kind: "waiting", TTLSeconds: statusWaitTTL}
+		}
 	}
 	// No agent is mid-turn, no model call is in flight, no question is
 	// open: the session waits on the user. One with an agent stays up for

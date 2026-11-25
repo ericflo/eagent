@@ -28,6 +28,15 @@ func (r *Runtime) closeInterrupted() {
 	}
 	legacy := r.st.Legacy() && !r.st.Upgraded()
 	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed}))
+	// The record names the model that speaks as eagent, and the phone and
+	// the views show it from there. A session last run with another model,
+	// or by the eagent of three models (which had none under this name),
+	// gets the one in use now written down.
+	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
+		if ep := m.client.Endpoint; ep.Model != "" && (r.st.Models[event.ActorEagent] != ep.Model || r.st.Hosts[event.ActorEagent] != ep.BaseURL) {
+			r.append(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, Provider: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model, Reason: "the session was resumed with this model"}))
+		}
+	}
 	if cut && !legacy {
 		// A turn was cut off by the restart. Whatever it had decided and
 		// not yet done (stop the agent, send it something, answer the

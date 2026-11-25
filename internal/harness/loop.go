@@ -63,6 +63,9 @@ type wake struct {
 	thread bool // the thread's title and summary may be out of date
 	owed   bool // a message the user wrote to eagent is still unanswered
 	final  bool // the session is about to end: the closing word
+	// wait bounds the whole turn: the last title and summary of a session
+	// that is about to end must not hold the end for long.
+	wait time.Duration
 }
 
 // reason names the wake for the turn's record: the most pressing thing
@@ -549,6 +552,9 @@ func (r *Runtime) startTurn(w wake) {
 	t.finalBusy = w.final
 	if w.thread {
 		t.threadDue = false
+		if r.summary.final && !w.event && !w.owed && !w.look && !w.final {
+			w.wait = summaryFinalWait // as the dedicated call is (summary.go)
+		}
 	}
 	r.wg.Add(1)
 	go func() {
@@ -569,6 +575,10 @@ func (r *Runtime) turn(w wake) {
 		// be reached does not keep a finished session open.
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(context.Background(), finalReportTimeout)
+		defer cancel()
+	} else if w.wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(r.ctx, w.wait)
 		defer cancel()
 	}
 	maxCalls := max(r.cfg.MaxCallsPerTurn, 1)
@@ -642,6 +652,10 @@ func (r *Runtime) turn(w wake) {
 		resp, err := r.complete(ctx, event.ActorEagent, req, r.observer())
 		r.ui.Stream("", "")
 		if err != nil {
+			if ctx.Err() != nil && r.ctx.Err() == nil && w.wait > 0 {
+				end = "timeout" // the row keeps the summary it had
+				break
+			}
 			if ctx.Err() != nil && !w.final {
 				end = "interrupted"
 				break
@@ -783,7 +797,7 @@ func (r *Runtime) turn(w wake) {
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
 		}
 		switch {
-		case end == "error" || end == "interrupted":
+		case end == "error" || end == "interrupted" || end == "timeout":
 			// What asked for the look is still owed one.
 		case tc.handled:
 			r.clearOwed()
@@ -793,7 +807,7 @@ func (r *Runtime) turn(w wake) {
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
 		}
-		if asked && end != "error" && end != "interrupted" {
+		if asked && end != "error" && end != "interrupted" && end != "timeout" {
 			r.threadAsked(tc.threaded)
 		}
 		if w.final && mustSpeak && !tc.spoke && end != "error" {

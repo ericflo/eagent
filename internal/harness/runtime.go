@@ -899,6 +899,9 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 	case "/help", "/?":
 		r.ui.Log("eagent: /status /schedules /dismiss /quit  (anything else goes to the agent, word for word; start a line with @e to talk to eagent instead)")
 		r.ui.Log("the agent: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
+	case "/tasks", "/procs", "/kill":
+		// Commands of the eagent that ran its own tasks and processes.
+		r.ui.Log("%s went with eagent's own tasks and processes: the agent does the work now. /relay shows the agent, /screen its terminal, /interrupt stops its turn and /stop-relay stops it.", fields[0])
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}

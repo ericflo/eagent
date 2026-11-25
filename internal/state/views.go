@@ -392,6 +392,10 @@ func (s *State) notice(ev event.Event, opts ViewOptions) string {
 	case event.Dossier:
 		var d event.DossierData
 		_ = ev.Decode(&d)
+		if d.NoMap {
+			// Not passed off as a map: see dossier.go.
+			return "[Briefing. Your conversation grew long and was restarted here. What you wrote before the restart says where the session stands, but it has no usable MAP of the record: its first lines say why. After it come the facts eagent keeps itself, which give the place in the record of every message from the user and every turn the agent finished. Carry on as if nothing had happened. The briefing is a summary and the record is the source: when the detail matters, read those places with session_read (file:line) and find the rest with session_search.]\n\n" + d.Text
+		}
 		return "[Briefing. Your conversation grew long and was restarted here. This is what you wrote before the restart: where the session stands, and a MAP of where in the record each topic can be read, followed by the facts eagent keeps itself. Carry on as if nothing had happened. The briefing is a summary and the record is the source: when the detail matters, or the user comes back to something it only touches, read the places it cites with session_read (file:line) and find the rest with session_search.]\n\n" + d.Text
 	case event.Steer:
 		if ev.Actor != event.ActorEagent {
