@@ -1,5 +1,7 @@
 # The Breakout grid v3: sixteen presets, one brief — plus heroes
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 On 2026-09-08/09 fourteen eagent presets each built the same game from the same one-paragraph spec, in parallel, unattended, on binary v0.8.0-1-g59ce5c7 (with all four cache/fallback fixes from the first grid). A measuring run then compiled all fourteen: it parsed their event logs, served each build, played it with scripted Chromium, took screenshots, and scored it against the same nine-item rubric as v1. Then phase 3, on 2026-09-09: four interrupted runs were resumed (the two budget-SIGTERM'd Anthropic runs and the two cap-killed runs), and two new **hero** runs were launched on the hero-tier models at xhigh effort. All six were re-shot, re-played and re-judged; the other ten scores are carried over untouched. This page is the record: what ran, what it cost, what each build shipped, and what the exercise changed in the harness. It replaces the fourteen-preset v2 grid; the six-preset grid of 2026-09-07 is archived as [`docs/grid/results-2026-09-07.json`](grid/results-2026-09-07.json), and the v2 dataset survives in git history.
 
 ## Heroes

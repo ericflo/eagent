@@ -1,5 +1,7 @@
 # Spec compliance
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 A section-by-section reading of the design specification
 ([`docs/DESIGN-SPEC.md`](DESIGN-SPEC.md)) against what eagent does. "Met" means implemented and
 covered by a test or a real run; "Deviates" means a deliberate difference with

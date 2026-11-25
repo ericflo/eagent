@@ -166,7 +166,7 @@ type SessionEndData struct {
 type SubsessionStartData struct {
 	File   string `json:"file"`
 	Index  int    `json:"index"`
-	Reason string `json:"reason"` // new | rollover
+	Reason string `json:"reason"` // new | rollover | upgrade (an older session continued from a dossier)
 }
 
 // SubsessionEndData closes a subsession file.

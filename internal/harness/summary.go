@@ -28,7 +28,7 @@ import (
 //     out of date, the next call's tail says so and shows them as they
 //     stand, and the model changes them with update_thread if they no longer
 //     fit, in the same reply as whatever else it does. Nothing is forced:
-//     the tool is one of the twelve it always has, and a model that leaves
+//     the tool is one of the fifteen it always has, and a model that leaves
 //     them alone leaves no trace. The request is the conversation it already
 //     has cached, so it costs a few hundred fresh tokens.
 //   - dedicated: a separate model call writes them from a short digest of
