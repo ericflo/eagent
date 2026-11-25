@@ -156,6 +156,18 @@ func (s *State) applyRelay(ev event.Event) {
 		r.Sends++
 		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
 		r.Undelivered[d.ID] = d.Text
+	case event.RelayMoved:
+		// The send is the new relay's from here on; the relay it was first
+		// sent to no longer waits for it.
+		var d event.RelayMovedData
+		_ = ev.Decode(&d)
+		bump(&s.relaySendSeq, d.ID, "r")
+		if prev := s.Relays[d.Prev]; prev != nil && prev != r {
+			delete(prev.Undelivered, d.ID)
+		}
+		r.Sends++
+		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
+		r.Undelivered[d.ID] = d.Text
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
@@ -254,6 +266,14 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 			return fmt.Sprintf("[%s Passed to %s as written%s]", ts, who, how)
 		}
 		return fmt.Sprintf("[%s eagent sent %s this itself%s]\n%s", ts, who, how, clip(d.Text, opts.RemarkChars))
+	case event.RelayMoved:
+		var d event.RelayMovedData
+		_ = ev.Decode(&d)
+		whose := "Your message"
+		if d.From == "user" {
+			whose = "The user's message"
+		}
+		return fmt.Sprintf("[%s %s (%s) to %s waited for the handover; it goes to %s instead.]", ts, whose, d.ID, s.relayWho(d.Prev), s.relayWho(d.Name))
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)

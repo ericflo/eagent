@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -65,5 +66,35 @@ func TestRestartOfAStoppedRelayOnItsConversationKeepsItsHistory(t *testing.T) {
 	rel := Replay(b.events).Relays["codex"]
 	if rel.InnerID != "conv-1" || rel.Turns != 1 || rel.LastTurn != "fixed in abc123" || !rel.Active() {
 		t.Fatalf("inner %q, %d turns, last %q, active %v", rel.InnerID, rel.Turns, rel.LastTurn, rel.Active())
+	}
+}
+
+// A send passed on by a switch (relay.moved) is the new relay's: it is its
+// latest send, it waits for confirmation there and not on the old relay,
+// and eagent's conversation says where it went.
+func TestMovedSendBelongsToTheNewRelay(t *testing.T) {
+	b := codexWithHistory()
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: "r2", From: "user", Seq: 9, Mode: "queue", Text: "use staging", Auto: true}))
+	b.add(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: "codex", Reason: "handed over to claude"}))
+	b.add(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Profile: "claude", Agent: "claude", AgentLabel: "Claude", Dir: "/p", Host: "tmux", Target: "eagent-1-claude"}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r3", From: "eagent", Mode: "queue", Text: "You are taking over", Auto: true}))
+	moved := b.add(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: event.RelaySendData{Name: "claude", ID: "r2", From: "user", Seq: 9, Mode: "queue", Text: "use staging", Auto: true}, Prev: "codex"}))
+	st := Replay(b.events)
+	claude, codex := st.Relays["claude"], st.Relays["codex"]
+	if claude.LastSendFrom != "user" || claude.Sends != 2 || claude.Undelivered["r2"] != "use staging" {
+		t.Fatalf("claude: from %q, %d sends, unconfirmed %v", claude.LastSendFrom, claude.Sends, claude.Undelivered)
+	}
+	if _, waiting := codex.Undelivered["r2"]; waiting {
+		t.Fatalf("codex still waits for r2: %v", codex.Undelivered)
+	}
+	if got := st.NextRelaySendID(); got != "r4" {
+		t.Fatalf("next send id %q", got)
+	}
+	if got := st.relayNotice(moved, DefaultViewOptions); !strings.Contains(got, "The user's message (r2) to Codex waited for the handover; it goes to Claude instead.") {
+		t.Fatalf("notice %q", got)
+	}
+	st.Apply(b.add(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "claude", ID: "r2", OK: true})))
+	if len(st.Relays["claude"].Undelivered) != 1 { // r3, the brief, is still unconfirmed
+		t.Fatalf("after confirmation: %v", st.Relays["claude"].Undelivered)
 	}
 }

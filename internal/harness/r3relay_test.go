@@ -240,3 +240,77 @@ func TestStopSessionWaitsForARestartStartedOffTheTurn(t *testing.T) {
 		})
 	}
 }
+
+// A message the user sent while a switch was under way goes to the new
+// agent, and the record says so: it is the new agent's send (who sent
+// last, what the user sent it, what a later handoff brief carries, what
+// relay_forward may not send again), its arrival is confirmed under the
+// new name, and the old relay does not keep it as unconfirmed.
+func TestMessageHeldDuringASwitchIsTheNewAgentsOwn(t *testing.T) {
+	old, next := &lingerSeat{newFakeSeat("one")}, newFakeSeat("Done: switched the database.")
+	next.waiting = true // each reply is a turn that ran nothing
+	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
+	rt := newLaunchRuntime(t)
+	out := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	userSays(t, rt, "A: use the staging database")
+	var seqA int64
+	rt.sync(func() { seqA = rt.st.LastUserSeq })
+	g.release <- struct{}{}
+	recv(t, out, "switch")
+	waitFor(t, "two turns from the new agent", func() bool {
+		n := 0
+		rt.sync(func() {
+			if rel := rt.st.Relays["claude"]; rel != nil {
+				n = rel.Turns
+			}
+		})
+		return n == 2
+	})
+	rt.sync(func() {
+		st := rt.st
+		claude, codex := st.Relays["claude"], st.Relays["codex"]
+		if claude.LastSendFrom != "user" {
+			t.Errorf("the new agent's last send is from %q, want the user", claude.LastSendFrom)
+		}
+		var turns []event.RelayTurnData
+		var moved []event.RelayMovedData
+		for _, ev := range st.Events {
+			switch ev.Type {
+			case event.RelayTurn:
+				var d event.RelayTurnData
+				_ = ev.Decode(&d)
+				turns = append(turns, d)
+			case event.RelayMoved:
+				var d event.RelayMovedData
+				_ = ev.Decode(&d)
+				moved = append(moved, d)
+			}
+		}
+		if len(turns) != 2 || turns[1].Idle {
+			t.Errorf("turn idle marks %+v: the reply to A answered the user, not eagent", turns)
+		}
+		if len(moved) != 1 || moved[0].Name != "claude" || moved[0].Prev != "codex" || moved[0].From != "user" || moved[0].Seq != seqA {
+			t.Errorf("moved: %+v", moved)
+		}
+		if sent := strings.Join(userSends(st, "claude", 8), "\n"); !strings.Contains(sent, "A: use the staging") || !strings.Contains(sent, "arrived") {
+			t.Errorf("what the user sent the new agent: %q", sent)
+		}
+		if sent := strings.Join(userSends(st, "codex", 8), "\n"); !strings.Contains(sent, "went to Claude") {
+			t.Errorf("what the user sent the old agent: %q", sent)
+		}
+		if len(codex.Undelivered) != 0 || len(claude.Undelivered) != 0 {
+			t.Errorf("unconfirmed: codex %v, claude %v", codex.Undelivered, claude.Undelivered)
+		}
+		if brief := rt.handoffBrief(claude); !strings.Contains(brief, "A: use the staging") {
+			t.Errorf("a later handoff brief from the new agent leaves out A:\n%s", brief)
+		}
+		if forwardedAs(st, "claude", seqA) == "" {
+			t.Error("relay_forward could send A to the new agent again")
+		}
+	})
+	text, isErr := rt.relayTool("relay_forward", argStr(map[string]any{"relay": "claude", "seq": seqA}), argNum(map[string]any{"relay": "claude", "seq": seqA}), argList(nil), false)
+	if !isErr || !strings.Contains(text, "already went") {
+		t.Fatalf("relay_forward of A to the new agent: %q", text)
+	}
+}

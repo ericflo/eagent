@@ -535,7 +535,18 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone})
 	}
-	queue = append(queue, held...)
+	for _, h := range held {
+		if h.on != "" && h.on != job.name && !h.barrier {
+			// A send on the record for the relay this one took over from
+			// is the new agent's from now on: who sent it last, what the
+			// user sent it and its arrival are the new relay's.
+			if d, ok := sendRecord(r.st, h.id); ok {
+				d.Name = job.name
+				r.append(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: d, Prev: h.on}))
+			}
+		}
+		queue = append(queue, h)
+	}
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
@@ -1418,15 +1429,11 @@ func (r *Runtime) handoffBrief(rel *state.Relay) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	for _, ev := range r.st.Events {
-		if ev.Type != event.RelaySend {
-			continue
-		}
-		var d event.RelaySendData
-		if ev.Decode(&d) == nil && d.Name == rel.Name && d.From == "user" {
+	relaySendsTo(r.st, rel.Name, func(_ event.Event, d event.RelaySendData) {
+		if d.From == "user" {
 			texts = append(texts, d.Text)
 		}
-	}
+	})
 	if len(texts) > 12 {
 		texts = texts[len(texts)-12:]
 		b.WriteString("(the latest 12)\n")
@@ -1555,21 +1562,71 @@ func (r *Runtime) armAutopilots() {
 	}
 }
 
+// sendRecord is the send recorded with an id.
+func sendRecord(st *state.State, id string) (event.RelaySendData, bool) {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		var d event.RelaySendData
+		if ev := st.Events[i]; ev.Type == event.RelaySend && ev.Decode(&d) == nil && d.ID == id {
+			return d, true
+		}
+	}
+	return event.RelaySendData{}, false
+}
+
+// relaySendsTo calls fn for each send on the record for a relay, oldest
+// first: its own, and those a switch to it passed on from the relay it took
+// over from (relay.moved). movedOn names, by send id, the sends of this
+// relay that went to another relay that way.
+func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.RelaySendData)) (movedOn map[string]string) {
+	movedOn = map[string]string{}
+	for _, ev := range st.Events {
+		switch ev.Type {
+		case event.RelaySend:
+			var d event.RelaySendData
+			if ev.Decode(&d) == nil && d.Name == name {
+				fn(ev, d)
+			}
+		case event.RelayMoved:
+			var d event.RelayMovedData
+			if ev.Decode(&d) != nil {
+				continue
+			}
+			if d.Name == name {
+				fn(ev, d.RelaySendData)
+			}
+			if d.Prev == name {
+				movedOn[d.ID] = d.Name
+			}
+		}
+	}
+	return movedOn
+}
+
 // userSends lists the latest user messages sent to a relay, each with when
 // it went and whether its arrival was confirmed. Loop goroutine.
 func userSends(st *state.State, name string, n int) []string {
 	rel := st.Relays[name]
+	type sent struct {
+		at time.Time
+		d  event.RelaySendData
+	}
+	var sends []sent
+	movedOn := relaySendsTo(st, name, func(ev event.Event, d event.RelaySendData) {
+		if d.From == "user" {
+			sends = append(sends, sent{ev.Time, d})
+		}
+	})
 	var out []string
-	for _, ev := range st.Events {
-		if ev.Type != event.RelaySend {
-			continue
-		}
-		var d event.RelaySendData
-		if ev.Decode(&d) != nil || d.Name != name || d.From != "user" {
-			continue
-		}
+	for _, s := range sends {
+		d := s.d
 		status := "arrived"
-		if rel != nil {
+		if to, ok := movedOn[d.ID]; ok {
+			// It waited for a switch and went to the agent that took over.
+			status = "went to " + to
+			if t := st.Relays[to]; t != nil {
+				status = "went to " + t.Who()
+			}
+		} else if rel != nil {
 			if _, waiting := rel.Undelivered[d.ID]; waiting {
 				status = "not confirmed yet"
 				if d.Mode == "after_turn" {
@@ -1577,7 +1634,7 @@ func userSends(st *state.State, name string, n int) []string {
 				}
 			}
 		}
-		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(ev.Time)), status, clipRunes(oneLine(d.Text, 200), 200)))
+		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(s.at)), status, clipRunes(oneLine(d.Text, 200), 200)))
 	}
 	if len(out) > n {
 		out = out[len(out)-n:]
@@ -1587,16 +1644,13 @@ func userSends(st *state.State, name string, n int) []string {
 
 // forwardedAs names the send that already forwarded a user message.
 func forwardedAs(st *state.State, relayName string, seq int64) string {
-	for _, ev := range st.Events {
-		if ev.Type != event.RelaySend {
-			continue
+	id := ""
+	relaySendsTo(st, relayName, func(_ event.Event, d event.RelaySendData) {
+		if id == "" && d.From == "user" && d.Seq == seq {
+			id = d.ID
 		}
-		var d event.RelaySendData
-		if ev.Decode(&d) == nil && d.Name == relayName && d.From == "user" && d.Seq == seq {
-			return d.ID
-		}
-	}
-	return ""
+	})
+	return id
 }
 
 // relayStatusText describes an agent in full: for the user who asks with

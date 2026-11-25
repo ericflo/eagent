@@ -72,6 +72,7 @@ const (
 	RelayStart     = "relay.start"     // the agent was launched (or relaunched)
 	RelayInner     = "relay.inner"     // the agent's own session id and transcript were found
 	RelaySend      = "relay.send"      // text was typed into the agent
+	RelayMoved     = "relay.moved"     // a send not yet typed went to the agent that took over
 	RelayDelivered = "relay.delivered" // the agent's transcript shows the text arrived
 	RelayState     = "relay.state"     // working, idle, blocked on a dialog, or exited
 	RelayProgress  = "relay.progress"  // something the agent said mid-turn
@@ -471,6 +472,16 @@ type RelaySendData struct {
 	// Auto marks a user message the harness forwarded the moment it
 	// arrived, with no model call.
 	Auto bool `json:"auto,omitempty"`
+}
+
+// RelayMovedData is a send that waited for a switch (or was waiting to be
+// typed when the switch stopped its agent) and goes to the agent that took
+// over instead. Its fields are the send's own, under the new relay's Name
+// and with the same ID; Prev is the relay it was first sent to. From now on
+// it is the new relay's send: arrival is confirmed under the new name.
+type RelayMovedData struct {
+	RelaySendData
+	Prev string `json:"prev"`
 }
 
 // RelayDeliveredData confirms (or gives up on confirming) that a send reached

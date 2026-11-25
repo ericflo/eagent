@@ -495,7 +495,7 @@ func (s *State) notice(ev event.Event, opts ViewOptions) string {
 			return ""
 		}
 		return fmt.Sprintf("[%s You now run on %s (%s).]", s.clock(ev.Time), d.Model, d.Reason)
-	case event.RelayStart, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
+	case event.RelayStart, event.RelaySend, event.RelayMoved, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		return s.relayNotice(ev, opts)
 	}
 	return ""
