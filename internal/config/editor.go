@@ -100,10 +100,11 @@ func Resolve(project, preset, bundle string) Resolution {
 		} else {
 			migrated, _ := MigrateLegacy(fileMap)
 			res.File.UnknownKeys = unknownKeys(migrated)
-			if raw, ok := fileMap["preset"]; ok {
+			// The names the file gives, as they are called today.
+			if raw, ok := migrated["preset"]; ok {
 				_ = json.Unmarshal(raw, &res.File.Preset)
 			}
-			if raw, ok := fileMap["default_config"]; ok {
+			if raw, ok := migrated["default_config"]; ok {
 				_ = json.Unmarshal(raw, &res.File.DefaultConfig)
 			}
 		}

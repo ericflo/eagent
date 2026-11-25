@@ -43,8 +43,28 @@ const (
 const maxCallsPerTurnLimit = 200
 
 // HasLegacyKeys reports whether a configuration object uses keys of the
-// three-actor design.
+// three-actor design, or names a preset by a name that is now another's.
 func HasLegacyKeys(m map[string]json.RawMessage) bool {
+	return hasLegacyKeys(m) || len(presetAliasesIn(m)) > 0
+}
+
+// presetAliasesIn maps each of preset and default_config that names a
+// preset by an older name to the name it stands for now.
+func presetAliasesIn(m map[string]json.RawMessage) map[string]string {
+	out := map[string]string{}
+	for _, k := range []string{"preset", "default_config"} {
+		var name string
+		if raw, ok := m[k]; !ok || json.Unmarshal(raw, &name) != nil {
+			continue
+		}
+		if canon, ok := presetAliases[name]; ok {
+			out[k] = canon
+		}
+	}
+	return out
+}
+
+func hasLegacyKeys(m map[string]json.RawMessage) bool {
 	if _, ok := m["orchestrator"]; ok {
 		return true
 	}
@@ -93,6 +113,10 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 //     are dropped.
 //   - rollover_tokens keeps its value; a file that does not name it is told
 //     that the default now follows the model's context window.
+//   - a preset (or default_config) named by an older name is named by the
+//     name it stands for now, so everything that shows, compares or checks
+//     a preset name sees one name; it loads the same preset either way.
+//     PresetNote says what became of a merged one.
 func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []string) {
 	if !HasLegacyKeys(m) {
 		return m, nil
@@ -100,6 +124,12 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 	out := make(map[string]json.RawMessage, len(m))
 	for k, v := range m {
 		out[k] = v
+	}
+	for k, canon := range presetAliasesIn(m) {
+		out[k], _ = json.Marshal(canon)
+	}
+	if !hasLegacyKeys(m) {
+		return out, nil
 	}
 	var notes []string
 

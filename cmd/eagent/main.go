@@ -93,8 +93,8 @@ Flags (before positional arguments):
   --json        emit what eagent says as JSON lines on stdout
   -C <dir>      project directory (default: current directory)
   --preset <n>  built-in or saved preset name (or EAGENT_PRESET); built-ins:
-                glm (default), astra, deepseek, qwen, mistral, muse, muse-open,
-                beam, deepseek-1017, or a provider tier: openai-high|med|low,
+                glm (default), deepseek, qwen, mistral, muse, muse-open,
+                beam, deepseek-1017, or a provider tier: openai-high|low,
                 openrouter-high|med|low, anthropic-high|med, deepinfra-high|med|low,
                 fireworks-high|med|low, opencode-high|med|low, nous-high|med|low
   --config <n>  saved preset / bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
@@ -108,7 +108,7 @@ Flags (before positional arguments):
   --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
-OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* and astra presets, OpenRouter is the
+OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* presets, OpenRouter is the
 fallback), OPENROUTER_API_KEY (openrouter-*, qwen, mistral, muse-open, beam,
 deepseek-1017), ANTHROPIC_API_KEY (anthropic-*),
 DEEPINFRA_API_KEY, FIREWORKS_API_KEY, OPENCODE_ZEN_API_KEY, NOUS_API_KEY.

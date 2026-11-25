@@ -285,3 +285,51 @@ func TestResolveCreditsTheEnvironmentForAValueItRemoved(t *testing.T) {
 		t.Fatalf("source of the window = %q", src)
 	}
 }
+
+// An older preset name in a file reads as the preset it now names wherever
+// a preset name is shown, compared or validated, and keeps loading.
+func TestAPresetAliasReadsAsItsCanonicalName(t *testing.T) {
+	noEagentEnv(t)
+	for alias, canon := range presetAliases {
+		project := t.TempDir()
+		writeConfig(t, project, `{"preset":"`+alias+`","tick_seconds":45}`)
+		res := Resolve(project, "", "")
+		if res.LoadError != "" {
+			t.Fatalf("%s: %s", alias, res.LoadError)
+		}
+		if res.File.Preset != canon || res.Preset != canon || res.Effective.Preset != canon {
+			t.Fatalf("%s: file preset %q, resolved %q, effective %q", alias, res.File.Preset, res.Preset, res.Effective.Preset)
+		}
+		// What the remote editor and undo read from the file's bytes.
+		m := rawObject(t, res.File.Raw)
+		if !HasLegacyKeys(m) {
+			t.Fatalf("%s: not seen as an older name", alias)
+		}
+		migrated, notes := MigrateLegacy(m)
+		if string(migrated["preset"]) != `"`+canon+`"` || string(migrated["tick_seconds"]) != "45" {
+			t.Fatalf("%s: migrated to %s", alias, mustMarshal(t, migrated))
+		}
+		for _, n := range notes {
+			if strings.Contains(n, "rollover_tokens") {
+				t.Fatalf("%s: a note about older keys the file does not have: %q", alias, n)
+			}
+		}
+		// The next save writes the canonical name.
+		edits, err := Overlay(res.Effective, res.File.Preset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := SaveFile(project, edits, "", false); err != nil {
+			t.Fatal(err)
+		}
+		if got := Resolve(project, "", "").File.Raw; !strings.Contains(got, `"preset": "`+canon+`"`) {
+			t.Fatalf("%s: saved as\n%s", alias, got)
+		}
+	}
+	// A default_config naming an older preset name reads as the preset.
+	project := t.TempDir()
+	writeConfig(t, project, `{"default_config":"astra"}`)
+	if res := Resolve(project, "", ""); res.File.DefaultConfig != "openai-high" {
+		t.Fatalf("default_config read as %q", res.File.DefaultConfig)
+	}
+}
