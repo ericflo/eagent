@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,4 +64,41 @@ func TestRelayFirstMessageGetsItsPhoneReceipt(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// Each kind of unusable reply is sent back once. When two kinds follow
+// each other in one turn (text with no tool call, then a hold on a message
+// kept for eagent), the third call is shown both exchanges: the second
+// send-back adds to the first and does not replace it.
+func TestSendBacksAddUpWithinATurn(t *testing.T) {
+	var mu sync.Mutex
+	var third string
+	n := 0
+	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+		if !strings.Contains(allText(msgs), "what is the plan") {
+			return hold()
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		n++
+		switch n {
+		case 1:
+			return reply{text: "The plan is to merge both."}
+		case 2:
+			return hold()
+		case 3:
+			third = allText(msgs)
+		}
+		return say("The plan is to merge both.")
+	}, nil)
+	s.settled()
+	s.type_("@e what is the plan")
+	s.waitFor("the answer", func() bool { return s.ui.messageCount() == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []string{"That reply had no tool call, so nobody saw it", "Holding is not an answer to a message addressed to you"} {
+		if !strings.Contains(third, want) {
+			t.Fatalf("the third call was not shown %q:\n%s", want, third)
+		}
+	}
 }
