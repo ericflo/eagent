@@ -269,12 +269,14 @@ func after(d time.Duration) <-chan struct{} {
 	return ch
 }
 
-// The reviewer's case: the pass's reading time scaled to 150 ms, every
-// call a lookup that takes 350 ms. One deadline bounds the whole pass, so
+// The reviewer's case, scaled: the pass's reading time is 1.5 s and every
+// call is a lookup that takes 3.5 s. One deadline bounds the whole pass, so
 // the harness writes the briefing and the loop answers again by the time
-// the reading and the writing allowed (150+100 ms), not two calls later.
+// the reading and the writing allowed (1.5 s + 1 s), not two calls later
+// (7 s). The times are long enough that a busy machine does not decide the
+// outcome.
 func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
-	r2DossierTime(t, 150*time.Millisecond, 100*time.Millisecond)
+	r2DossierTime(t, 1500*time.Millisecond, time.Second)
 	var mu sync.Mutex
 	var first time.Time
 	var told []string
@@ -285,14 +287,14 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 		}
 		told = append(told, lastText(msgs))
 		mu.Unlock()
-		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(350 * time.Millisecond)}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(3500 * time.Millisecond)}
 	})
 	took := time.Since(first)
 	if d := s.dossiers()[0]; d.By != "harness" {
 		t.Fatalf("dossier by %q", d.By)
 	}
-	if took > 500*time.Millisecond {
-		t.Fatalf("the pass took %s; it is bounded at 250ms", took)
+	if took > 3300*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 2.5s", took)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -304,7 +306,7 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 // A lookup still running when the reading time is over is cut short so
 // the writing keeps its reserved time, and the model's briefing is kept.
 func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
-	r2DossierTime(t, 150*time.Millisecond, 300*time.Millisecond)
+	r2DossierTime(t, 500*time.Millisecond, 2*time.Second)
 	var mu sync.Mutex
 	var first time.Time
 	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
@@ -312,7 +314,7 @@ func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
 		defer mu.Unlock()
 		if n == 1 {
 			first = time.Now()
-			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(2 * time.Second)}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(10 * time.Second)}
 		}
 		if !strings.Contains(lastText(msgs), "Write the briefing now") {
 			return reply{text: "not told to write"}
@@ -323,7 +325,9 @@ func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
 	if d := s.dossiers()[0]; d.By != "eagent" || d.NoMap {
 		t.Fatalf("dossier by %q nomap=%v:\n%s", d.By, d.NoMap, d.Text)
 	}
-	if took > 700*time.Millisecond {
-		t.Fatalf("the pass took %s; it is bounded at 450ms", took)
+	// The lookup is cut at 1.5 s (the reading time and half the writing
+	// time), and the writing has a second left.
+	if took > 2500*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 2.5s", took)
 	}
 }
