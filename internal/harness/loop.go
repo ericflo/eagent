@@ -161,6 +161,9 @@ type turnState struct {
 	// say it has reached nobody else. It is said once, later, and a hold
 	// after that stands: an answer can need nothing done.
 	owedAnswer bool
+	// owedResume is the newest record of the debt (event.Owed) of a
+	// resumed session, taken up when the loop starts (resumeOwed).
+	owedResume *owedRecord
 
 	// capRuns counts the turns in a row that stopped at the call limit
 	// with an agent still stuck on its screen.
@@ -172,11 +175,20 @@ type turnState struct {
 	finalBusy  bool
 }
 
+// owedRecord is what a resumed session read of the debt it was left.
+type owedRecord struct {
+	at      time.Time
+	started bool
+}
+
 // init reads, from a replayed log, what the loop would otherwise have had
 // in memory. Called once, before the loop starts.
 func (t *turnState) init(st *state.State) {
-	for _, ev := range st.Events {
+	var owed *event.Event
+	for i, ev := range st.Events {
 		switch {
+		case ev.Type == event.Owed:
+			owed = &st.Events[i]
 		case ev.Type == event.Assistant && ev.Actor == event.ActorEagent:
 			var d event.AssistantData
 			if ev.Decode(&d) == nil && d.SeenSeq > t.seen {
@@ -263,6 +275,14 @@ func (t *turnState) init(st *state.State) {
 				t.wakes[k] = ev.Seq
 			}
 		}
+	}
+	// A message that was looked at and left unanswered is no longer owed a
+	// look, but it is still owed an answer, and the reminders already
+	// arranged for it count.
+	var d event.OwedData
+	if owed != nil && owed.Decode(&d) == nil && d.Seq > 0 {
+		t.owed, t.owedTries, t.owedAnswer = d.Seq, d.Tries, d.Answer
+		t.owedResume = &owedRecord{at: owed.Time, started: d.Started}
 	}
 }
 
@@ -395,6 +415,10 @@ func (r *Runtime) maybeTurn() {
 		return
 	}
 	if t.owed > 0 && t.owedTimer == nil {
+		// Written before the call, so that a session stopped while it is
+		// out counts it when resumed: stopping and resuming over and over
+		// does not start the reminders over.
+		r.recordOwed(true)
 		r.startTurn(wake{owed: true, thread: t.threadDue || r.summaryRipe()})
 		return
 	}
@@ -434,13 +458,62 @@ func (r *Runtime) oweAnswer(seq int64) {
 	if t.owedTries >= len(owedRetryDelays) {
 		r.ui.Log("eagent: a message addressed to it went unanswered after %d reminders", t.owedTries+1)
 		t.owed, t.owedTries = 0, 0
+		r.recordOwed(false)
 		return
 	}
 	d := owedRetryDelays[t.owedTries]
 	t.owedTries++
+	r.armOwed(d)
+	r.recordOwed(false)
+}
+
+// armOwed sets the timer after which a call is made for what is owed.
+// Loop goroutine.
+func (r *Runtime) armOwed(d time.Duration) {
+	t := &r.turns
+	if t.owedTimer != nil {
+		t.owedTimer.Stop()
+	}
 	t.owedTimer = time.AfterFunc(d, func() {
 		r.post(func() { r.turns.owedTimer = nil })
 	})
+}
+
+// recordOwed writes the debt as it now stands (event.Owed), so that a
+// resumed session keeps asking where this one stopped. started says the
+// reminder numbered owedTries is going out now. Nothing is written for a
+// session that never owed anything. Loop goroutine.
+func (r *Runtime) recordOwed(started bool) {
+	t := &r.turns
+	d := event.OwedData{Seq: t.owed, Answer: t.owedAnswer, Tries: t.owedTries, Started: started}
+	if t.owed == 0 {
+		d = event.OwedData{}
+	}
+	r.append(event.New(event.Owed, event.ActorEagent, d))
+}
+
+// resumeOwed takes up the debt a resumed session was left (turnState.init):
+// the reminder that was waiting on its delay is due when it would have
+// been, counted from when it was arranged, and one that had gone out
+// counts as made, as if it had come back holding. Loop goroutine, once,
+// before the loop starts.
+func (r *Runtime) resumeOwed() {
+	t := &r.turns
+	rec := t.owedResume
+	t.owedResume = nil
+	if t.owed == 0 || rec == nil {
+		return
+	}
+	switch {
+	case rec.started && t.owedAnswer:
+		// An answer has one reminder; a hold after it stands.
+		r.clearOwed()
+	case rec.started:
+		r.oweAnswer(t.owed)
+	default:
+		i := min(max(t.owedTries-1, 0), len(owedRetryDelays)-1)
+		r.armOwed(max(time.Until(rec.at.Add(owedRetryDelays[i])), 0))
+	}
 }
 
 // oweReminder arranges one later call about the user's answer at seq,
@@ -453,22 +526,22 @@ func (r *Runtime) oweReminder(seq int64) {
 		return
 	}
 	t.owed, t.owedTries, t.owedAnswer = seq, 1, true
-	if t.owedTimer != nil {
-		t.owedTimer.Stop()
-	}
-	t.owedTimer = time.AfterFunc(owedRetryDelays[0], func() {
-		r.post(func() { r.turns.owedTimer = nil })
-	})
+	r.armOwed(owedRetryDelays[0])
+	r.recordOwed(false)
 }
 
 // clearOwed forgets the unanswered message: it was answered or acted on.
 // Loop goroutine.
 func (r *Runtime) clearOwed() {
 	t := &r.turns
+	was := t.owed
 	t.owed, t.owedTries, t.owedAnswer = 0, 0, false
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
 		t.owedTimer = nil
+	}
+	if was != 0 {
+		r.recordOwed(false)
 	}
 }
 

@@ -590,6 +590,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 	}()
 	r.armAutopilots()
 	r.rearmSchedules()
+	r.resumeOwed()
 	r.armTicker()
 	r.startSummaries()
 	defer r.stopSummaries()
