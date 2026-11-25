@@ -283,7 +283,13 @@ func (r *Runtime) needsDossier() bool {
 			t.futileLogged = true
 			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
 				input, fixed := r.inputRoom()
-				r.ui.Log("this model's window leaves %d tokens for a request, and its provider counts eagent's system prompt and tools alone as about %d of them, so no restart can make room; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md", input, r.provider(fixed))
+				if at := r.cfg.RolloverTokens; at > 0 && at < input && input > r.provider(fixed) {
+					// The window has the room; the restart size set
+					// by hand does not.
+					r.ui.Log("rollover_tokens is %d, and this model's provider counts eagent's system prompt and tools alone as about %d tokens, so no restart can make room; raise rollover_tokens (or remove it) or shorten .agents/eagent/INSTRUCTIONS.md", at, r.provider(fixed))
+				} else {
+					r.ui.Log("this model's window leaves %d tokens for a request, and its provider counts eagent's system prompt and tools alone as about %d of them, so no restart can make room; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md", input, r.provider(fixed))
+				}
 			} else {
 				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			}
@@ -1451,7 +1457,7 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 	if lim.chain {
 		if file, line, covers, ok := r.chainLink(); ok {
 			since = covers
-			fmt.Fprintf(&b, "\nEARLIER: the record before the briefing at %s:%d is mapped by it. It lists every file, agent, message from the user and turn end up to then, or names the briefing before it that does, and so on back to the start: read it with session_read to go further back. Below is what came after it.\n", file, line)
+			fmt.Fprintf(&b, "\nEARLIER: the record before the briefing at %s:%d is mapped by it. It lists every file, agent and message from the user up to then, or names the briefing before it that does, and so on back to the start: read it with session_read to go further back. session_search finds the rest of what those files hold, the agents' earlier turn ends among it. Below is what came after it.\n", file, line)
 		}
 	}
 
