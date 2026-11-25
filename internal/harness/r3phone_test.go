@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -455,5 +457,149 @@ func TestPhoneAttachmentStaysInTheSessionsFolder(t *testing.T) {
 		if filepath.Dir(saved.Path) != dir || strings.Contains(filepath.Base(saved.Path), "..") {
 			t.Fatalf("id %q name %q saved at %s, not a file of %s", a.ID, a.Filename, saved.Path, dir)
 		}
+	}
+}
+
+// lastMeta is the newest value the thread was given under key, and
+// whether it was given one at all.
+func (f *relayPhone) lastMeta(key string) (any, bool) {
+	var got any
+	found := false
+	for _, m := range f.metaPatches() {
+		if v, ok := m[key]; ok {
+			got, found = v, true
+		}
+	}
+	return got, found
+}
+
+func (f *relayPhone) receipts() map[string]any {
+	v, _ := f.lastMeta("relay_receipts")
+	rr, _ := v.(map[string]any)
+	return rr
+}
+
+// The thread shows the agent from the moment the phone connection is up,
+// not only once the agent first changes state.
+func TestTheAgentIsOnTheThreadFromTheStart(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("Done."))
+	fp := newRelayPhone()
+	t.Cleanup(fp.srv.Close)
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	project := t.TempDir()
+	rt, err := New(relayPhoneConfig(t, project, model.srv.URL, fp), Options{Project: project, Relay: "codex", Interactive: true}, &fakeUI{input: make(chan string, 4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRunLive(t, rt)
+	waitFor(t, "the agent on the thread", func() bool {
+		v, _ := fp.lastMeta("relay")
+		m, _ := v.(map[string]any)
+		return m["name"] == "codex" && m["state"] != nil
+	})
+}
+
+// An agent that exited while eagent was stopped shows as exited once the
+// session is resumed, not as still working.
+func TestAnAgentThatExitedWhileStoppedShowsAsExitedOnResume(t *testing.T) {
+	cfg, project, path, fp := stoppedRelaySession(t)
+	oldAttach := attachRelay
+	attachRelay = func(spec relay.Spec, host, target, innerID, transcript string, since time.Time) (relaySeat, error) {
+		return nil, errors.New("no such session")
+	}
+	t.Cleanup(func() { attachRelay = oldAttach })
+	patches := len(fp.metaPatches())
+	rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRunLive(t, rt)
+	waitFor(t, "the exited agent on the thread", func() bool {
+		for _, m := range fp.metaPatches()[min(patches, len(fp.metaPatches())):] {
+			if r, ok := m["relay"].(map[string]any); ok && r["state"] == "exited" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// The opening prompt of a session, when it is held for eagent, has its
+// receipt under it on the phone, as any later message would.
+func TestHeldOpeningPromptHasItsReceipt(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("Done."))
+	fp := newRelayPhone()
+	t.Cleanup(fp.srv.Close)
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	project := t.TempDir()
+	rt, err := New(relayPhoneConfig(t, project, model.srv.URL, fp), Options{Project: project, Relay: "codex", Interactive: true, Prompt: "@e keep an eye on it"}, &fakeUI{input: make(chan string, 4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRunLive(t, rt)
+	waitFor(t, "the opening post", func() bool { return fp.postCount() > 0 })
+	first := ""
+	fp.mu.Lock()
+	first, _ = fp.messages[0]["id"].(string)
+	fp.mu.Unlock()
+	waitFor(t, "its receipt", func() bool { return fp.receipts()[first] == "eagent" })
+}
+
+// The receipt under a message typed at the terminal (mirrored to the
+// thread) is still there after the session is resumed and a new receipt
+// is set: every patch replaces the thread's whole set.
+func TestTerminalMessageReceiptSurvivesAResume(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("Fixed it."))
+	fp := newRelayPhone()
+	t.Cleanup(fp.srv.Close)
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	project := t.TempDir()
+	cfg := relayPhoneConfig(t, project, model.srv.URL, fp)
+	ui := &fakeUI{input: make(chan string, 4)}
+	rt, err := New(cfg, Options{Project: project, Relay: "codex", Interactive: true}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	done := make(chan struct{})
+	go func() { rt.Run(ctx); close(done) }()
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	ui.input <- "Fix the flaky login test"
+	mirrored := ""
+	waitFor(t, "the mirrored message", func() bool {
+		fp.mu.Lock()
+		defer fp.mu.Unlock()
+		for _, m := range fp.messages {
+			if m["body"] == "Fix the flaky login test" {
+				mirrored, _ = m["id"].(string)
+			}
+		}
+		return mirrored != ""
+	})
+	waitFor(t, "its receipt", func() bool { return fp.receipts()[mirrored] == "delivered" })
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the session did not stop")
+	}
+	useFakeRelays(t, newFakeSeat("Updated the docs."))
+	gets := fp.getCount()
+	rt2, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRunLive(t, rt2)
+	waitFor(t, "the resumed phone poll", func() bool { return fp.getCount() > gets })
+	second := fp.userSays("Now update the docs", nil)
+	waitFor(t, "the new receipt", func() bool { return fp.receipts()[second] == "delivered" })
+	if got := fp.receipts(); got[mirrored] != "delivered" {
+		t.Fatalf("the terminal message's receipt was dropped: %v", got)
 	}
 }
