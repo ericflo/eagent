@@ -194,15 +194,24 @@ func RelayInput(profile, field string) string {
 	return "relay_" + profile + "_" + field
 }
 
+// relayListBudget bounds one agent's model list in a settings document
+// (256 KiB in all), by the same measure as ModelSuggestions' budget.
+const relayListBudget = 16 << 10
+
 // RelayModelSuggestions are the models an agent's relay can run, for its
 // model inputs and fields (any other name can still be typed).
 func RelayModelSuggestions(agent, project string) []control.Suggestion {
 	out := []control.Suggestion{}
+	budget := relayListBudget
 	for _, m := range relay.AgentModels(agent, project) {
 		if len(m.ID) > 500 {
 			continue
 		}
-		out = append(out, control.Suggestion{Value: m.ID, Label: clip(m.Label, 200), Detail: clip(m.Detail, 300)})
+		sug := control.Suggestion{Value: m.ID, Label: clip(m.Label, 200), Detail: clip(m.Detail, 300)}
+		if budget -= suggestionSize(sug); budget < 0 {
+			break
+		}
+		out = append(out, sug)
 	}
 	return out
 }
@@ -234,7 +243,7 @@ func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]
 		when := map[string][]any{"relay": {name}}
 		params[modelName] = text(200)
 		params[effortName] = choices(efforts)
-		model := control.Input{Name: modelName, Label: "Model", Group: group, When: when, Suggest: &control.Suggest{List: p.Agent + "_models"},
+		model := control.Input{Name: modelName, Label: "Model", Group: group, When: when, Suggest: &control.Suggest{List: relay.ModelListName(p.Agent)},
 			Description: "Left alone, " + who + " uses the model in its own configuration."}
 		effort := control.Input{Name: effortName, Label: "Reasoning effort", Group: group, When: when,
 			Description: "Left alone, " + who + " uses the effort in its own configuration."}

@@ -240,7 +240,7 @@ func View(project, session, generation string, values Values, available bool) (s
 		if rt.Waiting {
 			note += " A change is waiting for its current turn to end."
 		}
-		list := rt.Agent + "_models"
+		list := relay.ModelListName(rt.Agent)
 		if _, ok := suggestions[list]; !ok {
 			suggestions[list] = settings.RelayModelSuggestions(rt.Agent, project)
 		}

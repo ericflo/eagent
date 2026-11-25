@@ -7,7 +7,9 @@ package tools
 
 import (
 	"encoding/json"
+	"strings"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/llm"
 )
 
@@ -33,6 +35,13 @@ const (
 	SessionSearch  = "session_search"
 	SessionRead    = "session_read"
 )
+
+// builtinProfiles names the relay profiles every build has ("antigravity,
+// claude, codex, pi"). It is the same on every run, so the tool list stays
+// byte-for-byte the same.
+func builtinProfiles() string {
+	return strings.Join((config.Relay{}).RelayProfileNames(), ", ")
+}
 
 var all = []llm.Tool{
 	def(SendMessage, "Tell the user something (Markdown supported). At most one per reply.",
@@ -89,7 +98,7 @@ var all = []llm.Tool{
 	def(RelayStart,
 		"Start an agent in a terminal of its own. Only when none is running and the user wants one, or asks for a second.",
 		`{"type":"object","properties":{
-			"profile":{"type":"string","description":"A relay profile name."},
+			"profile":{"type":"string","description":"A relay profile: `+builtinProfiles()+`, or one the project defines."},
 			"dir":{"type":"string","description":"Folder to start in (default: the session's)."},
 			"model":{"type":"string","description":"Only if the user asked for one."},
 			"effort":{"type":"string","description":"Only if the user asked for one."}

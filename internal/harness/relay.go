@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -118,23 +117,10 @@ func (r *Runtime) relaySpec(name, profile, dir string, pick relayPick) (relay.Sp
 		p.Label = relay.Label(p.Agent, r.opts.Project, p.Model, p.Effort)
 	}
 	spec := relay.Spec{Session: r.sess.ID, Name: name, Profile: p, Dir: dir}
-	if p.Agent == "antigravity" {
-		exe, err := os.Executable()
-		if err != nil {
-			return relay.Spec{}, err
-		}
-		spec.StatusFile = filepath.Join(r.sess.Path, "relays", name, "agy-status.json")
-		spec.Hook = relay.ShellQuote(exe) + " relay-agy-status " + relay.ShellQuote(spec.StatusFile)
-	}
-	if p.Agent == "claude" {
-		// Claude Code's Stop hook hands over messages held for the end of a
-		// turn; it is this binary, reading the relay's spool.
-		spec.Spool = filepath.Join(r.sess.Path, "relays", name, "after_turn")
-		// Only an eagent binary has the relay-hook command (not a test
-		// binary); without the hook, held messages are typed instead.
-		if exe, err := os.Executable(); err == nil && strings.HasPrefix(filepath.Base(exe), "eagent") {
-			spec.Hook = relay.ShellQuote(exe) + " relay-hook " + relay.ShellQuote(spec.Spool)
-		}
+	// The agent's own hooks (a Stop hook, a status line, an extension) and
+	// the files they use live in the relay's directory of the session.
+	if err := relay.Prepare(&spec, filepath.Join(r.sess.Path, "relays", name)); err != nil {
+		return relay.Spec{}, err
 	}
 	return spec, nil
 }
@@ -156,17 +142,7 @@ func (r *Runtime) checkRelayPick(profile string, pick relayPick) error {
 	if !ok {
 		return fmt.Errorf("no relay profile %q (have %s)", profile, strings.Join(r.cfg.Relay.RelayProfileNames(), ", "))
 	}
-	if efforts := relay.AgentEfforts(p.Agent); pick.Effort != "" && len(efforts) > 0 && !slices.Contains(efforts, pick.Effort) {
-		return fmt.Errorf("%s takes reasoning effort %s, not %q", relay.AgentName(p.Agent), strings.Join(efforts, ", "), pick.Effort)
-	}
-	if len(pick.Model) > 200 || strings.ContainsAny(pick.Model, "\r\t\n") || p.Agent != "antigravity" && strings.Contains(pick.Model, " ") {
-		return fmt.Errorf("%q is not a model name", pick.Model)
-	}
-	if p.Agent == "antigravity" {
-		p = p.With(pick.Model, pick.Effort)
-		return relay.CheckAntigravityEffort(p.Model, p.Effort)
-	}
-	return nil
+	return relay.CheckPick(p, pick.Model, pick.Effort)
 }
 
 // startRelay launches an agent and makes the session a relay to it, with
@@ -203,7 +179,7 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayP
 		return "", err
 	}
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
-		Name: name, Profile: profile, Agent: spec.Profile.Agent, Label: spec.Profile.Label, Dir: dir,
+		Name: name, Profile: profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: dir,
 		Host: started.Host, Target: started.Target, Command: started.Command, InnerID: started.InnerID, Resumed: resume && innerID != "",
 		Model: pick.Model, Effort: pick.Effort,
 	}))
@@ -839,14 +815,13 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 
 // upgradeAgent runs the agent CLI's own updater.
 func upgradeAgent(agent string) (string, error) {
-	if agent == "antigravity" {
-		agent = "agy"
-	} else if agent != "codex" && agent != "claude" {
-		return "", fmt.Errorf("no upgrade command for %s", agent)
+	argv, err := relay.UpgradeCommand(agent)
+	if err != nil {
+		return "", err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, agent, "update")
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.WaitDelay = 5 * time.Second // an updater child that keeps the output open
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err

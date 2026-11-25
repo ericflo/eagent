@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,11 +16,43 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
-type antigravityAgent struct{ statusFile string }
+// Antigravity (Google's agy CLI). Its status line is this binary's
+// relay-agy-status command, which saves the conversation id, agent state
+// and quota to a file the seat polls.
+type antigravityAgent struct{ agentBase }
 
-func (antigravityAgent) label() string     { return "Antigravity" }
-func (antigravityAgent) chooseID() string  { return "" }
-func (antigravityAgent) newParser() parser { return antigravityParser{} }
+func init() { register(antigravityAgent{}) }
+
+func (antigravityAgent) Name() string        { return "antigravity" }
+func (antigravityAgent) Label() string       { return "Antigravity" }
+func (antigravityAgent) DisplayName() string { return "Antigravity" }
+func (antigravityAgent) Binary() string      { return "agy" }
+
+func (antigravityAgent) newParser(Spec) parser { return antigravityParser{} }
+
+// interruptKeys: agy stops a turn on Ctrl+C.
+func (antigravityAgent) interruptKeys() []string { return []string{"C-c"} }
+
+// ready matches the status line the relay-agy-status hook prints.
+func (antigravityAgent) ready(screen string) bool {
+	return strings.Contains(screen, "Antigravity relay ·")
+}
+
+func (antigravityAgent) dialogs() []dialog {
+	return []dialog{
+		{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
+	}
+}
+
+func (antigravityAgent) prepare(spec *Spec, stateDir string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	spec.StatusFile = filepath.Join(stateDir, "agy-status.json")
+	spec.Hook = ShellQuote(exe) + " relay-agy-status " + ShellQuote(spec.StatusFile)
+	return nil
+}
 
 func (antigravityAgent) command(p config.RelayProfile, id string, resume bool, hook string) []string {
 	argv := []string{"agy"}
@@ -89,17 +122,17 @@ func WriteAntigravityStatus(path string, stdin io.Reader, stdout io.Writer) int 
 	return 0
 }
 
-func (a antigravityAgent) status() agyStatus {
+func antigravityStatus(file string) agyStatus {
 	var status agyStatus
-	if raw, err := os.ReadFile(a.statusFile); err == nil {
+	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &status)
 	}
 	return status
 }
 
-func (a antigravityAgent) locate(_ string, _ time.Time, id string) (string, string) {
+func (antigravityAgent) locate(spec Spec, _ time.Time, id string) (string, string) {
 	if id == "" {
-		id = a.status().ID
+		id = antigravityStatus(spec.StatusFile).ID
 	}
 	if !conversationID.MatchString(id) {
 		return "", ""
@@ -114,8 +147,8 @@ func (a antigravityAgent) locate(_ string, _ time.Time, id string) (string, stri
 
 // An interrupted agy turn can end without a final transcript step. Wait for
 // the transcript writer to settle before reporting a turn without a reply.
-func (a antigravityAgent) poll(s *Seat, now time.Time) {
-	status := a.status()
+func (antigravityAgent) poll(s *Seat, now time.Time) {
+	status := antigravityStatus(s.spec.StatusFile)
 	if status.ID == "" || status.ID != s.innerID() {
 		return
 	}
@@ -236,6 +269,40 @@ func antigravityModels() []ModelChoice {
 		}
 	}
 	return slices.Clone(agyCatalog.models)
+}
+
+func (antigravityAgent) defaults() (string, string) { return antigravityDefaults() }
+
+func (antigravityAgent) models(string) []ModelChoice { return antigravityModels() }
+
+func (antigravityAgent) efforts() []string { return slices.Clone(standardEfforts) }
+
+// validModel: agy takes a model by its label too ("Gemini 3.8 Flash (Low)").
+func (antigravityAgent) validModel(string) bool { return true }
+
+func (antigravityAgent) checkPick(p config.RelayProfile) error {
+	return CheckAntigravityEffort(p.Model, p.Effort)
+}
+
+// resolve reads a model given by label or variant id as its variant id,
+// and its variant as the effort when none is given.
+func (antigravityAgent) resolve(model, effort string) (string, string) {
+	if model != "" {
+		id, variant := agyModelVariant(model)
+		return id, cmp.Or(effort, variant)
+	}
+	return resolveDefaults(antigravityAgent{}, model, effort)
+}
+
+// trimModelLabel drops the variant from "Gemini 3.8 Flash (High)" when the
+// label says the effort anyway.
+func (antigravityAgent) trimModelLabel(label, effort string) string {
+	if effort != "" {
+		if stem, suffix, ok := strings.Cut(label, " ("); ok && slices.Contains(standardEfforts, strings.ToLower(strings.TrimSuffix(suffix, ")"))) {
+			return stem
+		}
+	}
+	return label
 }
 
 func antigravityDefaults() (string, string) {

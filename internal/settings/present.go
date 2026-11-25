@@ -108,16 +108,28 @@ func placeProjectField(f *control.Field) {
 // last cached), grouped by provider id, for a client to offer as choices. Any
 // model id can still be typed in.
 func ModelSuggestions(project string) []control.Suggestion {
+	return modelSuggestionsWithin(project, modelListBudget)
+}
+
+// modelListBudget is the share of a settings document (256 KiB) the model
+// list may take, so a provider listing thousands of models cannot crowd
+// out the settings themselves.
+const modelListBudget = 160 << 10
+
+// suggestionSize is roughly what a suggestion takes in a document.
+func suggestionSize(s control.Suggestion) int {
+	return len(s.Value) + len(s.Label) + len(s.Group) + len(s.Detail) + 48
+}
+
+// modelSuggestionsWithin is ModelSuggestions within budget bytes.
+func modelSuggestionsWithin(project string, budget int) []control.Suggestion {
 	models := config.KnownModels(project)
 	providers := map[string]config.Provider{}
 	for _, pr := range config.AllProviders(project) {
 		providers[pr.ID] = pr
 	}
 	out := make([]control.Suggestion, 0, len(models))
-	// A settings document is capped at 256 KiB; the list keeps to 160 KiB,
-	// so a provider listing thousands of models cannot crowd out the
-	// settings themselves. Registered local models and the catalog come first.
-	budget := 160 << 10
+	// Registered local models and the catalog come first.
 	for _, m := range models {
 		if m.ID == "" || len(m.ID) > 500 {
 			continue
@@ -143,7 +155,7 @@ func ModelSuggestions(project string) []control.Suggestion {
 			detail = append(detail, "vision")
 		}
 		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: m.Provider, Detail: clip(strings.Join(detail, " · "), 300)}
-		if budget -= len(sug.Value) + len(sug.Label) + len(sug.Group) + len(sug.Detail) + 48; budget < 0 {
+		if budget -= suggestionSize(sug); budget < 0 {
 			break
 		}
 		out = append(out, sug)

@@ -304,20 +304,37 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
-	out.Descriptor.Suggestions = map[string][]control.Suggestion{"presets": PresetSuggestions(s.Project), "summarizer_modes": SummarizerModeSuggestions(), "models": ModelSuggestions(s.Project)}
-	for _, a := range out.Descriptor.Actions {
+	// A descriptor holds at most eight lists. Presets, the summarizer's
+	// modes and eagent's own model list always have theirs; each agent's
+	// models take one while there is room, and an input whose list does not
+	// fit is left to typing. eagent's model list keeps to what the agents'
+	// lists leave of its budget.
+	out.Descriptor.Suggestions = map[string][]control.Suggestion{"presets": PresetSuggestions(s.Project), "summarizer_modes": SummarizerModeSuggestions()}
+	relayBytes := 0
+	for ai := range out.Descriptor.Actions {
+		a := &out.Descriptor.Actions[ai]
 		if a.Operation != "session.start" {
 			continue
 		}
-		// Each agent's models, for its model input.
-		for _, in := range a.Inputs {
-			if in.Suggest != nil {
-				if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
-					out.Descriptor.Suggestions[in.Suggest.List] = RelayModelSuggestions(agent, s.Project)
+		for i := range a.Inputs {
+			in := &a.Inputs[i]
+			if in.Suggest == nil || in.Suggest.List == "models" {
+				continue
+			}
+			if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
+				if len(out.Descriptor.Suggestions) >= 7 {
+					in.Suggest = nil
+					continue
 				}
+				list := RelayModelSuggestions(agent, s.Project)
+				for _, sug := range list {
+					relayBytes += suggestionSize(sug)
+				}
+				out.Descriptor.Suggestions[in.Suggest.List] = list
 			}
 		}
 	}
+	out.Descriptor.Suggestions["models"] = modelSuggestionsWithin(s.Project, modelListBudget-relayBytes)
 	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < 8 {
 		out.Descriptor.Suggestions["bundles"] = bundleSugs
 		for i := range out.Descriptor.Fields {
