@@ -414,19 +414,23 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			return nil, fmt.Errorf("no model is configured for %s", who)
 		}
 		resp, err := client.Complete(ctx, req, obs)
+		// Pictures the provider would not take, whether the call then
+		// went through without them or failed for another reason.
+		// Written down, so the conversation is rendered without them by
+		// any client from here on (another route, this session resumed)
+		// and they are not uploaded to be refused again.
+		refused := client.TakeRefusedImages()
+		if err == nil {
+			refused = append(resp.RefusedImages, refused...)
+		}
+		if len(refused) > 0 {
+			r.sync(func() {
+				r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: refused}))
+			})
+		}
 		if err == nil {
 			if offline > 0 {
 				r.ui.Log("%s: %s is reachable again", who, client.Endpoint.BaseURL)
-			}
-			if len(resp.RefusedImages) > 0 {
-				// The provider would not take these pictures and the call
-				// went through without them. Written down, so the
-				// conversation is rendered without them by any client
-				// from here on (another route, this session resumed) and
-				// they are not uploaded to be refused again.
-				r.sync(func() {
-					r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: resp.RefusedImages}))
-				})
 			}
 			return resp, nil
 		}

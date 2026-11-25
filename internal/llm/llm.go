@@ -227,6 +227,19 @@ type imageMemory struct {
 	mu       sync.Mutex
 	accepted map[string]bool
 	refused  map[string]bool
+	// unreported are refusals no caller has been told of yet: a call
+	// that left a picture out and then failed for another reason reports
+	// nothing, and the refusal must still reach the record.
+	unreported []string
+}
+
+// report hands over the refusals not yet told to a caller.
+func (m *imageMemory) report() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.unreported
+	m.unreported = nil
+	return out
 }
 
 func (m *imageMemory) accept(paths []string) {
@@ -241,13 +254,13 @@ func (m *imageMemory) accept(paths []string) {
 }
 
 // refuse remembers which pictures of a refused request the refusal is
-// about, and returns the ones newly remembered. It is about a picture the
+// about, and keeps the new ones to be reported. It is about a picture the
 // provider has not taken: one this client never saw go through, and that
 // came after the model's last reply (what stands before a reply went
 // through in the call that produced it, whichever client made it). When
 // there is no such picture, every picture this client never saw go
 // through; when there is none of those either, or all is set, all of them.
-func (m *imageMemory) refuse(req Request, all bool) []string {
+func (m *imageMemory) refuse(req Request, all bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.refused == nil {
@@ -280,14 +293,12 @@ func (m *imageMemory) refuse(req Request, all bool) []string {
 	case len(fresh) == 0:
 		fresh = paths
 	}
-	var added []string
 	for _, p := range fresh {
 		if !m.refused[p] {
 			m.refused[p] = true
-			added = append(added, p)
+			m.unreported = append(m.unreported, p)
 		}
 	}
-	return added
 }
 
 // leaveOut replaces each refused picture with a note: one this client's
@@ -414,10 +425,11 @@ type Response struct {
 	BaseURL   string // the endpoint that produced this response
 	Model     string // as the response named it; the endpoint's model when it named none
 	Asked     string // the model the request asked for
-	// RefusedImages are the pictures the provider refused during this
-	// call, which went through without them. The caller writes them down
-	// and marks them (Image.Refused) from then on, so the request stays
-	// the same whichever client renders it.
+	// RefusedImages are the pictures the provider refused that have not
+	// been reported yet: during this call, which went through without
+	// them, or during an earlier one through this client that failed.
+	// The caller writes them down and marks them (Image.Refused) from
+	// then on, so the request stays the same whichever client renders it.
 	RefusedImages []string
 	Usage         event.Usage
 	Stop          string // "stop" | "tool_calls" | "length" | other provider value
@@ -674,6 +686,12 @@ var ErrIdle = errors.New("stream idle timeout")
 // signalled completion.
 var ErrTruncatedStream = errors.New("stream ended before completion")
 
+// TakeRefusedImages returns the pictures a provider refused that no
+// response has reported: those of a call that left a picture out and then
+// failed for another reason. A caller that keeps a record asks after a
+// failed call, so the refusal is written down all the same.
+func (c *Client) TakeRefusedImages() []string { return c.images.report() }
+
 // Complete performs one model call with retries on transient failures.
 func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	var lastErr error
@@ -690,15 +708,17 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			callCtx, cancel = context.WithTimeout(ctx, c.CallTimeout)
 			defer cancel()
 		}
-		if c.rejectsImages.Load() && hasImages(req) {
-			req = withoutImages(req)
-		}
+		// In this order on every call: a model found to take no pictures
+		// was found so on a request that already had these notes, and
+		// the next request must render the same.
 		if hasImages(req) {
 			req = c.images.leaveOut(fitImages(req, c.Endpoint.Protocol))
 		}
+		if c.rejectsImages.Load() && hasImages(req) {
+			req = withoutImages(req)
+		}
 		resp, err := c.once(callCtx, req, obs)
 		var ae *APIError
-		var refused []string
 		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
 			if ae.badImage() || ae.Status == 413 {
 				// A picture was refused (undecodable, too big for a limit
@@ -708,13 +728,13 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 				if c.OnRetry != nil {
 					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
 				}
-				refused = append(refused, c.images.refuse(req, false)...)
+				c.images.refuse(req, false)
 				req = c.images.leaveOut(req)
 				obs.reset()
 				resp, err = c.once(callCtx, req, obs)
 				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
 					// Still refused over pictures: leave them all out.
-					refused = append(refused, c.images.refuse(req, true)...)
+					c.images.refuse(req, true)
 					req = c.images.leaveOut(req)
 					obs.reset()
 					resp, err = c.once(callCtx, req, obs)
@@ -733,7 +753,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		}
 		if err == nil {
 			c.images.accept(imagePaths(req))
-			resp.RefusedImages = refused
+			resp.RefusedImages = c.images.report()
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
 			resp.BaseURL = c.Endpoint.BaseURL
