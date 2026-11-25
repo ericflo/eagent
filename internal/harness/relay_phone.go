@@ -237,10 +237,12 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 			r.publishRelayMeta()
 		}
 		parts := splitReport(body, phoneReportPart)
+		reqs := make([]finalechat.PostRequest, len(parts))
+		keys := make([]string, len(parts))
 		for i, part := range parts {
-			key := strconv.FormatInt(ev.Seq, 10)
+			keys[i] = strconv.FormatInt(ev.Seq, 10)
 			if i > 0 {
-				key += "." + strconv.Itoa(i+1)
+				keys[i] += "." + strconv.Itoa(i+1)
 			}
 			meta := map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}
 			if i == len(parts)-1 {
@@ -249,25 +251,41 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 			if len(parts) > 1 {
 				meta["part"], meta["parts"] = i+1, len(parts)
 			}
-			req := finalechat.PostRequest{Body: part, Notify: boolPtr(false), Meta: meta}
+			reqs[i] = finalechat.PostRequest{Body: part, Notify: boolPtr(false), Meta: meta}
 			if buzz && i == 0 {
-				req.Notify, req.Importance = nil, "important"
+				reqs[i].Notify, reqs[i].Importance = nil, "important"
 			}
-			p.enqueue(func(ctx context.Context) {
+		}
+		// One work item for the whole report, so a full queue takes all of
+		// it or none (and says so), and nothing queued later lands between
+		// its parts. The parts go in order; one the server will not take
+		// stops the rest, since a part after a gap would read as if it
+		// followed what came before, and the shortfall is said.
+		queued := p.enqueue(func(ctx context.Context) {
+			for i := range reqs {
+				req := reqs[i]
 				// The key and the status are read here, on the worker: until
 				// the first call has learned what the server supports, a key
 				// made on the loop would be empty, and the post would lose
 				// both its idempotency and its patient retries. An agent's
 				// post without a status clears the thread's line, so each
 				// part carries the one the work is in, as a message does.
-				req.ClientKey = p.key("rt", key)
+				req.ClientKey = p.key("rt", keys[i])
 				act := p.attach()
 				req.Activity = act
-				if msg, _, err := p.client.Post(ctx, p.ref, req); err == nil {
-					p.remember(msg.ID)
-					p.markSent(act)
+				msg, _, err := p.client.Post(ctx, p.ref, req)
+				if err != nil {
+					if len(reqs) > 1 {
+						p.say("finalechat: %s's report (event %d) reached the phone in %d of %d parts: %v; the whole report is in the session's record", agent, ev.Seq, i, len(reqs), shortErr(err))
+					}
+					return
 				}
-			})
+				p.remember(msg.ID)
+				p.markSent(act)
+			}
+		})
+		if !queued {
+			p.say("finalechat: %s's report (event %d) was not sent to the phone: too much is waiting to be sent; the whole report is in the session's record", agent, ev.Seq)
 		}
 	}
 }
