@@ -257,11 +257,22 @@ func (r *Runtime) threadAsked(answered bool) {
 		return
 	}
 	k.fails++
+	if k.fails > threadAskAgain {
+		// It was asked several times and left them alone each time: that
+		// is taken for "they still fit" until there is news.
+		k.fails, k.notBefore = 0, time.Time{}
+		r.threadKept()
+		return
+	}
 	k.notBefore = time.Now().Add(min(summaryRetry<<min(k.fails-1, 3), summaryLongGap))
 	if !r.ending {
 		r.armSummary(k.notBefore)
 	}
 }
+
+// threadAskAgain is how many more times a model that said nothing about
+// the title and summary is asked.
+const threadAskAgain = 2
 
 // finalSummary holds a batch session open for one last summary when it is
 // about to end with news the thread list has not got: the row should say

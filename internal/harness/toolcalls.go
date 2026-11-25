@@ -138,7 +138,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		var again bool
 		r.sync(func() { again = stamp != "" && r.viewed[path] == stamp })
 		if again {
-			return "this picture is already in your conversation above, and the file has not changed since you looked", false, true
+			return path + " is unchanged since you looked at it; the picture is in your conversation above.", false, true
 		}
 		att, err := r.viewImage(path)
 		if err != nil {

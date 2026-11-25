@@ -255,6 +255,9 @@ func TestMain(m *testing.M) {
 	}
 	agentInstalled = func(string) bool { return true }
 	wakeSettle, keysSettle = 0, 0
+	// A minute for the closing word and 75 seconds of grace at shutdown
+	// are real waits when a test's model is already gone.
+	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
 	os.Setenv("EAGENT_FINALECHAT", "off")
 	// The thread's title and summary are kept by the loop's own model, which
 	// would add a call most scripts have no reply for; the tests that cover

@@ -56,6 +56,12 @@ func (t *tails) find(sub string) string {
 // batch runs a session with no terminal and returns when it has ended.
 func batch(t *testing.T, prompt, agentReply string, brain func(model string, msgs []map[string]any) reply) (*Runtime, *fakeUI, *fakeSeat) {
 	t.Helper()
+	return batchExit(t, 0, prompt, agentReply, brain)
+}
+
+// batchExit is batch for a session expected to end with another exit code.
+func batchExit(t *testing.T, want int, prompt, agentReply string, brain func(model string, msgs []map[string]any) reply) (*Runtime, *fakeUI, *fakeSeat) {
+	t.Helper()
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	seat := newFakeSeat(agentReply)
 	useFakeRelays(t, seat)
@@ -79,8 +85,8 @@ func batch(t *testing.T, prompt, agentReply string, brain func(model string, msg
 	select {
 	case code := <-done:
 		done <- code
-		if code != 0 {
-			t.Fatalf("exit code %d; logs %v", code, ui.logged())
+		if code != want {
+			t.Fatalf("exit code %d, want %d; logs %v", code, want, ui.logged())
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatalf("the session did not end; said %q; logs %v", ui.said(), ui.logged())
@@ -368,14 +374,16 @@ func TestClosingWordFallsBackToTheHarness(t *testing.T) {
 }
 
 // With the model unreachable, nothing running and nobody at a terminal,
-// the session still ends, and still with a closing word.
+// the session still ends, and still with a closing word. It did not
+// finish: it ends waiting for the user (exit 2), and says how to pick it
+// back up.
 func TestSessionEndsWithAClosingWordWhenTheModelIsDown(t *testing.T) {
 	old := errorRetryDelays
 	errorRetryDelays = []time.Duration{20 * time.Millisecond, 20 * time.Millisecond, 20 * time.Millisecond}
 	defer func() { errorRetryDelays = old }()
 	var mu sync.Mutex
 	down := false
-	_, ui, _ := batch(t, brief+" Stop when done.", "Done: #42 and #44 are merged.", func(_ string, msgs []map[string]any) reply {
+	rt, ui, _ := batchExit(t, 2, brief+" Stop when done.", "Done: #42 and #44 are merged.", func(_ string, msgs []map[string]any) reply {
 		mu.Lock()
 		defer mu.Unlock()
 		if down {
@@ -388,6 +396,12 @@ func TestSessionEndsWithAClosingWordWhenTheModelIsDown(t *testing.T) {
 		return hold()
 	})
 	said := strings.Join(ui.said(), "\n---\n")
+	if evs, _ := store.Read(rt.sess.Path); state.Replay(evs).EndReason != "awaiting-input" {
+		t.Fatalf("end reason %q, want awaiting-input", state.Replay(evs).EndReason)
+	}
+	if !strings.Contains(said, "`eagent -c` picks the session back up") {
+		t.Fatalf("the closing word does not say how to resume: %q", said)
+	}
 	if !strings.Contains(said, "I could not write a proper closing report") || !strings.Contains(said, "Done: #42 and #44 are merged.") {
 		t.Fatalf("said %q", said)
 	}

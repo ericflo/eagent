@@ -246,7 +246,9 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.relays.mu.Unlock()
 		r.relays.noteStep(name, ev.Text, time.Now())
 		if r.phone != nil {
-			r.phone.kick()
+			// The status line names the step: work it out again (which
+			// wakes the keeper when it changed).
+			r.phone.noteState(r)
 		}
 	}
 }

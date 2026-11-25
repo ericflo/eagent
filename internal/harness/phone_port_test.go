@@ -57,7 +57,7 @@ func phoneStopAndClose(closing string) func(string, []map[string]any) reply {
 // one question, the report, and the closing note.
 func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 	fp := newPhoneFake(true)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
 		all := allText(msgs)
 		switch {
@@ -128,7 +128,7 @@ func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 // report reaches the user once.
 func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "hello", true, func(_ string, msgs []map[string]any) reply {
 		all, tail := allText(msgs), lastUserText(msgs)
 		switch {
@@ -192,7 +192,7 @@ func TestPhoneReplyAndTerminalAnswerMirror(t *testing.T) {
 // phone, token or not.
 func TestPhoneDisabledInConfig(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "hi", false, phoneStopAndClose("Nothing to do."), func(cfg *config.Config) {
 		off := false
 		cfg.Finalechat.Enabled = &off
@@ -229,7 +229,7 @@ func TestPhoneAttachmentsBothWays(t *testing.T) {
 	var mu sync.Mutex
 	var sawImagePart, sawAttachmentNote bool
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	fp.files["att-1"] = phoneFakeFile{name: "IMG_1.png", contentType: "image/png", data: tinyPNG}
 	g := phoneStart(t, fp, "look at what I send you", false, func(_ string, msgs []map[string]any) reply {
 		all := allText(msgs)
@@ -434,7 +434,7 @@ func TestTailKeepsTheNarratorsCadence(t *testing.T) {
 // is cleared at the end.
 func TestPhoneStatusLineFollowsWorkAndPostsAreIdempotent(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
 	g.seat.mu.Lock()
 	g.seat.hang = true
@@ -527,7 +527,7 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 	var mu sync.Mutex
 	sawNotice := false
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
 		all := allText(msgs)
 		switch {
@@ -622,7 +622,7 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 // the old test also held, is in gaps_phone_test.go.)
 func TestPhoneDismissedQuestionIsNotAskedAgain(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, phoneDismissedBrain(), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	if !fp.dismiss() {
@@ -707,7 +707,7 @@ func phoneColourBrain(stop bool) func(string, []map[string]any) reply {
 // question is not put back on the phone.
 func TestPhoneDismissedWhileSessionWasDown(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, phoneColourBrain(true), nil)
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	waitFor(t, "the card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 1 })
@@ -755,7 +755,7 @@ func TestPhoneDismissedWhileSessionWasDown(t *testing.T) {
 // line typed is a message, not the answer.
 func TestSlashDismissClosesQuestionAndPhoneCard(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", true, phoneColourBrain(false), nil)
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	waitFor(t, "the loop to settle", func() bool {
@@ -811,7 +811,7 @@ func TestSlashDismissClosesQuestionAndPhoneCard(t *testing.T) {
 func TestPhoneWithoutFeaturesSendsNoStatusOrKeys(t *testing.T) {
 	fp := newPhoneFake(false)
 	fp.features = []string{}
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "idle", false, phoneStopAndClose("Nothing to do."), nil)
 	if code := g.exit(20 * time.Second); code != 0 {
 		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
@@ -858,7 +858,7 @@ func TestRedactSecrets(t *testing.T) {
 func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
 	fp := newPhoneFake(false)
 	fp.latency = 150 * time.Millisecond
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "idle", false, phoneStopAndClose("Nothing to do."), nil)
 	if code := g.exit(25 * time.Second); code != 0 {
 		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
@@ -876,7 +876,7 @@ func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
 // user, and the phone says so rather than "Working".
 func TestPhoneStatusOfFreshInteractiveSessionIsWaiting(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", true, func(string, []map[string]any) reply { return hold() }, nil)
 	waitFor(t, "the first status", func() bool { return len(fp.statuses()) > 0 })
 	for _, a := range fp.statuses() {
@@ -915,7 +915,7 @@ func TestClipLabelIsRuneSafe(t *testing.T) {
 // agent's turn reports never did.)
 func TestPhoneSessionKindsAndSequencedClear(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "idle", false, phoneStopAndClose("Nothing to do."), nil)
 	if code := g.exit(20 * time.Second); code != 0 {
 		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
@@ -953,7 +953,7 @@ func TestPhoneSessionKindsAndSequencedClear(t *testing.T) {
 // as the user, right after the resume note.
 func TestPhoneMirrorsTheResumePrompt(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	brain := phoneStopAndClose("Nothing to do.")
 	g := phoneStart(t, fp, "first ask", false, func(m string, msgs []map[string]any) reply {
 		if strings.Contains(lastUserText(msgs), "kept for you") && !phoneLastIsTool(msgs) {
@@ -994,7 +994,7 @@ func TestPhoneMirrorsTheResumePrompt(t *testing.T) {
 // lands on whatever question happens to be open.
 func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "clean up", false, func(_ string, msgs []map[string]any) reply {
 		all, tail := allText(msgs), lastUserText(msgs)
 		switch {
@@ -1050,7 +1050,7 @@ func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 func TestPhonePollPacesItselfWhenTheServerDoesNotHold(t *testing.T) {
 	fp := newPhoneFake(false)
 	fp.anchorUnknown = true
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", true, func(string, []map[string]any) reply { return hold() }, nil)
 	waitFor(t, "the first poll", func() bool { return fp.getCount() >= 1 })
 	time.Sleep(3 * time.Second)
@@ -1198,7 +1198,7 @@ func TestDossierFactsRestateTheUsersMessagesWithTheirFiles(t *testing.T) {
 // is recorded in the log so replay and the web view see it.
 func TestUpdateThreadPatchesThePhoneThread(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", true, func(_ string, msgs []map[string]any) reply {
 		if strings.Contains(lastUserText(msgs), "kept for you") && !phoneLastIsTool(msgs) {
 			return reply{calls: []event.ToolCall{tc("update_thread", `{"title":"Paint the fence","summary":"Repainting the fence blue and covering it.","pin":true}`)}}
@@ -1253,8 +1253,14 @@ func TestUpdateThreadWithoutPhone(t *testing.T) {
 			t.Errorf("state title = %q desc = %q", st.Title, st.Description)
 		}
 	})
-	if out, isErr, _ := s.rt.updateThread("", "", false); !isErr {
-		t.Fatalf("an empty update should be refused, got %q", out)
+	// An update with neither field sets nothing: it is how the model says
+	// both still fit when it is asked about them (the old rename tool
+	// refused it; that tool was only ever called to change something).
+	if out, isErr, _ := s.rt.updateThread("", "", false); isErr || out != "kept as they are" {
+		t.Fatalf("an empty update = %q (error %v)", out, isErr)
+	}
+	if n := len(s.events(event.ThreadTitle)); n > 2 {
+		t.Fatalf("an empty update changed the record: %d thread.title events", n)
 	}
 }
 

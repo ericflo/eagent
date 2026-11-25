@@ -934,7 +934,8 @@ var errorRetryDelays = []time.Duration{0, time.Minute, 5 * time.Minute, 15 * tim
 
 // finalReportTimeout bounds the closing word of a session with no
 // terminal; finalReportGrace is how long shutdown waits for one in flight.
-const (
+// Variables so tests need not wait a minute for a model that is gone.
+var (
 	finalReportTimeout = 60 * time.Second
 	finalReportGrace   = 75 * time.Second
 )

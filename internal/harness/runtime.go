@@ -662,7 +662,12 @@ func (r *Runtime) maybeEnd() {
 	if r.finalSummary() {
 		return // the thread list gets how it ended, then the session ends
 	}
-	if r.st.Question != nil {
+	// How it ended. "done" is for a session whose agent was stopped with
+	// nothing waiting. One that stopped short of that waits on the user,
+	// and says so (the phone's closing note and the exit code follow the
+	// reason): a question is open or was dismissed and never taken up, the
+	// model could not be reached, or no agent could be started at all.
+	if r.st.Question != nil || down || r.st.DismissalStands() || len(r.st.RelayOrder) == 0 {
 		r.beginShutdown("awaiting-input", 2)
 		return
 	}
@@ -685,7 +690,13 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 func (r *Runtime) finish() {
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
-	deadline := time.NewTimer(5 * time.Second)
+	grace := 5 * time.Second
+	if r.turns.busy && r.turns.finalBusy {
+		// The closing word is being written: it gets its time even when
+		// the session was told to stop.
+		grace = finalReportGrace
+	}
+	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 drain:
 	for {

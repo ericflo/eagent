@@ -1,5 +1,3 @@
-//go:build gaps
-
 package harness
 
 // Behaviours the old phone_test.go held that the one-loop code does not
@@ -70,7 +68,7 @@ func TestGapPhoneRepeatViewImageIsShortCircuited(t *testing.T) {
 // exit 0, and the phone is told "eagent finished this session".
 func TestGapPhoneDismissedQuestionEndsAwaitingInput(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, phoneDismissedBrain(), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	if !fp.dismiss() {
@@ -98,7 +96,7 @@ func TestGapPhoneDismissedQuestionEndsAwaitingInput(t *testing.T) {
 // "awaiting-input", exit 2, and the question is never put back.
 func TestGapPhoneReasksPendingQuestionOnResume(t *testing.T) {
 	fp := newPhoneFake(true)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
 		all := allText(msgs)
 		switch {
@@ -147,7 +145,7 @@ func TestGapPhoneReasksPendingQuestionOnResume(t *testing.T) {
 // path through bash, which did update it, is gone.
 func TestGapPhoneStatusFollowsTheAgentsStep(t *testing.T) {
 	fp := newPhoneFake(false)
-	defer fp.srv.Close()
+	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
 	g.seat.mu.Lock()
 	g.seat.hang = true

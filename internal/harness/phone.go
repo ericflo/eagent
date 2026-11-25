@@ -27,6 +27,12 @@ import (
 
 // phone is the loop-side handle.
 type phone struct {
+	// reask is the open question a resumed session will ask again once
+	// the thread is attached, and reaskBy how long the session waits for
+	// that. Guarded by mu.
+	reask   string
+	reaskBy time.Time
+
 	client  *finalechat.Client
 	ref     string // ext:<external id>
 	title   string
@@ -104,6 +110,12 @@ func (r *Runtime) startPhone() {
 	var pending *event.QuestionData
 	if q := r.st.Question; q != nil {
 		pending = &event.QuestionData{ID: q.ID, Text: q.Text, Options: q.Options}
+		// It is asked again once the thread is attached; until then (for
+		// a bounded time) the session counts as waiting on the phone, so
+		// a session with no terminal does not end before the card is up.
+		p.mu.Lock()
+		p.reask, p.reaskBy = q.ID, time.Now().Add(phoneReaskWait)
+		p.mu.Unlock()
 	}
 	// The message the session was started or resumed with. It was appended
 	// before the mirror existed, so observe() never saw it; it is posted
@@ -510,6 +522,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	timeout := p.timeout
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
+	p.reask = ""
 	p.mu.Unlock()
 	p.enqueue(func(ctx context.Context) {
 		var act *finalechat.Activity
@@ -946,9 +959,16 @@ func (r *Runtime) waitingOnPhone() bool {
 	if p.gone[r.st.Question.ID] {
 		return false
 	}
+	if p.reask == r.st.Question.ID && time.Now().Before(p.reaskBy) {
+		return true // about to be asked again (startPhone)
+	}
 	_, asked := p.questions[r.st.Question.ID]
 	return asked
 }
+
+// phoneReaskWait bounds how long a resumed session with no terminal waits
+// for the phone thread to attach so its open question can be asked again.
+var phoneReaskWait = 20 * time.Second
 
 func (p *phone) isRemote() bool {
 	p.mu.Lock()
