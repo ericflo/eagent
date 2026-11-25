@@ -1050,12 +1050,20 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			return msg, false
 		case "stop":
-			if seat != nil {
-				_ = seat.Kill()
-				r.relays.drop(rel.Name, seat)
+			// The terminal that is the relay's now, not the one read
+			// above: a restart may have finished in between, and its new
+			// agent is the one to stop.
+			var current relaySeat
+			r.sync(func() {
+				if current = r.relays.get(rel.Name); current != nil {
+					r.relays.drop(rel.Name, current)
+				}
+				r.stopLaunches(rel.Name, "stopped")
+			})
+			if current != nil {
+				_ = current.Kill()
 			}
 			r.sync(func() {
-				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
 				r.armAutopilots()
 			})

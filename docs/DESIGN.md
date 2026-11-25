@@ -99,7 +99,7 @@ A progress look where nothing is worth saying therefore costs a cached read of t
 | `relay_control` | Keys for a dialog, interrupt, restart, upgrade, change model, switch agent, stop. |
 | `relay_autopilot` | Set or end a standing order. |
 | `schedule`, `cancel_schedule` | A timer that wakes eagent later with a note to itself. A session with a timer set stays alive. |
-| `view_image` | Look at a picture the agent made or the user sent. The file must be where the session works, reported by an agent, or named by the user. |
+| `view_image` | Look at a picture the agent made or the user sent. The file must be where the session works, or one an agent or the user named. |
 | `update_thread` | The thread's title and summary. |
 | `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters. |
 
@@ -113,7 +113,7 @@ How it is written (`dossier.go`):
 
 - The model that has been following the session writes it, at the end of the conversation it already has, so the request reuses the cached prompt.
 - It is given a table of every file and an index of the whole record by place: everything before its last dossier in outline (the user's words, the agent's turn ends, where each earlier dossier sits) and the stretch since line by line.
-- It studies the record before writing. During the pass only `session_search` and `session_read` run, up to 40 calls, and how much it may read back follows the room in the model's window (up to 300,000 characters; up to 600,000 when it works from the files alone). A conversation that leaves room for less than 60,000 is not written in: the writer works from the files instead. The lookups are part of the writing and are not recorded.
+- It studies the record before writing. During the pass only `session_search` and `session_read` run, up to 40 calls, and how much it may read back follows the room in the model's window (up to 300,000 characters; up to 600,000 when it works from the files alone). A conversation that leaves no room for even one lookup (24,000 characters) is not written in: the writer works from the files instead. The lookups are part of the writing and are not recorded.
 - It is told to rebuild from the record every time. Earlier dossiers are sources to read and check against the lines they cite, not text to carry forward.
 - The harness checks the result: it must be a real text, cite at least three places, and every citation must point at a line that exists. A dossier that fails is sent back once with what was wrong. Places that still do not exist are named in the dossier so nothing sends the reader to a missing line. A text that comes back a second time without a map is kept as a summary and labelled as one, in its first lines and in the notice above it; it is never passed off as a map.
 - After the model's text the harness adds what it knows exactly, each with its place: the table of files; every agent with its terminal, model and effort; every message the user sent (the first three and the latest 25 word for word, each one between in a line, and in a session with more than 150 between, the oldest by place); the latest turns the agent finished; an open question.

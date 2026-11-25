@@ -271,7 +271,7 @@ func (r *Runtime) viewImage(p string) (event.Attachment, error) {
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = real
 	}
-	if !r.sendable(abs) && !r.userNamed(abs) {
+	if !r.sendable(abs) && !r.named(abs) {
 		return event.Attachment{}, fmt.Errorf("%s is outside the project and the agent's folder, and neither the agent nor the user named it. Ask the user for the path if they want you to look at it", p)
 	}
 	st, err := os.Stat(abs)
@@ -391,14 +391,19 @@ func findByName(root, name string, maxDepth int) string {
 	return best
 }
 
-// userNamed reports whether the user wrote this path in a message of
-// their own (as an absolute path or one under ~): their word is leave to
-// look at it wherever it is. Not on the loop goroutine.
-func (r *Runtime) userNamed(abs string) bool {
+// named reports whether the user or an agent wrote this path (as an
+// absolute path or one under ~) in a message, an answer, a progress line or
+// a turn report. The user's word is leave to look at a file wherever it
+// is, and an agent that names a picture mid-turn (a screenshot it saved
+// under /tmp, say) has not finished the turn that would list it. Not on
+// the loop goroutine.
+func (r *Runtime) named(abs string) bool {
 	var texts []string
 	r.sync(func() {
 		for _, ev := range r.st.Events {
-			if ev.Type != event.UserMessage && ev.Type != event.UserAnswer {
+			switch ev.Type {
+			case event.UserMessage, event.UserAnswer, event.RelayProgress, event.RelayTurn:
+			default:
 				continue
 			}
 			var d struct {
@@ -485,6 +490,12 @@ func (r *Runtime) sendable(abs string) bool {
 				continue
 			}
 			for _, img := range d.Images {
+				// Agents also write a picture's path under ~ or from
+				// their own folder.
+				img = relay.ExpandHome(img)
+				if rel := r.st.Relays[d.Name]; !filepath.IsAbs(img) && rel != nil && rel.Dir != "" {
+					img = filepath.Join(rel.Dir, img)
+				}
 				if real, err := filepath.EvalSymlinks(img); err == nil {
 					img = real
 				}

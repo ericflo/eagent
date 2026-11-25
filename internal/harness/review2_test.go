@@ -518,6 +518,55 @@ func TestViewImageStaysWhereTheSessionWorks(t *testing.T) {
 	}
 }
 
+// An agent that names a picture has given eagent leave to look at it, as
+// the user's word does: a screenshot it saved outside the project and
+// mentioned mid-turn (the turn that would list it has not ended), and one a
+// finished turn lists under ~ or from the agent's own folder.
+func TestViewImageTakesAPictureAnAgentNamed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	view := func(path string) (string, bool, []event.Attachment) {
+		calls := &turnCalls{}
+		args, _ := json.Marshal(map[string]string{"path": path})
+		out, isErr, _ := s.rt.runTool(context.Background(), calls, tc("view_image", string(args)))
+		return out, isErr, calls.images
+	}
+	write := func(path string) string {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, tinyPNG, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	agentDir := t.TempDir()
+	midTurn := write(filepath.Join(t.TempDir(), "shot one.png"))
+	underHome := write(filepath.Join(home, "shots", "home.png"))
+	fromItsFolder := write(filepath.Join(filepath.Dir(agentDir), "beside", "rel.png"))
+	never := write(filepath.Join(t.TempDir(), "never.png"))
+	for _, path := range []string{midTurn, underHome, fromItsFolder, never} {
+		if out, isErr, _ := view(path); !isErr || !strings.Contains(out, "outside the project") {
+			t.Fatalf("view_image %s before anyone named it: error=%v: %s", path, isErr, out)
+		}
+	}
+	s.rt.sync(func() {
+		s.rt.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "codex", Profile: "codex", Agent: "codex", Dir: agentDir}))
+		s.rt.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "Saved the screenshot to " + midTurn + "."}))
+		s.rt.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "codex", Text: "Done.", Images: []string{"~/shots/home.png", filepath.Join("..", "beside", "rel.png")}}))
+	})
+	s.settled()
+	for _, path := range []string{midTurn, underHome, fromItsFolder} {
+		if out, isErr, images := view(path); isErr || len(images) != 1 {
+			t.Errorf("view_image %s after the agent named it: error=%v images=%d: %s", path, isErr, len(images), out)
+		}
+	}
+	if out, isErr, _ := view(never); !isErr {
+		t.Fatalf("a picture nobody named was shown: %s", out)
+	}
+}
+
 // A search of the record stays in every later prompt, like a read, so it
 // is bounded however many results the model asks for.
 func TestSessionSearchIsBoundedInTheLoop(t *testing.T) {
