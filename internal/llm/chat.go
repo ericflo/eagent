@@ -145,16 +145,19 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 					Reasoning int `json:"reasoning_tokens"`
 				} `json:"completion_tokens_details"`
 			} `json:"usage"`
-			Error *struct {
-				Message string `json:"message"`
-				Code    any    `json:"code"`
-			} `json:"error"`
+			Error json.RawMessage `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return nil // tolerate keepalives / unknown frames
 		}
-		if chunk.Error != nil {
-			return &APIError{Status: 502, Body: chunk.Error.Message}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			var e struct {
+				Message string `json:"message"`
+				Code    any    `json:"code"`
+				Type    string `json:"type"`
+			}
+			_ = json.Unmarshal(chunk.Error, &e)
+			return streamError(e.Code, e.Type, e.Message, chunk.Error)
 		}
 		if chunk.Model != "" {
 			out.Model = chunk.Model
@@ -456,6 +459,8 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		} `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
 		} `json:"error"`
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
@@ -466,7 +471,7 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 	}
 	if body.Error != nil {
-		return nil, &APIError{Status: 502, Body: body.Error.Message}
+		return nil, streamError(body.Error.Code, body.Error.Type, body.Error.Message, raw)
 	}
 	if len(body.Choices) == 0 {
 		return nil, ErrTruncatedStream

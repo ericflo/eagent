@@ -338,9 +338,12 @@ func (e *APIError) Retryable() bool {
 // fallback route rather than a retry.
 func (e *APIError) QuotaExhausted() bool {
 	b := strings.ToLower(e.Body)
-	return e.Code == "insufficient_quota" || e.Code == "credit_balance_exhausted" ||
+	// 402 is Payment Required: Anthropic's billing_error, OpenRouter's
+	// "requires more credits".
+	return e.Status == 402 || e.Code == "insufficient_quota" || e.Code == "credit_balance_exhausted" || e.Code == "billing_error" ||
 		strings.Contains(b, "insufficient_quota") || strings.Contains(b, "no credits") ||
-		strings.Contains(b, "credit balance") || strings.Contains(b, "insufficient credits")
+		strings.Contains(b, "credit balance") || strings.Contains(b, "insufficient credits") ||
+		strings.Contains(b, "requires more credits")
 }
 
 // Unroutable reports that this endpoint cannot serve the model at all
@@ -369,10 +372,86 @@ func (e *APIError) ContextOverflow() bool {
 		return false
 	}
 	b := strings.ToLower(e.Body)
+	if e.Status == 413 {
+		// Anthropic's request_too_large is a body over its size limit. A
+		// request with pictures has those dropped first (Complete); one
+		// without is a conversation too long to send, which a dossier
+		// fixes. A gateway's bare 413 says nothing about which it is.
+		return strings.Contains(b, "request_too_large")
+	}
 	return strings.Contains(b, "context_length") || strings.Contains(b, "context length") ||
 		strings.Contains(b, "maximum context") || strings.Contains(b, "too many tokens") ||
 		strings.Contains(b, "prompt is too long") || strings.Contains(b, "exceeds the limit") ||
-		strings.Contains(b, "input tokens exceed")
+		strings.Contains(b, "input tokens exceed") ||
+		// Anthropic: "input length and `max_tokens` exceed context limit".
+		strings.Contains(b, "exceed context limit")
+}
+
+// streamError builds the error for a failure reported inside a stream,
+// which arrives after a 200 and so carries no HTTP status of its own. The
+// provider's code or type gives it one, so that it is judged as the same
+// failure in a plain response would be (an overflow, missing credits, a
+// model this key cannot use). Only a failure that names nothing is taken
+// for a transient one, as before.
+func streamError(code any, kind, message string, raw []byte) *APIError {
+	e := &APIError{Status: 502, Body: message}
+	if len(raw) > 0 {
+		// The whole error object, as for a plain response, so that the
+		// code and type are matched as well as the message.
+		e.Body = string(raw)
+	}
+	if e.Body == "" {
+		e.Body = "stream error"
+	}
+	if n, ok := code.(int); ok {
+		code = float64(n)
+	}
+	switch v := code.(type) {
+	case float64:
+		if n := int(v); n >= 400 && n <= 599 {
+			e.Status = n
+			return e
+		}
+	case string:
+		e.Code = v
+	}
+	if e.Code == "" {
+		e.Code = kind
+	}
+	for _, k := range []string{e.Code, kind} {
+		if s, ok := streamStatus[k]; ok {
+			e.Status = s
+			return e
+		}
+		if strings.Contains(k, "image") {
+			e.Status = 400 // OpenAI's invalid_image, image_too_large, ...
+			return e
+		}
+	}
+	return e
+}
+
+// streamStatus maps the error codes and types providers put in a stream to
+// the status the same error has in a plain response.
+var streamStatus = map[string]int{
+	// Anthropic error types.
+	"invalid_request_error": 400,
+	"authentication_error":  401,
+	"billing_error":         402,
+	"permission_error":      403,
+	"not_found_error":       404,
+	"request_too_large":     413,
+	"rate_limit_error":      429,
+	"api_error":             500,
+	"timeout_error":         504,
+	"overloaded_error":      529,
+	// OpenAI error codes.
+	"context_length_exceeded": 400,
+	"invalid_prompt":          400,
+	"model_not_found":         404,
+	"insufficient_quota":      429,
+	"rate_limit_exceeded":     429,
+	"server_error":            500,
 }
 
 // ErrIdle is returned when a stream stalls.

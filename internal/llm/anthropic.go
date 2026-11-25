@@ -221,12 +221,14 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		case "message_stop":
 			stopped = true
 		case "error":
-			msg := "stream error"
-			if frame.Error != nil {
-				msg = frame.Error.Type + ": " + frame.Error.Message
+			if frame.Error == nil {
+				// An error that names nothing: overloaded, as before.
+				failure = &APIError{Status: 529, Body: "stream error"}
+				break
 			}
-			failure = &APIError{Status: 529, Body: msg}
-			if frame.Error != nil && frame.Error.Type == "overloaded_error" {
+			raw, _ := json.Marshal(map[string]any{"type": "error", "error": frame.Error})
+			failure = streamError(nil, frame.Error.Type, frame.Error.Message, raw)
+			if _, known := streamStatus[frame.Error.Type]; !known {
 				failure.Status = 529
 			}
 		}
@@ -553,7 +555,11 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 	}
 	if body.Error != nil {
-		return nil, &APIError{Status: 502, Body: body.Error.Type + ": " + body.Error.Message}
+		e := streamError(nil, body.Error.Type, body.Error.Message, raw)
+		if _, known := streamStatus[body.Error.Type]; !known {
+			e.Status = 502
+		}
+		return nil, e
 	}
 	out := &Response{Model: body.Model}
 	var text, reasoning strings.Builder
