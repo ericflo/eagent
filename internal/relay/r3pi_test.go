@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -293,5 +294,136 @@ func TestFreshLaunchDropsAnEarlierAgentsSpool(t *testing.T) {
 	defer seat.Kill()
 	if got := left(); strings.Join(got, ",") != strings.Join(before, ",") {
 		t.Fatalf("a resume lost what waited for it: %v, had %v", got, before)
+	}
+}
+
+// ---- the extension's hand-over ------------------------------------------------------
+
+// piExtensionDriver runs the embedded extension under node against a
+// stand-in for pi's extension API. pi.sendUserMessage returns nothing and
+// reports a refusal only as an extension error, so the stand-in either
+// starts a run (agent_start, then agent_settled) or does nothing, as pi
+// does when it throws. Each call is printed as a JSON line.
+const piExtensionDriver = `import { pathToFileURL } from "node:url";
+const handlers = {};
+const accept = process.env.ACCEPT === "1";
+const pi = {
+	on(name, fn) { handlers[name] = fn; },
+	appendEntry() {},
+	sendUserMessage(text, options) {
+		console.log(JSON.stringify({ text, deliverAs: (options && options.deliverAs) || "" }));
+		if (!accept) return;
+		setTimeout(() => {
+			handlers.agent_start && handlers.agent_start({});
+			setTimeout(() => handlers.agent_settled && handlers.agent_settled({ aborted: false }), 50);
+		}, 20);
+	},
+};
+const ext = await import(pathToFileURL(process.argv[2]).href);
+ext.default(pi);
+const ctx = {
+	isIdle: () => true,
+	hasPendingMessages: () => false,
+	sessionManager: { getEntries: () => [], getSessionFile: () => "", getSessionId: () => "x" },
+};
+handlers.session_start({}, ctx);
+setTimeout(() => process.exit(0), Number(process.env.RUN_MS));
+`
+
+type piHandOver struct {
+	Text, DeliverAs string
+}
+
+// runPiExtension starts the extension with a spool holding one message
+// and returns the spool, a function that lists what it holds, and one that
+// waits for the run to end and returns the hand-overs.
+func runPiExtension(t *testing.T, accept bool, run time.Duration) (func() []string, func() []piHandOver) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	dir := t.TempDir()
+	ext, driver, spool := filepath.Join(dir, "eagent-relay.ts"), filepath.Join(dir, "driver.mjs"), filepath.Join(dir, "after_turn")
+	if err := os.WriteFile(ext, []byte(piExtension), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(driver, []byte(piExtensionDriver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := spoolMessage(spool, "a1", "the held message"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(node, driver, ext)
+	cmd.Env = append(os.Environ(), "EAGENT_PI_STATUS="+filepath.Join(dir, "pi-status.json"), "EAGENT_PI_SPOOL="+spool, fmt.Sprintf("RUN_MS=%d", run.Milliseconds()))
+	if accept {
+		cmd.Env = append(cmd.Env, "ACCEPT=1")
+	}
+	var out strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	list := func() []string {
+		names, _ := filepath.Glob(filepath.Join(spool, "*"))
+		for i := range names {
+			names[i] = filepath.Base(names[i])
+		}
+		return names
+	}
+	wait := func() []piHandOver {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("extension driver: %v\n%s", err, out.String())
+		}
+		var got []piHandOver
+		for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+			var h piHandOver
+			if line == "" {
+				continue
+			}
+			if json.Unmarshal([]byte(line), &h) != nil {
+				t.Fatalf("driver printed %q", line)
+			}
+			got = append(got, h)
+		}
+		return got
+	}
+	return list, wait
+}
+
+// pi refuses a hand-over it cannot take (a prompt while it compacts, no
+// model): the message is not gone, and goes again later.
+func TestPiExtensionKeepsAMessagePiRefused(t *testing.T) {
+	t.Parallel()
+	list, wait := runPiExtension(t, false, 9*time.Second)
+	time.Sleep(2500 * time.Millisecond) // the extension looks every second
+	if got := list(); len(got) != 1 {
+		t.Fatalf("after a refused hand-over the spool holds %v", got)
+	}
+	sent := wait()
+	if len(sent) < 2 || sent[0].Text != "the held message" || sent[1].Text != "the held message" {
+		t.Fatalf("hand-overs %+v", sent)
+	}
+	for _, h := range sent {
+		if h.DeliverAs != "followUp" {
+			t.Fatalf("handed over as %q: pi throws on a plain message while a run starts", h.DeliverAs)
+		}
+	}
+	if got := list(); len(got) != 1 {
+		t.Fatalf("spool %v", got)
+	}
+}
+
+// pi takes it: the message goes once and leaves the spool.
+func TestPiExtensionHandsAMessageOverOnce(t *testing.T) {
+	t.Parallel()
+	list, wait := runPiExtension(t, true, 9*time.Second)
+	sent := wait()
+	if len(sent) != 1 || sent[0].Text != "the held message" || sent[0].DeliverAs != "followUp" {
+		t.Fatalf("hand-overs %+v", sent)
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("spool %v", got)
 	}
 }
