@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/ericflo/eagent/internal/event"
 )
@@ -25,7 +27,8 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
 	messages := anthropicMessagesFor(req, c.Endpoint.BaseURL, c.Endpoint.Model)
-	cached := anthropicBridge(messages, int(c.anthropicCached.Load()))
+	head, _ := json.Marshal([]any{c.Endpoint.Model, req.System, req.Tools})
+	cached := anthropicBridge(messages, head, c.anthropicCached.known())
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
 		"messages":   messages,
@@ -107,7 +110,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	}
 	// The request was taken: its breakpoints are where the next call's
 	// cache entries are.
-	c.anthropicCached.Store(int64(cached))
+	c.anthropicCached.add(cached)
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
 		return c.anthropicNonStreaming(resp)
 	}
@@ -218,12 +221,14 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		case "message_stop":
 			stopped = true
 		case "error":
-			msg := "stream error"
-			if frame.Error != nil {
-				msg = frame.Error.Type + ": " + frame.Error.Message
+			if frame.Error == nil {
+				// An error that names nothing: overloaded, as before.
+				failure = &APIError{Status: 529, Body: "stream error"}
+				break
 			}
-			failure = &APIError{Status: 529, Body: msg}
-			if frame.Error != nil && frame.Error.Type == "overloaded_error" {
+			raw, _ := json.Marshal(map[string]any{"type": "error", "error": frame.Error})
+			failure = streamError(nil, frame.Error.Type, frame.Error.Message, raw)
+			if _, known := streamStatus[frame.Error.Type]; !known {
 				failure.Status = 529
 			}
 		}
@@ -404,46 +409,141 @@ func anthropicStable(msgs []map[string]any) []map[string]any {
 	for _, m := range msgs {
 		blocks, _ := m["content"].([]map[string]any)
 		for _, b := range blocks {
-			switch t, _ := b["type"].(string); t {
-			case "thinking", "redacted_thinking":
-				continue
-			case "text":
-				if s, _ := b["text"].(string); strings.TrimSpace(s) == "" {
-					continue
-				}
-			case "tool_result":
-				// A blank screen comes back as an empty result, and a
-				// breakpoint may not sit on an empty block.
-				if s, ok := b["content"].(string); ok && strings.TrimSpace(s) == "" {
-					continue
-				}
+			if anthropicCacheable(b) {
+				stable = append(stable, b)
 			}
-			stable = append(stable, b)
 		}
 	}
 	return stable
 }
 
+// anthropicCacheable reports whether a content block can carry a cache
+// breakpoint.
+func anthropicCacheable(b map[string]any) bool {
+	switch t, _ := b["type"].(string); t {
+	case "thinking", "redacted_thinking":
+		return false
+	case "text":
+		if s, _ := b["text"].(string); strings.TrimSpace(s) == "" {
+			return false
+		}
+	case "tool_result":
+		// A blank screen comes back as an empty result, and a breakpoint
+		// may not sit on an empty block.
+		if s, ok := b["content"].(string); ok && strings.TrimSpace(s) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // anthropicLookback is how far behind a breakpoint Anthropic looks for an
-// earlier cache entry: 20 positions, less a margin.
+// earlier cache entry: 20 blocks, less a margin.
 const anthropicLookback = 18
 
-// anthropicBridge keeps a long step between two calls on the cache, and
-// returns how many blocks this conversation has for the next call to pass
-// back as prev. A breakpoint finds an earlier entry only a short way behind
-// it, so when more blocks than that were added since the last call (a
-// chatty agent, a burst of events or pictures) the two breakpoints at the
-// end would find nothing and the whole conversation would be written to
-// the cache again. The last call left an entry at the block before its
-// final one, which is in this conversation whether or not that call's end
-// was recorded: a breakpoint there is read from the cache, and only what
-// came after it is new.
-func anthropicBridge(msgs []map[string]any, prev int) int {
-	stable := anthropicStable(msgs)
-	if at := prev - 2; at >= 0 && len(stable)-1-at > anthropicLookback {
-		stable[at]["cache_control"] = map[string]any{"type": "ephemeral"}
+// anthropicBridge keeps a long step between two calls on the cache. A
+// breakpoint finds an earlier entry only a short way behind it, so when
+// more blocks than that were added since the last call (a chatty agent, a
+// burst of events, many lookups at once) the two breakpoints at the end
+// would find nothing and the whole conversation would be written to the
+// cache again. A third breakpoint on the newest block that an earlier
+// request left an entry at is read from the cache, and only what came
+// after it is new.
+//
+// Where the entries are is known by what they hold, not by counting: each
+// block is identified by a hash of the whole request up to and including
+// it (head is what comes before the messages: model, system prompt,
+// tools). Counting from the end of the last request goes wrong whenever
+// that request ended in blocks that were never recorded (a reply sent back
+// for another try, a look's prompt) or the conversation started afresh.
+//
+// known lists the prefixes earlier requests left entries at. The result is
+// the prefixes this request leaves entries at, or refreshes by reading
+// them, for the caller to remember once the request is taken.
+func anthropicBridge(msgs []map[string]any, head []byte, known []uint64) []uint64 {
+	type block struct {
+		b      map[string]any
+		key    uint64
+		stable bool
 	}
-	return len(stable)
+	h := fnv.New64a()
+	h.Write(head)
+	var blocks []block
+	for _, m := range msgs {
+		role, _ := m["role"].(string)
+		h.Write([]byte("\x00" + role + "\x00"))
+		content, _ := m["content"].([]map[string]any)
+		for _, b := range content {
+			cc, marked := b["cache_control"]
+			delete(b, "cache_control")
+			raw, _ := json.Marshal(b)
+			if marked {
+				b["cache_control"] = cc
+			}
+			h.Write(raw)
+			h.Write([]byte{1})
+			blocks = append(blocks, block{b: b, key: h.Sum64(), stable: anthropicCacheable(b)})
+		}
+	}
+	reach := -1
+	for i := len(blocks) - 1; i >= 0 && reach < 0; i-- {
+		if !blocks[i].stable {
+			continue
+		}
+		for _, k := range known {
+			if k == blocks[i].key {
+				reach = i
+				break
+			}
+		}
+	}
+	if reach >= 0 && len(blocks)-1-reach > anthropicLookback {
+		blocks[reach].b["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	var out []uint64
+	if reach >= 0 {
+		out = append(out, blocks[reach].key)
+	}
+	for _, b := range blocks {
+		if b.b["cache_control"] != nil {
+			out = append(out, b.key)
+		}
+	}
+	return out
+}
+
+// anthropicEntries remembers the prefixes the last few requests through a
+// client left cache entries at (anthropicBridge). A few requests' worth, so
+// that two conversations sharing a client (a dossier's lookups beside the
+// session) do not push each other's out.
+type anthropicEntries struct {
+	mu   sync.Mutex
+	keys []uint64
+}
+
+const anthropicEntriesKept = 16
+
+func (e *anthropicEntries) known() []uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]uint64(nil), e.keys...)
+}
+
+func (e *anthropicEntries) add(keys []uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, k := range keys {
+		for i, old := range e.keys {
+			if old == k {
+				e.keys = append(e.keys[:i], e.keys[i+1:]...)
+				break
+			}
+		}
+		e.keys = append(e.keys, k)
+	}
+	if n := len(e.keys) - anthropicEntriesKept; n > 0 {
+		e.keys = append([]uint64(nil), e.keys[n:]...)
+	}
 }
 
 // anthropicNonStreaming parses a plain Anthropic Messages JSON body for
@@ -483,7 +583,11 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 	}
 	if body.Error != nil {
-		return nil, &APIError{Status: 502, Body: body.Error.Type + ": " + body.Error.Message}
+		e := streamError(nil, body.Error.Type, body.Error.Message, raw)
+		if _, known := streamStatus[body.Error.Type]; !known {
+			e.Status = 502
+		}
+		return nil, e
 	}
 	out := &Response{Model: body.Model}
 	var text, reasoning strings.Builder

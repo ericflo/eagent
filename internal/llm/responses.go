@@ -76,7 +76,11 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 			return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 		}
 		if probe.Error != nil && probe.Error.Message != "" {
-			return nil, &APIError{Status: 502, Body: probe.Error.Message}
+			var whole struct {
+				Error json.RawMessage `json:"error"`
+			}
+			_ = json.Unmarshal(raw, &whole)
+			return nil, responsesFailure(whole.Error, nil, probe.Error.Message)
 		}
 		if probe.Status == "incomplete" {
 			incomplete = "incomplete"
@@ -89,11 +93,9 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 				Delta    string          `json:"delta"`
 				Item     json.RawMessage `json:"item"`
 				Response json.RawMessage `json:"response"`
-				Error    *struct {
-					Message string `json:"message"`
-					Code    any    `json:"code"`
-				} `json:"error"`
-				Message string `json:"message"`
+				Error    json.RawMessage `json:"error"`
+				Message  string          `json:"message"`
+				Code     any             `json:"code"`
 			}
 			if err := json.Unmarshal(ev.Data, &frame); err != nil {
 				return nil
@@ -120,22 +122,15 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 				incomplete = "incomplete"
 			case "response.failed":
 				final = frame.Response
-				msg := "response failed"
 				var r struct {
-					Error *struct {
-						Message string `json:"message"`
-					} `json:"error"`
+					Error json.RawMessage `json:"error"`
 				}
-				if json.Unmarshal(frame.Response, &r) == nil && r.Error != nil {
-					msg = r.Error.Message
-				}
-				failure = &APIError{Status: 502, Body: msg}
+				_ = json.Unmarshal(frame.Response, &r)
+				failure = responsesFailure(r.Error, nil, "response failed")
 			case "error":
-				msg := frame.Message
-				if frame.Error != nil {
-					msg = frame.Error.Message
-				}
-				failure = &APIError{Status: 502, Body: msg}
+				// The error is either the frame itself (code, message at
+				// the top) or an object inside it.
+				failure = responsesFailure(frame.Error, frame.Code, frame.Message)
 			}
 			return nil
 		})
@@ -313,6 +308,27 @@ func stripStatus(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 	return b
+}
+
+// responsesFailure builds the error for a failed or error frame from the
+// error object when there is one, else from the frame's own code and
+// message.
+func responsesFailure(obj json.RawMessage, code any, message string) *APIError {
+	if len(obj) > 0 && string(obj) != "null" {
+		var e struct {
+			Message string `json:"message"`
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+		}
+		if json.Unmarshal(obj, &e) == nil {
+			return streamError(e.Code, e.Type, e.Message, obj)
+		}
+	}
+	var raw []byte
+	if code != nil {
+		raw, _ = json.Marshal(map[string]any{"code": code, "message": message})
+	}
+	return streamError(code, "", message, raw)
 }
 
 // responsesInput renders history as Responses API input items.

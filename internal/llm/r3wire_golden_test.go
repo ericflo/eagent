@@ -69,11 +69,11 @@ func (w *wireCapture) send(t *testing.T, ep Endpoint, msgs []Message) []byte {
 	return w.bodies[len(w.bodies)-1]
 }
 
-// ordinarySession is a conversation as eagent's record renders it on one
+// ordinaryWireSession is a conversation as eagent's record renders it on one
 // route: the route's own turns carry their native items and are replayed at
 // the host that made them; one earlier turn came from another provider.
 // host is filled in with the fake server's address.
-func ordinarySession(protocol, host string) []Message {
+func ordinaryWireSession(protocol, host string) []Message {
 	screen := event.ToolCall{ID: "call_q7Hk2", Name: "relay_screen", Args: json.RawMessage(`{}`)}
 	// A turn that came from another provider, rendered from its text and
 	// calls. Its ids are ones every protocol takes.
@@ -136,7 +136,7 @@ func TestAnOrdinarySessionSendsTheSameBytesAsBefore(t *testing.T) {
 	var got bytes.Buffer
 	for _, protocol := range []string{ProtocolAnthropic, ProtocolResponses, ProtocolChat} {
 		w := newWireCapture(t, protocol)
-		conv := ordinarySession(protocol, w.srv.URL)
+		conv := ordinaryWireSession(protocol, w.srv.URL)
 		// One request per point where the conversation grew, each ending
 		// with the tail a look carries.
 		for n := 1; n <= len(conv); n++ {

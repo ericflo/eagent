@@ -92,28 +92,31 @@ func TestAnthropicLongStepBetweenCallsStaysOnTheCache(t *testing.T) {
 		return append(out, Message{Role: "user", Text: tail})
 	}
 	first := anthropicMessages(Request{Messages: with(0, "[eagent 10:02:30] A look.")}, "")
-	prev := anthropicBridge(first, 0)
-	if got := marked(first); prev != 4 || len(got) != 2 {
-		t.Fatalf("first call: %d blocks, breakpoints on %q", prev, got)
+	known := anthropicBridge(first, nil, nil)
+	if got := marked(first); len(known) != 2 || len(got) != 2 {
+		t.Fatalf("first call: %d entries, breakpoints on %q", len(known), got)
 	}
 	// A short step needs nothing more: the end is within reach of the
 	// entry the last call left.
 	short := anthropicMessages(Request{Messages: with(5, "[eagent 10:04:00] A look.")}, "")
-	if anthropicBridge(short, prev); len(marked(short)) != 2 {
+	if anthropicBridge(short, nil, known); len(marked(short)) != 2 {
 		t.Fatalf("a short step: breakpoints on %q", marked(short))
 	}
 	// A long one gets the third breakpoint, on the last recorded block the
-	// first call saw (the one before the end of its prompt).
+	// first call saw (the one before the end of its prompt, which was not
+	// recorded).
 	long := anthropicMessages(Request{Messages: with(30, "[eagent 10:04:00] A look.")}, "")
-	n := anthropicBridge(long, prev)
+	anthropicBridge(long, nil, known)
 	got := marked(long)
-	if n != 34 || len(got) != 3 || got[0] != "[10:02:00] <Codex> Listing the open PRs." || got[1] != "[10:03:29] <Codex> step 29" || !strings.HasPrefix(got[2], "[eagent 10:04:00]") {
-		t.Fatalf("a long step: %d blocks, breakpoints on %q", n, got)
+	if len(got) != 3 || got[0] != "[10:02:00] <Codex> Listing the open PRs." || got[1] != "[10:03:29] <Codex> step 29" || !strings.HasPrefix(got[2], "[eagent 10:04:00]") {
+		t.Fatalf("a long step: breakpoints on %q", got)
 	}
-	// A count left over from a longer conversation (before a restart from
-	// a dossier) marks nothing.
+	// Entries left by another conversation (the one before a restart from
+	// a dossier) mark nothing.
+	other := anthropicMessages(Request{Messages: with(40, "[eagent 09:00:00] Another conversation.")}, "")
+	stale := anthropicBridge(other, []byte("before the restart"), nil)
 	fresh := anthropicMessages(Request{Messages: with(0, "[eagent 10:05:00] A look.")}, "")
-	if anthropicBridge(fresh, 500); len(marked(fresh)) != 2 {
+	if anthropicBridge(fresh, nil, stale); len(marked(fresh)) != 2 {
 		t.Fatalf("after a restart: breakpoints on %q", marked(fresh))
 	}
 }
@@ -169,9 +172,9 @@ func TestAnthropicRequestKeepsToFourBreakpoints(t *testing.T) {
 	if !strings.Contains(bodies[2], `"cache_control":{"type":"ephemeral"},"description":"","input_schema":{"type":"object"},"name":"send_message"`) {
 		t.Fatalf("with no system prompt the last tool carries no breakpoint: %s", bodies[2])
 	}
-	// The third breakpoint of the long step is on the block before the end
-	// of the first prompt.
-	if !strings.Contains(bodies[1], `{"cache_control":{"type":"ephemeral"},"text":"three","type":"text"}`) {
+	// The third breakpoint of the long step is on the end of the first
+	// prompt, which the second request still has.
+	if !strings.Contains(bodies[1], `{"cache_control":{"type":"ephemeral"},"text":"the end of the first prompt","type":"text"}`) {
 		t.Fatalf("the long step has no breakpoint where the first call left its entry: %s", bodies[1])
 	}
 }
