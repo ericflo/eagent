@@ -126,3 +126,34 @@ func oldSessionFixtures(t *testing.T, project string) (done, upgraded string) {
 	)
 	return done, upgraded
 }
+
+// TestBrowserNoEffortIsNotShownAsNone: on Chat Completions a route with no
+// effort sends none, and the effort control lights 'default', not 'none',
+// even on a model whose checked efforts include none. Runs by hand, like
+// TestBrowserOldSession.
+func TestBrowserNoEffortIsNotShownAsNone(t *testing.T) {
+	module := os.Getenv("EAGENT_PLAYWRIGHT_MODULE")
+	if module == "" {
+		t.Skip("set EAGENT_PLAYWRIGHT_MODULE to run the browser test")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not installed")
+	}
+	s, project := newTestServer(t)
+	if err := os.MkdirAll(filepath.Join(project, ".agents", "eagent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// DeepSeek V4.1 Flash 1017 on Together lists none among its efforts.
+	if err := os.WriteFile(filepath.Join(project, ".agents", "eagent", "config.json"), []byte(`{"model":{"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017","reasoning_effort":null}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.loopbackOnly(s.Handler()))
+	defer srv.Close()
+	cmd := exec.Command("node", filepath.Join("testdata", "old-session-browser.mjs"), srv.URL, "effort", "")
+	cmd.Env = append(os.Environ(), "EAGENT_PLAYWRIGHT_MODULE="+module)
+	out, err := cmd.CombinedOutput()
+	t.Logf("%s", out)
+	if err != nil {
+		t.Fatalf("browser test failed: %v", err)
+	}
+}
