@@ -206,6 +206,47 @@ func replaceImages(req Request, note func(Image) string) Request {
 	return req
 }
 
+// WithRefused returns the request with the pictures at paths marked as
+// refused (Image.Refused), as the record will mark them on every later
+// request. A caller that has just written a refusal down and goes on with
+// the same request through another client (a fallback route) uses it, so
+// that client is not sent a picture the record says was refused, and what
+// it is sent is what the conversation renders from then on.
+func (req Request) WithRefused(paths []string) Request {
+	if len(paths) == 0 {
+		return req
+	}
+	refused := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		refused[p] = true
+	}
+	var out []Message
+	for i, m := range req.Messages {
+		var images []Image
+		for j, im := range m.Images {
+			if !refused[im.Path] || im.Refused {
+				continue
+			}
+			if images == nil {
+				images = append([]Image(nil), m.Images...)
+			}
+			images[j].Refused = true
+		}
+		if images == nil {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), req.Messages...)
+		}
+		m.Images = images
+		out[i] = m
+	}
+	if out != nil {
+		req.Messages = out
+	}
+	return req
+}
+
 // imagePaths lists the pictures a request carries.
 func imagePaths(req Request) []string {
 	var out []string

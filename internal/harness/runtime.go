@@ -427,6 +427,10 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			r.sync(func() {
 				r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: refused}))
 			})
+			// The request in hand was rendered before that was written:
+			// should it go on to another route, it goes as the record
+			// now renders it.
+			req = req.WithRefused(refused)
 		}
 		if err == nil {
 			if offline > 0 {
