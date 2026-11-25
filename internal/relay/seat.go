@@ -149,6 +149,14 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 			return nil, Started{}, err
 		}
 	}
+	if !resume && spec.Spool != "" {
+		// The spool belongs to the relay's name, and a name is used again
+		// after its agent stopped. What waits there was held for that
+		// conversation; a fresh one must not run it. A resume keeps it.
+		if err := clearSpool(spec.Spool); err != nil {
+			return nil, Started{}, err
+		}
+	}
 	for path, content := range spec.Files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, Started{}, err
@@ -904,6 +912,27 @@ func (s *Seat) moveCut() time.Time {
 		cut = s.sinceKept
 	}
 	return cut
+}
+
+// clearSpool removes the files waiting in a spool: messages, ones a hook
+// claimed (.taken) and half-written ones.
+func clearSpool(spool string) error {
+	list, err := os.ReadDir(spool)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range list {
+		if e.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(spool, e.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func removePending(list []*pending, x *pending) []*pending {
