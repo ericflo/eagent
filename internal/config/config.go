@@ -788,6 +788,42 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	return cfg, cfg.Validate()
 }
 
+// ChosenPreset is a built-in preset as a running session gets it when the
+// user picks it from the list of configurations: the project file's
+// settings over the preset, as at a start with --preset, except which model
+// the file names and where it is reached (and its default_config). The
+// model is what picking a preset chooses; the file's own would make every
+// preset the same model, or a broken one (a model name over another
+// provider's address). The file's effort and reply ceiling still apply.
+func ChosenPreset(project, preset string) (Config, error) {
+	file, err := readJSONMap(File(project))
+	if err != nil {
+		return Defaults(), err
+	}
+	return ChosenPresetWithFile(project, preset, file)
+}
+
+// ChosenPresetWithFile is ChosenPreset over given file contents.
+func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessage) (Config, error) {
+	if _, ok := ResolvePreset(preset); !ok {
+		return Defaults(), fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
+	}
+	migrated, _ := MigrateLegacy(file)
+	rest := make(map[string]json.RawMessage, len(migrated))
+	for k, v := range migrated {
+		if k != "default_config" && k != "preset" {
+			rest[k] = v
+		}
+	}
+	if route := object(rest["model"]); route != nil {
+		for _, k := range []string{"protocol", "base_url", "model", "api_key_env", "context_tokens", "fallback"} {
+			delete(route, k)
+		}
+		rest["model"], _ = json.Marshal(route)
+	}
+	return LoadBundleWithFile(project, preset, "", rest)
+}
+
 // normalize spells out what an empty setting means: an empty summarizer
 // mode is inline.
 func normalize(cfg *Config) {
