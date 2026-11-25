@@ -155,6 +155,12 @@ func (r *Runtime) needsDossier() bool {
 	if t.adopt {
 		return true // a session of the three-actor design: see resume.go
 	}
+	if r.st.Unfinished() {
+		// The last run stopped in the middle of a restart: the new file was
+		// begun and its dossier never written. That restart is finished
+		// before anything else, from the conversation it was replacing.
+		return true
+	}
 	limit := r.rolloverTokens()
 	if !t.overflowed && r.contextTokens() < limit {
 		return false
@@ -233,6 +239,11 @@ func (r *Runtime) startDossier() {
 	t.busy, t.compacting, t.callAt = true, true, time.Now()
 	r.flushSilent()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
+	if r.st.Unfinished() {
+		// The new file's start set the prompt's size back to nothing; the
+		// conversation being replaced is as long as when it was closed.
+		job.tokens = max(job.tokens, r.closedTokens())
+	}
 	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= dossierUnseenBytes {
 		// Something arrived that no look has taken in yet: the message
 		// or the turn end that set this restart off. The briefing does
@@ -294,7 +305,7 @@ const dossierRefused = "the model refused the conversation as too long"
 func (r *Runtime) dossierFromFiles(job *dossierJob, reason string) {
 	data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex(), Fresh: true, Legacy: job.adopt, Reason: reason}
 	var msgs []llm.Message
-	if cur := r.st.Current(); !job.adopt && cur != nil && cur.Dossier != "" {
+	if cur := r.st.Conversation(); !job.adopt && cur != nil && cur.Dossier != "" {
 		if all := r.st.View(&r.view); len(all) > 0 {
 			msgs = all[:1:1]
 		}
@@ -676,6 +687,69 @@ func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (str
 	return next, nil
 }
 
+// closedTokens is the prompt size the last subsession.end recorded: how
+// long the conversation was when its file was closed. Loop goroutine only.
+func (r *Runtime) closedTokens() int {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		if ev := r.st.Events[i]; ev.Type == event.SubsessionEnd {
+			var d event.SubsessionEndData
+			_ = ev.Decode(&d)
+			return d.InputTokens
+		}
+	}
+	return 0
+}
+
+// finishOpening completes a restart the last run stopped between closing
+// its file and starting the next: the record says the subsession ended and
+// no other began. The file it named is begun now, so the session continues
+// in it, and the restart is then finished like one stopped before its
+// dossier (needsDossier). Before anything else is written on resume.
+func (r *Runtime) finishOpening() {
+	cur := r.st.Current()
+	if cur == nil || cur.EndSeq == 0 {
+		return
+	}
+	// The end is the last thing the record holds: the stop came right after
+	// it. (Found by number, not by place: the files are read in the order
+	// their names sort.)
+	var last *event.Event
+	for i := range r.st.Events {
+		if ev := &r.st.Events[i]; last == nil || ev.Seq > last.Seq {
+			last = ev
+		}
+	}
+	var end event.SubsessionEndData
+	if last == nil || last.Type != event.SubsessionEnd || last.Decode(&end) != nil {
+		return
+	}
+	reason := "rollover"
+	if end.Reason == "resumed by an eagent with one loop" {
+		reason = "upgrade"
+	}
+	next := end.NextFile
+	if next != "" && next != r.sess.Current() {
+		if _, err := r.sess.OpenSubsession(next); err != nil {
+			next = ""
+		}
+	}
+	if next == "" {
+		name, err := r.sess.CreateSubsession(time.Now())
+		if err == nil {
+			_, err = r.sess.OpenSubsession(name)
+		}
+		if err != nil {
+			// The session goes on in the file it has. Its record says the
+			// subsession ended; the conversation is the same either way.
+			r.ui.Log("could not begin the file the last restart was opening: %v", err)
+			return
+		}
+		next = name
+	}
+	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: next, Index: len(r.st.Subsessions), Reason: reason}))
+	r.ui.Log("the last run stopped while restarting the conversation; finishing that restart")
+}
+
 // recordFile is one subsession file of the record, as the log shows it.
 type recordFile struct {
 	name        string
@@ -763,7 +837,7 @@ func (r *Runtime) fileTable(opens string) string {
 // goroutine only.
 func (r *Runtime) dossierIndex() string {
 	var from int64
-	if cur := r.st.Current(); cur != nil {
+	if cur := r.st.Conversation(); cur != nil {
 		from = cur.StartSeq
 		if cur.CoversSeq > 0 || cur.CoversNone {
 			from = cur.CoversSeq + 1

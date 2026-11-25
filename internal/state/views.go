@@ -55,9 +55,10 @@ func (s *State) QuestionText(id string) string {
 // A subsession that opened with a briefing shows everything after the last
 // event the briefing took in, including events that were written to the
 // previous file while the briefing was being composed. Any other subsession
-// shows its own file.
+// shows its own file. A restart stopped before its briefing was written is
+// not the conversation yet: the one before it is, with everything since.
 func (s *State) viewEvents() ([]event.Event, *event.Event) {
-	cur := s.Current()
+	cur := s.Conversation()
 	if cur == nil {
 		return s.Events, nil
 	}
