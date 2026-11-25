@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -81,8 +82,11 @@ const (
 
 // dossierBudget is how many characters of the record one pass may read
 // back: what the model's window has left after the prompt it already
-// holds and the room it needs to write, within fixed bounds. Loop
-// goroutine only.
+// holds and the room it needs to write, up to a fixed bound. It is small
+// or negative when the prompt nearly fills the window (rollover_tokens
+// fixed close to it, or one turn that took the conversation far past the
+// limit); such a pass is not written inside the conversation
+// (startDossier). Loop goroutine only.
 func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
 	window, reply := r.window()
 	limit := dossierReadMax
@@ -91,7 +95,7 @@ func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
 	}
 	free := window - promptTokens - reply - 8000
 	// About three characters of the record to a token, with a fifth held back.
-	return max(dossierReadMin, min(limit, free*3*4/5))
+	return min(limit, free*3*4/5)
 }
 
 // window is the context window of the model eagent's calls go to right now,
@@ -196,6 +200,7 @@ type dossierJob struct {
 	covers int64
 	tokens int
 	adopt  bool // the record is the three-actor design's (resume.go)
+	fresh  bool // written from the files, without the conversation
 }
 
 // dossierResult is what a pass came back with.
@@ -227,39 +232,60 @@ func (r *Runtime) startDossier() {
 		// the restart, and the facts list it with its places.)
 		job.covers = t.seen
 	}
-	data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex()}
-	var msgs []llm.Message
 	switch {
 	case t.adopt:
 		// A session written by the three-actor design. Its conversation
 		// was the orchestrator's and has no rendering here, so the model
 		// writes from the files, as a writer with no memory would.
-		data.Fresh, data.Legacy = true, true
+		r.dossierFromFiles(&job, "")
 		r.ui.Log("this session was written by an earlier eagent; writing a dossier from its record to continue from")
 	case t.overflowed:
 		// The provider refused the conversation as too long, so it cannot
-		// be the prompt. The model works from the files instead, starting
-		// from the dossier this subsession opened with (the first message
-		// of the conversation).
-		data.Fresh, data.Reason = true, "the model refused the conversation as too long"
-		if cur := r.st.Current(); cur != nil && cur.Dossier != "" {
-			if all := r.st.View(&r.view); len(all) > 0 {
-				msgs = all[:1:1]
-			}
-		}
+		// be the prompt. The model works from the files instead.
+		r.dossierFromFiles(&job, dossierRefused)
 		r.ui.Log("the model refused the conversation as too long; restarting it from a dossier")
+	case r.dossierBudget(job.tokens, false) < dossierReadMin:
+		// The conversation leaves the window too little room to read the
+		// record on top of it. Written inside it, the pass would be
+		// refused as too long at its first lookups, or write a map
+		// without having read anything.
+		r.dossierFromFiles(&job, "the conversation fills too much of the model's context window to write a briefing inside it")
+		r.ui.Log("the conversation reached %dk tokens, too near the model's window to write a dossier inside it; writing one from the record", job.tokens/1000)
 	default:
-		msgs = r.st.View(&r.view)
+		data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex()}
+		job.budget = r.dossierBudget(job.tokens, false)
+		job.msgs = state.WithTail(r.st.View(&r.view), r.prompts.Render("DOSSIER.md", data))
 		r.ui.Log("the conversation reached %dk tokens; restarting it from a dossier", job.tokens/1000)
 	}
-	job.budget = r.dossierBudget(job.tokens, data.Fresh)
-	job.msgs = state.WithTail(msgs, r.prompts.Render("DOSSIER.md", data))
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		res := r.writeDossier(job)
 		r.post(func() { r.finishDossier(job, res) })
 	}()
+}
+
+// dossierRefused is why a pass is written from the files after the
+// provider would not take the conversation.
+const dossierRefused = "the model refused the conversation as too long"
+
+// dossierFromFiles makes a pass one that is written from the files alone,
+// with why (the conversation cannot be the prompt). The model starts from
+// the dossier this subsession opened with, which is the first message of
+// the conversation, and has the whole window to read the record in. One
+// lookup is always allowed: a writer that could read nothing could not
+// write a map. Loop goroutine only.
+func (r *Runtime) dossierFromFiles(job *dossierJob, reason string) {
+	data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex(), Fresh: true, Legacy: job.adopt, Reason: reason}
+	var msgs []llm.Message
+	if cur := r.st.Current(); !job.adopt && cur != nil && cur.Dossier != "" {
+		if all := r.st.View(&r.view); len(all) > 0 {
+			msgs = all[:1:1]
+		}
+	}
+	job.fresh = true
+	job.budget = max(dossierReadChars, r.dossierBudget(job.tokens, true))
+	job.msgs = state.WithTail(msgs, r.prompts.Render("DOSSIER.md", data))
 }
 
 // dossierUnseenBytes is the most that may have arrived since the last look
@@ -309,6 +335,9 @@ func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 	msgs := job.msgs[:len(job.msgs):len(job.msgs)]
 	read, rejected, retried, last := 0, false, false, false
+	// lookedAt is where the last lookups begin in msgs (0 for none), and
+	// dropped says a round of them was already taken out again.
+	lookedAt, dropped := 0, false
 	started := time.Now()
 	for res.calls < dossierMaxCalls {
 		ctx, cancel := context.WithTimeout(r.ctx, dossierTimeout)
@@ -319,6 +348,29 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 				return res
 			}
 			r.ui.Log("dossier: model call failed: %s", shortErr(err))
+			var ae *llm.APIError
+			if errors.As(err, &ae) && ae.ContextOverflow() {
+				// The prompt does not fit. The same request would be
+				// refused again, so it is made smaller instead.
+				switch {
+				case lookedAt > 0 && !dropped:
+					// What it just read back was too much: those results
+					// go, and it writes with what it had before them.
+					dropped, last = true, true
+					msgs = append(msgs[:lookedAt:lookedAt], llm.Message{Role: "user", Text: "[eagent] What you looked up last did not fit in the model's context window with the rest, so those results were taken out again. Do not look anything else up. Write the briefing now from what is above, as your whole reply, with no tool call."})
+					r.ui.Log("dossier: the last lookups did not fit; asking for the briefing without them")
+					continue
+				case !job.fresh:
+					// The conversation it was to be written in is too
+					// long: from the files, as after a refused turn.
+					r.sync(func() { r.dossierFromFiles(&job, dossierRefused) })
+					msgs = job.msgs[:len(job.msgs):len(job.msgs)]
+					read, last, lookedAt, dropped = 0, false, 0, false
+					r.ui.Log("dossier: the conversation is too long to write in; writing from the record")
+					continue
+				}
+				return res
+			}
 			if retried || time.Since(started) > dossierPassTime {
 				return res
 			}
@@ -338,6 +390,9 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		res.usage.Cached += resp.Usage.Cached
 		res.usage.Reasoning += resp.Usage.Reasoning
 		res.elapsed += resp.Elapsed
+		if len(resp.ToolCalls) > 0 {
+			lookedAt = len(msgs)
+		}
 		msgs = append(msgs, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL})
 		if len(resp.ToolCalls) > 0 {
 			// Looking things up before writing.
@@ -476,6 +531,9 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
+	// A new conversation: if this one turns out too long from its first
+	// call as well, the user is told again.
+	t.futileLogged = false
 	cites, _ := checkCitations(res.text, job.lines)
 	r.ui.Log("subsession %d begins with a dossier written by %s (%d characters, %d places cited, %d lookups)", len(r.st.Subsessions), by, len(body), cites, len(res.consulted))
 }

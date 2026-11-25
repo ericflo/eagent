@@ -3,11 +3,13 @@ package harness
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
@@ -340,5 +342,135 @@ func TestAQuestionCountsAsHavingSpoken(t *testing.T) {
 	})
 	if q := s.events(event.Question); len(q) != 1 || live != q[0].Seq || replayed != live {
 		t.Fatalf("saidSeq is %d live and %d from the log; the question is event %v", live, replayed, q)
+	}
+}
+
+const tooLongBody = `{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum","type":"invalid_request_error"}}`
+
+// dossierAfterALook starts a session whose first look reports a prompt
+// past the limit, so the dossier pass begins at once. write answers every
+// call of the pass.
+func dossierAfterALook(t *testing.T, tune func(*config.Config), write func(ask string, msgs []map[string]any) reply) *session {
+	t.Helper()
+	var first atomic.Bool
+	return startSession(t, brief, func(_ string, msgs []map[string]any) reply {
+		if ask := dossierRequest(msgs); ask != "" {
+			return write(ask, msgs)
+		}
+		r := hold()
+		if first.CompareAndSwap(false, true) {
+			r.prompt = 25000
+		}
+		return r
+	}, tune)
+}
+
+const fromTheFiles = "You no longer have the conversation in front of you"
+
+// A conversation that nearly fills the model's window leaves no room to
+// read the record on top of it. The dossier is then written from the
+// files, where the whole window is free, and not inside the conversation,
+// where the first lookups would be refused as too long.
+func TestDossierIsWrittenFromTheFilesWhenTheConversationFillsTheWindow(t *testing.T) {
+	var mu sync.Mutex
+	var asks []string
+	s := dossierAfterALook(t, func(cfg *config.Config) {
+		// 25,000 tokens of conversation and 30,000 kept for the reply, in
+		// a window of 60,000.
+		cfg.Model.ContextTokens, cfg.Model.MaxTokens = 60_000, 30_000
+	}, func(ask string, msgs []map[string]any) reply {
+		mu.Lock()
+		asks = append(asks, ask)
+		mu.Unlock()
+		return reply{text: briefing(places(ask)[:3])}
+	})
+	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asks) != 1 || !strings.Contains(asks[0], fromTheFiles) || !strings.Contains(asks[0], "fills too much of the model's context window") {
+		t.Fatalf("the pass was asked %d times; first:\n%s", len(asks), asks[0])
+	}
+	if d := s.dossiers()[0]; d.By != "eagent" {
+		t.Fatalf("dossier by %q", d.By)
+	}
+}
+
+// A dossier pass the provider refuses as too long is not asked the same
+// thing again. Lookups that did not fit are taken out and the model
+// writes without them; a conversation that does not fit is left and the
+// model writes from the files. Either way the model's dossier is kept,
+// where the harness would otherwise have had to write one itself.
+func TestDossierPassRefusedAsTooLongIsMadeSmaller(t *testing.T) {
+	t.Run("the lookups did not fit", func(t *testing.T) {
+		var mu sync.Mutex
+		refused := 0
+		var wrote []map[string]any
+		s := dossierAfterALook(t, nil, func(ask string, msgs []map[string]any) reply {
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case strings.Contains(lastText(msgs), "did not fit in the model's context window"):
+				wrote = msgs
+				return reply{text: briefing(places(ask)[:3])}
+			case msgs[len(msgs)-1]["role"] == "tool":
+				refused++
+				return reply{status: 400, body: tooLongBody}
+			}
+			return reply{calls: []event.ToolCall{tc("session_read", fmt.Sprintf(`{"file":%q}`, strings.SplitN(places(ask)[0], ":", 2)[0]))}}
+		})
+		s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
+		mu.Lock()
+		defer mu.Unlock()
+		if d := s.dossiers()[0]; d.By != "eagent" || refused != 1 {
+			t.Fatalf("dossier by %q after %d refusals", d.By, refused)
+		}
+		for _, m := range wrote {
+			if m["role"] == "tool" {
+				t.Fatal("the lookups that did not fit are still in the request")
+			}
+		}
+		if strings.Contains(allText(wrote), fromTheFiles) {
+			t.Fatal("the conversation was given up, though it fitted before the lookups")
+		}
+	})
+	t.Run("the conversation did not fit", func(t *testing.T) {
+		var mu sync.Mutex
+		refused := 0
+		var fresh []map[string]any
+		s := dossierAfterALook(t, nil, func(ask string, msgs []map[string]any) reply {
+			mu.Lock()
+			defer mu.Unlock()
+			if !strings.Contains(ask, fromTheFiles) {
+				refused++
+				return reply{status: 400, body: tooLongBody}
+			}
+			fresh = msgs
+			return reply{text: briefing(places(ask)[:3])}
+		})
+		s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
+		mu.Lock()
+		defer mu.Unlock()
+		if d := s.dossiers()[0]; d.By != "eagent" || refused != 1 {
+			t.Fatalf("dossier by %q after %d refusals", d.By, refused)
+		}
+		if len(fresh) != 2 || !strings.Contains(lastUserText(fresh), "refused the conversation as too long") {
+			t.Fatalf("the writer was given %d messages; the last:\n%s", len(fresh), lastUserText(fresh))
+		}
+	})
+}
+
+// The warning that a restart cannot make room is given once for a
+// conversation, not once for a session: a later conversation that is too
+// long from its first call is reported again.
+func TestFullConversationWarningIsPerConversation(t *testing.T) {
+	s := dossierAfterALook(t, nil, func(ask string, msgs []map[string]any) reply {
+		return reply{text: briefing(places(ask)[:3])}
+	})
+	s.rt.sync(func() { s.rt.turns.futileLogged = true })
+	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
+	var logged bool
+	s.rt.sync(func() { logged = s.rt.turns.futileLogged })
+	if logged {
+		t.Fatal("the new conversation still counts as warned about")
 	}
 }

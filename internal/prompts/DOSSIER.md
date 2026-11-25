@@ -22,7 +22,7 @@ The record is these files, oldest first. One line of a file is one event, cited 
 {{if .Legacy}}
 You have no conversation to work from, only the record. Read the newest file first with session_read, then the older ones; where a file opens with a briefing the earlier eagent wrote, read it and follow its map.
 {{else if .Fresh}}
-You no longer have the conversation in front of you: the model refused it as too long. Work from the record instead. Read the newest file first with session_read, then follow the map of the briefing that file opens with into the older ones.
+You no longer have the conversation in front of you: it is too long to write a briefing in. Work from the record instead. Read the newest file first with session_read, then follow the map of the briefing that file opens with into the older ones.
 {{end}}
 The record by place:
 {{.Index}}

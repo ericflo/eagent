@@ -767,8 +767,8 @@ func TestDossierLookupBudgetFollowsTheModelsWindow(t *testing.T) {
 		})
 		return n
 	}
-	if got := budget(64_000, 60_000, false); got != dossierReadMin {
-		t.Fatalf("a nearly full small window gives %d, want the floor %d", got, dossierReadMin)
+	if got := budget(64_000, 60_000, false); got >= dossierReadMin {
+		t.Fatalf("a nearly full small window gives %d; it has no room, so the pass must be written from the files (under %d)", got, dossierReadMin)
 	}
 	mid := budget(200_000, 64_000, false)
 	if mid <= dossierReadMin || mid >= dossierReadMax {
