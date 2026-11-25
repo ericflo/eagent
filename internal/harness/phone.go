@@ -46,8 +46,11 @@ type phone struct {
 	wg     sync.WaitGroup
 	queue  chan func(context.Context)
 
-	sid     string // the eagent session id
-	resumes int    // how many times the session had been resumed when the mirror started
+	sid string // the eagent session id
+	// logf says what the mirror could not do where the user reads the
+	// session's log (the terminal, the web UI). Any goroutine.
+	logf    func(string, ...any)
+	resumes int // how many times the session had been resumed when the mirror started
 
 	// The status line (see phonestatus.go): want is what the loop last
 	// derived, sent is what the server shows, stats feed the thread meta.
@@ -100,7 +103,7 @@ func (r *Runtime) startPhone() {
 	client.Patient = true
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &phone{
-		client: client, ref: finalechat.Ref("eagent:" + r.sess.ID),
+		client: client, ref: finalechat.Ref("eagent:" + r.sess.ID), logf: r.ui.Log,
 		title: filepath.Base(r.opts.Project), agent: fc.AgentName(),
 		timeout: fc.QuestionTimeout(), mirror: fc.Mirror(),
 		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
