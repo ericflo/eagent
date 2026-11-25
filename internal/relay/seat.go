@@ -149,6 +149,14 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 			return nil, Started{}, err
 		}
 	}
+	if !resume && spec.Spool != "" {
+		// The spool belongs to the relay's name, and a name is used again
+		// after its agent stopped. What waits there was held for that
+		// conversation; a fresh one must not run it. A resume keeps it.
+		if err := clearSpool(spec.Spool); err != nil {
+			return nil, Started{}, err
+		}
+	}
 	for path, content := range spec.Files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, Started{}, err
@@ -493,6 +501,15 @@ func (s *Seat) watch() {
 				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
 				first := s.transcript == ""
+				if _, ok := s.agent.(sessionStarter); ok && first && !s.followed && s.inner != "" && inner != s.inner {
+					// The agent left the session it was started on before
+					// the seat found any transcript (pi's /resume before its
+					// first message). The one it is on holds history the
+					// seat never saw live: decide where its news begins as
+					// for a move the seat saw.
+					s.sinceKept = s.since
+					s.since, s.followed, s.onAt = s.moveCut(), true, time.Time{}
+				}
 				s.transcript, s.inner = path, inner
 				exact := false
 				if s.followed {
@@ -549,7 +566,12 @@ func (s *Seat) watch() {
 				return
 			}
 		}
-		if pl, ok := s.agent.(poller); ok && tail != nil {
+		_, starter := s.agent.(sessionStarter)
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
+			// An agent that moves between sessions of its own (pi) is
+			// polled before any transcript is found too: a sighting on the
+			// session it was started on dates a move made before its first
+			// message.
 			pl.poll(s, now)
 		}
 		if dr, ok := s.agent.(dialogReporter); ok {
@@ -733,7 +755,8 @@ func (s *Seat) checkScreen(now time.Time) {
 	}
 	since := now.Sub(s.stateAt)
 	s.mu.Unlock()
-	if state == "starting" && looksReady(screen) {
+	ready := s.ready(screen)
+	if state == "starting" && ready {
 		// Codex draws a ready-looking screen for a moment before its trust
 		// prompt appears: ready only counts when it holds across two looks.
 		s.mu.Lock()
@@ -750,7 +773,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
-	} else if state == "blocked" && looksReady(screen) && !s.dialogShowing() {
+	} else if state == "blocked" && ready && !s.dialogShowing() {
 		s.setState("idle", "")
 	}
 }
@@ -836,6 +859,24 @@ func looksReady(screen string) bool {
 	return false
 }
 
+// readyReporter is an agent whose own hook says whether it waits at its
+// prompt (pi's status file); known is false when it says nothing usable.
+type readyReporter interface {
+	reportedReady(s *Seat) (ready, known bool)
+}
+
+// ready says whether the agent waits at its prompt: what its hook reports,
+// when it reports anything, and otherwise what the screen looks like. A
+// screen can look ready while the agent works (pi always draws its footer).
+func (s *Seat) ready(screen string) bool {
+	if rr, ok := s.agent.(readyReporter); ok {
+		if ready, known := rr.reportedReady(s); known {
+			return ready
+		}
+	}
+	return looksReady(screen)
+}
+
 // sessionStarter is an agent that can say how many entries a transcript
 // held when the agent opened it (pi's extension records it): those are
 // history, the rest is news.
@@ -870,6 +911,14 @@ func (s *Seat) follow(id string) {
 	if !s.followed {
 		s.sinceKept = s.since
 	}
+	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, s.moveCut(), time.Time{}
+}
+
+// moveCut is where news begins in a transcript the agent moved to, when the
+// agent cannot say: just before it was last seen on the session it left,
+// never earlier than sinceKept, "now" without a sighting. The caller holds
+// s.mu and has set sinceKept.
+func (s *Seat) moveCut() time.Time {
 	cut := time.Now()
 	if !s.onAt.IsZero() && s.onAt.Before(cut) {
 		cut = s.onAt.Add(-time.Millisecond)
@@ -877,7 +926,28 @@ func (s *Seat) follow(id string) {
 	if cut.Before(s.sinceKept) {
 		cut = s.sinceKept
 	}
-	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, cut, time.Time{}
+	return cut
+}
+
+// clearSpool removes the files waiting in a spool: messages, ones a hook
+// claimed (.taken) and half-written ones.
+func clearSpool(spool string) error {
+	list, err := os.ReadDir(spool)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range list {
+		if e.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(spool, e.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func removePending(list []*pending, x *pending) []*pending {

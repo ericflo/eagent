@@ -80,15 +80,38 @@ export default function (pi: any) {
 		} catch {}
 	}
 
+	// A hand-over pi has not taken yet. pi.sendUserMessage returns nothing
+	// and a refusal (a prompt while pi compacts, no model) shows only as an
+	// extension error, so the claimed files stay until pi starts the run
+	// that carries them; if it stays idle instead, they go back to wait.
+	let handing: any = null;
+	let tries = 0;
+	let retryAt = 0;
+
+	// Files claimed by a pi that exited before taking them wait again.
+	if (spool) {
+		try {
+			for (const name of fs.readdirSync(spool)) {
+				if (!name.startsWith(".") && name.endsWith(".txt.taken")) {
+					try {
+						fs.renameSync(path.join(spool, name), path.join(spool, name.slice(0, -".taken".length)));
+					} catch {}
+				}
+			}
+		} catch {}
+	}
+
 	// take claims every waiting message (renaming it first, so no message
-	// is handed over twice) and returns them joined, oldest first.
-	function take(): string {
-		if (!spool) return "";
+	// is handed over twice) and returns them joined, oldest first, with the
+	// claimed files.
+	function take(): { text: string; files: string[] } {
+		const out = { text: "", files: [] as string[] };
+		if (!spool) return out;
 		let names: string[];
 		try {
 			names = fs.readdirSync(spool).filter((n) => n.endsWith(".txt") && !n.startsWith(".")).sort();
 		} catch {
-			return "";
+			return out;
 		}
 		const texts: string[] = [];
 		for (const name of names) {
@@ -99,21 +122,55 @@ export default function (pi: any) {
 			} catch {
 				continue;
 			}
+			out.files.push(taken);
 			try {
 				const text = fs.readFileSync(taken, "utf8").trim();
 				if (text) texts.push(text);
 			} catch {}
+		}
+		out.text = texts.join("\n\n");
+		return out;
+	}
+
+	// handed: pi took the hand-over; its files are done with.
+	function handed() {
+		if (!handing) return;
+		for (const file of handing.files) {
 			try {
-				fs.unlinkSync(taken);
+				fs.unlinkSync(file);
 			} catch {}
 		}
-		return texts.join("\n\n");
+		handing = null;
+		tries = 0;
+	}
+
+	// giveBack returns a refused hand-over to the spool. It goes again at
+	// once, then after a pause that grows while pi keeps refusing.
+	function giveBack() {
+		if (!handing) return;
+		for (const file of handing.files) {
+			try {
+				fs.renameSync(file, file.slice(0, -".taken".length));
+			} catch {}
+		}
+		handing = null;
+		tries++;
+		retryAt = tries < 2 ? 0 : Date.now() + Math.min(60000, 5000 * 2 ** (tries - 2));
 	}
 
 	function deliver() {
-		if (prompting) return;
-		const text = take();
-		if (text) pi.sendUserMessage(text);
+		if (prompting || handing || Date.now() < retryAt) return;
+		const { text, files } = take();
+		if (!files.length) return;
+		handing = { files, at: Date.now() };
+		if (!text) {
+			handed();
+			return;
+		}
+		// followUp: should a run start meanwhile (a message typed just now),
+		// pi queues this after it instead of throwing it away. When pi is
+		// idle it starts a run with it, as a plain message does.
+		pi.sendUserMessage(text, { deliverAs: "followUp" });
 	}
 
 	pi.on("session_start", (_event: any, ctx: any) => {
@@ -130,7 +187,9 @@ export default function (pi: any) {
 		clearInterval(timer);
 		timer = setInterval(() => {
 			try {
-				if (status.state === "idle" && ctx.isIdle() && !ctx.hasPendingMessages()) deliver();
+				const idle = status.state === "idle" && ctx.isIdle() && !ctx.hasPendingMessages();
+				if (idle && handing && Date.now() - handing.at > 5000) giveBack();
+				if (idle) deliver();
 			} catch {}
 		}, 1000);
 		if (timer && timer.unref) timer.unref();
@@ -139,6 +198,7 @@ export default function (pi: any) {
 		clearInterval(timer);
 	});
 	pi.on("agent_start", () => {
+		handed();
 		save({ state: "working", aborted: false });
 	});
 	pi.on("agent_settled", (event: any) => {
@@ -208,12 +268,34 @@ func (piAgent) afterTurn(s *Seat, id, text string) error {
 // while pi worked (and not yet read) back into the editor; the seat's
 // stuck-send check presses Enter on them, or they go with the next message.
 
-var piFooter = regexp.MustCompile(`\d+(?:\.\d+)?%/\d+(?:\.\d+)?[kKmMgG]? \(`)
+// piFooter is the context use in pi's footer: "0.4%/1.0M (auto)", without
+// "(auto)" when auto-compaction is off (then padding and the model, or the
+// line's end), and "?" for the percentage after a compaction.
+var piFooter = regexp.MustCompile(`(?m)(?:^|\s)(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+)?[kKmMgG]?(?: \(auto\)|  |[ \t]*$)`)
 
-// ready matches pi's footer (context use, "0.4%/1.0M (auto)") or the key
-// hints at the top of a fresh screen.
+// ready matches pi's footer or the key hints at the top of a fresh screen.
+// pi draws its footer all the time, working or showing its own selectors,
+// so this is only the fallback for a pi whose status file says nothing
+// (reportedReady).
 func (piAgent) ready(screen string) bool {
 	return piFooter.MatchString(screen) || strings.Contains(screen, "escape interrupt · ctrl+c/ctrl+d clear/exit")
+}
+
+// reportedReady is what the extension's status file says: idle with no
+// dialog open is ready, working is not. Without a status file, or with a
+// state it does not know, the screen decides.
+func (piAgent) reportedReady(s *Seat) (ready, known bool) {
+	st, ok := readPiStatus(s.spec.StatusFile)
+	if !ok {
+		return false, false
+	}
+	switch st.State {
+	case "idle":
+		return strings.TrimSpace(st.Prompt) == "", true
+	case "working":
+		return false, true
+	}
+	return false, false
 }
 
 func (piAgent) dialogs() []dialog {
