@@ -129,6 +129,16 @@ func TestDismissThatResumesASessionClosesTheEarlierRunsCard(t *testing.T) {
 	waitFor(t, "the thread to exist", func() bool { return fp.postCount() >= 1 })
 	fp.userReply("this comes from the phone")
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	// The card is known to a later run only once it is on the record.
+	waitFor(t, "the card on the record", func() bool {
+		for _, ev := range g.log() {
+			var c event.PhoneQuestionData
+			if ev.Type == event.PhoneQuestion && ev.Decode(&c) == nil && c.CardID != "" {
+				return true
+			}
+		}
+		return false
+	})
 	g.interrupt()
 	if n := fp.pendingQuestions(); n != 1 {
 		t.Fatalf("%d cards open after the stop, want the one", n)

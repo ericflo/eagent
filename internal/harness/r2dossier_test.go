@@ -289,7 +289,9 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 		mu.Unlock()
 		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(3500 * time.Millisecond)}
 	})
+	mu.Lock()
 	took := time.Since(first)
+	mu.Unlock()
 	if d := s.dossiers()[0]; d.By != "harness" {
 		t.Fatalf("dossier by %q", d.By)
 	}
