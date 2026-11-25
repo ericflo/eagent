@@ -785,7 +785,8 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 // local editor does: its protocol, key variable, an effort it accepts, and
 // the new model's context window (routePickFields). A field the proposal
 // sets itself, or one the connector may not write, is left as it is. A
-// model no list knows keeps the rest of the route, and its window becomes
+// model no list knows gets the provider's protocol and key variable when
+// the address changes, keeps the rest of the route, and its window becomes
 // unknown. The fallback is kept, as the local editor keeps it.
 func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, d control.Descriptor) error {
 	writable := map[string]bool{}
@@ -867,7 +868,14 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		}
 		picked, err := config.PickRoute(s.Project, r.before, pr.ID, r.after.Model, "")
 		if err != nil {
-			continue // a model no list knows: the rest of the route stays
+			// A model no list knows keeps the rest of the route at the same
+			// provider. At a new address it takes that provider's protocol
+			// and key variable: the old provider's key is not sent there.
+			if strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
+				continue
+			}
+			picked = r.after
+			picked.Protocol, picked.APIKeyEnv = pr.Protocol, pr.KeyEnv
 		}
 		if picked.Protocol != r.after.Protocol {
 			give("protocol", picked.Protocol)

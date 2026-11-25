@@ -66,3 +66,34 @@ func TestSummarizerPickUnderTheEnvironmentsModelGetsItsProvider(t *testing.T) {
 		t.Fatalf("summarizer route = %+v\n%s", r, written)
 	}
 }
+
+// Moving a route to another provider with a model no list knows still
+// gives it that provider's protocol and key variable: the old provider's key
+// is not sent to the new address.
+func TestAddressSwitchWithAnUnlistedModelTakesTheNewProvidersProtocolAndKey(t *testing.T) {
+	clearRouteEnv(t)
+	project := t.TempDir()
+	writeProjectFile(t, project, `{}`)
+	s := &Service{Project: project}
+	apply(t, s, control.Edit{Op: "set", Key: "/model/base_url", Value: "https://api.anthropic.com/v1"}, control.Edit{Op: "set", Key: "/model/model", Value: "claude-unlisted"})
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Protocol != "anthropic" || cfg.Model.APIKeyEnv != "ANTHROPIC_API_KEY" || cfg.Model.ContextTokens != 0 {
+		t.Fatalf("route = %+v", cfg.Model)
+	}
+
+	// And to a registered keyless server.
+	reg, err := config.RegisterServer(context.Background(), project, config.ProbeOptions{URL: "http://gpu-box.invalid:8000/v1", ID: "box", Protocol: "openai-chat"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, s, control.Edit{Op: "set", Key: "/model/base_url", Value: reg.Server.BaseURL}, control.Edit{Op: "set", Key: "/model/model", Value: "whatever-is-loaded"})
+	if cfg, err = config.Load(project, ""); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Protocol != "openai-chat" || cfg.Model.APIKeyEnv != "" || cfg.Model.BaseURL != reg.Server.BaseURL {
+		t.Fatalf("route = %+v", cfg.Model)
+	}
+}
