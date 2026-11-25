@@ -4,8 +4,8 @@ import "testing"
 
 func TestPickRoute(t *testing.T) {
 	project := t.TempDir()
-	base := Actor{Protocol: "openai-responses", BaseURL: "https://api.openai.com/v1", Model: "gpt-x", APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "xhigh", MaxTokens: 32768,
-		Fallback: &Actor{BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-x", APIKeyEnv: "OPENROUTER_API_KEY"}}
+	base := ModelRoute{Protocol: "openai-responses", BaseURL: "https://api.openai.com/v1", Model: "gpt-x", APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "xhigh", MaxTokens: 32768,
+		Fallback: &ModelRoute{BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-x", APIKeyEnv: "OPENROUTER_API_KEY"}}
 	// Another model: the old model's fallback goes, the limits stay, and
 	// the effort moves to the nearest one the model offers.
 	a, err := PickRoute(project, base, "openrouter", "z-ai/glm-5.3", "")
@@ -13,7 +13,7 @@ func TestPickRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a.Fallback != nil || a.MaxTokens != 32768 || a.BaseURL != "https://openrouter.ai/api/v1" || a.APIKeyEnv != "OPENROUTER_API_KEY" {
-		t.Fatalf("picked actor = %+v", a)
+		t.Fatalf("picked route = %+v", a)
 	}
 	if a.ReasoningEffort != "high" {
 		t.Fatalf("effort = %q, want the nearest offered to xhigh", a.ReasoningEffort)

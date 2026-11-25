@@ -6,17 +6,17 @@ import (
 	"strings"
 )
 
-// PickRoute applies a provider + model + reasoning-effort pick to an actor:
-// the one place a pick from the new-session dialog or a running session's
+// PickRoute applies a provider + model + reasoning-effort pick to a route:
+// the one place a pick from the settings editor or a running session's
 // settings becomes a route. The model must be in the static catalog or the
-// cached live list; the network is never touched. The actor keeps its own
+// cached live list; the network is never touched. The route keeps its own
 // limits; picking a different model drops its fallback chain, which belonged
-// to the old model. An empty effort keeps the actor's when the model accepts
+// to the old model. An empty effort keeps the route's when the model accepts
 // it, else takes the nearest level the model offers. An empty provider is
 // inferred from the model.
-func PickRoute(project string, a Actor, providerID, modelID, effort string) (Actor, error) {
+func PickRoute(project string, a ModelRoute, providerID, modelID, effort string) (ModelRoute, error) {
 	if providerID == "" {
-		// No provider named: the actor's own, when it lists the model, or
+		// No provider named: the route's own, when it lists the model, or
 		// the one provider that does.
 		var err error
 		if providerID, err = providerFor(project, a, modelID); err != nil {
@@ -76,7 +76,7 @@ func NearestEffort(offered []string, want string) string {
 }
 
 // providerFor finds the provider for a model named without one.
-func providerFor(project string, a Actor, modelID string) (string, error) {
+func providerFor(project string, a ModelRoute, modelID string) (string, error) {
 	if pr, ok := ProviderForURLFor(project, a.BaseURL); ok {
 		if _, _, ok := ResolveLiveModel(project, pr.ID, modelID); ok {
 			return pr.ID, nil

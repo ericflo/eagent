@@ -33,7 +33,7 @@ type Active struct {
 // Resolution is a configuration with its layers laid bare.
 type Resolution struct {
 	Effective Config `json:"effective"`
-	// Sources maps a JSON pointer ("/orchestrator/model") to the layer that
+	// Sources maps a JSON pointer ("/model/model") to the layer that
 	// set the effective value: "default", "preset:NAME", "file",
 	// "bundle:NAME", or "env:VAR".
 	Sources map[string]string `json:"sources"`
@@ -94,7 +94,8 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.File.ParseError = err.Error()
 			fileMap = nil
 		} else {
-			res.File.UnknownKeys = unknownKeys(fileMap)
+			migrated, _ := MigrateLegacy(fileMap)
+			res.File.UnknownKeys = unknownKeys(migrated)
 			if raw, ok := fileMap["preset"]; ok {
 				_ = json.Unmarshal(raw, &res.File.Preset)
 			}
@@ -182,10 +183,15 @@ func Resolve(project, preset, bundle string) Resolution {
 	}
 	envVars := EnvOverrides()
 	applyEnv(&cfg)
+	normalize(&cfg)
 	cur := flatten(cfg)
 	for k, v := range cur {
 		if prev[k] != v {
 			if name, ok := envVars[k]; ok {
+				res.Sources[k] = "env:" + name
+			} else if name, ok := envVars["/summarizer/model/model"]; ok && strings.HasPrefix(k, "/summarizer/model/") {
+				// The rest of a summarizer route the environment created is
+				// copied from the main model because of that variable.
 				res.Sources[k] = "env:" + name
 			} else {
 				res.Sources[k] = "env"
@@ -214,37 +220,56 @@ func Resolve(project, preset, bundle string) Resolution {
 	return res
 }
 
-// fileSetsRoutes reports whether the project file decides any actor's route.
+// fileSetsRoutes reports whether the project file decides the model or the
+// summarizer.
 func fileSetsRoutes(sources map[string]string) bool {
 	for k, v := range sources {
-		if v == "file" && (strings.HasPrefix(k, "/orchestrator/") || strings.HasPrefix(k, "/task/") || strings.HasPrefix(k, "/narrator/")) {
+		if v == "file" && (strings.HasPrefix(k, "/model/") || strings.HasPrefix(k, "/summarizer/")) {
 			return true
 		}
 	}
 	return false
 }
 
+// routeEnvFields maps the suffix of a route's environment variables to the
+// route field it sets.
+var routeEnvFields = map[string]string{"MODEL": "model", "PROTOCOL": "protocol", "BASE_URL": "base_url", "API_KEY_ENV": "api_key_env", "REASONING_EFFORT": "reasoning_effort", "MAX_TOKENS": "max_tokens", "REPLAY_REASONING": "replay_reasoning"}
+
 // EnvOverrides maps the JSON pointer of every field an EAGENT_* variable
-// currently overrides to that variable's name.
+// currently overrides to that variable's name. Where an older name is read
+// as a fallback, the name in effect is reported.
 func EnvOverrides() map[string]string {
 	out := map[string]string{}
-	for name, ptr := range map[string]string{"ORCHESTRATOR": "/orchestrator", "TASK": "/task", "NARRATOR": "/narrator"} {
-		for suffix, field := range map[string]string{"MODEL": "model", "PROTOCOL": "protocol", "BASE_URL": "base_url", "API_KEY_ENV": "api_key_env", "REASONING_EFFORT": "reasoning_effort", "MAX_TOKENS": "max_tokens", "REPLAY_REASONING": "replay_reasoning"} {
-			v := "EAGENT_" + name + "_" + suffix
-			if suffix == "API_KEY_ENV" {
-				if _, ok := os.LookupEnv(v); ok {
-					out[ptr+"/"+field] = v
+	set := func(ptr string, names ...string) {
+		for _, n := range names {
+			if strings.HasSuffix(n, "_API_KEY_ENV") {
+				// An empty key variable is an override too: no key needed.
+				if _, ok := os.LookupEnv(n); ok {
+					out[ptr] = n
+					return
 				}
-			} else if os.Getenv(v) != "" {
-				out[ptr+"/"+field] = v
+			} else if os.Getenv(n) != "" {
+				out[ptr] = n
+				return
 			}
 		}
 	}
-	for v, ptr := range map[string]string{"EAGENT_TASK_CONCURRENCY": "/task_concurrency", "EAGENT_ROLLOVER_TOKENS": "/rollover_tokens", "EAGENT_NARRATOR_TICK_SECONDS": "/narrator_tick_seconds", "EAGENT_NARRATOR_QUIET_SECONDS": "/narrator_quiet_seconds", "EAGENT_PERSONA": "/persona", "EAGENT_FINALECHAT": "/finalechat/enabled", "EAGENT_FINALECHAT_ARTIFACTS": "/finalechat/artifacts"} {
-		if os.Getenv(v) != "" {
-			out[ptr] = v
+	for suffix, field := range routeEnvFields {
+		if suffix == "REASONING_EFFORT" {
+			set("/model/"+field, "EAGENT_REASONING_EFFORT", "EAGENT_NARRATOR_REASONING_EFFORT")
+		} else {
+			set("/model/"+field, "EAGENT_"+suffix, "EAGENT_ORCHESTRATOR_"+suffix)
 		}
+		set("/summarizer/model/"+field, "EAGENT_SUMMARIZER_"+suffix)
 	}
+	set("/summarizer/mode", "EAGENT_SUMMARIZER_MODE")
+	set("/tick_seconds", "EAGENT_TICK_SECONDS", "EAGENT_NARRATOR_TICK_SECONDS")
+	set("/quiet_seconds", "EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")
+	set("/rollover_tokens", "EAGENT_ROLLOVER_TOKENS")
+	set("/persona", "EAGENT_PERSONA")
+	set("/relay/default", "EAGENT_DEFAULT_RELAY")
+	set("/finalechat/enabled", "EAGENT_FINALECHAT")
+	set("/finalechat/artifacts", "EAGENT_FINALECHAT_ARTIFACTS")
 	return out
 }
 
@@ -275,9 +300,12 @@ func flatten(cfg Config) map[string]string {
 }
 
 // editorKeys are the top-level keys the editor may write. Anything else in
-// the file is left byte for byte as it was.
-var editorKeys = []string{"preset", "default_config", "orchestrator", "task", "narrator", "task_concurrency", "max_task_turns", "max_orchestrator_calls_per_turn", "narrator_tick_seconds", "narrator_quiet_seconds", "rollover_tokens", "bash_wait_seconds", "bash_timeout_seconds", "tool_output_max_chars", "persona", "allow_outside_project", "finalechat"}
+// the file is left byte for byte as it was. Of relay the editor writes only
+// relay.default: profiles name programs to run and stay as written.
+var editorKeys = []string{"preset", "default_config", "model", "summarizer", "max_calls_per_turn", "tick_seconds", "quiet_seconds", "rollover_tokens", "report_max_chars", "persona", "finalechat", "relay"}
 
+// unknownKeys lists the keys of a configuration object, already carried
+// over to today's keys, that eagent does not read.
 func unknownKeys(m map[string]json.RawMessage) []string {
 	known := map[string]bool{"name": true, "description": true}
 	for _, k := range editorKeys {
@@ -298,7 +326,8 @@ func unknownKeys(m map[string]json.RawMessage) []string {
 // Overlay returns the JSON the file needs so that Defaults()+preset+file
 // equals cfg, touching only editor-owned keys: values equal to the base are
 // omitted (a key present on disk but now equal to the base is deleted, sent
-// as a nil RawMessage), and actors carry only the fields that differ.
+// as a nil RawMessage), routes carry only the fields that differ, and relay
+// carries only its default.
 func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 	base := Defaults()
 	if preset != "" {
@@ -323,7 +352,13 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 		}
 		w, h := want[k], have[k]
 		switch k {
-		case "orchestrator", "task", "narrator":
+		case "relay":
+			if cfg.Relay.Default == base.Relay.Default {
+				out[k] = nil
+			} else {
+				out[k] = relayDefault(cfg.Relay.Default)
+			}
+		case "model", "summarizer":
 			diff := diffObjects(h, w)
 			if len(diff) == 0 {
 				out[k] = nil
@@ -384,6 +419,7 @@ func BundleFromBytes(name string, raw []byte) (Config, error) {
 	if err := overlay(&cfg, m, "bundle "+name); err != nil {
 		return Config{}, err
 	}
+	normalize(&cfg)
 	cfg.Preset = preset
 	return cfg, nil
 }
@@ -403,7 +439,38 @@ func Pin(cfg Config, preset string) map[string]json.RawMessage {
 			}
 		}
 	}
+	out["relay"] = relayDefault(cfg.Relay.Default)
 	return out
+}
+
+// relayDefault is the editor's edit of the relay key: its default alone.
+func relayDefault(name string) json.RawMessage {
+	raw, _ := json.Marshal(map[string]string{"default": name})
+	return raw
+}
+
+// mergeRelay applies the editor's relay edit (nil, or an object of which
+// only "default" is read) to the relay object in the file, keeping
+// everything else there as written. It returns nil when nothing is left.
+func mergeRelay(existing, edit json.RawMessage) json.RawMessage {
+	obj := object(existing)
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	var name string
+	if e := object(edit); e != nil {
+		_ = json.Unmarshal(e["default"], &name)
+	}
+	if name == "" {
+		delete(obj, "default")
+	} else {
+		obj["default"], _ = json.Marshal(name)
+	}
+	if len(obj) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(obj)
+	return raw
 }
 
 func topLevel(cfg Config) map[string]json.RawMessage {
@@ -463,8 +530,10 @@ type SaveResult struct {
 	PrevETag string `json:"prev_etag,omitempty"`
 }
 
-// SaveFile applies editor edits to the project's config.json: existing keys
-// the editor does not own are kept byte for byte, a nil value deletes a key,
+// SaveFile applies editor edits to the project's config.json: a file still
+// in the keys of eagent's earlier design is carried over to today's first,
+// existing keys the editor does not own are kept byte for byte, a nil value
+// deletes a key, a relay edit sets only relay.default,
 // the write is atomic, the previous bytes go to config.json.bak, and when
 // ifMatch is given the write is refused unless the file still has that etag
 // ("" meaning "there was no file").
@@ -497,7 +566,11 @@ func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 	if checkMatch && ifMatch != res.PrevETag {
 		return res, &ErrConflict{Current: res.Previous, ETag: res.PrevETag}
 	}
+	existing, _ = MigrateLegacy(existing)
 	for k, v := range edits {
+		if k == "relay" {
+			v = mergeRelay(existing[k], v)
+		}
 		if v == nil {
 			delete(existing, k)
 		} else {
@@ -664,38 +737,37 @@ func (c Config) Problems() []Problem {
 	add := func(sev, path, code, msg string) {
 		out = append(out, Problem{Path: path, Code: code, Message: msg, Severity: sev})
 	}
-	for name, a := range map[string]Actor{"/orchestrator": c.Orchestrator, "/task": c.Task, "/narrator": c.Narrator} {
-		out = append(out, actorProblems(name, a, 0)...)
+	out = append(out, routeProblems("/model", c.Model, 0)...)
+	if c.Summarizer.Model != nil {
+		out = append(out, routeProblems("/summarizer/model", *c.Summarizer.Model, 0)...)
 	}
-	if c.TaskConcurrency < 1 {
-		add("error", "/task_concurrency", "min", "task_concurrency must be at least 1")
+	switch c.Summarizer.Mode {
+	case "", SummarizerInline, SummarizerDedicated:
+	default:
+		add("error", "/summarizer/mode", "enum", fmt.Sprintf("summarizer mode %q is not %s or %s", c.Summarizer.Mode, SummarizerInline, SummarizerDedicated))
 	}
-	if c.MaxTaskTurns < 1 {
-		add("error", "/max_task_turns", "min", "max_task_turns must be at least 1")
+	if c.MaxCallsPerTurn < 1 || c.MaxCallsPerTurn > 32 {
+		add("error", "/max_calls_per_turn", "range", "max_calls_per_turn must be between 1 and 32")
 	}
-	if c.MaxOrchestratorCallsPerTurn < 1 {
-		add("error", "/max_orchestrator_calls_per_turn", "min", "max_orchestrator_calls_per_turn must be at least 1")
+	if c.TickSeconds < 5 {
+		add("error", "/tick_seconds", "min", "tick_seconds must be at least 5")
 	}
-	if c.NarratorTickSeconds < 5 {
-		add("error", "/narrator_tick_seconds", "min", "narrator_tick_seconds must be at least 5")
-	}
-	if c.NarratorQuietSeconds < 0 {
-		add("error", "/narrator_quiet_seconds", "min", "narrator_quiet_seconds cannot be negative (0 disables the reminder)")
+	if c.QuietSeconds < 0 {
+		add("error", "/quiet_seconds", "min", "quiet_seconds cannot be negative (0 disables the limit)")
 	}
 	if c.RolloverTokens < 20_000 {
 		add("error", "/rollover_tokens", "min", "rollover_tokens must be at least 20000")
 	}
-	if w := c.Orchestrator.ContextTokens; w > 0 && float64(c.RolloverTokens) > 0.9*float64(w) {
-		add("warning", "/rollover_tokens", "near_window", fmt.Sprintf("rollover_tokens (%d) is within 10%% of the orchestrator's context window (%d); the context can overflow before the dossier is written", c.RolloverTokens, w))
+	if w := c.Model.ContextTokens; w > 0 && float64(c.RolloverTokens) > 0.9*float64(w) {
+		add("warning", "/rollover_tokens", "near_window", fmt.Sprintf("rollover_tokens (%d) is within 10%% of the model's context window (%d); the context can overflow before the dossier is written", c.RolloverTokens, w))
 	}
-	if c.BashWaitSeconds < 0 || c.BashWaitSeconds > 300 {
-		add("error", "/bash_wait_seconds", "range", "bash_wait_seconds must be between 0 and 300")
+	if c.ReportMaxChars < 500 {
+		add("error", "/report_max_chars", "min", "report_max_chars must be at least 500")
 	}
-	if c.BashTimeoutSeconds < 1 {
-		add("error", "/bash_timeout_seconds", "min", "bash_timeout_seconds must be at least 1")
-	}
-	if c.ToolOutputMaxChars < 1000 {
-		add("error", "/tool_output_max_chars", "min", "tool_output_max_chars must be at least 1000")
+	if d := c.Relay.Default; d != "" {
+		if _, ok := c.Relay.RelayProfiles()[d]; !ok {
+			add("error", "/relay/default", "enum", fmt.Sprintf("relay default %q is not a relay profile (have %s)", d, strings.Join(c.Relay.RelayProfileNames(), ", ")))
+		}
 	}
 	if len(c.Persona) > 8192 {
 		add("error", "/persona", "too_long", "persona must be at most 8 KB")
@@ -709,7 +781,7 @@ func (c Config) Problems() []Problem {
 	return out
 }
 
-func actorProblems(path string, a Actor, depth int) []Problem {
+func routeProblems(path string, a ModelRoute, depth int) []Problem {
 	var out []Problem
 	add := func(sev, p, code, msg string) {
 		out = append(out, Problem{Path: p, Code: code, Message: msg, Severity: sev})
@@ -758,7 +830,7 @@ func actorProblems(path string, a Actor, depth int) []Problem {
 		if depth >= 1 {
 			add("error", path+"/fallback", "too_deep", "only one level of fallback is supported")
 		} else {
-			out = append(out, actorProblems(path+"/fallback", *a.Fallback, depth+1)...)
+			out = append(out, routeProblems(path+"/fallback", *a.Fallback, depth+1)...)
 		}
 	}
 	return out

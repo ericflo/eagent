@@ -60,8 +60,9 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 //     preset or the defaults give (low).
 //   - narrator_tick_seconds and narrator_quiet_seconds become tick_seconds and
 //     quiet_seconds; relay.quiet_seconds, which replaced the quiet limit in
-//     relay sessions, becomes quiet_seconds too and wins, since every session
-//     is a relay now.
+//     relay sessions, becomes quiet_seconds too and wins over
+//     narrator_quiet_seconds, since every session is a relay now. A key
+//     already in today's name is never overwritten.
 //   - task, narrator, and the settings of the task worker and the shell tools
 //     are dropped.
 func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []string) {
@@ -125,7 +126,9 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 	if relay := object(out["relay"]); relay != nil {
 		if v, ok := relay["quiet_seconds"]; ok {
 			delete(relay, "quiet_seconds")
-			if string(v) != "0" && string(v) != "null" {
+			// It wins over narrator_quiet_seconds, but a quiet_seconds the
+			// file already has in today's key stays.
+			if _, current := m["quiet_seconds"]; !current && string(v) != "0" && string(v) != "null" {
 				out["quiet_seconds"] = v
 				notes = append(notes, "relay.quiet_seconds is now quiet_seconds")
 			}

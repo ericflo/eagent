@@ -31,7 +31,7 @@ func (s *Service) KnownKeyEnvs() []string {
 	for _, k := range config.KeyEnvsFor(s.Project) {
 		seen[k] = true
 	}
-	for _, a := range s.savedActors() {
+	for _, a := range s.savedRoutes() {
 		if a.APIKeyEnv != "" {
 			seen[a.APIKeyEnv] = true
 		}
@@ -44,12 +44,22 @@ func (s *Service) KnownKeyEnvs() []string {
 	return out
 }
 
-// savedActors lists every actor (and fallback) already on disk in the
+// configRoutes are the model routes a configuration names: the model's and,
+// when one is written, the summarizer's.
+func configRoutes(cfg config.Config) map[string]config.ModelRoute {
+	out := map[string]config.ModelRoute{"model": cfg.Model}
+	if cfg.Summarizer.Model != nil {
+		out["summarizer"] = *cfg.Summarizer.Model
+	}
+	return out
+}
+
+// savedRoutes lists every route (and fallback) already on disk in the
 // project file or its bundles; their hosts and key names are trusted.
-func (s *Service) savedActors() []config.Actor {
-	var out []config.Actor
+func (s *Service) savedRoutes() []config.ModelRoute {
+	var out []config.ModelRoute
 	collect := func(cfg config.Config) {
-		for _, a := range []config.Actor{cfg.Orchestrator, cfg.Task, cfg.Narrator} {
+		for _, a := range configRoutes(cfg) {
 			for cur := &a; cur != nil; cur = cur.Fallback {
 				out = append(out, *cur)
 			}
@@ -72,8 +82,8 @@ func (s *Service) savedActors() []config.Actor {
 // registered explicitly (via servers.json, CLI, or local UI) or written to
 // config.json, never smuggled in via a config save or remote edit.
 func (s *Service) CheckRoutes(cfg config.Config) error {
-	saved := s.savedActors()
-	known := func(a config.Actor) error {
+	saved := s.savedRoutes()
+	known := func(a config.ModelRoute) error {
 		trimmed := strings.TrimRight(a.BaseURL, "/")
 		if pr, ok := config.ProviderForURLFor(s.Project, a.BaseURL); ok && pr.Custom {
 			// A registered custom/local server may use no key ("") or its own
@@ -107,7 +117,7 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 		}
 		return nil
 	}
-	for name, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
+	for name, a := range configRoutes(cfg) {
 		for cur := &a; cur != nil; cur = cur.Fallback {
 			if err := known(*cur); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
@@ -222,45 +232,40 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
 			_ = json.Unmarshal(raw, &onDisk)
 		}
+		onDisk, _ = config.MigrateLegacy(onDisk)
 		var ptrs []string
 		for ptr := range env {
 			ptrs = append(ptrs, ptr)
 		}
 		sort.Strings(ptrs)
 		for _, ptr := range ptrs {
-			top := strings.SplitN(strings.TrimPrefix(ptr, "/"), "/", 2)
-			fileVal, fileHas := pointerIn(onDisk, top)
+			segs := strings.Split(strings.TrimPrefix(ptr, "/"), "/")
+			fileVal, fileHas := pointerIn(onDisk, segs)
 			touched := false
-			if len(top) == 1 {
-				if v, present := edits[top[0]]; present && v != nil {
+			if len(segs) == 1 {
+				if v, present := edits[segs[0]]; present && v != nil {
 					touched = true
 				}
 				if fileHas {
-					edits[top[0]] = fileVal
+					edits[segs[0]] = fileVal
 				} else {
-					delete(edits, top[0])
+					delete(edits, segs[0])
 				}
 			} else {
 				var obj map[string]json.RawMessage
-				if v, present := edits[top[0]]; present && v != nil {
+				if v, present := edits[segs[0]]; present && v != nil {
 					_ = json.Unmarshal(v, &obj)
-				}
-				if _, in := obj[top[1]]; in {
-					touched = true
 				}
 				if obj == nil {
 					obj = map[string]json.RawMessage{}
 				}
-				delete(obj, top[1])
-				if fileHas {
-					obj[top[1]] = fileVal
-				}
+				touched = replaceIn(obj, segs[1:], fileVal, fileHas)
 				if len(obj) == 0 {
-					if _, present := edits[top[0]]; present {
-						edits[top[0]] = nil
+					if _, present := edits[segs[0]]; present {
+						edits[segs[0]] = nil
 					}
 				} else {
-					edits[top[0]], _ = json.Marshal(obj)
+					edits[segs[0]], _ = json.Marshal(obj)
 				}
 			}
 			switch {
@@ -288,10 +293,11 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	return Result{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)}, nil
 }
 
-// pointerIn reads a one- or two-segment pointer out of a raw JSON object.
+// pointerIn reads a pointer, split into its segments, out of a raw JSON
+// object.
 func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bool) {
 	v, ok := m[segs[0]]
-	if !ok || v == nil {
+	if !ok || v == nil || string(v) == "null" {
 		return nil, false
 	}
 	if len(segs) == 1 {
@@ -301,8 +307,37 @@ func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bo
 	if json.Unmarshal(v, &obj) != nil {
 		return nil, false
 	}
-	f, ok := obj[segs[1]]
-	return f, ok && f != nil
+	return pointerIn(obj, segs[1:])
+}
+
+// replaceIn removes the value at segs inside obj and, when has, puts val
+// there instead, creating and dropping the objects on the way as needed. It
+// reports whether obj had a value there.
+func replaceIn(obj map[string]json.RawMessage, segs []string, val json.RawMessage, has bool) bool {
+	key := segs[0]
+	if len(segs) == 1 {
+		_, had := obj[key]
+		delete(obj, key)
+		if has {
+			obj[key] = val
+		}
+		return had
+	}
+	var child map[string]json.RawMessage
+	_ = json.Unmarshal(obj[key], &child)
+	if child == nil {
+		if !has {
+			return false
+		}
+		child = map[string]json.RawMessage{}
+	}
+	had := replaceIn(child, segs[1:], val, has)
+	if len(child) == 0 {
+		delete(obj, key)
+	} else {
+		obj[key], _ = json.Marshal(child)
+	}
+	return had
 }
 
 func orDefault(v, d string) string {

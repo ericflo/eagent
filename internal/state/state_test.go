@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
 )
 
 type builder struct {
@@ -35,502 +36,420 @@ func newBuilder() *builder {
 	return b
 }
 
-func TestOrchestratorViewPlacesResultsAndDeferredNotifications(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "build it"}))                                                          // 3
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "delegate", `{}`)}, SeenSeq: 3})) // 4
-	b.add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "x", Description: "do x", Kind: "work"}))             // 5
-	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "delegate", Output: "Task t1 started"}))           // 6
-	// A task result lands while the next model call (seen through 6) is in flight.
-	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t1", Status: "completed", Summary: "done x"}).WithTask("t1"))                          // 7
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c2", "bash", `{"command":"ls"}`)}, SeenSeq: 6})) // 8
-	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c2", Name: "bash", Output: "a.txt"}))                                   // 9
-	// Task worker internals must not appear.
-	b.add(event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "worker thinking"}).WithTask("t1")) // 10
+// startClaude adds a running Claude relay to a log.
+func (b *builder) startClaude() {
+	b.add(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Profile: "claude", Agent: "claude", Label: "Claude Code", Dir: "/p", Host: "tmux", Target: "eagent-1"}))
+}
 
-	st := Replay(b.events)
-	msgs := st.OrchestratorView()
+func flat(msgs []llm.Message) string {
+	var sb strings.Builder
+	for _, m := range msgs {
+		sb.WriteString(m.Role + "\x00" + m.Text)
+		for _, tc := range m.ToolCalls {
+			sb.WriteString("\x02" + tc.ID + tc.Name + string(tc.Args))
+		}
+		for _, r := range m.Results {
+			sb.WriteString("\x03" + r.CallID + r.Output)
+		}
+		sb.WriteString("\x01")
+	}
+	return sb.String()
+}
+
+func texts(msgs []llm.Message) string {
+	var parts []string
+	for _, m := range msgs {
+		parts = append(parts, m.Role+": "+m.Text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func TestViewPlacesResultsAndWhatArrivedMidCall(t *testing.T) {
+	b := newBuilder()
+	b.startClaude()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "how is it going?", Held: "it is about the session"}))
+	seen := b.seq
+	// While the model was answering, the agent said something.
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: "Running the tests now."}))
+	b.add(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: "[woken: a message from the user]"}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "relay_screen", `{}`)}, SeenSeq: seen}))
+	b.add(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: "c1", Name: "relay_screen", Output: "$ go test ./..."}))
+
+	msgs := Replay(b.events).View(nil)
 	var roles []string
 	for _, m := range msgs {
 		roles = append(roles, m.Role)
 	}
-	want := []string{"user", "assistant", "tool", "assistant", "tool", "user"}
-	if strings.Join(roles, ",") != strings.Join(want, ",") {
-		t.Fatalf("roles = %v, want %v", roles, want)
+	// relay.start, the user's message, the steer, the reply, its result,
+	// then the remark that arrived during the call.
+	if got := strings.Join(roles, ","); got != "user,user,user,assistant,tool,user" {
+		t.Fatalf("roles = %s\n%s", got, texts(msgs))
 	}
-	if !strings.Contains(msgs[5].Text, "Task t1 completed") {
-		t.Fatalf("deferred notification missing: %q", msgs[5].Text)
+	if !strings.Contains(msgs[1].Text, "how is it going?") || !strings.Contains(msgs[1].Text, "[Not passed to the agent: it is about the session.]") {
+		t.Fatalf("the held message does not say it was held: %q", msgs[1].Text)
 	}
-	if msgs[2].Results[0].Output != "Task t1 started" {
-		t.Fatalf("tool result misplaced: %+v", msgs[2].Results)
+	if msgs[2].Text != "[woken: a message from the user]" {
+		t.Fatalf("the steer must sit right before the reply it led to, got %q", msgs[2].Text)
 	}
-	if st.Tasks["t1"].Status != "completed" || st.Idle() {
-		t.Fatalf("task=%s idle=%v", st.Tasks["t1"].Status, st.Idle())
+	if msgs[4].Results[0].Output != "$ go test ./..." {
+		t.Fatalf("tool result misplaced: %+v", msgs[4])
+	}
+	if !strings.Contains(msgs[5].Text, "<Claude> Running the tests now.") {
+		t.Fatalf("the mid-call remark must follow the call's results, got %q", msgs[5].Text)
+	}
+}
+
+// The prompt of one look must be a strict prefix of the prompt of the next,
+// whether the look ended in silence or in an action. That is what keeps the
+// provider's cache of the conversation valid.
+func TestEveryPromptExtendsTheOneBefore(t *testing.T) {
+	b := newBuilder()
+	b.startClaude()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "add a dark mode"}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Seq: b.seq, Mode: "queue", Text: "add a dark mode", Auto: true}))
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: "I'll start with the theme tokens."}))
+
+	// Look 1: a progress tick that ends in a hold. Nothing is recorded.
+	tail1 := "[12:00:30 progress look] Claude has been working for 25s."
+	prompt1 := WithTail(Replay(b.events).View(nil), tail1)
+
+	// More happens.
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: "Tokens are in; wiring the toggle."}))
+
+	// Look 2: the model speaks. The tail is recorded as a steer, then the
+	// reply, while a remark lands mid-call.
+	tail2 := "[12:01:15 progress look] Claude has been working for 70s; the user has heard nothing for 70s."
+	seen := b.seq
+	prompt2 := WithTail(Replay(b.events).View(nil), tail2)
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: "Toggle works in the header."}))
+	b.add(event.New(event.TurnStart, event.ActorEagent, event.TurnData{}))
+	b.add(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail2}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "send_message", `{"text":"Claude has the theme tokens in and is wiring the toggle."}`)}, SeenSeq: seen}))
+	b.add(event.New(event.Message, event.ActorEagent, event.MessageData{Text: "Claude has the theme tokens in and is wiring the toggle."}))
+	b.add(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: "c1", Name: "send_message", Output: "sent"}))
+	b.add(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{}))
+
+	// Look 3.
+	prompt3 := WithTail(Replay(b.events).View(nil), "[12:02:00 progress look]")
+
+	p1, p2, p3 := flat(prompt1[:len(prompt1)-1]), flat(prompt2[:len(prompt2)-1]), flat(prompt3[:len(prompt3)-1])
+	if !strings.HasPrefix(p2, p1) {
+		t.Fatalf("look 2 does not extend look 1 (a silent look left a trace, or the record was rewritten)\n1: %q\n2: %q", p1, p2)
+	}
+	// Look 3 must extend all of look 2, tail included: the tail was recorded.
+	if full2 := flat(prompt2); !strings.HasPrefix(p3, full2) {
+		t.Fatalf("look 3 does not extend look 2 including its tail\n2: %q\n3: %q", full2, p3)
+	}
+	// And the remark that landed mid-call shows after the reply's result.
+	last := prompt3[len(prompt3)-2]
+	if !strings.Contains(last.Text, "Toggle works in the header.") {
+		t.Fatalf("the mid-call remark should be the newest line, got %q", last.Text)
 	}
 }
 
 func TestDanglingCallGetsSyntheticError(t *testing.T) {
 	b := newBuilder()
 	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "bash", `{}`)}, SeenSeq: 3}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "relay_screen", `{}`)}, SeenSeq: 3}))
 	st := Replay(b.events)
-	if d := st.DanglingCalls(event.ActorOrchestrator, ""); len(d) != 1 || d[0].ID != "c1" {
-		t.Fatalf("dangling = %+v", d)
+	if d := st.DanglingCalls(event.ActorEagent); len(d) != 1 || d[0].ID != "c1" {
+		t.Fatalf("dangling calls = %+v", d)
 	}
-	msgs := st.OrchestratorView()
-	if msgs[2].Role != "tool" || !msgs[2].Results[0].IsError {
-		t.Fatalf("expected synthetic error result, got %+v", msgs[2])
+	msgs := st.View(nil)
+	last := msgs[len(msgs)-1]
+	if last.Role != "tool" || !last.Results[0].IsError || !strings.Contains(last.Results[0].Output, "interrupted") {
+		t.Fatalf("a call without a result must render an error result, got %+v", last)
 	}
 }
 
-func TestYieldAndWakeSemantics(t *testing.T) {
+func TestBriefingOpensTheConversationAndNothingAfterItIsLost(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))                                                             // 3
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 3})) // 4
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting"}))                                             // 5
-	st := Replay(b.events)
-	if !st.Idle() {
-		t.Fatal("should be idle after yield")
-	}
-	b.add(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "tick"})) // 6
-	st = Replay(b.events)
-	if st.Idle() {
-		t.Fatal("schedule fire must wake")
-	}
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c2", "yield", `{}`)}, SeenSeq: 6})) // 7
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "finished"}))
-	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "d1", Status: "completed"}).WithTask("d1"))
-	st = Replay(b.events)
-	// Unknown task id (not registered) must not wake; only known work tasks do.
-	if !st.Idle() {
-		t.Fatal("task end for an unknown task should not wake")
-	}
-}
-
-func TestNarratorViewBatchesObservations(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))                                                                                        // 3
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "plan", ToolCalls: []event.ToolCall{call("c1", "bash", `{"command":"ls"}`)}, SeenSeq: 3})) // 4
-	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "bash", Output: strings.Repeat("x", 5000)}))                               // 5
-	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone"}))                                                                                       // 6
-	// Narrator turn saw through 6; a task-worker event and a new note arrive during it.
-	b.add(event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "internal"}).WithTask("t1"))                                                          // 7
-	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "second"}))                                                                             // 8
-	b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call("n1", "send_message", `{"text":"hi"}`)}, SeenSeq: 6})) // 9
-	b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "hi"}))                                                               // 10
-	b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: "n1", Name: "send_message", Output: "delivered"}))                            // 11
-
-	st := Replay(b.events)
-	msgs := st.NarratorView(nil)
-	if len(msgs) != 4 {
-		t.Fatalf("expected user, assistant, tool, user; got %d: %+v", len(msgs), msgs)
-	}
-	first := msgs[0].Text
-	if !strings.Contains(first, "USER: go") || !strings.Contains(first, "NOTE FROM ORCHESTRATOR") || !strings.Contains(first, "milestone") {
-		t.Fatalf("first batch = %q", first)
-	}
-	if strings.Contains(first, "second") {
-		t.Fatal("observation after seenSeq leaked into the earlier batch")
-	}
-	if strings.Contains(first, "internal") {
-		t.Fatal("task worker internals leaked to the narrator")
-	}
-	if len(first) > 4000 {
-		t.Fatalf("tool output not clipped for the narrator: %d chars", len(first))
-	}
-	if !strings.Contains(msgs[3].Text, "second") {
-		t.Fatalf("held observation missing from the next batch: %q", msgs[3].Text)
-	}
-	// Prefix stability: adding a new event must not change earlier messages.
-	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "third"}))
-	msgs2 := Replay(b.events).NarratorView(nil)
-	for i := 0; i < 3; i++ {
-		if msgs2[i].Text != msgs[i].Text {
-			t.Fatalf("message %d changed after append", i)
-		}
-	}
-}
-
-func TestSubsessionAndDossier(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "old", Usage: event.Usage{Input: 190000}, SeenSeq: 3}))
-	b.add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "full", NextFile: "2.jsonl"}))
+	b.startClaude()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "old request"}))
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "old report"}))
+	covers := b.seq
+	// The briefing is being written. Meanwhile the user writes again and
+	// the agent says something; both land in the old file.
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "one more thing"}))
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: "On it."}))
+	b.add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "rollover", NextFile: "2.jsonl"}))
 	b.add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
-	b.add(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: "t9", Kind: "dossier", Title: "Dossier", Description: "..."}))
-	// A work task finishes before the dossier lands.
-	b.add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t2", Kind: "work", Title: "w", Description: "..."}))
-	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t2", Status: "completed", Summary: "w done"}).WithTask("t2"))
-	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t9", Status: "completed", Summary: "the dossier"}).WithTask("t9"))
-	b.add(event.New(event.Dossier, event.ActorHarness, event.DossierData{TaskID: "t9", Text: "the dossier"}))
+	b.add(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "WHAT THE USER WANTS\nthe old request", CoversSeq: covers, By: "eagent", Usage: &event.Usage{Input: 50_000, Output: 400, Cached: 49_000}, ElapsedMS: 3000}))
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "new report"}))
 
 	st := Replay(b.events)
-	if len(st.Subsessions) != 2 || st.Current().File != "2.jsonl" || st.Current().Dossier != "the dossier" {
+	if len(st.Subsessions) != 2 || st.Current().CoversSeq != covers || !strings.Contains(st.Current().Dossier, "the old request") {
 		t.Fatalf("subsessions = %+v", st.Subsessions)
 	}
-	if st.ContextTokens(event.ActorOrchestrator) != 0 {
-		t.Fatal("context usage should reset at a new subsession")
+	msgs := st.View(nil)
+	all := texts(msgs)
+	if !strings.HasPrefix(msgs[0].Text, "[Briefing.") || !strings.Contains(msgs[0].Text, "WHAT THE USER WANTS") {
+		t.Fatalf("the briefing must open the conversation, got %q", msgs[0].Text)
 	}
-	msgs := st.OrchestratorView()
-	if len(msgs) < 2 || !strings.Contains(msgs[0].Text, "Dossier") || !strings.Contains(msgs[0].Text, "the dossier") {
-		t.Fatalf("dossier must open the new subsession; got %+v", msgs)
-	}
-	joined := ""
-	for _, m := range msgs {
-		joined += m.Text + "\n"
-	}
-	if n := strings.Count(joined, "the dossier"); n != 1 {
-		t.Fatalf("the dossier must reach the orchestrator once, not %d times: %s", n, joined)
-	}
-	if strings.Contains(joined, "Task t9") {
-		t.Fatalf("the dossier task's end must not be reported as a task: %s", joined)
-	}
-	if !strings.Contains(msgs[1].Text, "Task t2 completed") {
-		t.Fatalf("work task result missing: %+v", msgs[1])
-	}
-	for _, m := range msgs {
-		if strings.Contains(m.Text, "old") {
-			t.Fatal("previous subsession leaked into the new view")
+	for _, gone := range []string{"old request\n", "old report"} {
+		if strings.Contains(strings.TrimPrefix(all, "user: "+msgs[0].Text), gone) {
+			t.Fatalf("%q is covered by the briefing and must not be rendered again:\n%s", gone, all)
 		}
 	}
-	if st.Idle() {
-		t.Fatal("dossier arrival must wake the orchestrator")
+	for _, kept := range []string{"one more thing", "On it.", "new report"} {
+		if !strings.Contains(all, kept) {
+			t.Fatalf("%q arrived after the briefing was taken and must be in the conversation:\n%s", kept, all)
+		}
+	}
+	if strings.Index(all, "one more thing") > strings.Index(all, "new report") {
+		t.Fatalf("events are out of order:\n%s", all)
+	}
+	// The briefing's model call is eagent's, and the prompt size starts over.
+	if st.Totals[event.ActorEagent].Input != 50_000 || st.Calls[event.ActorEagent] != 1 {
+		t.Fatalf("briefing usage not counted: %+v", st.Totals)
+	}
+	if st.ContextTokens() != 0 {
+		t.Fatalf("context should start over in a new subsession, got %d", st.ContextTokens())
 	}
 }
 
 func TestIDCountersContinueAfterReplay(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t3", Kind: "work"}))
-	b.add(event.New(event.ProcStart, event.ActorOrchestrator, event.ProcStartData{Handle: "p7", Command: "ls"}))
-	b.add(event.New(event.ScheduleCreate, event.ActorOrchestrator, event.ScheduleCreateData{ID: "s2", Kind: "loop", Spec: "5m"}))
+	b.startClaude()
+	b.add(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q7", Text: "?"}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r4", From: "eagent", Text: "x"}))
 	st := Replay(b.events)
-	if st.NextTaskID() != "t4" || st.NextProcHandle() != "p8" || st.NextScheduleID() != "s3" {
-		t.Fatal("counters did not continue")
+	if id := st.NextQuestionID(); id != "q8" {
+		t.Fatalf("next question id = %s", id)
+	}
+	if id := st.NextRelaySendID(); id != "r5" {
+		t.Fatalf("next send id = %s", id)
 	}
 }
 
-func TestStaleYieldDoesNotIdle(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))                               // 3
-	b.add(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Kind: "work", Title: "w"})) // 4
-	// The yielding call saw through 4; t1 finishes while it is in flight.
-	b.add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t1", Status: "completed", Summary: "done"}).WithTask("t1"))               // 5
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 4})) // 6
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting for t1"}))                                      // 7
-	st := Replay(b.events)
-	if st.Idle() {
-		t.Fatal("a yield that predates an unseen task result must not make the session idle")
-	}
-	// Once a later call has seen everything, a yield counts.
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c2", "yield", `{}`)}, SeenSeq: 7}))
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "finished"}))
-	if st = Replay(b.events); !st.Idle() || !st.LastYield.Done {
-		t.Fatal("a yield after seeing everything must idle the session")
-	}
-}
-
-func TestForcedYieldAlwaysIdles(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	// No assistant event ever succeeded (every model call failed), then the
-	// harness forces a yield: the session must be idle, not loop.
-	b.add(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: "recover"}))
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Forced: true, Reason: "failed"}))
-	if st := Replay(b.events); !st.Idle() {
-		t.Fatal("forced yield must idle the session")
-	}
-}
-
-// An answer to a question asked in an earlier context restates the question
-// in the orchestrator's view, so a terse option stays readable.
-func TestAnswerAcrossRolloverCarriesTheQuestion(t *testing.T) {
-	st := New()
-	seq := int64(0)
-	add := func(ev event.Event) {
-		seq++
-		ev.Seq = seq
-		st.Apply(ev)
-	}
-	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
-	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
-	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
-	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
-	add(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: "t9", Kind: "dossier", Title: "Dossier"}))
-	add(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: "t9", Status: "completed", Summary: "the dossier"}).WithTask("t9"))
-	add(event.New(event.Dossier, event.ActorHarness, event.DossierData{TaskID: "t9", Text: "the dossier"}))
-	add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "SQLite"}))
-	joined := ""
-	for _, m := range st.OrchestratorView() {
-		joined += m.Text + "\n"
-	}
-	if !strings.Contains(joined, "Which database?") || !strings.Contains(joined, "SQLite | Postgres") || !strings.Contains(joined, "SQLite") {
-		t.Fatalf("the answer lost its question across the rollover: %s", joined)
-	}
-	if st.QuestionText("nope") != "" {
-		t.Fatal("unknown question ids have no text")
-	}
-}
-
-// Only picture formats every vision model accepts are inlined; a phone's
-// HEIC stays a file the note mentions.
 func TestImagesOfSkipsUnsupportedTypes(t *testing.T) {
 	ev := event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "look", Attachments: []event.Attachment{
-		{Name: "a.heic", Path: "/x/a.heic", ContentType: "image/heic", Kind: "image"},
-		{Name: "b.png", Path: "/x/b.png", ContentType: "image/png", Kind: "image"},
+		{Name: "a.png", Path: "/x/a.png", ContentType: "image/png"},
+		{Name: "b.heic", Path: "/x/b.heic", ContentType: "image/heic"},
 	}})
-	imgs := imagesOf(ev)
-	if len(imgs) != 1 || imgs[0].Path != "/x/b.png" {
+	if imgs := imagesOf(ev); len(imgs) != 1 || imgs[0].Path != "/x/a.png" {
 		t.Fatalf("images = %+v", imgs)
 	}
 }
 
-func TestWorkingDirectoryFollowsCdEventsPerActor(t *testing.T) {
-	st := New()
-	st.Apply(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: "1", Cwd: "/proj"}))
-	if st.WorkDir("") != "/proj" || st.WorkDir("t9") != "/proj" {
-		t.Fatalf("fresh session: %q %q", st.WorkDir(""), st.WorkDir("t9"))
-	}
-	st.Apply(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: "/proj/sub", Previous: "/proj"}))
-	if st.WorkDir("") != "/proj/sub" {
-		t.Fatalf("orchestrator cd not applied: %q", st.WorkDir(""))
-	}
-	// A worker starts where the orchestrator was, and keeps it when the
-	// orchestrator moves on; its own cd is its own.
-	st.Apply(event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "x", Description: "y", Kind: "work"}))
-	st.Apply(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: "/elsewhere"}))
-	if st.WorkDir("t1") != "/proj/sub" || st.WorkDir("") != "/elsewhere" {
-		t.Fatalf("task inheritance: task=%q orch=%q", st.WorkDir("t1"), st.WorkDir(""))
-	}
-	st.Apply(event.New(event.CwdChange, event.ActorTask, event.CwdChangeData{Path: "/proj/sub/deeper"}).WithTask("t1"))
-	if st.WorkDir("t1") != "/proj/sub/deeper" || st.WorkDir("") != "/elsewhere" {
-		t.Fatalf("task cd leaked: task=%q orch=%q", st.WorkDir("t1"), st.WorkDir(""))
-	}
-	// Replaying the same events gives the same answer.
-	again := Replay(st.Events)
-	if again.WorkDir("t1") != "/proj/sub/deeper" || again.WorkDir("") != "/elsewhere" {
-		t.Fatal("replay lost the working directories")
-	}
-	if got := Observe(st.Events[1], 200); !strings.Contains(got, "/proj/sub") {
-		t.Fatalf("narrator does not see the move: %q", got)
-	}
-	if got := Observe(st.Events[len(st.Events)-1], 200); got != "" {
-		t.Fatalf("a worker's cd is not the narrator's business: %q", got)
-	}
-}
-
-func TestAnswerNotesAreMarkedForTheNarrator(t *testing.T) {
-	ev := event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "Mostly the briefing.", Answer: true})
-	if got := Observe(ev, 200); !strings.Contains(got, "ANSWER FROM THE ORCHESTRATOR") || !strings.Contains(got, "Mostly the briefing.") {
-		t.Fatalf("answer note rendering: %q", got)
-	}
-	plain := event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone"})
-	if got := Observe(plain, 200); strings.Contains(got, "ANSWER") {
-		t.Fatalf("plain note rendered as an answer: %q", got)
-	}
-}
-
-// A progress check shows the narrator a steer that is recorded only if it
-// speaks: WithSteer must render exactly what the recorded steer would.
-func TestWithSteerMatchesARecordedSteer(t *testing.T) {
+func TestSessionFolderComesFromTheStartNotFromOldShellCds(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone"}))
-	const steer = "[harness] Progress check while work goes on."
-	shown := WithSteer(Replay(b.events).NarratorView(nil), steer)
-	seen := b.seq
-	// A remark lands while the model answers; then the turn is recorded.
-	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "arrived during the call"}))
-	b.add(event.New(event.TurnStart, event.ActorNarrator, event.TurnData{Reason: "periodic"}))
-	b.add(event.New(event.Steer, event.ActorNarrator, event.SteerData{Text: steer}))
-	b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call("n1", "send_message", `{"text":"hi"}`)}, SeenSeq: seen}))
-	b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: "n1", Name: "send_message", Output: "delivered"}))
-	recorded := Replay(b.events).NarratorView(nil)
-	if len(shown) != 1 || len(recorded) != 4 {
-		t.Fatalf("shown %d messages, recorded %d", len(shown), len(recorded))
-	}
-	if shown[0].Text != recorded[0].Text {
-		t.Fatalf("the model saw\n%q\nbut the log rebuilds\n%q", shown[0].Text, recorded[0].Text)
-	}
-	if !strings.Contains(recorded[3].Text, "arrived during the call") {
-		t.Fatalf("what arrived during the call belongs after the turn: %q", recorded[3].Text)
-	}
-	// With nothing observed since its last turn, the steer stands alone.
-	alone := WithSteer(recorded[:3], steer)
-	if len(alone) != 4 || alone[3].Role != "user" || alone[3].Text != steer {
-		t.Fatalf("steer after a turn = %+v", alone)
-	}
-}
-
-// A trimmed narrator view starts at the cut with a recap of what it told
-// the user, and stays put (so its prefix stays cached) until trimmed again.
-func TestNarratorViewTrim(t *testing.T) {
-	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "go"}))
-	for i := 0; i < 6; i++ {
-		id := "n" + string(rune('a'+i))
-		b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "remark " + id + " " + strings.Repeat("x", 300)}))
-		seen := b.seq
-		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
-		b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "said " + id}))
-		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
-	}
 	st := Replay(b.events)
-	if _, _, ok := st.NarratorTrimPoint(1 << 20); ok {
-		t.Fatal("a short view was offered a trim")
+	if st.WorkDir() != "/p" || st.Dir != "" {
+		t.Fatalf("a session works in the project root by default, got %q / %q", st.WorkDir(), st.Dir)
 	}
-	from, recap, ok := st.NarratorTrimPoint(800)
-	if !ok || from <= 3 || from >= b.seq {
-		t.Fatalf("trim point %d ok=%v", from, ok)
-	}
-	if !strings.Contains(recap, "no longer shown") || !strings.Contains(recap, "said na") {
-		t.Fatalf("recap = %q", recap)
-	}
-	full := st.NarratorView(nil)
-	b.add(event.New(event.NarratorTrim, event.ActorHarness, event.NarratorTrimData{FromSeq: from, Recap: recap}))
-	trimmed := Replay(b.events).NarratorView(nil)
-	if len(trimmed) >= len(full) || trimmed[0].Role != "user" || !strings.HasPrefix(trimmed[0].Text, recap) {
-		t.Fatalf("trimmed view: %d messages (was %d), first %+v", len(trimmed), len(full), trimmed[0])
-	}
-	var all string
-	for _, m := range trimmed {
-		all += m.Text
-	}
-	if strings.Contains(all, "remark na") || !strings.Contains(all, "remark nf") {
-		t.Fatal("the trim kept the oldest remark or dropped the newest")
-	}
-	// New events leave the trimmed prefix as it was.
-	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "later"}))
-	again := Replay(b.events).NarratorView(nil)
-	for i := 0; i < len(trimmed)-1; i++ {
-		if again[i].Text != trimmed[i].Text {
-			t.Fatalf("message %d changed after an append", i)
-		}
+	b.add(event.New(event.CwdChange, event.ActorHarness, event.CwdChangeData{Path: "/p/app", Previous: "/p"}))
+	// A log from when workers had shells: a task's cd is not the session's.
+	b.add(event.New(event.CwdChange, event.LegacyTask, event.CwdChangeData{Path: "/tmp/elsewhere"}).WithTask("t1"))
+	st = Replay(b.events)
+	if st.WorkDir() != "/p/app" || st.Dir != "/p/app" {
+		t.Fatalf("session folder = %q / %q", st.WorkDir(), st.Dir)
 	}
 }
 
-// Progress checks that said nothing are counted for their tokens only.
-func TestNarratorChecksCountTowardTotals(t *testing.T) {
+func TestSilentLooksCountTowardTotalsAndContext(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.Checks, event.ActorNarrator, event.ChecksData{Count: 3, Usage: event.Usage{Input: 3000, Output: 30, Cached: 2700}}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Text: "", Usage: event.Usage{Input: 1000, Output: 20, Cached: 900}, ElapsedMS: 800}))
+	b.add(event.New(event.Checks, event.ActorEagent, event.ChecksData{Count: 3, Usage: event.Usage{Input: 3300, Output: 30, Cached: 3000}, PromptTokens: 1150}))
 	st := Replay(b.events)
-	if tot := st.Totals[event.ActorNarrator]; tot.Input != 3000 || tot.Cached != 2700 || st.Calls[event.ActorNarrator] != 3 {
-		t.Fatalf("totals %+v, calls %d", tot, st.Calls[event.ActorNarrator])
+	if st.Calls[event.ActorEagent] != 4 {
+		t.Fatalf("calls = %d, want 4", st.Calls[event.ActorEagent])
 	}
-	for _, m := range st.NarratorView(nil) {
-		if strings.Contains(m.Text, "3000") || m.Role == "assistant" {
-			t.Fatalf("the count leaked into the narrator's view: %+v", m)
-		}
+	if tot := st.Totals[event.ActorEagent]; tot.Input != 4300 || tot.Cached != 3900 || tot.Output != 50 {
+		t.Fatalf("totals = %+v", tot)
+	}
+	if st.ContextTokens() != 1150 {
+		t.Fatalf("context = %d, want the size of the last silent prompt", st.ContextTokens())
+	}
+	if len(st.Latencies[event.ActorEagent]) != 1 {
+		t.Fatalf("silent looks have no single latency to record: %v", st.Latencies)
+	}
+	if line := st.UsageLine(); !strings.Contains(line, "eagent 4 calls") || !strings.Contains(line, "90% cached") {
+		t.Fatalf("usage line = %q", line)
 	}
 }
 
-// A dismissed question is closed with nothing decided: the orchestrator is
-// not woken, an answer is not recorded, and both readers are told in words
-// that it was not an answer. The dismissal stands (no asking again) until
-// the user writes or the orchestrator yields anew.
-func TestDismissClosesQuestionWithoutWaking(t *testing.T) {
+func TestDismissClosesQuestionAndStandsUntilSomethingMoves(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "paint it"}))                                                        // 3
-	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 3}))  // 4
-	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "yield", Output: "ok"}))                         // 5
-	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting for the colour"}))                               // 6
-	b.add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Which colour?", Options: []string{"red"}})) // 7
+	b.startClaude()
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "Delete the old reader?"}))
+	b.add(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Delete the old reader?", Options: []string{"Yes", "No"}}))
 	st := Replay(b.events)
 	if st.Question == nil || st.DismissalStands() {
-		t.Fatalf("before the dismissal: question=%v stands=%v", st.Question, st.DismissalStands())
+		t.Fatalf("question should be pending")
 	}
-	dismiss := b.add(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: "q1", Source: "finalechat"})) // 8
+	b.add(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: "q1"}))
 	st = Replay(b.events)
-	if st.Question != nil {
-		t.Fatalf("the question is still pending: %+v", st.Question)
+	if st.Question != nil || !st.DismissalStands() {
+		t.Fatalf("a dismissed question is closed and must not be asked again")
 	}
-	if !st.Idle() {
-		t.Fatal("a dismissal must not wake the orchestrator")
+	if all := texts(st.View(nil)); !strings.Contains(all, "dismissed question q1 without answering") {
+		t.Fatalf("eagent is not told about the dismissal:\n%s", all)
 	}
-	if st.LastUserSeq != 3 {
-		t.Fatalf("a dismissal is not something the user said: LastUserSeq = %d", st.LastUserSeq)
+	// The agent finishing another turn is new ground.
+	moved := append([]event.Event{}, b.events...)
+	b2 := &builder{seq: b.seq, events: moved, t: b.t}
+	b2.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "Also: tests pass."}))
+	if Replay(b2.events).DismissalStands() {
+		t.Fatalf("a new turn from the agent ends the dismissal's hold")
 	}
-	if !st.DismissalStands() {
-		t.Fatal("the dismissal should stand while nothing has moved")
-	}
-	if got := Observe(dismiss, 200); !strings.Contains(got, "USER dismissed q1 without answering") || !strings.Contains(got, "Do not ask it again") {
-		t.Fatalf("narrator's view of the dismissal = %q", got)
-	}
-	view := st.OrchestratorView()
-	last := view[len(view)-1].Text
-	if !strings.Contains(last, "dismissed question q1 without answering") || !strings.Contains(last, "not an answer and not a go-ahead") {
-		t.Fatalf("orchestrator's view ends with %q", last)
-	}
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "make it green"})) // 9
-	st = Replay(b.events)
-	if st.DismissalStands() {
-		t.Fatal("the dismissal no longer stands once the user has written")
-	}
-	if st.Idle() {
-		t.Fatal("the user's message wakes the orchestrator")
+	// So is the user writing.
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "keep it"}))
+	if Replay(b.events).DismissalStands() {
+		t.Fatalf("a message from the user ends the dismissal's hold")
 	}
 }
 
-func TestNarratorPhoneRemoteModeObserveAndToggle(t *testing.T) {
+func TestAwayAndBackAreSaidOnceEach(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "hi"}))
-	// Initial connect with remote_mode=false adds no noise.
-	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: false}))
-	v0 := Replay(b.events).NarratorView(nil)
-	if strings.Contains(v0[0].Text, "remote mode") {
-		t.Fatalf("initial non-remote phone thread should stay silent: %q", v0[0].Text)
-	}
-	// Turning remote mode on surfaces once in observations.
-	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: true}))
-	v1 := Replay(b.events).NarratorView(nil)
-	if !strings.Contains(v1[0].Text, "phone remote mode is on") {
-		t.Fatalf("missing remote mode on notice: %q", v1[0].Text)
-	}
-	// Turning remote mode back off surfaces once.
-	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "th1", RemoteMode: false}))
-	v2 := Replay(b.events).NarratorView(nil)
-	if !strings.Contains(v2[0].Text, "phone remote mode is off") {
-		t.Fatalf("missing remote mode off notice: %q", v2[0].Text)
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", RemoteMode: false}))
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", RemoteMode: true}))
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", RemoteMode: true}))
+	b.add(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", RemoteMode: false}))
+	all := texts(Replay(b.events).View(nil))
+	if strings.Count(all, "away from the terminal") != 1 || strings.Count(all, "back at the terminal") != 1 {
+		t.Fatalf("want one line for leaving and one for returning:\n%s", all)
 	}
 }
 
-func TestNarratorObserveDedupAndToolResultCap(t *testing.T) {
-	procEv := event.New(event.ProcStart, event.ActorOrchestrator, event.ProcStartData{Handle: "p1", Command: "go test -v ./..."})
-	procEv.Time = time.Now()
-	if got := Observe(procEv, 1500); !strings.HasSuffix(got, "started p1") || strings.Contains(got, "go test") {
-		t.Fatalf("ProcStart should not repeat the command: %q", got)
-	}
-
-	big := strings.Repeat("a", 1200)
-	bashOK := event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "bash", Output: big})
-	bashOK.Time = time.Now()
-	if got := Observe(bashOK, 1500); len(got) > 560 {
-		t.Fatalf("non-error bash ToolResult should be capped around 500 chars, got len=%d", len(got))
-	}
-	bashErr := event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c2", Name: "bash", Output: big, IsError: true})
-	bashErr.Time = time.Now()
-	if got := Observe(bashErr, 1500); len(got) < 1200 {
-		t.Fatalf("error ToolResult should keep full maxChars, got len=%d", len(got))
-	}
-}
-
-func TestNarratorTrimPreservesOpeningRequestForNonRelay(t *testing.T) {
+func TestAgentLinesAndBounds(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "Build a fast prefix-cached server"}))
-	for i := 0; i < 6; i++ {
-		id := "n" + string(rune('a'+i))
-		b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone " + id + " " + strings.Repeat("z", 350)}))
-		seen := b.seq
-		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
-		b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "said " + id}))
-		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
-	}
+	b.startClaude()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "fix the importer"}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Seq: b.seq, Mode: "interrupt", Text: "fix the importer", Auto: true}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r2", From: "eagent", Mode: "queue", Text: "the fixture is at testdata/big.csv"}))
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "working"}))
+	b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "claude", Text: strings.Repeat("r", 5000)}))
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "blocked", Detail: "Do you trust this folder? 1. Yes 2. No"}))
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: strings.Repeat("R", 20_000), DurationMS: 400_000, Tools: 23, Images: []string{"/p/shot.png"}}))
+	b.add(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "claude", ID: "r2", OK: false, Detail: "not seen in its transcript after 60s"}))
 	st := Replay(b.events)
-	_, recap, ok := st.NarratorTrimPoint(800)
-	if !ok {
-		t.Fatal("expected non-relay trim point")
+	msgs := st.View(&ViewOptions{RemarkChars: 200, ReportChars: 1000})
+	all := texts(msgs)
+	for _, want := range []string{
+		"Started Claude Code in /p.]",
+		"Passed to Claude as written, interrupting what it was doing.]",
+		"Claude needs attention: Do you trust this folder?",
+		"Claude finished a turn after 6m40s, 23 tool calls. Its report:]",
+		"[Pictures it made or looked at: /p/shot.png]",
+		"A message to Claude (r2) could not be confirmed: not seen in its transcript after 60s]",
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("conversation lacks %q:\n%s", want, all)
+		}
 	}
-	if !strings.Contains(recap, "Original user request: Build a fast prefix-cached server.") {
-		t.Fatalf("non-relay recap should preserve opening user request: %q", recap)
+	// A send eagent made with its own tool call is not repeated as a line,
+	// and plain working/idle changes say nothing.
+	if strings.Contains(all, "testdata/big.csv") || strings.Contains(all, "working]") {
+		t.Errorf("redundant lines in the conversation:\n%s", all)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "<Claude> rrr") && len(m.Text) > 400 {
+			t.Errorf("a remark is not bounded: %d chars", len(m.Text))
+		}
+		if strings.Contains(m.Text, "<Claude> RRR") && len(m.Text) > 1300 {
+			t.Errorf("a report is not bounded: %d chars", len(m.Text))
+		}
+	}
+}
+
+func TestClockTimesUseTheSessionsZoneEverywhere(t *testing.T) {
+	b := &builder{t: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
+	b.add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: "s1", Cwd: "/p", TZ: "Asia/Tokyo"}))
+	b.add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Reason: "new"}))
+	b.startClaude()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "hello"}))
+	all := texts(Replay(b.events).View(nil))
+	// 12:00 UTC is 21:00 in Tokyo, whatever zone this test runs in.
+	if !strings.Contains(all, "[21:00:03 Started Claude Code") || !strings.Contains(all, "[2026-09-06 21:00:04] <user> hello") {
+		t.Fatalf("times are not in the session's zone:\n%s", all)
+	}
+}
+
+func TestWaiting(t *testing.T) {
+	b := newBuilder()
+	if !Replay(b.events).Waiting() {
+		t.Fatalf("a session with no agent waits on the user")
+	}
+	b.startClaude()
+	if Replay(b.events).Waiting() {
+		t.Fatalf("a starting agent is not waiting")
+	}
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "idle"}))
+	if !Replay(b.events).Waiting() {
+		t.Fatalf("an idle agent waits on the user")
+	}
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Text: "go", Auto: true}))
+	if Replay(b.events).Waiting() {
+		t.Fatalf("a message on its way to the agent is not waiting")
+	}
+	b.add(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "claude", ID: "r1", OK: true}))
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "working"}))
+	if Replay(b.events).Waiting() {
+		t.Fatalf("a working agent is not waiting")
+	}
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "done"}))
+	if !Replay(b.events).Waiting() {
+		t.Fatalf("after its turn the agent waits on the user")
+	}
+	b.add(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: "claude"}))
+	if !Replay(b.events).Waiting() {
+		t.Fatalf("a stopped agent leaves the session waiting")
+	}
+}
+
+func TestSummaryCallsAreCountedUnderWhoMadeThem(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.ThreadTitle, event.ActorSummarizer, event.ThreadTitleData{Title: "Importer rewrite", Description: "Rewriting the importer.", By: "summary", SeenSeq: 2, Usage: &event.Usage{Input: 900, Output: 40}, ElapsedMS: 700}))
+	// An inline update is part of one of eagent's own calls: no usage.
+	b.add(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{Description: "Rewriting the importer. Tests pass.", By: "summary", SeenSeq: 3}))
+	st := Replay(b.events)
+	if st.Calls[event.ActorSummarizer] != 1 || st.Totals[event.ActorSummarizer].Input != 900 || st.Calls[event.ActorEagent] != 0 {
+		t.Fatalf("calls = %+v totals = %+v", st.Calls, st.Totals)
+	}
+	if st.Title != "Importer rewrite" || st.Description != "Rewriting the importer. Tests pass." || st.SummarySeq != 3 || st.TitleRevisions != 1 {
+		t.Fatalf("title state = %q / %q / %d / %d", st.Title, st.Description, st.SummarySeq, st.TitleRevisions)
+	}
+	// A title the user asked for is pinned; later summaries keep that.
+	b.add(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{Title: "Big CSV import", Pin: true}))
+	b.add(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{Title: "Big CSV import", Description: "Later.", By: "summary", SeenSeq: 5}))
+	st = Replay(b.events)
+	if !st.TitlePinned || st.Title != "Big CSV import" {
+		t.Fatalf("pinned title lost: %q pinned=%v", st.Title, st.TitlePinned)
+	}
+}
+
+// A log written by the three-actor design still folds: its usage shows under
+// the old names, its events do not disturb the picture, and it is recognised
+// for what it is.
+func TestOldLogsStillFold(t *testing.T) {
+	b := &builder{t: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)}
+	b.add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: "old", Cwd: "/p", Models: map[string]string{"orchestrator": "m-o", "task": "m-t", "narrator": "m-n"}}))
+	b.add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Reason: "new"}))
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "build a thing"}))
+	b.add(event.New(event.Assistant, event.LegacyOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "delegate", `{"title":"x"}`)}, Usage: event.Usage{Input: 2000, Output: 100}, ElapsedMS: 900}))
+	b.add(event.New(event.LegacyTaskCreate, event.LegacyOrchestrator, map[string]any{"id": "t1", "title": "x", "description": "do x"}))
+	b.add(event.New(event.Assistant, event.LegacyTask, event.AssistantData{Text: "working", Usage: event.Usage{Input: 5000, Output: 300}, ElapsedMS: 1200}).WithTask("t1"))
+	b.add(event.New(event.LegacyTaskEnd, event.LegacyTask, map[string]any{"id": "t1", "status": "completed", "summary": "did x"}).WithTask("t1"))
+	b.add(event.New(event.Checks, event.LegacyNarrator, event.ChecksData{Count: 2, Usage: event.Usage{Input: 800, Output: 10}}))
+	b.add(event.New(event.ThreadTitle, event.ActorHarness, event.ThreadTitleData{Title: "A thing", By: "summary", Usage: &event.Usage{Input: 300, Output: 20}, ElapsedMS: 500}))
+	b.add(event.New(event.Message, event.LegacyNarrator, event.MessageData{Text: "It built the thing."}))
+	b.add(event.New(event.LegacyYield, event.LegacyOrchestrator, event.LegacyYieldData{Done: true, Reason: "built"}))
+	b.add(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: "done"}))
+	st := Replay(b.events)
+	if !st.Legacy() {
+		t.Fatalf("an old log should be recognised")
+	}
+	if got := strings.Join(st.UsageActors(), ","); got != "orchestrator,task,narrator" {
+		t.Fatalf("usage actors = %s", got)
+	}
+	if st.Calls[event.LegacyNarrator] != 3 || st.Totals[event.LegacyNarrator].Input != 1100 {
+		t.Fatalf("narrator usage = %d calls, %+v", st.Calls[event.LegacyNarrator], st.Totals[event.LegacyNarrator])
+	}
+	if st.ContextTokens() != 2000 || !st.Ended || st.EndReason != "done" || st.Title != "A thing" {
+		t.Fatalf("old session picture is off: ctx=%d ended=%v reason=%q title=%q", st.ContextTokens(), st.Ended, st.EndReason, st.Title)
+	}
+	if Replay(newBuilder().events).Legacy() {
+		t.Fatalf("a new log is not an old one")
 	}
 }

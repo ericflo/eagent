@@ -16,10 +16,13 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
+// RouteTestRequest is one model route to try with a single call: Route picks
+// its primary or its fallback, and Effort, when given, replaces its reasoning
+// effort.
 type RouteTestRequest struct {
-	Actor  config.Actor `json:"actor"`
-	Effort *string      `json:"effort"`
-	Route  string       `json:"route"`
+	Model  config.ModelRoute `json:"model"`
+	Effort *string           `json:"effort"`
+	Route  string            `json:"route"`
 }
 
 type RouteTestResult struct {
@@ -46,8 +49,9 @@ var routeTests = struct {
 	sem   chan struct{}
 }{sem: make(chan struct{}, 4)}
 
-func (s *Service) routeActor(b RouteTestRequest) (config.Actor, string, error) {
-	a, route := b.Actor, "primary"
+// testedRoute is the route a test calls, checked like a saved one.
+func (s *Service) testedRoute(b RouteTestRequest) (config.ModelRoute, string, error) {
+	a, route := b.Model, "primary"
 	if b.Route != "" && b.Route != "primary" && b.Route != "fallback" {
 		return a, route, &Error{Status: 400, Message: "unknown route"}
 	}
@@ -62,19 +66,20 @@ func (s *Service) routeActor(b RouteTestRequest) (config.Actor, string, error) {
 		a.ReasoningEffort = *b.Effort
 	}
 	probe := config.Defaults()
-	probe.Orchestrator, probe.Task, probe.Narrator = a, a, a
+	probe.Model = a
 	if err := s.CheckRoutes(probe); err != nil {
 		return a, route, &Error{Status: 422, Message: err.Error()}
 	}
 	for _, p := range probe.Problems() {
-		if p.Severity == "error" && strings.HasPrefix(p.Path, "/orchestrator") {
-			return a, route, &Error{Status: 422, Message: strings.TrimPrefix(p.Path, "/orchestrator/") + ": " + p.Message}
+		if p.Severity == "error" && strings.HasPrefix(p.Path, "/model/") {
+			return a, route, &Error{Status: 422, Message: strings.TrimPrefix(p.Path, "/model/") + ": " + p.Message}
 		}
 	}
 	return a, route, nil
 }
 
-// PrepareRoute accepts only a named actor from the reviewed saved defaults.
+// PrepareRoute accepts only a named target from the reviewed saved
+// configuration: "model", or "summarizer" (the dedicated summarizer's route).
 // It cannot turn an iframe parameter into a URL or credential lookup.
 func (s *Service) PrepareRoute(p control.Proposal, grant control.Grant) (RouteTestRequest, error) {
 	var b RouteTestRequest
@@ -85,21 +90,19 @@ func (s *Service) PrepareRoute(p control.Proposal, grant control.Grant) (RouteTe
 	if err != nil {
 		return b, err
 	}
-	switch p.Parameters["actor"] {
-	case "orchestrator":
-		b.Actor = cfg.Orchestrator
-	case "task":
-		b.Actor = cfg.Task
-	case "narrator":
-		b.Actor = cfg.Narrator
+	switch p.Parameters["target"] {
+	case "model":
+		b.Model = cfg.Model
+	case "summarizer":
+		b.Model = cfg.Summarizer.Route(cfg.Model)
 	default:
-		return b, fmt.Errorf("unknown saved actor")
+		return b, fmt.Errorf("unknown saved route")
 	}
 	b.Route, _ = p.Parameters["route"].(string)
 	if value, ok := p.Parameters["effort"].(string); ok {
 		b.Effort = &value
 	}
-	_, _, err = s.routeActor(b)
+	_, _, err = s.testedRoute(b)
 	return b, err
 }
 
@@ -109,7 +112,7 @@ func (s *Service) TestRoute(parent context.Context, b RouteTestRequest) (RouteTe
 	if err := parent.Err(); err != nil {
 		return RouteTestResult{}, err
 	}
-	a, route, err := s.routeActor(b)
+	a, route, err := s.testedRoute(b)
 	if err != nil {
 		return RouteTestResult{}, err
 	}
@@ -180,7 +183,7 @@ func (s *Service) TestRoute(parent context.Context, b RouteTestRequest) (RouteTe
 	return res, nil
 }
 
-func routeSent(a config.Actor) map[string]any {
+func routeSent(a config.ModelRoute) map[string]any {
 	e := a.ReasoningEffort
 	switch a.Protocol {
 	case llm.ProtocolResponses:

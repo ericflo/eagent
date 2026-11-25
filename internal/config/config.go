@@ -698,8 +698,17 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		cfg.Name = bundle
 	}
 	applyEnv(&cfg)
+	normalize(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
+}
+
+// normalize spells out what an empty setting means: an empty summarizer
+// mode is inline.
+func normalize(cfg *Config) {
+	if cfg.Summarizer.Mode == "" {
+		cfg.Summarizer.Mode = SummarizerInline
+	}
 }
 
 func readJSONMap(path string) (map[string]json.RawMessage, error) {

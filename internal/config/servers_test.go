@@ -351,7 +351,7 @@ func TestRegisterUpdateRefreshDeleteAndPick(t *testing.T) {
 		t.Fatalf("KnownModels[0] = %+v", known[0])
 	}
 	// PickRoute resolves keyless custom model and updates context tokens.
-	picked, err := PickRoute(project, Defaults().Orchestrator, "my-local", "local-model-v1", "medium")
+	picked, err := PickRoute(project, Defaults().Model, "my-local", "local-model-v1", "medium")
 	if err != nil {
 		t.Fatalf("PickRoute: %v", err)
 	}
@@ -361,16 +361,16 @@ func TestRegisterUpdateRefreshDeleteAndPick(t *testing.T) {
 	if ep, err := picked.Endpoint(); err != nil || ep.APIKey != "" {
 		t.Fatalf("keyless Endpoint = %+v err=%v", ep, err)
 	}
-	// Empty EAGENT_ORCHESTRATOR_API_KEY_ENV overrides default's TOGETHER_API_KEY.
-	t.Setenv("EAGENT_ORCHESTRATOR_BASE_URL", srv.URL+"/v1")
-	t.Setenv("EAGENT_ORCHESTRATOR_MODEL", "local-model-v1")
-	t.Setenv("EAGENT_ORCHESTRATOR_API_KEY_ENV", "")
+	// An empty EAGENT_API_KEY_ENV overrides the default's TOGETHER_API_KEY.
+	t.Setenv("EAGENT_BASE_URL", srv.URL+"/v1")
+	t.Setenv("EAGENT_MODEL", "local-model-v1")
+	t.Setenv("EAGENT_API_KEY_ENV", "")
 	cfg, err := Load(project, "")
 	if err != nil {
 		t.Fatalf("Load with empty key env: %v", err)
 	}
-	if cfg.Orchestrator.APIKeyEnv != "" {
-		t.Fatalf("APIKeyEnv = %q, want empty", cfg.Orchestrator.APIKeyEnv)
+	if cfg.Model.APIKeyEnv != "" {
+		t.Fatalf("APIKeyEnv = %q, want empty", cfg.Model.APIKeyEnv)
 	}
 	// UpdateServer switches default protocol without re-probing.
 	upd, err := UpdateServer(context.Background(), project, "my-local", ProbeOptions{Protocol: llm.ProtocolResponses}, true)

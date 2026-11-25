@@ -57,7 +57,7 @@ func (e *Editor) RelatedPath(kind, name string) (string, error) {
 			return BundlePath(e.project, name), nil
 		}
 	case "prompt":
-		if slices.Contains([]string{"ORCHESTRATOR.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "COMPACTION-DOSSIER.md", "THREAD-SUMMARY.md"}, name) {
+		if slices.Contains([]string{"EAGENT.md", "PERSONA.md", "USER_MESSAGE.md", "USER_ANSWER.md", "DOSSIER.md", "THREAD-SUMMARY.md"}, name) {
 			return filepath.Join(e.project, ".agents/eagent/prompts", name), nil
 		}
 	}

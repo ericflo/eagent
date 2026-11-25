@@ -8,9 +8,8 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// Relay is an external coding agent (Codex, Claude Code) the session runs
-// in a terminal of its own and passes the user's words to. Its existence in
-// the log, not anything a model remembers, is what makes a session a relay.
+// Relay is a coding agent (Claude Code, Codex, Antigravity, pi) the session
+// runs in a terminal of its own and passes the user's words to.
 type Relay struct {
 	Name, Profile, Agent, Label string
 	// Model and Effort are the session's picks over the profile's ("" for
@@ -61,10 +60,6 @@ func (r *Relay) Who() string {
 // Active reports whether the relay is still meant to be running.
 func (r *Relay) Active() bool { return !r.Ended && r.State != "stopped" }
 
-// RelayMode reports whether this session is a relay session: a relay was
-// started in it, whether or not it is still running.
-func (s *State) RelayMode() bool { return len(s.RelayOrder) > 0 }
-
 // ActiveRelays returns the relays not stopped on purpose, in start order.
 func (s *State) ActiveRelays() []*Relay {
 	var out []*Relay
@@ -92,8 +87,10 @@ func (s *State) NextRelaySendID() string {
 	return fmt.Sprintf("r%d", s.relaySendSeq)
 }
 
-// relayWakes lists relay events the orchestrator must act on.
-func relayWakes(ev event.Event) bool {
+// NeedsAttention reports whether a relay event is one eagent must look at
+// now rather than at its next progress look: a finished turn, a usage limit,
+// a dialog the agent is stuck on, an exit, a message that did not arrive.
+func NeedsAttention(ev event.Event) bool {
 	switch ev.Type {
 	case event.RelayTurn, event.RelayLimit:
 		return true
@@ -106,9 +103,6 @@ func relayWakes(ev event.Event) bool {
 	}
 	return false
 }
-
-// RelayWakes reports whether a relay event should wake the orchestrator.
-func RelayWakes(ev event.Event) bool { return relayWakes(ev) }
 
 func (s *State) applyRelay(ev event.Event) {
 	if s.Relays == nil {
@@ -194,8 +188,13 @@ func (s *State) applyRelay(ev event.Event) {
 		r.State, r.StateSince = "stopped", ev.Time
 		r.Autopilot = nil
 	}
-	if relayWakes(ev) {
-		s.wake(ev.Seq)
+	switch ev.Type {
+	case event.RelayStart, event.RelayTurn:
+		s.lastMoveSeq = ev.Seq
+	case event.RelayState:
+		if r.State == "blocked" || r.State == "exited" {
+			s.lastMoveSeq = ev.Seq
+		}
 	}
 }
 
@@ -206,16 +205,72 @@ func (s *State) relayWho(name string) string {
 	return name
 }
 
-// relayNotification renders relay events the orchestrator must hear about.
-func (s *State) relayNotification(ev event.Event) string {
+// relayNotice renders a relay event as a line of eagent's conversation.
+// What an agent said is written under its name, the way the user's messages
+// are written under theirs; everything else is a bracketed notice.
+func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
+	ts := s.clock(ev.Time)
 	switch ev.Type {
+	case event.RelayStart:
+		var d event.RelayStartData
+		_ = ev.Decode(&d)
+		verb := "Started"
+		if d.Resumed {
+			verb = "Restarted"
+		}
+		line := fmt.Sprintf("[%s %s %s in %s", ts, verb, firstNonEmpty(d.Label, d.Agent), d.Dir)
+		if d.Resumed {
+			line += ", continuing its own session"
+		}
+		if d.Name != d.Agent {
+			line += fmt.Sprintf(`; it is called %q here`, d.Name)
+		}
+		return line + ".]"
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		if !d.Auto {
+			return "" // sent by a tool call of eagent's own, whose result says so
+		}
+		who := s.relayWho(d.Name)
+		how := "."
+		switch d.Mode {
+		case "interrupt":
+			how = ", interrupting what it was doing."
+		case "after_turn":
+			how = ", to be read when its current turn ends."
+		}
+		if d.From == "user" {
+			return fmt.Sprintf("[%s Passed to %s as written%s]", ts, who, how)
+		}
+		return fmt.Sprintf("[%s eagent sent %s this itself%s]\n%s", ts, who, how, clip(d.Text, opts.RemarkChars))
+	case event.RelayDelivered:
+		var d event.RelayDeliveredData
+		_ = ev.Decode(&d)
+		if !d.OK {
+			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name), d.ID, clip(d.Detail, 300))
+		}
+	case event.RelayState:
+		var d event.RelayStateData
+		_ = ev.Decode(&d)
+		who := s.relayWho(d.Name)
+		switch d.State {
+		case "blocked":
+			return fmt.Sprintf("[%s %s needs attention: %s]", ts, who, clip(d.Detail, 600))
+		case "exited":
+			return fmt.Sprintf("[%s %s exited. Its screen ended with:]\n%s", ts, who, clip(d.Detail, 600))
+		}
+	case event.RelayProgress:
+		var d event.RelayProgressData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("[%s] <%s> %s", ts, s.relayWho(d.Name), clip(strings.TrimSpace(d.Text), opts.RemarkChars))
 	case event.RelayTurn:
 		var d event.RelayTurnData
 		_ = ev.Decode(&d)
 		who := s.relayWho(d.Name)
-		head := fmt.Sprintf("[%s finished a turn", who)
+		head := fmt.Sprintf("[%s %s finished a turn", ts, who)
 		if d.Interrupted {
-			head = fmt.Sprintf("[%s's turn was interrupted", who)
+			head = fmt.Sprintf("[%s %s's turn was interrupted", ts, who)
 		}
 		if d.DurationMS > 0 {
 			head += " after " + fmtMillis(d.DurationMS)
@@ -223,136 +278,70 @@ func (s *State) relayNotification(ev event.Event) string {
 		if d.Tools > 0 {
 			head += fmt.Sprintf(", %d tool calls", d.Tools)
 		}
-		head += "]"
-		if len(d.Images) > 0 {
-			head += "\nPictures it made or looked at: " + strings.Join(d.Images, ", ")
-		}
+		head += ". Its report:]"
 		text := strings.TrimSpace(d.Text)
 		if text == "" {
 			text = "(it ended the turn without a message)"
 		}
-		if d.Idle {
-			text += "\n[It ran nothing in reply to your message. If it is waiting on work of its own (a command, a render, a timer it set, a helper), do not send again: it reports when that work does, and each message only starts another turn like this one. Yield.]"
-		}
-		return head + "\n" + text
-	case event.RelayState:
-		var d event.RelayStateData
-		_ = ev.Decode(&d)
-		who := s.relayWho(d.Name)
-		switch d.State {
-		case "blocked":
-			return fmt.Sprintf("[%s needs attention: %s]\nLook with relay_screen; answer a dialog with relay_control keys, or tell the user what it is asking.", who, d.Detail)
-		case "exited":
-			return fmt.Sprintf("[%s exited.]\nIts screen ended with:\n%s\nrelay_control restart starts it again and continues its own session.", who, d.Detail)
-		}
-	case event.RelayDelivered:
-		var d event.RelayDeliveredData
-		_ = ev.Decode(&d)
-		if !d.OK {
-			return fmt.Sprintf("[A message to %s (%s) could not be confirmed: %s]", s.relayWho(d.Name), d.ID, d.Detail)
-		}
-	case event.RelayLimit:
-		var d event.RelayLimitData
-		_ = ev.Decode(&d)
-		return "[" + relayLimitText(s.relayWho(d.Name), d) + "]"
-	}
-	return ""
-}
-
-func relayLimitText(who string, d event.RelayLimitData) string {
-	if d.Text != "" {
-		return fmt.Sprintf("%s usage limit: %s", who, d.Text)
-	}
-	s := fmt.Sprintf("%s has used %.0f%% of its", who, d.UsedPercent)
-	if d.Window != "" {
-		s += " " + d.Window
-	}
-	s += " usage budget"
-	if d.ResetsAt != "" {
-		if t, err := time.Parse(time.RFC3339, d.ResetsAt); err == nil {
-			s += "; it resets " + t.Local().Format("Mon Jan 2 15:04")
-		}
-	}
-	return s
-}
-
-// observeRelay renders relay events for the narrator.
-func observeRelay(ev event.Event, maxChars int, ts string) string {
-	switch ev.Type {
-	case event.RelayStart:
-		var d event.RelayStartData
-		_ = ev.Decode(&d)
-		verb := "started"
-		if d.Resumed {
-			verb = "restarted (continuing its own session)"
-		}
-		return fmt.Sprintf("%s %s %s in %s", ts, verb, firstNonEmpty(d.Label, d.Agent), d.Dir)
-	case event.RelaySend:
-		var d event.RelaySendData
-		_ = ev.Decode(&d)
-		how := ""
-		switch d.Mode {
-		case "interrupt":
-			how = ", interrupting it"
-		case "after_turn":
-			how = ", for when its current turn ends"
-		}
-		if d.From == "user" {
-			return fmt.Sprintf("%s -> forwarded the user's message to %s verbatim%s", ts, d.Name, how)
-		}
-		return fmt.Sprintf("%s -> sent to %s%s (written by me, mirrored to the user): %s", ts, d.Name, how, clip(d.Text, maxChars))
-	case event.RelayDelivered:
-		var d event.RelayDeliveredData
-		_ = ev.Decode(&d)
-		if !d.OK {
-			return fmt.Sprintf("%s a message to %s could not be confirmed: %s", ts, d.Name, clip(d.Detail, 300))
-		}
-	case event.RelayState:
-		var d event.RelayStateData
-		_ = ev.Decode(&d)
-		if d.State == "working" || d.State == "idle" {
-			return "" // turns and remarks say this better
-		}
-		return fmt.Sprintf("%s %s is %s: %s", ts, d.Name, d.State, clip(d.Detail, 600))
-	case event.RelayProgress:
-		var d event.RelayProgressData
-		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s %s (working): %s", ts, d.Name, clip(d.Text, maxChars))
-	case event.RelayTurn:
-		var d event.RelayTurnData
-		_ = ev.Decode(&d)
-		head := fmt.Sprintf("%s %s FINISHED A TURN", ts, strings.ToUpper(d.Name))
-		if d.Interrupted {
-			head = fmt.Sprintf("%s %s'S TURN WAS INTERRUPTED", ts, strings.ToUpper(d.Name))
-		}
-		if d.DurationMS > 0 {
-			head += " after " + fmtMillis(d.DurationMS)
-		}
+		out := head + "\n" + fmt.Sprintf("<%s> %s", who, clip(text, opts.ReportChars))
 		if len(d.Images) > 0 {
-			head += "; pictures (attach the ones worth seeing): " + strings.Join(d.Images, ", ")
+			out += "\n[Pictures it made or looked at: " + strings.Join(d.Images, ", ") + "]"
 		}
-		return head + ". Its own report:\n" + clip(strings.TrimSpace(d.Text), maxChars*4)
+		if d.Idle {
+			out += "\n[It ran nothing in reply to what you sent. If it is waiting on work of its own (a command, a render, a timer it set, a helper), do not send again: it reports when that work does, and each message only starts another turn like this one.]"
+		}
+		return out
 	case event.RelayLimit:
 		var d event.RelayLimitData
 		_ = ev.Decode(&d)
-		return ts + " " + relayLimitText(d.Name, d)
+		return fmt.Sprintf("[%s %s]", ts, s.relayLimitText(s.relayWho(d.Name), d))
 	case event.RelayEnd:
 		var d event.RelayEndData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s stopped %s (%s)", ts, d.Name, d.Reason)
+		if d.Reason != "" {
+			return fmt.Sprintf("[%s Stopped %s (%s).]", ts, s.relayWho(d.Name), d.Reason)
+		}
+		return fmt.Sprintf("[%s Stopped %s.]", ts, s.relayWho(d.Name))
 	case event.RelayAutopilot:
 		var d event.RelayAutopilotData
 		_ = ev.Decode(&d)
+		who := s.relayWho(d.Name)
 		if d.Off {
-			return fmt.Sprintf("%s autopilot for %s is off", ts, d.Name)
+			return fmt.Sprintf("[%s Autopilot for %s is off.]", ts, who)
 		}
 		until := "until the user says stop"
 		if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
-			until = "until " + t.Local().Format("Mon 15:04")
+			until = "until " + t.In(s.Location()).Format("Mon 15:04")
 		}
-		return fmt.Sprintf("%s autopilot on for %s, %s: %s", ts, d.Name, until, clip(d.Instruction, maxChars))
+		decide := ""
+		if !d.Decide {
+			decide = " Its questions still go to the user."
+		}
+		return fmt.Sprintf("[%s Autopilot is on for %s, %s.%s The standing order:]\n%s", ts, who, until, decide, clip(d.Instruction, opts.RemarkChars))
 	}
 	return ""
+}
+
+// RelayLimitText says where an agent's usage budget stands, for people.
+func (s *State) RelayLimitText(who string, d event.RelayLimitData) string {
+	return s.relayLimitText(who, d)
+}
+
+func (s *State) relayLimitText(who string, d event.RelayLimitData) string {
+	if d.Text != "" {
+		return fmt.Sprintf("%s usage limit: %s", who, d.Text)
+	}
+	text := fmt.Sprintf("%s has used %.0f%% of its", who, d.UsedPercent)
+	if d.Window != "" {
+		text += " " + d.Window
+	}
+	text += " usage budget"
+	if d.ResetsAt != "" {
+		if t, err := time.Parse(time.RFC3339, d.ResetsAt); err == nil {
+			text += "; it resets " + t.In(s.Location()).Format("Mon Jan 2 15:04")
+		}
+	}
+	return text
 }
 
 func firstNonEmpty(xs ...string) string {

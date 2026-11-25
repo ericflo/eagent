@@ -1,7 +1,7 @@
-// Package state folds the event log into the runtime picture: tasks,
-// processes, schedules, the pending question, subsessions, and each actor's
-// conversation view. The same reducer runs live and on replay, so a resumed
-// session is byte-for-byte the session that crashed.
+// Package state folds the event log into the runtime picture: the agents the
+// session runs, the pending question, subsessions, token accounting, and the
+// conversation eagent's model is shown. The same reducer runs live and on
+// replay, so a resumed session is byte-for-byte the session that stopped.
 package state
 
 import (
@@ -15,57 +15,6 @@ import (
 	"github.com/ericflo/eagent/internal/prompts"
 )
 
-// Task is delegated work.
-type Task struct {
-	ID          string
-	Title       string
-	Description string
-	Kind        string // work | dossier
-	Status      string // queued | running | completed | failed | cancelled | interrupted
-	Summary     string
-	CreatedSeq  int64
-	StartedSeq  int64
-	EndedSeq    int64
-	Created     time.Time
-	Ended       time.Time
-	Turns       int
-	Usage       event.Usage
-}
-
-// Running reports whether the task still needs a worker.
-func (t *Task) Running() bool { return t.Status == "queued" || t.Status == "running" }
-
-// Proc is a shell command started by an actor.
-type Proc struct {
-	Handle   string
-	Actor    string
-	Task     string
-	Command  string
-	Cwd      string
-	TimeoutS int
-	Status   string // running | exited | killed | timeout | lost
-	ExitCode int
-	StartSeq int64
-	ExitSeq  int64
-	Started  time.Time
-	// PID and StartedAt identify the live process (from proc.pid); zero for
-	// logs written before that event existed.
-	PID       int
-	StartedAt time.Time
-}
-
-// Schedule is a loop, cron, or one-shot wake.
-type Schedule struct {
-	ID        string
-	Kind      string
-	Spec      string
-	Note      string
-	Next      time.Time
-	Fires     int
-	Cancelled bool
-	Created   time.Time
-}
-
 // Question is a pending ask_user.
 type Question struct {
 	ID      string
@@ -78,36 +27,26 @@ type Question struct {
 
 // Subsession is one JSONL file's span.
 type Subsession struct {
-	Index       int
-	File        string
-	Reason      string
-	StartSeq    int64
-	EndSeq      int64 // 0 while open
-	Dossier     string
-	DossierTask string
-}
-
-// Note is an orchestrator hint for the narrator.
-type Note struct {
-	Seq  int64
-	Text string
-	Time time.Time
-}
-
-// Yield records the orchestrator declaring it has nothing to do.
-type Yield struct {
-	Seq    int64
-	Done   bool
-	Reason string
+	Index    int
+	File     string
+	Reason   string
+	StartSeq int64
+	EndSeq   int64 // 0 while open
+	// Dossier is the briefing the subsession opened with ("" for the
+	// first), and CoversSeq the last event that briefing took in.
+	Dossier   string
+	CoversSeq int64
 }
 
 // State is everything derived from the log.
 type State struct {
-	SessionID   string
-	Cwd         string
+	SessionID string
+	// Cwd is the project root. Dir is the folder the session works in when
+	// that is somewhere else ("" otherwise): where its agents start.
+	Cwd, Dir    string
 	Version     string
 	Interactive bool
-	Models      map[string]string
+	Models      map[string]string      // actor -> model in use
 	Hosts       map[string]string      // actor -> base URL in use
 	Efforts     map[string]string      // actor -> reasoning effort in use
 	Config      string                 // bundle or preset name the session runs under
@@ -116,8 +55,8 @@ type State struct {
 	Description string                 // latest thread.title summary ("" until summarized)
 	// TitlePinned says someone chose the title on purpose (see
 	// event.ThreadTitleData.Pin); TitleSeq is the event that last changed
-	// it; TitleRevisions counts the harness's own changes to it; SummarySeq
-	// is the newest event the latest summary covered.
+	// it; TitleRevisions counts the running summary's changes to it;
+	// SummarySeq is the newest event the latest summary covered.
 	TitlePinned    bool
 	TitleSeq       int64
 	TitleRevisions int
@@ -127,31 +66,13 @@ type State struct {
 	Events      []event.Event
 	Subsessions []Subsession
 
-	Tasks         map[string]*Task
-	TaskOrder     []string
-	Procs         map[string]*Proc
-	ProcOrder     []string
-	Schedules     map[string]*Schedule
-	ScheduleOrder []string
-	Question      *Question // pending, or nil
+	Question *Question // pending, or nil
 	// LastDismissSeq is the seq of the latest user.dismiss (a question the
 	// user closed without answering), 0 if none.
 	LastDismissSeq int64
-	Notes          []Note
-	// WorkDirs holds each actor's current working directory once a cd of
-	// its own moved it off Cwd, keyed "orchestrator" or by task id.
-	WorkDirs map[string]string
-	// Relays are the external agents the session runs, by name.
+	// Relays are the agents the session runs, by name.
 	Relays     map[string]*Relay
 	RelayOrder []string
-	// NarratorTrim is where the narrator's view of the open subsession
-	// starts when it was shortened; nil shows it all.
-	NarratorTrim *event.NarratorTrimData
-
-	// LastYield is the orchestrator's most recent yield after the last thing
-	// that would wake it (user message, task end, schedule fire...). Nil
-	// means the orchestrator has work to do or is mid-turn.
-	LastYield *Yield
 	// LastUserSeq is the newest user message or answer.
 	LastUserSeq int64
 
@@ -159,14 +80,14 @@ type State struct {
 	EndReason string
 	Resumes   int
 	// Turns tracks open turns per actor (turn.start without turn.end), so a
-	// reader of the log can tell which actors are mid-call right now.
+	// reader of the log can tell who is mid-turn right now.
 	Turns     map[string]int
 	TurnSince map[string]time.Time
 
-	// LastUsage is the newest provider-reported usage per continuous actor;
-	// its Input is the current prompt size.
+	// LastUsage is the newest provider-reported usage per actor; its Input
+	// is the size of that actor's last recorded prompt.
 	LastUsage map[string]event.Usage
-	// Totals accumulate all usage per actor (task totals include every task).
+	// Totals accumulate all usage per actor.
 	Totals map[string]event.Usage
 	// ByRoute accumulates usage under the route that actually served each
 	// call, so a mid-session fallback does not reprice tokens already spent.
@@ -175,24 +96,27 @@ type State struct {
 	// Latencies holds every model call's wall time per actor, for percentiles.
 	Latencies map[string][]int64
 
+	Errors []string
+
 	// Counters continue id sequences across restarts.
-	taskSeq, procSeq, scheduleSeq, questionSeq, relaySendSeq int
-	Errors                                                   []string
+	questionSeq, relaySendSeq int
 
-	// lastWakeSeq is the newest event that should wake the orchestrator;
-	// lastOrchSeen is what its latest call was shown. A yield produced by a
-	// call that predates a wake is stale and does not make the session idle.
-	lastWakeSeq  int64
-	lastOrchSeen int64
+	// lastMoveSeq is the newest thing an agent did that the user might be
+	// asked about: a finished turn, a dialog it is stuck on, an exit.
+	lastMoveSeq int64
 
-	// prompts renders user messages and answers in the orchestrator's
-	// view. Nil means the built-in defaults; SetPrompts installs a
-	// project set (with overrides) loaded by the harness.
+	// loc is the time zone the session's clock times are rendered in (see
+	// event.SessionStartData.TZ); nil means the reader's own.
+	loc *time.Location
+
+	// prompts renders user messages and answers in eagent's conversation.
+	// Nil means the built-in defaults; SetPrompts installs a project set
+	// (with overrides) loaded by the harness.
 	prompts *prompts.Set
 }
 
 // SetPrompts installs the prompt set used to render user messages and
-// answers in OrchestratorView. Pass nil to go back to the built-ins.
+// answers. Pass nil to go back to the built-ins.
 func (s *State) SetPrompts(p *prompts.Set) { s.prompts = p }
 
 // RouteKey identifies the endpoint that served a set of calls, for pricing.
@@ -204,10 +128,6 @@ func New() *State {
 		Models:    map[string]string{},
 		Efforts:   map[string]string{},
 		Hosts:     map[string]string{},
-		WorkDirs:  map[string]string{},
-		Tasks:     map[string]*Task{},
-		Procs:     map[string]*Proc{},
-		Schedules: map[string]*Schedule{},
 		LastUsage: map[string]event.Usage{},
 		Totals:    map[string]event.Usage{},
 		ByRoute:   map[RouteKey]event.Usage{},
@@ -243,18 +163,8 @@ func (s *State) LastSeq() int64 {
 	return s.Events[len(s.Events)-1].Seq
 }
 
-// NextTaskID etc. allocate ids that continue after replay.
-func (s *State) NextTaskID() string     { s.taskSeq++; return "t" + strconv.Itoa(s.taskSeq) }
-func (s *State) NextProcHandle() string { s.procSeq++; return "p" + strconv.Itoa(s.procSeq) }
-func (s *State) NextScheduleID() string { s.scheduleSeq++; return "s" + strconv.Itoa(s.scheduleSeq) }
+// NextQuestionID allocates a question id that continues after replay.
 func (s *State) NextQuestionID() string { s.questionSeq++; return "q" + strconv.Itoa(s.questionSeq) }
-
-func (s *State) wake(seq int64) {
-	s.LastYield = nil
-	if seq > s.lastWakeSeq {
-		s.lastWakeSeq = seq
-	}
-}
 
 func bump(counter *int, id string, prefix string) {
 	if n, err := strconv.Atoi(strings.TrimPrefix(id, prefix)); err == nil && n > *counter {
@@ -262,26 +172,47 @@ func bump(counter *int, id string, prefix string) {
 	}
 }
 
-func workDirKey(ev event.Event) string {
-	if ev.Task != "" {
-		return ev.Task
-	}
-	return event.ActorOrchestrator
-}
-
-// WorkDir is where an actor's commands run and its relative paths resolve:
-// the project root (Cwd) until a cd of its own moved it. task names a worker;
-// "" is the orchestrator.
-func (s *State) WorkDir(task string) string {
-	if task != "" {
-		if d := s.WorkDirs[task]; d != "" {
-			return d
-		}
-	}
-	if d := s.WorkDirs[event.ActorOrchestrator]; d != "" {
-		return d
+// WorkDir is the folder the session works in: where its agents start unless
+// told otherwise. It is the project root unless the session was started
+// somewhere else.
+func (s *State) WorkDir() string {
+	if s.Dir != "" {
+		return s.Dir
 	}
 	return s.Cwd
+}
+
+// Location is the time zone clock times are written in for the model: the
+// one the session started in, wherever it is read.
+func (s *State) Location() *time.Location {
+	if s.loc != nil {
+		return s.loc
+	}
+	return time.Local
+}
+
+// clock renders a time of day in the session's zone.
+func (s *State) clock(t time.Time) string { return t.In(s.Location()).Format("15:04:05") }
+
+// account adds model usage to an actor's totals.
+func (s *State) account(actor string, u event.Usage, calls int, elapsedMS int64) {
+	tot := s.Totals[actor]
+	tot.Input += u.Input
+	tot.Output += u.Output
+	tot.Cached += u.Cached
+	tot.Reasoning += u.Reasoning
+	s.Totals[actor] = tot
+	rk := RouteKey{Actor: actor, Host: s.Hosts[actor], Model: s.Models[actor]}
+	ru := s.ByRoute[rk]
+	ru.Input += u.Input
+	ru.Output += u.Output
+	ru.Cached += u.Cached
+	ru.Reasoning += u.Reasoning
+	s.ByRoute[rk] = ru
+	s.Calls[actor] += calls
+	if elapsedMS > 0 {
+		s.Latencies[actor] = append(s.Latencies[actor], elapsedMS)
+	}
 }
 
 // Apply folds one event.
@@ -301,6 +232,11 @@ func (s *State) Apply(ev event.Event) {
 		s.Config = d.Config
 		for a, u := range d.Endpoints {
 			s.Hosts[a] = u
+		}
+		if d.TZ != "" {
+			if loc, err := time.LoadLocation(d.TZ); err == nil {
+				s.loc = loc
+			}
 		}
 		s.Started = ev.Time
 	case event.PhoneThread:
@@ -332,30 +268,19 @@ func (s *State) Apply(ev event.Event) {
 					s.SummarySeq = d.SeenSeq
 				}
 				if d.Usage != nil {
-					// The summary's model call ran on the narrator's route.
-					key := event.ActorNarrator
-					tot := s.Totals[key]
-					tot.Input += d.Usage.Input
-					tot.Output += d.Usage.Output
-					tot.Cached += d.Usage.Cached
-					tot.Reasoning += d.Usage.Reasoning
-					s.Totals[key] = tot
-					rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
-					ru := s.ByRoute[rk]
-					ru.Input += d.Usage.Input
-					ru.Output += d.Usage.Output
-					ru.Cached += d.Usage.Cached
-					ru.Reasoning += d.Usage.Reasoning
-					s.ByRoute[rk] = ru
-					s.Calls[key]++
-					s.Latencies[key] = append(s.Latencies[key], d.ElapsedMS)
+					s.account(summaryActor(ev), *d.Usage, 1, d.ElapsedMS)
 				}
 			}
 		}
 	case event.CwdChange:
+		// Logs from when actors had shells record every cd; only the
+		// session's own folder matters now.
 		var d event.CwdChangeData
-		if ev.Decode(&d) == nil && d.Path != "" {
-			s.WorkDirs[workDirKey(ev)] = d.Path
+		if ev.Decode(&d) == nil && d.Path != "" && ev.Task == "" {
+			s.Dir = d.Path
+			if s.Dir == s.Cwd {
+				s.Dir = ""
+			}
 		}
 	case event.Route:
 		var d event.RouteData
@@ -395,9 +320,8 @@ func (s *State) Apply(ev event.Event) {
 			cur.EndSeq = ev.Seq - 1
 		}
 		s.Subsessions = append(s.Subsessions, Subsession{Index: d.Index, File: d.File, Reason: d.Reason, StartSeq: ev.Seq})
-		// A fresh context: the orchestrator's usage restarts.
-		delete(s.LastUsage, event.ActorOrchestrator)
-		delete(s.LastUsage, event.ActorNarrator)
+		// A fresh conversation: the prompt size starts over.
+		s.LastUsage = map[string]event.Usage{}
 	case event.SubsessionEnd:
 		if cur := s.Current(); cur != nil {
 			cur.EndSeq = ev.Seq
@@ -407,12 +331,13 @@ func (s *State) Apply(ev event.Event) {
 		_ = ev.Decode(&d)
 		if cur := s.Current(); cur != nil {
 			cur.Dossier = d.Text
-			cur.DossierTask = d.TaskID
+			cur.CoversSeq = d.CoversSeq
 		}
-		s.wake(ev.Seq)
+		if d.Usage != nil {
+			s.account(event.ActorEagent, *d.Usage, 1, d.ElapsedMS)
+		}
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
-		s.wake(ev.Seq)
 		if ev.Type == event.UserAnswer {
 			var d event.UserAnswerData
 			_ = ev.Decode(&d)
@@ -423,8 +348,7 @@ func (s *State) Apply(ev event.Event) {
 			}
 		}
 	case event.UserDismiss:
-		// The question is over, with nothing decided. No wake: the
-		// orchestrator stays where it was until the user writes.
+		// The question is over, with nothing decided.
 		var d event.UserDismissData
 		_ = ev.Decode(&d)
 		if s.Question != nil && (d.QuestionID == "" || s.Question.ID == d.QuestionID) {
@@ -435,215 +359,52 @@ func (s *State) Apply(ev event.Event) {
 	case event.Assistant:
 		var d event.AssistantData
 		_ = ev.Decode(&d)
-		key := ev.Actor
-		if ev.Actor == event.ActorTask {
-			key = event.ActorTask
-			if t := s.Tasks[ev.Task]; t != nil {
-				t.Turns++
-				t.Usage.Input += d.Usage.Input
-				t.Usage.Output += d.Usage.Output
-				t.Usage.Cached += d.Usage.Cached
-				t.Usage.Reasoning += d.Usage.Reasoning
-			}
-		} else {
-			s.LastUsage[key] = d.Usage
-			if ev.Actor == event.ActorOrchestrator {
-				s.lastOrchSeen = d.SeenSeq
-			}
+		if ev.Task == "" {
+			s.LastUsage[ev.Actor] = d.Usage
 		}
-		tot := s.Totals[key]
-		tot.Input += d.Usage.Input
-		tot.Output += d.Usage.Output
-		tot.Cached += d.Usage.Cached
-		tot.Reasoning += d.Usage.Reasoning
-		s.Totals[key] = tot
-		rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
-		ru := s.ByRoute[rk]
-		ru.Input += d.Usage.Input
-		ru.Output += d.Usage.Output
-		ru.Cached += d.Usage.Cached
-		ru.Reasoning += d.Usage.Reasoning
-		s.ByRoute[rk] = ru
-		s.Calls[key]++
-		s.Latencies[key] = append(s.Latencies[key], d.ElapsedMS)
-	case event.TaskCreate:
-		var d event.TaskCreateData
-		_ = ev.Decode(&d)
-		bump(&s.taskSeq, d.ID, "t")
-		s.Tasks[d.ID] = &Task{ID: d.ID, Title: d.Title, Description: d.Description, Kind: d.Kind, Status: "queued", CreatedSeq: ev.Seq, Created: ev.Time}
-		s.TaskOrder = append(s.TaskOrder, d.ID)
-		// A worker starts where the orchestrator was when it delegated, and
-		// keeps that directory even if the orchestrator moves on later.
-		s.WorkDirs[d.ID] = s.WorkDir("")
-		if d.Kind == "dossier" {
-			if cur := s.Current(); cur != nil {
-				cur.DossierTask = d.ID
-			}
-		}
-	case event.TaskStart:
-		var d event.TaskCreateData
-		_ = ev.Decode(&d)
-		id := d.ID
-		if id == "" {
-			id = ev.Task
-		}
-		if t := s.Tasks[id]; t != nil {
-			t.Status = "running"
-			t.StartedSeq = ev.Seq
-		}
-	case event.TaskEnd:
-		var d event.TaskEndData
-		_ = ev.Decode(&d)
-		if t := s.Tasks[d.ID]; t != nil {
-			t.Status = d.Status
-			t.Summary = d.Summary
-			t.EndedSeq = ev.Seq
-			t.Ended = ev.Time
-			if t.Kind != "dossier" {
-				s.wake(ev.Seq)
-			}
-		}
-	case event.Note:
-		var d event.NoteData
-		_ = ev.Decode(&d)
-		s.Notes = append(s.Notes, Note{Seq: ev.Seq, Text: d.Text, Time: ev.Time})
+		s.account(ev.Actor, d.Usage, 1, d.ElapsedMS)
 	case event.Question:
 		var d event.QuestionData
 		_ = ev.Decode(&d)
 		bump(&s.questionSeq, d.ID, "q")
 		s.Question = &Question{ID: d.ID, Text: d.Text, Options: d.Options, Seq: ev.Seq}
-	case event.ScheduleCreate:
-		var d event.ScheduleCreateData
-		_ = ev.Decode(&d)
-		bump(&s.scheduleSeq, d.ID, "s")
-		s.Schedules[d.ID] = &Schedule{ID: d.ID, Kind: d.Kind, Spec: d.Spec, Note: d.Note, Next: d.Next, Created: ev.Time}
-		s.ScheduleOrder = append(s.ScheduleOrder, d.ID)
-	case event.ScheduleFire:
-		var d event.ScheduleFireData
-		_ = ev.Decode(&d)
-		if sc := s.Schedules[d.ID]; sc != nil {
-			sc.Fires++
-			sc.Next = d.Next
-			if d.Next.IsZero() {
-				sc.Cancelled = true
-			}
-		}
-		s.wake(ev.Seq)
-	case event.ScheduleCancel:
-		var d event.ScheduleCancelData
-		_ = ev.Decode(&d)
-		if sc := s.Schedules[d.ID]; sc != nil {
-			sc.Cancelled = true
-		}
-	case event.ProcStart:
-		var d event.ProcStartData
-		_ = ev.Decode(&d)
-		bump(&s.procSeq, d.Handle, "p")
-		s.Procs[d.Handle] = &Proc{Handle: d.Handle, Actor: ev.Actor, Task: ev.Task, Command: d.Command, Cwd: d.Cwd, TimeoutS: d.TimeoutS, Status: "running", StartSeq: ev.Seq, Started: ev.Time}
-		s.ProcOrder = append(s.ProcOrder, d.Handle)
-	case event.ProcPID:
-		var d event.ProcPIDData
-		_ = ev.Decode(&d)
-		if p := s.Procs[d.Handle]; p != nil && p.Status == "running" {
-			p.PID, p.StartedAt = d.PID, d.StartedAt
-		}
-	case event.ProcExit:
-		var d event.ProcExitData
-		_ = ev.Decode(&d)
-		if p := s.Procs[d.Handle]; p != nil {
-			p.Status = d.Reason
-			p.ExitCode = d.ExitCode
-			p.ExitSeq = ev.Seq
-			if d.Notify && p.Actor == event.ActorOrchestrator && p.Task == "" {
-				s.wake(ev.Seq)
-			}
-		}
-	case event.Yield:
-		var d event.YieldData
-		_ = ev.Decode(&d)
-		if s.lastWakeSeq > s.lastOrchSeen && !d.Forced {
-			// Something arrived while the yielding call was in flight; the
-			// orchestrator has not seen it, so it is not idle.
-			return
-		}
-		s.LastYield = &Yield{Seq: ev.Seq, Done: d.Done, Reason: d.Reason}
-	case event.HarnessMessage:
-		if ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			s.wake(ev.Seq)
-		}
 	case event.Error:
 		var d event.ErrorData
 		_ = ev.Decode(&d)
 		s.Errors = append(s.Errors, d.Where+": "+d.Text)
 	case event.RelayStart, event.RelayInner, event.RelaySend, event.RelayDelivered, event.RelayState, event.RelayProgress, event.RelayTurn, event.RelayLimit, event.RelayEnd, event.RelayAutopilot:
 		s.applyRelay(ev)
-	case event.NarratorTrim:
-		var d event.NarratorTrimData
-		if ev.Decode(&d) == nil {
-			s.NarratorTrim = &d
-		}
 	case event.Checks:
 		var d event.ChecksData
 		if ev.Decode(&d) == nil && d.Count > 0 {
-			key := event.ActorNarrator
-			tot := s.Totals[key]
-			tot.Input += d.Usage.Input
-			tot.Output += d.Usage.Output
-			tot.Cached += d.Usage.Cached
-			tot.Reasoning += d.Usage.Reasoning
-			s.Totals[key] = tot
-			rk := RouteKey{Actor: key, Host: s.Hosts[key], Model: s.Models[key]}
-			ru := s.ByRoute[rk]
-			ru.Input += d.Usage.Input
-			ru.Output += d.Usage.Output
-			ru.Cached += d.Usage.Cached
-			ru.Reasoning += d.Usage.Reasoning
-			s.ByRoute[rk] = ru
-			s.Calls[key] += d.Count
+			actor := ev.Actor
+			s.account(actor, d.Usage, d.Count, 0)
+			if d.PromptTokens > 0 {
+				u := s.LastUsage[actor]
+				u.Input = d.PromptTokens
+				s.LastUsage[actor] = u
+			}
 		}
 	}
 }
 
-// RunningTasks returns queued or running tasks in creation order.
-func (s *State) RunningTasks() []*Task {
-	var out []*Task
-	for _, id := range s.TaskOrder {
-		if t := s.Tasks[id]; t.Running() {
-			out = append(out, t)
-		}
+// summaryActor is who a running summary's model call is counted under: the
+// dedicated summarizer. Logs from when the narrator's route made that call
+// wrote the event as the harness.
+func summaryActor(ev event.Event) string {
+	if ev.Actor == event.ActorSummarizer {
+		return event.ActorSummarizer
 	}
-	return out
+	return event.LegacyNarrator
 }
 
-// RunningProcs returns processes still marked running.
-func (s *State) RunningProcs() []*Proc {
-	var out []*Proc
-	for _, h := range s.ProcOrder {
-		if p := s.Procs[h]; p.Status == "running" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// ActiveSchedules returns schedules that will fire again.
-func (s *State) ActiveSchedules() []*Schedule {
-	var out []*Schedule
-	for _, id := range s.ScheduleOrder {
-		if sc := s.Schedules[id]; !sc.Cancelled {
-			out = append(out, sc)
-		}
-	}
-	return out
-}
-
-// DanglingCalls finds tool calls by an actor (and task) that never got a
-// result, e.g. because the runner died mid-turn.
-func (s *State) DanglingCalls(actor, task string) []event.ToolCall {
+// DanglingCalls finds an actor's tool calls that never got a result, for
+// example because the process died mid-turn.
+func (s *State) DanglingCalls(actor string) []event.ToolCall {
 	results := map[string]bool{}
 	var calls []event.ToolCall
 	for _, ev := range s.Events {
-		if ev.Actor != actor || ev.Task != task {
+		if ev.Actor != actor || ev.Task != "" {
 			continue
 		}
 		switch ev.Type {
@@ -666,22 +427,43 @@ func (s *State) DanglingCalls(actor, task string) []event.ToolCall {
 	return out
 }
 
-// ContextTokens estimates the orchestrator's current prompt size.
-func (s *State) ContextTokens(actor string) int {
-	return s.LastUsage[actor].Input
+// ContextTokens is the size of eagent's last recorded prompt.
+func (s *State) ContextTokens() int {
+	if u, ok := s.LastUsage[event.ActorEagent]; ok {
+		return u.Input
+	}
+	// A log from before there was one loop: the orchestrator's.
+	return s.LastUsage[event.LegacyOrchestrator].Input
 }
 
-// Idle reports whether the orchestrator has yielded and nothing has arrived
-// since to wake it.
-func (s *State) Idle() bool { return s.LastYield != nil }
+// Legacy reports whether the log was written by the three-actor design.
+func (s *State) Legacy() bool {
+	for _, a := range event.LegacyActors {
+		if s.Calls[a] > 0 || s.Models[a] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Waiting reports that nothing more is expected until the user writes: no
+// agent is starting or in the middle of a turn, and nothing sent to one is
+// still on its way. A session with no agent running is waiting too.
+func (s *State) Waiting() bool {
+	for _, r := range s.ActiveRelays() {
+		if r.State == "starting" || r.State == "working" || len(r.Undelivered) > 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // DismissalStands reports that the user closed the last question without
-// answering and nothing has moved since: they have not written, and the
-// orchestrator is still stopped where it was when the question was asked.
-// Asking again would put back the card they just closed.
+// answering and nothing has moved since: they have not written, and no agent
+// has finished a turn, stopped on a dialog or exited. Asking again would put
+// back the card they just closed.
 func (s *State) DismissalStands() bool {
-	return s.LastDismissSeq > 0 && s.Question == nil && s.LastUserSeq < s.LastDismissSeq &&
-		s.LastYield != nil && s.LastYield.Seq < s.LastDismissSeq
+	return s.LastDismissSeq > 0 && s.Question == nil && s.LastUserSeq < s.LastDismissSeq && s.lastMoveSeq < s.LastDismissSeq
 }
 
 // Summary renders a short status for humans.
@@ -692,27 +474,23 @@ func (s *State) Summary() string {
 		fmt.Fprintf(&b, " (%d subsessions)", len(s.Subsessions))
 	}
 	fmt.Fprintf(&b, "\n")
-	running := s.RunningTasks()
-	fmt.Fprintf(&b, "tasks: %d total, %d active\n", len(s.TaskOrder), len(running))
-	for _, t := range running {
-		fmt.Fprintf(&b, "  %s [%s] %s\n", t.ID, t.Status, t.Title)
-	}
-	if procs := s.RunningProcs(); len(procs) > 0 {
-		fmt.Fprintf(&b, "processes running: %d\n", len(procs))
-		for _, p := range procs {
-			fmt.Fprintf(&b, "  %s %s\n", p.Handle, firstLine(p.Command, 70))
+	for _, r := range s.ActiveRelays() {
+		fmt.Fprintf(&b, "%s: %s", r.Who(), r.State)
+		if !r.StateSince.IsZero() {
+			fmt.Fprintf(&b, " since %s", s.clock(r.StateSince))
 		}
-	}
-	if sc := s.ActiveSchedules(); len(sc) > 0 {
-		fmt.Fprintf(&b, "schedules: %d\n", len(sc))
-		for _, x := range sc {
-			fmt.Fprintf(&b, "  %s %s %q next %s\n", x.ID, x.Kind, x.Spec, x.Next.Local().Format("15:04:05"))
+		if r.Autopilot != nil {
+			fmt.Fprintf(&b, ", autopilot on")
 		}
+		fmt.Fprintf(&b, " (%s)\n", r.Dir)
+	}
+	if len(s.ActiveRelays()) == 0 {
+		fmt.Fprintf(&b, "no agent is running\n")
 	}
 	if s.Question != nil {
 		fmt.Fprintf(&b, "waiting on your answer to %s: %s\n", s.Question.ID, s.Question.Text)
 	}
-	fmt.Fprintf(&b, "orchestrator context: %s tokens", humanInt(s.ContextTokens(event.ActorOrchestrator)))
+	fmt.Fprintf(&b, "context: %s tokens", humanInt(s.ContextTokens()))
 	fmt.Fprintf(&b, "\n%s", s.UsageLine())
 	if l := s.LatencyLine(); l != "" {
 		fmt.Fprintf(&b, "\n%s", l)
@@ -720,10 +498,33 @@ func (s *State) Summary() string {
 	return b.String()
 }
 
+// UsageActors lists the actors that made model calls: eagent and the
+// summarizer first, then whatever else the log names (the three actors of
+// older logs, in their old order).
+func (s *State) UsageActors() []string {
+	known := append([]string{event.ActorEagent, event.ActorSummarizer}, event.LegacyActors...)
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range known {
+		seen[a] = true
+		if s.Calls[a] > 0 {
+			out = append(out, a)
+		}
+	}
+	var rest []string
+	for a, n := range s.Calls {
+		if n > 0 && !seen[a] {
+			rest = append(rest, a)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
+}
+
 // UsageLine renders token totals.
 func (s *State) UsageLine() string {
 	var parts []string
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+	for _, a := range s.UsageActors() {
 		u := s.Totals[a]
 		if u.Input == 0 && u.Output == 0 {
 			continue
@@ -754,11 +555,11 @@ func (s *State) Percentile(actor string, p int) int64 {
 // LatencyLine renders per-actor call latency percentiles.
 func (s *State) LatencyLine() string {
 	var parts []string
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+	for _, a := range s.UsageActors() {
 		if len(s.Latencies[a]) == 0 {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s p50 %s / p95 %s / max %s", a, fmtMS(s.Percentile(a, 50)), fmtMS(s.Percentile(a, 95)), fmtMS(s.Percentile(a, 100))))
+		parts = append(parts, fmt.Sprintf("%s p50 %s / p95 %s / max %s", a, fmtMillis(s.Percentile(a, 50)), fmtMillis(s.Percentile(a, 95)), fmtMillis(s.Percentile(a, 100))))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -766,7 +567,7 @@ func (s *State) LatencyLine() string {
 	return "latency: " + strings.Join(parts, "; ")
 }
 
-func fmtMS(ms int64) string {
+func fmtMillis(ms int64) string {
 	switch {
 	case ms >= 60_000:
 		return fmt.Sprintf("%dm%ds", ms/60_000, (ms%60_000)/1000)
@@ -784,15 +585,4 @@ func humanInt(n int) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
 	}
 	return strconv.Itoa(n)
-}
-
-func firstLine(s string, max int) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i] + " ..."
-	}
-	if len(s) > max {
-		s = s[:max-3] + "..."
-	}
-	return s
 }

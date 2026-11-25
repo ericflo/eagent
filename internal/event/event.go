@@ -185,6 +185,10 @@ type UserMessageData struct {
 	// agent: queue, interrupt, or after_turn. Both are empty when unsaid.
 	Route    string `json:"route,omitempty"`
 	Delivery string `json:"delivery,omitempty"`
+	// Held is why the message was kept for eagent instead of being typed
+	// into the agent's terminal as it arrived ("it is addressed to you").
+	// Empty for a message that was passed straight on.
+	Held string `json:"held,omitempty"`
 	// PhoneID is the Finalechat message id when the message came from the
 	// phone, so the thread can show what became of it (relay receipts).
 	PhoneID string `json:"phone_id,omitempty"`
@@ -505,6 +509,9 @@ type ChecksData struct {
 	Count     int   `json:"count"`
 	Usage     Usage `json:"usage"`
 	ElapsedMS int64 `json:"elapsed_ms,omitempty"`
+	// PromptTokens is the size of the last of those prompts, so a reader
+	// of the log knows how full the conversation is.
+	PromptTokens int `json:"prompt_tokens,omitempty"`
 }
 
 // RelayEndData records the agent being stopped on purpose.
