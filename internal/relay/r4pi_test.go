@@ -25,8 +25,9 @@ import (
 //     starts a run: agent_start, then message_start for the user message;
 //   - typed messages take the same path with source "interactive";
 //   - an interrupt puts queued messages back in the editor, ahead of
-//     what is in it, before the run settles aborted; an extension can
-//     read the editor's text.
+//     what is in it, before the run settles aborted; the editor keeps
+//     line ends as "\n" and tabs as four spaces; an extension can read
+//     the editor's text.
 //
 // STEPS is a JSON list of [ms, action, text]: "type" a message, or "spool"
 // one for the extension. Every observation is a JSON line.
@@ -66,7 +67,8 @@ async function startRun(text, source) {
 		if (abortQueued) {
 			abortQueued = false;
 			const back = queue.splice(0);
-			editor = [back.map((q) => q.text).join("\n\n"), editor].filter((t) => t.trim()).join("\n\n");
+			editor = [back.map((q) => q.text).join("\n\n"), editor].filter((t) => t.trim()).join("\n\n")
+				.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
 			log({ editor: back.map((q) => q.text) });
 			aborted = true;
 			break;
@@ -163,6 +165,12 @@ func (r piPathRun) count(key, text string) int {
 // for the end of the run.
 func runPiPromptPath(t *testing.T, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun) {
 	t.Helper()
+	return runPiPromptPathWith(t, held, run, steps, env...)
+}
+
+// runPiPromptPathWith is runPiPromptPath with another held message.
+func runPiPromptPathWith(t *testing.T, text string, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun) {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed")
@@ -175,7 +183,7 @@ func runPiPromptPath(t *testing.T, run time.Duration, steps string, env ...strin
 	if err := os.WriteFile(driver, []byte(piPromptPath), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := spoolMessage(spool, "a1", "the held message"); err != nil {
+	if err := spoolMessage(spool, "a1", text); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(node, driver, ext)

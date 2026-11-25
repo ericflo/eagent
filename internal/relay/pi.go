@@ -267,9 +267,12 @@ export default function (pi: any) {
 		try {
 			pending = !!(ctx && ctx.hasPendingMessages());
 		} catch {}
+		// The editor keeps line ends as "\n" and tabs as four spaces, so
+		// the hand-over is looked for as the editor would hold it.
+		const flat = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
 		let inEditor = false;
 		try {
-			inEditor = !!(handing && aborted && ctx && ctx.ui && String(ctx.ui.getEditorText()).includes(handing.text));
+			inEditor = !!(handing && aborted && ctx && ctx.ui && flat(String(ctx.ui.getEditorText())).includes(flat(handing.text)));
 		} catch {}
 		if (handing && handing.seen && !pending && (handing.queued || inEditor)) handed();
 		try {
