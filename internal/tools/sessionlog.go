@@ -178,7 +178,11 @@ func Summarize(ev event.Event, max int) string {
 			body += ": " + d.Detail
 		}
 	default:
-		body = string(ev.Data)
+		if b, ok := summarizeLegacy(ev); ok {
+			body = b
+		} else {
+			body = string(ev.Data)
+		}
 	}
 	body = oneLine(body)
 	if max > 0 && len(body) > max {
@@ -186,6 +190,107 @@ func Summarize(ev event.Event, max int) string {
 		body = oneLine(body)
 	}
 	return fmt.Sprintf("%s %s %s: %s", ts, ev.Type, who, body)
+}
+
+// The data of event types only logs from before eagent was one loop hold,
+// as they were written then.
+type (
+	legacyTaskCreate struct {
+		ID, Title, Description, Kind string
+	}
+	legacyTaskStart struct {
+		ID string
+	}
+	legacyTaskEnd struct {
+		ID, Status, Summary string
+	}
+	legacyNote struct {
+		Text   string
+		Answer bool
+	}
+	legacyProcStart struct {
+		Handle, Command, Cwd string
+	}
+	legacyProcPID struct {
+		Handle string
+		PID    int
+	}
+	legacyProcExit struct {
+		Handle   string
+		ExitCode int `json:"exit_code"`
+		Reason   string
+		Tail     string
+	}
+	legacyNarratorTrim struct {
+		FromSeq int64 `json:"from_seq"`
+		Recap   string
+	}
+)
+
+// summarizeLegacy renders the events of the three-actor design readably;
+// ok is false for any other type.
+func summarizeLegacy(ev event.Event) (string, bool) {
+	switch ev.Type {
+	case event.LegacyTaskCreate:
+		var d legacyTaskCreate
+		_ = ev.Decode(&d)
+		body := d.ID + " " + d.Title + ": " + d.Description
+		if d.Kind == "dossier" {
+			body = d.ID + " (notes for a fresh context) " + d.Title + ": " + d.Description
+		}
+		return body, true
+	case event.LegacyTaskStart:
+		var d legacyTaskStart
+		_ = ev.Decode(&d)
+		return d.ID + " started", true
+	case event.LegacyTaskEnd:
+		var d legacyTaskEnd
+		_ = ev.Decode(&d)
+		return d.ID + " " + d.Status + ": " + d.Summary, true
+	case event.LegacyNote:
+		var d legacyNote
+		_ = ev.Decode(&d)
+		if d.Answer {
+			return "(answer) " + d.Text, true
+		}
+		return d.Text, true
+	case event.LegacyYield:
+		var d event.LegacyYieldData
+		_ = ev.Decode(&d)
+		if d.Done {
+			return "done: " + d.Reason, true
+		}
+		return "waiting: " + d.Reason, true
+	case event.LegacyProcStart:
+		var d legacyProcStart
+		_ = ev.Decode(&d)
+		body := d.Handle + " " + d.Command
+		if d.Cwd != "" {
+			body += " (in " + d.Cwd + ")"
+		}
+		return body, true
+	case event.LegacyProcPID:
+		var d legacyProcPID
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s pid %d", d.Handle, d.PID), true
+	case event.LegacyProcExit:
+		var d legacyProcExit
+		_ = ev.Decode(&d)
+		body := fmt.Sprintf("%s %s code=%d", d.Handle, d.Reason, d.ExitCode)
+		if d.Tail != "" {
+			body += ": " + d.Tail
+		}
+		return body, true
+	case event.LegacyNarratorTrim:
+		var d legacyNarratorTrim
+		_ = ev.Decode(&d)
+		body := fmt.Sprintf("narrator conversation trimmed from #%d", d.FromSeq)
+		if d.Recap != "" {
+			body += ": " + d.Recap
+		}
+		return body, true
+	}
+	return "", false
 }
 
 func oneLine(s string) string {
