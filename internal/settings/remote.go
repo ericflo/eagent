@@ -586,7 +586,62 @@ func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (
 	if p.Operation != "settings.apply" {
 		return RemoteView{}, fmt.Errorf("operation is not a configuration edit")
 	}
+	for _, e := range p.Edits {
+		if e.Key != "/servers" || e.Op == "unset" {
+			continue
+		}
+		specs, err := serverSpecs(e.Value)
+		if err != nil {
+			return RemoteView{}, err
+		}
+		if err := s.checkServerKeys(specs); err != nil {
+			return RemoteView{}, err
+		}
+	}
 	return before, nil
+}
+
+func serverSpecs(v any) ([]config.SyncServerSpec, error) {
+	var specs []config.SyncServerSpec
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("/servers: %w", err)
+	}
+	if err := json.Unmarshal(raw, &specs); err != nil {
+		return nil, fmt.Errorf("/servers: %w", err)
+	}
+	return specs, nil
+}
+
+// checkServerKeys holds a remote server list to the rule CheckRoutes holds
+// routes to: probing or saving a server sends its key variable's value to its
+// address, so a remote edit may name a key variable only for an address the
+// local user registered with that same variable. Anything else is registered
+// without a key, or from the CLI or the local web UI.
+func (s *Service) checkServerKeys(specs []config.SyncServerSpec) error {
+	var existing []config.RegisteredServer
+	for _, sp := range specs {
+		keyEnv := strings.TrimSpace(sp.KeyEnv)
+		if keyEnv == "" {
+			continue
+		}
+		if existing == nil {
+			var err error
+			if existing, err = config.LoadServers(s.Project); err != nil {
+				return err
+			}
+		}
+		cands, _, err := config.NormalizeServerURL(sp.URL)
+		if err != nil {
+			return fmt.Errorf("/servers: %w", err)
+		}
+		if !slices.ContainsFunc(existing, func(r config.RegisteredServer) bool {
+			return r.KeyEnv == keyEnv && slices.Contains(cands, strings.TrimRight(r.BaseURL, "/"))
+		}) {
+			return fmt.Errorf("/servers: %s is not the key variable registered for %s; a server's key is set from the CLI (eagent servers) or eagent's own web UI", keyEnv, strings.TrimSpace(sp.URL))
+		}
+	}
+	return nil
 }
 
 // ApplyServerEdits executes /servers and /add_server_url edits from a validated
@@ -606,12 +661,9 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 				specs = nil
 				continue
 			}
-			raw, err := json.Marshal(e.Value)
-			if err != nil {
-				return nil, fmt.Errorf("/servers: %w", err)
-			}
-			if err := json.Unmarshal(raw, &specs); err != nil {
-				return nil, fmt.Errorf("/servers: %w", err)
+			var err error
+			if specs, err = serverSpecs(e.Value); err != nil {
+				return nil, err
 			}
 		case "/add_server_url":
 			if e.Op == "set" {
@@ -621,6 +673,11 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 		}
 	}
 	if hasServers {
+		// Checked again here: servers.json may have changed since the
+		// proposal was reviewed.
+		if err := s.checkServerKeys(specs); err != nil {
+			return nil, err
+		}
 		if addURL != "" {
 			specs = append(specs, config.SyncServerSpec{URL: addURL})
 		}
