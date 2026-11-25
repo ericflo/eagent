@@ -138,7 +138,9 @@ A failed call is retried at once, then after a minute, 5, 15 and 30 minutes, the
 
 Everything that differs between agents is behind one interface (`relay.Agent` in `internal/relay/agents.go`): how to start and resume it, where its transcript is and how to parse it, which startup dialogs to answer, which models and efforts it takes. Adding an agent is one file that implements the interface and registers itself, plus a line in the built-in profiles. `claude.go`, `codex.go`, `antigravity.go` and `pi.go` are the four that ship.
 
-What the agent says and does is read from its own transcript, not scraped from the screen. The screen is read only for dialogs and when the model asks to see it.
+What the agent says and does is read from its own transcript, not scraped from the screen. The screen is read only for dialogs and when the model asks to see it. pi says itself when it waits on a dialog (its extension writes it to a status file); the relay is `blocked` until the dialog ends.
+
+Starting an agent, starting it again and handing over to another one can take a minute (a `git pull`, the terminal, the agent's own startup), so none of it runs on the loop: the loop claims the name, the launch runs beside it, and the result is recorded when it is in. A message sent to an agent that is starting again waits and is typed into the new one. An agent that was stopped to start again and could not start is recorded as `exited` with the reason, which wakes eagent. News from a terminal that has been replaced is dropped.
 
 ## Configuration
 
@@ -146,7 +148,7 @@ What the agent says and does is read from its own transcript, not scraped from t
 
 | Key | Default | |
 |---|---|---|
-| `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. |
+| `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. `context_tokens` follows the model: a file, bundle or environment variable that names another model without a window of its own gets that model's, from the catalog or the provider's cached list. |
 | `summarizer` | `{"mode": "inline"}` | Or `dedicated`, with its own `model`. |
 | `rollover_tokens` | 0 | Prompt size at which the conversation restarts from a dossier. 0 follows the model in use: half its context window, in whole thousands, and it moves if the model changes mid-session. A number fixes it. |
 | `tick_seconds` | 30 | How often to check for something new while the agent works. |
@@ -157,7 +159,7 @@ What the agent says and does is read from its own transcript, not scraped from t
 | `finalechat` | on when a token is found | The phone mirror and session archives. |
 | `persona` | | Replaces the voice in `PERSONA.md`. |
 
-Presets name one model each (`eagent config list`). They run it at the effort their orchestrator ran at before: `xhigh`, or the highest the model offers below `max` (`high` for GLM, Kimi, Mistral and DeepSeek). `model.reasoning_effort` sets another level.
+Presets name one model each (`eagent config list`). They run it at the effort their orchestrator ran at before: `xhigh`, or the highest the model offers below `max` (`high` for GLM, Kimi, Mistral and DeepSeek). `model.reasoning_effort` sets another level. `astra` and `openai-med` ran the same orchestrator as `openai-high` and differed only in the task worker's model, so both names now load `openai-high`; `eagent doctor` says so.
 
 Prompts are Markdown files embedded in the binary: `EAGENT.md`, `PERSONA.md`, `DOSSIER.md`, `THREAD-SUMMARY.md`, `USER_MESSAGE.md`, `USER_ANSWER.md`. A file of the same name in `.agents/eagent/prompts/` overrides one.
 

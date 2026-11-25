@@ -42,8 +42,15 @@ func TestPresetsKeepTheirOrchestratorsRoute(t *testing.T) {
 		{"beam", "reflection/beam-1.0-501b-a23b", "openai-chat", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 1048576, "", "", ""},
 		{"deepseek-1017", "deepseek/deepseek-v4.1-flash-1017", "openai-chat", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 1048576, "", "", ""},
 	} {
+		// Every name main had still resolves: two of them now name
+		// openai-high (TestPresetsThatBecameTheSameAreOne).
+		canon, ok := ResolvePreset(w.preset)
+		if !ok {
+			t.Errorf("%s: main had this preset and the name no longer loads", w.preset)
+			continue
+		}
 		c := Defaults()
-		Presets[w.preset](&c)
+		Presets[canon](&c)
 		m := c.Model
 		if m.Model != w.model || m.Protocol != w.protocol || m.BaseURL != w.baseURL || m.APIKeyEnv != w.keyEnv || m.ContextTokens != w.contextTokens || m.MaxTokens != 32768 {
 			t.Errorf("%s: model = %s %s %s %s %d (max %d), want %s %s %s %s %d (max 32768)", w.preset, m.Model, m.Protocol, m.BaseURL, m.APIKeyEnv, m.ContextTokens, m.MaxTokens, w.model, w.protocol, w.baseURL, w.keyEnv, w.contextTokens)
@@ -56,7 +63,7 @@ func TestPresetsKeepTheirOrchestratorsRoute(t *testing.T) {
 			t.Errorf("%s: fallback = %+v, want %s at %s (%s)", w.preset, m.Fallback, w.fallbackModel, w.fallbackURL, w.fallbackKey)
 		}
 	}
-	if len(PresetNames()) != 29 {
-		t.Fatalf("PresetNames has %d presets; main had 29 and the table lists them all", len(PresetNames()))
+	if len(PresetNames()) != 27 {
+		t.Fatalf("PresetNames has %d presets; main had 29, of which astra and openai-med are now names for openai-high", len(PresetNames()))
 	}
 }

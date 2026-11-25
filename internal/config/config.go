@@ -376,15 +376,7 @@ func Defaults() Config {
 // and presetEffort).
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
-	"astra": func(c *Config) {
-		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
-		c.Model = openaiRoute("gpt-6-astra")
-	},
 	"openai-high": func(c *Config) {
-		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
-		c.Model = openaiRoute("gpt-6-astra")
-	},
-	"openai-med": func(c *Config) {
 		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
 		c.Model = openaiRoute("gpt-6-astra")
 	},
@@ -491,13 +483,34 @@ var Presets = map[string]func(*Config){
 }
 
 // presetAliases keeps older names working.
-var presetAliases = map[string]string{"anthropic": "anthropic-high"}
+var presetAliases = map[string]string{
+	"anthropic":  "anthropic-high",
+	"astra":      "openai-high",
+	"openai-med": "openai-high",
+}
+
+// mergedPresets are the names that were presets of their own while a
+// preset set a model per actor. They ran the same orchestrator as the
+// preset they now name, and differed only in the task worker's model, so
+// with one model they are that preset. A config that names one is told
+// (PresetNote).
+var mergedPresets = map[string]bool{"astra": true, "openai-med": true}
+
+// PresetNote says what became of a preset name that is now another's, or
+// "" for any other name.
+func PresetNote(name string) string {
+	if !mergedPresets[name] {
+		return ""
+	}
+	canon := presetAliases[name]
+	return fmt.Sprintf("preset %q is now %q: both ran %s, and differed only in the task worker's model, which is gone", name, canon, PresetDescription(canon))
+}
 
 // PresetNames lists presets in a stable order.
 func PresetNames() []string {
 	return []string{
-		"glm", "astra",
-		"openai-high", "openai-med", "openai-low",
+		"glm",
+		"openai-high", "openai-low",
 		"openrouter-high", "openrouter-med", "openrouter-low",
 		"anthropic-high", "anthropic-med",
 		"deepinfra-high", "deepinfra-med", "deepinfra-low",
@@ -758,6 +771,9 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	}
 	if preset != "" {
 		canon, ok := ResolvePreset(preset)
+		if note := PresetNote(preset); note != "" {
+			cfg.Migrated = append(cfg.Migrated, note)
+		}
 		if ok {
 			preset = canon
 		}

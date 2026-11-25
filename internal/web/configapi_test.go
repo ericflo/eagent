@@ -219,14 +219,14 @@ func TestPresetChipsAndPromptsAreClosedSets(t *testing.T) {
 	if err := os.WriteFile(config.File(project), []byte(`{"preset": "glm", "max_calls_per_turn": 9}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/astra", nil)
+	r := httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/openai-high", nil)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	var pv presetConfigView
 	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 {
 		t.Fatalf("preset = %d %v", w.Code, err)
 	}
-	if pv.Config.MaxCallsPerTurn == 9 || pv.Config.Preset != "astra" {
+	if pv.Config.MaxCallsPerTurn == 9 || pv.Config.Preset != "openai-high" {
 		t.Fatalf("preset config carries the project file: %+v", pv.Config.MaxCallsPerTurn)
 	}
 	// A bundle is shown on its own, over its own preset.

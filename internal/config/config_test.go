@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,12 +39,12 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 
 func TestPresetsAndRoutes(t *testing.T) {
 	dir := t.TempDir()
-	cfg, err := Load(dir, "astra")
+	cfg, err := Load(dir, "openai-high")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Model.Model != "gpt-6-astra" || cfg.Model.Fallback == nil {
-		t.Fatalf("astra preset = %+v", cfg.Model)
+		t.Fatalf("openai-high preset = %+v", cfg.Model)
 	}
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "k")
@@ -166,7 +167,7 @@ func TestBundleBytesSpellsOutNoFallback(t *testing.T) {
 	if fb, ok := object(obj["model"])["fallback"]; !ok || string(fb) != "null" {
 		t.Fatalf("model.fallback = %s (present %v) in %s", fb, ok, raw)
 	}
-	Presets["astra"](&cfg)
+	Presets["openai-high"](&cfg)
 	raw, _ = BundleBytes("local", "", cfg)
 	_ = json.Unmarshal(raw, &obj)
 	if string(object(obj["model"])["fallback"]) == "null" {
@@ -239,7 +240,7 @@ func TestSavedPresetResolvesViaPresetFlagRejectsBuiltInAndClearsFallback(t *test
 // mainOrchestratorEffort is the reasoning effort of each preset's
 // orchestrator on main, before the one-loop change.
 var mainOrchestratorEffort = map[string]string{
-	"glm": "high", "astra": "xhigh", "openai-high": "xhigh", "openai-med": "xhigh", "openai-low": "xhigh",
+	"glm": "high", "openai-high": "xhigh", "openai-low": "xhigh",
 	"openrouter-high": "high", "openrouter-med": "high", "openrouter-low": "high",
 	"anthropic-high": "xhigh", "anthropic-med": "xhigh",
 	"deepinfra-high": "high", "deepinfra-med": "high", "deepinfra-low": "high",
@@ -299,5 +300,58 @@ func TestRolloverFollowsTheContextWindow(t *testing.T) {
 	}
 	if has(ok) || !has(low) {
 		t.Fatalf("validation: 0 flagged=%v, 19999 flagged=%v", has(ok), has(low))
+	}
+}
+
+// "astra", "openai-high" and "openai-med" ran the same orchestrator and
+// differed only in the task worker's model. With one model they are one
+// preset: the list shows it once, the two other names still load as it, and
+// a config that names one is told. No two listed presets are the same.
+func TestPresetsThatBecameTheSameAreOne(t *testing.T) {
+	seen := map[string]string{}
+	for _, name := range PresetNames() {
+		cfg := Defaults()
+		Presets[name](&cfg)
+		raw, _ := json.Marshal(cfg.Model)
+		if other, dup := seen[string(raw)]; dup {
+			t.Errorf("presets %q and %q are the same model route", other, name)
+		}
+		seen[string(raw)] = name
+	}
+	want, err := Load(t.TempDir(), "openai-high")
+	if err != nil || len(want.Migrated) != 0 {
+		t.Fatalf("openai-high: %v, notes %v", err, want.Migrated)
+	}
+	for _, old := range []string{"astra", "openai-med"} {
+		for _, fromFile := range []bool{false, true} {
+			dir, preset := t.TempDir(), old
+			if fromFile {
+				if err := os.MkdirAll(filepath.Dir(File(dir)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(File(dir), []byte(`{"preset":"`+old+`"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				preset = ""
+			}
+			cfg, err := Load(dir, preset)
+			if err != nil {
+				t.Fatalf("%s (from file %v): %v", old, fromFile, err)
+			}
+			// A name written in a file is kept as written, like any alias;
+			// what it resolves to is openai-high.
+			if canon, _ := ResolvePreset(cfg.Preset); canon != "openai-high" || cfg.Model.Model != want.Model.Model || cfg.Model.ReasoningEffort != want.Model.ReasoningEffort || cfg.Model.Fallback == nil {
+				t.Errorf("%s (from file %v) loaded as %q: %+v", old, fromFile, cfg.Preset, cfg.Model)
+			}
+			if len(cfg.Migrated) != 1 || !strings.Contains(cfg.Migrated[0], `"`+old+`" is now "openai-high"`) {
+				t.Errorf("%s (from file %v): notes %q", old, fromFile, cfg.Migrated)
+			}
+		}
+		if PresetDescription(old) != PresetDescription("openai-high") {
+			t.Errorf("%s is described as %q", old, PresetDescription(old))
+		}
+	}
+	if PresetNote("anthropic") != "" || PresetNote("glm") != "" {
+		t.Error("only the merged names carry a note")
 	}
 }
