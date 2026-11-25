@@ -74,9 +74,9 @@ func TestIndepStopSessionDuringSwitchLeavesNoAgent(t *testing.T) {
 			t.Errorf("after Stop session, %s is on the record as running", rel.Name)
 		}
 	})
-	if !next.wasKilled() {
-		t.Errorf("the agent the switch launched was left running after Stop session")
-	}
+	// The agent is stopped on a goroutine of its own when the session
+	// lives on, so the loop does not wait for it.
+	waitFor(t, "the agent the switch launched to be stopped after Stop session", next.wasKilled)
 }
 
 // /stop-relay while a switch is launching: the user stopped the agent, so
@@ -96,9 +96,9 @@ func TestIndepStopDuringSwitchStopsTheHandover(t *testing.T) {
 			t.Errorf("after /stop-relay during a switch, %s runs", rel.Name)
 		}
 	})
-	if !next.wasKilled() {
-		t.Errorf("the agent the switch launched runs after the user stopped the relay")
-	}
+	// The agent is stopped on a goroutine of its own when the session
+	// lives on, so the loop does not wait for it.
+	waitFor(t, "the agent the switch launched to be stopped after the user stopped the relay", next.wasKilled)
 }
 
 // Stop session while eagent's relay_start is launching.
@@ -127,7 +127,7 @@ func TestIndepStopSessionDuringStartLeavesNoAgent(t *testing.T) {
 			}
 		}
 	})
-	if !next.wasKilled() {
-		t.Errorf("the agent relay_start launched was left running after Stop session")
-	}
+	// The agent is stopped on a goroutine of its own when the session
+	// lives on, so the loop does not wait for it.
+	waitFor(t, "the agent relay_start launched to be stopped after Stop session", next.wasKilled)
 }

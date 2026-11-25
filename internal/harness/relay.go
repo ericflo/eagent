@@ -386,7 +386,15 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// Stopped while it started (again): it stays stopped.
 			err = fmt.Errorf("%s was stopped while it started", firstNonEmpty(job.replaces, job.name))
 			seat := job.seat
-			go func() { _ = seat.Kill() }()
+			if r.ending {
+				// The session is being stopped and the process may exit
+				// before another goroutine would run: an agent that came
+				// up now is stopped before anything else, so "stop
+				// everything" leaves none behind.
+				_ = seat.Kill()
+			} else {
+				go func() { _ = seat.Kill() }()
+			}
 		}
 	}
 	r.startFailed = err != nil
