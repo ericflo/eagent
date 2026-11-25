@@ -81,6 +81,28 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 	if err := r.checkRelayPick(rel.Profile, pick); err != nil {
 		return "", err
 	}
+	if job := r.relays.launch(name); job != nil && job.name == name {
+		// A start of this relay is under way: what it runs next is what
+		// that start launches, not what the record says it runs now.
+		if r.relayRepick == nil {
+			r.relayRepick = map[string]relayPick{}
+		}
+		if pick == job.pick {
+			// Nothing waits beyond the start (finishLaunch clears a pick
+			// equal to the one it started); one waiting already is dropped.
+			if _, waiting := r.relayRepick[name]; waiting {
+				r.relayRepick[name] = pick
+			}
+			r.syncRelaySettings()
+			r.publishRelayMeta()
+			return rel.Who() + " is already starting again with " + r.pickText(rel, pick) + ".", nil
+		}
+		// Applied once the new agent is idle (applyWaitingRepick).
+		r.relayRepick[name] = pick
+		r.syncRelaySettings()
+		r.publishRelayMeta()
+		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
+	}
 	if pick == (relayPick{rel.Model, rel.Effort}) {
 		delete(r.relayRepick, name)
 		r.syncRelaySettings()
@@ -152,16 +174,13 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
 		ran := false
 		r.sync(func() {
 			ran = true
-			name, held, err := r.finishLaunch(job)
-			if err != nil {
+			if _, err := r.finishLaunch(job); err != nil {
 				r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + who + " again with " + text + ": " + err.Error()}))
 				r.ui.Log("relay %s: %v", job.name, err)
-				return
 			}
-			go r.sendHeld(name, job.seat, held)
 		})
-		if !ran && job.err == nil {
-			_ = job.seat.Kill() // the session ended meanwhile: nothing would watch it
+		if !ran {
+			r.abandonLaunch(job) // the session ended meanwhile: nothing would watch it
 		}
 	}()
 	return nil

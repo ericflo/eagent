@@ -265,3 +265,83 @@ func TestRelaySwitchRunsOffTheLoop(t *testing.T) {
 		}
 	})
 }
+
+// The reviewer's scenario: a model change starts Codex again; while that
+// launch is under way the user picks the default again. That is not "what
+// it already runs": the launch starts the first pick, so the second waits
+// and is applied once the new agent is idle.
+func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
+	first, second := newFakeSeat("two"), newFakeSeat("three")
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), first, second}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("repick: %v", err)
+		}
+	})
+	g.waitEntered(t)
+	var msg string
+	rt.sync(func() {
+		var err error
+		if msg, err = rt.repickRelay("codex", relayPick{}); err != nil {
+			t.Errorf("repick back: %v", err)
+		}
+		if got := rt.relayRoutes()["codex"]; !got.Waiting || got.Model != "" {
+			t.Errorf("while starting, the default pick should wait: %+v", got)
+		}
+	})
+	if strings.Contains(msg, "already runs") {
+		t.Fatalf("repick back to the default during the launch: %q", msg)
+	}
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		rel := rt.st.Relays["codex"]
+		if rel.Model != "gpt-6.2-astra" {
+			t.Errorf("the launch under way started %q", rel.Model)
+		}
+		if p, ok := rt.relayRepick["codex"]; !ok || p != (relayPick{}) {
+			t.Errorf("the default pick is not waiting after the launch: %v %v", p, ok)
+		}
+	})
+	// Idle: the waiting change applies.
+	first.emit(relay.Event{Kind: relay.KindState, State: "idle"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		rel := rt.st.Relays["codex"]
+		if rel.Model != "" || len(rt.relayRepick) != 0 {
+			t.Errorf("after the waiting change: model %q, waiting %v", rel.Model, rt.relayRepick)
+		}
+	})
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := len(g.specs); n != 3 {
+		t.Fatalf("%d launches, want 3", n)
+	}
+}
+
+// Picking again what the launch under way already starts changes nothing
+// and starts nothing more.
+func TestRelayRepickDuringLaunchSamePick(t *testing.T) {
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		_, _ = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""})
+	})
+	g.waitEntered(t)
+	rt.sync(func() {
+		_, _ = rt.repickRelay("codex", relayPick{"gpt-5", ""})
+		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("repick: %v", err)
+		}
+	})
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		if rel := rt.st.Relays["codex"]; rel.Model != "gpt-6.2-astra" || len(rt.relayRepick) != 0 {
+			t.Errorf("after the launch: model %q, waiting %v", rel.Model, rt.relayRepick)
+		}
+	})
+}
