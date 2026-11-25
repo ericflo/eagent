@@ -769,8 +769,9 @@ func (r *Runtime) dossierIndex() string {
 			from = cur.CoversSeq + 1
 		}
 	}
+	var at int64 // the event being listed: a name may have had another agent then
 	who := func(name string) string {
-		if rel := r.st.Relays[name]; rel != nil {
+		if rel := r.st.RelayAt(name, at); rel != nil {
 			return rel.Who()
 		}
 		return firstNonEmpty(name, "the agent")
@@ -784,6 +785,7 @@ func (r *Runtime) dossierIndex() string {
 		if ev.Source.File == "" {
 			continue
 		}
+		at = ev.Seq
 		var what string
 		outline, user := false, false // outline: listed for the older stretches too
 		switch ev.Type {
@@ -1062,7 +1064,7 @@ func (r *Runtime) dossierFacts(covers int64, opens string) string {
 				continue
 			}
 			who := d.Name
-			if rel := r.st.Relays[d.Name]; rel != nil {
+			if rel := r.st.RelayAt(d.Name, ev.Seq); rel != nil {
 				who = rel.Who()
 			}
 			head := who

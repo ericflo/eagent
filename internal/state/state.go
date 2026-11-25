@@ -114,6 +114,11 @@ type State struct {
 	// Counters continue id sequences across restarts.
 	questionSeq, relaySendSeq, scheduleSeq int
 
+	// relayHolders are, per name, the relays that held it in turn: a new
+	// conversation under a stopped relay's name adds one, a restart
+	// replaces the last. See RelayAt.
+	relayHolders map[string][]*Relay
+
 	// lastMoveSeq is the newest thing an agent did that the user might be
 	// asked about: a finished turn, a dialog it is stuck on, an exit.
 	lastMoveSeq int64
