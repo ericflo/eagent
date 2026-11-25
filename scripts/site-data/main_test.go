@@ -15,20 +15,21 @@ func TestCatalogFollowsNewPresetsAndRoutes(t *testing.T) {
 		delete(config.Presets, name)
 		config.Models = previousModels
 	})
-	actor := config.Defaults().Task
+	actor := config.Defaults().Model
 	provider, ok := config.ProviderForURL(actor.BaseURL)
 	if !ok {
-		t.Fatal("default task provider is missing from catalog")
+		t.Fatal("default provider is missing from catalog")
 	}
 	actor.Model = "test/model"
 	actor.ReasoningEffort = "test-effort"
 	config.Models = append(append([]config.Model(nil), config.Models...), config.Model{
 		Provider: provider.ID, ID: actor.Model, Label: "New model from catalog",
 	})
-	fallback := config.Defaults().Narrator
+	fallback := config.Defaults().Model
+	fallback.Model, fallback.ReasoningEffort, fallback.Fallback = "test/fallback", "low", nil
 	actor.Fallback = &fallback
 	config.Presets[name] = func(cfg *config.Config) {
-		cfg.Orchestrator = actor
+		cfg.Model = actor
 		cfg.Description = "A new canonical description."
 	}
 	for _, p := range exportCatalog().Presets {
@@ -52,10 +53,10 @@ func TestDefaultsWithoutMatchingPreset(t *testing.T) {
 	t.Cleanup(func() { config.Presets = previous })
 	config.Presets = make(map[string]func(*config.Config), len(previous))
 	for name := range previous {
-		config.Presets[name] = func(cfg *config.Config) { cfg.Orchestrator.Model = "non-default" }
+		config.Presets[name] = func(cfg *config.Config) { cfg.Model.Model = "non-default" }
 	}
 	data := exportCatalog()
-	if data.Default != "" || data.Presets[0].Name != "" || data.Presets[0].Routes[0].Model != config.Defaults().Orchestrator.Model {
+	if data.Default != "" || data.Presets[0].Name != "" || data.Presets[0].Routes[0].Model != config.Defaults().Model.Model {
 		t.Fatal("defaults should remain available when no named preset matches")
 	}
 }

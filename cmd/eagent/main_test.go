@@ -66,8 +66,8 @@ func TestCmdServersLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load after use: %v", err)
 	}
-	if cfg.Orchestrator.BaseURL != mock.URL+"/v1" || cfg.Orchestrator.Model != "cli-test-model" || cfg.Orchestrator.Protocol != llm.ProtocolResponses || cfg.Orchestrator.APIKeyEnv != "" {
-		t.Fatalf("cfg.Orchestrator = %+v", cfg.Orchestrator)
+	if cfg.Model.BaseURL != mock.URL+"/v1" || cfg.Model.Model != "cli-test-model" || cfg.Model.Protocol != llm.ProtocolResponses || cfg.Model.APIKeyEnv != "" {
+		t.Fatalf("cfg.Model = %+v", cfg.Model)
 	}
 	if code := cmdServers(project, []string{"refresh", "cli-box"}, serverCLIOpts{}); code != 0 {
 		t.Fatalf("refresh exit code = %d", code)

@@ -39,14 +39,15 @@
   }
   function configView() {
     const snapshot = resource.snapshot, details = snapshot.details || {}, effective = expand(snapshot.effective), saved = expand(snapshot.saved);
-    const models = cfg => ['orchestrator', 'task', 'narrator'].map(actor => cfg[actor]?.model || '').join(' · ');
+    const models = cfg => cfg.model?.model || '';
     const presets = Object.entries(data.presets).map(([name, config]) => ({ name, description: config.description, models: models(config) }));
     const bundles = (details.bundles || []).map(name => {
       const entry = data.bundles[name], valid = entry?.config && entry.sha256 === details.context_digests?.['bundle:' + name];
       return { name, description: valid ? entry.config.description : '', models: valid ? models(entry.config) : '', invalid: valid ? '' : entry?.invalid || 'This bundle changed since capture. Reopen the latest artifact to load it.' };
     });
     const project = details.project || snapshot.context || '';
-    return { project, defaults: data.defaults, presets, bundles, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source })), keys: details.keys_present || {}, running: [], server: {},
+    const agents = (field('/relay/default')?.schema?.enum || []).map(name => ({ name: String(name) }));
+    return { project, defaults: data.defaults, presets, bundles, agents, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source })), keys: details.keys_present || {}, running: [], server: {},
       files: { config: project + '/.agents/eagent/config.json', bundles: project + '/.agents/eagent/configs', prompts: project + '/.agents/eagent/prompts' },
       phone: { state: effective.finalechat?.enabled === false ? 'disabled' : 'configured', detail: 'Mirror defaults are shown here. Live chat delivery and credentials remain with the integration.' },
       resolution: { effective, sources: details.sources || {}, active: details.active || { kind: '', name: '' }, preset: effective.preset || '', file: { exists: !!details.file_etag, etag: snapshot.version, raw: JSON.stringify(saved, null, 2), preset: saved.preset || '', default_config: saved.default_config || '', path: project + '/.agents/eagent/config.json', unknown_keys: [] } } };
@@ -207,13 +208,14 @@
         return await stage({ operation: 'settings.apply', edits: editsFor(values, resource.snapshot.saved, false) }, { version: body.if_match });
       }
       if (method === 'POST' && url.pathname === '/api/config/test') {
-        const actor = body.actor_key, route = body.route || 'primary';
-        if (!['orchestrator', 'task', 'narrator'].includes(actor) || !['primary', 'fallback'].includes(route)) throw new Error('Select a saved actor route.');
-        const saved = expand(resource.snapshot.effective)[actor];
-        const selected = route === 'fallback' ? body.actor?.fallback : body.actor, current = route === 'fallback' ? saved?.fallback : saved;
+        const target = body.target, route = body.route || 'primary';
+        if (!['model', 'summarizer'].includes(target) || !['primary', 'fallback'].includes(route)) throw new Error('Select a saved model route.');
+        const effective = expand(resource.snapshot.effective);
+        const saved = target === 'model' ? effective.model : effective.summarizer?.model;
+        const selected = route === 'fallback' ? body.model?.fallback : body.model, current = route === 'fallback' ? saved?.fallback : saved;
         const routeIdentity = value => Object.fromEntries(Object.entries(value || {}).filter(([key]) => !['reasoning_effort', 'fallback'].includes(key)));
         if (!selected || !current || canonical(routeIdentity(selected)) !== canonical(routeIdentity(current))) throw new Error('Save this model route before testing it remotely. Each test uses the reviewed saved route.');
-        return await stage({ operation: 'route.test', parameters: { actor, route, effort: body.effort ?? selected.reasoning_effort ?? '' } }, { routeKey: actor, route });
+        return await stage({ operation: 'route.test', parameters: { target, route, effort: body.effort ?? selected.reasoning_effort ?? '' } }, { routeKey: target, route });
       }
       if (method === 'POST' && url.pathname === '/api/config/bundles') return await stage({ operation: 'bundle.save', parameters: { name: body.name, description: body.description || '', config_json: JSON.stringify(body.config) } }, { bundleSave: { name: body.name, description: body.description || '', config: clone(body.config) } });
       if (method === 'POST' && url.pathname === '/api/config/delete-bundle') return await stage({ operation: 'bundle.delete', parameters: { name: body.name } }, { bundleDelete: body.name });

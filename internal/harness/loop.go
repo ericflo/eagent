@@ -60,9 +60,12 @@ type wake struct {
 	moved  bool // (look) something has happened since the user last heard
 	steps  int  // (look) how many steps the agents had taken when it was started
 	thread bool // the thread's title and summary may be out of date
+	owed   bool // a message the user wrote to eagent is still unanswered
+	final  bool // the session is about to end: the closing word
 }
 
-// reason names the wake for the turn's record.
+// reason names the wake for the turn's record: the most pressing thing
+// that asked for the look. The steer that follows names all of them.
 func (w wake) reason() string {
 	switch {
 	case w.event && w.kind == wakeUser:
@@ -75,6 +78,10 @@ func (w wake) reason() string {
 		return "a notice from eagent"
 	case w.look:
 		return "progress while the agent works"
+	case w.owed:
+		return "a message for eagent is still unanswered"
+	case w.final:
+		return "the session is ending"
 	}
 	return "the thread's title and summary"
 }
@@ -134,6 +141,22 @@ type turnState struct {
 	overflowed      bool
 	futileLogged    bool
 	dossierFailedAt time.Time
+
+	// owed is a message the user wrote to eagent itself that was looked at
+	// and left with no answer and nothing done about it. Until that
+	// changes every call is told so, and a call is made for it alone a few
+	// times, further and further apart.
+	owed      int64
+	owedTries int
+	owedTimer *time.Timer
+
+	// capRuns counts the turns in a row that stopped at the call limit
+	// with an agent still stuck on its screen.
+	capRuns int
+
+	// finalAsked: the closing word of a session with no terminal has been
+	// asked for.
+	finalAsked bool
 }
 
 // init reads, from a replayed log, what the loop would otherwise have had
@@ -239,6 +262,15 @@ func (r *Runtime) noteWake(ev event.Event) {
 		return
 	}
 	t.wakes[k] = ev.Seq
+	if k == wakeUser || k == wakeTurnEnd {
+		t.capRuns = 0
+	}
+	if k == wakeUser {
+		// What they write now is looked at on its own; an older message
+		// still unanswered is in the conversation above it.
+		r.clearOwed()
+		t.finalAsked = false
+	}
 	if r.ending || wakeSettle <= 0 {
 		return
 	}
@@ -299,9 +331,86 @@ func (r *Runtime) maybeTurn() {
 		r.startDossier()
 		return
 	}
+	if t.owed > 0 && t.owedTimer == nil {
+		r.startTurn(wake{owed: true, thread: t.threadDue || r.summaryRipe()})
+		return
+	}
 	if t.threadDue {
 		r.startTurn(wake{thread: true})
 	}
+}
+
+// ---- a message for eagent is answered -------------------------------------
+
+// owedRetryDelays space out the calls made only because a message the user
+// wrote to eagent is still unanswered.
+var owedRetryDelays = []time.Duration{15 * time.Second, time.Minute, 5 * time.Minute}
+
+// oweAnswer notes that the message at seq was looked at and left
+// unanswered, and arranges another call for it. Loop goroutine.
+func (r *Runtime) oweAnswer(seq int64) {
+	t := &r.turns
+	if t.owed != seq {
+		t.owed, t.owedTries = seq, 0
+	}
+	if t.owedTimer != nil {
+		t.owedTimer.Stop()
+		t.owedTimer = nil
+	}
+	if t.owedTries >= len(owedRetryDelays) {
+		r.ui.Log("eagent: a message addressed to it went unanswered after %d reminders", t.owedTries+1)
+		t.owed, t.owedTries = 0, 0
+		return
+	}
+	d := owedRetryDelays[t.owedTries]
+	t.owedTries++
+	t.owedTimer = time.AfterFunc(d, func() {
+		r.post(func() { r.turns.owedTimer = nil })
+	})
+}
+
+// clearOwed forgets the unanswered message: it was answered, acted on, or
+// overtaken by a newer one. Loop goroutine.
+func (r *Runtime) clearOwed() {
+	t := &r.turns
+	t.owed, t.owedTries = 0, 0
+	if t.owedTimer != nil {
+		t.owedTimer.Stop()
+		t.owedTimer = nil
+	}
+}
+
+// heldSince returns the newest message the user wrote that was kept for
+// eagent and has not been looked at, or 0. Loop goroutine.
+func (r *Runtime) heldSince(seen int64) int64 {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= seen {
+			break
+		}
+		if ev.Type == event.UserMessage {
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && d.Held != "" {
+				return ev.Seq
+			}
+		}
+	}
+	return 0
+}
+
+// sentBack is the exchange that returns a reply to the model for another
+// try without recording it: its reply, then why it will not do. A reply
+// that called hold gets the reason as that call's result.
+func sentBack(resp *llm.Response, why string) []llm.Message {
+	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL}}
+	if len(resp.ToolCalls) == 0 {
+		return append(out, llm.Message{Role: "user", Text: "[eagent] " + why})
+	}
+	results := llm.Message{Role: "tool"}
+	for _, c := range resp.ToolCalls {
+		results.Results = append(results.Results, llm.ToolResult{CallID: c.ID, Name: c.Name, Output: "not accepted: " + why, IsError: true})
+	}
+	return append(out, results)
 }
 
 // ---- progress looks -------------------------------------------------------
@@ -428,11 +537,15 @@ func (r *Runtime) turn(w wake) {
 	// extra is an exchange that belongs to this call alone and is never
 	// recorded: a reply that had to be sent back for another try.
 	var extra []llm.Message
-	nudged, rewrote := false, false
+	nudged, rewrote, cut, reminded := false, false, false, false
 	end := "done"
 	// tail is the end of the prompt for this turn: written once, and
-	// recorded only if the model acts on it.
+	// recorded only if the model acts on it. held is settled with it: the
+	// message kept for eagent that this turn has to answer (0 for none).
 	var tail string
+	var mustSpeak bool
+	var held int64
+	who := "the agent"
 	for call := 1; call <= maxCalls; call++ {
 		if ctx.Err() != nil {
 			end = "interrupted"
@@ -443,14 +556,26 @@ func (r *Runtime) turn(w wake) {
 		r.sync(func() {
 			msgs = r.st.View(&r.view)
 			seen = r.st.LastSeq()
-			if !recorded {
-				if tail == "" {
-					tail = r.tail(w, time.Now())
+			if tail == "" {
+				held = r.heldSince(r.turns.seen)
+				if w.owed {
+					held = r.turns.owed
 				}
+				mustSpeak = w.final && r.turns.saidAt.IsZero()
+				if active := r.st.ActiveRelays(); len(active) > 0 {
+					who = active[0].Who()
+				}
+				tail = r.tail(w, time.Now())
+			}
+			if !recorded {
 				msgs = state.WithTail(msgs, tail)
 			}
 			r.turns.callAt = time.Now()
 		})
+		// Every call of a session is the same request but for its messages:
+		// one system prompt, one tool list, one effort, one output ceiling.
+		// Anything that varied would cost the provider's cache of the
+		// conversation.
 		req := llm.Request{System: r.system, Messages: append(msgs, extra...), Tools: r.toolset, CacheKey: r.sess.ID}
 		resp, err := r.complete(ctx, event.ActorEagent, req, r.observer())
 		r.ui.Stream("", "")
@@ -462,6 +587,9 @@ func (r *Runtime) turn(w wake) {
 			r.sync(func() {
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
+				if w.final {
+					r.fallbackFinal()
+				}
 			})
 			end = "error"
 			break
@@ -473,15 +601,26 @@ func (r *Runtime) turn(w wake) {
 			}
 		}
 		if acts == 0 {
-			// Words with no tool call reach no one. Asked once, off the
-			// record; after that they are taken for a hold.
-			if text := strings.TrimSpace(resp.Text); text != "" && len(resp.ToolCalls) == 0 && !nudged {
+			// A reply that reaches no one. Some are sent back once, off the
+			// record, with the reason; after that it is taken for a hold.
+			var back string
+			switch {
+			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
+				cut = true
+				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
+			case strings.TrimSpace(resp.Text) != "" && len(resp.ToolCalls) == 0 && !nudged:
 				nudged = true
+				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
+			case held > 0 && !reminded:
+				reminded = true
+				back = "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + ". Holding is not an answer to a message addressed to you."
+			case mustSpeak && !reminded:
+				reminded = true
+				back = "The session is ending and the user has heard nothing from you. Send the final report now with send_message."
+			}
+			if back != "" {
 				r.sync(func() { r.noteSilent(resp, 0, wake{}) })
-				extra = []llm.Message{
-					{Role: "assistant", Text: resp.Text, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL},
-					{Role: "user", Text: "[eagent] That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."},
-				}
+				extra = sentBack(resp, back)
 				continue
 			}
 			r.sync(func() { r.noteSilent(resp, seen, w) })
@@ -533,9 +672,68 @@ func (r *Runtime) turn(w wake) {
 			end = "call limit"
 		}
 	}
-	if recorded {
-		r.sync(func() { r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end})) })
+	r.sync(func() {
+		if recorded {
+			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
+		}
+		switch {
+		case end == "error" || end == "interrupted":
+			// What asked for the look is still owed one.
+		case tc.handled:
+			r.clearOwed()
+		case held > 0:
+			r.oweAnswer(held)
+		}
+		if end == "call limit" {
+			r.afterCallLimit(maxCalls)
+		}
+		if w.final && mustSpeak && !tc.spoke && end != "error" && end != "interrupted" {
+			r.fallbackFinal()
+		}
+	})
+}
+
+// afterCallLimit handles a turn that was stopped at the call limit. If an
+// agent is still stuck on its screen, the work of clearing it is not done:
+// eagent is woken once more to carry on, and after that the user is told.
+// Loop goroutine.
+func (r *Runtime) afterCallLimit(maxCalls int) {
+	t := &r.turns
+	var stuck *state.Relay
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State == "blocked" {
+			stuck = rel
+			break
+		}
 	}
+	if stuck == nil {
+		return
+	}
+	t.capRuns++
+	if t.capRuns <= 1 {
+		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("You were stopped after %d calls in a row, and %s is still stuck on its screen. Read the screen once more and either clear it or ask the user; do not repeat what has not worked.", maxCalls, stuck.Who())}))
+		return
+	}
+	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", stuck.Who(), stuck.Name)})
+}
+
+// fallbackFinal makes sure a session with no terminal does not end in
+// silence when the model could not give the closing word: eagent says
+// where things stand in its own words. Loop goroutine.
+func (r *Runtime) fallbackFinal() {
+	var b strings.Builder
+	b.WriteString("This session is ending and I could not write a proper closing report.")
+	for _, name := range r.st.RelayOrder {
+		rel := r.st.Relays[name]
+		if rel == nil || strings.TrimSpace(rel.LastTurn) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n\n%s's last report (%s):\n%s", rel.Who(), r.when(rel.LastTurnAt), clipRunes(strings.TrimSpace(rel.LastTurn), 1500))
+	}
+	if r.st.Question != nil {
+		b.WriteString("\n\nStill open: " + clipRunes(oneLine(r.st.Question.Text, 300), 300))
+	}
+	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: b.String()})
 }
 
 // looked notes that a call came back having seen everything up to seen.
@@ -645,7 +843,7 @@ func (r *Runtime) turnFailed(err error) {
 // stopTimers stops the loop's timers at the end of a run.
 func (r *Runtime) stopTimers() {
 	t := &r.turns
-	for _, tm := range []*time.Timer{t.ticker, t.settle, t.retryTime} {
+	for _, tm := range []*time.Timer{t.ticker, t.settle, t.retryTime, t.owedTimer} {
 		if tm != nil {
 			tm.Stop()
 		}

@@ -4,39 +4,44 @@
 const X = window.__eagent;
 const {h, api, toast, showModal, closeModal, k, money, $} = X;
 
-const ACTORS = [
-  {key: 'orchestrator', name: 'Orchestrator', role: 'Plans the work, delegates tasks, and decides when it is done. It reads every result, so a stronger model pays off here.'},
-  {key: 'task', name: 'Task worker', role: 'Does one task at a time: reads, edits, runs commands. Most tokens are spent here, so price matters most.'},
-  {key: 'narrator', name: 'Narrator', role: 'Talks to you: acknowledges requests, reports progress, asks questions. It speaks often, so keep it fast.'},
-];
+// The model routes the page edits: eagent's own, and the dedicated
+// summarizer's when it has one.
+const ROUTES = {
+  model: {key: 'model', ptr: '/model', name: 'eagent', role: 'The model eagent runs on. It reads what the agent does, talks to you, and types into the agent\'s terminal. It is called often, so a fast model whose prompt cache holds pays off.'},
+  summarizer: {key: 'summarizer', ptr: '/summarizer/model', name: 'Summarizer', role: 'Keeps the thread\'s title and summary in a separate small call.'},
+};
+const routeOf = (cfg, key) => key === 'model' ? cfg.model : cfg.summarizer && cfg.summarizer.model;
+const ROUTE_RE = /^\/(model|summarizer\/model)\/(fallback\/)?(\w+)/;
+const ROUTE_NAME = {'model': 'eagent\'s model', 'summarizer/model': 'summarizer model'};
 const EFFORT_HELP = {
   default: 'No reasoning_effort field is sent; the model or server default applies.',
   none: 'Turns reasoning off (or sends no thinking block where supported).',
   minimal: 'Barely any thinking before answering.',
-  low: 'A little thinking. Good for narration and routine tasks.',
-  medium: 'Balanced. The usual choice for task workers.',
-  high: 'Thinks at length. Slower and pricier; good for planning.',
+  low: 'A little thinking. The usual choice for eagent: it is called often.',
+  medium: 'Balanced.',
+  high: 'Thinks at length. Slower and pricier.',
   xhigh: 'Very long thinking. Only worth it for hard problems.',
   max: 'The model thinks as long as it wants.',
 };
 const PROTO_LABELS = {'openai-chat': 'Chat Completions', 'openai-responses': 'Responses', 'anthropic': 'Anthropic Messages'};
 const ENGINE_LABELS = {lmstudio: 'LM Studio', loom: 'Loom', llamacpp: 'llama.cpp', vllm: 'vLLM', sglang: 'SGLang', ollama: 'Ollama'};
 const LABELS = {
-  '/task_concurrency': 'task concurrency', '/max_task_turns': 'max task calls', '/max_orchestrator_calls_per_turn': 'max orchestrator calls per turn',
-  '/narrator_tick_seconds': 'narrator tick', '/narrator_quiet_seconds': 'narrator quiet limit', '/rollover_tokens': 'fresh-context threshold',
-  '/bash_wait_seconds': 'command wait', '/bash_timeout_seconds': 'command timeout', '/tool_output_max_chars': 'tool output limit',
-  '/persona': 'narrator voice', '/allow_outside_project': 'allow edits outside the project', '/finalechat/enabled': 'phone mirror',
+  '/tick_seconds': 'seconds between progress looks', '/quiet_seconds': 'longest silence while the agent works', '/max_calls_per_turn': 'calls per turn',
+  '/rollover_tokens': 'context rollover', '/report_max_chars': 'report kept', '/persona': 'eagent\'s voice',
+  '/summarizer/mode': 'title and summary', '/relay/default': 'default agent', '/finalechat/enabled': 'phone mirror',
   '/finalechat/question_timeout_seconds': 'phone question timeout', '/finalechat/mirror_input': 'mirror your messages to the phone',
   '/finalechat/agent': 'phone agent name', '/finalechat/token_env': 'phone token variable', '/finalechat/base_url': 'phone service address',
+  '/finalechat/artifacts': 'session archives',
 };
-const ACTOR_LABEL = {orchestrator: 'orchestrator', task: 'task worker', narrator: 'narrator'};
 const FIELD_LABEL = {model: 'model', protocol: 'protocol', base_url: 'provider', api_key_env: 'key variable', reasoning_effort: 'effort', max_tokens: 'max output tokens', context_tokens: 'context window', replay_reasoning: 'replay reasoning', fallback: 'fallback'};
 
 let E = null;
 
 // ---- state -------------------------------------------------------------------------------
 const clone = v => JSON.parse(JSON.stringify(v));
-function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; delete c.servers; delete c.add_server_url; delete c.save_preset; if (!c.finalechat) c.finalechat = {}; return c; }
+function strip(cfg) { const c = clone(cfg); delete c.name; delete c.description; delete c.instructions; delete c.preset; delete c.default_config; delete c.servers; delete c.add_server_url; delete c.save_preset; if (!c.finalechat) c.finalechat = {}; if (!c.summarizer) c.summarizer = {mode: 'inline'}; return c; }
+// at reads a nested value by its pointer path ("model/fallback").
+function at(obj, path) { for (const seg of path.split('/')) obj = obj == null ? undefined : obj[seg]; return obj; }
 function flatten(v, prefix = '', out = {}) {
   if (v && typeof v === 'object' && !Array.isArray(v)) { for (const key of Object.keys(v)) flatten(v[key], prefix + '/' + key, out); }
   else out[prefix] = JSON.stringify(v);
@@ -52,21 +57,22 @@ function changes() {
 function label(ptr) {
   if (ptr === '/preset') return 'base preset';
   if (LABELS[ptr]) return LABELS[ptr];
-  const m = ptr.match(/^\/(orchestrator|task|narrator)\/(fallback\/)?(\w+)/);
-  if (m) return `${ACTOR_LABEL[m[1]]} ${m[2] ? 'fallback ' : ''}${FIELD_LABEL[m[3]] || m[3].replace(/_/g, ' ')}`;
+  const m = ptr.match(ROUTE_RE);
+  if (m) return `${ROUTE_NAME[m[1]]} ${m[2] ? 'fallback ' : ''}${FIELD_LABEL[m[3]] || m[3].replace(/_/g, ' ')}`;
   return ptr.slice(1).replace(/[/_]/g, ' ');
 }
 function groupChanges(ptrs) {
   // Collapse one route's many fields into one item so the summary reads naturally.
   const seen = new Set(), out = [];
   for (const p of ptrs) {
-    const m = p.match(/^\/(orchestrator|task|narrator)\/(fallback)?/);
+    const m = p.match(ROUTE_RE);
     const key = m ? `/${m[1]}${m[2] ? '/fallback' : ''}` : p;
     if (seen.has(key)) continue;
     seen.add(key);
     if (m) {
-      const who = `${ACTOR_LABEL[m[1]]}${m[2] ? ' fallback' : ''}`;
-      const before = m[2] ? E.loaded[m[1]].fallback : E.loaded[m[1]], after = m[2] ? E.cfg[m[1]].fallback : E.cfg[m[1]];
+      const who = `${ROUTE_NAME[m[1]]}${m[2] ? ' fallback' : ''}`;
+      const path = m[1] + (m[2] ? '/fallback' : '');
+      const before = at(E.loaded, path), after = at(E.cfg, path);
       if (!before && after) { out.push(`${who} added`); continue; }
       if (before && !after) { out.push(`${who} removed`); continue; }
       let fields = [...new Set(ptrs.filter(q => q.startsWith(key + '/') && !(q.slice(key.length + 1).includes('/'))).map(q => q.split('/').pop()))];
@@ -79,7 +85,7 @@ function groupChanges(ptrs) {
 }
 function source(ptr) {
   const s = E.sources[ptr];
-  if (!s) { // a parent may carry it (e.g. the whole actor came from one layer)
+  if (!s) { // a parent may carry it (e.g. the whole route came from one layer)
     const parts = ptr.split('/'); while (parts.length > 2) { parts.pop(); const ps = E.sources[parts.join('/')]; if (ps) return ps; }
     return '';
   }
@@ -188,19 +194,19 @@ function draw() {
     body.append(h('div',{class:'settings-intro'},
       h('div',{class:'settings-intro-row'},
         h('div',null,
-          h('h2',null,tab==='Models'?'Choose how your agent thinks':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give your agent direction':'Fine-tune your setup'),
-          h('p',null,tab==='Models'?'Pick a model and reasoning effort for each role.':tab==='Behavior'?'Adjust session limits, narration, and phone updates.':tab==='Prompts'?'Customize the instructions behind each role.':'Presets, saved configurations, and detailed overrides.')),
+          h('h2',null,tab==='Models'?'Choose the model eagent runs on':tab==='Behavior'?'Make it work your way':tab==='Prompts'?'Give eagent direction':'Fine-tune your setup'),
+          h('p',null,tab==='Models'?'Pick a model and reasoning effort, and how the thread is summarized.':tab==='Behavior'?'Choose the default agent and adjust progress updates, limits, and the phone mirror.':tab==='Prompts'?'Customize the instructions eagent works from.':'Presets, saved configurations, and detailed overrides.')),
         tab==='Models' && canAction('bundle.save') ? h('button',{class:'small',onclick:saveBundleDialog,title:'Save this setup as a reusable named preset'},'+ Save as preset…') : null)));
-    if(tab==='Models') { const sc = serversCard(); if (sc) body.append(sc); body.append(h('div',{class:'routes'},...ACTORS.map(routeCard))); }
-    if(tab==='Behavior') body.append(sessionCard(),narratorCard(),phoneCard());
+    if(tab==='Models') { const sc = serversCard(); if (sc) body.append(sc); body.append(h('div',{class:'routes'},routeCard(ROUTES.model),summarizerCard())); }
+    if(tab==='Behavior') body.append(agentCard(),behaviorCard(),phoneCard());
     if(tab==='Prompts') body.append(promptsCard());
     if(tab==='Advanced') body.append(quickStart(),advancedCard());
   } else {
   body.append(quickStart());
   const sc = serversCard();
   if (sc) body.append(sc);
-  body.append(h('div', {class: 'routes'}, ...ACTORS.map(routeCard)));
-  body.append(h('div', {class: 'grid2'}, sessionCard(), narratorCard()));
+  body.append(h('div', {class: 'routes'}, routeCard(ROUTES.model), summarizerCard()));
+  body.append(h('div', {class: 'grid2'}, agentCard(), behaviorCard()));
   body.append(h('div', {class: 'grid2'}, phoneCard(), promptsCard()));
   body.append(advancedCard());
   }
@@ -223,7 +229,7 @@ function header() {
   const envs = Object.entries(E.sources).filter(([, s]) => s.startsWith('env:'));
   if (envs.length) bits.push(h('span', {class: 'warn-text', title: envs.map(([p, s]) => `${label(p)} ← $${s.slice(4)}`).join('\n')}, `${envs.length} value${envs.length > 1 ? 's' : ''} pinned by environment variables`));
   if (f.unknown_keys && f.unknown_keys.length) bits.push(h('span', {title: f.unknown_keys.join(', ')}, `${f.unknown_keys.length} hand-written key${f.unknown_keys.length > 1 ? 's' : ''} kept as is`));
-  return h('div', {class: 'cfg-head'}, h('div', null, h('h2', null, 'Configuration'), h('p', {class: 'sub'}, 'Which models do the work, how hard they think, and how the session behaves. Changes apply to sessions started or resumed after you save.')),
+  return h('div', {class: 'cfg-head'}, h('div', null, h('h2', null, 'Configuration'), h('p', {class: 'sub'}, 'The model eagent runs on, how hard it thinks, which agent a session starts, and how the session behaves. Changes apply to sessions started or resumed after you save.')),
     h('div', {class: 'where'}, ...bits.flatMap((b, i) => i ? [h('span', {class: 'dot-sep'}, '·'), b] : [b])));
 }
 const shortPath = p => { const i = p.indexOf('.agents/'); return i >= 0 ? p.slice(i) : p; };
@@ -309,7 +315,7 @@ function keepPinned() {
     if (from && from[last] !== undefined) to[last] = clone(from[last]); else if (to) delete to[last];
   }
   // Restoring absent locked fallback fields must not create an empty route.
-  for (const actor of ACTORS) if (E.cfg[actor.key]?.fallback && !Object.keys(E.cfg[actor.key].fallback).length) delete E.cfg[actor.key].fallback;
+  for (const key of Object.keys(ROUTES)) { const a = routeOf(E.cfg, key); if (a?.fallback && !Object.keys(a.fallback).length) delete a.fallback; }
   if (X.canEdit && !X.canEdit('/preset')) E.base = E.loadedBase;
 }
 
@@ -332,19 +338,17 @@ function serversCard() {
     const err = E.cat.live_errors && E.cat.live_errors[s.id];
     const ready = keyReady(s.key_env);
     const protos = (s.protocols && s.protocols.length) ? s.protocols : [s.protocol || 'openai-chat'];
-    const useAll = ms.length && !lockedField('/orchestrator/model') && !lockedField('/task/model') && !lockedField('/narrator/model')
-      ? h('button', {class: 'small', title: `Use ${ms[0].id} on ${s.label} for orchestrator, task, and narrator`, onclick: () => {
-          for (const actor of ACTORS) {
-            setModel(E.cfg[actor.key], ms[0]);
-            E.cfg[actor.key].protocol = s.protocol || protocolOf(ms[0]);
-            if (E.cfg[actor.key].protocol !== 'openai-responses') delete E.cfg[actor.key].replay_reasoning;
-          }
+    const useAll = ms.length && !lockedField('/model/model')
+      ? h('button', {class: 'small', title: `Use ${ms[0].id} on ${s.label} as eagent's model`, onclick: () => {
+          setModel(E.cfg.model, ms[0]);
+          E.cfg.model.protocol = s.protocol || protocolOf(ms[0]);
+          if (E.cfg.model.protocol !== 'openai-responses') delete E.cfg.model.replay_reasoning;
           if (ms[0].context && E.cfg.rollover_tokens > Math.floor(ms[0].context * 0.85)) {
             E.cfg.rollover_tokens = Math.max(20000, Math.floor(ms[0].context * 0.75));
           }
           rerender();
-          toast(`loaded ${ms[0].id} for all actors (press Save to apply)`);
-        }}, 'Use for all')
+          toast(`loaded ${ms[0].id} as eagent's model (press Save to apply)`);
+        }}, 'Use for eagent')
       : null;
     const protoEl = canManage
       ? h('select', {class: 'mini', title: 'Default wire API protocol for this server', onchange: async ev => {
@@ -499,7 +503,7 @@ function serverDialog(existing) {
     field('Server URL', [urlIn, probeBtn], [h('span', {class: 'src'}, 'Examples: http://localhost:8080 (llama.cpp), http://localhost:1234 (LM Studio), http://gpu-box:8000 (vLLM / SGLang)')]),
     preview,
     h('div', {class: 'fields'},
-      field('Default API protocol', [protoSel], [h('span', {class: 'src'}, 'Per-actor protocol can still be switched independently')]),
+      field('Default API protocol', [protoSel], [h('span', {class: 'src'}, 'A model route can still pick another protocol')]),
       field('API key env variable (optional)', [keyIn], [h('span', {class: 'src'}, 'Leave blank for local servers without authentication')]),
       field('Display name (optional)', [labelIn], []),
       field('Server ID (optional)', [idIn], [h('span', {class: 'src'}, 'Used in CLI and FinaleChat provider lists')])),
@@ -509,19 +513,23 @@ function serverDialog(existing) {
 }
 
 // ---- route cards ---------------------------------------------------------------------------
-function routeCard(actor) {
-  const a = E.cfg[actor.key];
-  const ptr = f => `/${actor.key}/${f}`;
+// routeCard edits one model route. top holds extra controls shown under the
+// heading (the summarizer's mode).
+function routeCard(slot, top) {
+  const a = routeOf(E.cfg, slot.key);
+  const key = slot.key;
+  const ptr = f => `${slot.ptr}/${f}`;
   const m = lookup(a);
   const prov = providerOf(a.base_url);
   const locked = f => lockedField(ptr(f));
-  const card = h('div', {class: 'card route ' + actor.key});
-  card.append(h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), actor.name), h('p', {class: 'sub role'}, X.threadControls ? ({orchestrator:'Plans the work and coordinates the team.',task:'Handles individual tasks and tools.',narrator:'Keeps you informed as work progresses.'}[actor.key]) : actor.role)));
+  const card = h('div', {class: 'card route ' + key});
+  card.append(h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), slot.name), h('p', {class: 'sub role'}, slot.role)));
+  if (top) card.append(...[].concat(top));
 
   // Model
-  const pickBtn = h('button', {class: 'pick', disabled: locked('model') || locked('base_url'), onclick: () => openPicker(card, a, actor.key, false)},
+  const pickBtn = h('button', {class: 'pick', disabled: locked('model') || locked('base_url'), onclick: () => openPicker(card, a, key, false)},
     h('span', {class: 'pk'}, h('span', {class: 'kdot' + (keyReady(a.api_key_env) ? ' on' : '')}), h('b', null, m ? m.label : a.model), h('span', {class: 'sub'}, prov ? prov.label : a.base_url.replace(/^https?:\/\//, ''))), h('span', {class: 'caret'}, '▾'));
-  const same = actor.key !== 'orchestrator' && !locked('model') ? h('button', {class: 'link', title: 'Copy the orchestrator\'s provider, model, and effort', onclick: () => { const o = E.cfg.orchestrator; Object.assign(a, {base_url: o.base_url, protocol: o.protocol, api_key_env: o.api_key_env, model: o.model, reasoning_effort: o.reasoning_effort, context_tokens: o.context_tokens}); if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, 'same as orchestrator') : null;
+  const same = key === 'summarizer' && !locked('model') ? h('button', {class: 'link', title: 'Remove this route; the summarizer then calls eagent\'s model', onclick: () => { delete E.cfg.summarizer.model; rerender(); }}, 'use eagent\'s model instead') : null;
   card.append(field('Model', [pickBtn], [h('span', {class: 'notes-row'}, srcNode(ptr('model')), same), ...problemNodes(ptr('model'))]));
   card.append(h('div', {class: 'sub price'}, priceLine(m, prov),
     a.api_key_env && !keyPresent(a.api_key_env) ? h('span', {class: 'warn-text'}, ` · $${a.api_key_env} is not set in this shell`)
@@ -560,26 +568,26 @@ function routeCard(actor) {
     }},
       h('span', {class: 'e'}, e), anyCheck ? h('span', {class: 'ann'}, chk ? checkText(chk) : '') : null));
   }
-  const testing = E.tests[actor.key] && E.tests[actor.key].busy;
+  const testing = E.tests[key] && E.tests[key].busy;
   const tools = h('div', {class: 'testrow'},
-    h('button', {class: 'small', disabled: testing || !canAction('route.test'), onclick: () => runTest(actor.key, null)}, testing ? 'testing…' : X.remote ? 'Review route test' : 'Test this route'),
-    X.remote ? null : h('button', {class: 'small', disabled: testing, title: 'Send one tool call at each effort and note the latency and reasoning tokens. Each call uses provider billing.', onclick: () => runAll(actor.key)}, 'Try every effort'),
+    h('button', {class: 'small', disabled: testing || !canAction('route.test'), onclick: () => runTest(key, null)}, testing ? 'testing…' : X.remote ? 'Review route test' : 'Test this route'),
+    X.remote ? null : h('button', {class: 'small', disabled: testing, title: 'Send one tool call at each effort and note the latency and reasoning tokens. Each call uses provider billing.', onclick: () => runAll(key)}, 'Try every effort'),
     h('span', {class: 'sub grow'}, checked ? '' : 'Efforts are not verified for this model; the annotations come from your tests.'));
   card.append(field('Reasoning effort', [seg, tools], [srcNode(ptr('reasoning_effort')), h('span', {class: 'src'}, 'sends ', h('code', {class: 'inline'}, sentFor(a))), ...problemNodes(ptr('reasoning_effort'))]));
-  const t = E.tests[actor.key];
+  const t = E.tests[key];
   if (t && t.result) card.append(resultLine(t.result));
 
   // Fallback
-  if(!X.threadControls) card.append(fallbackLine(card, a, actor.key));
+  if(!X.threadControls) card.append(fallbackLine(card, a, slot));
 
   // Advanced
-  const open = !!E.open[actor.key];
-  const det = h('details', {open}, h('summary', {onclick: () => { E.open[actor.key] = !open; }}, 'Advanced'));
+  const open = !!E.open[key];
+  const det = h('details', {open}, h('summary', {onclick: () => { E.open[key] = !open; }}, 'Advanced'));
   const num = (f, lbl, help, attrs) => field(lbl, [h('input', Object.assign({type: 'number', value: a[f] || '', disabled: locked(f), onchange: ev => { const v = parseInt(ev.target.value, 10); if (isNaN(v)) delete a[f]; else a[f] = v; rerender(); }}, attrs || {}))], [srcNode(ptr(f)), help ? h('span', {class: 'src'}, help) : null, ...problemNodes(ptr(f))]);
-  if(X.threadControls) det.append(fallbackLine(card, a, actor.key));
+  if(X.threadControls) det.append(fallbackLine(card, a, slot));
   det.append(h('div', {class: 'adv'},
     num('max_tokens', 'Max output tokens', 'per call; reasoning counts toward it on most providers'),
-    num('context_tokens', 'Context window', 'what the harness assumes when deciding to start a fresh context'),
+    num('context_tokens', 'Context window', 'the model\'s usable window; the conversation restarts long before it, at the rollover threshold'),
     a.protocol === 'openai-responses' ? field('Replay reasoning', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: a.replay_reasoning !== false, disabled: locked('replay_reasoning'), onchange: ev => { if (ev.target.checked) delete a.replay_reasoning; else a.replay_reasoning = false; rerender(); }}), 'keep the model\'s reasoning items across turns (recommended; keeps the prompt cache warm)')], [srcNode(ptr('replay_reasoning'))]) : null,
     field('Protocol', [h('select', {disabled: locked('protocol'), onchange: ev => { a.protocol = ev.target.value; if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: a.protocol === p}, `${p} · ${E.cat.transports[p] || ''}`)))], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]),
     field('Provider address', [h('select', {disabled: locked('base_url'), onchange: ev => { a.base_url = ev.target.value; const p = providerOf(a.base_url); if (p) { a.api_key_env = p.key_env || ''; if (!lookup(a)) a.protocol = p.protocol; } rerender(); }}, ...providerOptions(a.base_url))], [srcNode(ptr('base_url')), h('span', {class: 'src'}, 'Register custom or local servers above; catalog and registered servers appear here.'), ...problemNodes(ptr('base_url'))]),
@@ -626,12 +634,15 @@ function resultLine(r) {
   if (r.priced) parts.push(`~${money(r.est_cost_usd)}`);
   return h('div', {class: 'testresult ' + (ok ? 'ok' : r.status === 'no_tool_call' ? 'warn' : 'bad')}, h('span', {class: 'mark'}, ok ? '✓' : r.status === 'no_tool_call' ? '△' : '✕'), h('span', null, `${r.route} · effort ${r.effort || 'default'} · ${parts.join(' · ')}`), r.text ? h('span', {class: 'sub'}, ` “${r.text}”`) : null);
 }
+// A route test sends the route as the form has it ("model") and which of
+// the saved routes it is ("target": model or summarizer) for the artifact
+// transport, which can only test saved routes.
 async function runTest(key, effort, route) {
-  const a = E.cfg[key];
+  const a = routeOf(E.cfg, key);
   const testKey = route === 'fallback' ? key + ':fb' : key;
   E.tests[testKey] = {busy: true, result: null}; rerender();
   try {
-    const body = {actor: a, actor_key: key, route: route || 'primary'};
+    const body = {model: a, target: key, route: route || 'primary'};
     if (effort !== null && effort !== undefined) body.effort = effort;
     const r = await api('/api/config/test', {method: 'POST', body: JSON.stringify(body)});
     if (r.staged) { E.tests[testKey] = {busy: false, result: r}; return r; }
@@ -642,7 +653,7 @@ async function runTest(key, effort, route) {
   finally { rerender(); }
 }
 async function runAll(key) {
-  const a = E.cfg[key];
+  const a = routeOf(E.cfg, key);
   const {list, checked} = effortsFor(a);
   const showDefault = a.protocol === 'openai-chat' && !checked;
   const efforts = showDefault ? ['default', ...list] : list;
@@ -650,7 +661,7 @@ async function runAll(key) {
     E.tests[key] = {busy: true, result: E.tests[key] && E.tests[key].result}; rerender();
     const ro = e === 'default' ? '' : (e === 'none' && a.protocol === 'openai-chat' && !(checked && list.includes('none')) && !showDefault ? '' : e);
     try {
-      const r = await api('/api/config/test', {method: 'POST', body: JSON.stringify({actor: a, route: 'primary', effort: ro})});
+      const r = await api('/api/config/test', {method: 'POST', body: JSON.stringify({model: a, target: key, route: 'primary', effort: ro})});
       E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage.output, reasoning: r.usage.reasoning, error: r.error, at: r.at};
       E.tests[key] = {busy: true, result: r};
     } catch (err) { E.tests[key] = {busy: true, result: {route: 'primary', effort: e, status: 'failed', error: err.message, usage: {}}}; }
@@ -659,9 +670,10 @@ async function runAll(key) {
   E.tests[key].busy = false; rerender();
 }
 
-function fallbackLine(card, a, key) {
+function fallbackLine(card, a, slot) {
+  const key = slot.key, base = slot.ptr;
   const fb = a.fallback;
-  const locked = lockedField(`/${key}/fallback/model`) || lockedField(`/${key}/fallback/base_url`);
+  const locked = lockedField(`${base}/fallback/model`) || lockedField(`${base}/fallback/base_url`);
   if (!fb) {
     const alt = suggestFallback(a);
     return h('div', {class: 'fb'}, h('span', {class: 'sub'}, 'Fallback: none. If this route fails, the call fails.'),
@@ -675,7 +687,7 @@ function fallbackLine(card, a, key) {
   const showDefault = fb.protocol === 'openai-chat' && !checked;
   const displayList = showDefault ? ['default', ...list] : list;
   const cur = fb.reasoning_effort || (fb.protocol === 'openai-chat' ? (showDefault ? 'default' : '') : 'none');
-  const sel = h('select', {class: 'mini', disabled: lockedField(`/${key}/fallback/reasoning_effort`), onchange: ev => {
+  const sel = h('select', {class: 'mini', disabled: lockedField(`${base}/fallback/reasoning_effort`), onchange: ev => {
     const v = ev.target.value;
     if (v === 'default') fb.reasoning_effort = '';
     else if (v === 'none' && fb.protocol === 'openai-chat' && !(checked && list.includes('none')) && !showDefault) fb.reasoning_effort = '';
@@ -691,7 +703,7 @@ function fallbackLine(card, a, key) {
     t && t.result ? resultLine(t.result) : null,
     inert ? h('div', {class: 'problem error'}, 'This fallback is the same route as the primary, so it cannot help. Pick another provider or model.') : null,
     sameProv ? h('div', {class: 'problem warning'}, 'Same provider as the primary: this covers a model outage, not a provider outage.') : null,
-    ...problemNodes(`/${key}/fallback/model`), ...problemNodes(`/${key}/fallback/base_url`), ...problemNodes(`/${key}/fallback/reasoning_effort`), ...problemNodes(`/${key}/fallback/fallback`));
+    ...problemNodes(`${base}/fallback/model`), ...problemNodes(`${base}/fallback/base_url`), ...problemNodes(`${base}/fallback/reasoning_effort`), ...problemNodes(`${base}/fallback/fallback`));
 }
 function providerLabel(u) { const p = providerOf(u); return p ? p.label : String(u || '').replace(/^https?:\/\//, ''); }
 function suggestFallback(a) {
@@ -761,31 +773,55 @@ function openPicker(card, a, key, forFallback) {
   setTimeout(() => { document.addEventListener('mousedown', outside, true); input.focus(); }, 0);
 }
 
-// ---- session, narrator, phone, prompts, advanced -------------------------------------------------
+// ---- summarizer, agent, behavior, phone, prompts, advanced --------------------------------------
+// summarizerCard chooses how the thread's title and summary are kept and,
+// when a dedicated call keeps them, the route it calls.
+function summarizerCard() {
+  const sm = E.cfg.summarizer || (E.cfg.summarizer = {mode: 'inline'});
+  const locked = lockedField('/summarizer/mode');
+  const mode = sm.mode === 'dedicated' ? 'dedicated' : 'inline';
+  const seg = h('div', {class: 'seg'}, ...[['inline', 'Inline', 'eagent keeps the title and summary itself, on the prompt it already has.'], ['dedicated', 'Dedicated', 'A separate small call keeps them, on its own model or on eagent\'s.']].map(([v, t, tip]) =>
+    h('button', {class: mode === v ? 'on' : '', disabled: locked, title: tip, onclick: () => { sm.mode = v; rerender(); }}, t)));
+  const modeField = field('Title and summary', [seg], [srcNode('/summarizer/mode'), h('span', {class: 'src'}, mode === 'inline' ? 'eagent keeps them itself; no extra model calls.' : 'A separate call keeps them.'), ...problemNodes('/summarizer/mode')]);
+  if (mode === 'dedicated' && sm.model && sm.model.model) return routeCard(ROUTES.summarizer, modeField);
+  const own = mode === 'dedicated' && !lockedField('/summarizer/model/model')
+    ? h('button', {class: 'small', onclick: () => { const c = clone(E.cfg.model); delete c.fallback; sm.model = c; rerender(); }}, 'Give it its own model')
+    : null;
+  return h('div', {class: 'card route summarizer'}, h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), ROUTES.summarizer.name), h('p', {class: 'sub role'}, 'How the thread\'s title and summary are kept.')),
+    modeField, mode === 'dedicated' ? h('div', {class: 'row'}, h('span', {class: 'sub'}, 'It calls eagent\'s model.'), own) : null, ...problemNodes('/summarizer/model'));
+}
 function numField(f, lbl, help, attrs) {
   const ptr = '/' + f;
   const locked = lockedField(ptr);
   return field(lbl, [h('input', Object.assign({type: 'number', value: E.cfg[f] ?? '', disabled: locked, onchange: ev => { const v = parseInt(ev.target.value, 10); if (!isNaN(v)) E.cfg[f] = v; rerender(); }}, attrs || {}))], [srcNode(ptr), help ? h('span', {class: 'src'}, help) : null, ...problemNodes(ptr)]);
 }
-function sessionCard() {
-  return h('div', {class: 'card'}, h('h3', null, 'Session'),
+// agentCard picks the coding agent a session starts when it is not told
+// which.
+function agentCard() {
+  const agents = E.c.agents || [];
+  const cur = (E.cfg.relay && E.cfg.relay.default) || '';
+  const sel = h('select', {'aria-label': 'Default agent', disabled: lockedField('/relay/default'), onchange: ev => {
+    const v = ev.target.value;
+    if (v) { E.cfg.relay = E.cfg.relay || {}; E.cfg.relay.default = v; }
+    else if (E.cfg.relay) { delete E.cfg.relay.default; if (!Object.keys(E.cfg.relay).length) delete E.cfg.relay; }
+    rerender();
+  }}, h('option', {value: '', selected: !cur}, 'the first one installed'),
+    ...agents.map(a => h('option', {value: a.name, selected: a.name === cur}, a.label && a.label !== a.name ? `${a.label} (${a.name})` : a.name)),
+    cur && !agents.some(a => a.name === cur) ? h('option', {value: cur, selected: true}, `${cur} (not a known profile)`) : null);
+  return h('div', {class: 'card'}, h('h3', null, 'Agent'),
     h('div', {class: 'fields'},
-      numField('task_concurrency', 'Task workers at once', 'how many delegated tasks run in parallel', {min: 1, max: 32}),
-      numField('max_task_turns', 'Max calls per task', 'a worker that reaches this is stopped and reports what it has', {min: 1}),
-      numField('max_orchestrator_calls_per_turn', 'Nudge the planner after', 'consecutive calls in one turn before the harness suggests delegating, waiting, or yielding; a nudge, not a cap', {min: 1}),
-      numField('rollover_tokens', 'Fresh-context threshold', 'the orchestrator writes a dossier and starts a fresh context past this many tokens', {min: 20000, step: 10000}),
-      numField('bash_wait_seconds', 'Command wait', 'seconds a command may run before it becomes a background handle', {min: 0, max: 300}),
-      numField('bash_timeout_seconds', 'Command timeout', 'seconds before a background command is killed', {min: 1}),
-      numField('tool_output_max_chars', 'Tool output limit', 'characters of tool output kept per call', {min: 1000, step: 1000}),
-      field('Edits outside the project', [h('label', {class: 'check'}, h('input', {type: 'checkbox', disabled: lockedField('/allow_outside_project'), checked: !!E.cfg.allow_outside_project, onchange: ev => { E.cfg.allow_outside_project = ev.target.checked; rerender(); }}), 'allow the agent to read and write files outside the project directory')], [srcNode('/allow_outside_project'), E.cfg.allow_outside_project ? h('span', {class: 'problem warning'}, 'The agent can then change anything your user can. Turn it off when you do not need it.') : null])));
+      field('Default agent', [sel], [srcNode('/relay/default'), h('span', {class: 'src'}, 'The coding agent a new session starts when it is not told which. A session can still pick another one, with its own model and effort.'), ...problemNodes('/relay/default')])));
 }
-function narratorCard() {
+function behaviorCard() {
   const locked = lockedField('/persona');
-  return h('div', {class: 'card'}, h('h3', null, 'Narrator cadence and voice'),
+  return h('div', {class: 'card'}, h('h3', null, 'Progress and voice'),
     h('div', {class: 'fields'},
-      numField('narrator_tick_seconds', 'Check in every', 'seconds between narrator wake-ups while work runs; it also wakes when you write', {min: 5}),
-      numField('narrator_quiet_seconds', 'Must speak after', 'seconds of silence after which the narrator has to say something, even a short hold', {min: 0}),
-      field('Voice', [h('textarea', {rows: 4, disabled: locked, placeholder: 'How the narrator should sound. Leave empty for the built-in voice (warm, plain, no catchphrases).', onchange: ev => { E.cfg.persona = ev.target.value; if (!E.cfg.persona) delete E.cfg.persona; rerender(); }}, E.cfg.persona || '')], [srcNode('/persona'), h('span', {class: 'src'}, 'Replaces the persona prompt for new sessions. The full prompts are under Prompts.'), ...problemNodes('/persona')])));
+      numField('tick_seconds', 'Look at progress every', 'seconds between progress looks while the agent works; a look with nothing new costs no model call', {min: 5}),
+      numField('quiet_seconds', 'Longest silence', 'seconds you go without a progress line while the agent works; 0 turns the limit off', {min: 0}),
+      numField('max_calls_per_turn', 'Calls per turn', 'model calls eagent may make each time it wakes: a look at the screen, a key press, another look', {min: 1}),
+      numField('rollover_tokens', 'Context rollover', 'at this prompt size eagent writes a briefing and continues from it in a fresh conversation', {min: 20000, step: 10000}),
+      numField('report_max_chars', 'Report kept', 'characters of the agent\'s turn report eagent itself reads; you always get the whole report', {min: 500, step: 500}),
+      field('Voice', [h('textarea', {rows: 4, disabled: locked, placeholder: 'How eagent should sound. Leave empty for the built-in voice (warm, plain, no catchphrases).', onchange: ev => { E.cfg.persona = ev.target.value; if (!E.cfg.persona) delete E.cfg.persona; rerender(); }}, E.cfg.persona || '')], [srcNode('/persona'), h('span', {class: 'src'}, 'Replaces the persona prompt for new sessions. The full prompts are under Prompts.'), ...problemNodes('/persona')])));
 }
 function phoneCard() {
   const fc = E.cfg.finalechat || (E.cfg.finalechat = {});
@@ -804,12 +840,12 @@ function phoneCard() {
       field('Token variable', [h('input', {class: 'search', disabled: lockedField('/finalechat/token_env'), value: fc.token_env || '', placeholder: 'FINALECHAT_TOKEN', onchange: ev => { fc.token_env = ev.target.value.trim(); if (!fc.token_env) delete fc.token_env; rerender(); }})], [srcNode('/finalechat/token_env'), h('span', {class: 'src'}, 'falls back to ~/.config/finalechat/config.json'), ...problemNodes('/finalechat/token_env')]),
       field('Service address', [h('input', {class: 'search', disabled: lockedField('/finalechat/base_url'), value: fc.base_url || '', placeholder: 'https://www.finalechat.com', onchange: ev => { fc.base_url = ev.target.value.trim(); if (!fc.base_url) delete fc.base_url; rerender(); }})], [srcNode('/finalechat/base_url'), h('span', {class: 'src'}, 'New custom service addresses must first be established locally.'), ...problemNodes('/finalechat/base_url')]),
       field('Session archives', [h('label', {class: 'check'}, h('input', {type: 'checkbox', disabled: lockedField('/finalechat/artifacts'), checked: !!fc.artifacts, onchange: ev => { fc.artifacts = ev.target.checked; rerender(); }}), 'publish permanent session websites, including native logs and attachments')], [srcNode('/finalechat/artifacts'), h('span', {class: 'src'}, 'Separate opt-in from chat mirroring. The EAGENT_FINALECHAT=off kill switch disables all outbound integration traffic.')])));
-  return h('div', {class: 'card'}, h('h3', null, 'Phone mirror'), h('p', {class: 'sub'}, 'Mirrors the conversation to Finalechat on your phone: every narrator message, every question, and the pictures the agent takes.'),
+  return h('div', {class: 'card'}, h('h3', null, 'Phone mirror'), h('p', {class: 'sub'}, 'Mirrors the conversation to Finalechat on your phone: everything eagent tells you, every question, and the pictures the agent takes.'),
     field('Mirror', [seg], [srcNode('/finalechat/enabled'), ...problemNodes('/finalechat/enabled')]), state, det);
 }
 function promptsCard() {
-  const HELP = {'ORCHESTRATOR.md': 'how the orchestrator plans, delegates, and finishes', 'TASK-WORKER.md': 'how a worker does one task and reports', 'NARRATOR.md': 'when the narrator speaks and what it never writes', 'PERSONA.md': 'the narrator\'s voice', 'COMPACTION-DOSSIER.md': 'the notes written before a fresh context', 'THREAD-SUMMARY.md': 'how a session\'s title and summary in the thread list are written'};
-  return h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('p', {class: 'sub'}, 'The instructions each actor works from. Click one to read or edit it; edits are saved as project overrides.'),
+  const HELP = {'EAGENT.md': 'what eagent does: passing your words on, watching the agent, answering its terminal, telling you how it goes', 'PERSONA.md': 'eagent\'s voice', 'USER_MESSAGE.md': 'how a message you write is put to eagent', 'USER_ANSWER.md': 'how your answer to a question is put to eagent', 'DOSSIER.md': 'the briefing written before a fresh conversation', 'THREAD-SUMMARY.md': 'how a session\'s title and summary in the thread list are written'};
+  return h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('p', {class: 'sub'}, 'The instructions eagent works from. Click one to read or edit it; edits are saved as project overrides.'),
     h('div', {class: 'plist2'}, ...E.c.prompts.map(p => h('button', {class: 'prompt-row', onclick: () => X.promptEditor(p.name)},
       h('code', {class: 'inline'}, p.name), h('span', {class: 'badge' + (p.source === 'built-in' ? '' : ' completed')}, p.source === 'built-in' ? 'built-in' : 'override'), h('span', {class: 'sub'}, HELP[p.name] || '')))));
 }

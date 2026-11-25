@@ -104,14 +104,14 @@ func TestServersHTTPAPI(t *testing.T) {
 
 	// PUT /api/config saves a keyless route pointing at the registered server.
 	cfg := config.Defaults()
-	cfg.Orchestrator = config.Actor{Protocol: llm.ProtocolChat, BaseURL: mock.URL + "/v1", Model: "demo-local-12b", APIKeyEnv: "", MaxTokens: 4096, ContextTokens: 131072}
+	cfg.Model = config.ModelRoute{Protocol: llm.ProtocolChat, BaseURL: mock.URL + "/v1", Model: "demo-local-12b", APIKeyEnv: "", MaxTokens: 4096, ContextTokens: 131072}
 	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 200 {
 		t.Fatalf("PUT /api/config with local server = %d %s", w.Code, w.Body)
 	}
 
 	// POST /api/config/test succeeds against the keyless registered server.
-	w = do(s, "POST", "/api/config/test", map[string]any{"actor": cfg.Orchestrator}, nil)
+	w = do(s, "POST", "/api/config/test", map[string]any{"model": cfg.Model}, nil)
 	if w.Code != 200 {
 		t.Fatalf("POST /api/config/test = %d %s", w.Code, w.Body)
 	}

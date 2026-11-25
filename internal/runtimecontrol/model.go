@@ -206,6 +206,7 @@ func View(project, session, generation string, values Values, available bool) (s
 		active["/routes/"+key+"/provider"] = rt.Provider
 		active["/routes/"+key+"/model"] = rt.Model
 		active["/routes/"+key+"/effort"] = rt.Effort
+
 	}
 	for _, spec := range []struct {
 		key, label, effect, description string

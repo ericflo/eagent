@@ -24,7 +24,7 @@ func fixtureCommand(t *testing.T) (*settings.Service, control.Grant, command) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := control.Proposal{Operation: "settings.apply", SchemaVersion: settings.SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: float64(6)}}}
+	p := control.Proposal{Operation: "settings.apply", SchemaVersion: settings.SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: float64(60)}}}
 	raw, _ := json.Marshal(p)
 	return s, g, command{ID: randomID(), UserID: "test-user", Proposal: p, Digest: artifact.Digest(raw), Expires: time.Now().Add(time.Minute)}
 }
@@ -203,7 +203,7 @@ func TestConnectorSavePresetStandaloneCombinedAndUndo(t *testing.T) {
 		SchemaVersion:   settings.SchemaVersion,
 		ExpectedVersion: v1.Snapshot.Version,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/task_concurrency", Value: float64(8)},
+			{Op: "set", Key: "/max_calls_per_turn", Value: float64(8)},
 			{Op: "set", Key: "/save_preset", Value: "snap-8"},
 		},
 	}
@@ -214,17 +214,17 @@ func TestConnectorSavePresetStandaloneCombinedAndUndo(t *testing.T) {
 		t.Fatalf("combined save_preset: status=%s result=%v err=%v", res2.Status, res2.Result, err)
 	}
 	loaded, err := config.Load(s.Project, "snap-8")
-	if err != nil || loaded.TaskConcurrency != 8 {
+	if err != nil || loaded.MaxCallsPerTurn != 8 {
 		t.Fatalf("snap-8 = %+v err=%v", loaded, err)
 	}
 	rawCfg, _ := os.ReadFile(config.File(s.Project))
-	if string(rawCfg) == "" || config.Resolve(s.Project, "", "").Effective.TaskConcurrency != 8 {
+	if string(rawCfg) == "" || config.Resolve(s.Project, "", "").Effective.MaxCallsPerTurn != 8 {
 		t.Fatalf("config.json = %s", rawCfg)
 	}
 	// Undo reverses the config.json edit cleanly (and does not choke on /save_preset).
 	undo := reviewedUndo(t, s, g, res2)
 	executeExpected(t, s, g, undo, "succeeded")
-	if got := config.Resolve(s.Project, "", "").Effective.TaskConcurrency; got != config.Defaults().TaskConcurrency {
-		t.Fatalf("after undo task_concurrency = %d", got)
+	if got := config.Resolve(s.Project, "", "").Effective.MaxCallsPerTurn; got != config.Defaults().MaxCallsPerTurn {
+		t.Fatalf("after undo max_calls_per_turn = %d", got)
 	}
 }

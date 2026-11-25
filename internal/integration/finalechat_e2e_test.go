@@ -93,7 +93,7 @@ func TestFinaleChatEndToEnd(t *testing.T) {
 	}
 	var applied atomic.Int32
 	owner, err := runtimecontrol.New(project, sess.ID, runtimecontrol.FromConfig(config.Defaults()), func(_ runtimecontrol.Request, v runtimecontrol.Values, _ map[string]any) error {
-		applied.Store(int32(v.TaskConcurrency))
+		applied.Store(int32(v.TickSeconds))
 		return nil
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestFinaleChatEndToEnd(t *testing.T) {
 	}
 	call("", "GET", "/api/v1/settings-resources/"+got[0].ID, nil, &view)
 	proposal := map[string]any{"operation": "settings.apply", "schema_version": view.Resource.Descriptor.SchemaVersion, "expected_version": view.Resource.Snapshot.Version, "generation": view.Resource.Generation,
-		"edits": []map[string]any{{"op": "set", "key": "/task_concurrency", "value": 5}}}
+		"edits": []map[string]any{{"op": "set", "key": "/tick_seconds", "value": 45}}}
 	var created struct {
 		Command struct {
 			ID     string         `json:"id"`
@@ -177,8 +177,8 @@ func TestFinaleChatEndToEnd(t *testing.T) {
 			t.Fatal("command never finished")
 		}
 	}
-	if created.Command.Status != "succeeded" || applied.Load() != 5 {
-		t.Fatalf("command %s (%v); harness saw task_concurrency=%d", created.Command.Status, created.Command.Result, applied.Load())
+	if created.Command.Status != "succeeded" || applied.Load() != 45 {
+		t.Fatalf("command %s (%v); harness saw tick_seconds=%d", created.Command.Status, created.Command.Result, applied.Load())
 	}
 
 	// The session stops: its settings leave the thread; the project's stay.

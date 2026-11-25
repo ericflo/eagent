@@ -22,10 +22,15 @@ import (
 
 // ModelRoute configures one model endpoint.
 type ModelRoute struct {
-	Protocol        string `json:"protocol"` // openai-chat | openai-responses | anthropic
-	BaseURL         string `json:"base_url"`
-	Model           string `json:"model"`
-	APIKeyEnv       string `json:"api_key_env"`
+	Protocol  string `json:"protocol"` // openai-chat | openai-responses | anthropic
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKeyEnv string `json:"api_key_env"`
+	// ReasoningEffort is the one effort every call of a session runs at:
+	// looks, decisions and the dossier alike. It never changes from call
+	// to call, because on many engines the effort is part of the rendered
+	// prompt (a line of the system block, a thinking setting), and a
+	// change would discard the provider's cache of the conversation.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// ReplayReasoning sends models their prior reasoning back on later
 	// calls (encrypted reasoning on OpenAI Responses; reasoning_content /
@@ -268,9 +273,17 @@ const (
 	nousURL       = "https://inference-api.nousresearch.com/v1"
 )
 
-// loopMaxTokens is the output budget of one call: a message, a few tool
-// calls, or a one-page dossier.
-const loopMaxTokens = 8192
+// loopMaxTokens is the output ceiling of every call: room to think and to
+// write a dossier of a few pages. It is the same for every call, like the
+// effort, because some engines derive a thinking budget from it. A ceiling
+// costs nothing when a reply is short.
+const loopMaxTokens = 32768
+
+// loopEffort is the effort the presets run at. One model both watches the
+// agent (often, where low would do) and decides for the user (a stuck
+// terminal, autopilot, where the three-actor design used its highest
+// effort), and it has one effort for both.
+const loopEffort = "medium"
 
 // glmDescription describes the built-in defaults, which the "glm" preset names.
 const glmDescription = "GLM-5.3 (Together AI)"
@@ -281,7 +294,7 @@ func Defaults() Config {
 	return Config{
 		Model:           chatRoute(togetherURL, "TOGETHER_API_KEY", "zai-org/GLM-5.3", 200_000),
 		Summarizer:      Summarizer{Mode: SummarizerInline},
-		MaxCallsPerTurn: 8,
+		MaxCallsPerTurn: 30,
 		TickSeconds:     30,
 		QuietSeconds:    180,
 		RolloverTokens:  64_000,
@@ -294,9 +307,8 @@ func Defaults() Config {
 // (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
 // within one provider; glm is the default.
 //
-// Every preset runs at low reasoning effort: eagent is called often, on a
-// prompt it has mostly seen before, to make small decisions. It always thinks
-// a little, never none.
+// Every preset runs at one effort, medium (see loopEffort), for every call.
+// It always thinks, never none.
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {
@@ -361,7 +373,7 @@ var Presets = map[string]func(*Config){
 	},
 	"opencode-high": func(c *Config) {
 		c.Description = "Claude Fable 5.1 (OpenCode Zen)"
-		c.Model = ModelRoute{Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1", APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
+		c.Model = ModelRoute{Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1", APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"opencode-med": func(c *Config) {
 		c.Description = "GLM-5.3 (OpenCode Zen)"
@@ -389,7 +401,7 @@ var Presets = map[string]func(*Config){
 	},
 	"muse": func(c *Config) {
 		c.Description = "Muse Spark 1.3 Contributor (Meta)"
-		c.Model = ModelRoute{Protocol: llm.ProtocolResponses, BaseURL: metaURL, Model: "muse-spark-1.3-contributor", APIKeyEnv: "META_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
+		c.Model = ModelRoute{Protocol: llm.ProtocolResponses, BaseURL: metaURL, Model: "muse-spark-1.3-contributor", APIKeyEnv: "META_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"qwen": func(c *Config) {
 		c.Description = "Qwen 3.8 27B (OpenRouter; a dense model you could run locally)"
@@ -460,10 +472,10 @@ func PresetDescription(name string) string {
 func openaiRoute(model string) ModelRoute {
 	return ModelRoute{
 		Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: model,
-		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
+		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
 		Fallback: &ModelRoute{
 			Protocol: llm.ProtocolResponses, BaseURL: openrouterURL, Model: "openai/" + model,
-			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
+			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
 		},
 	}
 }
@@ -472,14 +484,14 @@ func openaiRoute(model string) ModelRoute {
 func chatRoute(baseURL, keyEnv, model string, contextTokens int) ModelRoute {
 	return ModelRoute{
 		Protocol: llm.ProtocolChat, BaseURL: baseURL, Model: model,
-		APIKeyEnv: keyEnv, ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
+		APIKeyEnv: keyEnv, ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
 	}
 }
 
 func anthropicRoute(model string) ModelRoute {
 	return ModelRoute{
 		Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: model,
-		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000,
+		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000,
 	}
 }
 
@@ -802,10 +814,11 @@ func applyEnv(cfg *Config) {
 		cfg.Finalechat.Artifacts = value
 	}
 	// EAGENT_MODEL, EAGENT_PROTOCOL, EAGENT_BASE_URL, ... The orchestrator's
-	// old names still name the model; its effort does not carry over (the
-	// narrator's did the talking, and its name is read instead).
+	// old names still name the model. The one model has one effort, and the
+	// old names each set a different one, so neither is read for it:
+	// EAGENT_REASONING_EFFORT sets it.
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
-	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_NARRATOR_REASONING_EFFORT"); v != "" {
+	if v := os.Getenv("EAGENT_REASONING_EFFORT"); v != "" {
 		cfg.Model.ReasoningEffort = v
 	}
 	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {

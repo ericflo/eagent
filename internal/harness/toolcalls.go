@@ -14,6 +14,9 @@ import (
 type turnCalls struct {
 	wake  wake
 	spoke bool // a message or a question went out in this turn
+	// handled: the turn answered the user or did something with the agent,
+	// so a message kept for eagent has not been left lying.
+	handled bool
 }
 
 // runTool runs one of eagent's tool calls and returns its result. again
@@ -47,8 +50,10 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return "not sent: " + err.Error() + ". Fix the attachment or send the message without it.", true, true
 		}
 		important, _ := args["important"].(bool)
+		// The closing word of a session always buzzes.
+		important = important || tc.wake.final
 		r.sync(func() { r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts}) })
-		tc.spoke = true
+		tc.spoke, tc.handled = true, true
 		if len(atts) > 0 {
 			return fmt.Sprintf("delivered with %d attachment(s)", len(atts)), false, false
 		}
@@ -72,9 +77,9 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			case r.st.DismissalStands():
 				// Asking again would put back the card they just closed.
 				refused = "not asked: the user dismissed your last question without answering and has not written since. Nothing was decided. Do not ask again; they will write when they are ready."
-			case r.st.Question != nil:
-				refused = "not asked: your earlier question is still open (" + clipRunes(oneLine(r.st.Question.Text, 160), 160) + "). One question at a time."
 			default:
+				// A new question takes the place of one still open: the
+				// agent has moved on, and the user is shown what it asks now.
 				id = r.st.NextQuestionID()
 				r.append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: id, Text: text, Options: opts}))
 				r.turns.saidAt = r.st.Events[len(r.st.Events)-1].Time
@@ -85,7 +90,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return refused, true, false
 		}
 		r.ui.Ask(id, text, opts)
-		tc.spoke = true
+		tc.spoke, tc.handled = true, true
 		if onPhone && !r.opts.Interactive {
 			return "asked on the user's phone; the answer will appear as a message from them", false, false
 		}
@@ -110,6 +115,9 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 	}
 	// The rest drive the agent.
 	out, isErr = r.relayTool(c.Name, str, num, list, false)
+	if !isErr && !tools.Looks(c.Name) {
+		tc.handled = true
+	}
 	switch {
 	case tools.Looks(c.Name):
 		again = true

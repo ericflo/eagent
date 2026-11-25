@@ -67,6 +67,8 @@ type SessionSummary struct {
 	// WorkDir is the folder the session works in when that is not the
 	// project root.
 	WorkDir string `json:"work_dir,omitempty"`
+	// Legacy says the log was written before eagent was one loop.
+	Legacy bool `json:"legacy,omitempty"`
 }
 
 // SessionDetail adds the derived runtime picture.
@@ -130,7 +132,7 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	evs := st.Events
 	sum := SessionSummary{
 		ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size,
-		Models: st.Models, Cwd: st.Cwd, WorkDir: workDirOf(st), Events: len(evs),
+		Models: st.Models, Cwd: st.Cwd, WorkDir: workDirOf(st), Events: len(evs), Legacy: st.Legacy(),
 	}
 	if len(evs) > 0 {
 		var d event.SessionStartData

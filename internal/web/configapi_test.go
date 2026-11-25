@@ -88,8 +88,8 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := config.Defaults()
 	config.Presets["anthropic-med"](&cfg)
-	cfg.Task.ReasoningEffort = "high"
-	cfg.TaskConcurrency = 5
+	cfg.Model.ReasoningEffort = "high"
+	cfg.MaxCallsPerTurn = 5
 	w := do(s, "PUT", "/api/config", map[string]any{"config": cfg, "base_preset": "anthropic-med"}, nil)
 	if w.Code != 200 {
 		t.Fatalf("PUT = %d %s", w.Code, w.Body)
@@ -104,10 +104,10 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		t.Fatal(err)
 	}
-	if string(file["preset"]) != `"anthropic-med"` || file["orchestrator"] != nil || string(file["task_concurrency"]) != "5" {
+	if string(file["preset"]) != `"anthropic-med"` || string(file["max_calls_per_turn"]) != "5" {
 		t.Fatalf("overlay file = %s", raw)
 	}
-	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Task.ReasoningEffort != "high" || res.Resolution.Effective.Orchestrator.Model != "claude-opus-5-5" {
+	if res.Resolution.Active.Kind != "file" || res.Resolution.Effective.Model.ReasoningEffort != "high" || res.Resolution.Effective.Model.Model != "claude-opus-5-5" {
 		t.Fatalf("resolution after save: %+v", res.Resolution.Active)
 	}
 	// A stale etag is a 409 that carries the current file.
@@ -123,7 +123,7 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 	raw, _ = os.ReadFile(config.File(project))
 	file = nil
 	_ = json.Unmarshal(raw, &file)
-	if file["preset"] != nil || file["orchestrator"] == nil {
+	if file["preset"] != nil || file["model"] == nil {
 		t.Fatalf("pin file = %s", raw)
 	}
 	if _, err := os.Stat(config.File(project) + ".bak"); err != nil {
@@ -134,13 +134,13 @@ func TestPutConfigOverlayPinAndConflict(t *testing.T) {
 func TestPutConfigRefusesUnknownHostsKeysAndFields(t *testing.T) {
 	s, _ := newTestServer(t)
 	cfg := config.Defaults()
-	cfg.Task.BaseURL = "https://attacker.example/v1"
+	cfg.Model.BaseURL = "https://attacker.example/v1"
 	w := do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 422 || !strings.Contains(w.Body.String(), "not a catalog provider") {
 		t.Fatalf("unknown host = %d %s", w.Code, w.Body)
 	}
 	cfg = config.Defaults()
-	cfg.Narrator.APIKeyEnv = "AWS_SECRET_ACCESS_KEY"
+	cfg.Model.APIKeyEnv = "AWS_SECRET_ACCESS_KEY"
 	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 422 || !strings.Contains(w.Body.String(), "not a key variable") {
 		t.Fatalf("unknown key = %d %s", w.Code, w.Body)
@@ -150,9 +150,9 @@ func TestPutConfigRefusesUnknownHostsKeysAndFields(t *testing.T) {
 		t.Fatalf("unknown field = %d %s", w.Code, w.Body)
 	}
 	cfg = config.Defaults()
-	cfg.NarratorTickSeconds = 1
+	cfg.TickSeconds = 1
 	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
-	if w.Code != 422 || !strings.Contains(w.Body.String(), `"path": "/narrator_tick_seconds"`) && !strings.Contains(w.Body.String(), `"path":"/narrator_tick_seconds"`) {
+	if w.Code != 422 || !strings.Contains(w.Body.String(), `"path": "/tick_seconds"`) && !strings.Contains(w.Body.String(), `"path":"/tick_seconds"`) {
 		t.Fatalf("problem = %d %s", w.Code, w.Body)
 	}
 	cfg = config.Defaults()
@@ -162,9 +162,9 @@ func TestPutConfigRefusesUnknownHostsKeysAndFields(t *testing.T) {
 		t.Fatalf("phone address = %d %s", w.Code, w.Body)
 	}
 	// Route tests cannot point a key at an unknown host either.
-	a := config.Defaults().Task
+	a := config.Defaults().Model
 	a.BaseURL = "https://attacker.example/v1"
-	w = do(s, "POST", "/api/config/test", map[string]any{"actor": a}, nil)
+	w = do(s, "POST", "/api/config/test", map[string]any{"model": a, "target": "model"}, nil)
 	if w.Code != 422 {
 		t.Fatalf("test unknown host = %d %s", w.Code, w.Body)
 	}
@@ -172,32 +172,32 @@ func TestPutConfigRefusesUnknownHostsKeysAndFields(t *testing.T) {
 
 func TestPutConfigSkipsFieldsTheEnvironmentOverrides(t *testing.T) {
 	s, project := newTestServer(t)
-	t.Setenv("EAGENT_TASK_REASONING_EFFORT", "high")
+	t.Setenv("EAGENT_REASONING_EFFORT", "high")
 	cfg := config.Defaults()
-	cfg.Task.ReasoningEffort = "xhigh" // the default is medium, so this is a real edit
-	cfg.TaskConcurrency = 6
+	cfg.Model.ReasoningEffort = "xhigh" // not the default, so this is a real edit
+	cfg.MaxCallsPerTurn = 6
 	w := do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 200 {
 		t.Fatalf("PUT = %d %s", w.Code, w.Body)
 	}
 	var res putConfigResult
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
-	if len(res.Skipped) != 1 || res.Skipped[0].Pointer != "/task/reasoning_effort" || res.Skipped[0].Env != "EAGENT_TASK_REASONING_EFFORT" {
+	if len(res.Skipped) != 1 || res.Skipped[0].Pointer != "/model/reasoning_effort" || res.Skipped[0].Env != "EAGENT_REASONING_EFFORT" {
 		t.Fatalf("skipped = %v", res.Skipped)
 	}
 	raw, _ := os.ReadFile(config.File(project))
-	if strings.Contains(string(raw), "reasoning_effort") || !strings.Contains(string(raw), `"task_concurrency": 6`) {
+	if strings.Contains(string(raw), "reasoning_effort") || !strings.Contains(string(raw), `"max_calls_per_turn": 6`) {
 		t.Fatalf("file = %s", raw)
 	}
 	// A value the file already holds for a pinned field survives a save of
 	// something else, even though the environment hides it right now.
-	if err := os.WriteFile(config.File(project), []byte(`{"task": {"reasoning_effort": "xhigh", "max_tokens": 9000}, "task_concurrency": 6}`), 0o644); err != nil {
+	if err := os.WriteFile(config.File(project), []byte(`{"model": {"reasoning_effort": "xhigh", "max_tokens": 9000}, "max_calls_per_turn": 6}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg = config.Defaults()
-	cfg.Task.MaxTokens = 9000
-	cfg.Task.ReasoningEffort = "high" // what the env says; the file says xhigh
-	cfg.TaskConcurrency = 7
+	cfg.Model.MaxTokens = 9000
+	cfg.Model.ReasoningEffort = "high" // what the env says; the file says xhigh
+	cfg.MaxCallsPerTurn = 7
 	w = do(s, "PUT", "/api/config", map[string]any{"config": cfg}, nil)
 	if w.Code != 200 {
 		t.Fatalf("PUT = %d %s", w.Code, w.Body)
@@ -205,7 +205,7 @@ func TestPutConfigSkipsFieldsTheEnvironmentOverrides(t *testing.T) {
 	res = putConfigResult{}
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
 	raw, _ = os.ReadFile(config.File(project))
-	if !strings.Contains(string(raw), `"reasoning_effort": "xhigh"`) || !strings.Contains(string(raw), `"task_concurrency": 7`) || len(res.Kept) != 1 {
+	if !strings.Contains(string(raw), `"reasoning_effort": "xhigh"`) || !strings.Contains(string(raw), `"max_calls_per_turn": 7`) || len(res.Kept) != 1 {
 		t.Fatalf("pinned value not carried over: %s (kept=%v)", raw, res.Kept)
 	}
 }
@@ -216,7 +216,7 @@ func TestPresetChipsAndPromptsAreClosedSets(t *testing.T) {
 	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.File(project), []byte(`{"preset": "glm", "task_concurrency": 9}`), 0o644); err != nil {
+	if err := os.WriteFile(config.File(project), []byte(`{"preset": "glm", "max_calls_per_turn": 9}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	r := httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/astra", nil)
@@ -226,19 +226,19 @@ func TestPresetChipsAndPromptsAreClosedSets(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 {
 		t.Fatalf("preset = %d %v", w.Code, err)
 	}
-	if pv.Config.TaskConcurrency == 9 || pv.Config.Preset != "astra" {
-		t.Fatalf("preset config carries the project file: %+v", pv.Config.TaskConcurrency)
+	if pv.Config.MaxCallsPerTurn == 9 || pv.Config.Preset != "astra" {
+		t.Fatalf("preset config carries the project file: %+v", pv.Config.MaxCallsPerTurn)
 	}
 	// A bundle is shown on its own, over its own preset.
-	if err := os.WriteFile(config.BundlePath(project, "mine"), []byte(`{"preset": "anthropic-med", "narrator": {"reasoning_effort": "medium"}}`), 0o644); err != nil {
+	if err := os.WriteFile(config.BundlePath(project, "mine"), []byte(`{"preset": "anthropic-med", "model": {"reasoning_effort": "medium"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	r = httptest.NewRequest("GET", "http://127.0.0.1:7331/api/config/presets/mine", nil)
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	pv = presetConfigView{}
-	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 || pv.Config.Preset != "anthropic-med" || pv.Config.Orchestrator.Model != "claude-opus-5-5" || pv.Config.TaskConcurrency == 9 {
-		t.Fatalf("bundle = %d %v %+v", w.Code, err, pv.Config.Orchestrator.Model)
+	if err := json.Unmarshal(w.Body.Bytes(), &pv); err != nil || w.Code != 200 || pv.Config.Preset != "anthropic-med" || pv.Config.Model.Model != "claude-opus-5-5" || pv.Config.MaxCallsPerTurn == 9 {
+		t.Fatalf("bundle = %d %v %+v", w.Code, err, pv.Config.Model.Model)
 	}
 	// Anything else is a 404 before any file is opened.
 	secret := filepath.Join(project, "secret.json")
@@ -283,6 +283,15 @@ func TestRawRepairAndCatalog(t *testing.T) {
 	if v.Resolution.LoadError == "" || v.Resolution.File.Raw == "" {
 		t.Fatalf("broken file not reported: %+v", v.Resolution.File)
 	}
+	// The default agent is chosen from the relay profiles, built-in ones
+	// included.
+	names := map[string]bool{}
+	for _, a := range v.Agents {
+		names[a.Name] = a.Agent != ""
+	}
+	if !names["claude"] || !names["codex"] {
+		t.Fatalf("agents = %+v", v.Agents)
+	}
 	w2 := do(s, "PUT", "/api/config/raw", map[string]any{"raw": `{"preset": "glm", "nope": `}, nil)
 	if w2.Code != 422 {
 		t.Fatalf("bad raw accepted: %d", w2.Code)
@@ -310,7 +319,7 @@ func TestRawRepairAndCatalog(t *testing.T) {
 }
 
 // Tokens spent at one provider stay priced at that provider after a
-// fallback switches the actor to another route.
+// fallback switches eagent to another route.
 func TestCostIsPricedPerRouteAcrossFallback(t *testing.T) {
 	st := state.New()
 	seq := int64(0)
@@ -320,14 +329,14 @@ func TestCostIsPricedPerRouteAcrossFallback(t *testing.T) {
 		st.Apply(ev)
 	}
 	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
-	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorOrchestrator, Model: "zai-org/GLM-5.3", BaseURL: "https://api.together.xyz/v1"}))
-	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "a", Usage: event.Usage{Input: 1_000_000, Cached: 400_000, Output: 20_000}}))
+	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, Model: "zai-org/GLM-5.3", BaseURL: "https://api.together.xyz/v1"}))
+	add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Text: "a", Usage: event.Usage{Input: 1_000_000, Cached: 400_000, Output: 20_000}}))
 	before, ok := estimateCost(st)
 	if !ok || before <= 0 {
 		t.Fatalf("before = %v %v", before, ok)
 	}
-	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorOrchestrator, Model: "zai-org/GLM-5.3-Flash", BaseURL: "https://api.together.xyz/v1"}))
-	add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{Text: "b", Usage: event.Usage{Input: 1000, Output: 10}}))
+	add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, Model: "zai-org/GLM-5.3-Flash", BaseURL: "https://api.together.xyz/v1"}))
+	add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Text: "b", Usage: event.Usage{Input: 1000, Output: 10}}))
 	after, ok := estimateCost(st)
 	if !ok || after < before || after-before > 0.01 {
 		t.Fatalf("a fallback repriced the past: before %.6f after %.6f", before, after)
@@ -458,120 +467,11 @@ func TestCatalogLiveRefreshHappensOnlyOnRequest(t *testing.T) {
 	}
 }
 
-func TestApplyRoutePicks(t *testing.T) {
-	s, project := newTestServer(t)
-	// Seed a fresh live cache so no network happens; include a live-only model.
-	live := []config.Model{
-		{Provider: "openrouter", ID: "acme/nova-9", Family: "nova-9", Label: "Nova 9", Live: true, Context: 2_097_152, Vision: true, Efforts: []string{"low", "medium", "high"}},
-	}
-	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now(), Models: live}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Defaults()
-	cfg.Orchestrator.ReasoningEffort = "xhigh" // not in nova-9's [low medium high] -> the nearest, high
-	cfg.Orchestrator.Fallback = &config.Actor{BaseURL: "https://api.openai.com/v1", Model: "gpt-x", APIKeyEnv: "OPENAI_API_KEY"}
-
-	out, err := s.applyRoutePicks(cfg, map[string]routePick{
-		"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := out.Orchestrator
-	if a.Model != "acme/nova-9" || a.BaseURL != "https://openrouter.ai/api/v1" || a.APIKeyEnv != "OPENROUTER_API_KEY" {
-		t.Fatalf("route not resolved from the catalog provider: %+v", a)
-	}
-	if a.Fallback != nil {
-		t.Fatalf("another model kept the old model's fallback: %+v", a.Fallback)
-	}
-	if a.ReasoningEffort != "high" {
-		t.Fatalf("effort should move to the nearest one the model lists, got %q", a.ReasoningEffort)
-	}
-	// An inherited effort that IS in the model's list is kept.
-	cfg2 := config.Defaults()
-	cfg2.Orchestrator.ReasoningEffort = "high"
-	out1b, err := s.applyRoutePicks(cfg2, map[string]routePick{"orchestrator": {Provider: "openrouter", Model: "acme/nova-9"}})
-	if err != nil || out1b.Orchestrator.ReasoningEffort != "high" {
-		t.Fatalf("in-list effort should be kept: %+v %v", out1b.Orchestrator, err)
-	}
-	if out.Task.Model != cfg.Task.Model || out.Narrator.Model != cfg.Narrator.Model {
-		t.Fatal("untouched actors must keep the base preset's models")
-	}
-
-	// A statically known model keeps its catalog protocol.
-	out2, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"task": {Provider: "openai", Model: "gpt-6.1-terra"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out2.Task.Protocol != "openai-responses" || out2.Task.BaseURL != "https://api.openai.com/v1" {
-		t.Fatalf("static model metadata wrong: %+v", out2.Task)
-	}
-
-	// Bad picks are rejected.
-	for _, picks := range []map[string]routePick{
-		{"narratorX": {Provider: "openrouter", Model: "acme/nova-9"}},
-		{"task": {Provider: "evil", Model: "x"}},
-		{"task": {Provider: "openrouter", Model: "not/a-model"}},
-	} {
-		if _, err := s.applyRoutePicks(config.Defaults(), picks); err == nil {
-			t.Fatalf("expected error for %v", picks)
-		}
-	}
-
-	// Explicit effort: accepted when the model lists it, set verbatim.
-	out3, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "high"},
-	})
-	if err != nil || out3.Narrator.ReasoningEffort != "high" {
-		t.Fatalf("explicit effort: %+v %v", out3.Narrator, err)
-	}
-	// Effort the model does not list -> rejected.
-	if _, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "xhigh"},
-	}); err == nil {
-		t.Fatal("effort not in the model's list should be rejected")
-	}
-	// Effort off the canonical scale -> rejected.
-	if _, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"narrator": {Provider: "openrouter", Model: "acme/nova-9", Effort: "ultra"},
-	}); err == nil {
-		t.Fatal("non-canonical effort should be rejected")
-	}
-	// A model whose catalog entry lists efforts accepts one of them verbatim.
-	out4, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"task": {Provider: "openai", Model: "gpt-6-astra", Effort: "max"},
-	})
-	if err != nil || out4.Task.ReasoningEffort != "max" {
-		t.Fatalf("canonical effort in the model's list: %+v %v", out4.Task, err)
-	}
-	// A model with no known effort list (minimax-m3 on fireworks) accepts any
-	// canonical level.
-	out5, err := s.applyRoutePicks(config.Defaults(), map[string]routePick{
-		"task": {Provider: "fireworks", Model: "accounts/fireworks/models/minimax-m3", Effort: "xhigh"},
-	})
-	if err != nil || out5.Task.ReasoningEffort != "xhigh" || out5.Task.APIKeyEnv != "FIREWORKS_API_KEY" {
-		t.Fatalf("unchecked model accepts canonical effort: %+v %v", out5.Task, err)
-	}
-}
-
-func TestStartSessionRejectsBadRoutePick(t *testing.T) {
-	s, project := newTestServer(t)
-	if err := config.WriteLiveCache(project, &config.LiveCache{FetchedAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	w := do(s, "POST", "/api/sessions", map[string]any{"prompt": "hi", "routes": map[string]any{"task": map[string]any{"provider": "openrouter", "model": "nope/nothing"}}}, nil)
-	if w.Code != 400 {
-		t.Fatalf("bad route pick: status %d want 400: %s", w.Code, w.Body)
-	}
-}
-
 func TestSaveAndDeleteBundleEndpoints(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := config.Defaults()
-	cfg.TaskConcurrency = 6
-	w := do(s, "POST", "/api/config/bundles", map[string]any{"name": "my-preset", "description": "six workers", "config": cfg}, nil)
+	cfg.MaxCallsPerTurn = 6
+	w := do(s, "POST", "/api/config/bundles", map[string]any{"name": "my-preset", "description": "six calls a turn", "config": cfg}, nil)
 	if w.Code != 200 {
 		t.Fatalf("POST bundle = %d %s", w.Code, w.Body)
 	}

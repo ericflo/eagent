@@ -1,6 +1,6 @@
 // Package web serves eagent's browser UI: a live view of any session in the
 // project (running in this process or in a terminal elsewhere), a session
-// browser, task and tool-call drill-down, and configuration.
+// browser, a peek at the agent's terminal, and configuration.
 //
 // The log on disk is the source of truth, so the UI tails the JSONL files
 // rather than depending on the process that writes them. Messages to a
@@ -99,6 +99,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/events", s.getEvents)
 	s.mux.HandleFunc("GET /api/sessions/{id}/stream", s.stream)
 	s.mux.HandleFunc("GET /api/sessions/{id}/attachments/{name}", s.getAttachment)
+	s.mux.HandleFunc("GET /api/sessions/{id}/agents/{name}/screen", s.getScreen)
+	s.mux.HandleFunc("GET /api/agents", s.listAgents)
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.guard(s.postMessage))
 	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.guard(s.postAnswer))
 	s.mux.HandleFunc("POST /api/sessions/{id}/dismiss", s.guard(s.postDismiss))
@@ -175,9 +177,6 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 // Session views are shared with the portable artifact exporter.
 type SessionSummary = projection.SessionSummary
 type SessionDetail = projection.SessionDetail
-type TaskView = projection.TaskView
-type ProcView = projection.ProcView
-type ScheduleView = projection.ScheduleView
 type UsageView = projection.UsageView
 
 var priceFor = projection.PriceFor
@@ -207,9 +206,9 @@ func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary
 	s.mu.Unlock()
 	sum.Alive = sum.Hosted || alive(info.Path)
 	switch {
-	case sum.Alive && st.Idle() && st.Question != nil:
+	case sum.Alive && st.Question != nil:
 		sum.Status = "awaiting-input"
-	case sum.Alive && st.Idle():
+	case sum.Alive && st.Waiting():
 		sum.Status = "idle"
 	case sum.Alive:
 		sum.Status = "running"
@@ -256,22 +255,23 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 	}
 	s.mu.Unlock()
 	if d.Live == nil && sum.Alive {
-		// Not hosted here: derive activity from open turns in the log.
-		live := harness.Status{OrchestratorBusy: st.Turns[event.ActorOrchestrator] > 0, NarratorBusy: st.Turns[event.ActorNarrator] > 0, ContextTokens: d.Context}
-		if live.OrchestratorBusy {
-			live.OrchestratorFor = time.Since(st.TurnSince[event.ActorOrchestrator]).Round(time.Second).String()
-		}
-		for _, t := range st.RunningTasks() {
-			if t.Status == "running" {
-				live.TasksRunning++
-			} else {
-				live.TasksQueued++
-			}
-		}
-		live.Procs = len(st.RunningProcs())
-		d.Live = &live
+		// Not hosted here: derive activity from the log.
+		d.Live = liveFromLog(st)
 	}
 	return d
+}
+
+// liveFromLog is the status of a session another process runs, as far as
+// its log tells: an open turn of eagent's, and what each agent is doing.
+func liveFromLog(st *state.State) *harness.Status {
+	live := harness.Status{Busy: st.Turns[event.ActorEagent] > 0, ContextTokens: st.ContextTokens(), Waiting: st.Waiting() && st.Turns[event.ActorEagent] == 0 && st.Question == nil, Phone: st.Phone != nil}
+	if live.Busy {
+		live.BusyFor = time.Since(st.TurnSince[event.ActorEagent]).Round(time.Second).String()
+	}
+	for _, r := range st.ActiveRelays() {
+		live.Agents = append(live.Agents, harness.AgentStatus{Name: r.Name, Who: r.Who(), State: r.State})
+	}
+	return &live
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
@@ -482,23 +482,15 @@ type messageBody struct {
 	Config     string `json:"config"`
 	Preset     string `json:"preset"`
 	UseProject bool   `json:"use_project"`
-	// Routes lets the new-session dialog start a session on catalog models
-	// picked in the browser, on top of the chosen preset/bundle. Only
-	// provider id + model id travel from the browser; the base URL and key
-	// variable are resolved server-side from the catalog, so a browser can
-	// never point a key at an arbitrary host.
-	Routes map[string]routePick `json:"routes,omitempty"`
+	// Dir, Relay, RelayModel and RelayEffort start a new session in a
+	// folder with an agent profile and that agent's model and effort. Empty
+	// means the project root, the default agent and the profile's picks.
+	Dir         string `json:"dir"`
+	Relay       string `json:"relay"`
+	RelayModel  string `json:"relay_model"`
+	RelayEffort string `json:"relay_effort"`
 	// Client declares what context the browser can supply.
 	Client *clientcaps.Caps `json:"client"`
-}
-
-// routePick names one catalog model for one actor, optionally with the
-// reasoning effort to run it at. Effort is validated against the canonical
-// scale and the model's known efforts, when the catalog lists any.
-type routePick struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Effort   string `json:"effort,omitempty"`
 }
 
 func readBody(r *http.Request) (messageBody, error) {
@@ -637,31 +629,23 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	if len(b.Routes) > 0 {
-		cfg, err = s.applyRoutePicks(cfg, b.Routes)
-		if err != nil {
-			writeErr(w, 400, err)
+	dir := strings.TrimSpace(b.Dir)
+	if dir != "" {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(s.Project, dir)
+		}
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			writeErr(w, 400, fmt.Errorf("%s is not a directory", dir))
 			return
 		}
 	}
-	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, cfg)
+	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
+		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
 	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
-}
-
-// applyRoutePicks overlays browser-picked models onto the resolved
-// configuration. Picks resolve against the static catalog and the cached
-// live list (the dialog's browse fetched it), so starting a session never
-// waits on the network, and a browser cannot point a key elsewhere.
-func (s *Server) applyRoutePicks(cfg config.Config, picks map[string]routePick) (config.Config, error) {
-	converted := map[string]integration.RoutePick{}
-	for actor, p := range picks {
-		converted[actor] = integration.RoutePick{Provider: p.Provider, Model: p.Model, Effort: p.Effort}
-	}
-	return integration.ApplyPicks(s.Project, cfg, converted)
 }
 
 func (s *Server) isHosted(id string) bool {
@@ -686,15 +670,6 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 	return config.LoadBundle(s.Project, preset, bundle)
 }
 
-// hostNew starts a new session in this process.
-func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, error) {
-	cfg, err := s.loadConfig(bundle, preset)
-	if err != nil {
-		return "", err
-	}
-	return s.hostNewCfg(opts, cfg)
-}
-
 // hostNewCfg starts a new session in this process on an already-resolved
 // configuration (loadConfig plus any browser-picked route overrides).
 func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
@@ -715,13 +690,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if project != s.Project {
 			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
 		}
-		// The configuration and model picks the phone chose, else this
-		// server's default configuration.
-		preset, bundle := integration.SplitConfig(req.Config)
-		cfg, err := s.loadConfig(bundle, preset)
-		if err == nil {
-			cfg, err = integration.ApplyPicks(s.Project, cfg, req.Routes)
-		}
+		cfg, err := s.loadConfig("", "")
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
@@ -808,7 +777,7 @@ func modelsLine(c config.Config) string {
 		}
 		return m
 	}
-	return short(c.Orchestrator.Model) + " / " + short(c.Task.Model) + " / " + short(c.Narrator.Model)
+	return short(c.Model.Model)
 }
 
 // saveBundle writes a named configuration from the UI. The body carries the
@@ -877,13 +846,13 @@ type webUI struct {
 
 func newWebUI(logf func(string, ...any)) *webUI { return &webUI{logf: logf} }
 
-func (u *webUI) Narrate(string)                        {}
-func (u *webUI) Ask(string, string, []string)          {}
-func (u *webUI) Trace(event.Event)                     {}
-func (u *webUI) Stream(string, string, string, string) {}
-func (u *webUI) Input() <-chan string                  { return nil }
-func (u *webUI) Idle(bool)                             {}
-func (u *webUI) Log(format string, args ...any)        { u.logf("  "+format, args...) }
+func (u *webUI) Say(string)                     {}
+func (u *webUI) Ask(string, string, []string)   {}
+func (u *webUI) Trace(event.Event)              {}
+func (u *webUI) Stream(string, string)          {}
+func (u *webUI) Input() <-chan string           { return nil }
+func (u *webUI) Idle(bool)                      {}
+func (u *webUI) Log(format string, args ...any) { u.logf("  "+format, args...) }
 func (u *webUI) Status(s harness.Status) {
 	u.mu.Lock()
 	u.st = s

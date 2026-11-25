@@ -257,7 +257,7 @@ func TestProjectConnectorHostsRunningSessionSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := control.Proposal{Operation: "settings.apply", SchemaVersion: runtimecontrol.Schema, Generation: view.Generation, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: float64(7)}}}
+	p := control.Proposal{Operation: "settings.apply", SchemaVersion: runtimecontrol.Schema, Generation: view.Generation, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: float64(70)}}}
 	raw, _ := json.Marshal(p)
 	q := command{ID: randomID(), UserID: "owner", ResourceID: "resource:" + liveGrant.Key, Proposal: p, Digest: artifact.Digest(raw), ClaimToken: "claim", Expires: time.Now().Add(time.Minute)}
 	f.mu.Lock()
@@ -273,12 +273,12 @@ func TestProjectConnectorHostsRunningSessionSettings(t *testing.T) {
 	}
 	f.waitFor(t, ctx, "the updated session snapshot", func() bool {
 		all := f.published[liveGrant.Key]
-		return all[len(all)-1].Saved["/task_concurrency"] == float64(7)
+		return all[len(all)-1].Saved["/tick_seconds"] == float64(70)
 	})
 	if _, err := os.Stat(config.File(project)); err != nil {
 		t.Fatal(err)
 	}
-	if raw, _ := os.ReadFile(config.File(project)); strings.Contains(string(raw), "task_concurrency") {
+	if raw, _ := os.ReadFile(config.File(project)); strings.Contains(string(raw), "tick_seconds") {
 		t.Fatal("a session command wrote project defaults")
 	}
 

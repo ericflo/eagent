@@ -288,7 +288,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 }
 
 // anthropicMessages renders history with strict user/assistant alternation
-// and a cache breakpoint on the last stable message.
+// and cache breakpoints on its last two blocks.
 func anthropicMessages(req Request, host string) []map[string]any {
 	var msgs []map[string]any
 	push := func(role string, content []map[string]any) {
@@ -351,33 +351,31 @@ func anthropicMessages(req Request, host string) []map[string]any {
 			push("user", content)
 		}
 	}
-	// Cache breakpoints on the final message and (when present) the one before
-	// it so both normal multi-turn loops (extending msgs[len-1]) and unrecorded
-	// checks (replacing msgs[len-1] while keeping msgs[len-2]) hit the cache.
+	// Cache breakpoints on the final block and on the one before it. A call
+	// that extends the conversation hits the cache at the first. A look
+	// whose last block is the end of a prompt that is not recorded (so the
+	// next call carries a different one in its place) hits it at the second.
+	// Adjacent user messages were merged above, so the block before the
+	// last is usually inside the same message, not the message before.
 	// Along with system and the last tool, this stays within Anthropic's
 	// four-breakpoint limit.
-	markCacheable := func(msg map[string]any) {
-		blocks, _ := msg["content"].([]map[string]any)
-		for i := len(blocks) - 1; i >= 0; i-- {
-			b := blocks[i]
-			t, _ := b["type"].(string)
-			if t == "thinking" || t == "redacted_thinking" {
+	var stable []map[string]any
+	for _, m := range msgs {
+		blocks, _ := m["content"].([]map[string]any)
+		for _, b := range blocks {
+			switch t, _ := b["type"].(string); t {
+			case "thinking", "redacted_thinking":
 				continue
-			}
-			if t == "text" {
+			case "text":
 				if s, _ := b["text"].(string); s == "" {
 					continue
 				}
 			}
-			b["cache_control"] = map[string]any{"type": "ephemeral"}
-			return
+			stable = append(stable, b)
 		}
 	}
-	if len(msgs) >= 1 {
-		markCacheable(msgs[len(msgs)-1])
-	}
-	if len(msgs) >= 2 {
-		markCacheable(msgs[len(msgs)-2])
+	for i := len(stable) - 1; i >= 0 && i >= len(stable)-2; i-- {
+		stable[i]["cache_control"] = map[string]any{"type": "ephemeral"}
 	}
 	return msgs
 }

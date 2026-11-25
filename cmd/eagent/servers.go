@@ -230,36 +230,35 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return fail(errors.New(res.LoadError))
 	}
 	cfg := res.Effective
-	for _, a := range []*config.Actor{&cfg.Orchestrator, &cfg.Task, &cfg.Narrator} {
-		picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)
-		if err != nil {
-			// If the user typed a model ID not yet in the live cache on a custom
-			// server, apply it directly with the server's route details.
-			if pr.Custom {
-				picked = *a
-				picked.BaseURL = pr.BaseURL
-				picked.Model = modelID
-				picked.APIKeyEnv = pr.KeyEnv
-				picked.Protocol = pr.Protocol
-				picked.Fallback = nil
-				if opts.effort != "" {
-					picked.ReasoningEffort = opts.effort
-				}
-			} else {
-				return fail(err)
+	a := &cfg.Model
+	picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)
+	if err != nil {
+		// If the user typed a model ID not yet in the live cache on a custom
+		// server, apply it directly with the server's route details.
+		if pr.Custom {
+			picked = *a
+			picked.BaseURL = pr.BaseURL
+			picked.Model = modelID
+			picked.APIKeyEnv = pr.KeyEnv
+			picked.Protocol = pr.Protocol
+			picked.Fallback = nil
+			if opts.effort != "" {
+				picked.ReasoningEffort = opts.effort
 			}
+		} else {
+			return fail(err)
 		}
-		if opts.protocol != "" {
-			picked.Protocol = opts.protocol
-			if picked.Protocol != llm.ProtocolResponses {
-				picked.ReplayReasoning = nil
-			}
-		}
-		*a = picked
 	}
+	if opts.protocol != "" {
+		picked.Protocol = opts.protocol
+		if picked.Protocol != llm.ProtocolResponses {
+			picked.ReplayReasoning = nil
+		}
+	}
+	*a = picked
 	// If the model has a known context window smaller than RolloverTokens, pull
 	// RolloverTokens down to 75% of the window (at least 20k) so validation stays clean.
-	if w := cfg.Orchestrator.ContextTokens; w > 0 && cfg.RolloverTokens > w*3/4 {
+	if w := cfg.Model.ContextTokens; w > 0 && cfg.RolloverTokens > w*3/4 {
 		cfg.RolloverTokens = max(20_000, w*3/4)
 	}
 	rawCfg, err := json.Marshal(cfg)
@@ -282,7 +281,7 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return 0
 	}
 	fmt.Printf("updated %s\n", saveRes.Saved.Path)
-	fmt.Printf("  orchestrator/task/narrator -> %s @ %s (%s)\n", cfg.Orchestrator.Model, cfg.Orchestrator.BaseURL, cfg.Orchestrator.Protocol)
+	fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
 	return 0
 }
 

@@ -88,6 +88,21 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; padding: 10px; line
 .session-head { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
 .session-title { font-weight: 650; font-size: 15px; letter-spacing: -.1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-desc { color: var(--muted); font-size: 12.5px; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agents { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; font-size: 12.5px; }
+.agents:empty { display: none; }
+.agent { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.agent .st { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); margin-right: 2px; flex: none; }
+.agent .st.working, .agent .st.starting { background: var(--ok); }
+.agent .st.idle { background: var(--accent); }
+.agent .st.blocked { background: var(--warn); }
+.agent .st.exited { background: var(--bad); }
+.agent button { margin-left: 4px; }
+.badge.model { font-family: var(--mono); font-weight: 400; color: var(--ink); }
+.badge.working, .badge.starting { color: var(--ok); background: var(--ok-soft); }
+.badge.blocked { color: var(--warn); background: var(--warn-soft); }
+.msg.agent .avatar { background: var(--c-task); }
+.msg.agent details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+pre.screen { max-height: 65vh; overflow: auto; font-size: 11.5px; line-height: 1.3; white-space: pre; }
 .pane { flex: 1; overflow-y: auto; padding: 16px; min-height: 0; }
 .empty { color: var(--muted); text-align: center; padding: 80px 20px; }
 .empty h2 { margin: 0 0 6px; font-weight: 650; color: var(--ink); font-size: 20px; }
@@ -104,7 +119,7 @@ textarea.code { font-family: var(--mono); font-size: 12.5px; padding: 10px; line
 .chip { border: 1px solid var(--line); border-radius: 999px; height: 24px; display: inline-flex; align-items: center; padding: 0 10px; font-size: 12px; cursor: pointer; color: var(--muted); background: var(--panel); }
 .chip.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.actor-user { color: var(--c-user); } .actor-orchestrator { color: var(--c-orch); } .actor-task { color: var(--c-task); } .actor-narrator { color: var(--c-narr); } .actor-harness { color: var(--c-harness); }
+.actor-user { color: var(--c-user); } .actor-eagent { color: var(--c-orch); } .actor-summarizer { color: var(--c-narr); } .actor-orchestrator { color: var(--c-orch); } .actor-task { color: var(--c-task); } .actor-narrator { color: var(--c-narr); } .actor-harness { color: var(--c-harness); }
 
 /* ---- chat ---- */
 .chat { display: flex; flex-direction: column; height: 100%; }
@@ -180,21 +195,6 @@ summary:hover { color: var(--ink); }
 .key .d { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); } .key .d.on { background: var(--ok); }
 
 /* ---- task detail ---- */
-.turn { border-left: 2px solid var(--line); padding: 2px 0 2px 14px; margin: 12px 0; }
-.turn .hd { display: flex; gap: 10px; align-items: baseline; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.turn .hd .actor { font-weight: 600; color: var(--ink); }
-.turn .text { margin: 6px 0; white-space: pre-wrap; }
-.turn .reasoning { color: var(--muted); font-style: italic; white-space: pre-wrap; font-size: 13px; }
-.call { margin: 8px 0; padding: 8px 12px; background: var(--code); border-radius: 8px; border: 1px solid var(--line); }
-.callhd { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
-.call .name { font-family: var(--mono); font-weight: 600; font-size: 12.5px; color: var(--c-task); }
-.call pre { margin: 6px 0 0; background: transparent; padding: 0; max-height: 320px; overflow: auto; }
-.call .res { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 6px; }
-.call .res.err pre { color: var(--bad); }
-.call .diff { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.call .diff pre { margin: 6px 0 0; padding-left: 8px; }
-.call .diff .old { border-left: 3px solid var(--bad); } .call .diff .new { border-left: 3px solid var(--ok); }
-.call .text { white-space: pre-wrap; margin: 4px 0; }
 
 /* ---- timeline ---- */
 .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
@@ -230,15 +230,6 @@ svg .dot { fill: var(--muted); } svg .dot.cached { fill: var(--ok); }
 .modal h2 { margin: 0 0 12px; font-size: 16px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
 .modal textarea { width: 100%; min-height: 140px; padding: 10px 12px; border-radius: 10px; resize: vertical; background: var(--bg); }
 .modal .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
-/* New-session custom routing rows: fixed grid so the effort select and browse
-   button never wrap onto their own line; the model label truncates instead. */
-.modal .routerow { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; margin: 4px 0; }
-.modal .routerow .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.modal .routerow .lbl b { font-weight: 600; }
-@media (max-width: 700px) {
-  .modal .routerow { display: flex; flex-wrap: wrap; }
-  .modal .routerow .lbl { flex: 1 1 100%; order: 2; }
-}
 .modal .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; align-items: center; }
 #toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column-reverse; align-items: center; gap: 8px; pointer-events: none; max-width: 80vw; }
 .toast { transform: translateY(20px); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 13px; opacity: 0; transition: all .25s; max-width: 80vw; pointer-events: auto; }
@@ -246,13 +237,13 @@ svg .dot { fill: var(--muted); } svg .dot.cached { fill: var(--ok); }
 .toast.bad { background: var(--bad); color: white; }
 
 @media (max-width: 900px) { .sidebar { width: 220px; } .project { display: none; } .tabs .badge.mono { display: none; } }
-@media (max-width: 640px) { .top { gap: 8px; padding: 0 10px; } .live { font-size: 12px; } .actions { gap: 6px; } .actions button, .actions .btn { padding: 0 9px; font-size: 12px; height: 28px; } .tabs { padding: 0 8px; overflow-x: auto; } .tabs .tools .badge { display: none; } .pane { padding: 10px; } .body { flex-direction: column; } .sidebar { width: 100%; max-height: 30vh; border-right: none; border-bottom: 1px solid var(--line); } .call .diff { grid-template-columns: 1fr; } .msg.user .bubble { max-width: 92%; } }
+@media (max-width: 640px) { .top { gap: 8px; padding: 0 10px; } .live { font-size: 12px; } .actions { gap: 6px; } .actions button, .actions .btn { padding: 0 9px; font-size: 12px; height: 28px; } .tabs { padding: 0 8px; overflow-x: auto; } .tabs .tools .badge { display: none; } .pane { padding: 10px; } .body { flex-direction: column; } .sidebar { width: 100%; max-height: 30vh; border-right: none; border-bottom: 1px solid var(--line); } .msg.user .bubble { max-width: 92%; } }
 
 /* ---- overflow hardening: long paths, URLs, and tokens wrap instead of escaping ---- */
 .pane, .chat .col, .modal .box, .sessions { overflow-wrap: anywhere; }
 code.inline { overflow-wrap: anywhere; }
 pre { overflow-wrap: anywhere; }
-.msg .text, .msg .bubble, .qcard, .act, .turn .text, .call .text, .callhd, .kv, .stat .l, .notice { overflow-wrap: anywhere; }
+.msg .text, .msg .bubble, .qcard, .act, .kv, .stat .l, .notice { overflow-wrap: anywhere; }
 .card td { overflow-wrap: normal; } .card td.wrap { overflow-wrap: anywhere; } td.num, td.nowrap, .card td .badge { white-space: nowrap; }
 .act > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .qcard .options button, .composer .pending button { white-space: normal; height: auto; min-height: 30px; padding: 4px 12px; text-align: left; line-height: 1.35; }
@@ -260,7 +251,6 @@ pre { overflow-wrap: anywhere; }
 .card td .badge { white-space: nowrap; }
 svg.gantt text.label { font-family: var(--mono); }
 .tabs .tools .badge { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
-.callhd .sub { min-width: 0; }
 select { max-width: 100%; }
 .modal .row select { flex: 1; min-width: 0; }
 @media (max-width: 640px) {
@@ -271,7 +261,6 @@ select { max-width: 100%; }
   .filters input.search { flex: 1; min-width: 120px; }
 }
 @media (max-width: 640px) {
-  table.tasks th:nth-child(4), table.tasks td:nth-child(4), table.tasks th:nth-child(5), table.tasks td:nth-child(5) { display: none; }
   .stats { grid-template-columns: 1fr 1fr; }
   .card { padding: 12px; }
 }
@@ -325,9 +314,8 @@ select { max-width: 100%; }
 .route { position: relative; margin-bottom: 0 !important; min-width: 0; }
 .route .rhead h3 { margin-bottom: 2px; }
 .route .swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--c-harness); display: inline-block; }
-.route.orchestrator .swatch { background: var(--c-orch); }
-.route.task .swatch { background: var(--c-task); }
-.route.narrator .swatch { background: var(--c-narr); }
+.route.model .swatch { background: var(--c-orch); }
+.route.summarizer .swatch { background: var(--c-narr); }
 .route .role { min-height: 3.2em; }
 .route .price { margin: -4px 0 10px; }
 
@@ -447,3 +435,5 @@ select.mini { height: 28px; font-size: 12px; padding: 0 6px; }
   .quick h3 .sub { display: none; }
   .seg button { min-width: 0; flex: 1 1 auto; }
 }
+.receipt { align-self: flex-end; color: var(--dim); font-size: 11.5px; margin: -10px 4px 0; text-align: right; }
+.receipt.bad { color: var(--bad); }

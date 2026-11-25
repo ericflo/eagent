@@ -50,7 +50,7 @@ func executeExpected(t *testing.T, s *settings.Service, g control.Grant, q comma
 
 func TestUndoPreservesUnrelatedEditsAndCanItselfBeUndone(t *testing.T) {
 	s, g, q := fixtureCommand(t)
-	if _, err := config.SaveRaw(s.Project, `{"task_concurrency":3,"private_unknown":"do-not-export"}`, "", true); err != nil {
+	if _, err := config.SaveRaw(s.Project, `{"tick_seconds":30,"private_unknown":"do-not-export"}`, "", true); err != nil {
 		t.Fatal(err)
 	}
 	q = reviewedCommand(t, s, g, q.Proposal)
@@ -62,7 +62,7 @@ func TestUndoPreservesUnrelatedEditsAndCanItselfBeUndone(t *testing.T) {
 	undo := reviewedUndo(t, s, g, first)
 	second := executeExpected(t, s, g, undo, "succeeded")
 	res = config.Resolve(s.Project, "", "")
-	if res.Effective.TaskConcurrency != 3 || res.Effective.Persona != "concise" || !strings.Contains(res.File.Raw, "do-not-export") {
+	if res.Effective.TickSeconds != 30 || res.Effective.Persona != "concise" || !strings.Contains(res.File.Raw, "do-not-export") {
 		t.Fatalf("undo lost original or unrelated settings: %s", res.File.Raw)
 	}
 	raw, _ := json.Marshal(second.Result)
@@ -76,7 +76,7 @@ func TestUndoPreservesUnrelatedEditsAndCanItselfBeUndone(t *testing.T) {
 		t.Fatal("duplicate undo performed another write", err)
 	}
 	executeExpected(t, s, g, reviewedUndo(t, s, g, second), "succeeded")
-	if got := config.Resolve(s.Project, "", "").Effective; got.TaskConcurrency != 6 || got.Persona != "concise" {
+	if got := config.Resolve(s.Project, "", "").Effective; got.TickSeconds != 60 || got.Persona != "concise" {
 		t.Fatal("undo of undo failed to preserve unrelated values")
 	}
 }
@@ -88,28 +88,28 @@ func TestUndoConflictsOnAffectedFieldsAndRequiresExactReviewedTarget(t *testing.
 	bad.Proposal.Parameters["restore_sha256"] = strings.Repeat("0", 64)
 	executeExpected(t, s, g, bad, "rejected")
 	res := config.Resolve(s.Project, "", "")
-	if _, err := config.SaveFile(s.Project, map[string]json.RawMessage{"task_concurrency": json.RawMessage("7")}, res.File.ETag, true); err != nil {
+	if _, err := config.SaveFile(s.Project, map[string]json.RawMessage{"tick_seconds": json.RawMessage("70")}, res.File.ETag, true); err != nil {
 		t.Fatal(err)
 	}
 	executeExpected(t, s, g, reviewedUndo(t, s, g, first), "conflicted")
-	if config.Resolve(s.Project, "", "").Effective.TaskConcurrency != 7 {
+	if config.Resolve(s.Project, "", "").Effective.TickSeconds != 70 {
 		t.Fatal("undo overwrote an intervening change to its field")
 	}
 }
 
 func TestUndoRechecksCurrentFieldPermissionsAndOverrides(t *testing.T) {
 	s, g, _ := fixtureCommand(t)
-	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/allow_outside_project", Value: true}}})
+	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENROUTER_API_KEY"}}})
 	first := executeExpected(t, s, g, q, "succeeded")
 	restricted := g
 	restricted.Classes = []string{"preference"}
 	executeExpected(t, s, restricted, reviewedUndo(t, s, restricted, first), "rejected")
-	if !config.Resolve(s.Project, "", "").Effective.AllowOutsideProject {
+	if config.Resolve(s.Project, "", "").Effective.Model.APIKeyEnv != "OPENROUTER_API_KEY" {
 		t.Fatal("undo bypassed the current permission grant")
 	}
-	q = reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: float64(6)}}})
+	q = reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: float64(60)}}})
 	first = executeExpected(t, s, g, q, "succeeded")
-	t.Setenv("EAGENT_TASK_CONCURRENCY", "9")
+	t.Setenv("EAGENT_TICK_SECONDS", "90")
 	executeExpected(t, s, g, reviewedUndo(t, s, g, first), "rejected")
 }
 

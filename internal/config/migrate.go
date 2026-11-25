@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"sort"
+	"strings"
 )
 
 // eagent used to run three models (an orchestrator, a task worker and a
@@ -12,14 +13,15 @@ import (
 
 // legacyDropped are keys with nothing to carry over to.
 var legacyDropped = []string{
-	"task", "task_concurrency", "max_task_turns", "max_orchestrator_calls_per_turn",
+	"task", "task_concurrency", "max_task_turns",
 	"bash_wait_seconds", "bash_timeout_seconds", "tool_output_max_chars", "allow_outside_project",
 }
 
 // legacyRenamed are settings that only changed name.
 var legacyRenamed = map[string]string{
-	"narrator_tick_seconds":  "tick_seconds",
-	"narrator_quiet_seconds": "quiet_seconds",
+	"narrator_tick_seconds":           "tick_seconds",
+	"narrator_quiet_seconds":          "quiet_seconds",
+	"max_orchestrator_calls_per_turn": "max_calls_per_turn",
 }
 
 // HasLegacyKeys reports whether a configuration object uses keys of the
@@ -54,10 +56,10 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 // did. The input is not changed; an object with no such keys is returned as
 // it is, with no notes.
 //
-//   - orchestrator becomes model. Its reasoning effort is not carried over:
-//     the one model is called as often as the narrator was, so it takes the
-//     narrator's effort when the file set one, and otherwise whatever the
-//     preset or the defaults give (low).
+//   - orchestrator becomes model. The one model has one effort for every
+//     call, where the orchestrator and the narrator each had their own.
+//     When the file gave both the same effort it is kept; otherwise it
+//     becomes medium, between the two.
 //   - narrator_tick_seconds and narrator_quiet_seconds become tick_seconds and
 //     quiet_seconds; relay.quiet_seconds, which replaced the quiet limit in
 //     relay sessions, becomes quiet_seconds too and wins over
@@ -83,17 +85,20 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 		for k, v := range orch {
 			model[k] = v
 		}
-		delete(model, "reasoning_effort")
-		effort := json.RawMessage(`"low"`)
-		if e, ok := narr["reasoning_effort"]; ok {
-			effort = e
-			model["reasoning_effort"] = e
+		effort := json.RawMessage(`"` + loopEffort + `"`)
+		oe, hasOE := orch["reasoning_effort"]
+		ne, hasNE := narr["reasoning_effort"]
+		switch {
+		case hasOE && hasNE && string(oe) == string(ne), hasOE && narr == nil:
+			effort = oe
+		case hasNE && orch == nil:
+			effort = ne
 		}
-		setFallbackEffort(model, effort)
+		setEffort(model, effort)
 		if len(model) > 0 {
 			out["model"], _ = json.Marshal(model)
 			if orch != nil {
-				notes = append(notes, "orchestrator is now model; it runs at the narrator's reasoning effort (low unless set)")
+				notes = append(notes, "orchestrator is now model, the one model for every call; its reasoning effort is "+strings.Trim(string(effort), `"`)+" (the orchestrator and the narrator each had their own; set model.reasoning_effort to change it)")
 			} else {
 				notes = append(notes, "the narrator's reasoning effort is now model.reasoning_effort")
 			}
@@ -148,16 +153,13 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 	return out, notes
 }
 
-// setFallbackEffort gives a route's fallbacks, all the way down, the effort
-// the route itself runs at.
-func setFallbackEffort(route map[string]json.RawMessage, effort json.RawMessage) {
-	fb := object(route["fallback"])
-	if fb == nil {
-		return
+// setEffort gives a route, and its fallbacks all the way down, one effort.
+func setEffort(route map[string]json.RawMessage, effort json.RawMessage) {
+	route["reasoning_effort"] = effort
+	if fb := object(route["fallback"]); fb != nil {
+		setEffort(fb, effort)
+		route["fallback"], _ = json.Marshal(fb)
 	}
-	fb["reasoning_effort"] = effort
-	setFallbackEffort(fb, effort)
-	route["fallback"], _ = json.Marshal(fb)
 }
 
 // object decodes a JSON object, or returns nil for anything else.

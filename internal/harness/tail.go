@@ -96,16 +96,31 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 		who = active[0].Who()
 	}
 
-	// Why this call.
+	// Why this call. Several things may have happened since the last look
+	// (the user wrote while the agent was finishing a turn); each is named,
+	// most pressing first, because the look answers for all of them.
 	switch {
-	case w.event && w.kind == wakeUser:
-		b.WriteString(r.userTail(who))
-	case w.event && w.kind == wakeAttention:
-		b.WriteString(r.attentionTail(who))
-	case w.event && w.kind == wakeTurnEnd:
-		fmt.Fprintf(&b, "%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who))
 	case w.event:
-		b.WriteString("A notice for you is above. Do what it calls for.")
+		var reasons []string
+		for k := wakeKinds - 1; k >= 0; k-- {
+			if t.wakes[k] <= t.seen {
+				continue
+			}
+			switch k {
+			case wakeUser:
+				reasons = append(reasons, r.userTail(who))
+			case wakeAttention:
+				reasons = append(reasons, r.attentionTail(who))
+			case wakeTurnEnd:
+				reasons = append(reasons, fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who)))
+			case wakeNotice:
+				reasons = append(reasons, "A notice for you is above. Do what it calls for.")
+			}
+		}
+		if len(reasons) == 0 {
+			reasons = append(reasons, "Something happened; see above.")
+		}
+		b.WriteString(strings.Join(reasons, "\n"))
 	case w.look:
 		b.WriteString("A look while the work goes on.")
 	default:
@@ -279,7 +294,7 @@ func (r *Runtime) userTail(who string) string {
 		parts = append(parts, s)
 	}
 	if passed > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written; their own screen shows it as delivered, so say nothing about that. Act only on what it asks of you: a standing order to keep %s going, how often they want to hear from you, something %s needs that the message lacks. Otherwise hold.", who, who, who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written; their own screen shows it as delivered, so say nothing about that. It needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs.", who, who, who))
 	}
 	if len(parts) == 0 {
 		return "The user wrote."

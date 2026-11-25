@@ -35,25 +35,31 @@ type catalog struct {
 	Providers []string `json:"providers"`
 }
 
-func publicRoute(actor config.Actor) route {
-	r := route{Model: actor.Model, Label: actor.Model, Provider: actor.BaseURL, Effort: actor.ReasoningEffort, KeyEnv: actor.APIKeyEnv}
-	if model, ok := config.Lookup(actor.BaseURL, actor.Model); ok {
+func publicRoute(m config.ModelRoute) route {
+	r := route{Model: m.Model, Label: m.Model, Provider: m.BaseURL, Effort: m.ReasoningEffort, KeyEnv: m.APIKeyEnv}
+	if model, ok := config.Lookup(m.BaseURL, m.Model); ok {
 		r.Label = model.Label
 	}
-	if provider, ok := config.ProviderForURL(actor.BaseURL); ok {
+	if provider, ok := config.ProviderForURL(m.BaseURL); ok {
 		r.Provider = provider.Label
 	}
-	if actor.Fallback != nil {
-		fallback := publicRoute(*actor.Fallback)
+	if m.Fallback != nil {
+		fallback := publicRoute(*m.Fallback)
 		r.Fallback = &fallback
 	}
 	return r
 }
 
+// routes lists the models a configuration runs: eagent's, and a dedicated
+// summarizer's when it has its own.
 func routes(cfg config.Config) []route {
-	result := []route{publicRoute(cfg.Orchestrator), publicRoute(cfg.Task), publicRoute(cfg.Narrator)}
-	for i, actor := range []string{"orchestrator", "task", "narrator"} {
-		result[i].Actor = actor
+	main := publicRoute(cfg.Model)
+	main.Actor = "eagent"
+	result := []route{main}
+	if cfg.Summarizer.Mode == "dedicated" && cfg.Summarizer.Model != nil && cfg.Summarizer.Model.Model != "" {
+		s := publicRoute(*cfg.Summarizer.Model)
+		s.Actor = "summarizer"
+		result = append(result, s)
 	}
 	return result
 }

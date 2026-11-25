@@ -256,7 +256,7 @@ func EnvOverrides() map[string]string {
 	}
 	for suffix, field := range routeEnvFields {
 		if suffix == "REASONING_EFFORT" {
-			set("/model/"+field, "EAGENT_REASONING_EFFORT", "EAGENT_NARRATOR_REASONING_EFFORT")
+			set("/model/"+field, "EAGENT_REASONING_EFFORT")
 		} else {
 			set("/model/"+field, "EAGENT_"+suffix, "EAGENT_ORCHESTRATOR_"+suffix)
 		}
@@ -746,8 +746,8 @@ func (c Config) Problems() []Problem {
 	default:
 		add("error", "/summarizer/mode", "enum", fmt.Sprintf("summarizer mode %q is not %s or %s", c.Summarizer.Mode, SummarizerInline, SummarizerDedicated))
 	}
-	if c.MaxCallsPerTurn < 1 || c.MaxCallsPerTurn > 32 {
-		add("error", "/max_calls_per_turn", "range", "max_calls_per_turn must be between 1 and 32")
+	if c.MaxCallsPerTurn < 1 || c.MaxCallsPerTurn > 200 {
+		add("error", "/max_calls_per_turn", "range", "max_calls_per_turn must be between 1 and 200")
 	}
 	if c.TickSeconds < 5 {
 		add("error", "/tick_seconds", "min", "tick_seconds must be at least 5")

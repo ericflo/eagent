@@ -112,6 +112,15 @@ type configView struct {
 	Running    []runningView     `json:"running"`
 	Defaults   config.Config     `json:"defaults"`
 	Server     serverView        `json:"server"`
+	// Agents are the relay profiles a session can start, for the default
+	// agent choice.
+	Agents []profileView `json:"agents"`
+}
+
+type profileView struct {
+	Name  string `json:"name"`
+	Agent string `json:"agent"`
+	Label string `json:"label,omitempty"`
 }
 
 type phoneView struct {
@@ -181,6 +190,11 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		v.Phone = phoneView{State: "off", Detail: "no token in $" + fc.TokenEnvName() + " or ~/.config/finalechat/config.json"}
 	default:
 		v.Phone = phoneView{State: "on", Source: client.Source, Detail: "new sessions are mirrored to your phone (token from " + client.Source + ")"}
+	}
+	profiles := res.Effective.Relay.RelayProfiles()
+	v.Agents = []profileView{}
+	for _, name := range res.Effective.Relay.RelayProfileNames() {
+		v.Agents = append(v.Agents, profileView{Name: name, Agent: profiles[name].Agent, Label: profiles[name].Label})
 	}
 	v.Files["config"] = config.File(s.Project)
 	v.Files["bundles"] = config.BundlesDir(s.Project)
