@@ -212,8 +212,10 @@ func (r Relay) RelayProfileNames() []string {
 type Finalechat struct {
 	// Artifacts enables proactive upload of native session logs and portable
 	// viewers, independently of conversation mirroring. On by default; set
-	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out.
-	Artifacts bool `json:"artifacts,omitempty"`
+	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out. Always written:
+	// false is the opt-out, and a file that left it out would read as on.
+	// A file without the key means on, as it always has.
+	Artifacts bool `json:"artifacts"`
 	// Enabled: nil means "on when a token is found"; false turns it off even
 	// when a token is present; true makes a missing token an error at start.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -644,23 +646,10 @@ func BundleBytes(name, description string, cfg Config) ([]byte, error) {
 		cfg.Description = description
 	}
 	cfg.DefaultConfig = ""
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, err
-	}
-	// Spell out "fallback": null when the model has no fallback so loading
-	// this saved preset on top of a project file whose preset carries one
-	// (such as openai-high) clears it instead of inheriting it.
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	if cfg.Model.Fallback == nil {
-		if m, ok := obj["model"].(map[string]any); ok {
-			m["fallback"] = nil
-		}
-	}
-	pretty, err := json.MarshalIndent(obj, "", "  ")
+	// A saved preset loads over the project file and the preset that file
+	// names, so every value it leaves empty is spelled out (spelled): a
+	// missing fallback or effort would otherwise be the file's or preset's.
+	pretty, err := json.MarshalIndent(spelled(cfg), "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +976,9 @@ func applyEnv(project string, cfg *Config) {
 		}
 		cfg.Summarizer.Model = &route
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v > 0 {
+	// 0 is a value of its own: follow the model in use, over a number the
+	// file fixes.
+	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v >= 0 {
 		cfg.RolloverTokens = v
 	}
 	if v, err := strconv.Atoi(envFirst("EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
@@ -1132,12 +1123,14 @@ func Write(project string, cfg Config) (string, error) {
 		return path, err
 	}
 	defer editor.Close()
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	// The file builds on the preset it names, so what cfg leaves empty is
+	// spelled out to stay empty.
+	raw, err := marshalOrdered(spelled(cfg))
 	if err != nil {
 		return path, err
 	}
-	if len(raw)+1 > 1<<20 {
+	if len(raw) > 1<<20 {
 		return path, fmt.Errorf("configuration exceeds 1 MiB")
 	}
-	return path, filelock.CreateFile(path, append(raw, '\n'), 0o644)
+	return path, filelock.CreateFile(path, raw, 0o644)
 }

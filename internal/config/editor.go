@@ -191,20 +191,31 @@ func Resolve(project, preset, bundle string) Resolution {
 	applyEnv(project, &cfg)
 	normalize(&cfg)
 	cur := flatten(cfg)
+	// A key the environment removed (a window an unknown model has none
+	// of) is the environment's doing too.
+	changed := map[string]bool{}
 	for k, v := range cur {
 		if prev[k] != v {
-			if name, ok := envVars[k]; ok {
-				res.Sources[k] = "env:" + name
-			} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
-				// The rest of a summarizer route the environment created is
-				// copied from the main model because of that variable.
-				res.Sources[k] = "env:" + name
-			} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
-				// The window follows the model the variable names.
-				res.Sources[k] = "env:" + name
-			} else {
-				res.Sources[k] = "env"
-			}
+			changed[k] = true
+		}
+	}
+	for k := range prev {
+		if _, ok := cur[k]; !ok {
+			changed[k] = true
+		}
+	}
+	for k := range changed {
+		if name, ok := envVars[k]; ok {
+			res.Sources[k] = "env:" + name
+		} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
+			// The rest of a summarizer route the environment created is
+			// copied from the main model because of that variable.
+			res.Sources[k] = "env:" + name
+		} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
+			// The window follows the model the variable names.
+			res.Sources[k] = "env:" + name
+		} else {
+			res.Sources[k] = "env"
 		}
 	}
 	cfg.Instructions = loadInstructions(project)
@@ -447,7 +458,7 @@ func Pin(cfg Config, preset string) map[string]json.RawMessage {
 	} else {
 		out["preset"] = nil // a pinned file stands alone; drop any preset the file had
 	}
-	for k, v := range topLevel(cfg) {
+	for k, v := range spelled(cfg) {
 		for _, ek := range editorKeys {
 			if ek == k && k != "preset" && k != "default_config" {
 				out[k] = v
@@ -486,6 +497,57 @@ func mergeRelay(existing, edit json.RawMessage) json.RawMessage {
 	}
 	raw, _ := json.Marshal(obj)
 	return raw
+}
+
+// spelled is cfg as a file holds it when the file stands over other layers
+// (a preset, or for a saved preset the project file too) and must load back
+// to cfg: what JSON would leave out as empty is written, so a layer below
+// cannot fill it in. A route's empty field is null, which the loader reads
+// as "clear what is below" (followModel); a missing fallback or summarizer
+// route is null; other empty values are written as they are.
+func spelled(cfg Config) map[string]json.RawMessage {
+	m := topLevel(cfg)
+	m["model"] = spelledRoute(cfg.Model)
+	summarizer := object(m["summarizer"])
+	if summarizer == nil {
+		summarizer = map[string]json.RawMessage{}
+	}
+	summarizer["model"] = json.RawMessage("null")
+	if cfg.Summarizer.Model != nil {
+		summarizer["model"] = spelledRoute(*cfg.Summarizer.Model)
+	}
+	m["summarizer"], _ = json.Marshal(summarizer)
+	phone := object(m["finalechat"])
+	if phone == nil {
+		phone = map[string]json.RawMessage{}
+	}
+	for k, empty := range map[string]string{"enabled": "null", "mirror_input": "null", "token_env": `""`, "base_url": `""`, "agent": `""`, "question_timeout_seconds": "0"} {
+		if _, ok := phone[k]; !ok {
+			phone[k] = json.RawMessage(empty)
+		}
+	}
+	m["finalechat"], _ = json.Marshal(phone)
+	if _, ok := m["persona"]; !ok {
+		m["persona"] = json.RawMessage(`""`)
+	}
+	return m
+}
+
+// spelledRoute is a route with its empty fields as nulls (see spelled).
+func spelledRoute(a ModelRoute) json.RawMessage {
+	raw, _ := json.Marshal(a)
+	obj := object(raw)
+	for _, k := range []string{"reasoning_effort", "replay_reasoning", "max_tokens", "context_tokens"} {
+		if _, ok := obj[k]; !ok {
+			obj[k] = json.RawMessage("null")
+		}
+	}
+	obj["fallback"] = json.RawMessage("null")
+	if a.Fallback != nil {
+		obj["fallback"] = spelledRoute(*a.Fallback)
+	}
+	out, _ := json.Marshal(obj)
+	return out
 }
 
 func topLevel(cfg Config) map[string]json.RawMessage {
