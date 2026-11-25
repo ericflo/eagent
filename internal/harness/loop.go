@@ -421,11 +421,11 @@ func (r *Runtime) oweAnswer(seq int64) {
 	switch {
 	case t.owed == 0:
 		t.owed, t.owedTries = seq, 0
-	case seq > t.owed:
-		// A newer one joins the one still unanswered: the oldest stays the
+	case seq != t.owed:
+		// Another one joins the one still unanswered: the oldest is the
 		// mark (the reminder names every message since), and the
 		// reminders start over.
-		t.owedTries = 0
+		t.owed, t.owedTries = min(t.owed, seq), 0
 	}
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
@@ -472,9 +472,12 @@ func (r *Runtime) clearOwed() {
 	}
 }
 
-// heldSince returns the newest message the user wrote that was kept for
-// eagent and has not been looked at, or 0. Loop goroutine.
+// heldSince returns the oldest message the user wrote that was kept for
+// eagent and has not been looked at, or 0. The oldest is the mark of what
+// is owed: the reminder names it and every one kept since (owedTail), so
+// two that arrive in one wake are both brought up. Loop goroutine.
 func (r *Runtime) heldSince(seen int64) int64 {
+	var oldest int64
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
 		if ev.Seq <= seen {
@@ -483,11 +486,11 @@ func (r *Runtime) heldSince(seen int64) int64 {
 		if ev.Type == event.UserMessage {
 			var d event.UserMessageData
 			if ev.Decode(&d) == nil && d.Held != "" {
-				return ev.Seq
+				oldest = ev.Seq
 			}
 		}
 	}
-	return 0
+	return oldest
 }
 
 // answeredSince returns the newest answer the user gave to a question of
@@ -753,8 +756,13 @@ func (r *Runtime) turn(w wake) {
 			if fresh {
 				first := tail == ""
 				if h := r.heldSince(r.turns.seen); h > 0 {
-					// Not answered by what the turn did before it came.
-					held, tc.handled = h, tc.handled && first
+					// Not answered by what the turn did before it came. One
+					// kept earlier in this turn and not dealt with yet stays
+					// the mark: the newer one joins it.
+					if held == 0 || tc.handled || h < held {
+						held = h
+					}
+					tc.handled = tc.handled && first
 				}
 				if first && r.turns.owed > 0 && r.turns.owedAnswer {
 					// Its tail says the answer has reached nobody else

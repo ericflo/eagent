@@ -437,12 +437,19 @@ func (r *Runtime) owedTail(who string, alone bool) string {
 		}
 		return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was "+tailEnd, lead, clock(k.at), clipRunes(oneLine(k.text, 300), 300), who)
 	}
-	if len(list) > 4 {
-		list = list[len(list)-4:]
+	// Oldest first, as they were written. Past four, the rest are pointed at
+	// by their time rather than quoted: they are in the conversation above,
+	// and a long reminder would crowd out what the call is for.
+	var quoted, later []string
+	for i, k := range list {
+		if i < 4 {
+			quoted = append(quoted, fmt.Sprintf("at %s %q", clock(k.at), clipRunes(oneLine(k.text, 300), 300)))
+		} else {
+			later = append(later, clock(k.at))
+		}
 	}
-	var quoted []string
-	for _, k := range list {
-		quoted = append(quoted, fmt.Sprintf("at %s %q", clock(k.at), clipRunes(oneLine(k.text, 300), 300)))
+	if len(later) > 0 {
+		quoted = append(quoted, fmt.Sprintf("and %d more after those, above (at %s)", len(later), strings.Join(later, ", ")))
 	}
 	return fmt.Sprintf("%s user wrote to you more than once and has had no answer and seen nothing done about it: %s. These were "+tailEnd, lead, strings.Join(quoted, "; "), who)
 }
