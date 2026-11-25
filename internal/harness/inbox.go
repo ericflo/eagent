@@ -127,3 +127,20 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		r.onInputFrom(text, msg.From, msg.Client, msg.Attachments...)
 	}
 }
+
+// eagentCommand reports whether a line that starts with "/" is one of
+// eagent's own commands, today's or one it used to have and still answers
+// for. Anything else that starts with a slash is the agent's command, or
+// just words.
+func eagentCommand(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	switch cmd := strings.ToLower(fields[0]); cmd {
+	case "/quit", "/exit", "/q", "/dismiss", "/status", "/s", "/schedules", "/help", "/?", "/tasks", "/procs", "/kill":
+		return true
+	default:
+		return relayCommands[cmd]
+	}
+}

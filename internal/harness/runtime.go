@@ -310,7 +310,22 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		// It comes after the mirror starts, so what it does reaches the phone
 		// (a screen, a receipt) as it would while running.
 		from := len(r.st.Events)
-		r.handleInbox(InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID})
+		in := InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID}
+		if text := strings.TrimSpace(opts.Prompt); strings.HasPrefix(text, "/") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(text) {
+			// Words that only begin with a slash (a path, say) and no
+			// agent running to take them. A running session calls that an
+			// unknown command and says so at the terminal. This session
+			// was woken for these words and nobody is at a terminal, so
+			// they are what they were before: a message, or the answer.
+			r.ui.Idle(false)
+			if q := r.st.Question; q != nil {
+				r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments}))
+			} else {
+				r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
+			}
+		} else {
+			r.handleInbox(in)
+		}
 		if r.phone != nil {
 			r.phone.withdrawAnswered(r, r.st.Events[from:])
 		}

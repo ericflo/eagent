@@ -603,3 +603,52 @@ func TestTerminalMessageReceiptSurvivesAResume(t *testing.T) {
 		t.Fatalf("the terminal message's receipt was dropped: %v", got)
 	}
 }
+
+// A stopped session whose agent is gone is woken by words that begin with
+// a slash but are no command (a path). They reach eagent as the message
+// they are; a command still runs as a command.
+func TestWordsThatBeginWithASlashStillWakeASessionWhoseAgentIsGone(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("Fixed the flaky login test."))
+	fp := newRelayPhone()
+	t.Cleanup(fp.srv.Close)
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	project := t.TempDir()
+	cfg := relayPhoneConfig(t, project, model.srv.URL, fp)
+	rt, err := New(cfg, Options{Project: project, Relay: "codex", Interactive: true}, &fakeUI{input: make(chan string, 4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	done := make(chan struct{})
+	go func() { rt.Run(ctx); close(done) }()
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	rt.sync(func() { rt.relayCommand([]string{"/stop-relay"}, nil) })
+	waitFor(t, "the agent stopped", func() bool {
+		n := 1
+		rt.sync(func() { n = len(rt.st.ActiveRelays()) })
+		return n == 0
+	})
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the session did not stop")
+	}
+
+	const words = "/tmp/build.log has the trace, start Codex on it"
+	id := fp.userSays(words, nil)
+	resumed, _ := resumeFromPhone(t, cfg, project, rt.sess.Path, id, words, nil)
+	var got event.UserMessageData
+	resumed.sync(func() {
+		for _, ev := range resumed.st.Events {
+			if ev.Type == event.UserMessage {
+				_ = ev.Decode(&got)
+			}
+		}
+	})
+	if got.Text != words || got.PhoneID != id || got.Source != "finalechat" {
+		t.Fatalf("the words that woke the session were not recorded as its message: %+v", got)
+	}
+}
