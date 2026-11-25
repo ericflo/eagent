@@ -229,3 +229,21 @@ func TestSuggestionListLimits(t *testing.T) {
 		t.Fatal("17 lists accepted")
 	}
 }
+
+// A remote pick of another model on a route whose effort is "" (send none)
+// keeps it "": an empty effort is not one the new model lacks.
+func TestRemoteModelPickKeepsAnEmptyEffortEmpty(t *testing.T) {
+	project := t.TempDir()
+	writeProjectFile(t, project, `{"model":{"reasoning_effort":null}}`)
+	s := &Service{Project: project}
+	apply(t, s,
+		control.Edit{Op: "set", Key: "/model/base_url", Value: "https://openrouter.ai/api/v1"},
+		control.Edit{Op: "set", Key: "/model/model", Value: "z-ai/glm-5.3"})
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Model != "z-ai/glm-5.3" || cfg.Model.ReasoningEffort != "" {
+		t.Fatalf("after the pick: %s at effort %q", cfg.Model.Model, cfg.Model.ReasoningEffort)
+	}
+}

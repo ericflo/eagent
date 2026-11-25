@@ -12,7 +12,8 @@ import (
 // cached live list; the network is never touched. The route keeps its own
 // limits; picking a different model drops its fallback chain, which belonged
 // to the old model. An empty effort keeps the route's when the model accepts
-// it, else takes the nearest level the model offers. An empty provider is
+// it, else takes the nearest level the model offers; a route with no effort
+// (send none) keeps none. An empty provider is
 // inferred from the model. The context window becomes the new model's, or 0
 // (unknown) when no list says it.
 func PickRoute(project string, a ModelRoute, providerID, modelID, effort string) (ModelRoute, error) {
@@ -43,6 +44,9 @@ func PickRoute(project string, a ModelRoute, providerID, modelID, effort string)
 	switch {
 	case effort != "":
 		a.ReasoningEffort = effort
+	case a.ReasoningEffort == "":
+		// No effort sends none (the provider's default) on any model; it
+		// is not a level the model lacks, so it stays.
 	case len(m.Efforts) > 0 && !slices.Contains(m.Efforts, a.ReasoningEffort):
 		a.ReasoningEffort = NearestEffort(m.Efforts, a.ReasoningEffort)
 	}

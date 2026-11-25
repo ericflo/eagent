@@ -66,10 +66,10 @@ func TestSwitchingModelLiveTakesTheNearestEffortTheNewModelOffers(t *testing.T) 
 	}
 }
 
-// A route with no effort switched to a model that lists efforts reports the
-// effort the switch gives it, not an empty one: the session sends what it
-// reports.
-func TestSwitchingModelLiveReportsTheEffortItSends(t *testing.T) {
+// A route with no effort ("" sends none) switched live to another model,
+// with no effort named, keeps sending none: an empty effort is not one the
+// model lacks.
+func TestSwitchingModelLiveKeepsAnEmptyEffortEmpty(t *testing.T) {
 	r3Env(t)
 	project := t.TempDir()
 	cfg, err := config.Load(project, "openai-high")
@@ -77,21 +77,19 @@ func TestSwitchingModelLiveReportsTheEffortItSends(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Model.ReasoningEffort = ""
-	values := FromConfigFor(project, cfg)
-	out, err := r3Apply(t, project, values,
+	out, err := r3Apply(t, project, FromConfigFor(project, cfg),
 		control.Edit{Op: "set", Key: "/routes/eagent/provider", Value: "openrouter"},
 		control.Edit{Op: "set", Key: "/routes/eagent/model", Value: "z-ai/glm-5.3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// What the session applies: the configured route with the reported pick
-	// (harness routeChanges).
-	sent, err := config.PickRoute(project, cfg.Model, out.Routes[RouteEagent].Provider, out.Routes[RouteEagent].Model, out.Routes[RouteEagent].Effort)
-	if err != nil {
-		t.Fatal(err)
+	if got := out.Routes[RouteEagent].Effort; got != "" {
+		t.Fatalf("reported %q after a switch that named no effort", got)
 	}
-	if got := out.Routes[RouteEagent].Effort; got == "" || got != sent.ReasoningEffort {
-		t.Fatalf("reported %q, sends %q", got, sent.ReasoningEffort)
+	// The project settings give the same route the same effort.
+	inProject, err := config.PickRoute(project, cfg.Model, "openrouter", "z-ai/glm-5.3", "")
+	if err != nil || inProject.ReasoningEffort != "" {
+		t.Fatalf("project settings: %q %v", inProject.ReasoningEffort, err)
 	}
 }
 
@@ -125,5 +123,37 @@ func TestChoosingAPresetLiveGivesItsModelOverTheFilesModel(t *testing.T) {
 				t.Fatalf("%s: the suggestion implies %v", name, s.Implies)
 			}
 		}
+	}
+}
+
+// The project's effort is "" (the editor's "default": send none). Choosing
+// the preset the project already runs, live, gives the session what a
+// session started on that preset gets: no effort, not the nearest offered.
+func TestChoosingAPresetLiveKeepsAnEmptyEffortEmpty(t *testing.T) {
+	r3Env(t)
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.File(project), []byte(`{"preset":"glm","model":{"reasoning_effort":null}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.ReasoningEffort != "" {
+		t.Fatalf("setup: effort %q", cfg.Model.ReasoningEffort)
+	}
+	chosen, err := config.ChosenPreset(project, "glm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := r3Apply(t, project, FromConfigFor(project, cfg), control.Edit{Op: "set", Key: "/config", Value: "glm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Routes[RouteEagent].Effort; got != chosen.Model.ReasoningEffort {
+		t.Fatalf("live choice of glm runs effort %q; a session on glm here runs %q", got, chosen.Model.ReasoningEffort)
 	}
 }

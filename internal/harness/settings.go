@@ -137,6 +137,10 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", who, err)
 		}
+		// The pick names the effort the session reports (ApplyValues
+		// resolves it), "" (send none) included, so it is the one sent,
+		// not the configured route's.
+		a.ReasoningEffort = pick.Effort
 		// The picked route itself must be usable (its key set); fallbacks
 		// without a key are skipped as usual.
 		if _, err := a.Endpoint(); err != nil {
