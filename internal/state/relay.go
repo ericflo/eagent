@@ -24,10 +24,14 @@ type Relay struct {
 	Detail              string
 	StateSince          time.Time
 	StartSeq            int64
-	Turns               int
-	LastTurn            string
-	LastTurnAt          time.Time
-	Sends               int
+	// PrevEnded is when the agent that held this name before stopped, zero
+	// for the name's first agent: what the harness saw before then was
+	// that agent's, not this one's.
+	PrevEnded  time.Time
+	Turns      int
+	LastTurn   string
+	LastTurnAt time.Time
+	Sends      int
 	// LastSendFrom ("user" or "eagent") and LastSendAt describe the newest
 	// message sent to the agent.
 	LastSendFrom string
@@ -119,6 +123,9 @@ func (s *State) applyRelay(ev event.Event) {
 		var d event.RelayStartData
 		_ = ev.Decode(&d)
 		prev := r
+		if s.relayHolders == nil {
+			s.relayHolders = map[string][]*Relay{}
+		}
 		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, AgentLabel: d.AgentLabel, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
 		switch {
@@ -130,13 +137,20 @@ func (s *State) applyRelay(ev event.Event) {
 			if r.InnerID == "" {
 				r.InnerID = prev.InnerID
 			}
+			r.PrevEnded = prev.PrevEnded
+			if h := s.relayHolders[d.Name]; len(h) > 0 {
+				h[len(h)-1] = r
+			}
 		case prev != nil:
 			// A new agent under the name of one that was stopped (a switch
 			// back, a new start) is a new conversation. Only the usage
 			// budget, which is the agent account's, carries over.
 			r.Limit = prev.Limit
+			r.PrevEnded = prev.StateSince
+			s.relayHolders[d.Name] = append(s.relayHolders[d.Name], r)
 		default:
 			s.RelayOrder = append(s.RelayOrder, d.Name)
+			s.relayHolders[d.Name] = append(s.relayHolders[d.Name], r)
 		}
 		s.Relays[d.Name] = r
 	}
@@ -220,8 +234,26 @@ func (s *State) applyRelay(ev event.Event) {
 	}
 }
 
-func (s *State) relayWho(name string) string {
-	if r := s.Relays[name]; r != nil {
+// RelayAt returns the relay that held a name when the event at seq was
+// written: the name can be taken again by a new agent (a custom profile now
+// backed by another program, a switch back), and what is said about an
+// older event must not change when that happens. A restart continues the
+// same relay, so it is the relay as it is now. Nil for an unknown name.
+func (s *State) RelayAt(name string, seq int64) *Relay {
+	h := s.relayHolders[name]
+	for i := len(h) - 1; i > 0; i-- {
+		if h[i].StartSeq <= seq {
+			return h[i]
+		}
+	}
+	if len(h) > 0 {
+		return h[0]
+	}
+	return s.Relays[name]
+}
+
+func (s *State) relayWho(name string, seq int64) string {
+	if r := s.RelayAt(name, seq); r != nil {
 		return r.Who()
 	}
 	return name
@@ -254,7 +286,7 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		if !d.Auto {
 			return "" // sent by a tool call of eagent's own, whose result says so
 		}
-		who := s.relayWho(d.Name)
+		who := s.relayWho(d.Name, ev.Seq)
 		how := "."
 		switch d.Mode {
 		case "interrupt":
@@ -273,17 +305,17 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		if d.From == "user" {
 			whose = "The user's message"
 		}
-		return fmt.Sprintf("[%s %s (%s) to %s waited for the handover; it goes to %s instead.]", ts, whose, d.ID, s.relayWho(d.Prev), s.relayWho(d.Name))
+		return fmt.Sprintf("[%s %s (%s) to %s waited for the handover; it goes to %s instead.]", ts, whose, d.ID, s.relayWho(d.Prev, ev.Seq), s.relayWho(d.Name, ev.Seq))
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
 		if !d.OK {
-			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name), d.ID, clip(d.Detail, detailChars))
+			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name, ev.Seq), d.ID, clip(d.Detail, detailChars))
 		}
 	case event.RelayState:
 		var d event.RelayStateData
 		_ = ev.Decode(&d)
-		who := s.relayWho(d.Name)
+		who := s.relayWho(d.Name, ev.Seq)
 		switch d.State {
 		case "blocked":
 			return fmt.Sprintf("[%s %s needs attention: %s]", ts, who, clip(d.Detail, detailChars))
@@ -293,11 +325,11 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 	case event.RelayProgress:
 		var d event.RelayProgressData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("[%s] <%s> %s", ts, s.relayWho(d.Name), clip(strings.TrimSpace(d.Text), opts.RemarkChars))
+		return fmt.Sprintf("[%s] <%s> %s", ts, s.relayWho(d.Name, ev.Seq), clip(strings.TrimSpace(d.Text), opts.RemarkChars))
 	case event.RelayTurn:
 		var d event.RelayTurnData
 		_ = ev.Decode(&d)
-		who := s.relayWho(d.Name)
+		who := s.relayWho(d.Name, ev.Seq)
 		head := fmt.Sprintf("[%s %s finished a turn", ts, who)
 		if d.Interrupted {
 			head = fmt.Sprintf("[%s %s's turn was interrupted", ts, who)
@@ -324,18 +356,18 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 	case event.RelayLimit:
 		var d event.RelayLimitData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("[%s %s]", ts, s.relayLimitText(s.relayWho(d.Name), d))
+		return fmt.Sprintf("[%s %s]", ts, s.relayLimitText(s.relayWho(d.Name, ev.Seq), d))
 	case event.RelayEnd:
 		var d event.RelayEndData
 		_ = ev.Decode(&d)
 		if d.Reason != "" {
-			return fmt.Sprintf("[%s Stopped %s (%s).]", ts, s.relayWho(d.Name), d.Reason)
+			return fmt.Sprintf("[%s Stopped %s (%s).]", ts, s.relayWho(d.Name, ev.Seq), d.Reason)
 		}
-		return fmt.Sprintf("[%s Stopped %s.]", ts, s.relayWho(d.Name))
+		return fmt.Sprintf("[%s Stopped %s.]", ts, s.relayWho(d.Name, ev.Seq))
 	case event.RelayAutopilot:
 		var d event.RelayAutopilotData
 		_ = ev.Decode(&d)
-		who := s.relayWho(d.Name)
+		who := s.relayWho(d.Name, ev.Seq)
 		if d.Off {
 			return fmt.Sprintf("[%s Autopilot for %s is off.]", ts, who)
 		}
