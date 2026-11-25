@@ -81,7 +81,24 @@ func (s *State) viewEvents() ([]event.Event, *event.Event) {
 	for from > 0 && s.Events[from-1].Seq > cur.CoversSeq {
 		from--
 	}
-	return s.Events[from:], dossier
+	if from == start {
+		return s.Events[start:], dossier
+	}
+	// What the user and the agents put in the previous file after the last
+	// event the briefing took in is carried over whole. eagent's own calls
+	// there are not: they belong to the conversation the briefing replaced
+	// and was written in, so it accounts for them.
+	carried := make([]event.Event, 0, len(s.Events)-from)
+	for _, ev := range s.Events[from:start] {
+		if ev.Actor == event.ActorEagent && ev.Task == "" {
+			switch ev.Type {
+			case event.Steer, event.Assistant, event.ToolResult:
+				continue
+			}
+		}
+		carried = append(carried, ev)
+	}
+	return append(carried, s.Events[start:]...), dossier
 }
 
 // View renders eagent's conversation: the session's record since its last

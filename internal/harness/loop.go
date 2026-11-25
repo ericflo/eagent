@@ -594,18 +594,57 @@ func (r *Runtime) turn(w wake) {
 	// again when something that asks for a look arrives while the turn is
 	// running (the user writes, the agent ends a turn), so that nothing
 	// reaches the model without being told what it calls for. A tail is
-	// recorded only if the model acts on it (tailKept). Three things are
-	// settled with each tail. covered is the newest event it speaks for:
-	// the look counts for nothing newer. held is the message kept for
-	// eagent that the turn has to answer (0 for none), and answered says
-	// the user answered a question.
+	// recorded only if the model acts on it (tailKept). Two things are
+	// settled with each tail: held is the message kept for eagent that
+	// the turn has to answer (0 for none), and answered says the user
+	// answered a question.
+	//
+	// base is the conversation as rendered for a call, and covered the
+	// newest event in it. A reply is recorded with covered, and the
+	// renderer puts everything newer after that reply (state.View), so
+	// the two must be taken together: a later prompt then has every line
+	// exactly where this call saw it. base is rendered again only when the
+	// record has changed (refresh). A reply sent back for another try is
+	// answered from the same base, so that call is the last one plus the
+	// exchange and nothing has moved under it.
 	var tail string
 	tailKept := false
 	asked := w.thread // the turn was asked about the title and summary
 	var mustSpeak, answered bool
 	var held, covered int64
+	var base []llm.Message
+	refresh := true
 	who := "the agent"
 	stopped := func() string { return stopReason(ctx) }
+	// owes returns the reminder for what the wake asked for and the turn
+	// has not done, each given once: a message kept for eagent, an answer
+	// from the user, the closing word. acted says the reply did something
+	// else instead (set the title, say) rather than hold.
+	owes := func(acted bool) string {
+		switch {
+		case held > 0 && !reminded && !tc.handled:
+			reminded = true
+			last := " Holding is not an answer to a message addressed to you."
+			if acted {
+				last = " What you just did is not an answer to it."
+			}
+			return "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + "." + last
+		case answered && !remindedAnswer && !tc.handled:
+			remindedAnswer = true
+			last := " Hold again only if the answer needs nothing done."
+			if acted {
+				last = " Hold only if the answer needs nothing done."
+			}
+			return "The user's answer has reached nobody but you. If " + who + " is waiting on it, give it to " + who + " with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next." + last
+		case mustSpeak && !remindedFinal && !tc.spoke:
+			remindedFinal = true
+			if acted {
+				return "The session is ending and the user is owed a last word, which they have not had. Send the final report now with send_message."
+			}
+			return "Holding is not allowed here: the session is ending and the user is owed a last word. Send the final report now with send_message."
+		}
+		return ""
+	}
 	for call := 1; call <= maxCalls; call++ {
 		if ctx.Err() != nil {
 			end = stopped()
@@ -613,9 +652,22 @@ func (r *Runtime) turn(w wake) {
 		}
 		var msgs []llm.Message
 		r.sync(func() {
-			msgs = r.st.View(&r.view)
+			defer func() { r.turns.callAt = time.Now() }()
+			msgs = base
+			if !tailKept {
+				msgs = state.WithTail(base, tail)
+			}
+			if !refresh {
+				return
+			}
+			refresh = false
+			base, covered = r.st.View(&r.view), r.st.LastSeq()
 			fresh := tail == ""
-			if !fresh && tailKept {
+			if !fresh {
+				// Only something that asks for a look gets a tail of its
+				// own. Anything else that came (a remark from the agent,
+				// what this turn's own calls put on the record) is in the
+				// conversation the call is given, and counts as seen.
 				if k, ok := r.dueWake(); ok {
 					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
@@ -623,7 +675,6 @@ func (r *Runtime) turn(w wake) {
 			}
 			if fresh {
 				first := tail == ""
-				covered = r.st.LastSeq()
 				if h := r.heldSince(r.turns.seen); h > 0 {
 					// Not answered by what the turn did before it came.
 					held, tc.handled = h, tc.handled && first
@@ -640,10 +691,10 @@ func (r *Runtime) turn(w wake) {
 				}
 				tail, tailKept = r.tail(w, time.Now()), false
 			}
+			msgs = base
 			if !tailKept {
-				msgs = state.WithTail(msgs, tail)
+				msgs = state.WithTail(base, tail)
 			}
-			r.turns.callAt = time.Now()
 		})
 		// Every call of a session is the same request but for its messages:
 		// one system prompt, one tool list, one effort, one output ceiling.
@@ -711,15 +762,8 @@ func (r *Runtime) turn(w wake) {
 			case strings.TrimSpace(resp.Text) != "" && len(resp.ToolCalls) == 0 && !nudged:
 				nudged = true
 				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
-			case held > 0 && !reminded && !tc.handled:
-				reminded = true
-				back = "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + ". Holding is not an answer to a message addressed to you."
-			case answered && !remindedAnswer && !tc.handled:
-				remindedAnswer = true
-				back = "The user's answer has reached nobody but you. If " + who + " is waiting on it, give it to " + who + " with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next. Hold again only if the answer needs nothing done."
-			case mustSpeak && !remindedFinal && !tc.spoke:
-				remindedFinal = true
-				back = "Holding is not allowed here: the session is ending and the user is owed a last word. Send the final report now with send_message."
+			default:
+				back = owes(false)
 			}
 			if back != "" {
 				r.sync(func() { r.noteSilent(resp, 0, wake{}) })
@@ -764,7 +808,7 @@ func (r *Runtime) turn(w wake) {
 			}))
 			r.looked(covered, resp.Usage.Input, w)
 		})
-		recorded, tailKept, extra = true, true, nil
+		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
@@ -788,6 +832,15 @@ func (r *Runtime) turn(w wake) {
 			// that started an agent in this very turn is not: nothing is
 			// owed, and nothing may say "nothing is running now".
 			r.sync(func() { mustSpeak = len(r.st.ActiveRelays()) == 0 })
+		}
+		if !again && end == "done" && call < maxCalls {
+			// The turn would end here. A reply that did something else
+			// than what the wake asked for (it set the title and summary,
+			// and the user's answer or their message to eagent went
+			// nowhere) is told so once, off the record, like a hold is.
+			if back := owes(true); back != "" {
+				extra, again = []llm.Message{{Role: "user", Text: back}}, true
+			}
 		}
 		if !again || end == "interrupted" || end == "timeout" {
 			break

@@ -95,7 +95,8 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 				// agent has moved on, and the user is shown what it asks now.
 				id = r.st.NextQuestionID()
 				r.append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: id, Text: text, Options: opts}))
-				r.turns.saidAt = r.st.Events[len(r.st.Events)-1].Time
+				asked := r.st.Events[len(r.st.Events)-1]
+				r.turns.saidAt, r.turns.saidSeq = asked.Time, asked.Seq
 				onPhone = r.phone != nil
 			}
 		})
