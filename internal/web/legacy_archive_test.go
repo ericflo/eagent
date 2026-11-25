@@ -61,7 +61,7 @@ func TestSavedOldSessionShowsHowItStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`<button data-view="overview">Overview</button>`,
+		`<button data-view="overview" aria-pressed="true">Overview</button>`,
 		`detail.last_reason`,
 		`took this older session over`,
 		`showLegacyActivity: ARCHIVE ||`,
