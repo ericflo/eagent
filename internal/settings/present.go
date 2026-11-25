@@ -97,7 +97,9 @@ func placeProjectField(f *control.Field) {
 	}
 	f.Advanced = len(route) > 1 || (leaf != "model" && leaf != "reasoning_effort")
 	if leaf == "reasoning_effort" {
-		f.Shape.Enum = nil
+		// "" sends no effort, so the provider's default applies: the
+		// editor's "default", which a preset's effort does not take away.
+		f.Shape.Enum = []any{""}
 		for _, e := range config.EffortOrder {
 			f.Shape.Enum = append(f.Shape.Enum, e)
 		}

@@ -97,3 +97,23 @@ func TestAddressSwitchWithAnUnlistedModelTakesTheNewProvidersProtocolAndKey(t *t
 		t.Fatalf("route = %+v", cfg.Model)
 	}
 }
+
+// "default" effort (send none, the provider's own) is chosen as an effort
+// of "": a remote edit can set it under a preset's effort, and it loads.
+func TestRemoteEditCanChooseTheDefaultEffort(t *testing.T) {
+	clearRouteEnv(t)
+	project := t.TempDir()
+	writeProjectFile(t, project, `{"preset":"glm"}`)
+	s := &Service{Project: project}
+	if cfg, _ := config.Load(project, ""); cfg.Model.ReasoningEffort == "" {
+		t.Fatal("the preset sets no effort; the test needs one")
+	}
+	apply(t, s, control.Edit{Op: "set", Key: "/model/reasoning_effort", Value: ""})
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.ReasoningEffort != "" {
+		t.Fatalf("effort = %q", cfg.Model.ReasoningEffort)
+	}
+}
