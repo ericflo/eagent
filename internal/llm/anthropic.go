@@ -24,7 +24,7 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 // call, not just one per client, gets its retry).
 func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
-	messages := anthropicMessages(req, c.Endpoint.BaseURL)
+	messages := anthropicMessagesFor(req, c.Endpoint.BaseURL, c.Endpoint.Model)
 	cached := anthropicBridge(messages, int(c.anthropicCached.Load()))
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
@@ -270,7 +270,10 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		case "thinking":
 			b.Thinking = b.partial.String()
 			reasoning.WriteString(b.Thinking)
-			native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			// Cut off before its signature came: Claude would refuse it back.
+			if b.Signature != "" || !claudeModel(c.Endpoint.Model) {
+				native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			}
 		case "redacted_thinking":
 			native = append(native, map[string]any{"type": "redacted_thinking", "data": b.partial.String()})
 		}
@@ -295,9 +298,14 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	return out, nil
 }
 
-// anthropicMessages renders history with strict user/assistant alternation
-// and cache breakpoints on its last two blocks.
+// anthropicMessages renders history for a model it does not name.
 func anthropicMessages(req Request, host string) []map[string]any {
+	return anthropicMessagesFor(req, host, "")
+}
+
+// anthropicMessagesFor renders history for model with strict user/assistant
+// alternation and cache breakpoints on its last two blocks.
+func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 	var msgs []map[string]any
 	push := func(role string, content []map[string]any) {
 		if len(msgs) > 0 && msgs[len(msgs)-1]["role"] == role {
@@ -307,11 +315,12 @@ func anthropicMessages(req Request, host string) []map[string]any {
 		}
 		msgs = append(msgs, map[string]any{"role": role, "content": content})
 	}
-	for _, m := range req.Messages {
+	ids := newCallIDs(anthropicAccepts)
+	for i, m := range req.Messages {
 		switch m.Role {
 		case "user":
 			text := m.Text
-			if text == "" {
+			if strings.TrimSpace(text) == "" { // the API refuses a blank text block
 				text = "(empty)"
 			}
 			blocks := []map[string]any{{"type": "text", "text": text}}
@@ -325,22 +334,35 @@ func anthropicMessages(req Request, host string) []map[string]any {
 			var content []map[string]any
 			// Signed thinking blocks are bound to the account that produced
 			// them; replay them only at the host that did.
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && anthropicReplays(m, model) {
 				var native []map[string]any
-				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
+				if json.Unmarshal(m.Native, &native) != nil {
+					native = nil
+				} else if claudeModel(model) {
+					native = claudeThinking(native)
+				}
+				if len(native) > 0 {
 					content = native
+					var own []string
+					for _, b := range native {
+						if id, _ := b["id"].(string); b["type"] == "tool_use" {
+							own = append(own, id)
+						}
+					}
+					ids.kept(own)
 				}
 			}
 			if content == nil {
-				if m.Text != "" {
+				ids.rebuilt()
+				if strings.TrimSpace(m.Text) != "" {
 					content = append(content, map[string]any{"type": "text", "text": m.Text})
 				}
-				for _, tc := range m.ToolCalls {
+				for j, tc := range m.ToolCalls {
 					var input any = json.RawMessage(`{}`)
 					if obj, err := ArgsObject(tc.Args); err == nil {
 						input = obj
 					}
-					content = append(content, map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": input})
+					content = append(content, map[string]any{"type": "tool_use", "id": ids.call(i, j, tc.ID), "name": tc.Name, "input": input})
 				}
 			}
 			if len(content) == 0 {
@@ -350,7 +372,7 @@ func anthropicMessages(req Request, host string) []map[string]any {
 		case "tool":
 			var content []map[string]any
 			for _, r := range m.Results {
-				block := map[string]any{"type": "tool_result", "tool_use_id": r.CallID, "content": r.Output}
+				block := map[string]any{"type": "tool_result", "tool_use_id": ids.result(r.CallID), "content": r.Output}
 				if r.IsError {
 					block["is_error"] = true
 				}
@@ -386,7 +408,13 @@ func anthropicStable(msgs []map[string]any) []map[string]any {
 			case "thinking", "redacted_thinking":
 				continue
 			case "text":
-				if s, _ := b["text"].(string); s == "" {
+				if s, _ := b["text"].(string); strings.TrimSpace(s) == "" {
+					continue
+				}
+			case "tool_result":
+				// A blank screen comes back as an empty result, and a
+				// breakpoint may not sit on an empty block.
+				if s, ok := b["content"].(string); ok && strings.TrimSpace(s) == "" {
 					continue
 				}
 			}
@@ -481,7 +509,9 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 			native = append(native, map[string]any{"type": "tool_use", "id": b.ID, "name": b.Name, "input": input})
 		case "thinking":
 			reasoning.WriteString(b.Thinking)
-			native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			if b.Signature != "" || !claudeModel(c.Endpoint.Model) {
+				native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			}
 		case "redacted_thinking":
 			native = append(native, map[string]any{"type": "redacted_thinking", "data": b.Data})
 		}

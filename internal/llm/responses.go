@@ -17,7 +17,7 @@ import (
 func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	body := map[string]any{
 		"model":             c.Endpoint.Model,
-		"input":             responsesInput(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL),
+		"input":             responsesInputFor(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL, c.Endpoint.Model),
 		"stream":            true,
 		"store":             false,
 		"max_output_tokens": c.maxTokens(req),
@@ -344,9 +344,16 @@ func sanitizeNativeArgs(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
+// responsesInput renders history for a model it does not name.
 func responsesInput(req Request, replayReasoning bool, host string) []any {
+	return responsesInputFor(req, replayReasoning, host, "")
+}
+
+// responsesInputFor renders history as input items for model.
+func responsesInputFor(req Request, replayReasoning bool, host, model string) []any {
 	var items []any
-	for _, m := range req.Messages {
+	ids := newCallIDs(responsesAccepts)
+	for i, m := range req.Messages {
 		switch m.Role {
 		case "user":
 			if len(m.Images) == 0 {
@@ -363,30 +370,45 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 		case "assistant":
 			// Native items replay only at the host that minted them: encrypted
 			// reasoning and rs_/fc_ ids belong to that account, and a fallback
-			// route elsewhere would be rejected on every turn.
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+			// route elsewhere would be rejected on every turn. They replay only
+			// to the model that made them, too: another model at the same host
+			// gets the turn rebuilt, which every model takes.
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && sameModel(m.NativeModel, model) {
 				var native []json.RawMessage
 				if json.Unmarshal(m.Native, &native) == nil {
 					if replayReasoning {
 						native = dropDanglingReasoning(native)
+						if reasoningUnreplayable(native) {
+							native = nil
+						}
 					} else {
 						native = dropReasoning(native)
 					}
 				}
 				if len(native) > 0 {
+					var own []string
 					for _, it := range native {
+						var probe struct {
+							Type   string `json:"type"`
+							CallID string `json:"call_id"`
+						}
+						if json.Unmarshal(it, &probe) == nil && probe.Type == "function_call" {
+							own = append(own, probe.CallID)
+						}
 						items = append(items, sanitizeNativeArgs(it))
 					}
+					ids.kept(own)
 					continue
 				}
 			}
+			ids.rebuilt()
 			if m.Text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": m.Text})
 			}
-			for _, tc := range m.ToolCalls {
+			for j, tc := range m.ToolCalls {
 				items = append(items, map[string]any{
 					"type":      "function_call",
-					"call_id":   tc.ID,
+					"call_id":   ids.call(i, j, tc.ID),
 					"name":      tc.Name,
 					"arguments": argsString(tc.Args),
 				})
@@ -395,7 +417,7 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 			for _, r := range m.Results {
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
-					"call_id": r.CallID,
+					"call_id": ids.result(r.CallID),
 					"output":  r.Output,
 				})
 			}

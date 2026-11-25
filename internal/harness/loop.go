@@ -481,7 +481,7 @@ func (r *Runtime) answeredSince(seen int64) bool {
 // try without recording it: its reply, then why it will not do. A reply
 // that called hold gets the reason as that call's result.
 func sentBack(resp *llm.Response, why string) []llm.Message {
-	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL}}
+	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.Model}}
 	if len(resp.ToolCalls) == 0 {
 		return append(out, llm.Message{Role: "user", Text: "[eagent] " + why})
 	}
@@ -840,7 +840,7 @@ func (r *Runtime) turn(w wake) {
 			rewrote = true
 			r.sync(func() { r.noteSilent(resp, 0, wake{}) })
 			extra = append(extra,
-				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL},
+				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.Model},
 				rewriteRequest(resp, leak),
 			)
 			continue

@@ -93,6 +93,10 @@ type Message struct {
 	// and item ids are bound to the account that minted them, so a fallback
 	// route at another host must rebuild the turn instead of replaying.
 	NativeHost string
+	// NativeModel is the model that produced Native, as the response named
+	// it (which can be a dated variant of the model that was asked for).
+	// Empty when the record does not say.
+	NativeModel string
 
 	// CacheBreak marks the last stable message (Anthropic cache_control).
 	CacheBreak bool
