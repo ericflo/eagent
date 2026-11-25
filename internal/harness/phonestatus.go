@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
-	"github.com/ericflo/eagent/internal/state"
 )
 
 // The status line: what the session is doing right now, shown on the phone
@@ -113,55 +111,20 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 	if text, ok := r.relayActivityLine(); ok {
 		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
 	}
-	if procs := r.st.RunningProcs(); len(procs) > 0 {
-		text := "Running " + redactSecrets(shortCommand(procs[0].Command))
-		if len(procs) > 1 {
-			text += fmt.Sprintf(" and %d more", len(procs)-1)
-		}
-		return finalechat.Activity{Text: oneLine(text, 200), Kind: "tool", TTLSeconds: statusTTL}
-	}
-	var running []*state.Task
-	queued := 0
-	for _, t := range r.st.RunningTasks() {
-		if t.Status == "running" {
-			running = append(running, t)
-		} else {
-			queued++
-		}
-	}
-	if len(running) > 0 {
-		t := running[0]
-		text := "Working on " + t.Title
-		if step, _ := r.lastStep(t.ID); step != "" {
-			text += ": " + step
-		}
-		if len(running) > 1 {
-			text += fmt.Sprintf(" (+%d tasks)", len(running)-1)
-		}
-		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
-	}
-	if r.orchBusy {
-		text := "Thinking about the next step"
-		if !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
-			text = "Still thinking (a long think or a long reply)"
+	if r.turns.busy {
+		text := "Thinking"
+		if !r.turns.callAt.IsZero() && now.Sub(r.turns.callAt) > 45*time.Second {
+			text = "Still thinking"
 		}
 		return finalechat.Activity{Text: text, Kind: "thinking", TTLSeconds: statusTTL}
-	}
-	if r.narrBusy {
-		return finalechat.Activity{Text: "Writing to you", Kind: "typing", TTLSeconds: statusTTL}
 	}
 	if r.st.Question != nil {
 		return finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
-	if queued > 0 {
-		return finalechat.Activity{Text: fmt.Sprintf("Waiting for a free worker (%d queued)", queued), Kind: "working", TTLSeconds: statusTTL}
-	}
-	// Nothing is running, nobody is mid-call, no question is open: the
-	// session is waiting on the user, whether it has yielded (Idle) or has
-	// simply not started yet (a fresh interactive session before the first
-	// message). Idle() alone misses the second case and used to leave a
-	// phantom "Working" on the phone.
-	if r.opts.Interactive || r.listeningAfterDismissal() {
+	// No agent is mid-turn, no model call is in flight, no question is
+	// open: the session waits on the user. One with an agent stays up for
+	// as long as the agent does.
+	if r.opts.Interactive || len(r.st.ActiveRelays()) > 0 || r.listeningAfterDismissal() {
 		return finalechat.Activity{Text: "Waiting for your next message", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
 	return finalechat.Activity{} // a batch session with nothing left is about to end

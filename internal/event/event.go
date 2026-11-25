@@ -298,6 +298,11 @@ type MessageData struct {
 	Important bool `json:"important,omitempty"`
 	// Attachments are files sent with the message (screenshots, logs).
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// Auto marks words the harness said itself, without a model call: the
+	// outcome of a command the user typed, or that the model cannot be
+	// reached. They are shown to the model as a notice, since no reply of
+	// its own carries them.
+	Auto bool `json:"auto,omitempty"`
 }
 
 // PhoneQuestionData records which phone card carries a question,
@@ -347,8 +352,9 @@ type QuestionData struct {
 	Options []string `json:"options,omitempty"`
 }
 
-// DossierData opens a subsession with a briefing: what eagent wrote about
-// the session so far, with the facts the harness adds around it.
+// DossierData opens a subsession with a dossier: where the session stands
+// and a map (file:line) of where in the record each topic can be read, as
+// eagent wrote them, followed by the facts the harness adds from the log.
 type DossierData struct {
 	Text string `json:"text"`
 	// CoversSeq is the last event the briefing took into account. The new
@@ -358,9 +364,14 @@ type DossierData struct {
 	// By is who wrote the body: "eagent" (the model, on its cached prompt)
 	// or "harness" (built from the log alone, when the model could not).
 	By string `json:"by,omitempty"`
-	// Usage and ElapsedMS account for the model call that wrote it.
-	Usage     *Usage `json:"usage,omitempty"`
-	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	// Usage and ElapsedMS account for the model calls that wrote it, Calls
+	// says how many there were, and Consulted lists what the writer looked
+	// up in the record first ("read 1788740857293.jsonl:40-90", "search
+	// deploy"). The lookups themselves are not recorded.
+	Usage     *Usage   `json:"usage,omitempty"`
+	ElapsedMS int64    `json:"elapsed_ms,omitempty"`
+	Calls     int      `json:"calls,omitempty"`
+	Consulted []string `json:"consulted,omitempty"`
 	// TaskID names the task worker that wrote it, in logs from before
 	// eagent wrote its own.
 	TaskID string `json:"task_id,omitempty"`
@@ -515,6 +526,9 @@ type ChecksData struct {
 	// PromptTokens is the size of the last of those prompts, so a reader
 	// of the log knows how full the conversation is.
 	PromptTokens int `json:"prompt_tokens,omitempty"`
+	// SeenSeq is the newest event the last of those looks had in view, so
+	// a resumed session does not look again at what was already weighed.
+	SeenSeq int64 `json:"seen_seq,omitempty"`
 }
 
 // RelayEndData records the agent being stopped on purpose.

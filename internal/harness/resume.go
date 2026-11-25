@@ -2,114 +2,80 @@ package harness
 
 import (
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
-	"github.com/ericflo/eagent/internal/procs"
-	"github.com/ericflo/eagent/internal/state"
 )
 
-// closeInterrupted repairs state after a restart: dangling tool calls get
-// error results, running tasks and processes are marked interrupted, and the
-// orchestrator is told what happened. Called before the loop starts.
+// closeInterrupted repairs the record after a restart: the agents that kept
+// running in their terminals are picked up again, tool calls that never got
+// a result get one, a turn left open is closed, and a session written by
+// the three-actor design is given a briefing to continue from. Called
+// before the loop starts.
 func (r *Runtime) closeInterrupted() {
-	var closed []string
-	now := time.Now()
-
-	// A command started under the previous run may still be alive after a
-	// hard kill (its own process group). Stop it when it can be found and
-	// proved ours; otherwise it is lost to us.
-	for _, p := range r.st.RunningProcs() {
-		reason, what := "lost", "was lost"
-		if p.PID > 0 && procs.ReapOrphanGroup(p.PID, p.StartedAt) {
-			reason, what = "killed", "was still running after the crash and has been stopped"
-		}
-		r.append(event.New(event.ProcExit, p.Actor, event.ProcExitData{
-			Handle: p.Handle, ExitCode: -1, Reason: reason,
-			DurationMS: now.Sub(p.Started).Milliseconds(), Notify: p.Actor == event.ActorOrchestrator && p.Task == "",
-		}).WithTask(p.Task))
-		closed = append(closed, fmt.Sprintf("process %s (%s) %s", p.Handle, firstLine(p.Command, 60), what))
-	}
-	// Relayed agents run in terminals of their own and survive this; pick
-	// them up again, and say which are gone.
-	closed = append(closed, r.reattachRelays()...)
-	// Orchestrator tool calls without results.
-	for _, tc := range r.st.DanglingCalls(event.ActorOrchestrator, "") {
-		r.append(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{
-			CallID: tc.ID, Name: tc.Name, Output: "interrupted: the runner restarted before this tool finished", IsError: true,
+	// The agents run in terminals of their own and survive eagent stopping;
+	// pick them up again, and say which are gone.
+	closed := r.reattachRelays()
+	for _, tc := range r.st.DanglingCalls(event.ActorEagent) {
+		r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{
+			CallID: tc.ID, Name: tc.Name, Output: "interrupted: eagent restarted before this finished", IsError: true,
 		}))
 	}
-	// Tasks: mark interrupted; the orchestrator can re-delegate.
-	for _, t := range r.st.RunningTasks() {
-		for _, tc := range r.st.DanglingCalls(event.ActorTask, t.ID) {
-			r.append(event.New(event.ToolResult, event.ActorTask, event.ToolResultData{
-				CallID: tc.ID, Name: tc.Name, Output: "interrupted: the runner restarted", IsError: true,
-			}).WithTask(t.ID))
-		}
-		if t.Kind == "dossier" {
-			r.append(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: t.ID, Status: "interrupted", Summary: "the runner restarted while the dossier was being written"}).WithTask(t.ID))
-			closed = append(closed, "dossier task "+t.ID+" restarted")
-			continue
-		}
-		r.append(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: t.ID, Status: "interrupted", Summary: "the runner restarted while this task was running; its partial work may be on disk. Check, then re-delegate what is missing."}).WithTask(t.ID))
-		closed = append(closed, fmt.Sprintf("task %s (%s) was interrupted", t.ID, t.Title))
+	if r.st.Turns[event.ActorEagent] > 0 {
+		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
+	legacy := r.st.Legacy() && r.st.Calls[event.ActorEagent] == 0
 	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed}))
-
-	// A rollover that never received its dossier needs a fresh dossier task.
-	if cur := r.st.Current(); cur != nil && cur.Reason == "rollover" && cur.Dossier == "" {
-		r.rolling = true
-		r.createDossierTask("the previous runner stopped before the dossier was written")
+	if legacy {
+		r.adoptLegacy()
 	}
+}
 
-	// Tell the orchestrator, unless it had finished and nothing new arrived.
-	if !(r.st.LastYield != nil && r.st.LastYield.Done) || len(closed) > 0 {
-		msg := fmt.Sprintf("[Session resumed at %s after an interruption.]", now.Local().Format("2006-01-02 15:04:05"))
-		if len(closed) > 0 {
-			msg += " What was lost: "
-			for i, c := range closed {
-				if i > 0 {
-					msg += "; "
-				}
-				msg += c
-			}
-			msg += ". Check the filesystem for partial work before redoing anything."
-		}
-		if r.st.LastYield != nil && r.st.LastYield.Done {
-			msg += " You had declared the work done; confirm nothing is left, then yield again."
-		} else if r.st.LastYield != nil {
-			msg += " You were waiting: " + r.st.LastYield.Reason
-		}
-		if r.st.Question != nil {
-			msg += " A question to the user is still pending: " + firstLine(r.st.Question.Text, 200)
-		}
-		r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: msg}))
-	}
-	r.lastOrchSeen = 0
+// adoptLegacy continues a session that was written when eagent ran three
+// models (an orchestrator, task workers and a narrator). Its record stays
+// as it is and stays readable; the one loop starts a new subsession from a
+// briefing the harness assembles, so its conversation never has to render
+// events it has no words for. Called before the loop starts.
+func (r *Runtime) adoptLegacy() {
+	covers := r.st.LastSeq()
+	var b strings.Builder
+	b.WriteString("(This session was started by an earlier eagent, which did the work itself with helpers of its own. That way of working is gone: now a coding agent in a terminal does the work and you stand between it and the user. eagent assembled this briefing from the old record; session_search and session_read reach all of it.)\n")
+	var told, notes []string
 	for _, ev := range r.st.Events {
-		if ev.Actor != event.ActorNarrator && ev.Type != event.PhoneThread && state.Observe(ev, 100) != "" {
-			r.narrWorthy = ev.Seq
-		}
-		if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			var d event.AssistantData
-			_ = ev.Decode(&d)
-			r.lastOrchSeen = d.SeenSeq
-		}
-		if ev.Type == event.Assistant && ev.Actor == event.ActorNarrator {
-			var d event.AssistantData
-			_ = ev.Decode(&d)
-			r.narrLastSeen = d.SeenSeq
-		}
-		if ev.Type == event.Message {
+		switch ev.Type {
+		case event.Message:
 			var d event.MessageData
-			_ = ev.Decode(&d)
-			r.narrLastSaid = d.Text
-			r.narrSaidSeq = ev.Seq
-			r.narrSaidAt = ev.Time
-			r.narrSaidSeen = r.narrLastSeen
+			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
+				told = append(told, fmt.Sprintf("- [%s] %s", r.when(ev.Time), clipRunes(oneLine(d.Text, 700), 700)))
+			}
+		case event.LegacyYield:
+			var d event.LegacyYieldData
+			if ev.Decode(&d) == nil && strings.TrimSpace(d.Reason) != "" {
+				state := "it stopped to wait"
+				if d.Done {
+					state = "it called the work done"
+				}
+				notes = append(notes, fmt.Sprintf("- [%s] %s: %s", r.when(ev.Time), state, clipRunes(oneLine(d.Reason, 500), 500)))
+			}
 		}
 	}
-	// Continue process handles after replayed ones.
-	r.procs.SetSeq(len(r.st.ProcOrder))
-	r.procCursor = map[string]int{}
+	if len(told) > 0 {
+		b.WriteString("\nWHAT THE USER WAS LAST TOLD, oldest first:\n" + strings.Join(told[max(0, len(told)-6):], "\n") + "\n")
+	}
+	if len(notes) > 0 {
+		b.WriteString("\nHOW THE OLD SESSION LEFT THINGS:\n" + strings.Join(notes[max(0, len(notes)-3):], "\n") + "\n")
+	}
+	for _, name := range r.st.RelayOrder {
+		if rel := r.st.Relays[name]; rel != nil && rel.LastTurn != "" {
+			fmt.Fprintf(&b, "\n%s'S LAST REPORT (%s):\n%s\n", strings.ToUpper(rel.Who()), r.when(rel.LastTurnAt), clipRunes(rel.LastTurn, 3000))
+		}
+	}
+	body := strings.TrimSpace(b.String()) + "\n\n" + r.dossierFacts(covers)
+	if err := r.openSubsession("resumed by an eagent with one loop", "upgrade", r.st.ContextTokens()); err != nil {
+		r.ui.Log("resume: %v", err)
+		return
+	}
+	r.append(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: body, CoversSeq: covers, By: "harness"}))
+	r.turns.promptTokens = 0
+	r.ui.Log("this session was written by an earlier eagent; it continues in a new subsession from a briefing")
 }

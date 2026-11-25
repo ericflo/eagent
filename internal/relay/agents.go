@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -180,6 +181,16 @@ func AgentLabel(name string) string {
 		return a.Label()
 	}
 	return name
+}
+
+// Installed reports whether an agent's program is on this machine.
+func Installed(agent string) bool {
+	a := AgentByName(agent)
+	if a == nil {
+		return false
+	}
+	_, err := exec.LookPath(a.Binary())
+	return err == nil
 }
 
 // AgentOf reads which agent a relay runs from its name ("codex-2" runs

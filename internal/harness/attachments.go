@@ -3,10 +3,6 @@ package harness
 import (
 	"errors"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -18,10 +14,11 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // Attachments are files that travel with messages: screenshots the user
-// sends from their phone, and files the narrator sends back. Every one is
+// sends from their phone, and files eagent sends back. Every one is
 // copied under <session>/attachments/ so the log points at bytes that will
 // still be there on replay, whatever happens to the project directory.
 
@@ -70,10 +67,10 @@ func kindFor(contentType string) string {
 	return "file"
 }
 
-// narratorAttachments validates the paths a narrator wants to send and
-// copies each into the session so the log stays self-contained. Errors are
-// written for the narrator to read.
-func (r *Runtime) narratorAttachments(raw any) ([]event.Attachment, error) {
+// messageAttachments validates the paths eagent wants to send with a
+// message and copies each into the session so the log stays self-contained.
+// Errors are written for the model to read.
+func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 	list, _ := raw.([]any)
 	if len(list) == 0 {
 		return nil, nil
@@ -87,19 +84,18 @@ func (r *Runtime) narratorAttachments(raw any) ([]event.Attachment, error) {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		abs, err := r.locateFile(caller{actor: event.ActorNarrator}, p)
+		abs, err := r.locateFile(p)
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s: %v", p, err)
 		}
 		// This is the one path that sends bytes off the machine, so the file
-		// must really be in the project, not merely named as if it were:
-		// symlinks are followed before the check, and the write rule's
-		// temp-dir exemption does not apply here.
+		// must really be where the session works, not merely named as if it
+		// were: symlinks are followed before the check.
 		if real, err := filepath.EvalSymlinks(abs); err == nil {
 			abs = real
 		}
-		if !r.insideProject(abs) {
-			return nil, fmt.Errorf("attachment %s is outside the project directory; copy it into the project first", p)
+		if !r.sendable(abs) {
+			return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
 		}
 		st, err := os.Stat(abs)
 		if err != nil {
@@ -239,89 +235,61 @@ func attachmentSummary(atts []event.Attachment) string {
 	return "📎 " + strings.Join(parts, ", ")
 }
 
-// viewImage prepares a picture for a model to look at: the file must be an
-// image of a supported type, and a copy goes into the session so the log
-// can be replayed later.
-func (r *Runtime) viewImage(c caller, p string) (event.Attachment, error) {
-	abs, err := r.locateFile(c, p)
-	if err != nil {
-		return event.Attachment{}, err
-	}
-	st, err := os.Stat(abs)
-	if err != nil {
-		return event.Attachment{}, fmt.Errorf("%s: %v", p, shortErr(err))
-	}
-	if !st.Mode().IsRegular() || st.Size() == 0 {
-		return event.Attachment{}, fmt.Errorf("%s is not a file with content", p)
-	}
-	if st.Size() > finalechat.MaxAttachmentSize {
-		return event.Attachment{}, fmt.Errorf("%s is %s; images over 10 MB cannot be shown", p, humanBytes(st.Size()))
-	}
-	att, err := r.copyAttachment(abs, "view")
-	if err != nil {
-		return event.Attachment{}, err
-	}
-	if !att.IsImage() {
-		_ = os.Remove(att.Path)
-		return event.Attachment{}, fmt.Errorf("%s is %s, not an image; use read_file for text", p, att.ContentType)
-	}
-	if f, err := os.Open(att.Path); err == nil {
-		if cfg, _, err := image.DecodeConfig(f); err == nil {
-			att.Width, att.Height = cfg.Width, cfg.Height
+// sessionRoots are the folders the session works in: the project and each
+// running agent's folder. Not on the loop goroutine.
+func (r *Runtime) sessionRoots() []string {
+	roots := []string{r.projectPath()}
+	r.sync(func() {
+		if wd := r.workDir(); wd != roots[0] {
+			roots = append(roots, wd)
 		}
-		f.Close()
-	}
-	return att, nil
-}
-
-// stashImage keeps a tool's picture until its result is recorded. Tool
-// calls run concurrently across tasks, so this is keyed by call id.
-func (r *Runtime) stashImage(callID string, att event.Attachment) {
-	r.toolImagesMu.Lock()
-	defer r.toolImagesMu.Unlock()
-	if r.toolImages == nil {
-		r.toolImages = map[string][]event.Attachment{}
-	}
-	r.toolImages[callID] = append(r.toolImages[callID], att)
-}
-
-func (r *Runtime) takeImages(callID string) []event.Attachment {
-	r.toolImagesMu.Lock()
-	defer r.toolImagesMu.Unlock()
-	out := r.toolImages[callID]
-	delete(r.toolImages, callID)
-	return out
+		for _, rel := range r.st.ActiveRelays() {
+			roots = append(roots, rel.Dir)
+		}
+	})
+	return roots
 }
 
 // locateFile finds a file the model named. Models copy long paths from the
-// log imperfectly, so after the exact path (absolute or project-relative)
-// it tries the file name alone: in the project, the session's attachments,
-// and the project tree a few levels deep.
-func (r *Runtime) locateFile(c caller, p string) (string, error) {
-	p = strings.TrimSpace(p)
+// record imperfectly, so after the exact path (absolute, or relative to the
+// project or an agent's folder) it tries the file name alone: in those
+// folders, the session's attachments, and their trees a few levels deep.
+func (r *Runtime) locateFile(p string) (string, error) {
+	p = relay.ExpandHome(strings.TrimSpace(p))
 	if p == "" {
 		return "", errors.New("path is required")
 	}
-	abs, err := r.filesFor(c).Resolve(p, false)
-	if err != nil {
-		return "", err
+	regular := func(path string) bool {
+		st, err := os.Stat(path)
+		return err == nil && st.Mode().IsRegular()
 	}
-	if st, err := os.Stat(abs); err == nil && st.Mode().IsRegular() {
-		return abs, nil
+	roots := r.sessionRoots()
+	if filepath.IsAbs(p) {
+		if regular(p) {
+			return filepath.Clean(p), nil
+		}
+	} else {
+		for _, root := range roots {
+			if cand := filepath.Join(root, p); regular(cand) {
+				return cand, nil
+			}
+		}
 	}
 	base := filepath.Base(p)
-	for _, cand := range []string{filepath.Join(r.opts.Project, base), filepath.Join(attachmentsDir(r.sess.Path), base)} {
-		if st, err := os.Stat(cand); err == nil && st.Mode().IsRegular() {
+	for _, root := range append(roots, attachmentsDir(r.sess.Path)) {
+		if cand := filepath.Join(root, base); regular(cand) {
 			return cand, nil
 		}
 	}
-	if found := findByName(r.opts.Project, base, 4); found != "" {
-		return found, nil
+	for _, root := range roots {
+		if found := findByName(root, base, 4); found != "" {
+			return found, nil
+		}
 	}
 	if matches, _ := filepath.Glob(filepath.Join(attachmentsDir(r.sess.Path), "*-"+base)); len(matches) > 0 {
 		return matches[len(matches)-1], nil
 	}
-	return "", fmt.Errorf("no such file (looked for the exact path and for %q in the project); give the path exactly as it appears in the log, or just the file name", base)
+	return "", fmt.Errorf("no such file (looked for the exact path and for %q where the session works); give the path exactly as it appears in your conversation, or just the file name", base)
 }
 
 // findByName walks a tree for a file with the given name, skipping the
@@ -355,22 +323,12 @@ func findByName(root, name string, maxDepth int) string {
 	return best
 }
 
-// insideProject reports whether an already-resolved absolute path lies in
-// the project or an active relay's folder (or anywhere, when edits outside
-// the project are allowed). Not on the loop goroutine.
-func (r *Runtime) insideProject(abs string) bool {
-	if r.files.AllowOutside {
-		return true
-	}
-	roots := []string{r.opts.Project}
-	// A relayed agent works in the folder the user chose for it; what it
-	// makes there (screenshots, renders) may be sent to the user too.
-	// Called from the narrator's goroutine, so state is read on the loop.
-	r.sync(func() {
-		for _, rel := range r.st.ActiveRelays() {
-			roots = append(roots, rel.Dir)
-		}
-	})
+// sendable reports whether an already-resolved absolute path may be sent
+// to the user: it lies where the session works (the project, an agent's
+// folder, the session's own files), or an agent's transcript named it as a
+// picture it made or looked at. Not on the loop goroutine.
+func (r *Runtime) sendable(abs string) bool {
+	roots := append(r.sessionRoots(), r.sess.Path)
 	for _, root := range roots {
 		root = filepath.Clean(root)
 		if real, err := filepath.EvalSymlinks(root); err == nil {
@@ -380,5 +338,27 @@ func (r *Runtime) insideProject(abs string) bool {
 			return true
 		}
 	}
-	return false
+	reported := false
+	r.sync(func() {
+		for i := len(r.st.Events) - 1; i >= 0 && !reported; i-- {
+			ev := r.st.Events[i]
+			if ev.Type != event.RelayTurn {
+				continue
+			}
+			var d event.RelayTurnData
+			if ev.Decode(&d) != nil {
+				continue
+			}
+			for _, img := range d.Images {
+				if real, err := filepath.EvalSymlinks(img); err == nil {
+					img = real
+				}
+				if filepath.Clean(img) == abs {
+					reported = true
+					break
+				}
+			}
+		}
+	})
+	return reported
 }

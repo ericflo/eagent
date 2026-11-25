@@ -148,6 +148,7 @@ type Session struct {
 	mu      sync.Mutex
 	file    *os.File
 	current string // current subsession file name
+	line    int    // lines written to it so far
 	seq     int64
 	lock    *os.File
 	closed  bool
@@ -214,7 +215,27 @@ func Open(path string, lastSeq int64, now time.Time) (*Session, error) {
 	}
 	s.file = f
 	s.current = current
+	s.line = countLines(filepath.Join(path, current))
 	return s, nil
+}
+
+// countLines counts the lines of a subsession file, so an event appended
+// to it can say which line it is.
+func countLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	n := 0
+	buf := make([]byte, 64<<10)
+	for {
+		k, err := f.Read(buf)
+		n += bytes.Count(buf[:k], []byte{'\n'})
+		if err != nil {
+			return n
+		}
+	}
 }
 
 // ReadOnly returns a Session handle that can enumerate files but not append.
@@ -315,7 +336,8 @@ func (s *Session) Append(ev event.Event) (event.Event, error) {
 	if err := s.file.Sync(); err != nil {
 		return ev, err
 	}
-	ev.Source = event.Source{File: s.current}
+	s.line++
+	ev.Source = event.Source{File: s.current, Line: s.line}
 	return ev, nil
 }
 
@@ -358,6 +380,7 @@ func (s *Session) OpenSubsession(name string) (string, error) {
 	}
 	s.file = f
 	s.current = name
+	s.line = 0
 	s.closed = false
 	return name, nil
 }
@@ -381,6 +404,7 @@ func (s *Session) newSubsession(now time.Time) (string, error) {
 	}
 	s.file = f
 	s.current = name
+	s.line = 0
 	s.closed = false
 	return name, nil
 }

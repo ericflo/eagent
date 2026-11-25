@@ -27,7 +27,7 @@ func TestCreateAppendRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Append(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "n"})); err != nil {
+	if _, err := s.Append(event.New(event.Message, event.ActorEagent, event.MessageData{Text: "n"})); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

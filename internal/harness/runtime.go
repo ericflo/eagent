@@ -1,18 +1,19 @@
-// Package harness runs a session: it owns the event log and derived state,
-// wakes the three actors, executes their tools, rolls subsessions over with
-// dossiers, and decides when the session is finished.
+// Package harness runs a session. A session is one coding agent in a
+// terminal eagent owns (the relay) and one model loop that stands between
+// that agent and the user: it passes the user's words on, says what the
+// agent is doing, answers what its terminal asks, and keeps the session's
+// record.
 //
-// Concurrency model: one loop goroutine owns the store and the state. Actor
-// turns run in their own goroutines and mutate state only through sync(),
-// which executes a closure on the loop goroutine. Tool execution (which may
-// block for seconds) happens on the actor goroutine.
+// Concurrency model: one loop goroutine owns the store and the state. A
+// turn of the model runs on its own goroutine and changes state only
+// through sync(), which runs a closure on the loop goroutine. Tools (which
+// may block for seconds) run on the turn's goroutine.
 package harness
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/ericflo/eagent/internal/netx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,10 +26,10 @@ import (
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
-	"github.com/ericflo/eagent/internal/procs"
+	"github.com/ericflo/eagent/internal/netx"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
-	"github.com/ericflo/eagent/internal/sched"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
@@ -59,17 +60,25 @@ type Options struct {
 	// Answer can supply. It travels into the appended user.message or
 	// user.answer event so caps survive a resume.
 	PromptClient *clientcaps.Caps
-	// StartDir, when set, is where a new session's commands start instead
-	// of the project root; it is recorded as the first working-directory
-	// move so the log, the phone and the UI show it from the start.
+	// StartDir, when set, is the folder the session works in instead of the
+	// project root: where its agent starts.
 	StartDir string
-	// Relay, when set, names a relay profile ("codex", "claude", "pi"): the new
-	// session starts that agent in StartDir (or the project) and is a relay
-	// to it from the first message.
+	// Relay names the relay profile ("codex", "claude", "pi") the new
+	// session starts in StartDir (or the project). Empty starts the
+	// configured default, else the first agent that is installed.
 	Relay string
 	// RelayModel and RelayEffort, when set, are that agent's model and
 	// reasoning effort instead of the profile's (or the agent's own).
 	RelayModel, RelayEffort string
+}
+
+// modelRoute is one model eagent calls: its ordered routes (the configured
+// one, then its fallbacks) and the client in use. The client moves along
+// the routes when one turns out to be unroutable. Read and swapped on the
+// loop goroutine.
+type modelRoute struct {
+	routes []llm.Endpoint
+	client *llm.Client
 }
 
 // Runtime is one live session.
@@ -80,26 +89,23 @@ type Runtime struct {
 
 	sess    *store.Session
 	st      *state.State
-	procs   *procs.Manager
-	files   tools.Files
 	archive tools.Archive
+	prompts *prompts.Set
+
+	// The start of every request, fixed for the life of this process: the
+	// system prompt, the tool list and how long texts are clipped. Nothing
+	// that changes while the session runs may reach them.
+	system  string
+	toolset []llm.Tool
+	view    state.ViewOptions
+
+	// models are the routes by who calls them: eagent always, the
+	// summarizer only when it is dedicated.
+	models map[string]*modelRoute
 
 	// listenUntil is how long a batch session keeps listening after the
 	// user dismissed a question (the question's own deadline).
 	listenUntil time.Time
-
-	// Each actor has an ordered list of routes (primary, then fallbacks)
-	// and a current client; completeActor advances the client when a route
-	// turns out to be unroutable. Clients are read and swapped under sync.
-	orchRoutes []llm.Endpoint
-	taskRoutes []llm.Endpoint
-	narrRoutes []llm.Endpoint
-	orchClient *llm.Client
-	taskClient *llm.Client
-	narrClient *llm.Client
-
-	narrTools []llm.Tool
-	prompts   *prompts.Set
 
 	loop chan func()
 	// later holds work the loop queued for itself, run once the current
@@ -110,100 +116,24 @@ type Runtime struct {
 	stop  context.CancelFunc
 	wg    sync.WaitGroup
 
-	// Loop-owned scheduling state.
-	orchBusy            bool
-	errorRetries        int // retries scheduled since the orchestrator last got a model reply
-	orchCallAt          time.Time
-	narrBusy            bool
-	narrPending         string // reason for a wake requested during a turn
-	narrLastSeen        int64  // seq the narrator saw on its latest call
-	narrWorthy          int64  // seq of the newest event the narrator can observe
-	narrLastSaid        string
-	narrSaidSeq         int64     // seq of the last narrator.message
-	narrSaidAt          time.Time // when the user last heard from the narrator (message or question)
-	narrFinal           bool      // final report delivered
-	narrTicker          *time.Timer
-	narrTimerGeneration uint64
-	summary             summaryKeeper         // the thread's title and summary (summary.go); loop-owned
-	activeSettings      runtimecontrol.Values // loop-owned; cfg remains immutable
-	runtimeControl      *runtimecontrol.Controller
-	remoteStop          bool   // the app asked this session to stop; see acceptRemoteStop
-	phone               *phone // Finalechat mirror; nil when off
-	relays              relaySeats
-	autopilotTimers     map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
-	autopilotChecks     map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
-	relayNotifyDone     map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
-	relayRepick         map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
-	// The narrator's progress checks while work goes on (narratorcheck.go):
-	// what it had seen when the user last heard from it, what the last check
-	// had seen (log seq and relay steps), when a check last ran and last
-	// failed, and the checks that said nothing and are not yet on the record.
-	narrSaidSeen   int64
-	checkSeenSeq   int64
-	checkSeenSteps int
-	checkedAt      time.Time
-	checkFailedAt  time.Time
-	quietChecks    event.ChecksData
-	toolImagesMu   sync.Mutex
-	memoMu         sync.Mutex
-	memo           map[string]fileMark           // what each caller last read or viewed, to skip repeats
-	toolImages     map[string][]event.Attachment // call id -> pictures for the model (view_image)
-	running        map[string]context.CancelFunc // task id -> cancel
-	waiters        []*waiter
-	timers         map[string]*time.Timer // schedule id -> timer
-	rolling        bool
-	ending         bool
-	endReason      string
-	shutdownOnce   sync.Once
-	exitCode       int
-	awaitingUser   bool
-	lastOrchSeen   int64
-	lastWake       int64 // seq of the newest event that should wake the orchestrator
-	// lastArrival is the newest wake that came from outside the harness (a
-	// user message or answer, a schedule firing, a task or notified process
-	// ending). Harness-made wakes (recovery messages, the dossier) advance
-	// lastWake but not this, so the futile-rollover pause cannot be stood
-	// aside by the harness's own nudges.
-	lastArrival int64
-	// futileSkipped is the newest unseen arrival for which the futile-rollover
-	// pause already stood aside once (see futileStandAside).
-	futileSkipped int64
-	// yieldSeenSeq is the seq at which the latest yield first became visible
-	// to the narrator (the assistant call that made it, or the yield event
-	// itself for a forced one), so a narrator that already reported it is
-	// not woken again by the yield event's own, later, seq.
-	yieldSeenSeq int64
-	lastOrchText string
+	turns          turnState             // the model loop (loop.go); loop-owned
+	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
+	activeSettings runtimecontrol.Values // loop-owned; cfg remains immutable
+	runtimeControl *runtimecontrol.Controller
+	remoteStop     bool   // the app asked this session to stop; see acceptRemoteStop
+	phone          *phone // Finalechat mirror; nil when off
 
-	// userWaitSeq is the user message whose narrator acknowledgement is held
-	// until the orchestrator reacts to it (or narratorAckGrace passes), so
-	// the user hears one reply grounded in what actually happened. When the
-	// message asks a question, only an answer or the end of the
-	// orchestrator's turn counts as the reaction.
-	userWaitSeq      int64
-	userWaitQuestion bool
-	// orchSawSeq is the newest event the orchestrator's latest response had
-	// seen, so a reaction is only credited to a message it had in view.
-	orchSawSeq int64
-	// bashEnv is the BASH_ENV file every command sources: an EXIT trap that
-	// reports the shell's final directory, so a cd persists across commands.
-	bashEnv string
+	relays          relaySeats
+	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
+	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
+	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
+	relayRepick     map[string]relayPick   // relay name -> model/effort change waiting for its turn to end
 
-	procCursor   map[string]int // handle -> bytes already shown
-	procOwner    map[string]owner
-	procSeenAt   map[string]bool // handle -> tool result already delivered final output
-	procAttended map[string]bool // handle -> owner is blocked waiting on it right now
-	closed       chan struct{}   // closed when the loop has fully stopped
-}
-
-type owner struct{ actor, task string }
-
-// waiter is a blocked `wait` tool call.
-type waiter struct {
-	tasks map[string]bool
-	procs map[string]bool
-	any   bool
-	ch    chan string
+	ending       bool
+	endReason    string
+	shutdownOnce sync.Once
+	exitCode     int
+	closed       chan struct{} // closed when the loop has fully stopped
 }
 
 // New creates a new session in the project directory.
@@ -219,47 +149,100 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		_ = sess.Discard()
 		return nil, err
 	}
-	// Record the routes actually in use, which differ from the configured
-	// primaries when a fallback took over at startup.
-	models := map[string]string{
-		event.ActorOrchestrator: r.orchClient.Endpoint.Model,
-		event.ActorTask:         r.taskClient.Endpoint.Model,
-		event.ActorNarrator:     r.narrClient.Endpoint.Model,
-	}
-	endpoints := map[string]string{
-		event.ActorOrchestrator: r.orchClient.Endpoint.BaseURL,
-		event.ActorTask:         r.taskClient.Endpoint.BaseURL,
-		event.ActorNarrator:     r.narrClient.Endpoint.BaseURL,
-	}
-	efforts := map[string]string{
-		event.ActorOrchestrator: cfg.Orchestrator.ReasoningEffort,
-		event.ActorTask:         cfg.Task.ReasoningEffort,
-		event.ActorNarrator:     cfg.Narrator.ReasoningEffort,
+	// The routes actually in use, which differ from the configured ones
+	// when a fallback took over at startup.
+	models, endpoints, efforts := map[string]string{}, map[string]string{}, map[string]string{}
+	for who, m := range r.models {
+		models[who], endpoints[who], efforts[who] = m.client.Endpoint.Model, m.client.Endpoint.BaseURL, m.client.Endpoint.ReasoningEffort
 	}
 	name := cfg.Name
 	if name == "" {
 		name = cfg.Preset
 	}
 	r.append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
-		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Efforts: efforts, Config: name,
+		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Efforts: efforts, Config: name, TZ: localZone(),
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if dir := strings.TrimSpace(opts.StartDir); dir != "" && !sameDir(dir, r.projectPath()) {
-		r.append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
+		r.append(event.New(event.CwdChange, event.ActorHarness, event.CwdChangeData{Path: dir, Previous: r.projectPath()}))
 	}
-	if profile := strings.TrimSpace(opts.Relay); profile != "" {
-		if _, err := r.startRelay(profile, r.workDir(""), "", false, relayPick{strings.TrimSpace(opts.RelayModel), strings.TrimSpace(opts.RelayEffort)}); err != nil {
-			// The session still starts, so the user hears why on the phone
-			// too; the orchestrator is told to explain.
-			r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: err.Error()}))
-			r.append(event.New(event.HarnessMessage, event.ActorOrchestrator, event.HarnessMessageData{Text: fmt.Sprintf("The %s relay the user asked for could not be started: %v. Tell the user in a note, then wait.", profile, err)}))
-		}
-	}
-	if strings.TrimSpace(opts.Prompt) != "" {
-		r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
+	r.startFirstRelay()
+	if strings.TrimSpace(opts.Prompt) != "" || len(opts.PromptAttachments) > 0 {
+		r.userMessage(event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
 	}
 	r.startPhone()
+	r.renderSystem()
 	return r, nil
+}
+
+// startFirstRelay starts the agent a new session is for: the profile it
+// was asked for, else the configured default, else the first agent that is
+// installed. A session whose agent cannot be started still starts, so the
+// user hears why wherever they are reading. Before the loop starts.
+func (r *Runtime) startFirstRelay() {
+	profile := strings.TrimSpace(r.opts.Relay)
+	if profile == "" {
+		profile = r.defaultProfile()
+	}
+	if profile == "" {
+		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "no coding agent is installed on this machine (looked for " + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")"}))
+		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] No agent could be started: none of the coding agents eagent knows is installed here. Tell the user which to install (Claude Code, Codex, Antigravity or pi), in one message."}))
+		return
+	}
+	pick := relayPick{strings.TrimSpace(r.opts.RelayModel), strings.TrimSpace(r.opts.RelayEffort)}
+	if _, err := r.startRelay(profile, r.workDir(), "", false, pick); err != nil {
+		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: err.Error()}))
+		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[eagent] The %s agent this session was started for could not be started: %v. Tell the user, in one message, what went wrong and what would fix it.", profile, err)}))
+	}
+}
+
+// defaultProfile is the profile a session starts when none was named:
+// relay.default, else the first built-in agent whose program is installed.
+func (r *Runtime) defaultProfile() string {
+	if d := strings.TrimSpace(r.cfg.Relay.Default); d != "" {
+		return d
+	}
+	profiles := r.cfg.Relay.RelayProfiles()
+	for _, name := range []string{"claude", "codex", "antigravity", "pi"} {
+		if p, ok := profiles[name]; ok && agentInstalled(p.Agent) {
+			return name
+		}
+	}
+	for _, name := range r.cfg.Relay.RelayProfileNames() {
+		if agentInstalled(profiles[name].Agent) {
+			return name
+		}
+	}
+	return ""
+}
+
+// agentInstalled reports whether an agent's program is on this machine;
+// tests replace it.
+var agentInstalled = relay.Installed
+
+// localZone is the IANA name of this machine's time zone, so clock times in
+// the conversation read the same wherever the log is replayed. "" when the
+// zone has no name (a fixed offset); the reader then uses its own.
+func localZone() string {
+	if name := time.Local.String(); name != "" && name != "Local" {
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
+		}
+	}
+	if tz := os.Getenv("TZ"); tz != "" {
+		if _, err := time.LoadLocation(tz); err == nil {
+			return tz
+		}
+	}
+	if link, err := os.Readlink("/etc/localtime"); err == nil {
+		if i := strings.Index(link, "zoneinfo/"); i >= 0 {
+			name := link[i+len("zoneinfo/"):]
+			if _, err := time.LoadLocation(name); err == nil {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // Resume reopens an existing session directory.
@@ -292,7 +275,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		} else {
 			// Answered elsewhere first (the phone, another resume): the words
 			// still count, as a message, rather than vanishing with exit 0.
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
+			r.userMessage(event.UserMessageData{Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
 		}
 	}
 	if text := strings.TrimSpace(opts.Prompt); text != "" || len(opts.PromptAttachments) > 0 {
@@ -304,10 +287,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			}
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		} else {
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
+			r.userMessage(event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
 		}
 	}
 	r.startPhone()
+	r.renderSystem()
 	return r, nil
 }
 
@@ -319,20 +303,16 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 	r := &Runtime{
 		cfg: cfg, opts: opts, ui: ui, sess: sess, st: st,
 		activeSettings: runtimecontrol.FromConfigFor(opts.Project, cfg),
-		procs:          procs.NewManager(),
-		files:          tools.Files{Root: opts.Project, AllowOutside: cfg.AllowOutsideProject},
-		bashEnv:        writeBashEnv(opts.Project),
 		archive:        tools.Archive{Path: sess.Path},
-		narrTools:      tools.NarratorTools(),
+		toolset:        tools.All(),
+		view:           state.DefaultViewOptions,
+		models:         map[string]*modelRoute{},
 		loop:           make(chan func(), 1024),
 		ctx:            ctx, stop: cancel,
-		running:      map[string]context.CancelFunc{},
-		timers:       map[string]*time.Timer{},
-		procCursor:   map[string]int{},
-		procOwner:    map[string]owner{},
-		procSeenAt:   map[string]bool{},
-		procAttended: map[string]bool{},
-		closed:       make(chan struct{}),
+		closed: make(chan struct{}),
+	}
+	if cfg.ReportMaxChars > 0 {
+		r.view.ReportChars = cfg.ReportMaxChars
 	}
 	var err error
 	if r.prompts, err = prompts.Load(opts.Project); err != nil {
@@ -340,73 +320,72 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		return nil, fmt.Errorf("prompts: %w", err)
 	}
 	st.SetPrompts(r.prompts)
-	if r.orchRoutes, err = cfg.Orchestrator.Routes(); err != nil {
+	routes, err := cfg.Model.Routes()
+	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("orchestrator: %w", err)
+		return nil, fmt.Errorf("model: %w", err)
 	}
-	r.orchClient = r.newClient(r.orchRoutes[0], event.ActorOrchestrator)
-	if r.taskRoutes, err = cfg.Task.Routes(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("task worker: %w", err)
+	r.models[event.ActorEagent] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorEagent)}
+	if cfg.Summarizer.Mode == config.SummarizerDedicated {
+		routes, err := cfg.Summarizer.Route(cfg.Model).Routes()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("summarizer: %w", err)
+		}
+		r.models[event.ActorSummarizer] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorSummarizer)}
 	}
-	r.taskClient = r.newClient(r.taskRoutes[0], event.ActorTask)
-	if r.narrRoutes, err = cfg.Narrator.Routes(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("narrator: %w", err)
-	}
-	r.narrClient = r.newClient(r.narrRoutes[0], event.ActorNarrator)
+	r.turns.init(st)
 	return r, nil
 }
 
-// clientFor returns an actor's current client. Loop goroutine only.
-func (r *Runtime) clientFor(actor string) *llm.Client {
-	switch actor {
-	case event.ActorTask:
-		return r.taskClient
-	case event.ActorNarrator:
-		return r.narrClient
+// renderSystem writes the system prompt, once, after the phone mirror is
+// known to be on or off. The same bytes open every request of this run.
+func (r *Runtime) renderSystem() {
+	persona := strings.TrimSpace(r.cfg.Persona)
+	if persona == "" {
+		persona = strings.TrimSpace(r.prompts.Render("PERSONA.md", nil))
 	}
-	return r.orchClient
+	phone := ""
+	if r.phone != nil {
+		phone = PhoneStatus()
+	}
+	r.system = r.prompts.Render("EAGENT.md", prompts.EagentData{
+		Persona: persona, Phone: phone, Project: r.projectPath(), Interactive: r.opts.Interactive, Instructions: strings.TrimSpace(r.cfg.Instructions),
+	})
 }
 
-// routesFor returns an actor's ordered routes.
-func (r *Runtime) routesFor(actor string) []llm.Endpoint {
-	switch actor {
-	case event.ActorTask:
-		return r.taskRoutes
-	case event.ActorNarrator:
-		return r.narrRoutes
-	}
-	return r.orchRoutes
-}
-
-// completeActor calls the actor's current route and, when that route
+// complete calls a model through its current route and, when that route
 // cannot serve the model at all (bad key, no access, no credits), moves to
 // the next configured route and tries again. Every switch is logged in the
 // session so replay and the UI know which model actually answered. Safe to
-// call from any goroutine; several task workers may hit the same dead
-// route at once and only the first switch counts.
-func (r *Runtime) completeActor(ctx context.Context, actor, task string, req llm.Request) (*llm.Response, error) {
+// call from any goroutine.
+func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs *llm.Observer) (*llm.Response, error) {
 	offline := 0 // consecutive calls the network kept from the provider
 	for {
 		var client *llm.Client
-		r.sync(func() { client = r.clientFor(actor) })
-		resp, err := client.Complete(ctx, req, r.observer(actor, task))
+		r.sync(func() {
+			if m := r.models[who]; m != nil {
+				client = m.client
+			}
+		})
+		if client == nil {
+			return nil, fmt.Errorf("no model is configured for %s", who)
+		}
+		resp, err := client.Complete(ctx, req, obs)
 		if err == nil {
 			if offline > 0 {
-				r.ui.Log("%s: %s is reachable again", actor, client.Endpoint.BaseURL)
+				r.ui.Log("%s: %s is reachable again", who, client.Endpoint.BaseURL)
 			}
 			return resp, nil
 		}
 		if ctx.Err() == nil && networkDown(err) {
 			// The provider cannot be reached at all (no DNS, no route, the
 			// connection refused or dropped). That passes: wait for the
-			// network instead of failing the turn, which would leave the
-			// session paused until someone resumes it.
+			// network instead of failing the turn.
 			offline++
 			wait := min(time.Duration(offline)*offlineWait, 4*offlineWait)
 			if offline == 1 {
-				r.ui.Log("%s: cannot reach %s (%s); waiting for the network", actor, client.Endpoint.BaseURL, shortErr(err))
+				r.ui.Log("%s: cannot reach %s (%s); waiting for the network", who, client.Endpoint.BaseURL, shortErr(err))
 			}
 			select {
 			case <-ctx.Done():
@@ -421,28 +400,19 @@ func (r *Runtime) completeActor(ctx context.Context, actor, task string, req llm
 		}
 		var switched bool
 		r.sync(func() {
-			cur := r.clientFor(actor)
-			if cur != client {
+			m := r.models[who]
+			if m.client != client {
 				switched = true // another call already moved on; use its route
 				return
 			}
-			routes := r.routesFor(actor)
-			for i, ep := range routes {
-				if ep.BaseURL == cur.Endpoint.BaseURL && ep.Model == cur.Endpoint.Model && i+1 < len(routes) {
-					next := routes[i+1]
-					r.ui.Log("%s: %s is unavailable (%s); switching to %s", actor, cur.Endpoint, shortErr(err), next)
-					nc := r.newClient(next, actor)
-					switch actor {
-					case event.ActorTask:
-						r.taskClient = nc
-					case event.ActorNarrator:
-						r.narrClient = nc
-					default:
-						r.orchClient = nc
-					}
+			for i, ep := range m.routes {
+				if ep.BaseURL == client.Endpoint.BaseURL && ep.Model == client.Endpoint.Model && i+1 < len(m.routes) {
+					next := m.routes[i+1]
+					r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
+					m.client = r.newClient(next, who)
 					r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-						Actor: actor, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
-						Reason: "primary route unavailable: " + shortErr(err),
+						Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
+						Reason: "the configured route is unavailable: " + shortErr(err),
 					}))
 					switched = true
 					return
@@ -465,10 +435,10 @@ func networkDown(err error) bool {
 	return netx.Transient(err) && !errors.Is(err, context.DeadlineExceeded)
 }
 
-func (r *Runtime) newClient(ep llm.Endpoint, actor string) *llm.Client {
+func (r *Runtime) newClient(ep llm.Endpoint, who string) *llm.Client {
 	c := llm.NewClient(ep)
 	c.OnRetry = func(attempt int, err error, wait time.Duration) {
-		r.ui.Log("%s: %v; retrying in %s (attempt %d)", actor, shortErr(err), wait.Round(time.Second), attempt+1)
+		r.ui.Log("%s: %v; retrying in %s (attempt %d)", who, shortErr(err), wait.Round(time.Second), attempt+1)
 	}
 	return c
 }
@@ -488,14 +458,11 @@ func (r *Runtime) State() *state.State { return r.st }
 // SessionID returns the session identifier.
 func (r *Runtime) SessionID() string { return r.sess.ID }
 
-// KillProcesses terminates every child process; used on a hard exit.
-func (r *Runtime) KillProcesses() { r.procs.KillAll() }
-
 // ---- loop plumbing --------------------------------------------------------
 
 // sync runs fn on the loop goroutine and waits for it. During shutdown the
-// loop keeps serving closures until the actors have stopped, so late events
-// (a final narrator message, a tool result) are still recorded.
+// loop keeps serving closures until the turn in flight has stopped, so late
+// events (a last message, a tool result) are still recorded.
 func (r *Runtime) sync(fn func()) {
 	done := make(chan struct{})
 	select {
@@ -538,90 +505,6 @@ func (r *Runtime) append(ev event.Event) event.Event {
 	return ev
 }
 
-// noteWake tracks which events should wake whom.
-func (r *Runtime) noteWake(ev event.Event) {
-	if ev.Actor != event.ActorNarrator && ev.Type != event.PhoneThread && state.Observe(ev, 100) != "" {
-		r.narrWorthy = ev.Seq
-	}
-	if ev.Type == event.Assistant && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-		var d event.AssistantData
-		if ev.Decode(&d) == nil && d.SeenSeq > r.orchSawSeq {
-			r.orchSawSeq = d.SeenSeq
-		}
-	}
-	if r.userWaitSeq > 0 && ev.Seq > r.userWaitSeq && r.orchSawSeq >= r.userWaitSeq && orchestratorReacted(ev, r.userWaitQuestion) {
-		// The orchestrator has done something about the user's message (in a
-		// turn that had it in view); the narrator can now answer with that
-		// instead of guessing.
-		r.userWaitSeq = 0
-		r.wakeNarrator(wakeUser)
-	}
-	switch ev.Type {
-	case event.Yield:
-		r.yieldSeenSeq = ev.Seq // a forced yield has no call of its own; the orchestrator overrides this for its own
-	case event.UserMessage, event.UserAnswer, event.ScheduleFire, event.Dossier:
-		r.lastWake = ev.Seq
-		if ev.Type != event.Dossier {
-			r.lastArrival = ev.Seq
-		}
-		r.narrFinal = false
-		if ev.Type == event.UserMessage || ev.Type == event.UserAnswer {
-			question := false
-			if ev.Type == event.UserMessage {
-				var d event.UserMessageData
-				question = ev.Decode(&d) == nil && isQuestion(d.Text)
-			}
-			r.holdNarratorForOrchestrator(ev.Seq, question)
-			if ev.Type == event.UserMessage && len(r.st.ActiveRelays()) > 0 {
-				// Straight to the agent, before any model call: after this
-				// event has been fully recorded, on the next loop turn.
-				seq := ev.Seq
-				r.later = append(r.later, func() { r.autoForward(seq) })
-			}
-		}
-	case event.TaskEnd:
-		var d event.TaskEndData
-		_ = ev.Decode(&d)
-		if t := r.st.Tasks[d.ID]; t != nil && t.Kind != "dossier" {
-			r.lastWake = ev.Seq
-			r.lastArrival = ev.Seq
-		}
-	case event.ProcExit:
-		var d event.ProcExitData
-		_ = ev.Decode(&d)
-		if d.Notify && ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			r.lastWake = ev.Seq
-			r.lastArrival = ev.Seq
-		}
-	case event.RelayTurn, event.RelayState, event.RelayDelivered, event.RelayLimit:
-		if state.RelayWakes(ev) {
-			r.lastWake = ev.Seq
-			r.lastArrival = ev.Seq
-		}
-	case event.HarnessMessage:
-		if ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			r.lastWake = ev.Seq
-		}
-	case event.Assistant:
-		if ev.Actor == event.ActorOrchestrator && ev.Task == "" {
-			var d event.AssistantData
-			_ = ev.Decode(&d)
-			r.lastOrchSeen = d.SeenSeq
-		}
-	}
-}
-
-// orchestratorHasWork reports whether the orchestrator should be running.
-// The reducer clears LastYield whenever something arrives that the
-// orchestrator has not seen (including during the call that yielded), so
-// "not idle" is the whole test once the session has a user message.
-func (r *Runtime) orchestratorHasWork() bool {
-	if r.st.LastYield != nil {
-		return false
-	}
-	return r.st.LastUserSeq > 0 || r.lastWake > 0
-}
-
 // Run drives the session until it ends or ctx is cancelled. It returns the
 // process exit code.
 func (r *Runtime) Run(ctx context.Context) int {
@@ -643,9 +526,8 @@ func (r *Runtime) Run(ctx context.Context) int {
 		<-ctx.Done()
 		r.post(func() { r.beginShutdown("interrupted", 130) })
 	}()
-	r.rearmSchedules()
 	r.armAutopilots()
-	r.armNarratorTimer()
+	r.armTicker()
 	r.startSummaries()
 	defer r.stopSummaries()
 	if r.st.Question != nil && r.opts.Interactive {
@@ -665,9 +547,6 @@ func (r *Runtime) Run(ctx context.Context) int {
 			r.tick()
 		case fn := <-r.loop:
 			fn()
-			r.tick()
-		case p := <-r.procs.Exited():
-			r.onProcExit(p)
 			r.tick()
 		case line, ok := <-r.inputChan():
 			if !ok {
@@ -700,196 +579,103 @@ func (r *Runtime) tick() {
 	if r.ending {
 		return
 	}
-	r.startQueuedTasks()
-	if r.rolling {
-		// Waiting for the dossier; nothing else for the orchestrator to do.
-	} else if !r.orchBusy {
-		if r.needsRollover() && r.startRollover() {
-			// rolling, or paused once for a futile rollover
-		} else if r.orchestratorHasWork() {
-			r.startOrchestratorTurn()
-		}
-	}
-	r.maybeWakeNarrator()
+	r.maybeTurn()
 	r.maybeEnd()
 	r.publishStatus()
 }
 
 func (r *Runtime) publishStatus() {
 	s := Status{
-		OrchestratorBusy: r.orchBusy,
-		NarratorBusy:     r.narrBusy,
-		Procs:            len(r.st.RunningProcs()),
-		ContextTokens:    r.st.ContextTokens(event.ActorOrchestrator),
-		Rollover:         r.rolling,
-		Waiting:          r.st.Idle() && !r.orchBusy && r.st.Question == nil,
+		Busy:          r.turns.busy,
+		ContextTokens: r.contextTokens(),
+		Compacting:    r.turns.compacting,
+		Waiting:       !r.turns.busy && r.st.Waiting() && r.st.Question == nil && !r.wakePending(),
+		Phone:         r.phone != nil,
 	}
-	if r.orchBusy && !r.orchCallAt.IsZero() {
-		s.OrchestratorFor = since(r.orchCallAt, time.Now())
+	if r.turns.busy && !r.turns.callAt.IsZero() {
+		s.BusyFor = since(r.turns.callAt, time.Now())
 	}
-	for _, t := range r.st.RunningTasks() {
-		if t.Status == "running" {
-			s.TasksRunning++
-		} else {
-			s.TasksQueued++
-		}
+	for _, rel := range r.st.ActiveRelays() {
+		s.Agents = append(s.Agents, AgentStatus{Name: rel.Name, Who: rel.Who(), State: rel.State})
 	}
-	s.Phone = r.phone != nil
 	r.ui.Status(s)
 }
 
-// maybeEnd decides whether a non-interactive session is finished.
+// maybeEnd decides whether the session is finished. A session with an
+// agent never ends by itself: the user talks to it for days. One whose
+// agent was stopped on purpose (or never started) ends once eagent has had
+// its say and nothing is waiting on the user.
 func (r *Runtime) maybeEnd() {
-	if r.ending || r.orchBusy || r.rolling || r.narrBusy {
-		return
-	}
-	if !r.st.Idle() || r.orchestratorHasWork() {
-		return
-	}
-	if len(r.st.RunningTasks()) > 0 {
+	if r.ending || r.turns.busy || r.turns.compacting || r.wakePending() {
 		return
 	}
 	if r.opts.Interactive {
-		// Interactive sessions wait for the user (a schedule means "do not
-		// end", not "do not accept input"). Make sure the narrator had its
-		// say about the idle state, then show the prompt.
-		if !r.narrFinal && r.narrLastSeen < r.st.LastYield.Seq && !r.narratorCoveredYield() {
-			r.wakeNarrator(narratorReasonForYield(r.st))
-			return
-		}
-		r.ui.Idle(true)
+		// An interactive session waits for the user.
+		r.ui.Idle(r.st.Waiting())
 		return
 	}
-	if len(r.st.ActiveSchedules()) > 0 {
-		return // a batch session with a schedule keeps running
-	}
 	if len(r.st.ActiveRelays()) > 0 {
-		return // so does one relaying to an agent: the user talks to it for days
+		return
 	}
 	if r.waitingOnPhone() {
-		// A question is open on the user's phone: a batch session waits for
-		// the answer (or the question's expiry) instead of ending.
+		// A question is open on the user's phone: the session waits for the
+		// answer (or the question's expiry) instead of ending.
 		return
 	}
 	if r.listeningAfterDismissal() {
 		// They closed the question to say something else; wait for it.
 		return
 	}
-	// Batch: give the narrator a final word, then end.
-	if !r.narrFinal {
-		r.narrFinal = true
-		if r.narrSaidSeq > r.st.LastYield.Seq || r.narratorCoveredYield() {
-			// It already reported after the orchestrator finished.
-			if r.finalSummary() {
-				return
-			}
-			r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
-			return
-		}
-		r.wakeNarrator(wakeFinal)
-		return
-	}
 	if r.finalSummary() {
 		return // the thread list gets how it ended, then the session ends
 	}
-	r.beginShutdown(r.endReasonForIdle(), r.endCodeForIdle())
-}
-
-func (r *Runtime) endReasonForIdle() string {
-	if !r.st.LastYield.Done || r.st.Question != nil {
-		return "awaiting-input"
+	if r.st.Question != nil {
+		r.beginShutdown("awaiting-input", 2)
+		return
 	}
-	return "done"
+	r.beginShutdown("done", 0)
 }
 
-func (r *Runtime) endCodeForIdle() int {
-	if r.endReasonForIdle() == "awaiting-input" {
-		return 2
-	}
-	return 0
-}
-
-func narratorReasonForYield(st *state.State) string {
-	if st.LastYield != nil && st.LastYield.Done {
-		return wakeDone
-	}
-	return wakeYield
-}
-
-// beginShutdown records the end and stops actors; finish() completes it.
+// beginShutdown records the end and stops the turn; finish() completes it.
 func (r *Runtime) beginShutdown(reason string, code int) {
 	r.shutdownOnce.Do(func() {
 		r.ending = true
 		r.stopRuntimeSettings()
 		r.endReason = reason
 		r.exitCode = code
-		for _, cancel := range r.running {
-			cancel()
-		}
 		r.stop()
 	})
 }
 
-// finish runs after the loop exits: waits for actors, kills processes,
-// records session.end, closes the store.
+// finish runs after the loop exits: waits for the turn in flight, records
+// session.end, closes the store.
 func (r *Runtime) finish() {
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
-	grace := 5 * time.Second
-	if r.narrBusy {
-		grace = 75 * time.Second // the final report gets a chance to land
-	}
-	deadline := time.NewTimer(grace)
+	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 drain:
 	for {
 		select {
 		case fn := <-r.loop:
-			fn() // actors finishing up still record their events
-		case p := <-r.procs.Exited():
-			r.onProcExit(p)
+			fn() // a turn finishing up still records its events
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			r.ui.Log("some actor goroutines did not stop in time")
+			r.ui.Log("a model call did not stop in time")
 			break drain
 		}
 	}
 	close(r.closed)
-	// Relayed agents are not the session's children: they run in terminals
-	// of their own and outlive this process, so a resumed session (or the
+	// The agents are not the session's children: they run in terminals of
+	// their own and outlive this process, so a resumed session (or the
 	// user, attached) picks up where they are. Only stop watching them.
 	r.closeRelays()
-	// Everything the session started goes with it, including background
-	// children whose shell already exited; a finished session must not
-	// leave a dev server holding a port.
-	r.procs.KillAll()
-	for _, t := range r.timers {
-		t.Stop()
-	}
-	if r.narrTicker != nil {
-		r.narrTicker.Stop()
-	}
+	r.stopTimers()
 	// Direct writes: the loop is no longer running.
-	if r.quietChecks.Count > 0 {
-		r.appendDirect(event.New(event.Checks, event.ActorNarrator, r.quietChecks))
-		r.quietChecks = event.ChecksData{}
-	}
-	for _, p := range r.procs.All() {
-		if sp := r.st.Procs[p.Handle]; sp != nil && sp.Status == "running" {
-			ev := event.New(event.ProcExit, sp.Actor, event.ProcExitData{Handle: p.Handle, ExitCode: -1, Reason: "killed", DurationMS: p.Duration().Milliseconds()}).WithTask(sp.Task)
-			r.appendDirect(ev)
-		}
-	}
-	// Tasks that were queued or whose worker did not stop in time are closed
-	// here so the log is consistent at every session.end; resume re-checks
-	// anyway for hard crashes that never reach this point.
-	for _, t := range r.st.RunningTasks() {
-		summary := "the runner stopped before this task started; delegate it again if it is still needed"
-		if t.Status == "running" {
-			summary = "the runner stopped while this task was running; its partial work may be on disk. Check, then re-delegate what is missing."
-		}
-		r.appendDirect(event.New(event.TaskEnd, event.ActorHarness, event.TaskEndData{ID: t.ID, Status: "interrupted", Summary: summary, Turns: t.Turns, Usage: t.Usage}).WithTask(t.ID))
+	if r.turns.silent.Count > 0 {
+		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))
+		r.turns.silent = event.ChecksData{}
 	}
 	r.appendDirect(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: r.endReason}))
 	if r.phone != nil {
@@ -935,13 +721,31 @@ func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts
 		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts}))
 		return
 	}
-	r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts}))
+	r.userMessage(event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts})
+}
+
+// userMessage records something the user wrote and, unless it is held back
+// for eagent, types it into the agent's terminal at once, word for word.
+// Whether it was held is decided before it is recorded, so the record says
+// what became of it from its first line. Loop goroutine (or before the loop
+// starts).
+func (r *Runtime) userMessage(d event.UserMessageData) {
+	rel, held := r.routeUserMessage(d)
+	d.Held = held
+	ev := r.append(event.New(event.UserMessage, event.ActorUser, d))
+	if held != "" {
+		if r.phone != nil && len(r.st.ActiveRelays()) > 0 {
+			r.phone.setReceipt(r, ev.Seq, "eagent")
+		}
+		return
+	}
+	r.forwardUserMessage(rel, ev.Seq, d)
 }
 
 // dismissQuestion closes the open question with no answer. Nothing is sent
-// to the orchestrator and nobody is woken: the session stays where it was
-// until the user writes. A batch session keeps listening for that message
-// for as long as it would have waited for the answer. Loop goroutine only.
+// to anyone and nobody is woken: the session stays where it was until the
+// user writes. A batch session keeps listening for that message for as long
+// as it would have waited for the answer. Loop goroutine only.
 func (r *Runtime) dismissQuestion(qid, source string) {
 	q := r.st.Question
 	if q == nil || (qid != "" && q.ID != qid) {
@@ -1015,8 +819,6 @@ func optionIndex(line string, options []string) int {
 	return -1
 }
 
-func (r *Runtime) slashCommand(line string) { r.slashCommandFrom(line, nil) }
-
 // slashCommandFrom runs a command; client is what the sending client
 // declared (its time zone reads "/autopilot until 10:00" in the user's time,
 // not the machine's).
@@ -1048,253 +850,41 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		}
 	case "/status", "/s":
 		r.ui.Log("%s", r.st.Summary())
-	case "/tasks":
-		for _, id := range r.st.TaskOrder {
-			t := r.st.Tasks[id]
-			r.ui.Log("%s [%s] %s", t.ID, t.Status, t.Title)
-		}
-		if len(r.st.TaskOrder) == 0 {
-			r.ui.Log("no tasks yet")
-		}
-	case "/procs":
-		for _, p := range r.procs.All() {
-			r.ui.Log("%s", p.Describe())
-		}
-		if len(r.procs.All()) == 0 {
-			r.ui.Log("no processes")
-		}
-	case "/kill":
-		if len(fields) < 2 {
-			r.ui.Log("usage: /kill <handle>")
-			return
-		}
-		if p, ok := r.procs.Get(fields[1]); ok {
-			p.Kill()
-			r.ui.Log("killed %s", fields[1])
-		} else {
-			r.ui.Log("no such process %s", fields[1])
-		}
-	case "/schedules":
-		for _, s := range r.st.ActiveSchedules() {
-			r.ui.Log("%s %s %q next %s: %s", s.ID, s.Kind, s.Spec, s.Next.Local().Format("15:04:05"), s.Note)
-		}
-		if len(r.st.ActiveSchedules()) == 0 {
-			r.ui.Log("no schedules")
-		}
 	case "/help", "/?":
-		r.ui.Log("commands: /status /tasks /procs /kill <handle> /schedules /dismiss /quit  (anything else is sent to the agent)")
-		r.ui.Log("relay: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
+		r.ui.Log("eagent: /status /dismiss /quit  (anything else goes to the agent, word for word; start a line with @e to talk to eagent instead)")
+		r.ui.Log("the agent: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}
 }
 
-// ---- processes ------------------------------------------------------------
-
-func (r *Runtime) onProcExit(p *procs.Proc) {
-	sp := r.st.Procs[p.Handle]
-	if sp == nil || sp.Status != "running" {
-		return
-	}
-	reason := string(p.Status())
-	// Notify the owner only if it already moved on: its tool result did not
-	// include the final output and it is not blocked waiting on the process.
-	notify := !r.procSeenAt[p.Handle] && !r.procAttended[p.Handle]
-	tail := ""
-	if notify {
-		tail = tools.Truncate(p.Tail(4000), 4000)
-	}
-	ev := event.New(event.ProcExit, sp.Actor, event.ProcExitData{
-		Handle: p.Handle, ExitCode: p.ExitCode(), Reason: reason,
-		DurationMS: p.Duration().Milliseconds(), Tail: tail, Notify: notify,
-	}).WithTask(sp.Task)
-	r.append(ev)
-	r.adoptCwd(p.Handle)
-	r.signalWaiters("", p.Handle)
-}
-
-// ---- schedules ------------------------------------------------------------
-
-func (r *Runtime) rearmSchedules() {
-	now := time.Now()
-	for _, sc := range r.st.ActiveSchedules() {
-		next := sc.Next
-		if next.IsZero() || next.Before(now) {
-			// Missed while we were away: fire soon, once.
-			next = now.Add(2 * time.Second)
-		}
-		r.armSchedule(sc.ID, next)
-	}
-}
-
-// maxTimerHop bounds one time.AfterFunc. Go timers run on the monotonic
-// clock, which stops while the machine sleeps, so a single long hop would
-// hold a deadline that no longer matches the schedule's wall-clock time.
-// Hopping re-reads the wall clock every minute, so the error after a resume
-// or a clock step is at most one hop.
-const maxTimerHop = time.Minute
-
-func (r *Runtime) armSchedule(id string, at time.Time) {
-	if t := r.timers[id]; t != nil {
-		t.Stop()
-	}
-	d := time.Until(at)
-	if d < 0 {
-		d = 0
-	}
-	if d > maxTimerHop {
-		var t *time.Timer
-		t = time.AfterFunc(maxTimerHop, func() {
-			r.post(func() {
-				if r.timers[id] == t { // still ours: not cancelled or re-armed meanwhile
-					r.armSchedule(id, at)
-				}
-			})
-		})
-		r.timers[id] = t
-		return
-	}
-	r.timers[id] = time.AfterFunc(d, func() {
-		r.post(func() { r.fireSchedule(id) })
-	})
-}
-
-func (r *Runtime) fireSchedule(id string) {
-	sc := r.st.Schedules[id]
-	if sc == nil || sc.Cancelled || r.ending {
-		return
-	}
-	now := time.Now()
-	var next time.Time
-	if sc.Kind != sched.Once {
-		// Relative specs ("in 10m") must not be re-parsed: a one-shot fires once.
-		s, err := sched.Parse(sc.Spec)
-		if err != nil {
-			return
-		}
-		next = s.Next(now)
-	}
-	r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: id, Note: sc.Note, Next: next}))
-	if !next.IsZero() {
-		r.armSchedule(id, next)
-	} else {
-		delete(r.timers, id)
-	}
-}
-
-// ---- waiters --------------------------------------------------------------
-
-func (r *Runtime) signalWaiters(taskID, handle string) {
-	var keep []*waiter
-	for _, w := range r.waiters {
-		hit := (taskID != "" && (w.tasks[taskID] || (w.any && len(w.procs) == 0))) || (handle != "" && w.procs[handle])
-		if hit {
-			what := taskID
-			if what == "" {
-				what = handle
-			}
-			select {
-			case w.ch <- what:
-			default:
-			}
-			continue
-		}
-		keep = append(keep, w)
-	}
-	r.waiters = keep
-}
-
-// projectPath is the absolute project directory.
-// narratorAckGrace bounds how long the narrator's reply to a user message
-// waits for the orchestrator's first reaction.
-var narratorAckGrace = 15 * time.Second
-
-// holdNarratorForOrchestrator delays the narrator's acknowledgement of the
-// user's message until the orchestrator has reacted to it, or the grace
-// period passes. Loop goroutine only.
-func (r *Runtime) holdNarratorForOrchestrator(seq int64, question bool) {
-	r.userWaitSeq, r.userWaitQuestion = seq, question
-	time.AfterFunc(narratorAckGrace, func() {
-		r.post(func() {
-			// Still unanswered: let the narrator say the message landed. The
-			// hold stays, so the orchestrator's eventual reaction wakes it
-			// again with the answer.
-			if r.userWaitSeq == seq {
-				r.wakeNarrator(wakeUser)
-			}
-		})
-	})
-}
-
-// orchestratorReacted reports an event that shows the orchestrator acting on
-// what the user said. For an instruction any reaction counts: a note, a
-// tool result, a command, a delegation, a yield, a text-only reply, or its
-// call failing. For a question only an answer note, the end of its turn
-// (yield) or a failure counts, so the narrator never relays a half-formed
-// answer assembled from the first command's output.
-func orchestratorReacted(ev event.Event, question bool) bool {
-	if ev.Type == event.Error {
-		var d event.ErrorData
-		return ev.Decode(&d) == nil && d.Where == event.ActorOrchestrator
-	}
-	if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
-		return false
-	}
-	switch ev.Type {
-	case event.Note:
-		if !question {
-			return true
-		}
-		var d event.NoteData
-		return ev.Decode(&d) == nil && d.Answer
-	case event.Yield:
-		return true
-	case event.ToolResult, event.ProcStart, event.TaskCreate:
-		return !question
-	case event.Assistant:
-		var d event.AssistantData
-		return ev.Decode(&d) == nil && len(d.ToolCalls) == 0
-	}
-	return false
-}
-
-// isQuestion is the harness's cheap reading of whether a message asks
-// something: it contains a question mark.
-func isQuestion(text string) bool { return strings.Contains(text, "?") }
-
-// workDir is where an actor's commands run and its relative paths resolve:
-// the project root until a cd of its own moved it. Loop goroutine only.
-func (r *Runtime) workDir(task string) string {
-	if d := r.st.WorkDir(task); d != "" && d != r.st.Cwd {
+// workDir is the folder the session works in: the project root unless it
+// was started somewhere else. Loop goroutine only.
+func (r *Runtime) workDir() string {
+	if d := r.st.WorkDir(); d != "" && d != r.st.Cwd {
 		return d
 	}
 	return r.projectPath()
 }
 
-// writeBashEnv installs, for every command the actors run, an EXIT trap that
-// reports the shell's final directory, so a cd persists across commands
-// without rewriting what the model wrote. Returns "" when it cannot be
-// written, in which case cd simply does not persist.
-func writeBashEnv(project string) string {
-	path := filepath.Join(project, ".agents", "eagent", "bash_env")
-	const script = "# Written by eagent: report where a command's shell ended up, so a cd persists for later commands.\n" +
-		"trap 'if [ -n \"$EAGENT_PWD_FILE\" ]; then printf %s \"$PWD\" > \"$EAGENT_PWD_FILE\" 2>/dev/null; fi' EXIT\n"
-	if raw, err := os.ReadFile(path); err == nil && string(raw) == script {
-		return path
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return ""
-	}
-	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
-		return ""
-	}
-	return path
-}
+// projectName is the project directory's own name.
+func (r *Runtime) projectName() string { return filepath.Base(r.projectPath()) }
 
+// projectPath is the absolute project directory.
 func (r *Runtime) projectPath() string {
 	abs, err := filepath.Abs(r.opts.Project)
 	if err != nil {
 		return r.opts.Project
 	}
 	return abs
+}
+
+// sameDir reports whether two paths name the same directory.
+func sameDir(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
 }

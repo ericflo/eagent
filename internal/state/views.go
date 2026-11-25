@@ -376,7 +376,7 @@ func (s *State) notice(ev event.Event, opts ViewOptions) string {
 	case event.Dossier:
 		var d event.DossierData
 		_ = ev.Decode(&d)
-		return "[Briefing. Your conversation grew long and was restarted here. This is what you wrote down about the session before the restart, followed by the facts eagent keeps itself. Read it and carry on as if nothing had happened; session_read opens any file:line it cites.]\n\n" + d.Text
+		return "[Briefing. Your conversation grew long and was restarted here. This is what you wrote before the restart: where the session stands, and a MAP of where in the record each topic can be read, followed by the facts eagent keeps itself. Carry on as if nothing had happened. The briefing is a summary and the record is the source: when the detail matters, or the user comes back to something it only touches, read the places it cites with session_read (file:line) and find the rest with session_search.]\n\n" + d.Text
 	case event.Steer:
 		if ev.Actor != event.ActorEagent {
 			return ""
@@ -391,6 +391,15 @@ func (s *State) notice(ev event.Event, opts ViewOptions) string {
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
 		return d.Text
+	case event.Message:
+		// A reply of eagent's own carries what it said. Only words the
+		// harness said for it need a line.
+		var d event.MessageData
+		_ = ev.Decode(&d)
+		if !d.Auto {
+			return ""
+		}
+		return fmt.Sprintf("[%s eagent told the user this itself, without asking you:]\n%s", s.clock(ev.Time), clip(d.Text, opts.RemarkChars))
 	case event.UserMessage:
 		var d event.UserMessageData
 		_ = ev.Decode(&d)

@@ -158,7 +158,7 @@ func (r *Runtime) startPhone() {
 			}
 		}
 	}
-	project, workDir := r.projectPath(), r.workDir("")
+	project, workDir := r.projectPath(), r.workDir()
 	host, _ := os.Hostname()
 	meta := routeMeta(r)
 	meta["project"], meta["cwd"], meta["host"] = project, workDir, host
@@ -325,13 +325,13 @@ func (p *phone) close(reason string) {
 
 func boolPtr(b bool) *bool { return &b }
 
-// routeMeta is the thread's model chip: the orchestrator's model in use,
-// after any fallback. Every actor's route is in the session's settings, not
-// the thread header; the per-actor keys earlier builds set are cleared.
+// routeMeta is the thread's model chip: the model eagent runs on, after
+// any fallback. The routes are in the session's settings, not the thread
+// header; the per-actor keys earlier builds set are cleared.
 // It reads session state, so it runs on the loop goroutine, never inside an
 // enqueued phone call.
 func routeMeta(r *Runtime) map[string]any {
-	return map[string]any{"model": r.st.Models[event.ActorOrchestrator], "models": nil, "hosts": nil, "efforts": nil, "config": nil}
+	return map[string]any{"model": r.st.Models[event.ActorEagent], "models": nil, "hosts": nil, "efforts": nil, "config": nil}
 }
 
 // gitBranch names the checked-out branch of a project, or "" when it is not
@@ -356,9 +356,7 @@ func gitBranch(ctx context.Context, project string) string {
 // observe mirrors a newly recorded event. Loop goroutine only.
 func (p *phone) observe(r *Runtime, ev event.Event) {
 	p.noteState(r)
-	if r.st.RelayMode() {
-		p.observeRelay(r, ev)
-	}
+	p.observeRelay(r, ev)
 	seq := strconv.FormatInt(ev.Seq, 10)
 	switch ev.Type {
 	case event.Message:
@@ -371,9 +369,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		text, atts := d.Text, d.Attachments
 		p.enqueue(func(ctx context.Context) {
 			// The status the work is in right now rides on the message, so
-			// it does not blink off while the orchestrator keeps going.
+			// it does not blink off while the agent keeps going.
 			act := p.attach()
-			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "narrator", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
+			req := finalechat.PostRequest{Body: text, Importance: importance, Meta: map[string]any{"eagent": "message", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, Files: attachmentFiles(atts), ClientKey: p.key("m", seq), Activity: act}
 			msg, thread, err := p.client.Post(ctx, p.ref, req)
 			if err != nil && len(req.Files) > 0 {
 				// The files may be refused (storage off, too large); the words still matter.
@@ -392,9 +390,6 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		_ = ev.Decode(&d)
 		p.ask(r, d.ID, d.Text, d.Options)
 	case event.CwdChange:
-		if ev.Actor != event.ActorOrchestrator || ev.Task != "" {
-			return
-		}
 		var d event.CwdChangeData
 		_ = ev.Decode(&d)
 		dir := d.Path

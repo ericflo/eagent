@@ -154,6 +154,29 @@ func Summarize(ev event.Event, max int) string {
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
 		body = d.Text
+	case event.Steer:
+		var d event.SteerData
+		_ = ev.Decode(&d)
+		body = d.Text
+	case event.RelayTurn:
+		var d event.RelayTurnData
+		_ = ev.Decode(&d)
+		body = d.Name + " finished a turn: " + d.Text
+	case event.RelayProgress:
+		var d event.RelayProgressData
+		_ = ev.Decode(&d)
+		body = d.Name + " said: " + d.Text
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		body = fmt.Sprintf("to %s from %s (%s, %s): %s", d.Name, d.From, d.ID, d.Mode, d.Text)
+	case event.RelayState:
+		var d event.RelayStateData
+		_ = ev.Decode(&d)
+		body = d.Name + " " + d.State
+		if d.Detail != "" {
+			body += ": " + d.Detail
+		}
 	default:
 		body = string(ev.Data)
 	}

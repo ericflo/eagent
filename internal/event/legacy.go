@@ -37,3 +37,9 @@ type LegacyYieldData struct {
 	Done   bool   `json:"done"`
 	Reason string `json:"reason,omitempty"`
 }
+
+// IsLegacy reports an event written by one of the three-actor design's
+// actors.
+func IsLegacy(ev Event) bool {
+	return ev.Actor == LegacyOrchestrator || ev.Actor == LegacyTask || ev.Actor == LegacyNarrator
+}

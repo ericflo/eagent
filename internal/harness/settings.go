@@ -91,10 +91,10 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	if ev.Seq <= previousSeq || ev.Seq != r.st.LastSeq() {
 		return fmt.Errorf("the settings event was not durably recorded")
 	}
-	changedTimer := r.activeSettings.NarratorTickSeconds != values.NarratorTickSeconds
+	changedTimer := r.activeSettings.TickSeconds != values.TickSeconds
 	r.activeSettings = values
 	if changedTimer {
-		r.armNarratorTimer()
+		r.armTicker()
 	}
 	for _, sw := range swaps {
 		r.swapRoute(sw)
@@ -108,75 +108,65 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 		r.ui.Log("relay %s: %s", name, msg)
 		// Said in the conversation too, as /model says it: a change made in
 		// the app's settings is otherwise silent until the agent restarts.
-		go r.deliverMessage(msg, false)
+		go r.tell(msg, false)
 	}
 	return nil
 }
 
-// routeSwap is one actor's new route list, resolved from a settings pick.
+// routeSwap is one model's new route list, resolved from a settings pick.
 type routeSwap struct {
-	actor string
-	pick  runtimecontrol.Route
-	eps   []llm.Endpoint
+	who  string
+	pick runtimecontrol.Route
+	eps  []llm.Endpoint
 }
 
-// routeChanges resolves the actors whose pick changed. An actor whose pick
-// did not change keeps its routes, including a fallback it switched to. A
-// changed pick starts from the configured actor (see config.PickRoute:
+// routeChanges resolves the models whose pick changed. One whose pick did
+// not change keeps its routes, including a fallback it switched to. A
+// changed pick starts from the configured route (see config.PickRoute:
 // limits stay, another model drops the old model's fallback chain).
 func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([]routeSwap, error) {
 	var out []routeSwap
-	for _, actor := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		pick, ok := after[actor]
-		if !ok || pick == before[actor] || pick.Provider == "" || pick.Model == "" {
+	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
+		pick, ok := after[who]
+		if !ok || pick == before[who] || pick.Provider == "" || pick.Model == "" || r.models[who] == nil {
 			continue
 		}
-		a, err := config.PickRoute(r.opts.Project, r.configActor(actor), pick.Provider, pick.Model, pick.Effort)
+		a, err := config.PickRoute(r.opts.Project, r.configRoute(who), pick.Provider, pick.Model, pick.Effort)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, fmt.Errorf("%s: %w", who, err)
 		}
 		// The picked route itself must be usable (its key set); fallbacks
 		// without a key are skipped as usual.
 		if _, err := a.Endpoint(); err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, fmt.Errorf("%s: %w", who, err)
 		}
 		eps, err := a.Routes()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, fmt.Errorf("%s: %w", who, err)
 		}
-		out = append(out, routeSwap{actor: actor, pick: pick, eps: eps})
+		out = append(out, routeSwap{who: who, pick: pick, eps: eps})
 	}
 	return out, nil
 }
 
-// configActor is the configured actor for a role.
-func (r *Runtime) configActor(actor string) config.Actor {
-	switch actor {
-	case event.ActorTask:
-		return r.cfg.Task
-	case event.ActorNarrator:
-		return r.cfg.Narrator
-	default:
-		return r.cfg.Orchestrator
+// configRoute is the configured route of one of the session's models.
+func (r *Runtime) configRoute(who string) config.ModelRoute {
+	if who == runtimecontrol.RouteSummarizer {
+		return r.cfg.Summarizer.Route(r.cfg.Model)
 	}
+	return r.cfg.Model
 }
 
-// swapRoute installs a resolved route between turns (the control poll runs
-// on the loop goroutine) and records it; the Route event also refreshes the
-// phone's model chip.
+// swapRoute installs a resolved route between calls (the control poll runs
+// on the loop goroutine; a call in flight finishes on the route it started
+// with) and records it; the Route event also refreshes the phone's model
+// chip. A new model has no cache of the conversation, so its first call
+// pays for the whole prompt once.
 func (r *Runtime) swapRoute(sw routeSwap) {
-	nc := r.newClient(sw.eps[0], sw.actor)
-	switch sw.actor {
-	case event.ActorTask:
-		r.taskRoutes, r.taskClient = sw.eps, nc
-	case event.ActorNarrator:
-		r.narrRoutes, r.narrClient = sw.eps, nc
-	default:
-		r.orchRoutes, r.orchClient = sw.eps, nc
-	}
+	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who)}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-		Actor: sw.actor, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
+		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),
 	}))
-	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.actor, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
+	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.who, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
 }

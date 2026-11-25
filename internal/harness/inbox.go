@@ -105,7 +105,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		}
 		if text != "" || len(msg.Attachments) > 0 { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments}))
+			r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments})
 		}
 	case "dismiss":
 		r.dismissQuestion(msg.QuestionID, msg.From)
@@ -120,7 +120,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		if msg.Route != "" || msg.Delivery != "" || msg.PhoneID != "" {
 			if q := r.st.Question; q == nil {
 				r.ui.Idle(false)
-				r.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery, PhoneID: msg.PhoneID}))
+				r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery, PhoneID: msg.PhoneID})
 				return
 			}
 		}

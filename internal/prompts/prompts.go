@@ -101,6 +101,15 @@ type EagentData struct {
 
 // DossierData feeds DOSSIER.md.
 type DossierData struct {
+	// Files is the table of the session's record files, oldest first.
+	Files string
+	// Index lists what happened since the last dossier, one line per event
+	// with its file:line.
+	Index string
+	// Fresh says the model no longer has the conversation in front of it
+	// (the provider refused it as too long) and writes from the files.
+	Fresh bool
+	// Reason is why the restart is happening ("" when it is only size).
 	Reason string
 }
 

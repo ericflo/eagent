@@ -78,11 +78,9 @@ type commandJournal struct {
 }
 
 type sessionStartIntent struct {
-	Prompt string               `json:"prompt"`
-	Dir    string               `json:"dir,omitempty"`
-	Relay  string               `json:"relay,omitempty"`
-	Config string               `json:"config,omitempty"`
-	Routes map[string]RoutePick `json:"routes,omitempty"`
+	Prompt string `json:"prompt"`
+	Dir    string `json:"dir,omitempty"`
+	Relay  string `json:"relay,omitempty"`
 	// RelayModel and RelayEffort are the relayed agent's picks.
 	RelayModel  string `json:"relay_model,omitempty"`
 	RelayEffort string `json:"relay_effort,omitempty"`
@@ -733,11 +731,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 				prepareErr = fmt.Errorf("the first message is required")
 			} else if err := checkStartDir(dir); err != nil {
 				prepareErr = err
-			} else if cfgName, picks, err := startPicks(s.Project, q.Proposal.Parameters); err != nil {
-				prepareErr = err
 			} else {
 				model, effort := RelayPicks(q.Proposal.Parameters, relayProfile)
-				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir, Relay: relayProfile, Config: cfgName, Routes: picks, RelayModel: model, RelayEffort: effort}
+				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir, Relay: relayProfile, RelayModel: model, RelayEffort: effort}
 			}
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
@@ -807,7 +803,7 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		// Starting a session must not hold the settings writer: the new
 		// session reads the configuration through the same lock.
 		editor.Close()
-		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir, Relay: journal.Session.Relay, RelayModel: journal.Session.RelayModel, RelayEffort: journal.Session.RelayEffort, Config: journal.Session.Config, Routes: journal.Session.Routes})
+		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir, Relay: journal.Session.Relay, RelayModel: journal.Session.RelayModel, RelayEffort: journal.Session.RelayEffort})
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish("unknown", map[string]any{"message": "Starting the session was interrupted. It was not repeated; check the session list."})

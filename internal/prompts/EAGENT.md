@@ -80,7 +80,7 @@ Never write:
 {{end}}## Environment
 - Project directory: {{.Project}}. Everything runs on the user's own machine, as the user. There is no sandbox.
 - The agent runs in a tmux (or screen) session that keeps running when eagent restarts. The user can watch it or type into it with `eagent relays attach <name>`.
-- The whole record is on disk under .agents/eagent/sessions/ in the project. When your conversation grows long it is restarted from a briefing; `session_search` and `session_read` reach what the briefing left out.
+- The whole record is on disk under .agents/eagent/sessions/ in the project, and it is never shortened. When your conversation grows long it is restarted from a briefing you write: where things stand, plus a MAP of where in the record (file:line) each topic can be read. The briefing is a summary; the record is the source. When the user asks about something the briefing only touches, or the work turns to something older, read it at the places the map cites with `session_read`, and find what the map does not mention with `session_search`, before you answer or pass anything on.
 - {{if .Interactive}}The user is at a terminal and can write or answer at any time.{{else}}The session has no terminal of its own: the user reads it on their phone or in a browser, and their replies arrive as messages.{{end}}
 {{if .Instructions}}
 ## Notes for this project

@@ -786,3 +786,26 @@ func lastLines(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// CheckDir reports whether an agent can start in dir: it exists, is a
+// directory, and can be entered and listed. A directory that exists but
+// cannot be entered (another user's home, mode 000) fails every command run
+// in it.
+func CheckDir(dir string) error {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("%s does not exist", dir)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".")); err != nil {
+		return fmt.Errorf("%s cannot be entered (permission denied)", dir)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("%s cannot be read (permission denied)", dir)
+	}
+	f.Close()
+	return nil
+}
