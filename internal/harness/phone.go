@@ -70,6 +70,11 @@ type phone struct {
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
 	threadID   string
 	threadSeen bool
+	// resumedBy is the thread message that resumed the session, and
+	// fallback the session's own first post: the reply poll reads on from
+	// the first, so what the user sent while the session was coming back
+	// is read too; from the second if the server does not know the first.
+	resumedBy, fallback string
 }
 
 // startPhone wires the mirror up if a token is available and it is not
@@ -234,6 +239,14 @@ func (r *Runtime) startPhone() {
 		p.mu.Lock()
 		p.posted[msg.ID] = true
 		p.lastID = msg.ID
+		if by := r.opts.PromptPhoneID; resumed && by != "" {
+			// A message the user sent after the one that resumed the session
+			// and before this post was left by the reply watcher to this
+			// mirror (the session was running by then): read on from the
+			// message that resumed it, which itself is not taken again.
+			p.lastID, p.resumedBy, p.fallback = by, by, msg.ID
+			p.posted[by] = true
+		}
 		p.threadID = thread.ID
 		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
 			p.mirror1(promptSeq, msg.ID) // so that its receipt has a message to sit under
@@ -246,7 +259,9 @@ func (r *Runtime) startPhone() {
 			if err == nil {
 				p.mu.Lock()
 				p.posted[m2.ID] = true
-				p.lastID = m2.ID
+				if p.resumedBy == "" {
+					p.lastID = m2.ID
+				}
 				if promptSeq > 0 {
 					p.mirror1(promptSeq, m2.ID)
 				}
@@ -291,6 +306,37 @@ func (r *Runtime) startPhone() {
 			}
 		}
 	}
+}
+
+// withdrawAnswered closes the phone cards of questions that evs (what the
+// message that resumed the session recorded) answered: the cards were
+// posted by an earlier run, so this one does not know them except from
+// the record. Loop goroutine.
+func (p *phone) withdrawAnswered(r *Runtime, evs []event.Event) {
+	var cards []string
+	for _, ev := range evs {
+		if ev.Type != event.UserAnswer {
+			continue
+		}
+		var d event.UserAnswerData
+		if ev.Decode(&d) != nil {
+			continue
+		}
+		for _, q := range r.st.Events {
+			var c event.PhoneQuestionData
+			if q.Type == event.PhoneQuestion && q.Decode(&c) == nil && c.QuestionID == d.QuestionID && c.CardID != "" {
+				cards = append(cards, c.CardID)
+			}
+		}
+	}
+	if len(cards) == 0 {
+		return
+	}
+	p.enqueue(func(ctx context.Context) {
+		for _, fid := range cards {
+			_ = p.client.Cancel(ctx, fid) // already resolved is fine
+		}
+	})
 }
 
 // mirror1 notes the thread message that shows a user message of the
@@ -710,6 +756,22 @@ func (p *phone) poll(r *Runtime) {
 		p.mu.Unlock()
 		start := time.Now()
 		msgs, _, anchorUnknown, err := p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		p.mu.Lock()
+		resumedBy, fallback := p.resumedBy, p.fallback
+		p.mu.Unlock()
+		if err == nil && anchorUnknown && after != "" && after == resumedBy {
+			// The message that resumed the session is not in the thread the
+			// server has (it was taken back, or the thread was recreated):
+			// read on from the session's own first post instead of from the
+			// thread's start, which would take old messages again.
+			p.mu.Lock()
+			if p.lastID == after {
+				p.lastID = fallback
+			}
+			p.resumedBy = ""
+			p.mu.Unlock()
+			continue
+		}
 		if anchorUnknown && !saidRecreated {
 			// The thread was deleted from the app and recreated under the same
 			// id; the page restarts from its first message, and our own posts
@@ -805,6 +867,15 @@ func (p *phone) poll(r *Runtime) {
 			})
 		}
 	}
+}
+
+// FromPhone reads what the app says about a message the user sent from the
+// phone, in its meta: the composer's route and delivery, and the client's
+// capabilities. A process that resumes a session with such a message
+// passes them on (Options.PromptRoute, PromptDelivery, PromptClient).
+func FromPhone(meta map[string]any) (route, delivery string, client *clientcaps.Caps) {
+	route, delivery = routeFromMeta(meta)
+	return route, delivery, capsFromMeta(meta)
 }
 
 // routeFromMeta reads a relay session's composer choices from a phone

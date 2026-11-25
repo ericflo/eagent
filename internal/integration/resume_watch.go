@@ -188,7 +188,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		w.logf("finalechat: reply to session %s left to its running mirror", sid)
 		return
 	}
-	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body)}
+	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
 		if err != nil {
@@ -354,7 +354,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	if !ok || !last.CreatedAt.After(info.Modified) {
 		return PhoneMessage{}, false, nil
 	}
-	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body)}
+	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
 		if err != nil {
@@ -367,6 +367,10 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 
 var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+// unsafeAttachmentID is what may not stay of a server's attachment id in a
+// file name: anything but letters, digits and dashes (an id is a uuid).
+var unsafeAttachmentID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
+
 // saveAttachment downloads a phone attachment under the session directory,
 // named the way the running mirror names them.
 func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath string, a finalechat.Attachment) (event.Attachment, error) {
@@ -374,7 +378,9 @@ func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
-	short := a.ID
+	// Both come from the server: neither may bring a "/" or ".." into the
+	// path.
+	short := unsafeAttachmentID.ReplaceAllString(a.ID, "_")
 	if len(short) > 8 {
 		short = short[:8]
 	}

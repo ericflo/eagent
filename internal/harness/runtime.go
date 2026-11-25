@@ -182,6 +182,8 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 	}
 	r.startFirstRelay()
 	if strings.TrimSpace(opts.Prompt) != "" || len(opts.PromptAttachments) > 0 {
+		// Before the mirror exists: the thread opens with these words as
+		// the user's (startPhone), and its receipt is set from the record.
 		r.userMessage(event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
 	}
 	r.startPhone()
@@ -293,19 +295,21 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			r.userMessage(event.UserMessageData{Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
 		}
 	}
-	if text := strings.TrimSpace(opts.Prompt); text != "" || len(opts.PromptAttachments) > 0 {
-		if q := st.Question; q != nil {
-			// The natural reply to a session that stopped on a question is
-			// the answer, exactly as it would be from the terminal or the web.
-			if n := optionIndex(text, q.Options); n >= 0 {
-				text = q.Options[n]
-			}
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
-		} else {
-			r.userMessage(event.UserMessageData{Text: opts.Prompt, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments})
+	r.startPhone()
+	if strings.TrimSpace(opts.Prompt) != "" || len(opts.PromptAttachments) > 0 {
+		// The message the session is resumed with is taken exactly as a
+		// running session takes one from the same place: through the inbox's
+		// intake, so a slash command runs as a command (never typed into the
+		// agent), the app's route and delivery and the message's id are kept,
+		// and a session that stopped on a question takes it as the answer.
+		// It comes after the mirror starts, so what it does reaches the phone
+		// (a screen, a receipt) as it would while running.
+		from := len(r.st.Events)
+		r.handleInbox(InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID})
+		if r.phone != nil {
+			r.phone.withdrawAnswered(r, r.st.Events[from:])
 		}
 	}
-	r.startPhone()
 	r.renderSystem()
 	return r, nil
 }
