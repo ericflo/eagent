@@ -1,12 +1,17 @@
 package tools
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -29,33 +34,41 @@ func (a Archive) Read(file string, from, to int, raw bool, offset, maxChars int)
 	if strings.ContainsAny(file, "/\\") || !strings.HasSuffix(file, ".jsonl") {
 		return "", fmt.Errorf("file must be one of the session's record files, named like 1788740857293.jsonl")
 	}
-	evs, err := store.ReadFile(filepath.Join(a.Path, file))
-	if err != nil {
-		return "", err
-	}
 	if from < 1 {
 		from = 1
 	}
 	if to < from {
 		to = from + 39
 	}
-	if to > len(evs) {
-		to = len(evs)
+	evs, last, err := readLines(filepath.Join(a.Path, file), from, to)
+	if err != nil {
+		return "", err
 	}
-	if from > len(evs) {
-		return fmt.Sprintf("%s has only %d lines", file, len(evs)), nil
+	if from > last {
+		return fmt.Sprintf("%s has only %d lines", file, last), nil
 	}
 	if offset >= 0 {
-		return readPiece(file, evs[from-1], raw, offset, maxChars), nil
+		if len(evs) == 0 || evs[0].Source.Line != from {
+			return fmt.Sprintf("%s:%d is a blank line; there is nothing in it to read\n", file, from), nil
+		}
+		return readPiece(file, evs[0], raw, offset, maxChars), nil
+	}
+	if len(evs) == 0 {
+		return fmt.Sprintf("%s:%d to %d are blank lines\n", file, from, min(to, last)), nil
+	}
+	rawArg := ""
+	if raw {
+		rawArg = " raw=true"
 	}
 	var b strings.Builder
-	for _, ev := range evs[from-1 : to] {
+	for _, ev := range evs {
 		var entry string
 		if raw {
 			entry = fmt.Sprintf("%s:%d %s\n", file, ev.Source.Line, wholeLine(ev, true))
 		} else {
-			entry = fmt.Sprintf("%s:%d %s", file, ev.Source.Line, Summarize(ev, 400))
-			if len(Summarize(ev, 0)) > 400 {
+			head, body := summaryParts(ev)
+			entry = fmt.Sprintf("%s:%d %s", file, ev.Source.Line, shorten(head, body, 400))
+			if len(body) > 400 {
 				entry += fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", ev.Source.Line)
 			}
 			entry += "\n"
@@ -66,7 +79,7 @@ func (a Archive) Read(file string, from, to int, raw bool, offset, maxChars int)
 		}
 		if b.Len() > 0 {
 			// The next line is read whole by the next call.
-			fmt.Fprintf(&b, "[... output limit reached before line %d of %d; call again with from=%d ...]\n", ev.Source.Line, len(evs), ev.Source.Line)
+			fmt.Fprintf(&b, "[... output limit reached before line %d of %d; call again with from=%d%s ...]\n", ev.Source.Line, last, ev.Source.Line, rawArg)
 			break
 		}
 		// One line longer than a whole result: its first piece.
@@ -74,6 +87,86 @@ func (a Archive) Read(file string, from, to int, raw bool, offset, maxChars int)
 		break
 	}
 	return b.String(), nil
+}
+
+// readLines parses the events on lines from..to of one record file, each
+// with the line it sits on (a blank line is counted and holds no event, as
+// store.ReadFile does), and counts the file's committed lines. Only the
+// lines asked for are parsed: a long session is read in pages, and each
+// page would otherwise parse the whole file again.
+func readLines(path string, from, to int) ([]event.Event, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	name := filepath.Base(path)
+	r := bufio.NewReaderSize(f, 1<<20)
+	var evs []event.Event
+	line := 0
+	for line < to {
+		if line+1 < from {
+			// Skip a line before the range without keeping it.
+			done, err := skipLine(r)
+			if err != nil {
+				return nil, 0, err
+			}
+			if !done {
+				return evs, line, nil // the uncommitted tail, or the end
+			}
+			line++
+			continue
+		}
+		raw, err := r.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			// An uncommitted tail is not a line yet.
+			return evs, line, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		line++
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 {
+			continue
+		}
+		var ev event.Event
+		if jerr := json.Unmarshal(trimmed, &ev); jerr != nil {
+			return nil, 0, fmt.Errorf("%s:%d: corrupt event: %w", name, line, jerr)
+		}
+		ev.Source = event.Source{File: name, Line: line}
+		evs = append(evs, ev)
+	}
+	// The lines after the range are only counted.
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := r.Read(buf)
+		line += bytes.Count(buf[:n], []byte{'\n'})
+		if errors.Is(err, io.EOF) {
+			return evs, line, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+}
+
+// skipLine reads past one newline-terminated line; done is false when the
+// file ends first.
+func skipLine(r *bufio.Reader) (done bool, err error) {
+	for {
+		_, err := r.ReadSlice('\n')
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return false, nil
+		default:
+			return false, err
+		}
+	}
 }
 
 // wholeLine is one event as session_read renders it whole: its JSON, or
@@ -123,7 +216,12 @@ func readPiece(file string, ev event.Event, raw bool, offset, maxChars int) stri
 // MaxSearchResults is the most one search returns, whatever was asked for.
 const MaxSearchResults = 200
 
-// Search finds events whose rendered form contains query (case-insensitive).
+// Search finds events whose text contains query, ignoring case and
+// treating any run of spaces and line breaks as one space. The text is what
+// a person reads in the event: its fields decoded from JSON, without the
+// provider's replay payload, so "a && b", "<div>" or a path with
+// backslashes match, and a short word does not match inside signed or
+// encrypted reasoning.
 func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	if strings.TrimSpace(query) == "" {
 		return "", fmt.Errorf("query is required")
@@ -138,8 +236,7 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	// A result is a line of up to 300 characters, and the whole list goes
 	// into a prompt.
 	maxResults = min(maxResults, MaxSearchResults)
-	q := strings.ToLower(query)
-	match := regexp.MustCompile("(?i)" + regexp.QuoteMeta(query))
+	m := newMatcher(query)
 	var b strings.Builder
 	n := 0
 	for _, e := range entries {
@@ -152,11 +249,12 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 			continue
 		}
 		for _, ev := range evs {
-			hay := strings.ToLower(string(ev.Data) + " " + ev.Type + " " + ev.Actor)
-			if !strings.Contains(hay, q) {
+			if !m.mayMatch(ev) || !strings.Contains(searchText(ev), m.text) {
 				continue
 			}
-			fmt.Fprintf(&b, "%s:%d %s%s\n", name, ev.Source.Line, Summarize(ev, 300), matchAt(ev, match))
+			head, body := summaryParts(ev)
+			shown := shorten(head, body, 300)
+			fmt.Fprintf(&b, "%s:%d %s%s\n", name, ev.Source.Line, shown, m.place(ev, shown, len(body) > 300))
 			n++
 			if n >= maxResults {
 				fmt.Fprintf(&b, "[... %d results shown; narrow the query or set a file ...]\n", n)
@@ -170,39 +268,245 @@ func (a Archive) Search(query, file string, maxResults int) (string, error) {
 	return b.String(), nil
 }
 
-// matchAt says, for a hit the result line shortens, where in the line the
-// match is and what session_read takes to show it: "" for a short line.
-func matchAt(ev event.Event, match *regexp.Regexp) string {
-	whole, line := Summarize(ev, 0), ev.Source.Line
-	if len(whole) <= 300 {
+// matcher is one search query: the text it matches, and patterns that
+// find it in the two forms session_read shows.
+type matcher struct {
+	text string // lower case, spaces collapsed
+	// readable finds the query in the readable form, where a line break is
+	// shown as ⏎; escaped finds it as JSON writes it (\u003c for <, \\ for
+	// a backslash), in the raw form and in tool arguments.
+	readable, escaped *regexp.Regexp
+	// must are the query's words JSON writes as they are; an event whose
+	// JSON lacks one cannot match, and is passed over without decoding it.
+	must []string
+}
+
+func newMatcher(query string) matcher {
+	words := strings.Fields(query)
+	plain := make([]string, len(words))
+	esc := make([]string, len(words))
+	var must []string
+	for i, w := range words {
+		if verbatimInJSON(w) {
+			must = append(must, strings.ToLower(w))
+		}
+		plain[i] = regexp.QuoteMeta(w)
+		j, _ := json.Marshal(w)
+		esc[i] = regexp.QuoteMeta(string(j[1 : len(j)-1]))
+	}
+	// Between words: spaces, the ⏎ mark, or a JSON-escaped break.
+	const gap = `(?:\s|⏎|\\[nrt])+`
+	return matcher{
+		text:     searchFold(query),
+		readable: regexp.MustCompile("(?i)" + strings.Join(plain, gap)),
+		escaped:  regexp.MustCompile("(?i)" + strings.Join(esc, gap)),
+		must:     must,
+	}
+}
+
+// verbatimInJSON reports whether any JSON encoder writes w as it is: plain
+// ASCII with nothing an encoder escapes (Go escapes <, > and &; some
+// encoders escape /).
+func verbatimInJSON(w string) bool {
+	for i := 0; i < len(w); i++ {
+		c := w[i]
+		if c < 0x20 || c >= 0x7f || strings.IndexByte(`<>&"\\/`, c) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// mayMatch is the quick test before an event is decoded for a search.
+func (m matcher) mayMatch(ev event.Event) bool {
+	if len(m.must) == 0 || legacyTypes[ev.Type] {
+		// A legacy event's readable form has words of its own.
+		return true
+	}
+	hay := strings.ToLower(string(ev.Data) + "\x00" + ev.Type + "\x00" + ev.Actor + "\x00" + ev.Task)
+	for _, w := range m.must {
+		if !strings.Contains(hay, w) {
+			return false
+		}
+	}
+	return true
+}
+
+var legacyTypes = map[string]bool{
+	event.LegacyTaskCreate: true, event.LegacyTaskStart: true, event.LegacyTaskEnd: true,
+	event.LegacyNote: true, event.LegacyYield: true, event.LegacyProcStart: true,
+	event.LegacyProcPID: true, event.LegacyProcExit: true, event.LegacyNarratorTrim: true,
+}
+
+// place says, for a hit whose match the result line does not show (it was
+// shortened, or the match is in a field the line leaves out), where in the
+// event the match is and what session_read takes to show it.
+func (m matcher) place(ev event.Event, shown string, shortened bool) string {
+	line := ev.Source.Line
+	if !shortened && (m.readable.MatchString(shown) || m.escaped.MatchString(shown)) {
 		return ""
+	}
+	note := ""
+	if shortened {
+		note = "shortened; "
 	}
 	for _, raw := range []bool{false, true} {
 		text := wholeLine(ev, raw)
-		if loc := match.FindStringIndex(text); loc != nil {
-			// A little before the match, so it is read in context.
-			at := max(0, loc[0]-200)
-			for at > 0 && !utf8.RuneStart(text[at]) {
-				at--
+		skipFrom, skipTo := -1, -1
+		if raw {
+			skipFrom, skipTo = nativeSpan(text)
+		}
+		at := -1
+		for _, re := range []*regexp.Regexp{m.readable, m.escaped} {
+			for _, loc := range re.FindAllStringIndex(text, -1) {
+				if loc[0] >= skipFrom && loc[0] < skipTo {
+					continue // inside the provider's replay payload
+				}
+				if at < 0 || loc[0] < at {
+					at = loc[0]
+				}
+				break
 			}
-			rawArg := ""
-			if raw {
-				rawArg = " raw=true"
-			}
-			return fmt.Sprintf(" [shortened; the match is read with from=%d offset=%d%s]", line, at, rawArg)
+		}
+		if at < 0 {
+			continue
+		}
+		// A little before the match, so it is read in context.
+		at = max(0, at-200)
+		for at > 0 && !utf8.RuneStart(text[at]) {
+			at--
+		}
+		rawArg := ""
+		if raw {
+			rawArg = " raw=true"
+		}
+		return fmt.Sprintf(" [%sthe match is read with from=%d offset=%d%s]", note, line, at, rawArg)
+	}
+	if shortened {
+		return fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", line)
+	}
+	return ""
+}
+
+// searchText is the text a query is matched against: the event's type,
+// actor and task, its readable form, and every string in its data decoded,
+// except the provider's replay payload (an assistant event's native).
+// Fields are kept apart, so a phrase does not match across two of them.
+func searchText(ev event.Event) string {
+	parts := []string{ev.Type, ev.Actor, ev.Task}
+	if b, ok := summarizeLegacy(ev); ok {
+		parts = append(parts, b)
+	}
+	var data any
+	dec := json.NewDecoder(bytes.NewReader(ev.Data))
+	dec.UseNumber()
+	if len(ev.Data) > 0 && dec.Decode(&data) == nil {
+		if obj, ok := data.(map[string]any); ok && ev.Type == event.Assistant {
+			delete(obj, "native")
+		}
+		parts = appendStrings(parts, data)
+	}
+	return searchFold(strings.Join(parts, "\x00"))
+}
+
+func appendStrings(parts []string, v any) []string {
+	switch x := v.(type) {
+	case string:
+		parts = append(parts, x)
+	case map[string]any:
+		for _, e := range x {
+			parts = appendStrings(parts, e)
+		}
+	case []any:
+		for _, e := range x {
+			parts = appendStrings(parts, e)
 		}
 	}
-	return fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", line)
+	return parts
+}
+
+// searchFold lower-cases s and makes every run of white space one space.
+func searchFold(s string) string {
+	var b strings.Builder
+	space := false
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsSpace(r) {
+			space = true
+			continue
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// nativeSpan is where an event's data.native value sits in its JSON line,
+// or -1, -1 when it has none.
+func nativeSpan(line string) (int, int) {
+	dec := json.NewDecoder(strings.NewReader(line))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return -1, -1
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return -1, -1
+		}
+		if k != "data" {
+			var skip json.RawMessage
+			if dec.Decode(&skip) != nil {
+				return -1, -1
+			}
+			continue
+		}
+		if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+			return -1, -1
+		}
+		for dec.More() {
+			k, err := dec.Token()
+			if err != nil {
+				return -1, -1
+			}
+			start := dec.InputOffset()
+			var v json.RawMessage
+			if dec.Decode(&v) != nil {
+				return -1, -1
+			}
+			if k == "native" {
+				return int(start), int(dec.InputOffset())
+			}
+		}
+		return -1, -1
+	}
+	return -1, -1
 }
 
 // Summarize renders one event as a compact human-readable line.
 func Summarize(ev event.Event, max int) string {
+	head, body := summaryParts(ev)
+	return shorten(head, body, max)
+}
+
+// shorten puts a summary's parts together with the body cut to about max
+// (0 for whole).
+func shorten(head, body string, max int) string {
+	if max > 0 && len(body) > max {
+		body = oneLine(Truncate(body, max))
+	}
+	return head + body
+}
+
+// summaryParts splits Summarize's line into its "time type actor: " head
+// and its one-line body, which alone is shortened.
+func summaryParts(ev event.Event) (head, body string) {
 	ts := ev.Time.Format("15:04:05")
 	who := ev.Actor
 	if ev.Task != "" {
 		who += "(" + ev.Task + ")"
 	}
-	body := ""
 	switch ev.Type {
 	case event.UserMessage:
 		var d event.UserMessageData
@@ -280,12 +584,7 @@ func Summarize(ev event.Event, max int) string {
 			body = string(ev.Data)
 		}
 	}
-	body = oneLine(body)
-	if max > 0 && len(body) > max {
-		body = Truncate(body, max)
-		body = oneLine(body)
-	}
-	return fmt.Sprintf("%s %s %s: %s", ts, ev.Type, who, body)
+	return fmt.Sprintf("%s %s %s: ", ts, ev.Type, who), oneLine(body)
 }
 
 // The data of event types only logs from before eagent was one loop hold,

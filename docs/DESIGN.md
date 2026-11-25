@@ -39,7 +39,7 @@ Routing is code, and it happens before any model call (`routeUserMessage` in `re
 | Starts with `@e`, or the client marked it for eagent | Kept for the model. |
 | Asks about the session ("how's it going?", "is it stuck?") | Kept for the model, which answers from the record and the screen without disturbing the agent. |
 | No agent is running, or more than one is | Kept for the model, which starts one or picks one and passes the message on with `relay_forward`. |
-| A slash command (`/screen`, `/model`, `/restart`, `/switch`, `/autopilot`, `/interrupt`, `/notify-done`, `/stop-relay`, `/schedules`, `/status`, `/dismiss`) | Carried out by the harness. No model call. |
+| A slash command (`/screen`, `/model`, `/restart`, `/switch`, `/autopilot`, `/interrupt`, `/notify-done`, `/stop-relay`, `/schedules`, `/status`, `/dismiss`) | Carried out by the harness. No model call. From the phone or the web, while an agent runs, `/status` and `/schedules` (and `/help`) go to the agent instead, since eagent's own output for them shows only in its terminal. While an agent runs, `/dismiss` with no question of eagent's open goes to the agent too. |
 
 So the agent hears the user even while eagent's own model is slow or unreachable. Each message gets a delivery receipt when the agent's transcript shows it arrived.
 
@@ -101,7 +101,7 @@ A progress look where nothing is worth saying therefore costs a cached read of t
 | `schedule`, `cancel_schedule` | A timer that wakes eagent later with a note to itself. A session with a timer set stays alive. |
 | `view_image` | Look at a picture the agent made or the user sent. The file must be where the session works, or one an agent or the user named. |
 | `update_thread` | The thread's title and summary. |
-| `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters; a line longer than that is read in pieces, each result saying which `offset` reads on. |
+| `session_search`, `session_read` | Find and read lines anywhere in the session's record. One result is at most 24,000 characters; a line longer than that is read in pieces, each result saying which `offset` reads on. A search matches the text of an event's fields as a person reads it, ignoring case and treating line breaks as spaces; it does not look inside the provider's replay payload. A hit whose match the result line does not show says which `offset` (and `raw=true`, when only the JSON form has it) reads the match. |
 
 ## The dossier
 

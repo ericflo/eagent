@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"strings"
 	"syscall/js"
+	// A browser has no zoneinfo files, so without the zones built in the
+	// session's time zone (SessionStartData.TZ) cannot be loaded and the
+	// prompt's clock times would be rendered at the browser's offset.
+	_ "time/tzdata"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/projection"

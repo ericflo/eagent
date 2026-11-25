@@ -165,6 +165,7 @@ func (r *Runtime) configRoute(who string) config.ModelRoute {
 // chip. A new model has no cache of the conversation, so its first call
 // pays for the whole prompt once.
 func (r *Runtime) swapRoute(sw routeSwap) {
+	r.flushSilent() // the looks so far were made on the old route
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
