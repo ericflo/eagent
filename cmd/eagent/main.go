@@ -87,7 +87,8 @@ Usage:
   eagent version
 
 Flags (before positional arguments):
-  -p            non-interactive: exit when idle (code 0 done, 2 awaiting input)
+  -p            non-interactive: exits when the work is done and its agent stopped
+                (code 0), or when it needs an answer (code 2; the agent keeps running)
   -c            resume the latest session
   -v            verbose: show every tool call and model response
   --json        emit what eagent says as JSON lines on stdout
