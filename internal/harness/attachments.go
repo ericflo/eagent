@@ -409,7 +409,36 @@ func (r *Runtime) userNamed(abs string) bool {
 			}
 		}
 	})
+	// A path with a space in it is not one word: it counts when the text
+	// holds it whole, as written or under ~, with nothing of a longer
+	// path on either side.
+	whole := []string{abs}
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(abs, home+string(filepath.Separator)) {
+		whole = append(whole, "~"+strings.TrimPrefix(abs, home))
+	}
+	pathByte := func(c byte) bool {
+		return c == '/' || c == '_' || c == '-' || c == '.' || c == '~' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+	}
 	for _, text := range texts {
+		for _, w := range whole {
+			if !strings.Contains(w, " ") {
+				continue // the words below cover it
+			}
+			for from := 0; ; {
+				i := strings.Index(text[from:], w)
+				if i < 0 {
+					break
+				}
+				i += from
+				end := i + len(w)
+				before := i == 0 || !pathByte(text[i-1])
+				after := end == len(text) || !pathByte(text[end]) || text[end] == '.' && (end+1 == len(text) || !pathByte(text[end+1]))
+				if before && after {
+					return true
+				}
+				from = i + 1
+			}
+		}
 		for _, word := range strings.Fields(text) {
 			word = strings.Trim(word, "\"'`()[]<>,;:!?")
 			if !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") {
