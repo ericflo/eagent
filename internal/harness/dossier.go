@@ -181,11 +181,14 @@ func (r *Runtime) startDossier() {
 	t.busy, t.compacting, t.callAt = true, true, time.Now()
 	r.flushSilent()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
-	if _, due := r.dueWake(); due && t.seen < job.covers {
+	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= dossierUnseenBytes {
 		// Something arrived that no look has taken in yet: the message
 		// or the turn end that set this restart off. The briefing does
 		// not stand in for it. The new conversation shows it whole, with
 		// its pictures, because it starts after the last thing seen.
+		// (Unless a great deal piled up unseen, as when the model was
+		// unreachable for hours: carrying all of that over would undo
+		// the restart, and the facts list it with its places.)
 		job.covers = t.seen
 	}
 	data := prompts.DossierData{Files: r.fileTable(""), Index: r.dossierIndex()}
@@ -221,6 +224,20 @@ func (r *Runtime) startDossier() {
 		res := r.writeDossier(job)
 		r.post(func() { r.finishDossier(job, res) })
 	}()
+}
+
+// dossierUnseenBytes is the most that may have arrived since the last look
+// for all of it to be carried whole into the new conversation.
+const dossierUnseenBytes = 80_000
+
+// unseenBytes sizes what the record holds after the last look. Loop
+// goroutine only.
+func (r *Runtime) unseenBytes() int {
+	n := 0
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > r.turns.seen; i-- {
+		n += len(r.st.Events[i].Data)
+	}
+	return n
 }
 
 // citation matches a place in the record: file:line or file:line-line.
