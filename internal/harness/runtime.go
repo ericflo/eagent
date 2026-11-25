@@ -123,6 +123,11 @@ type Runtime struct {
 	ctx   context.Context
 	stop  context.CancelFunc
 	wg    sync.WaitGroup
+	// relayOps are the starts and stops of agents under way off the loop
+	// goroutine (relay.go). finish waits for them after the loop has
+	// stopped, so the process never exits with an agent coming up or going
+	// down that the record does not account for. Added to on the loop only.
+	relayOps sync.WaitGroup
 
 	turns          turnState             // the model loop (loop.go); loop-owned
 	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
@@ -746,6 +751,18 @@ drain:
 		}
 	}
 	close(r.closed)
+	// A start still under way stops the agent it brings up (abandonLaunch),
+	// as nothing would watch it. Nothing is under way in an ordinary
+	// shutdown, so this costs nothing then.
+	opsDone := make(chan struct{})
+	go func() { r.relayOps.Wait(); close(opsDone) }()
+	opsDeadline := time.NewTimer(relayOpsGrace)
+	select {
+	case <-opsDone:
+	case <-opsDeadline.C:
+		r.ui.Log("an agent start or stop did not finish in time")
+	}
+	opsDeadline.Stop()
 	// The agents are not the session's children: they run in terminals of
 	// their own and outlive this process, so a resumed session (or the
 	// user, attached) picks up where they are. Only stop watching them.
@@ -765,6 +782,11 @@ drain:
 	}
 	r.ui.Status(Status{})
 }
+
+// relayOpsGrace bounds the wait for agent starts and stops at the end of a
+// session. A start can take a minute on its git pull, and closing a
+// terminal's watcher is bounded at 30 s; this covers both.
+const relayOpsGrace = 2 * time.Minute
 
 func (r *Runtime) appendDirect(ev event.Event) {
 	ev, err := r.sess.Append(ev)

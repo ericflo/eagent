@@ -121,13 +121,21 @@ func (s *State) applyRelay(ev event.Event) {
 		prev := r
 		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, AgentLabel: d.AgentLabel, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
-		if prev != nil {
-			// A restart continues the same relay: its history stays.
+		switch {
+		case prev != nil && (d.Resumed || !prev.Ended):
+			// A restart continues the same relay: its history stays. That
+			// is a start of a relay that was never stopped (a restart or a
+			// model change), or one that continues its own conversation.
 			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.LastSendFrom, r.LastSendAt, r.Recent, r.Limit, r.Autopilot = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.LastSendFrom, prev.LastSendAt, prev.Recent, prev.Limit, prev.Autopilot
 			if r.InnerID == "" {
 				r.InnerID = prev.InnerID
 			}
-		} else {
+		case prev != nil:
+			// A new agent under the name of one that was stopped (a switch
+			// back, a new start) is a new conversation. Only the usage
+			// budget, which is the agent account's, carries over.
+			r.Limit = prev.Limit
+		default:
 			s.RelayOrder = append(s.RelayOrder, d.Name)
 		}
 		s.Relays[d.Name] = r
@@ -145,6 +153,18 @@ func (s *State) applyRelay(ev event.Event) {
 		var d event.RelaySendData
 		_ = ev.Decode(&d)
 		bump(&s.relaySendSeq, d.ID, "r")
+		r.Sends++
+		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
+		r.Undelivered[d.ID] = d.Text
+	case event.RelayMoved:
+		// The send is the new relay's from here on; the relay it was first
+		// sent to no longer waits for it.
+		var d event.RelayMovedData
+		_ = ev.Decode(&d)
+		bump(&s.relaySendSeq, d.ID, "r")
+		if prev := s.Relays[d.Prev]; prev != nil && prev != r {
+			delete(prev.Undelivered, d.ID)
+		}
 		r.Sends++
 		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
 		r.Undelivered[d.ID] = d.Text
@@ -246,6 +266,14 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 			return fmt.Sprintf("[%s Passed to %s as written%s]", ts, who, how)
 		}
 		return fmt.Sprintf("[%s eagent sent %s this itself%s]\n%s", ts, who, how, clip(d.Text, opts.RemarkChars))
+	case event.RelayMoved:
+		var d event.RelayMovedData
+		_ = ev.Decode(&d)
+		whose := "Your message"
+		if d.From == "user" {
+			whose = "The user's message"
+		}
+		return fmt.Sprintf("[%s %s (%s) to %s waited for the handover; it goes to %s instead.]", ts, whose, d.ID, s.relayWho(d.Prev), s.relayWho(d.Name))
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)

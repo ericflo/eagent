@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,10 @@ type relaySeats struct {
 	// queues are the sends waiting to be typed into each seat, in the
 	// order they were accepted (enqueueSend).
 	queues map[relaySeat]*sendQueue
+	// stopping are the terminals relay_control stop is closing, by relay
+	// name, each closed when it is gone. Both share a terminal name, so a
+	// start under that name waits for it rather than racing the kill.
+	stopping map[string]chan struct{}
 }
 
 type relayActivity struct {
@@ -175,12 +180,19 @@ type relayLaunch struct {
 	// a switch, is why that relay ends.
 	replaces, endOld string
 	old              relaySeat
-	held             []heldSend
+	// oldIdle, when the old seat's queue was typing a send as this began,
+	// is closed once that send is settled: a send cut off by the old
+	// agent's stop then joins held before the new agent is launched.
+	oldIdle <-chan struct{}
+	// afterStop, when a stop of the relay with this name is still closing
+	// its terminal, is closed once it is gone.
+	afterStop <-chan struct{}
+	held      []heldSend
 	// brief, for a switch, is the handoff brief, typed into the new agent
 	// before anything that waited for it; briefAuto marks its send as the
 	// harness's own. briefDone hears how typing it went, and drained when
 	// what waited during the launch has been typed too.
-	brief              string
+	brief, briefID     string
 	briefAuto          bool
 	briefDone, drained chan sendResult
 	// wasActive: the relay it replaces was running when this began (a
@@ -205,6 +217,9 @@ type heldSend struct {
 	id, text, mode string
 	done           chan sendResult
 	barrier        bool
+	// on is the relay the send is on the record for, when it waits in a
+	// start that may hand it to another (a switch).
+	on string
 }
 
 // sendResult is how typing one send went.
@@ -221,6 +236,11 @@ type sendQueue struct {
 	name    string
 	items   []heldSend
 	running bool
+	// movedTo is the start that took this seat out of use: what it was
+	// typing when the seat closed goes there, as the rest of the queue did.
+	movedTo *relayLaunch
+	// idle is closed when the goroutine typing this queue ends.
+	idle chan struct{}
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -234,7 +254,7 @@ func (r *Runtime) enqueueSend(name string, seat relaySeat, items ...heldSend) {
 	}
 	q := r.relays.queues[seat]
 	if q == nil {
-		q = &sendQueue{name: name}
+		q = &sendQueue{name: name, idle: make(chan struct{})}
 		r.relays.queues[seat] = q
 	}
 	q.items = append(q.items, items...)
@@ -257,6 +277,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 			if r.relays.queues[seat] == q {
 				delete(r.relays.queues, seat)
 			}
+			close(q.idle)
 			r.relays.mu.Unlock()
 			return
 		}
@@ -277,8 +298,35 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 				res.how, res.err = seat.Send(h.id, h.text, h.mode)
 			}
 		}
+		if res.err != nil && r.passOn(q, h) {
+			continue
+		}
+		if errors.Is(res.err, relay.ErrClosed) {
+			// Its terminal was closed under it and no agent took over: the
+			// relay was stopped.
+			res.err = fmt.Errorf("the agent is not running")
+		}
 		r.settleSend(q.name, h, res)
 	}
+}
+
+// passOn hands a send that could not be typed because a restart or a
+// switch took its seat out of use to that start, ahead of the sends the
+// start took from the queue (this one was accepted before them). False when
+// no start took the seat, or that start is already over. Not on the loop
+// goroutine.
+func (r *Runtime) passOn(q *sendQueue, h heldSend) bool {
+	r.relays.mu.Lock()
+	defer r.relays.mu.Unlock()
+	job := q.movedTo
+	if job == nil || r.relays.launching[job.name] != job {
+		return false
+	}
+	if h.on == "" {
+		h.on = q.name
+	}
+	job.held = append([]heldSend{h}, job.held...)
+	return true
 }
 
 // awaitSend waits for a queued send to be typed, or for the session to
@@ -314,6 +362,11 @@ func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
 // prepareLaunch settles what a start launches. Loop goroutine (or before
 // the loop starts).
 func (r *Runtime) prepareLaunch(profile, dir, name string, resume bool, pick relayPick) (*relayLaunch, error) {
+	if r.ending {
+		// Nothing would watch it, and the session's end may not wait for
+		// it: no agent is started once the session is ending.
+		return nil, errEnding
+	}
 	if name == "" {
 		name = profile
 		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active() || r.relays.launch(name) != nil; i++ {
@@ -352,11 +405,17 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	if rel := r.st.Relays[replaces]; replaces != "" && rel != nil && rel.Active() {
 		job.wasActive = true
 	}
+	// Waited for at the session's end (finish), which must not exit while
+	// an agent is coming up; finishLaunch or abandonLaunch marks it done.
+	r.relayOps.Add(1)
 	r.relays.mu.Lock()
 	if r.relays.launching == nil {
 		r.relays.launching = map[string]*relayLaunch{}
 	}
 	r.relays.launching[job.name] = job
+	if ch := r.relays.stopping[job.name]; ch != nil {
+		job.afterStop = ch
+	}
 	if replaces != "" {
 		r.relays.launching[replaces] = job
 		job.old = r.relays.seats[replaces]
@@ -364,8 +423,17 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 		// What was still waiting to be typed into the agent being stopped
 		// goes to the new one, ahead of what arrives during the launch.
 		if q := r.relays.queues[job.old]; job.old != nil && q != nil {
-			job.held = append(job.held, q.items...)
+			for _, h := range q.items {
+				if h.on == "" {
+					h.on = replaces
+				}
+				job.held = append(job.held, h)
+			}
 			q.items = nil
+			q.movedTo = job
+			if q.running {
+				job.oldIdle = q.idle
+			}
 		}
 	}
 	r.relays.mu.Unlock()
@@ -377,14 +445,32 @@ func (job *relayLaunch) run() {
 	if job.old != nil {
 		_ = job.old.Kill()
 	}
+	if job.afterStop != nil {
+		<-job.afterStop // the stop's kill is bounded: 30 s for the watcher
+	}
+	if job.oldIdle != nil {
+		// The send the old agent was waiting to type stops waiting once its
+		// terminal is closed, and joins held; bounded, as a stuck terminal
+		// call must not hold the start.
+		select {
+		case <-job.oldIdle:
+		case <-time.After(oldSendSettle):
+		}
+	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
+
+// oldSendSettle bounds how long a start waits for the send the agent it
+// replaces was typing to give up. Once the old terminal is closed that send
+// fails at its next step, which takes well under a second.
+const oldSendSettle = 15 * time.Second
 
 // finishLaunch records how a start went and returns the relay's name. The
 // sends that waited for it are queued for the new seat, after a switch's
 // handoff brief and before anything sent from now on (or are recorded as
 // undelivered when the start failed). Loop goroutine.
 func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
+	defer r.relayOps.Done()
 	var held []heldSend
 	r.relays.mu.Lock()
 	for name, j := range r.relays.launching {
@@ -410,7 +496,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				// everything" leaves none behind.
 				_ = seat.Kill()
 			} else {
-				go func() { _ = seat.Kill() }()
+				r.relayOps.Add(1)
+				go func() {
+					defer r.relayOps.Done()
+					_ = seat.Kill()
+				}()
 			}
 		}
 	}
@@ -433,7 +523,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: fmt.Errorf("the agent could not start again: %w", err)}
 				continue
 			}
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: job.replaces, ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -455,10 +545,22 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	var queue []heldSend
 	if job.brief != "" {
 		id := r.st.NextRelaySendID()
+		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone})
 	}
-	queue = append(queue, held...)
+	for _, h := range held {
+		if h.on != "" && h.on != job.name && !h.barrier {
+			// A send on the record for the relay this one took over from
+			// is the new agent's from now on: who sent it last, what the
+			// user sent it and its arrival are the new relay's.
+			if d, ok := sendRecord(r.st, h.id); ok {
+				d.Name = job.name
+				r.append(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: d, Prev: h.on}))
+			}
+		}
+		queue = append(queue, h)
+	}
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
@@ -470,6 +572,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 // session ended: the new agent is stopped, as nothing would watch it, and
 // whoever waits on a send held for it is told. Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
+	defer r.relayOps.Done()
 	if job.err == nil {
 		_ = job.seat.Kill()
 	}
@@ -506,6 +609,7 @@ func (r *Runtime) holdSend(name string, h heldSend) bool {
 	if job == nil {
 		return false
 	}
+	h.on = name
 	job.held = append(job.held, h)
 	return true
 }
@@ -544,12 +648,18 @@ func (r *Runtime) launchOffLoop(prepare func() (*relayLaunch, error)) (string, e
 }
 
 // relaunch starts a relay again on its own session with its picks, from a
-// tool's goroutine; what waited for it is typed in after.
-func (r *Runtime) relaunch(name string) (string, error) {
+// tool's goroutine; what waited for it is typed in after. check, when set,
+// can refuse on the loop goroutine, against the relay as it is then.
+func (r *Runtime) relaunch(name string, check func(*state.Relay) error) (string, error) {
 	return r.launchOffLoop(func() (*relayLaunch, error) {
 		rel := r.st.Relays[name]
 		if rel == nil {
 			return nil, fmt.Errorf("no agent named %q here", name)
+		}
+		if check != nil {
+			if err := check(rel); err != nil {
+				return nil, err
+			}
 		}
 		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
 		if err != nil {
@@ -948,6 +1058,19 @@ func (r *Runtime) resolveRelay(name string) (*state.Relay, error) {
 
 // ---- tools ----------------------------------------------------------------
 
+// errEnding is a tool's answer once the session has ended: the loop runs
+// nothing more, so nothing about a relay can be learnt or changed.
+var errEnding = errors.New("the session is ending")
+
+// onLoop runs fn on the loop goroutine, as r.sync does, and reports whether
+// it ran: once the session has ended it does not, and whatever fn would have
+// set is still unset.
+func (r *Runtime) onLoop(fn func()) bool {
+	ran := false
+	r.sync(func() { fn(); ran = true })
+	return ran
+}
+
 // relayTool runs one of the tools that drive an agent. auto says the call
 // is the harness's own (a command the user typed), not the model's: what it
 // sends the agent is then marked so, and shows in the model's conversation
@@ -981,7 +1104,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		var seat relaySeat
 		held := false
 		done := make(chan sendResult, 1)
-		r.sync(func() {
+		ran := r.onLoop(func() {
 			if rel, err = r.resolveRelay(str("relay")); err != nil {
 				return
 			}
@@ -1027,6 +1150,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: "the agent is not running"}))
 			}
 		})
+		if !ran {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1048,12 +1174,14 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_status":
 		var name string
 		var err error
-		r.sync(func() {
+		if !r.onLoop(func() {
 			var rel *state.Relay
 			if rel, err = r.resolveRelay(str("relay")); err == nil {
 				name = rel.Name
 			}
-		})
+		}) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1061,7 +1189,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_screen":
 		var rel *state.Relay
 		var err error
-		r.sync(func() { rel, err = r.resolveRelay(str("relay")) })
+		if !r.onLoop(func() { rel, err = r.resolveRelay(str("relay")) }) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1078,7 +1208,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		action := str("action")
 		var rel *state.Relay
 		var err error
-		r.sync(func() { rel, err = r.resolveRelay(str("relay")) })
+		if !r.onLoop(func() { rel, err = r.resolveRelay(str("relay")) }) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1112,17 +1244,28 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			return "Keys sent. The screen now:\n" + strings.TrimRight(screen, "\n"), false
 		case "restart":
-			started, err := r.relaunch(rel.Name)
+			started, err := r.relaunch(rel.Name, nil)
 			if err != nil {
 				return "Could not restart: " + err.Error(), true
 			}
 			return r.relayStatusText(started, "Restarted, continuing its own session."), false
 		case "upgrade":
+			// The upgrade runs for minutes with the agent still working; if
+			// it is stopped or handed over meanwhile, it stays so.
+			wasActive := false
+			if !r.onLoop(func() { wasActive = r.st.Relays[rel.Name].Active() }) {
+				return errEnding.Error(), true
+			}
 			out, uerr := upgradeAgent(rel.Agent)
 			if uerr != nil {
 				return "The upgrade failed, so nothing was restarted: " + uerr.Error() + "\n" + out, true
 			}
-			started, err := r.relaunch(rel.Name)
+			started, err := r.relaunch(rel.Name, func(cur *state.Relay) error {
+				if wasActive && !cur.Active() {
+					return fmt.Errorf("%s was stopped while it upgraded, so it stays stopped", cur.Who())
+				}
+				return nil
+			})
 			if err != nil {
 				return "Upgraded, but the restart failed: " + err.Error() + "\n" + out, true
 			}
@@ -1133,6 +1276,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return "switch: say which profile to hand over to (" + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")", true
 			}
 			briefDone, drained := make(chan sendResult, 1), make(chan sendResult, 1)
+			var sw *relayLaunch
 			// The old agent is stopped and the new one launched off the loop
 			// goroutine; the old one ends on the record just before the new
 			// one starts.
@@ -1143,16 +1287,20 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				if err := r.checkRelayPick(profile, pick); err != nil {
 					return nil, err
 				}
-				job, err := r.prepareLaunch(profile, rel.Dir, "", false, pick)
+				// The relay as it is now: a restart since it was looked up
+				// has a newer record (its last report, its sends).
+				cur := r.st.Relays[rel.Name]
+				job, err := r.prepareLaunch(profile, cur.Dir, "", false, pick)
 				if err != nil {
 					return nil, err
 				}
-				if r.relays.launch(rel.Name) != nil {
-					return nil, fmt.Errorf("%s is starting again; wait for it", rel.Who())
+				if r.relays.launch(cur.Name) != nil {
+					return nil, fmt.Errorf("%s is starting again; wait for it", cur.Who())
 				}
 				job.endOld = "handed over to " + profile
-				job.brief, job.briefAuto, job.briefDone, job.drained = r.handoffBrief(rel), auto, briefDone, drained
-				r.beginLaunch(job, rel.Name)
+				job.brief, job.briefAuto, job.briefDone, job.drained = r.handoffBrief(cur), auto, briefDone, drained
+				r.beginLaunch(job, cur.Name)
+				sw = job
 				return job, nil
 			})
 			if err != nil {
@@ -1163,6 +1311,11 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			berr := r.awaitSend(briefDone).err
 			r.awaitSend(drained)
 			if berr != nil {
+				// On the record like any send that failed: it wakes eagent,
+				// and the new relay stops waiting for its arrival.
+				r.sync(func() {
+					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Detail: clipRunes(berr.Error(), 2000)}))
+				})
 				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
 			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false
@@ -1172,9 +1325,12 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return "model: say the model, the effort, or both (\"default\" goes back to the agent's own)", true
 			}
 			var msg string
-			r.sync(func() {
-				// "default" clears that pick; the other one is kept.
-				next := relayPick{rel.Model, rel.Effort}
+			ran := r.onLoop(func() {
+				// "default" clears that pick; the other one is kept. The
+				// relay as it is now: a restart since it was looked up
+				// may have changed its picks.
+				cur := r.st.Relays[rel.Name]
+				next := relayPick{cur.Model, cur.Effort}
 				if p, ok := r.relayRepick[rel.Name]; ok {
 					next = p
 				}
@@ -1191,6 +1347,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				}
 				msg, err = r.repickRelay(rel.Name, next)
 			})
+			if !ran {
+				return errEnding.Error(), true
+			}
 			if err != nil {
 				return err.Error(), true
 			}
@@ -1199,27 +1358,49 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			// The terminal that is the relay's now, not the one read
 			// above: a restart may have finished in between, and its new
 			// agent is the one to stop.
+			// It ends on the record in the same step: a restart asked for
+			// while the kill runs then starts from a stopped relay, and the
+			// end is never recorded over the agent that restart brings up.
 			var current relaySeat
-			r.sync(func() {
+			var killed chan struct{}
+			if !r.onLoop(func() {
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
+					// The session's end waits for the kill, so the agent
+					// is not left running once the record says stopped; a
+					// start under this name waits for it too (beginLaunch).
+					r.relayOps.Add(1)
+					killed = make(chan struct{})
+					r.relays.mu.Lock()
+					if r.relays.stopping == nil {
+						r.relays.stopping = map[string]chan struct{}{}
+					}
+					r.relays.stopping[rel.Name] = killed
+					r.relays.mu.Unlock()
 				}
 				r.stopLaunches(rel.Name, "stopped")
-			})
-			if current != nil {
-				_ = current.Kill()
-			}
-			r.sync(func() {
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
 				r.armAutopilots()
-			})
+			}) {
+				return errEnding.Error(), true
+			}
+			if current != nil {
+				_ = current.Kill()
+				r.relays.mu.Lock()
+				if r.relays.stopping[rel.Name] == killed {
+					delete(r.relays.stopping, rel.Name)
+				}
+				r.relays.mu.Unlock()
+				close(killed)
+				r.relayOps.Done()
+			}
 			return "Stopped " + rel.Who() + ".", false
 		}
 		return fmt.Sprintf("unknown action %q", action), true
 	case "relay_autopilot":
 		var out string
 		var err error
-		r.sync(func() {
+		ran := r.onLoop(func() {
 			var rel *state.Relay
 			if rel, err = r.resolveRelay(str("relay")); err != nil {
 				return
@@ -1252,6 +1433,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			r.append(event.New(event.RelayAutopilot, event.ActorHarness, d))
 			r.armAutopilots()
 		})
+		if !ran {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1273,7 +1457,7 @@ const maxRecordedReport = 1 << 20
 var keysSettle = 700 * time.Millisecond
 
 // upgradeAgent runs the agent CLI's own updater.
-func upgradeAgent(agent string) (string, error) {
+var upgradeAgent = func(agent string) (string, error) {
 	argv, err := relay.UpgradeCommand(agent)
 	if err != nil {
 		return "", err
@@ -1305,15 +1489,11 @@ func (r *Runtime) handoffBrief(rel *state.Relay) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	for _, ev := range r.st.Events {
-		if ev.Type != event.RelaySend {
-			continue
-		}
-		var d event.RelaySendData
-		if ev.Decode(&d) == nil && d.Name == rel.Name && d.From == "user" {
+	relaySendsTo(r.st, rel.Name, func(_ event.Event, d event.RelaySendData) {
+		if d.From == "user" {
 			texts = append(texts, d.Text)
 		}
-	}
+	})
 	if len(texts) > 12 {
 		texts = texts[len(texts)-12:]
 		b.WriteString("(the latest 12)\n")
@@ -1442,21 +1622,71 @@ func (r *Runtime) armAutopilots() {
 	}
 }
 
+// sendRecord is the send recorded with an id.
+func sendRecord(st *state.State, id string) (event.RelaySendData, bool) {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		var d event.RelaySendData
+		if ev := st.Events[i]; ev.Type == event.RelaySend && ev.Decode(&d) == nil && d.ID == id {
+			return d, true
+		}
+	}
+	return event.RelaySendData{}, false
+}
+
+// relaySendsTo calls fn for each send on the record for a relay, oldest
+// first: its own, and those a switch to it passed on from the relay it took
+// over from (relay.moved). movedOn names, by send id, the sends of this
+// relay that went to another relay that way.
+func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.RelaySendData)) (movedOn map[string]string) {
+	movedOn = map[string]string{}
+	for _, ev := range st.Events {
+		switch ev.Type {
+		case event.RelaySend:
+			var d event.RelaySendData
+			if ev.Decode(&d) == nil && d.Name == name {
+				fn(ev, d)
+			}
+		case event.RelayMoved:
+			var d event.RelayMovedData
+			if ev.Decode(&d) != nil {
+				continue
+			}
+			if d.Name == name {
+				fn(ev, d.RelaySendData)
+			}
+			if d.Prev == name {
+				movedOn[d.ID] = d.Name
+			}
+		}
+	}
+	return movedOn
+}
+
 // userSends lists the latest user messages sent to a relay, each with when
 // it went and whether its arrival was confirmed. Loop goroutine.
 func userSends(st *state.State, name string, n int) []string {
 	rel := st.Relays[name]
+	type sent struct {
+		at time.Time
+		d  event.RelaySendData
+	}
+	var sends []sent
+	movedOn := relaySendsTo(st, name, func(ev event.Event, d event.RelaySendData) {
+		if d.From == "user" {
+			sends = append(sends, sent{ev.Time, d})
+		}
+	})
 	var out []string
-	for _, ev := range st.Events {
-		if ev.Type != event.RelaySend {
-			continue
-		}
-		var d event.RelaySendData
-		if ev.Decode(&d) != nil || d.Name != name || d.From != "user" {
-			continue
-		}
+	for _, s := range sends {
+		d := s.d
 		status := "arrived"
-		if rel != nil {
+		if to, ok := movedOn[d.ID]; ok {
+			// It waited for a switch and went to the agent that took over.
+			status = "went to " + to
+			if t := st.Relays[to]; t != nil {
+				status = "went to " + t.Who()
+			}
+		} else if rel != nil {
 			if _, waiting := rel.Undelivered[d.ID]; waiting {
 				status = "not confirmed yet"
 				if d.Mode == "after_turn" {
@@ -1464,7 +1694,7 @@ func userSends(st *state.State, name string, n int) []string {
 				}
 			}
 		}
-		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(ev.Time)), status, clipRunes(oneLine(d.Text, 200), 200)))
+		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(s.at)), status, clipRunes(oneLine(d.Text, 200), 200)))
 	}
 	if len(out) > n {
 		out = out[len(out)-n:]
@@ -1474,16 +1704,13 @@ func userSends(st *state.State, name string, n int) []string {
 
 // forwardedAs names the send that already forwarded a user message.
 func forwardedAs(st *state.State, relayName string, seq int64) string {
-	for _, ev := range st.Events {
-		if ev.Type != event.RelaySend {
-			continue
+	id := ""
+	relaySendsTo(st, relayName, func(_ event.Event, d event.RelaySendData) {
+		if id == "" && d.From == "user" && d.Seq == seq {
+			id = d.ID
 		}
-		var d event.RelaySendData
-		if ev.Decode(&d) == nil && d.Name == relayName && d.From == "user" && d.Seq == seq {
-			return d.ID
-		}
-	}
-	return ""
+	})
+	return id
 }
 
 // relayStatusText describes an agent in full: for the user who asks with
@@ -1723,7 +1950,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 				}
 			})
 			if len(args) == 0 {
-				r.tell(now+" Change it with /model <model> [effort], e.g. /model sonnet high, or /model default for its own. It restarts on the same conversation, after the turn it's on.", false)
+				r.tell(now+" Change it with /model <model> [effort], e.g. /model sonnet high; /model default goes back to its own model and keeps the effort, /model default default to its own model and effort. It restarts on the same conversation, after the turn it's on.", false)
 				return
 			}
 			params["action"] = "model"
