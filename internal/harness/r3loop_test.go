@@ -348,3 +348,49 @@ func TestASentBackFirstCallIsTheConversationsFirstCall(t *testing.T) {
 	release()
 	s.waitFor("the second dossier", func() bool { return len(s.dossiers()) == 2 })
 }
+
+// A session of the earlier design is picked up from a dossier written from
+// its record. When the conversation that dossier opens is already at the
+// limit on its first call, writing another dossier would rebuild the same
+// prompt, as after any restart: the user is told once and no second pass
+// is paid for.
+func TestAConversationTooLongRightAfterBeingPickedUpIsNotRestartedAgain(t *testing.T) {
+	project, sess, files := oldSession(t)
+	var passes atomic.Int32
+	s, _ := resumeOld(t, project, sess, func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			passes.Add(1)
+			return reply{text: briefing([]string{files[0] + ":3", files[0] + ":5", files[1] + ":2", files[1] + ":3", files[1] + ":5"})}
+		}
+		// Every call of the new conversation is over the limit, the first
+		// one included.
+		r, ok := startsAnAgent(msgs)
+		if !ok {
+			r = hold()
+		}
+		r.prompt = 21_000
+		return r
+	})
+	s.waitFor("the message to reach a new agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	if passes.Load() != 1 {
+		t.Fatalf("picking the session up took %d dossier passes, want 1", passes.Load())
+	}
+	told := func() bool {
+		for _, m := range s.ui.said() {
+			if strings.HasPrefix(m, fullNotice) {
+				return true
+			}
+		}
+		return false
+	}
+	s.type_("@e where are we?")
+	s.waitFor("the user to be told, or another pass", func() bool { return told() || passes.Load() > 1 })
+	s.settled()
+	if n := passes.Load(); n != 1 {
+		t.Fatalf("a conversation that was too long from its first call was restarted again (%d passes)", n)
+	}
+	if !told() {
+		t.Fatal("the user was not told the conversation cannot be made shorter")
+	}
+}

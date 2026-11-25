@@ -159,10 +159,12 @@ func (r *Runtime) needsDossier() bool {
 	if !t.overflowed && r.contextTokens() < limit {
 		return false
 	}
-	if cur := r.st.Current(); cur != nil && cur.Reason == "rollover" && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) {
+	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) {
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
-		// Restarting again would only rebuild the same prompt.
+		// Restarting again would only rebuild the same prompt. A session
+		// of the earlier design picked up from a dossier ("upgrade") is in
+		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
 			r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
