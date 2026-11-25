@@ -100,6 +100,7 @@ These are written by `internal/harness/settings.go` with the type strings below;
 |---|---|---|---|
 | `route` | harness | `actor` (`eagent` or `summarizer`), `provider`, `base_url`, `model`, `reason` | A fallback route took over, or a settings change picked another route. The reducer updates the actor's model and endpoint; the phone's model chip follows eagent's. |
 | `phone.question` | harness | `question_id`, `card_id` | A question was posted to the phone as a card, so a later run can withdraw the card when the question is answered elsewhere. |
+| `phone.mirror` | harness | `seq`, `message_id` | A user message written at the terminal or in the web UI (`seq`) was copied to the phone thread as `message_id`, so a later run keeps the receipt under it. |
 | `phone.thread` | harness | `thread_id`, `external_id`, `base_url`, `remote_mode` | The session is mirrored to the user's phone through FinaleChat; `external_id` is `eagent:<session>`. Recorded again, with the new `remote_mode`, when the user flips remote mode mid-session. The phone's live status line is derived from the state and never written to the log. |
 | `error` | harness | `where` (`eagent`, `relay`), `text` | A model call failed after its retries, or an agent could not be started. Shown in eagent's conversation; it does not wake eagent. |
 

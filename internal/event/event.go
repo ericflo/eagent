@@ -56,6 +56,7 @@ const (
 	Route          = "route"
 	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
 	PhoneQuestion  = "phone.question" // a question was posted to the phone as a card
+	PhoneMirror    = "phone.mirror"   // a user message from the terminal or the web was copied to the phone thread
 	ThreadTitle    = "thread.title"   // the session's title and summary (whole session so far), mirrored to FinaleChat when the phone is on
 	Steer          = "steer"          // what eagent was shown at the end of its prompt for a look it acted on, kept so every prompt extends the last
 	CwdChange      = "cwd.change"     // the folder the session works in, when it is not the project root
@@ -322,6 +323,14 @@ type MessageData struct {
 type PhoneQuestionData struct {
 	QuestionID string `json:"question_id"`
 	CardID     string `json:"card_id"`
+}
+
+// PhoneMirrorData records which thread message shows a user message the
+// user wrote at the terminal or in the web UI, so a later run can keep the
+// receipt under it (a message from the phone carries its own id).
+type PhoneMirrorData struct {
+	Seq       int64  `json:"seq"`
+	MessageID string `json:"message_id"`
 }
 
 // PhoneThreadData records the Finalechat thread mirroring this session.

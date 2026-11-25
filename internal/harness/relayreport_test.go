@@ -89,8 +89,8 @@ func TestRelayReportReachesRecordAndPhoneWhole(t *testing.T) {
 }
 
 // A report too long for one FinaleChat message is posted in parts that each
-// fit, in order, that say which part they are, and that together are the
-// whole report.
+// fit, in order, that say which part they are on their last line, and that
+// together are the whole report.
 func TestRelayReportTooLongForOnePostIsSplit(t *testing.T) {
 	line := strings.Repeat("x", 99) + "\n"
 	report := strings.Repeat(line, 3000) + "END" // about 300 KB
@@ -99,16 +99,16 @@ func TestRelayReportTooLongForOnePostIsSplit(t *testing.T) {
 	if got := recordedReport(t, rt); got != report {
 		t.Fatalf("the record kept %d of %d bytes", len(got), len(report))
 	}
-	var joined strings.Builder
+	var bodies []string
 	keys := map[string]bool{}
 	for i, p := range relayReports(fp) {
 		body, _ := p["body"].(string)
 		if len(body) > phoneReportPart || len(body) > 256<<10 {
 			t.Fatalf("part %d is %d bytes", i+1, len(body))
 		}
-		head := "_(part " + string(rune('1'+i)) + " of 3)_\n\n"
-		if !strings.HasPrefix(body, head) {
-			t.Fatalf("part %d starts %q", i+1, body[:30])
+		tail := "\n\n_(part " + string(rune('1'+i)) + " of 3)_"
+		if !strings.HasSuffix(body, tail) || strings.HasPrefix(body, "_(") {
+			t.Fatalf("part %d starts %q and ends %q", i+1, body[:30], body[len(body)-30:])
 		}
 		meta, _ := p["meta"].(map[string]any)
 		if meta["part"] != float64(i+1) || meta["parts"] != float64(3) {
@@ -119,10 +119,10 @@ func TestRelayReportTooLongForOnePostIsSplit(t *testing.T) {
 			t.Errorf("part %d reuses the client key %q", i+1, key)
 		}
 		keys[key] = true
-		joined.WriteString(strings.TrimPrefix(body, head))
+		bodies = append(bodies, body)
 	}
-	if joined.String() != report {
-		t.Fatalf("the parts join to %d bytes, want the %d of the report", joined.Len(), len(report))
+	if joined := unsplit(t, bodies); joined != report {
+		t.Fatalf("the parts join to %d bytes, want the %d of the report", len(joined), len(report))
 	}
 }
 
@@ -145,8 +145,9 @@ func TestSplitReportKeepsCodeBlocksAndRunes(t *testing.T) {
 	}
 	long := strings.Repeat("é", 1000) // no line breaks, two bytes a rune
 	for i, p := range splitReport(long, 301) {
-		if len(p) > 301 || !strings.HasSuffix(p, "é") {
-			t.Errorf("part %d: %d bytes, ends %q", i+1, len(p), p[len(p)-2:])
+		body := partMarker.ReplaceAllString(p, "")
+		if len(p) > 301 || !strings.HasSuffix(body, "é") {
+			t.Errorf("part %d: %d bytes, ends %q", i+1, len(p), body[len(body)-2:])
 		}
 	}
 	if got := splitReport("short", 400); len(got) != 1 || got[0] != "short" {

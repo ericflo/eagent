@@ -157,7 +157,10 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // Resume reopens a session nobody is running with a reply the user sent to
 // its thread from the phone, the way postMessage resumes one from the
 // browser. The reply is the session's next turn (or the answer to the
-// question it stopped on); its source keeps the mirror from echoing it.
+// question it stopped on); its source keeps the mirror from echoing it. It
+// carries what a running session reads off the message too (its id, the
+// composer's route and delivery, the client's capabilities), so it is
+// taken as it would be had the session been running.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
@@ -169,7 +172,15 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return errors.New("the session is running; its own mirror reads the thread")
 	}
-	return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments}, "", "", true)
+	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
+}
+
+// phoneResumeOptions are the options a session is resumed with for a
+// message the user sent from the phone.
+func (s *Server) phoneResumeOptions(msg integration.PhoneMessage) harness.Options {
+	route, delivery, client := harness.FromPhone(msg.Meta)
+	return harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments,
+		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery}
 }
 
 // ---- sessions ---------------------------------------------------------------
@@ -547,8 +558,9 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"delivered": "inbox"})
 		return
 	}
-	// Nobody is running it: resume here with the message as the prompt.
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
+	// Nobody is running it: resume here with the message as the prompt,
+	// from the web as the inbox message above would be.
+	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
 		writeErr(w, 500, err)
 		return
 	}

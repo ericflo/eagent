@@ -31,6 +31,9 @@ func attachmentsDir(sessionPath string) string { return filepath.Join(sessionPat
 
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
+// unsafeID is what may not stay of a server's attachment id in a file name.
+var unsafeID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
+
 // safeName reduces a filename to something a shell and a browser both like.
 func safeName(name string) string {
 	name = filepath.Base(strings.TrimSpace(name))
@@ -165,7 +168,9 @@ func (r *Runtime) downloadAttachment(client *finalechat.Client, a finalechat.Att
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
-	short := a.ID
+	// Both come from the server: neither may bring a "/" or ".." into the
+	// path. An id is a uuid; anything but letters, digits and dashes goes.
+	short := unsafeID.ReplaceAllString(a.ID, "_")
 	if len(short) > 8 {
 		short = short[:8]
 	}
