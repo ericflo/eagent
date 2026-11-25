@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -392,5 +393,77 @@ func TestAConversationTooLongRightAfterBeingPickedUpIsNotRestartedAgain(t *testi
 	}
 	if !told() {
 		t.Fatal("the user was not told the conversation cannot be made shorter")
+	}
+}
+
+// When the file for the next conversation cannot be created, the dossier
+// is given up for now and the session carries on in the conversation it
+// has: the record still takes events, and nothing in it says the
+// conversation ended.
+func TestSessionCarriesOnWhenTheNextConversationFileCannotBeCreated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a directory cannot be made read-only for root")
+	}
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	var prompt atomic.Int64
+	var writing atomic.Bool
+	brain := func(_ string, msgs []map[string]any) reply {
+		if ask := dossierRequest(msgs); ask != "" {
+			writing.Store(true)
+			p := places(ask)
+			return reply{block: gate, text: briefing(p[:min(len(p), 4)])}
+		}
+		r := hold()
+		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
+			r = say("Here.")
+		}
+		if p := prompt.Swap(0); p > 0 {
+			r.prompt = int(p)
+		}
+		return r
+	}
+	s := startSession(t, brief, brain, nil)
+	t.Cleanup(release)
+	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	s.settled()
+	prompt.Store(21_000)
+	s.type_("@e hello")
+	s.waitFor("the dossier call to go out", writing.Load)
+	dir := s.rt.sess.Path
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	release()
+	s.waitFor("the dossier to be given up", func() bool {
+		for _, l := range s.ui.logged() {
+			if strings.Contains(l, "the conversation continues as it is for now") {
+				return true
+			}
+		}
+		return false
+	})
+	said := s.ui.messageCount()
+	s.type_("@e are you still there?")
+	s.waitFor("an answer in the same conversation", func() bool {
+		for _, l := range s.ui.logged() {
+			if strings.Contains(l, "FATAL") {
+				return true
+			}
+		}
+		return s.ui.messageCount() > said
+	})
+	for _, l := range s.ui.logged() {
+		if strings.Contains(l, "FATAL") {
+			t.Fatalf("the session lost its record: %s", l)
+		}
+	}
+	if n := len(s.events(event.SubsessionEnd)); n != 0 {
+		t.Fatalf("the record says %d conversations ended, though no new one could be opened", n)
+	}
+	if n := len(s.dossiers()); n != 0 {
+		t.Fatalf("%d dossiers recorded with no file to open", n)
 	}
 }

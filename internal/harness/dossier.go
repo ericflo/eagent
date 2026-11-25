@@ -618,7 +618,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	next, err := r.openSubsession(endReason, startReason, job.tokens)
 	if err != nil {
-		r.ui.Log("dossier: %v; the conversation continues as it is for now", err)
+		r.ui.Log("dossier: %v; the conversation continues as it is for now (the briefing that was written, %d calls, is not kept)", err, res.calls)
 		t.dossierFailedAt = time.Now()
 		return
 	}
@@ -641,7 +641,10 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 // openSubsession ends the current subsession file and starts the next.
 // Loop goroutine (or before the loop starts).
 func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (string, error) {
-	next, err := r.sess.NewSubsessionName(time.Now())
+	// The next file is made before the record says this one has ended: a
+	// session that cannot make it (a full disk, a directory it may no
+	// longer write) keeps its conversation and its record as they are.
+	next, err := r.sess.CreateSubsession(time.Now())
 	if err != nil {
 		return "", err
 	}

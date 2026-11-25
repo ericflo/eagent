@@ -160,6 +160,10 @@ type Session struct {
 	lock    *os.File
 	closed  bool
 	nextSeq func() int64
+	// pending is the next subsession's file, created by CreateSubsession
+	// and not yet switched to.
+	pending     *os.File
+	pendingName string
 	// Stale names the inbox files that already existed when this run took
 	// the lock: orders meant for an earlier run, not this one.
 	Stale map[string]bool
@@ -373,17 +377,66 @@ func (s *Session) NewSubsessionName(now time.Time) (string, error) {
 	}
 }
 
-// OpenSubsession closes the current file and starts appending to name.
+// CreateSubsession creates the file the next subsession will be written
+// to and returns its name, without switching to it: the session goes on
+// appending to its current file until OpenSubsession is given that name.
+// So the closing event of the current file can name its successor knowing
+// the successor exists, and a session that cannot create the file (a full
+// disk, a directory it may no longer write) is left exactly as it was.
+func (s *Session) CreateSubsession(now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dropPending()
+	name := NewID(now) + ".jsonl"
+	for i := 0; ; i++ {
+		if name != s.current {
+			f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
+			if err == nil {
+				s.pending, s.pendingName = f, name
+				return name, nil
+			}
+			if !errors.Is(err, os.ErrExist) {
+				return "", err
+			}
+		}
+		now = now.Add(time.Millisecond)
+		name = NewID(now) + ".jsonl"
+		if i > 1000 {
+			return "", errors.New("could not allocate a subsession name")
+		}
+	}
+}
+
+// dropPending lets go of a file CreateSubsession made that was never
+// switched to. It holds nothing, so it is removed.
+func (s *Session) dropPending() {
+	if s.pending == nil {
+		return
+	}
+	_ = s.pending.Close()
+	_ = os.Remove(filepath.Join(s.Path, s.pendingName))
+	s.pending, s.pendingName = nil, ""
+}
+
+// OpenSubsession closes the current file and starts appending to name: the
+// file CreateSubsession made, or a new one. The new file is in hand before
+// the current one is let go, so when it cannot be created the session goes
+// on appending where it was.
 func (s *Session) OpenSubsession(name string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	f := s.pending
+	if f != nil && s.pendingName == name {
+		s.pending, s.pendingName = nil, ""
+	} else {
+		var err error
+		f, err = os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
+		if err != nil {
+			return "", err
+		}
+	}
 	if s.file != nil {
 		_ = s.file.Close()
-		s.file = nil
-	}
-	f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
-	if err != nil {
-		return "", err
 	}
 	s.file = f
 	s.current = name
@@ -430,6 +483,7 @@ func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	s.dropPending()
 	var err error
 	if s.file != nil {
 		err = s.file.Close()
