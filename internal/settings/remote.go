@@ -664,7 +664,9 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	if _, written := pointerValue(values, "/summarizer/model"); !written && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
 		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
 	}) {
-		seed := res.Effective.Model
+		// The route as the layers write it: a variable's value is not the
+		// file's to keep.
+		seed := res.Layered.Model
 		seed.Fallback = nil
 		var route map[string]any
 		raw, _ := json.Marshal(seed)

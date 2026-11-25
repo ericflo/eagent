@@ -33,6 +33,10 @@ type Active struct {
 // Resolution is a configuration with its layers laid bare.
 type Resolution struct {
 	Effective Config `json:"effective"`
+	// Layered is Effective before the environment: what the defaults, the
+	// preset, the file and a bundle say. A value copied into the file comes
+	// from here, never from a variable.
+	Layered Config `json:"-"`
 	// Sources maps a JSON pointer ("/model/model") to the layer that
 	// set the effective value: "default", "preset:NAME", "file",
 	// "bundle:NAME", or "env:VAR".
@@ -182,6 +186,8 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	envVars := EnvOverrides()
+	res.Layered = cfg
+	normalize(&res.Layered)
 	applyEnv(project, &cfg)
 	normalize(&cfg)
 	cur := flatten(cfg)
