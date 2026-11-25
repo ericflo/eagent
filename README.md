@@ -89,7 +89,7 @@ Details: [docs/FINALECHAT-INTEGRATIONS.md](docs/FINALECHAT-INTEGRATIONS.md).
 
 - One model, with an optional fallback route. It runs at one reasoning effort for every call, so the provider's prompt cache keeps hitting.
 - `summarizer` keeps the thread's title and summary: in the same loop by default, or on a small model of its own (`"mode": "dedicated"`).
-- `.agents/eagent/INSTRUCTIONS.md` holds standing instructions for the project.
+- `.agents/eagent/INSTRUCTIONS.md` holds standing instructions for the project (`AGENTS.md` is read when there is none).
 - `eagent prompts export` copies the prompts into the project, where you can edit them.
 - A config file written for the earlier three-model eagent still loads; `eagent doctor` says what was carried over.
 
