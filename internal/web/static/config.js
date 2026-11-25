@@ -147,8 +147,13 @@ function setModel(a, m) {
   a.base_url = p.base_url; a.protocol = protocolOf(m); a.api_key_env = p.key_env || ''; a.model = m.id;
   // The window is the new model's; 0 is unknown, never the old model's.
   a.context_tokens = m.context || 0;
-  if (m.efforts && m.efforts.length && !m.efforts.includes(a.reasoning_effort || 'none')) {
-    a.reasoning_effort = m.efforts.includes('medium') ? 'medium' : m.efforts[Math.floor(m.efforts.length / 2)];
+  // The server's rule for a pick (config.PickRoute): no effort sends none
+  // on any model and stays; a level the model lacks moves to the nearest
+  // it offers, the lower on a tie (config.NearestEffort).
+  if (a.reasoning_effort && m.efforts && m.efforts.length && !m.efforts.includes(a.reasoning_effort)) {
+    const order = E.cat.effort_order || [], at = e => order.indexOf(e), want = at(a.reasoning_effort);
+    a.reasoning_effort = want < 0 ? (m.efforts.includes('medium') ? 'medium' : m.efforts[Math.floor(m.efforts.length / 2)])
+      : m.efforts.reduce((best, e) => { const d = Math.abs(at(e) - want), bd = Math.abs(at(best) - want); return d < bd || (d === bd && at(e) < at(best)) ? e : best; });
   }
   if (!replays(a)) delete a.replay_reasoning;
 }

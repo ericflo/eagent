@@ -84,6 +84,21 @@ try {
     const lit = await page.locator('.routes .card').first().locator('.seg button.on .e').allInnerTexts();
     assert.ok(lit.includes('default') && !lit.includes('none'), `lit: ${JSON.stringify(lit)}`);
     assert.match(await page.locator('.routes .card').first().innerText(), /no reasoning_effort is sent/);
+    // Picking another model keeps no effort as none, as a pick on the
+    // server does; a level the new model lacks moves to the nearest.
+    const card = () => page.locator('.routes .card').first();
+    const litNow = () => card().locator('.seg button.on .e').allInnerTexts();
+    const pick = async (search, label) => {
+      await card().locator('button.pick').first().click();
+      await page.locator('.picker input.search').fill(search);
+      await page.locator('.picker .prow').filter({ hasText: label }).first().click();
+    };
+    await pick('z-ai/glm-5.3', 'GLM-5.3 · OpenRouter');
+    assert.deepEqual(await litNow(), ['default'], 'no effort became a level');
+    await pick('DeepSeek-V4.1-Flash-1017', 'DeepSeek V4.1 Flash 1017');
+    await card().locator('.seg button').filter({ hasText: /^max/ }).click();
+    await pick('z-ai/glm-5.3', 'GLM-5.3 · OpenRouter');
+    assert.deepEqual(await litNow(), ['high'], 'max did not move to the nearest level GLM-5.3 offers');
   } else {
     for (const id of sessions) {
       for (const tab of ['chat', 'timeline', 'usage']) {
