@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -465,5 +466,165 @@ func TestSessionCarriesOnWhenTheNextConversationFileCannotBeCreated(t *testing.T
 	}
 	if n := len(s.dossiers()); n != 0 {
 		t.Fatalf("%d dossiers recorded with no file to open", n)
+	}
+}
+
+// Of two drafts that both had to be sent back, the one kept is the one
+// with the better map, not the longer one. A second draft that put the map
+// right but for one wrong place is a map with that place named, and is not
+// thrown away for a longer first draft that cited nothing.
+func TestDossierKeepsTheDraftWithTheBetterMap(t *testing.T) {
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		if n == 1 {
+			// Long, and no map at all.
+			return reply{text: briefing(nil) + strings.Repeat("More on where the work stands, with nothing cited. ", 40)}
+		}
+		p := places(dossierRequest(msgs))
+		return reply{text: briefing(append(append([]string{}, p[:min(len(p), 4)]...), "1111111111111.jsonl:5"))}
+	})
+	d := s.dossiers()[0]
+	if d.NoMap || strings.HasPrefix(d.Text, "(eagent checked this briefing and it is not a map") {
+		t.Fatalf("the draft with the map was dropped for the longer one without:\n%s", d.Text)
+	}
+	if !strings.Contains(d.Text, "- topic 1: ") || strings.Contains(d.Text, "with nothing cited") {
+		t.Fatalf("the dossier is not the second draft:\n%s", d.Text)
+	}
+	if !strings.Contains(d.Text, "disregard them: 1111111111111.jsonl:5") {
+		t.Fatalf("the place that does not exist is not named:\n%s", d.Text)
+	}
+}
+
+// When neither draft has a map, the fuller one is kept, as before.
+func TestDossierKeepsTheFullerOfTwoDraftsWithoutAMap(t *testing.T) {
+	long := briefing(nil) + strings.Repeat("More on where the work stands, with nothing cited. ", 40)
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		if n == 1 {
+			return reply{text: long}
+		}
+		return reply{text: briefing(nil)}
+	})
+	d := s.dossiers()[0]
+	if !d.NoMap || !strings.Contains(d.Text, "with nothing cited") {
+		t.Fatalf("nomap=%v; the fuller draft was not the one kept:\n%s", d.NoMap, d.Text)
+	}
+}
+
+// A dossier that has to be written from the record after all, because the
+// conversation it was being written in turned out too long, is a new
+// request: its first draft is sent back once like any other, even when a
+// draft had already been sent back in the conversation.
+func TestDossierWrittenFromTheRecordGetsItsOwnRewrite(t *testing.T) {
+	var calls atomic.Int32
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		calls.Store(int32(n))
+		switch n {
+		case 1:
+			return reply{text: briefing(nil)} // no map: sent back
+		case 2:
+			return reply{status: 400, body: tooLongBody} // the send-back did not fit
+		case 3:
+			return reply{text: briefing(nil)} // from the record now, and no map again
+		}
+		p := places(dossierRequest(msgs))
+		return reply{text: briefing(p[:min(len(p), 4)])}
+	})
+	d := s.dossiers()[0]
+	if d.NoMap || calls.Load() != 4 {
+		t.Fatalf("after %d calls the dossier kept is no map (nomap=%v): the pass from the record was not given its rewrite", calls.Load(), d.NoMap)
+	}
+}
+
+// The user's answer to a question of eagent's has reached nobody but the
+// model. A hold on it is sent back once with that said. A turn with no
+// call left cannot do that, so the reminder comes later, once, and what
+// the model does then stands.
+func TestAnAnswerHeldOnWithNoCallLeftIsBroughtUpOnceMore(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{30 * time.Millisecond, time.Hour, time.Hour}
+	defer func() { owedRetryDelays = old }()
+	for _, c := range []struct {
+		name   string
+		passes bool // the model passes the answer on when reminded
+	}{{"passes it on when reminded", true}, {"holds again", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			var reminded atomic.Int32
+			brain := func(_ string, msgs []map[string]any) reply {
+				last := lastUserText(msgs)
+				switch {
+				case strings.Contains(last, "kept for you") && msgs[len(msgs)-1]["role"] != "tool":
+					return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
+				case strings.Contains(last, "nothing has been done with the answer"):
+					reminded.Add(1)
+					if c.passes && msgs[len(msgs)-1]["role"] != "tool" {
+						return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"The user says: merge to main."}`)}}
+					}
+				}
+				return hold()
+			}
+			s := startSession(t, "", brain, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 1 })
+			s.settled()
+			s.type_("@e what next?")
+			s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+			s.settled()
+			before := s.model.count(testModel)
+			s.type_("main")
+			s.waitFor("the reminder", func() bool { return reminded.Load() >= 1 })
+			s.settled()
+			time.Sleep(200 * time.Millisecond)
+			s.settled()
+			if n := reminded.Load(); n != 1 {
+				t.Fatalf("the model was reminded of the answer %d times, want once", n)
+			}
+			var owed int64
+			s.rt.sync(func() { owed = s.rt.turns.owed })
+			if owed != 0 {
+				t.Fatal("the answer is still owed after its one reminder")
+			}
+			sent := s.seat.sentTexts()
+			if c.passes && (len(sent) != 1 || !strings.Contains(sent[0], "merge to main")) {
+				t.Fatalf("the agent was sent %q, want the answer passed on", sent)
+			}
+			if !c.passes && len(sent) != 0 {
+				t.Fatalf("the agent was sent %q by a model that held", sent)
+			}
+			// The model that passed it on is called again for the agent's
+			// reply; the one that held is not called again at all.
+			if n := s.model.count(testModel) - before; !c.passes && n != 2 {
+				t.Fatalf("the answer took %d calls, want the one that held and the one reminder", n)
+			}
+		})
+	}
+}
+
+// With calls to spare nothing changes: the hold on an answer is sent back
+// in the same turn, once, and no later call is made for it.
+func TestAnAnswerHeldOnIsSentBackOnceInItsTurn(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{30 * time.Millisecond, time.Hour, time.Hour}
+	defer func() { owedRetryDelays = old }()
+	brain := func(_ string, msgs []map[string]any) reply {
+		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
+		}
+		return hold()
+	}
+	s := startSession(t, "", brain, nil)
+	s.settled()
+	s.type_("@e what next?")
+	s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+	s.settled()
+	before := s.model.count(testModel)
+	s.type_("main")
+	s.waitFor("the two calls", func() bool { return s.model.count(testModel)-before >= 2 })
+	s.settled()
+	time.Sleep(200 * time.Millisecond)
+	s.settled()
+	if n := s.model.count(testModel) - before; n != 2 {
+		t.Fatalf("the answer took %d calls, want the hold and the one sent back", n)
+	}
+	var owed int64
+	s.rt.sync(func() { owed = s.rt.turns.owed })
+	if owed != 0 {
+		t.Fatal("an answer that was sent back in its turn is owed a later reminder as well")
 	}
 }

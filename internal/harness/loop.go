@@ -156,6 +156,11 @@ type turnState struct {
 	owed      int64
 	owedTries int
 	owedTimer *time.Timer
+	// owedAnswer: what is owed is not a message but the user's answer to
+	// a question of eagent's, held on in a turn that had no call left to
+	// say it has reached nobody else. It is said once, later, and a hold
+	// after that stands: an answer can need nothing done.
+	owedAnswer bool
 
 	// capRuns counts the turns in a row that stopped at the call limit
 	// with an agent still stuck on its screen.
@@ -408,6 +413,11 @@ var owedRetryDelays = []time.Duration{15 * time.Second, time.Minute, 5 * time.Mi
 // unanswered, and arranges another call for it. Loop goroutine.
 func (r *Runtime) oweAnswer(seq int64) {
 	t := &r.turns
+	if t.owedAnswer {
+		// A message kept for eagent comes before a reminder about an
+		// answer, and is what the calls are now made for.
+		t.owed, t.owedTries, t.owedAnswer = 0, 0, false
+	}
 	switch {
 	case t.owed == 0:
 		t.owed, t.owedTries = seq, 0
@@ -433,11 +443,29 @@ func (r *Runtime) oweAnswer(seq int64) {
 	})
 }
 
+// oweReminder arranges one later call about the user's answer at seq,
+// which a turn with no call left held on without being told that nobody
+// else has seen it. A message kept for eagent that is already owed comes
+// first, and its calls are told of the answer too. Loop goroutine.
+func (r *Runtime) oweReminder(seq int64) {
+	t := &r.turns
+	if t.owed != 0 {
+		return
+	}
+	t.owed, t.owedTries, t.owedAnswer = seq, 1, true
+	if t.owedTimer != nil {
+		t.owedTimer.Stop()
+	}
+	t.owedTimer = time.AfterFunc(owedRetryDelays[0], func() {
+		r.post(func() { r.turns.owedTimer = nil })
+	})
+}
+
 // clearOwed forgets the unanswered message: it was answered or acted on.
 // Loop goroutine.
 func (r *Runtime) clearOwed() {
 	t := &r.turns
-	t.owed, t.owedTries = 0, 0
+	t.owed, t.owedTries, t.owedAnswer = 0, 0, false
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
 		t.owedTimer = nil
@@ -462,19 +490,19 @@ func (r *Runtime) heldSince(seen int64) int64 {
 	return 0
 }
 
-// answeredSince reports whether the user answered a question of eagent's
-// after seen. Loop goroutine.
-func (r *Runtime) answeredSince(seen int64) bool {
+// answeredSince returns the newest answer the user gave to a question of
+// eagent's after seen, or 0. Loop goroutine.
+func (r *Runtime) answeredSince(seen int64) int64 {
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
 		if ev.Seq <= seen {
 			break
 		}
 		if ev.Type == event.UserAnswer {
-			return true
+			return ev.Seq
 		}
 	}
-	return false
+	return 0
 }
 
 // sentBack is the exchange that returns a reply to the model for another
@@ -657,6 +685,10 @@ func (r *Runtime) turn(w wake) {
 	asked := w.thread // the turn was asked about the title and summary
 	var mustSpeak, answered bool
 	var held, covered int64
+	// answerSeq is the answer this turn was woken for (0 for none), and
+	// answerDebt says the turn was told of an answer owed a reminder.
+	var answerSeq int64
+	answerDebt := false
 	var base []llm.Message
 	refresh := true
 	who := "the agent"
@@ -724,10 +756,18 @@ func (r *Runtime) turn(w wake) {
 					// Not answered by what the turn did before it came.
 					held, tc.handled = h, tc.handled && first
 				}
-				if first && w.owed {
+				if first && r.turns.owed > 0 && r.turns.owedAnswer {
+					// Its tail says the answer has reached nobody else
+					// (owedTail), in the call made for that alone or in
+					// one made for something else. That is the reminder:
+					// a hold is not sent back with it again.
+					answerDebt, remindedAnswer = true, true
+				} else if first && w.owed {
 					held = r.turns.owed
 				}
-				answered = answered || r.answeredSince(r.turns.seen)
+				if seq := r.answeredSince(r.turns.seen); seq > 0 {
+					answered, answerSeq = true, seq
+				}
 				// The closing word is owed whenever the user has not heard
 				// from eagent since they last wrote (or ever).
 				mustSpeak = w.final && r.turns.saidSeq <= r.st.LastUserSeq
@@ -915,6 +955,14 @@ func (r *Runtime) turn(w wake) {
 			r.clearOwed()
 		case held > 0:
 			r.oweAnswer(held)
+		case answerDebt:
+			// It was told, in this turn's tail, that the answer has
+			// reached nobody else. A hold after that stands.
+			r.clearOwed()
+		case answerSeq > 0 && !remindedAnswer:
+			// It held on the user's answer and the turn had no call left
+			// to send that back (owes): it is said once, later.
+			r.oweReminder(answerSeq)
 		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)

@@ -371,6 +371,23 @@ func mapProblem(text string, lines map[string]int) string {
 	return strings.Join(why, "; and ")
 }
 
+// draftBeats reports whether draft a is the one to keep over b, when
+// neither passed. One long enough to be a briefing beats one that is not;
+// then the one whose map cites more places that exist; then the fuller
+// one. Length alone would keep a long draft that cites nothing over the
+// rewrite that put the map right but for one place.
+func draftBeats(a, b string, lines map[string]int) bool {
+	if al, bl := len(a) >= dossierMinChars, len(b) >= dossierMinChars; al != bl {
+		return al
+	}
+	an, _ := checkCitations(a, lines)
+	bn, _ := checkCitations(b, lines)
+	if an != bn {
+		return an > bn
+	}
+	return len(a) > len(b)
+}
+
 // noMapReason says why a text kept after it was sent back is a summary and
 // not a map ("" when it is a map, if a partly wrong one).
 func noMapReason(text string, lines map[string]int) string {
@@ -453,7 +470,9 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 					// long: from the files, as after a refused turn.
 					r.sync(func() { r.dossierFromFiles(&job, dossierRefused) })
 					msgs = job.msgs[:len(job.msgs):len(job.msgs)]
-					read, last, lookedAt, dropped = 0, false, 0, false
+					// A new request: it gets its own send-back. A draft
+					// already in hand stays one to choose from.
+					read, last, lookedAt, dropped, rejected = 0, false, 0, false, false
 					r.ui.Log("dossier: the conversation is too long to write in; writing from the record")
 					continue
 				}
@@ -507,7 +526,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		if len(text) < dossierMinChars {
 			why = fmt.Sprintf("it is too short to be a briefing (%d characters)", len(text))
 		}
-		if len(text) > len(res.text) || why == "" {
+		if why == "" || draftBeats(text, res.text, job.lines) {
 			res.text, res.bad = text, bad
 		}
 		if why == "" {
