@@ -553,10 +553,12 @@ func (s *Seat) watch() {
 				return
 			}
 		}
-		if pl, ok := s.agent.(poller); ok {
-			// Also before any transcript is found: a sighting of the agent
-			// on the session it was started on dates a move made before
-			// its first message.
+		_, starter := s.agent.(sessionStarter)
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
+			// An agent that moves between sessions of its own (pi) is
+			// polled before any transcript is found too: a sighting on the
+			// session it was started on dates a move made before its first
+			// message.
 			pl.poll(s, now)
 		}
 		if dr, ok := s.agent.(dialogReporter); ok {
