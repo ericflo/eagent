@@ -54,12 +54,12 @@ var all = []llm.Tool{
 			"attachments":{"type":"array","items":{"type":"string"},"description":"Paths of existing files to attach, as they appear in your conversation (up to 8 files, 10 MB each)."}
 		},"required":["text"]}`),
 	def(AskUser,
-		"Ask the user a question and wait for the answer (options optional; free text is always accepted).",
+		"Ask the user a question and wait for the answer, only when a decision is needed or their intent is genuinely ambiguous (options optional; free text is always accepted).",
 		`{"type":"object","properties":{
 			"text":{"type":"string"},
 			"options":{"type":"array","items":{"type":"string"}}
 		},"required":["text"]}`),
-	def(Hold, "Do and say nothing for now. Leaves no trace.",
+	def(Hold, "Do and say nothing for now: the user heard from you recently and nothing has moved, or nothing here needs you. Leaves no trace.",
 		`{"type":"object","properties":{}}`),
 	def(RelayForward,
 		"Pass one of the user's messages to the agent verbatim, with its attachments. Only for a message that was held back for you: the others were passed on when they arrived.",

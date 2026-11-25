@@ -22,7 +22,15 @@ type turnCalls struct {
 	// images are the pictures view_image brought back in the call being
 	// run, recorded with its result.
 	images []event.Attachment
+	// threaded: the turn dealt with the thread's title and summary (set
+	// them, or said they still fit).
+	threaded bool
 }
+
+// loopReadChars bounds one session_read in eagent's own conversation,
+// where the result stays in every later prompt until the next restart
+// (the number the old tool_output_max_chars had).
+const loopReadChars = 24000
 
 // runTool runs one of eagent's tool calls and returns its result. again
 // says the model should get another call in this turn: it looked at
@@ -96,17 +104,21 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		}
 		r.ui.Ask(id, text, opts)
 		tc.spoke, tc.handled = true, true
-		if onPhone && !r.opts.Interactive {
-			return "asked on the user's phone; the answer will appear as a message from them", false, false
+		switch {
+		case r.opts.Interactive:
+			return "asked; the answer will appear as a message from the user", false, false
+		case onPhone:
+			return "asked on the user's phone; the session waits for the answer, which will appear as a message from them", false, false
 		}
-		return "asked; the answer will appear as a message from the user", false, false
+		return "shown to the user; nobody is at a terminal and no phone is connected, so this session ends now and they can answer with `eagent resume --answer`", false, false
 
 	case tools.UpdateThread:
+		tc.threaded = true
 		return r.updateThread(str("title"), str("summary"), str("pin") == "true")
 
 	case tools.SessionRead:
 		raw, _ := args["raw"].(bool)
-		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, 0)
+		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, loopReadChars)
 		if err != nil {
 			return err.Error(), true, true
 		}
@@ -119,12 +131,31 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		return out, false, true
 
 	case tools.ViewImage:
-		att, err := r.viewImage(str("path"))
+		// A picture already in the conversation is not put there again
+		// while the file is unchanged.
+		path := str("path")
+		stamp := r.imageStamp(path)
+		var again bool
+		r.sync(func() { again = stamp != "" && r.viewed[path] == stamp })
+		if again {
+			return "this picture is already in your conversation above, and the file has not changed since you looked", false, true
+		}
+		att, err := r.viewImage(path)
 		if err != nil {
 			return err.Error(), true, true
 		}
+		r.sync(func() {
+			if r.viewed == nil {
+				r.viewed = map[string]string{}
+			}
+			r.viewed[path] = stamp
+		})
 		tc.images = append(tc.images, att)
-		return fmt.Sprintf("showing %s (%s, %dx%d)", att.Name, att.ContentType, att.Width, att.Height), false, true
+		dims := ""
+		if att.Width > 0 {
+			dims = fmt.Sprintf(", %dx%d", att.Width, att.Height)
+		}
+		return fmt.Sprintf("%s (%s, %s%s) follows this result as an image.", att.Name, att.ContentType, humanBytes(att.Size), dims), false, true
 
 	case tools.Schedule:
 		spec := strings.TrimSpace(str("spec"))
@@ -179,6 +210,13 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		again = true
 	case c.Name == tools.RelayControl && str("action") == "keys":
 		again = true // the screen after the keys is there to be read
+	case !isErr && (c.Name == tools.RelayStart || c.Name == tools.RelayControl || c.Name == tools.RelayAutopilot):
+		// What came of it (the version it restarted on, a model change put
+		// off to the end of its turn, the deadline as it was understood)
+		// is in the result, and nothing else would wake eagent to tell
+		// the user. Passing words on (relay_send, relay_forward) ends the
+		// turn: the agent's answer is what comes next.
+		again = true
 	case isErr && c.Name != tools.RelayAutopilot:
 		again = true
 	case isErr:
@@ -188,22 +226,34 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 }
 
 // updateThread sets the title and summary the user sees in their list of
-// sessions. A title set with pin is one the user asked for by name: it
-// stays until they change it. Any other title follows the rule that keeps
-// a thread findable (acceptSummary): it replaces a missing or generic one,
-// may be revised once, and after that moves only when the user has written
-// since.
-func (r *Runtime) updateThread(title, summary string, pin bool) (string, bool, bool) {
-	title, summary = cleanTitle(title), cleanSummary(summary)
-	if title == "" && summary == "" {
-		return "nothing to set: give a title, a summary, or both", true, false
+// sessions. With pin the words are the user's own (they asked for the name,
+// or dictated the description): they are kept as written, and a pinned
+// title stays until the user changes it. Any other title follows the rule
+// that keeps a thread findable (acceptSummary): it replaces a missing or
+// generic one, may be revised once, and after that moves only when the
+// user has written since. A call with neither field says both still fit.
+func (r *Runtime) updateThread(rawTitle, rawSummary string, pin bool) (string, bool, bool) {
+	title, summary := cleanTitle(rawTitle), cleanSummary(rawSummary)
+	if pin {
+		title, summary = strings.TrimSpace(rawTitle), clipRunes(strings.TrimSpace(rawSummary), 2000)
 	}
 	var p *phone
-	var kept string
+	var out string
 	r.sync(func() {
-		d := event.ThreadTitleData{SeenSeq: r.turns.seen}
-		if pin && title != "" {
-			d.Title, d.Pin = title, true
+		seen := r.turns.seen
+		if title == "" && summary == "" {
+			r.threadKept()
+			out = "kept as they are"
+			return
+		}
+		if !pin && !r.summary.on {
+			out = "not set: titles and summaries are switched off for this session. Set one only when the user asks for it by name, with pin=true."
+			return
+		}
+		d := event.ThreadTitleData{SeenSeq: seen}
+		var kept string
+		if pin {
+			d.Title, d.Pin = title, title != ""
 			if summary != r.st.Description {
 				d.Description = summary
 			}
@@ -214,17 +264,22 @@ func (r *Runtime) updateThread(title, summary string, pin bool) (string, bool, b
 				kept = fmt.Sprintf(" The title stays %q.", r.st.Title)
 			}
 		}
+		// Recorded even when nothing changes: it says how far the title
+		// and summary are known to be right.
 		r.append(event.New(event.ThreadTitle, event.ActorEagent, d))
-		r.summary.seen = max(r.summary.seen, d.SeenSeq)
-		if d.Title != "" || d.Description != "" {
-			p = r.phone
+		r.summary.seen = max(r.summary.seen, seen)
+		if d.Title == "" && d.Description == "" {
+			out = "nothing changed: they already say that." + kept
+			return
 		}
+		p = r.phone
 		title, summary = d.Title, d.Description
+		out = "updated." + kept
 	})
 	if p != nil {
 		p.RetitleThread(r, title, summary)
 	}
-	return "updated." + kept, false, false
+	return out, strings.HasPrefix(out, "not set"), false
 }
 
 // ---- arguments -------------------------------------------------------------

@@ -364,7 +364,10 @@ func (s *State) Apply(ev event.Event) {
 			cur.CoversSeq = d.CoversSeq
 		}
 		if d.Usage != nil {
-			s.account(event.ActorEagent, *d.Usage, 1, d.ElapsedMS)
+			// A dossier is written in several calls (the lookups, then the
+			// text): each counts, and the latency kept is one call's share.
+			calls := max(d.Calls, 1)
+			s.account(event.ActorEagent, *d.Usage, calls, d.ElapsedMS/int64(calls))
 		}
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
@@ -492,6 +495,18 @@ func (s *State) ContextTokens() int {
 func (s *State) Legacy() bool {
 	for _, a := range event.LegacyActors {
 		if s.Calls[a] > 0 || s.Models[a] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Upgraded reports that a log written by the three-actor design has been
+// taken over by the one loop: it continued in a subsession opened from a
+// dossier written from the old record.
+func (s *State) Upgraded() bool {
+	for _, sub := range s.Subsessions {
+		if sub.Reason == "upgrade" {
 			return true
 		}
 	}

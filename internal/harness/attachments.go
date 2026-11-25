@@ -243,6 +243,20 @@ func attachmentSummary(atts []event.Attachment) string {
 // be an image of a supported type, and a copy goes into the session so the
 // conversation renders the same bytes every time, whatever happens to the
 // original. Not on the loop goroutine.
+// imageStamp identifies the file a path names by where it is, its size
+// and its time, or "" when it cannot be read.
+func (r *Runtime) imageStamp(p string) string {
+	abs, err := r.locateFile(p)
+	if err != nil {
+		return ""
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s|%d|%d", abs, st.Size(), st.ModTime().UnixNano())
+}
+
 func (r *Runtime) viewImage(p string) (event.Attachment, error) {
 	abs, err := r.locateFile(p)
 	if err != nil {

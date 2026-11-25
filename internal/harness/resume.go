@@ -16,16 +16,24 @@ func (r *Runtime) closeInterrupted() {
 	// The agents run in terminals of their own and survive eagent stopping;
 	// pick them up again, and say which are gone.
 	closed := r.reattachRelays()
-	for _, tc := range r.st.DanglingCalls(event.ActorEagent) {
+	dangling := r.st.DanglingCalls(event.ActorEagent)
+	for _, tc := range dangling {
 		r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{
 			CallID: tc.ID, Name: tc.Name, Output: "interrupted: eagent restarted before this finished", IsError: true,
 		}))
 	}
+	cut := len(dangling) > 0 || r.st.Turns[event.ActorEagent] > 0 || r.lastTurnCutOff()
 	if r.st.Turns[event.ActorEagent] > 0 {
 		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
-	legacy := r.st.Legacy() && r.st.Calls[event.ActorEagent] == 0
+	legacy := r.st.Legacy() && !r.st.Upgraded()
 	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed}))
+	if cut && !legacy {
+		// A turn was cut off by the restart. Whatever it had decided and
+		// not yet done (stop the agent, send it something, answer the
+		// user) is dropped unless eagent takes it up again, so it is woken.
+		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] You were restarted in the middle of a turn. Calls marked interrupted above did not run. Take the turn up where it stopped: make again the calls that are still needed, and do not repeat anything the record shows was done."}))
+	}
 	if legacy {
 		// A session written when eagent ran three models (an orchestrator,
 		// task workers and a narrator). Its record stays as it is and stays
@@ -35,6 +43,22 @@ func (r *Runtime) closeInterrupted() {
 		// conversation never has to render events it has no words for.
 		r.turns.adopt = true
 	}
+}
+
+// lastTurnCutOff reports that eagent's last turn of the run that just
+// ended was stopped part-way: calls it had decided on were never made.
+func (r *Runtime) lastTurnCutOff() bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		switch {
+		case ev.Type == event.SessionResume || ev.Type == event.SessionStart:
+			return false // an earlier run: it was dealt with when that run was resumed
+		case ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent:
+			var d event.TurnData
+			return ev.Decode(&d) == nil && d.Reason == "interrupted"
+		}
+	}
+	return false
 }
 
 // legacyBriefing stands in for the model's part of the dossier that a

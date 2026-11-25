@@ -1,4 +1,3 @@
-//go:build gaps
 
 package harness
 
@@ -30,6 +29,10 @@ func (u *relayCancelUI) Say(text string) {
 	u.fakeUI.Say(text)
 	if u.cancel != nil {
 		u.cancel()
+		// Say runs on the loop: hold it a moment so the shutdown the
+		// cancel asks for is queued ahead of the turn's next step, and the
+		// kill lands between the two calls every time.
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

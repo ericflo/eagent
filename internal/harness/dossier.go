@@ -369,6 +369,7 @@ func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (str
 		return "", err
 	}
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: next, Index: len(r.st.Subsessions), Reason: startReason}))
+	r.viewed = nil // the new conversation holds none of the pictures looked at before
 	return next, nil
 }
 

@@ -296,7 +296,7 @@ func TestSessionWithNoTerminalEndsWithAClosingWord(t *testing.T) {
 		tail := lastUserText(msgs)
 		seen.add(tail)
 		switch {
-		case strings.Contains(lastText(msgs), "the user has heard nothing from you. Send the final report now"):
+		case strings.Contains(lastText(msgs), "the user is owed a last word. Send the final report now"):
 			return say("All done: #42 and #44 are merged on main; nothing is left open.")
 		case msgs[len(msgs)-1]["role"] == "tool":
 			return hold()
@@ -684,7 +684,7 @@ func TestSystemPromptKeepsTheRulesOfTheOldPrompts(t *testing.T) {
 		"Do not copy the user's request word for word",
 		"is not waiting on the user",
 		"Where it stands is about the work, never about the agent",
-		"The plumbing between you stays out too",
+		"The session's own plumbing stays out too",
 		"No links unless a link is the result",
 		// timers and pictures
 		"`schedule` wakes you later with a note you leave yourself",

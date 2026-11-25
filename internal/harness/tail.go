@@ -112,7 +112,11 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 			case wakeAttention:
 				reasons = append(reasons, r.attentionTail(who))
 			case wakeTurnEnd:
-				reasons = append(reasons, fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who)))
+				s := fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who))
+				if r.phone != nil {
+					s += " If this finishes what the user asked for, or stops on something only they can settle, mark your message important so their phone buzzes."
+				}
+				reasons = append(reasons, s)
 			case wakeNotice:
 				reasons = append(reasons, r.noticeTail())
 			}
@@ -126,9 +130,12 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 	case w.owed:
 		b.WriteString(r.owedTail(who, true))
 	case w.final:
-		if t.saidAt.IsZero() {
+		switch {
+		case t.saidAt.IsZero():
 			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. The user has heard nothing from you yet. Send a complete final report, marked important: what was done, where it is, how to run it, what was verified, and what is missing or uncertain. Do not hold.")
-		} else {
+		case t.saidSeq <= r.st.LastUserSeq:
+			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. The user has written since you last spoke and has heard nothing back. Send a complete final report, marked important: what was done, where it is, how to run it, what was verified, and what is missing or uncertain. Do not hold.")
+		default:
 			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. If your last message already covers the final state (what was done, where it is, how to run it, what was verified, what is missing), hold. Otherwise send one final report with what is missing from it. Never repeat yourself.")
 		}
 	default:
@@ -251,6 +258,11 @@ func (r *Runtime) agentLine(rel *state.Relay, now time.Time) string {
 	}
 	if n := len(rel.Undelivered); n > 0 {
 		fmt.Fprintf(&b, " %d message(s) to it are not confirmed yet.", n)
+	}
+	if rel.Limit != nil {
+		// Where its budget stood when it last said: the user asks, and the
+		// line in the record is gone once the conversation is restarted.
+		fmt.Fprintf(&b, " Usage: %s.", limitLine(rel.Who(), *rel.Limit))
 	}
 	if ap := rel.Autopilot; ap != nil {
 		fmt.Fprintf(&b, " Autopilot is on %s", autopilotUntil(*ap))
@@ -378,24 +390,45 @@ func (r *Runtime) noticeTail() string {
 	return "A notice for you is above. Do what it calls for."
 }
 
-// owedTail reminds eagent of a message the user wrote to it that has had
-// no answer. alone says the call was made for this only.
+// owedTail reminds eagent of what the user wrote to it that has had no
+// answer: the oldest such message and every one kept for it since. alone
+// says the call was made for this only.
 func (r *Runtime) owedTail(who string, alone bool) string {
-	var text string
-	var at time.Time
-	for i := len(r.st.Events) - 1; i >= 0; i-- {
-		if ev := r.st.Events[i]; ev.Seq == r.turns.owed {
-			var d event.UserMessageData
-			_ = ev.Decode(&d)
-			text, at = d.Text, ev.Time
-			break
+	type kept struct {
+		text string
+		at   time.Time
+	}
+	var list []kept
+	for _, ev := range r.st.Events {
+		if ev.Seq < r.turns.owed || ev.Type != event.UserMessage {
+			continue
+		}
+		var d event.UserMessageData
+		if ev.Decode(&d) == nil && (d.Held != "" || ev.Seq == r.turns.owed) {
+			list = append(list, kept{d.Text, ev.Time})
 		}
 	}
 	lead := "Also: the"
 	if alone {
 		lead = "The"
 	}
-	return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was kept for you, so nobody else will answer. Answer it now with send_message, or pass it on with relay_forward if it is for %s.", lead, at.In(r.st.Location()).Format("15:04"), clipRunes(oneLine(text, 300), 300), who)
+	clock := func(t time.Time) string { return t.In(r.st.Location()).Format("15:04") }
+	const tailEnd = "kept for you, so nobody else will answer. Answer now with send_message, or pass it on with relay_forward if it is for %s."
+	if len(list) <= 1 {
+		var k kept
+		if len(list) == 1 {
+			k = list[0]
+		}
+		return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was "+tailEnd, lead, clock(k.at), clipRunes(oneLine(k.text, 300), 300), who)
+	}
+	if len(list) > 4 {
+		list = list[len(list)-4:]
+	}
+	var quoted []string
+	for _, k := range list {
+		quoted = append(quoted, fmt.Sprintf("at %s %q", clock(k.at), clipRunes(oneLine(k.text, 300), 300)))
+	}
+	return fmt.Sprintf("%s user wrote to you more than once and has had no answer and seen nothing done about it: %s. These were "+tailEnd, lead, strings.Join(quoted, "; "), who)
 }
 
 // threadTail asks about the thread's title and summary.
@@ -416,6 +449,6 @@ func (r *Runtime) threadTail() string {
 	} else {
 		b.WriteString("Summary: none yet. ")
 	}
-	b.WriteString("If the summary no longer says where things stand, set it with update_thread in this reply, alongside anything else you do. Set the title only if there is none or it names the wrong subject. If both still fit, leave them.")
+	b.WriteString("If the summary no longer says where things stand, set it with update_thread in this reply, alongside anything else you do. Set the title only if it is missing, generic, wrong, carries a status, or the session has become about something else. If both still fit, call update_thread with neither, so that you are not asked again.")
 	return b.String()
 }

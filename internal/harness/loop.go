@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -158,8 +159,9 @@ type turnState struct {
 	capRuns int
 
 	// finalAsked: the closing word of a session with no terminal has been
-	// asked for.
+	// asked for. finalBusy: that call is in flight (finish waits for it).
 	finalAsked bool
+	finalBusy  bool
 }
 
 // init reads, from a replayed log, what the loop would otherwise have had
@@ -193,7 +195,7 @@ func (t *turnState) init(st *state.State) {
 		}
 	}
 	t.promptTokens = st.ContextTokens()
-	if st.Legacy() && st.Calls[event.ActorEagent] == 0 {
+	if st.Legacy() && !st.Upgraded() {
 		// A log from the three-actor design: its events were weighed by
 		// actors that no longer exist. Nothing in it is owed a look; the
 		// session picks up from a briefing (resume.go).
@@ -275,9 +277,8 @@ func (r *Runtime) noteWake(ev event.Event) {
 		t.capRuns = 0
 	}
 	if k == wakeUser {
-		// What they write now is looked at on its own; an older message
-		// still unanswered is in the conversation above it.
-		r.clearOwed()
+		// A message of theirs still unanswered stays owed: the look at
+		// what they write now is told about it too (tail.go).
 		t.finalAsked = false
 	}
 	if r.ending || wakeSettle <= 0 {
@@ -359,8 +360,14 @@ var owedRetryDelays = []time.Duration{15 * time.Second, time.Minute, 5 * time.Mi
 // unanswered, and arranges another call for it. Loop goroutine.
 func (r *Runtime) oweAnswer(seq int64) {
 	t := &r.turns
-	if t.owed != seq {
+	switch {
+	case t.owed == 0:
 		t.owed, t.owedTries = seq, 0
+	case seq > t.owed:
+		// A newer one joins the one still unanswered: the oldest stays the
+		// mark (the reminder names every message since), and the
+		// reminders start over.
+		t.owedTries = 0
 	}
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
@@ -378,8 +385,8 @@ func (r *Runtime) oweAnswer(seq int64) {
 	})
 }
 
-// clearOwed forgets the unanswered message: it was answered, acted on, or
-// overtaken by a newer one. Loop goroutine.
+// clearOwed forgets the unanswered message: it was answered or acted on.
+// Loop goroutine.
 func (r *Runtime) clearOwed() {
 	t := &r.turns
 	t.owed, t.owedTries = 0, 0
@@ -405,6 +412,21 @@ func (r *Runtime) heldSince(seen int64) int64 {
 		}
 	}
 	return 0
+}
+
+// answeredSince reports whether the user answered a question of eagent's
+// after seen. Loop goroutine.
+func (r *Runtime) answeredSince(seen int64) bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= seen {
+			break
+		}
+		if ev.Type == event.UserAnswer {
+			return true
+		}
+	}
+	return false
 }
 
 // sentBack is the exchange that returns a reply to the model for another
@@ -524,6 +546,7 @@ func (r *Runtime) contextTokens() int {
 func (r *Runtime) startTurn(w wake) {
 	t := &r.turns
 	t.busy, t.callAt = true, time.Now()
+	t.finalBusy = w.final
 	if w.thread {
 		t.threadDue = false
 	}
@@ -532,7 +555,7 @@ func (r *Runtime) startTurn(w wake) {
 		defer r.wg.Done()
 		r.turn(w)
 		r.post(func() {
-			r.turns.busy, r.turns.callAt = false, time.Time{}
+			r.turns.busy, r.turns.callAt, r.turns.finalBusy = false, time.Time{}, false
 		})
 	}()
 }
@@ -540,20 +563,37 @@ func (r *Runtime) startTurn(w wake) {
 // turn makes the model calls of one wake. It runs on its own goroutine.
 func (r *Runtime) turn(w wake) {
 	ctx := r.ctx
+	if w.final {
+		// The closing word gets a minute of its own: it is still written
+		// when the session is being shut down, and a provider that cannot
+		// be reached does not keep a finished session open.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), finalReportTimeout)
+		defer cancel()
+	}
 	maxCalls := max(r.cfg.MaxCallsPerTurn, 1)
 	tc := &turnCalls{wake: w}
 	recorded := false
-	// extra is an exchange that belongs to this call alone and is never
-	// recorded: a reply that had to be sent back for another try.
+	// extra is what belongs to this turn's calls alone and is never
+	// recorded: replies that had to be sent back for another try, each
+	// with the reason, in the order they happened.
 	var extra []llm.Message
-	nudged, rewrote, cut, reminded := false, false, false, false
+	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
 	end := "done"
-	// tail is the end of the prompt for this turn: written once, and
-	// recorded only if the model acts on it. held is settled with it: the
-	// message kept for eagent that this turn has to answer (0 for none).
+	// tail is the end of the prompt: written when the turn starts, and
+	// again when something that asks for a look arrives while the turn is
+	// running (the user writes, the agent ends a turn), so that nothing
+	// reaches the model without being told what it calls for. A tail is
+	// recorded only if the model acts on it (tailKept). Three things are
+	// settled with each tail. covered is the newest event it speaks for:
+	// the look counts for nothing newer. held is the message kept for
+	// eagent that the turn has to answer (0 for none), and answered says
+	// the user answered a question.
 	var tail string
-	var mustSpeak bool
-	var held int64
+	tailKept := false
+	asked := w.thread // the turn was asked about the title and summary
+	var mustSpeak, answered bool
+	var held, covered int64
 	who := "the agent"
 	for call := 1; call <= maxCalls; call++ {
 		if ctx.Err() != nil {
@@ -561,22 +601,35 @@ func (r *Runtime) turn(w wake) {
 			break
 		}
 		var msgs []llm.Message
-		var seen int64
 		r.sync(func() {
 			msgs = r.st.View(&r.view)
-			seen = r.st.LastSeq()
-			if tail == "" {
-				held = r.heldSince(r.turns.seen)
-				if w.owed {
+			fresh := tail == ""
+			if !fresh && tailKept {
+				if k, ok := r.dueWake(); ok {
+					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded}
+					tc.wake, fresh = w, true
+				}
+			}
+			if fresh {
+				first := tail == ""
+				covered = r.st.LastSeq()
+				if h := r.heldSince(r.turns.seen); h > 0 {
+					// Not answered by what the turn did before it came.
+					held, tc.handled = h, tc.handled && first
+				}
+				if first && w.owed {
 					held = r.turns.owed
 				}
-				mustSpeak = w.final && r.turns.saidAt.IsZero()
+				answered = answered || r.answeredSince(r.turns.seen)
+				// The closing word is owed whenever the user has not heard
+				// from eagent since they last wrote (or ever).
+				mustSpeak = w.final && r.turns.saidSeq <= r.st.LastUserSeq
 				if active := r.st.ActiveRelays(); len(active) > 0 {
 					who = active[0].Who()
 				}
-				tail = r.tail(w, time.Now())
+				tail, tailKept = r.tail(w, time.Now()), false
 			}
-			if !recorded {
+			if !tailKept {
 				msgs = state.WithTail(msgs, tail)
 			}
 			r.turns.callAt = time.Now()
@@ -589,25 +642,52 @@ func (r *Runtime) turn(w wake) {
 		resp, err := r.complete(ctx, event.ActorEagent, req, r.observer())
 		r.ui.Stream("", "")
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil && !w.final {
 				end = "interrupted"
 				break
 			}
 			r.sync(func() {
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
-				if w.final {
+				if w.final && mustSpeak && !tc.spoke {
+					// The user must still get something.
 					r.fallbackFinal()
 				}
 			})
 			end = "error"
 			break
 		}
-		acts := 0
+		acts, fits := 0, false
 		for _, c := range resp.ToolCalls {
-			if c.Name != tools.Hold {
+			switch {
+			case c.Name == tools.Hold:
+			case keepsThread(c):
+				// "The title and summary still fit" changes nothing, so
+				// like a hold it leaves no record.
+				fits = true
+			default:
 				acts++
 			}
+		}
+		if acts == 0 && mustSpeak && len(resp.ToolCalls) == 0 && strings.TrimSpace(resp.Text) != "" {
+			// The closing report came as plain text: the text is the report.
+			r.sync(func() {
+				r.flushSilent()
+				if !recorded {
+					r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
+				}
+				if !tailKept {
+					r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
+				}
+				r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
+					Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
+				}))
+				r.looked(covered, resp.Usage.Input, w)
+				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
+			})
+			recorded, tailKept, tc.spoke, tc.handled = true, true, true, true
+			break
 		}
 		if acts == 0 {
 			// A reply that reaches no one. Some are sent back once, off the
@@ -623,16 +703,25 @@ func (r *Runtime) turn(w wake) {
 			case held > 0 && !reminded:
 				reminded = true
 				back = "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + ". Holding is not an answer to a message addressed to you."
-			case mustSpeak && !reminded:
-				reminded = true
-				back = "The session is ending and the user has heard nothing from you. Send the final report now with send_message."
+			case answered && !remindedAnswer:
+				remindedAnswer = true
+				back = "The user's answer has reached nobody but you. If " + who + " is waiting on it, give it to " + who + " with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next. Hold again only if the answer needs nothing done."
+			case mustSpeak && !remindedFinal:
+				remindedFinal = true
+				back = "Holding is not allowed here: the session is ending and the user is owed a last word. Send the final report now with send_message."
 			}
 			if back != "" {
 				r.sync(func() { r.noteSilent(resp, 0, wake{}) })
-				extra = sentBack(resp, back)
+				extra = append(extra, sentBack(resp, back)...)
 				continue
 			}
-			r.sync(func() { r.noteSilent(resp, seen, w) })
+			r.sync(func() {
+				r.noteSilent(resp, covered, w)
+				if fits {
+					tc.threaded = true
+					r.threadKept()
+				}
+			})
 			break
 		}
 		if leak := leakingMessage(resp); leak != "" && !rewrote {
@@ -641,10 +730,10 @@ func (r *Runtime) turn(w wake) {
 			// reply is run; after that the words go out as they are.
 			rewrote = true
 			r.sync(func() { r.noteSilent(resp, 0, wake{}) })
-			extra = []llm.Message{
-				{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL},
+			extra = append(extra,
+				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL},
 				rewriteRequest(resp, leak),
-			}
+			)
 			continue
 		}
 		// It acts, so this turn goes on the record: the lines it was given,
@@ -653,21 +742,27 @@ func (r *Runtime) turn(w wake) {
 			r.flushSilent()
 			if !recorded {
 				r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
+			}
+			if !tailKept {
 				r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
 			}
 			r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
 				Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 				ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
-				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: seen, Stop: resp.Stop,
+				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 			}))
-			r.looked(seen, resp.Usage.Input, w)
+			r.looked(covered, resp.Usage.Input, w)
 		})
-		recorded, extra = true, nil
+		recorded, tailKept, extra = true, true, nil
 		again := false
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
 			if ctx.Err() == nil {
 				out, isErr, more = r.runTool(ctx, tc, c)
+			} else {
+				// Decided and not done: the turn was cut off, and says so,
+				// so that a resumed session takes it up again (resume.go).
+				end = "interrupted"
 			}
 			images := tc.images
 			tc.images = nil
@@ -676,7 +771,7 @@ func (r *Runtime) turn(w wake) {
 			})
 			again = again || more
 		}
-		if !again {
+		if !again || end == "interrupted" {
 			break
 		}
 		if call == maxCalls {
@@ -698,10 +793,28 @@ func (r *Runtime) turn(w wake) {
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
 		}
-		if w.final && mustSpeak && !tc.spoke && end != "error" && end != "interrupted" {
+		if asked && end != "error" && end != "interrupted" {
+			r.threadAsked(tc.threaded)
+		}
+		if w.final && mustSpeak && !tc.spoke && end != "error" {
 			r.fallbackFinal()
 		}
 	})
+}
+
+// keepsThread reports an update_thread call that sets nothing: the model's
+// way of saying the title and summary still fit.
+func keepsThread(c event.ToolCall) bool {
+	if c.Name != tools.UpdateThread {
+		return false
+	}
+	args, err := llm.ArgsObject(c.Args)
+	if err != nil {
+		return false
+	}
+	title, _ := args["title"].(string)
+	summary, _ := args["summary"].(string)
+	return strings.TrimSpace(title) == "" && strings.TrimSpace(summary) == ""
 }
 
 // afterCallLimit handles a turn that was stopped at the call limit. If an
@@ -744,6 +857,12 @@ func (r *Runtime) fallbackFinal() {
 	if r.st.Question != nil {
 		b.WriteString("\n\nStill open: " + clipRunes(oneLine(r.st.Question.Text, 300), 300))
 	}
+	// It does not retry on its own once it has ended.
+	if r.phone != nil {
+		b.WriteString("\n\nNothing is running now. A reply here picks the session back up.")
+	} else {
+		b.WriteString("\n\nNothing is running now. `eagent -c` picks the session back up.")
+	}
 	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: b.String()})
 }
 
@@ -764,9 +883,6 @@ func (r *Runtime) looked(seen int64, promptTokens int, w wake) {
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
-	}
-	if w.thread && seen > r.summary.seen {
-		r.summary.seen = seen // it was asked about the title and summary
 	}
 	if t.failures > 0 {
 		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
@@ -809,10 +925,19 @@ func (r *Runtime) flushSilent() {
 	r.append(event.New(event.Checks, event.ActorEagent, d))
 }
 
-// errorRetryDelays space out the calls after the model failed: once soon,
-// then further and further apart, hourly for as long as it takes. A session
-// lives for days; a provider that comes back needs no resume.
-var errorRetryDelays = []time.Duration{5 * time.Second, time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+// errorRetryDelays space out the calls after the model failed: the first
+// failure is tried again at once (the client has already waited out what
+// looked passing), then further and further apart, hourly for as long as
+// it takes. A session lives for days; a provider that comes back needs no
+// resume.
+var errorRetryDelays = []time.Duration{0, time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// finalReportTimeout bounds the closing word of a session with no
+// terminal; finalReportGrace is how long shutdown waits for one in flight.
+const (
+	finalReportTimeout = 60 * time.Second
+	finalReportGrace   = 75 * time.Second
+)
 
 // turnFailed handles a model call that did not come back. What asked for
 // the look is still owed one, so the loop tries again later; a message from
@@ -832,7 +957,11 @@ func (r *Runtime) turnFailed(err error) {
 	t.failures++
 	wait := errorRetryDelays[min(t.failures, len(errorRetryDelays))-1]
 	t.retryAt, t.failSeq = time.Now().Add(wait), r.st.LastSeq()
-	r.ui.Log("eagent: model call failed: %s; trying again in %s", shortErr(err), roundDur(wait))
+	if wait <= 0 {
+		r.ui.Log("eagent: model call failed: %s; trying again now", shortErr(err))
+	} else {
+		r.ui.Log("eagent: model call failed: %s; trying again in %s", shortErr(err), roundDur(wait))
+	}
 	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: event.ActorEagent, Text: err.Error()}))
 	t.failSeq = r.st.LastSeq()
 	if t.retryTime != nil {
@@ -899,7 +1028,7 @@ func summarizeReasoning(s string) string {
 
 // mechanicsWords are the names of the machinery the user never sees; eagent
 // speaks as "I" and a message naming them is sent back once.
-var mechanicsWords = regexp.MustCompile(`(?i)\b(harness|dossier|subsession|rollover|context reset|tool call)s?\b`)
+var mechanicsWords = regexp.MustCompile(`(?i)\b(orchestrator|narrator|task worker|dossier|subsession|rollover|context reset|harness|tool call|long think)s?\b`)
 
 // mechanicsLeak lists the internal names a message uses, or "".
 func mechanicsLeak(text string) string {

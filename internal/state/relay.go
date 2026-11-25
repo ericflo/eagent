@@ -250,7 +250,7 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
 		if !d.OK {
-			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name), d.ID, clip(d.Detail, 300))
+			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name), d.ID, clip(d.Detail, detailChars))
 		}
 	case event.RelayState:
 		var d event.RelayStateData
@@ -258,9 +258,9 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		who := s.relayWho(d.Name)
 		switch d.State {
 		case "blocked":
-			return fmt.Sprintf("[%s %s needs attention: %s]", ts, who, clip(d.Detail, 600))
+			return fmt.Sprintf("[%s %s needs attention: %s]", ts, who, clip(d.Detail, detailChars))
 		case "exited":
-			return fmt.Sprintf("[%s %s exited. Its screen ended with:]\n%s", ts, who, clip(d.Detail, 600))
+			return fmt.Sprintf("[%s %s exited. Its screen ended with:]\n%s", ts, who, clip(d.Detail, detailChars))
 		}
 	case event.RelayProgress:
 		var d event.RelayProgressData
@@ -323,6 +323,12 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 	}
 	return ""
 }
+
+// detailChars bounds what eagent is shown of an agent's screen when it is
+// stuck, has exited, or a message to it could not be confirmed: all of what
+// the harness kept (the last lines of the screen), as the model that
+// decides what to do about it always had.
+const detailChars = 2000
 
 // RelayLimitText says where an agent's usage budget stands, for people.
 func (s *State) RelayLimitText(who string, d event.RelayLimitData) string {

@@ -82,7 +82,10 @@ type summaryKeeper struct {
 	seen   int64     // newest event a finished call covered
 	worthy int64     // newest event worth a fresh summary
 	fails  int
-	final  bool // the last summary of a batch session has been started
+	// notBefore: the model was asked about them and said nothing either
+	// way; it is not asked again before this (inline).
+	notBefore time.Time
+	final     bool // the last summary of a batch session has been started
 	// attached says the phone thread's own title and summary have been
 	// read (adoptThread), and attachBy is how long a summary waits for
 	// that: the model should see the title the user sees.
@@ -216,11 +219,48 @@ func (r *Runtime) summaryRipe() bool {
 	if r.phone != nil && !k.attached && time.Now().Before(k.attachBy) {
 		return false
 	}
-	if r.st.SummarySeq > 0 && time.Since(k.last) < summaryTurnGap {
+	if !k.last.IsZero() && time.Since(k.last) < summaryTurnGap {
+		return false
+	}
+	if time.Now().Before(k.notBefore) {
 		return false
 	}
 	k.last = time.Now()
 	return true
+}
+
+// threadKept records that eagent looked at the title and summary and
+// found they still fit. Nothing the user sees changes; the mark says how
+// far they are known to be right, so nobody asks again until there is
+// news. Loop goroutine only.
+func (r *Runtime) threadKept() {
+	seen := r.turns.seen
+	if !r.summary.on || seen <= r.summary.seen {
+		return
+	}
+	r.append(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{By: "summary", SeenSeq: seen}))
+	r.summary.seen = seen
+}
+
+// threadAsked is told how a call that was asked about the title and
+// summary ended (inline). A model that set them, or said they still fit,
+// has answered. One that did neither has left them as they were, possibly
+// stale: it is asked again, further apart each time, as a failed call of
+// the dedicated summarizer is tried again. Loop goroutine only.
+func (r *Runtime) threadAsked(answered bool) {
+	k := &r.summary
+	if !k.on || !k.inline {
+		return
+	}
+	if answered || k.worthy <= k.seen {
+		k.fails, k.notBefore = 0, time.Time{}
+		return
+	}
+	k.fails++
+	k.notBefore = time.Now().Add(min(summaryRetry<<min(k.fails-1, 3), summaryLongGap))
+	if !r.ending {
+		r.armSummary(k.notBefore)
+	}
 }
 
 // finalSummary holds a batch session open for one last summary when it is

@@ -123,8 +123,11 @@ type Runtime struct {
 	remoteStop     bool   // the app asked this session to stop; see acceptRemoteStop
 	phone          *phone // Finalechat mirror; nil when off
 
-	relays          relaySeats
-	timers          map[string]*time.Timer // timer id -> the timer eagent set with schedule; loop-owned
+	relays relaySeats
+	timers map[string]*time.Timer // timer id -> the timer eagent set with schedule; loop-owned
+	// viewed: the pictures view_image has put in the current conversation,
+	// by path, with each file's size and time. Loop goroutine.
+	viewed          map[string]string
 	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)

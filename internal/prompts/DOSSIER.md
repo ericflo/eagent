@@ -30,8 +30,8 @@ The record by place:
 Study the record before you write. session_search finds lines in any file; session_read shows them. Build the briefing from the record every time, the whole of it, not from the briefing before: earlier briefings (yours at the top of your conversation, and the one each file opens with) are sources like any other, good for finding where things are and no better than the lines they cite. Read the places that matter again, in the old files as well as the new, and keep an entry only when the record still bears it out. A topic that has gone quiet stays on the map: the user may come back to it. While you are writing the briefing only session_search and session_read run; no other tool does.
 
 Then write the briefing as your whole reply, in plain text, with no tool call, in these parts:
-1. WHAT THE USER WANTS: the goal as it stands now, the standing instructions and preferences they gave (how often to hear from you, what not to ask, how they like things done), and the decisions they made. Use their words where the wording matters.
-2. WHERE THE WORK STANDS: what the agent's reports show finished, what it is doing right now, and what failed or is unfinished, with the paths, commands, numbers and commit ids.
+1. WHAT THE USER WANTS: the goal as it stands now; every instruction the user gave the agent, in their words; the standing instructions and preferences they gave you (how often to hear from you, what not to ask, how they like things done); and the decisions they made.
+2. WHERE THE WORK STANDS: for each of those instructions, whether the agent's turn reports show it done, in progress, or not acted on yet; what the agent is doing right now; and what failed or is unfinished. Give the paths, commands, numbers, commit ids and error messages.
 3. DECISIONS AND CONSTRAINTS: choices that were made, things that were tried and dropped, and why.
 4. OPEN: questions waiting on the user or the agent, anything you were about to do, and any standing order to keep the agent going.
 5. WHAT THE USER LAST HEARD: the substance of your last few messages, so that you neither repeat nor contradict them.
@@ -39,6 +39,6 @@ Then write the briefing as your whole reply, in plain text, with no tool call, i
 
 Dense and specific, facts over prose, no preamble: one to three pages.
 
-Added after your text automatically, so leave them out: the table of files; each agent's terminal, folder, model and how to resume it; the user's messages word for word with their places; the agent's turn ends with their places.{{if .Reason}}
+Added after your text automatically, so leave them out: the table of files; each agent's terminal, folder, model and how to resume it; the user's messages with their places (the first few and the latest word for word, the ones between in a line each); the agent's turn ends with their places.{{if .Reason}}
 
 Why now: {{.Reason}}.{{end}}

@@ -1,4 +1,3 @@
-//go:build gaps
 
 package harness
 
