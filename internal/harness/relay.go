@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -175,7 +176,11 @@ type relayLaunch struct {
 	// a switch, is why that relay ends.
 	replaces, endOld string
 	old              relaySeat
-	held             []heldSend
+	// oldIdle, when the old seat's queue was typing a send as this began,
+	// is closed once that send is settled: a send cut off by the old
+	// agent's stop then joins held before the new agent is launched.
+	oldIdle <-chan struct{}
+	held    []heldSend
 	// brief, for a switch, is the handoff brief, typed into the new agent
 	// before anything that waited for it; briefAuto marks its send as the
 	// harness's own. briefDone hears how typing it went, and drained when
@@ -205,6 +210,9 @@ type heldSend struct {
 	id, text, mode string
 	done           chan sendResult
 	barrier        bool
+	// on is the relay the send is on the record for, when it waits in a
+	// start that may hand it to another (a switch).
+	on string
 }
 
 // sendResult is how typing one send went.
@@ -221,6 +229,11 @@ type sendQueue struct {
 	name    string
 	items   []heldSend
 	running bool
+	// movedTo is the start that took this seat out of use: what it was
+	// typing when the seat closed goes there, as the rest of the queue did.
+	movedTo *relayLaunch
+	// idle is closed when the goroutine typing this queue ends.
+	idle chan struct{}
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -234,7 +247,7 @@ func (r *Runtime) enqueueSend(name string, seat relaySeat, items ...heldSend) {
 	}
 	q := r.relays.queues[seat]
 	if q == nil {
-		q = &sendQueue{name: name}
+		q = &sendQueue{name: name, idle: make(chan struct{})}
 		r.relays.queues[seat] = q
 	}
 	q.items = append(q.items, items...)
@@ -257,6 +270,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 			if r.relays.queues[seat] == q {
 				delete(r.relays.queues, seat)
 			}
+			close(q.idle)
 			r.relays.mu.Unlock()
 			return
 		}
@@ -277,8 +291,35 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 				res.how, res.err = seat.Send(h.id, h.text, h.mode)
 			}
 		}
+		if res.err != nil && r.passOn(q, h) {
+			continue
+		}
+		if errors.Is(res.err, relay.ErrClosed) {
+			// Its terminal was closed under it and no agent took over: the
+			// relay was stopped.
+			res.err = fmt.Errorf("the agent is not running")
+		}
 		r.settleSend(q.name, h, res)
 	}
+}
+
+// passOn hands a send that could not be typed because a restart or a
+// switch took its seat out of use to that start, ahead of the sends the
+// start took from the queue (this one was accepted before them). False when
+// no start took the seat, or that start is already over. Not on the loop
+// goroutine.
+func (r *Runtime) passOn(q *sendQueue, h heldSend) bool {
+	r.relays.mu.Lock()
+	defer r.relays.mu.Unlock()
+	job := q.movedTo
+	if job == nil || r.relays.launching[job.name] != job {
+		return false
+	}
+	if h.on == "" {
+		h.on = q.name
+	}
+	job.held = append([]heldSend{h}, job.held...)
+	return true
 }
 
 // awaitSend waits for a queued send to be typed, or for the session to
@@ -364,8 +405,17 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 		// What was still waiting to be typed into the agent being stopped
 		// goes to the new one, ahead of what arrives during the launch.
 		if q := r.relays.queues[job.old]; job.old != nil && q != nil {
-			job.held = append(job.held, q.items...)
+			for _, h := range q.items {
+				if h.on == "" {
+					h.on = replaces
+				}
+				job.held = append(job.held, h)
+			}
 			q.items = nil
+			q.movedTo = job
+			if q.running {
+				job.oldIdle = q.idle
+			}
 		}
 	}
 	r.relays.mu.Unlock()
@@ -377,8 +427,22 @@ func (job *relayLaunch) run() {
 	if job.old != nil {
 		_ = job.old.Kill()
 	}
+	if job.oldIdle != nil {
+		// The send the old agent was waiting to type stops waiting once its
+		// terminal is closed, and joins held; bounded, as a stuck terminal
+		// call must not hold the start.
+		select {
+		case <-job.oldIdle:
+		case <-time.After(oldSendSettle):
+		}
+	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
+
+// oldSendSettle bounds how long a start waits for the send the agent it
+// replaces was typing to give up. Once the old terminal is closed that send
+// fails at its next step, which takes well under a second.
+const oldSendSettle = 15 * time.Second
 
 // finishLaunch records how a start went and returns the relay's name. The
 // sends that waited for it are queued for the new seat, after a switch's
@@ -433,7 +497,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: fmt.Errorf("the agent could not start again: %w", err)}
 				continue
 			}
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: job.replaces, ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -506,6 +570,7 @@ func (r *Runtime) holdSend(name string, h heldSend) bool {
 	if job == nil {
 		return false
 	}
+	h.on = name
 	job.held = append(job.held, h)
 	return true
 }
