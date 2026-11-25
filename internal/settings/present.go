@@ -76,7 +76,8 @@ func placeProjectField(f *control.Field) {
 	var route []string // the route's own keys: fallback/.../leaf
 	switch {
 	case len(parts) >= 2 && parts[0] == "model":
-		group, route = "Model", parts[1:]
+		// A reader puts the card's name before a label: "eagent model".
+		group, route = "eagent", parts[1:]
 	case len(parts) >= 3 && parts[0] == "summarizer" && parts[1] == "model":
 		group, route = "Summarizer", parts[2:]
 	default:
@@ -108,7 +109,33 @@ func placeProjectField(f *control.Field) {
 // last cached), grouped by provider id, for a client to offer as choices. Any
 // model id can still be typed in.
 func ModelSuggestions(project string) []control.Suggestion {
-	return modelSuggestionsWithin(project, modelListBudget)
+	return modelSuggestionsWithin(project, modelListBudget, func(pr config.Provider) string { return pr.ID })
+}
+
+// projectModelSuggestions are ModelSuggestions grouped by their provider's
+// address, for the project settings, where a route names its provider by
+// base_url: a model's group is the base_url picking it gives the route.
+func projectModelSuggestions(project string, budget int) []control.Suggestion {
+	return modelSuggestionsWithin(project, budget, func(pr config.Provider) string { return pr.BaseURL })
+}
+
+// providerAddressSuggestions name each address a route may use by its
+// provider, for the project settings' base_url fields.
+func providerAddressSuggestions(project string, addresses []any) []control.Suggestion {
+	out := make([]control.Suggestion, 0, len(addresses))
+	for _, v := range addresses {
+		u, _ := v.(string)
+		if u == "" || len(u) > 500 {
+			continue
+		}
+		s := control.Suggestion{Value: u}
+		if pr, ok := config.ProviderForURLFor(project, u); ok {
+			s.Label = clip(pr.Label, 200)
+		}
+		s.Detail = clip(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://"), 300)
+		out = append(out, s)
+	}
+	return out
 }
 
 // modelListBudget is the share of a settings document (256 KiB) the model
@@ -121,8 +148,9 @@ func suggestionSize(s control.Suggestion) int {
 	return len(s.Value) + len(s.Label) + len(s.Group) + len(s.Detail) + 48
 }
 
-// modelSuggestionsWithin is ModelSuggestions within budget bytes.
-func modelSuggestionsWithin(project string, budget int) []control.Suggestion {
+// modelSuggestionsWithin is ModelSuggestions within budget bytes, each in the
+// group group gives its provider.
+func modelSuggestionsWithin(project string, budget int, group func(config.Provider) string) []control.Suggestion {
 	models := config.KnownModels(project)
 	providers := map[string]config.Provider{}
 	for _, pr := range config.AllProviders(project) {
@@ -154,7 +182,14 @@ func modelSuggestionsWithin(project string, budget int) []control.Suggestion {
 		if m.Vision && providers[m.Provider].Custom {
 			detail = append(detail, "vision")
 		}
-		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: m.Provider, Detail: clip(strings.Join(detail, " · "), 300)}
+		pr, ok := providers[m.Provider]
+		if !ok {
+			pr = config.Provider{ID: m.Provider}
+		}
+		if group(pr) == "" {
+			continue // a provider no longer known has no address to pick
+		}
+		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: group(pr), Detail: clip(strings.Join(detail, " · "), 300)}
 		if budget -= suggestionSize(sug); budget < 0 {
 			break
 		}

@@ -102,16 +102,18 @@
       for (const m of (base.models || [])) if (customIDs.has(m.provider)) existingCustomModels.set(`${m.provider}|${m.id}`, m);
       const customModels = [];
       const seen = new Set();
+      // A model's group is its provider's address (base_url).
+      const providerOf = group => customProviders.find(p => p.id === group || p.base_url === String(group || '').replace(/\/+$/, ''));
       for (const sug of (resource?.descriptor?.suggestions?.models || [])) {
-        if (!customIDs.has(sug.group)) continue;
-        const k = `${sug.group}|${sug.value}`;
+        const pr = providerOf(sug.group);
+        if (!pr) continue;
+        const k = `${pr.id}|${sug.value}`;
         if (seen.has(k)) continue;
         seen.add(k);
         const existing = existingCustomModels.get(k);
         if (existing) { customModels.push(existing); continue; }
-        const pr = customProviders.find(p => p.id === sug.group);
         customModels.push({
-          provider: sug.group, id: sug.value, family: sug.value, label: sug.label || sug.value,
+          provider: pr.id, id: sug.value, family: sug.value, label: sug.label || sug.value,
           protocol: pr?.protocol || 'openai-chat', protocols: pr?.protocols || [], note: sug.detail || '', live: true,
         });
       }

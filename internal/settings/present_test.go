@@ -65,7 +65,7 @@ func TestStartOptionsAreTheAgentsOwn(t *testing.T) {
 		}
 	}
 	for name := range view.Descriptor.Suggestions {
-		if name == "configs" || name == "providers" {
+		if name == "configs" {
 			t.Errorf("suggestion list %s has no reader in project settings", name)
 		}
 	}
@@ -130,11 +130,11 @@ func TestProjectSettingsAreLaidOut(t *testing.T) {
 		}
 	}
 	for key, want := range map[string][4]string{
-		"/model/model":                   {"Models", "Model", "Model", ""},
-		"/model/reasoning_effort":        {"Models", "Model", "Reasoning effort", ""},
-		"/model/base_url":                {"Models", "Model", "Base URL", "advanced"},
-		"/model/fallback/model":          {"Models", "Model fallback", "Model", "advanced"},
-		"/model/fallback/fallback/model": {"Models", "Model fallback 2", "Model", "advanced"},
+		"/model/model":                   {"Models", "eagent", "Model", ""},
+		"/model/reasoning_effort":        {"Models", "eagent", "Reasoning effort", ""},
+		"/model/base_url":                {"Models", "eagent", "Base URL", "advanced"},
+		"/model/fallback/model":          {"Models", "eagent fallback", "Model", "advanced"},
+		"/model/fallback/fallback/model": {"Models", "eagent fallback 2", "Model", "advanced"},
 		"/summarizer/mode":               {"Models", "Summarizer", "Title and summary", ""},
 		"/tick_seconds":                  {"Behavior", "Progress", "Seconds between progress looks", ""},
 		"/quiet_seconds":                 {"Behavior", "Progress", "Longest silence while the agent works", ""},
@@ -169,12 +169,18 @@ func TestProjectSettingsAreLaidOut(t *testing.T) {
 	if r := fields["/relay/default"]; !slices.Contains(r.Shape.Enum, any("claude")) || slices.Contains(r.Shape.Enum, any("")) || !r.Unset {
 		t.Errorf("relay default = %+v", r)
 	}
-	// An inline summarizer has no route to set, and nothing else is left of
-	// settings that are gone.
-	for key := range fields {
-		if strings.HasPrefix(key, "/summarizer/model") || strings.HasPrefix(key, "/relay/profiles") || key == "/relay/quiet_seconds" {
+	// An inline summarizer's route is there to give it one, out of the way
+	// until it is dedicated; nothing else is left of settings that are gone.
+	for key, f := range fields {
+		if strings.HasPrefix(key, "/summarizer/model/") && (!f.Advanced || f.Group == "") {
+			t.Errorf("inline summarizer route field %s = %+v", key, f)
+		}
+		if strings.HasPrefix(key, "/relay/profiles") || key == "/relay/quiet_seconds" {
 			t.Errorf("unexpected field %s", key)
 		}
+	}
+	if _, ok := fields["/summarizer/model/model"]; !ok {
+		t.Error("no summarizer model field while inline")
 	}
 	for _, f := range view.Descriptor.Fields {
 		for _, word := range []string{"orchestrat", "narrat", "task worker", "actor"} {

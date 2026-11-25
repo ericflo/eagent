@@ -155,7 +155,7 @@ func TestConnectorAddsAndRefreshesLocalServer(t *testing.T) {
 	}
 	found := false
 	for _, m := range v2.Descriptor.Suggestions["models"] {
-		if m.Value == "local-v2" && m.Group == servers[0].ID {
+		if m.Value == "local-v2" && m.Group == servers[0].BaseURL {
 			found = true
 		}
 	}
