@@ -7,7 +7,7 @@
     <title>Breakout variance gallery — eagent</title>
     <meta
       name="description"
-      content="Thirty-three finished Breakout builds from forty variance runs across four cheap eagent presets: per-lane cost, duration, and completion data plus every playable game."
+      content="From eagent's earlier design, when it did the work itself: thirty-three finished Breakout builds from forty variance runs across four cheap presets, with per-lane cost, duration, and completion data plus every playable game."
     />
     <link rel="canonical" href="https://ericflo.github.io/eagent/variance/" />
     <meta property="og:type" content="website" />
@@ -15,7 +15,7 @@
     <meta property="og:title" content="Breakout variance gallery — eagent" />
     <meta
       property="og:description"
-      content="Same Breakout spec, ten repeats per preset, thirty-three playable games. Cost, duration, and completion variance with error bars."
+      content="An experiment on eagent's earlier design: the same Breakout spec, ten repeats per preset, thirty-three playable games, with cost, duration, and completion variance."
     />
     <meta
       property="og:url"
@@ -51,8 +51,10 @@
           <span></span><span></span>
         </button>
         <nav id="navigation" class="navigation" aria-label="Main navigation">
-          <a href="https://ericflo.github.io/eagent/#in-practice"
-            >The 16-game gallery</a
+          <a href="https://ericflo.github.io/eagent/">eagent today</a
+          ><a
+            href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
+            >The Breakout grid</a
           ><a
             href="https://github.com/ericflo/eagent/blob/main/docs/grid/VARIANCE.md"
             >The variance writeup</a
@@ -67,6 +69,24 @@
       </div>
     </header>
     <main id="main">
+      <aside
+        class="history-banner section-wrap"
+        aria-labelledby="history-banner-title"
+      >
+        <p class="eyebrow" id="history-banner-title">EARLIER DESIGN</p>
+        <p>
+          This page documents an experiment on eagent&rsquo;s earlier design,
+          in which eagent did the work itself: an orchestrator planned and
+          checked, task workers wrote the code, and a narrator reported. eagent
+          no longer works that way. It now runs a coding agent you already use
+          (Codex, Claude Code, Antigravity or pi) and stands between it and
+          you, and the agent does the work. The costs and times below describe
+          the earlier design only.
+        </p>
+        <a class="text-link" href="https://ericflo.github.io/eagent/"
+          >See what eagent does now</a
+        >
+      </aside>
       <section class="section-wrap">
         <div class="section-heading">
           <div>
@@ -93,11 +113,11 @@
           slightly different headline figures for two lanes because those fold
           the timeout-capped runs in. Each game was served statically and
           screenshotted with scripted Chromium at desktop and phone viewports.
-          The live
-          <a href="https://ericflo.github.io/eagent/#in-practice"
-            >16-game gallery</a
-          >
-          is untouched — this page is a separate annex.
+          The original sixteen-preset run is written up in the
+          <a
+            href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
+            >Breakout grid record</a
+          >.
         </p>
         <a
           class="text-link game-record-link"
@@ -181,13 +201,17 @@
             aria-label="eagent home"
             >eagent<span class="wordmark-period">.</span></a
           >
-          <p>Variance annex to the Breakout grid.</p>
+          <p>
+            Variance annex to the Breakout grid, from eagent&rsquo;s earlier
+            design.
+          </p>
         </div>
         <div class="footer-links">
           <div>
             <span>VARIANCE</span
-            ><a href="https://ericflo.github.io/eagent/#in-practice"
-              >The 16-game gallery</a
+            ><a
+              href="https://github.com/ericflo/eagent/blob/main/docs/breakout-grid.md"
+              >The Breakout grid</a
             ><a
               href="https://github.com/ericflo/eagent/blob/main/docs/grid/VARIANCE.md"
               >The variance writeup</a

@@ -28,8 +28,16 @@ def effort_label(effort):
     return "no reasoning" if effort == "none" else effort + " effort" if effort else "provider default"
 
 
-def route_html(route, number, label, color):
-    actor = route["actor"]
+def eagent_route(preset):
+    """The route of eagent's own model loop. A preset may also carry a
+    dedicated summarizer route; the site shows only the loop's model."""
+    for route in preset["routes"]:
+        if route["actor"] == "eagent":
+            return route
+    sys.exit(f"Preset has no eagent route: {preset['name']!r}")
+
+
+def route_html(route):
     fallbacks = []
     fallback = route.get("fallback")
     while fallback:
@@ -38,15 +46,20 @@ def route_html(route, number, label, color):
     fallback_text = "Fallback: " + " → ".join(fallbacks) if fallbacks else ""
     hidden = "" if fallbacks else " hidden"
     return f'''<div class="model-route">
-      <span class="route-number ink-{color}">{number:02d}</span>
+      <span class="route-number ink-orange">01</span>
       <div class="route-info">
-        <span>{label}</span>
-        <strong id="model-{actor}">{escape(route["label"])}</strong>
-        <p class="route-provider" id="provider-{actor}">{escape(route["provider"])}</p>
+        <span>EAGENT&#8217;S MODEL</span>
+        <strong id="model-eagent">{escape(route["label"])}</strong>
+        <p class="route-provider" id="provider-eagent">{escape(route["provider"])}</p>
       </div>
-      <span class="route-tag" id="effort-{actor}">{escape(effort_label(route["effort"]))}</span>
-      <p class="route-fallback" id="fallback-{actor}"{hidden}>{escape(fallback_text)}</p>
+      <span class="route-tag" id="effort-eagent">{escape(effort_label(route["effort"]))}</span>
+      <p class="route-fallback" id="fallback-eagent"{hidden}>{escape(fallback_text)}</p>
     </div>'''
+
+
+def preset_flag(preset):
+    """A preset that is the built-in default needs no flag."""
+    return "" if not preset["name"] or preset["name"] == catalog["default"] else " --preset " + preset["name"]
 
 
 options = []
@@ -56,195 +69,32 @@ for preset in ordered_presets:
     attribute = " selected" if selected else ""
     options.append(f'<option value="{escape(preset["name"])}"{attribute}>{escape(label)}</option>')
 
-command = "eagent" + (" --preset " + example["name"] if example["name"] else "") + ' "Build something good"'
+# The prompt is the README's own example.
+EXAMPLE_PROMPT = "add a Makefile with build and test targets"
+example_route = eagent_route(example)
+command = "eagent" + preset_flag(example) + f' "{EXAMPLE_PROMPT}"'
 example_providers = list(dict.fromkeys(route["provider"] for route in example["routes"]))
 example_keys = dict.fromkeys(route["keyEnv"] for route in example["routes"] if route.get("keyEnv"))
-key_commands = [f'export {key}="your-key"' for key in example_keys] + [f'eagent doctor --preset {example["name"]} --live']
-
-# Breakout-grid gallery data. docs/grid/results.json is the source of truth
-# for every displayed number; one-liners and short test labels below are
-# editorial summaries of its evidence/play_notes fields.
-grid = json.loads((root / "docs" / "grid" / "results.json").read_text())
-grid_presets = grid["presets"]
-grid_order = grid.get("ranking_by_rubric_total") or sorted(grid_presets)
-if set(grid_order) != set(grid_presets):
-    sys.exit("Grid ranking does not match results.json presets")
-grid_one_liners = {
-    "opencode-med": "Break through, get on top, go overdrive \u2014 rim payouts and reward capsules.",
-    "astra": "Breach the field; balls escaping above charge a burning overdrive meter.",
-    "openai-med": "Crack a route topside; breach lanes and cascades multiply everything.",
-    "openai-high": "Breach-protocol campaign: punch above, score topside, hit Maximum Overdrive.",
-    "anthropic-med": "Break through to the attic, where chained breaks escalate under time-dilation.",
-    "anthropic-high": "A neon Breakout about getting above the bricks \u2014 gated angle/speed bricks, overdrive multiplier, synth soundtrack.",
-    "hero-fable": "Punch a hole, get the ball into the attic, watch the multiplier climb \u2014 8 capsule powers, adaptive 7-tier soundtrack.",
-    "hero-astra": "Two-axis paddle across 5 sectors; breach the array to enter overdrive, where piercing becomes multiball.",
-    "muse": "Go exponential above the bricks; gated bricks and fire, ghost, heavy, multiball powers.",
-    "glm": "The real game starts above the bricks \u2014 \u00d72.5 multiplier, lights and shake.",
-    "openrouter-high": "Punch above the field across 6 levels; OVERDRIVE sends combos skyward.",
-    "deepseek": "Rooftop mode ramps the multiplier and rains bonus balls.",
-    "openai-low": "Tunnel the wall, trigger the orbit cascade, chain breaks to FRENZY.",
-    "openrouter-med": "Graze- and shock-gated bricks with fire, split, giant, laser and sticky balls.",
-    "qwen": "Five overdrive bands, key/lock and mover bricks, slam paddle, attract demo.",
-    "nous-med": "Chaos-doubling multiplier topside; volt chains and vortex booms.",
-}
-grid_status_labels = {
-    "done": "Done",
-    "stopped-budget": "Stopped \u00b7 budget",
-    "stopped-capped": "Stopped \u00b7 cap",
-    "halted-provider": "Halted \u00b7 provider",
-}
-# Honest defect labels, summarized from results.json play_notes/page_errors.
-grid_flags = {
-    "qwen": "Mobile viewport-scaling bug \u2014 tiny centered playfield",
-}
-
-
-def grid_tests_label(preset):
-    tests = grid_presets[preset]["tests"]
-    if not tests["exists"]:
-        return "None"
-    command = tests["command"]
-    if "vitest" in command:
-        return "vitest"
-    if "node --test" in command:
-        return "node --test"
-    if "tsx --test" in command:
-        return "tsx --test"
-    if "physics.test" in command:
-        return "physics.test.js"
-    if "qa.js" in command:
-        return "browser smoke (local server)"
-    return "node runners"
-
-
-def build_game_gallery():
-    row_html = {}
-    card_html = {}
-    data = {}
-    for preset in grid_order:
-        info = grid_presets[preset]
-        if preset not in grid_one_liners:
-            sys.exit(f"No gallery one-liner for grid preset: {preset}")
-        title = info["title"]
-        one_liner = grid_one_liners[preset]
-        models = f'{info["orchestrator"]} / {info["worker"]} / {info["narrator"]}'
-        cost = f'${info["cost_usd"]:.2f}'
-        minutes = int(round(info["duration_s"] / 60))
-        status = grid_status_labels.get(info["status"], info["status"])
-        flag = grid_flags.get(preset) or ("Broken canvas" if info["page_errors"] else "")
-        tests_label = grid_tests_label(preset)
-        status_cell = escape(status + (" \u2014 " + flag if flag else ""))
-        row_html[preset] = (
-            "<tr>"
-            f"<td><code>{escape(preset)}</code></td>"
-            f"<td>{escape(title)}</td>"
-            f"<td>{escape(models)}</td>"
-            f"<td>{cost}</td>"
-            f"<td>{minutes}m</td>"
-            f"<td>{info['loc']:,}</td>"
-            f"<td>{info['rubric_total']}/27</td>"
-            f"<td>{escape(tests_label)}</td>"
-            f"<td>{status_cell}</td>"
-            "</tr>"
-        )
-        badges = (
-            f'<span class="game-badge">{cost}</span>'
-            f'<span class="game-badge">{info["rubric_total"]}/27 rubric</span>'
-        )
-        featured = preset in ("hero-fable", "hero-astra")
-        if featured:
-            badges += '<span class="game-badge">Featured hero</span>'
-        if flag:
-            badges += f'<span class="game-badge game-badge-warn">{escape(flag.split(" \u2014 ")[0])}</span>'
-        card_class = "game-card game-card-featured" if featured else "game-card"
-        copy = f"<p>{escape(one_liner)}</p>"
-        if preset == "anthropic-high":
-            copy += (
-                '<p class="game-flag">Redemption arc: resumed to fix the nebula '
-                "black-canvas bug, 26\u219227 \u2014 full story in the "
-                '<a href="#game-record-link">Breakout grid record</a>.</p>'
-            )
-        elif flag:
-            copy += f'<p class="game-flag">{escape(flag)}</p>'
-        card_html[preset] = (
-            f'<article class="{card_class}" id="game-card-{escape(preset)}">'
-            f'<img id="game-thumb-{escape(preset)}" src="assets/games/{escape(preset)}-desktop.png" '
-            'width="1280" height="800" loading="lazy" '
-            f'alt="Screenshot of {escape(title)} played on a desktop browser" />'
-            '<div class="game-card-body">'
-            f"<h3>{escape(title)}</h3>"
-            f'<p class="game-preset"><code>{escape(preset)}</code> \u00b7 {escape(models)}</p>'
-            + copy
-            + f'<p class="game-badges">{badges}</p>'
-            '<div class="game-card-actions">'
-            f'<button type="button" class="game-play" data-play="{escape(preset)}">Play</button>'
-            f'<a class="game-open" href="games/{escape(preset)}/">Open full page</a>'
-            "</div></div></article>"
-        )
-        data[preset] = {
-            "title": title,
-            "oneLiner": one_liner,
-            "models": models,
-            "cost": cost,
-            "rubric": f'{info["rubric_total"]}/27',
-            "status": status,
-            "flag": flag,
-            "href": f"games/{preset}/",
-            "desktop": f"assets/games/{preset}-desktop.png",
-            "mobile": f"assets/games/{preset}-mobile.png",
-        }
-    # Featured order: hero runs pin to the top of the table and the cards,
-    # then the anthropic-high redemption story, then the rest by rubric rank.
-    hero_first = ["hero-fable", "hero-astra"]
-    for pinned in hero_first + ["anthropic-high"]:
-        if pinned not in row_html:
-            sys.exit(f"Featured gallery preset missing from results.json: {pinned}")
-    table_order = hero_first + [preset for preset in grid_order if preset not in hero_first]
-    card_order = hero_first + ["anthropic-high"] + [
-        preset for preset in grid_order if preset not in hero_first + ["anthropic-high"]
-    ]
-    table = (
-        '<div class="game-table-wrap" tabindex="0" role="region" aria-label="Breakout grid comparison table, scrollable"><table class="game-table" id="game-table">'
-        "<caption>Sixteen presets, one Breakout spec \u2014 cost, time, size, rubric score, tests, and run status from results.json.</caption>"
-        "<thead><tr><th scope=\"col\">Preset</th><th scope=\"col\">Game</th><th scope=\"col\">Models</th>"
-        "<th scope=\"col\">Cost</th><th scope=\"col\">Time</th><th scope=\"col\">LOC</th>"
-        "<th scope=\"col\">Rubric</th><th scope=\"col\">Tests</th><th scope=\"col\">Status</th></tr></thead>"
-        "<tbody>" + "".join(row_html[preset] for preset in table_order) + "</tbody></table></div>"
-    )
-    gallery = (
-        table
-        + '<div class="game-grid" id="game-grid">'
-        + "".join(card_html[preset] for preset in card_order)
-        + "</div>"
-        # Keep JSON inert even if a future title contains HTML.
-        + '<script type="application/json" id="game-data">'
-        + json.dumps(data, separators=(",", ":"), ensure_ascii=True).replace("<", "\\u003c")
-        + "</script>"
-    )
-    return gallery
+key_commands = [f'export {key}="your-key"' for key in example_keys] + ["eagent doctor" + preset_flag(example) + " --live"]
+default_route = catalog["defaults"][0]
 featured_providers = list(dict.fromkeys(route["provider"] for name in example_names for route in by_name[name]["routes"]))
 ordered_providers = featured_providers + [label for label in catalog["providers"] if label not in featured_providers]
 replacements = {
     "<!-- site:preset-options -->": "\n".join(options),
     "<!-- site:providers -->": "".join(f"<span>{escape(label)}</span>" for label in ordered_providers),
-    "<!-- site:example-routes -->": "\n".join(
-        route_html(route, i, label, color)
-        for i, (route, label, color) in enumerate(zip(example["routes"], ["ORCHESTRATOR", "TASK WORKER", "NARRATOR"], ["orange", "sage", "yellow"]), 1)
-    ),
+    "<!-- site:example-route -->": route_html(example_route),
+    "{{EXAMPLE_EAGENT}}": escape(example_route["label"]),
+    "{{DEFAULT_MODEL}}": escape(default_route["label"] + " on " + default_route["provider"]),
     "{{EXAMPLE_DESCRIPTION}}": escape(example["description"]),
     "{{EXAMPLE_COMMAND}}": escape(command),
     "{{EXAMPLE_PROVIDERS}}": escape(
         ("Example provider: " if len(example_providers) == 1 else "Example providers: ") + ", ".join(example_providers) + "."
     ),
     "{{EXAMPLE_KEY_COMMANDS}}": escape("\n".join(key_commands)),
-    "{{EXAMPLE_START_COMMAND}}": escape('cd your-project\neagent --preset ' + example["name"] + ' "Read this repo and fix the failing tests"'),
-    "{{EXAMPLE_SERVE_COMMAND}}": escape("eagent serve --preset " + example["name"]),
+    "{{EXAMPLE_START_COMMAND}}": escape("cd your-project\neagent" + preset_flag(example) + f' "{EXAMPLE_PROMPT}"'),
     # Keep JSON inert even if a future catalog label contains HTML.
     "<!-- site:preset-data -->": '<script type="application/json" id="preset-data">' + json.dumps(catalog, separators=(",", ":"), ensure_ascii=True).replace("<", "\\u003c") + "</script>",
-    "<!-- site:game-gallery -->": build_game_gallery(),
 }
-for route in example["routes"]:
-    replacements["{{EXAMPLE_" + route["actor"].upper() + "}}"] = escape(route["label"])
 page = (source / "index.template.html").read_text()
 for marker, value in replacements.items():
     if page.count(marker) != 1:
@@ -252,6 +102,16 @@ for marker, value in replacements.items():
     page = page.replace(marker, value)
 if re.search(r"<!-- site:|\{\{[A-Z_]+\}\}", page):
     sys.exit("Unresolved website template marker")
+
+# The Breakout grid and its variance annex document eagent's earlier design,
+# in which eagent did the work itself. The main page no longer shows them; the
+# games stay staged so their existing URLs keep working, and the variance page
+# carries a banner that says which design it documents.
+grid = json.loads((root / "docs" / "grid" / "results.json").read_text())
+grid_presets = grid["presets"]
+grid_order = grid.get("ranking_by_rubric_total") or sorted(grid_presets)
+if set(grid_order) != set(grid_presets):
+    sys.exit("Grid ranking does not match results.json presets")
 
 # Leading-slash asset references break under the /eagent/ project path and in
 # games/<preset>/ subpaths. Rewrite them to relative paths in staged copies.

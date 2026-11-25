@@ -518,7 +518,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 	if n := len(r.cfg.Migrated); n > 0 {
 		// Said once per run, in one line: the list is long and is the same
 		// every time until the configuration is brought up to date.
-		r.ui.Log("this project's configuration still has %d setting(s) of the eagent that ran three models; each was carried over, changed or dropped. `eagent config` lists them.", n)
+		r.ui.Log("this project's configuration still has %d setting(s) of the eagent that ran three models; each was carried over, changed or dropped. `eagent doctor` lists them.", n)
 	}
 	r.startRuntimeSettings()
 	defer r.stopRuntimeSettings()
