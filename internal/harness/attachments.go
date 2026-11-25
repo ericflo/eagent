@@ -498,7 +498,7 @@ func (r *Runtime) sendable(abs string) bool {
 				// Agents also write a picture's path under ~ or from
 				// their own folder.
 				img = relay.ExpandHome(img)
-				if rel := r.st.Relays[d.Name]; !filepath.IsAbs(img) && rel != nil && rel.Dir != "" {
+				if rel := r.st.RelayAt(d.Name, ev.Seq); !filepath.IsAbs(img) && rel != nil && rel.Dir != "" {
 					img = filepath.Join(rel.Dir, img)
 				}
 				if real, err := filepath.EvalSymlinks(img); err == nil {

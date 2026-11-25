@@ -35,6 +35,16 @@ const (
 	relayStepsShown = 30
 )
 
+// stepsFrom is the moment from which a relay's remembered steps are its
+// own and new: after since, and after the agent that held its name before
+// it stopped.
+func stepsFrom(rel *state.Relay, since time.Time) time.Time {
+	if rel != nil && rel.PrevEnded.After(since) {
+		return rel.PrevEnded
+	}
+	return since
+}
+
 // noteStep records a step an agent took.
 func (s *relaySeats) noteStep(name, text string, at time.Time) {
 	text = strings.TrimSpace(text)
@@ -175,7 +185,7 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 			if rel.State != "working" {
 				continue
 			}
-			steps := r.relays.stepsSince(rel.Name, t.saidAt)
+			steps := r.relays.stepsSince(rel.Name, stepsFrom(rel, t.saidAt))
 			if len(steps) == 0 {
 				if w.look {
 					fmt.Fprintf(&b, "\n%s has started no new step %s.", rel.Who(), heard)
@@ -284,7 +294,7 @@ func (r *Runtime) turnEndWho(fallback string) string {
 		if ev.Type == event.RelayTurn {
 			var d event.RelayTurnData
 			if ev.Decode(&d) == nil {
-				if rel := r.st.Relays[d.Name]; rel != nil {
+				if rel := r.st.RelayAt(d.Name, ev.Seq); rel != nil {
 					return rel.Who()
 				}
 			}
@@ -355,7 +365,7 @@ func (r *Runtime) attentionTail(fallback string) string {
 		}
 		_ = ev.Decode(&name)
 		who := fallback
-		if rel := r.st.Relays[name.Name]; rel != nil {
+		if rel := r.st.RelayAt(name.Name, ev.Seq); rel != nil {
 			who = rel.Who()
 		}
 		switch ev.Type {
