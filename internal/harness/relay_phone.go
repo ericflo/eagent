@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -211,19 +212,88 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		if images == nil {
 			images = []string{}
 		}
-		req := finalechat.PostRequest{Body: body, Notify: boolPtr(false), ClientKey: p.key("rt", strconv.FormatInt(ev.Seq, 10)),
-			Meta: map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "duration_ms": d.DurationMS, "tools": d.Tools, "interrupted": d.Interrupted, "images": images, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}}
-		if r.relayNotifyDone[d.Name] {
+		// The whole report, in as many posts as FinaleChat needs to take
+		// it, each saying which part it is; the first keeps the key and
+		// the buzz a single post had.
+		buzz := r.relayNotifyDone[d.Name]
+		if buzz {
 			delete(r.relayNotifyDone, d.Name)
-			req.Notify, req.Importance = nil, "important"
 			r.publishRelayMeta()
 		}
-		p.enqueue(func(ctx context.Context) {
-			if msg, _, err := p.client.Post(ctx, p.ref, req); err == nil {
-				p.remember(msg.ID)
+		parts := splitReport(body, phoneReportPart)
+		for i, part := range parts {
+			key := strconv.FormatInt(ev.Seq, 10)
+			if i > 0 {
+				key += "." + strconv.Itoa(i+1)
 			}
-		})
+			meta := map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "duration_ms": d.DurationMS, "tools": d.Tools, "interrupted": d.Interrupted, "images": images, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}
+			if len(parts) > 1 {
+				meta["part"], meta["parts"] = i+1, len(parts)
+			}
+			req := finalechat.PostRequest{Body: part, Notify: boolPtr(false), ClientKey: p.key("rt", key), Meta: meta}
+			if buzz && i == 0 {
+				req.Notify, req.Importance = nil, "important"
+			}
+			p.enqueue(func(ctx context.Context) {
+				if msg, _, err := p.client.Post(ctx, p.ref, req); err == nil {
+					p.remember(msg.ID)
+				}
+			})
+		}
 	}
+}
+
+// phoneReportPart bounds one post of an agent's report. FinaleChat refuses
+// a message body over 256 KiB and a request over 1 MiB, and JSON can write
+// one byte of the body as six ("<" is \u003c), so a part of 128 KiB is
+// taken whatever it holds.
+const phoneReportPart = 128 << 10
+
+// splitReport cuts a report too long for one post into parts of at most
+// limit bytes, at line ends where it can and never inside a UTF-8
+// sequence. When there are several, each starts with "(part i of n)", and a code block cut in two is closed at the end
+// of one part and opened again at the start of the next, so each part
+// reads on its own.
+func splitReport(body string, limit int) []string {
+	if len(body) <= limit {
+		return []string{body}
+	}
+	const room = 64 // the part line, and a fence closed and opened again
+	budget := limit - room
+	var parts []string
+	inFence := false
+	for rest := body; rest != ""; {
+		cut := len(rest)
+		if cut > budget {
+			cut = budget
+			if i := strings.LastIndexByte(rest[:cut], '\n'); i >= budget/2 {
+				cut = i + 1
+			} else {
+				for cut > 0 && rest[cut]&0xC0 == 0x80 {
+					cut--
+				}
+			}
+		}
+		chunk := rest[:cut]
+		rest = rest[cut:]
+		part := chunk
+		if inFence {
+			part = "```\n" + part
+		}
+		for _, line := range strings.Split(chunk, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				inFence = !inFence
+			}
+		}
+		if inFence && rest != "" {
+			part = strings.TrimRight(part, "\n") + "\n```"
+		}
+		parts = append(parts, part)
+	}
+	for i := range parts {
+		parts[i] = fmt.Sprintf("_(part %d of %d)_\n\n", i+1, len(parts)) + parts[i]
+	}
+	return parts
 }
 
 // postRelayScreen shows the agent's terminal in the thread. Any goroutine.

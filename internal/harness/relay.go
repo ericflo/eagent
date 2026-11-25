@@ -600,7 +600,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if cur := r.st.Relays[name]; cur != nil {
 			idle = ev.Tools == 0 && !ev.Interrupted && cur.LastSendFrom == "eagent" && cur.LastSendAt.After(cur.LastTurnAt)
 		}
-		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, 20000), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle}))
+		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, maxRecordedReport), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle}))
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
@@ -1234,6 +1234,14 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	}
 	return "unknown relay tool", true
 }
+
+// maxRecordedReport bounds the agent's turn report kept in the record. The
+// whole report is meant to be there (the user gets it, and eagent's own
+// prompt carries report_max_chars of it); this only keeps one event a sane
+// line of the log. A megabyte is far beyond any report an agent writes,
+// and stays well under the 16 MiB a line of the log may be when the
+// session is archived, even with JSON's escaping.
+const maxRecordedReport = 1 << 20
 
 // keysSettle is how long a screen is given to redraw after keys were sent
 // to it. A variable so tests can run without it.

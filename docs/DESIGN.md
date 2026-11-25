@@ -154,7 +154,7 @@ Starting an agent, starting it again and handing over to another one can take a 
 | `tick_seconds` | 30 | How often to check for something new while the agent works. |
 | `quiet_seconds` | 180 | Longest silence while the agent works. 0 turns the limit off. |
 | `max_calls_per_turn` | 30 | Calls on one wake. |
-| `report_max_chars` | 20000 | How much of an agent's turn report eagent's own prompt carries. The user always gets the whole report, and the rest is in the record. |
+| `report_max_chars` | 20000 | How much of an agent's turn report eagent's own prompt carries. The user always gets the whole report (on the phone, one longer than a FinaleChat message takes arrives in numbered parts), and the rest is in the record (up to 1 MB a report). |
 | `relay` | | `default` profile and custom `profiles`. |
 | `finalechat` | on when a token is found | The phone mirror and session archives. |
 | `persona` | | Replaces the voice in `PERSONA.md`. |
