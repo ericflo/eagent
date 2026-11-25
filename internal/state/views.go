@@ -243,6 +243,22 @@ func renderActor(events []event.Event, actor string, notify func(event.Event) st
 					tm.Results = append(tm.Results, llm.ToolResult{CallID: r.CallID, Name: r.Name, Output: r.Output, IsError: r.IsError})
 				}
 				msgs = append(msgs, tm)
+				// Pictures a call brought back follow its result. They are
+				// read from the copy kept in the session, so the message is
+				// the same bytes every time it is rendered.
+				var pics []llm.Image
+				var names []string
+				for _, tc := range d.ToolCalls {
+					for _, a := range results[tc.ID].Images {
+						if a.IsImage() {
+							pics = append(pics, llm.Image{Path: a.Path, MediaType: a.ContentType})
+							names = append(names, a.Name)
+						}
+					}
+				}
+				if len(pics) > 0 {
+					msgs = append(msgs, llm.Message{Role: "user", Text: "[image from view_image: " + strings.Join(names, ", ") + "]", Images: pics})
+				}
 			}
 			if sp := spanByIdx[i]; sp != nil {
 				for _, j := range sp.deferred {
@@ -391,6 +407,17 @@ func (s *State) notice(ev event.Event, opts ViewOptions) string {
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
 		return d.Text
+	case event.ScheduleFire:
+		if ev.Actor != event.ActorHarness {
+			return "" // a timer of the three-actor design's orchestrator
+		}
+		var d event.ScheduleFireData
+		_ = ev.Decode(&d)
+		next := "it does not come again"
+		if !d.Next.IsZero() {
+			next = "next at " + s.clock(d.Next)
+		}
+		return fmt.Sprintf("[%s Timer %s came due; %s. The note you left yourself:]\n%s", s.clock(ev.Time), d.ID, next, d.Note)
 	case event.Message:
 		// A reply of eagent's own carries what it said. Only words the
 		// harness said for it need a line.

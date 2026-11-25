@@ -9,17 +9,21 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
 
-const dossierAsk = "Your conversation has grown long and is about to be restarted from a briefing"
+const (
+	dossierAsk       = "Your conversation has grown long and is about to be restarted from a briefing"
+	dossierAskLegacy = "This session was started by an earlier eagent, which did the work itself"
+)
 
 // dossierRequest finds the request for a dossier in a prompt: "" when the
 // call is an ordinary one.
 func dossierRequest(msgs []map[string]any) string {
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if s, _ := msgs[i]["content"].(string); msgs[i]["role"] == "user" && strings.Contains(s, dossierAsk) {
+		if s, _ := msgs[i]["content"].(string); msgs[i]["role"] == "user" && (strings.Contains(s, dossierAsk) || strings.HasPrefix(s, "[eagent] "+dossierAskLegacy)) {
 			return s
 		}
 	}
@@ -66,10 +70,11 @@ func (s *session) dossiers() []event.DossierData {
 }
 
 // The dossier is a map over the whole record. Its writer is shown every
-// file and a line-by-line index, may read and search any of it before
-// writing, and must cite places; the harness adds the table of files and
-// the user's own words with their places. A later dossier carries the
-// earlier map forward and can reach the earlier dossier itself.
+// file and an index of the record by place, may read and search any of it
+// before writing, and must cite places; the harness adds the table of files
+// and the user's own words with their places. A later dossier is rebuilt
+// from the whole record: its writer is shown the earlier files in outline,
+// with their places, and where the earlier dossier sits.
 func TestDossierIsAMapOverTheWholeRecord(t *testing.T) {
 	var big atomic.Bool
 	var mu sync.Mutex
@@ -144,10 +149,6 @@ func TestDossierIsAMapOverTheWholeRecord(t *testing.T) {
 		t.Fatalf("subsessions = %v", files)
 	}
 	if first.By != "eagent" || first.CoversSeq == 0 || first.Calls != 2 || first.Usage == nil {
-		dumpLogs(t, s)
-		mu.Lock()
-		t.Log(asks[0])
-		mu.Unlock()
 		t.Fatalf("dossier = by %q covers %d calls %d usage %v", first.By, first.CoversSeq, first.Calls, first.Usage)
 	}
 	if want := []string{"read " + files[0] + ":1-30", "search PR"}; strings.Join(first.Consulted, "|") != strings.Join(want, "|") {
@@ -172,10 +173,17 @@ func TestDossierIsAMapOverTheWholeRecord(t *testing.T) {
 	mu.Lock()
 	ask := asks[0]
 	mu.Unlock()
-	for _, want := range []string{"- " + files[0] + ": lines 1-", "the file being written now", "the user wrote: " + brief[:40], "Codex finished a turn: Merged #42", "you told the user: Codex merged #42"} {
+	for _, want := range []string{
+		"- " + files[0] + ": lines 1-", "the file being written now", "the user wrote: " + brief[:40], "Codex finished a turn: Merged #42", "you told the user: Codex merged #42",
+		"Build the briefing from the record every time, the whole of it, not from the briefing before",
+		"A topic that has gone quiet stays on the map",
+	} {
 		if !strings.Contains(ask, want) {
 			t.Fatalf("the dossier request lacks %q:\n%s", want, ask)
 		}
+	}
+	if strings.Contains(ask, "Before your last briefing, in outline") {
+		t.Fatalf("the first dossier request speaks of an earlier briefing:\n%s", ask)
 	}
 	// The lookups belong to the writing: nothing of them is in the record,
 	// and nothing else ran.
@@ -231,6 +239,30 @@ func TestDossierIsAMapOverTheWholeRecord(t *testing.T) {
 	if !strings.Contains(asks[1], "opens with the briefing written then ("+files[1]+":2, by eagent)") {
 		t.Fatalf("the second writer was not shown where the first dossier is:\n%s", asks[1])
 	}
+	// The second writer is shown the first file too, by place, so its map
+	// is built from the record and not from the map before it.
+	outline := asks[1]
+	if i := strings.Index(outline, "Before your last briefing, in outline"); i < 0 {
+		t.Fatalf("the second writer was not shown the earlier stretch:\n%s", asks[1])
+	} else {
+		outline = outline[i:strings.Index(outline, "Since your last briefing, line by line")]
+	}
+	for _, want := range []string{files[0] + ":", "the user wrote: " + brief[:40], "Codex finished a turn: Merged #42"} {
+		if !strings.Contains(outline, want) {
+			t.Fatalf("the outline of the earlier record lacks %q:\n%s", want, outline)
+		}
+	}
+	if !strings.Contains(asks[1], "- "+files[1]+":2 ") || !strings.Contains(asks[1], "a briefing was written here (by eagent), with its own MAP") {
+		t.Fatalf("the index does not place the earlier dossier:\n%s", asks[1])
+	}
+	// The dossier's calls are the same request as every other call, but
+	// for their messages: one effort, one output limit, one tool list.
+	reqs := s.model.requests(testModel)
+	for i, q := range reqs {
+		if q.Rest != reqs[0].Rest || string(q.Tools) != string(reqs[0].Tools) || string(q.Messages[0]) != string(reqs[0].Messages[0]) {
+			t.Fatalf("call %d differs from the first outside its messages:\n%s\n%s", i, reqs[0].Rest, q.Rest)
+		}
+	}
 }
 
 // A dossier without a map is sent back once with the reason. If the second
@@ -253,6 +285,9 @@ func TestDossierWithoutAMapIsSentBackAndWrongPlacesAreNamed(t *testing.T) {
 			return reply{text: briefing(append(places(ask)[:3], "1111111111111.jsonl:5"))}
 		}
 		r := hold()
+		if strings.Contains(lastUserText(msgs), "kept for you") {
+			r = say("Hello.")
+		}
 		if big.CompareAndSwap(true, false) {
 			r.prompt = 25000
 		}
@@ -287,6 +322,9 @@ func TestHarnessWritesTheDossierWhenTheModelCannot(t *testing.T) {
 			return say("Codex merged #42 and #44.")
 		}
 		r := hold()
+		if strings.Contains(tail, "kept for you") {
+			r = say("Hello.")
+		}
 		if big.CompareAndSwap(true, false) {
 			r.prompt = 25000
 		}
@@ -330,6 +368,9 @@ func TestWhatArrivesWhileTheDossierIsWrittenIsKept(t *testing.T) {
 		}
 		mu.Unlock()
 		r := hold()
+		if strings.Contains(lastUserText(msgs), "kept for you") {
+			r = say("Hello.")
+		}
 		if big.CompareAndSwap(true, false) {
 			r.prompt = 25000
 		}
@@ -413,42 +454,57 @@ func TestRefusedConversationIsRestartedFromTheFiles(t *testing.T) {
 	}
 }
 
-// A session written by the three-actor eagent resumes into a new
-// subsession whose dossier the harness assembles from the old record; the
-// old files stay as they are and stay reachable.
-func TestOldSessionResumesFromAHarnessDossier(t *testing.T) {
+// oldSession writes a session the way the three-actor eagent did: two
+// files, the second opening with the dossier a task worker wrote.
+func oldSession(t *testing.T) (project string, sess *store.Session, files []string) {
+	t.Helper()
 	t.Setenv("EAGENT_TEST_KEY", "x")
-	project := t.TempDir()
+	project = t.TempDir()
 	sess, err := store.Create(store.Root(project), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := []event.Event{
+	add := func(evs ...event.Event) {
+		for _, ev := range evs {
+			if _, err := sess.Append(ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	first := sess.Current()
+	add(
 		event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project, Models: map[string]string{"orchestrator": "glm-5", "task": "glm-5", "narrator": "glm-5"}}),
-		event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}),
+		event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: first, Index: 0, Reason: "new"}),
 		event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "write the release notes for v2"}),
 		event.New(event.Assistant, event.LegacyOrchestrator, event.AssistantData{Text: "drafting", Usage: event.Usage{Input: 900, Output: 20}}),
 		event.New(event.Message, event.LegacyNarrator, event.MessageData{Text: "The release notes are drafted in NOTES.md; the changelog section is still empty."}),
+	)
+	next, err := sess.NewSubsessionName(time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: next, InputTokens: 151000}))
+	if _, err := sess.OpenSubsession(next); err != nil {
+		t.Fatal(err)
+	}
+	add(
+		event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: next, Index: 1, Reason: "rollover"}),
+		event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "1. USER'S GOAL: release notes for v2.\n5. MAP: the request " + first + ":3; the draft " + first + ":5"}),
+		event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "keep the tone dry, no exclamation marks"}),
+		event.New(event.Message, event.LegacyNarrator, event.MessageData{Text: "Understood: dry tone. The changelog is next."}),
 		event.New(event.LegacyYield, event.LegacyOrchestrator, event.LegacyYieldData{Done: false, Reason: "waiting for the user to confirm the changelog"}),
-	}
-	for _, ev := range old {
-		if _, err := sess.Append(ev); err != nil {
-			t.Fatal(err)
-		}
-	}
-	oldFile := sess.Current()
+	)
 	sess.Close()
+	return project, sess, []string{first, next}
+}
 
+// resumeOld resumes an old session with a new message from the user.
+func resumeOld(t *testing.T, project string, sess *store.Session, brain func(model string, msgs []map[string]any) reply) (*session, *[]relay.Spec) {
+	t.Helper()
 	seat := newFakeSeat("Filled in the changelog.")
 	launched, _ := useFakeRelays(t, seat)
-	model := newScripted(func(_ string, msgs []map[string]any) reply {
-		tail := lastUserText(msgs)
-		if strings.Contains(tail, "No agent is running: if they want one, start it") {
-			return reply{calls: []event.ToolCall{tc("relay_start", `{"profile":"codex"}`), tc("relay_forward", `{}`)}}
-		}
-		return hold()
-	})
-	defer model.srv.Close()
+	model := newScripted(brain)
+	t.Cleanup(model.srv.Close)
 	ui := &fakeUI{input: make(chan string, 4)}
 	rt, err := Resume(testConfig(model.srv.URL), Options{Project: project, Interactive: true, Prompt: "fill in the changelog too"}, ui, sess.Path)
 	if err != nil {
@@ -459,41 +515,136 @@ func TestOldSessionResumesFromAHarnessDossier(t *testing.T) {
 	s.cancel = cancel
 	go func() { s.done <- rt.Run(ctx) }()
 	t.Cleanup(s.stop)
-	s.waitFor("the message to reach a new agent", func() bool { return len(seat.sentTexts()) == 1 })
+	return s, launched
+}
+
+// startsAnAgent is what the model does with the user's message once the
+// old session has been picked up: no agent is running, so it starts one
+// and passes the message on.
+func startsAnAgent(msgs []map[string]any) (reply, bool) {
+	if strings.Contains(lastUserText(msgs), "No agent is running: if they want one, start it") && msgs[len(msgs)-1]["role"] != "tool" {
+		return reply{calls: []event.ToolCall{tc("relay_start", `{"profile":"codex"}`), tc("relay_forward", `{}`)}}, true
+	}
+	return reply{}, false
+}
+
+// A session written by the three-actor eagent is picked up with nothing
+// lost: before anything else the model writes a dossier from the old
+// record (every file, the old dossiers among them), with a map into it,
+// and the session continues in a new subsession. The old files stay as
+// they are and stay reachable.
+func TestOldSessionIsContinuedFromADossierWrittenFromItsRecord(t *testing.T) {
+	project, sess, files := oldSession(t)
+	var mu sync.Mutex
+	var ask string
+	var asked []map[string]any
+	s, launched := resumeOld(t, project, sess, func(_ string, msgs []map[string]any) reply {
+		if a := dossierRequest(msgs); a != "" {
+			if msgs[len(msgs)-1]["role"] != "tool" {
+				mu.Lock()
+				ask, asked = a, msgs
+				mu.Unlock()
+				return reply{calls: []event.ToolCall{
+					tc("session_read", fmt.Sprintf(`{"file":%q,"from":1,"to":12}`, files[1])),
+					tc("session_read", fmt.Sprintf(`{"file":%q,"from":1,"to":6}`, files[0])),
+				}}
+			}
+			return reply{text: briefing([]string{files[0] + ":3", files[0] + ":5", files[1] + ":2", files[1] + ":3", files[1] + ":5"})}
+		}
+		if r, ok := startsAnAgent(msgs); ok {
+			return r
+		}
+		return hold()
+	})
+	s.waitFor("the message to reach a new agent", func() bool { return len(s.seat.sentTexts()) == 1 })
 	s.settled()
-	if got := seat.sentTexts()[0]; got != "fill in the changelog too" {
+	if got := s.seat.sentTexts()[0]; got != "fill in the changelog too" {
 		t.Fatalf("the agent was sent %q", got)
 	}
 	if len(*launched) != 1 {
 		t.Fatalf("launched %d agents", len(*launched))
 	}
 	var subs []state.Subsession
-	s.read(func(st *state.State) {
-		subs = append(subs, st.Subsessions...)
-	})
-	if len(subs) != 2 || subs[1].Reason != "upgrade" || subs[0].File != oldFile {
+	s.read(func(st *state.State) { subs = append(subs, st.Subsessions...) })
+	if len(subs) != 3 || subs[2].Reason != "upgrade" || subs[0].File != files[0] || subs[1].File != files[1] {
 		t.Fatalf("subsessions = %+v", subs)
 	}
 	d := s.dossiers()
-	if len(d) != 1 || d[0].By != "harness" {
-		t.Fatalf("dossiers = %+v", d)
+	last := d[len(d)-1]
+	if len(d) != 2 || last.By != "eagent" || len(last.Consulted) != 2 {
+		t.Fatalf("dossiers = %d, the last by %q after consulting %v", len(d), last.By, last.Consulted)
+	}
+	lines := map[string]int{}
+	s.rt.sync(func() { lines = s.rt.recordLines() })
+	if n, bad := checkCitations(last.Text, lines); n < 5 || len(bad) != 0 {
+		t.Fatalf("the dossier cites %d places, %d of them wrong (%v)", n, len(bad), bad)
 	}
 	for _, want := range []string{
-		"started by an earlier eagent", "WHAT THE USER WAS LAST TOLD", "The release notes are drafted in NOTES.md",
-		"HOW THE OLD SESSION LEFT THINGS", "it stopped to wait: waiting for the user to confirm the changelog",
-		"- " + oldFile + ": lines 1-6", "from the earlier eagent that did the work itself",
-		oldFile + ":3] write the release notes for v2",
+		"6. MAP:", "- " + files[0] + ": lines 1-6", "from the earlier eagent that did the work itself",
+		"opens with the briefing written then (" + files[1] + ":2,",
+		"- " + subs[2].File + ": opens with this briefing",
+		files[0] + ":3] write the release notes for v2", files[1] + ":3] keep the tone dry, no exclamation marks",
 	} {
-		if !strings.Contains(d[0].Text, want) {
-			t.Fatalf("the dossier lacks %q:\n%s", want, d[0].Text)
+		if !strings.Contains(last.Text, want) {
+			t.Fatalf("the dossier lacks %q:\n%s", want, last.Text)
 		}
 	}
-	// The old events were never weighed by this loop and are not owed a look.
-	for _, q := range model.requests(testModel) {
+	// What the writer was given: no conversation, the whole record by
+	// place, and where the old dossier sits.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 {
+		t.Fatalf("the writer was given %d messages, want the system prompt and the request", len(asked))
+	}
+	for _, want := range []string{
+		"You have no conversation to work from, only the record",
+		"Before your last briefing, in outline", files[0] + ":3 ", "the user wrote: write the release notes for v2",
+		"a briefing was written here (by a helper of the earlier eagent), with its own MAP",
+		"the user wrote: keep the tone dry", "the earlier eagent stopped to wait: waiting for the user to confirm the changelog",
+		"the user was told: Understood: dry tone",
+	} {
+		if !strings.Contains(ask, want) {
+			t.Fatalf("the request lacks %q:\n%s", want, ask)
+		}
+	}
+	// The old actors' replies are never part of the new conversation.
+	for _, q := range s.model.requests(testModel) {
 		for _, m := range q.Messages[1:] {
 			if strings.Contains(string(m), `"drafting"`) {
 				t.Fatalf("an old actor's reply is in the new conversation: %s", m)
 			}
+		}
+	}
+}
+
+// If the model cannot write that dossier, eagent assembles one from the
+// old record itself, with the old session's last dossier inside it.
+func TestOldSessionFallsBackToADossierFromTheHarness(t *testing.T) {
+	project, sess, files := oldSession(t)
+	s, _ := resumeOld(t, project, sess, func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: "ok"}
+		}
+		if r, ok := startsAnAgent(msgs); ok {
+			return r
+		}
+		return hold()
+	})
+	s.waitFor("the message to reach a new agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	d := s.dossiers()
+	last := d[len(d)-1]
+	if len(d) != 2 || last.By != "harness" {
+		t.Fatalf("dossiers = %d, the last by %q", len(d), last.By)
+	}
+	for _, want := range []string{
+		"started by an earlier eagent", "WHAT THE USER WAS LAST TOLD", "Understood: dry tone. The changelog is next.",
+		"HOW THE OLD SESSION LEFT THINGS", "it stopped to wait: waiting for the user to confirm the changelog",
+		"THE OLD SESSION'S LAST BRIEFING (" + files[1] + ":2", "1. USER'S GOAL: release notes for v2.",
+		"- " + files[0] + ": lines 1-6", files[0] + ":3] write the release notes for v2",
+	} {
+		if !strings.Contains(last.Text, want) {
+			t.Fatalf("the dossier lacks %q:\n%s", want, last.Text)
 		}
 	}
 }

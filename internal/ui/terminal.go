@@ -470,17 +470,17 @@ func (t *Terminal) traceLine(ev event.Event) string {
 		}
 	case event.Dossier:
 		return "↻ briefing written; eagent continues from it"
-	case event.LegacyScheduleCreate: // "schedule.create", still written by scheduled wake-ups
+	case event.ScheduleCreate: // "schedule.create", still written by scheduled wake-ups
 		var d struct {
 			ID, Kind, Spec, Note string
 		}
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("⏰ %s %s %q: %s", d.ID, d.Kind, d.Spec, clip(d.Note, 100))
-	case event.LegacyScheduleFire:
+	case event.ScheduleFire:
 		var d struct{ ID string }
 		_ = ev.Decode(&d)
 		return "⏰ " + d.ID + " fired"
-	case event.LegacyScheduleCancel:
+	case event.ScheduleCancel:
 		var d struct{ ID, Reason string }
 		_ = ev.Decode(&d)
 		s := "⏰ " + d.ID + " cancelled"

@@ -61,6 +61,12 @@ const (
 	CwdChange      = "cwd.change"     // the folder the session works in, when it is not the project root
 	Error          = "error"
 
+	// Timers eagent sets for itself: wake me then, or every so often, with
+	// this note.
+	ScheduleCreate = "schedule.create"
+	ScheduleFire   = "schedule.fire"
+	ScheduleCancel = "schedule.cancel"
+
 	// A relay is a coding agent (Claude Code, Codex, Antigravity, pi) that
 	// eagent runs in a terminal it owns and passes the user's words to.
 	RelayStart     = "relay.start"     // the agent was launched (or relaunched)
@@ -278,8 +284,9 @@ type ToolResultData struct {
 	Name    string `json:"name"`
 	Output  string `json:"output"`
 	IsError bool   `json:"is_error,omitempty"`
-	// Images are pictures a tool produced for the model to look at, in logs
-	// from when eagent had such a tool.
+	// Images are pictures a tool brought back for the model to look at
+	// (view_image), copied into the session so the conversation renders the
+	// same bytes every time.
 	Images []Attachment `json:"images,omitempty"`
 }
 
@@ -492,6 +499,28 @@ type RelayTurnData struct {
 	// one of the user's) without running any tools: an agent waiting on its
 	// own work.
 	Idle bool `json:"idle,omitempty"`
+}
+
+// ScheduleCreateData registers a loop, cron, or one-shot wake.
+type ScheduleCreateData struct {
+	ID   string    `json:"id"`
+	Kind string    `json:"kind"` // loop | cron | once
+	Spec string    `json:"spec"` // "45s", "*/5 * * * *", or RFC3339 time
+	Note string    `json:"note"`
+	Next time.Time `json:"next"`
+}
+
+// ScheduleFireData records one firing.
+type ScheduleFireData struct {
+	ID   string    `json:"id"`
+	Note string    `json:"note"`
+	Next time.Time `json:"next"`
+}
+
+// ScheduleCancelData removes a schedule.
+type ScheduleCancelData struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // RelayLimitData reports the agent's usage budget.

@@ -9,8 +9,8 @@ import (
 
 func TestToolListIsFixedAndWellFormed(t *testing.T) {
 	first, second := All(), All()
-	if len(first) != 12 {
-		t.Fatalf("eagent has %d tools, want 12", len(first))
+	if len(first) != 15 {
+		t.Fatalf("eagent has %d tools, want 15", len(first))
 	}
 	seen := map[string]bool{}
 	for i, tool := range first {
@@ -34,16 +34,22 @@ func TestToolListIsFixedAndWellFormed(t *testing.T) {
 	if All()[0].Name == "changed" {
 		t.Fatal("All returned its own backing array")
 	}
-	for _, name := range []string{"bash", "write_file", "delegate", "yield", "note", "schedule"} {
+	for _, name := range []string{"bash", "write_file", "delegate", "yield", "note"} {
 		if Has(name) {
 			t.Fatalf("%s is still a tool", name)
+		}
+	}
+	// Kept from the three-actor design: timers and looking at a picture.
+	for _, name := range []string{Schedule, CancelSchedule, ViewImage} {
+		if !Has(name) {
+			t.Fatalf("%s is not a tool", name)
 		}
 	}
 }
 
 func TestOnlyReadingToolsContinueATurn(t *testing.T) {
 	for _, tool := range All() {
-		want := tool.Name == RelayScreen || tool.Name == SessionSearch || tool.Name == SessionRead
+		want := tool.Name == RelayScreen || tool.Name == SessionSearch || tool.Name == SessionRead || tool.Name == ViewImage
 		if Looks(tool.Name) != want {
 			t.Errorf("Looks(%s) = %v, want %v", tool.Name, Looks(tool.Name), want)
 		}

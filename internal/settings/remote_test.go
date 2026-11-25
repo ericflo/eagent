@@ -240,7 +240,7 @@ func TestPrepareRouteTargets(t *testing.T) {
 		return control.Proposal{Operation: "route.test", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"target": target}}
 	}
 	b, err := s.PrepareRoute(propose("model"), g)
-	if err != nil || b.Model.Model != "zai-org/GLM-5.3" || b.Model.ReasoningEffort != "low" {
+	if err != nil || b.Model.Model != "zai-org/GLM-5.3" || b.Model.ReasoningEffort != "medium" {
 		t.Fatalf("model: %v %+v", err, b.Model)
 	}
 	b, err = s.PrepareRoute(propose("summarizer"), g)

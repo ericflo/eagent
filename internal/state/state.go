@@ -75,6 +75,9 @@ type State struct {
 	RelayOrder []string
 	// LastUserSeq is the newest user message or answer.
 	LastUserSeq int64
+	// Schedules are the timers eagent set for itself, by id.
+	Schedules     map[string]*Schedule
+	ScheduleOrder []string
 
 	Ended     bool
 	EndReason string
@@ -99,7 +102,7 @@ type State struct {
 	Errors []string
 
 	// Counters continue id sequences across restarts.
-	questionSeq, relaySendSeq int
+	questionSeq, relaySendSeq, scheduleSeq int
 
 	// lastMoveSeq is the newest thing an agent did that the user might be
 	// asked about: a finished turn, a dialog it is stuck on, an exit.
@@ -133,6 +136,7 @@ func New() *State {
 		ByRoute:   map[RouteKey]event.Usage{},
 		Calls:     map[string]int{},
 		Latencies: map[string][]int64{},
+		Schedules: map[string]*Schedule{},
 		Turns:     map[string]int{},
 		TurnSince: map[string]time.Time{},
 	}
@@ -161,6 +165,32 @@ func (s *State) LastSeq() int64 {
 		return 0
 	}
 	return s.Events[len(s.Events)-1].Seq
+}
+
+// Schedule is a loop, cron, or one-shot wake.
+type Schedule struct {
+	ID        string
+	Kind      string
+	Spec      string
+	Note      string
+	Next      time.Time
+	Fires     int
+	Cancelled bool
+	Created   time.Time
+}
+
+// NextScheduleID allocates a schedule id that continues after replay.
+func (s *State) NextScheduleID() string { s.scheduleSeq++; return "s" + strconv.Itoa(s.scheduleSeq) }
+
+// ActiveSchedules returns schedules that will fire again.
+func (s *State) ActiveSchedules() []*Schedule {
+	var out []*Schedule
+	for _, id := range s.ScheduleOrder {
+		if sc := s.Schedules[id]; !sc.Cancelled {
+			out = append(out, sc)
+		}
+	}
+	return out
 }
 
 // NextQuestionID allocates a question id that continues after replay.
@@ -368,6 +398,28 @@ func (s *State) Apply(ev event.Event) {
 		_ = ev.Decode(&d)
 		bump(&s.questionSeq, d.ID, "q")
 		s.Question = &Question{ID: d.ID, Text: d.Text, Options: d.Options, Seq: ev.Seq}
+	case event.ScheduleCreate:
+		var d event.ScheduleCreateData
+		_ = ev.Decode(&d)
+		bump(&s.scheduleSeq, d.ID, "s")
+		s.Schedules[d.ID] = &Schedule{ID: d.ID, Kind: d.Kind, Spec: d.Spec, Note: d.Note, Next: d.Next, Created: ev.Time}
+		s.ScheduleOrder = append(s.ScheduleOrder, d.ID)
+	case event.ScheduleFire:
+		var d event.ScheduleFireData
+		_ = ev.Decode(&d)
+		if sc := s.Schedules[d.ID]; sc != nil {
+			sc.Fires++
+			sc.Next = d.Next
+			if d.Next.IsZero() {
+				sc.Cancelled = true
+			}
+		}
+	case event.ScheduleCancel:
+		var d event.ScheduleCancelData
+		_ = ev.Decode(&d)
+		if sc := s.Schedules[d.ID]; sc != nil {
+			sc.Cancelled = true
+		}
 	case event.Error:
 		var d event.ErrorData
 		_ = ev.Decode(&d)
@@ -489,6 +541,9 @@ func (s *State) Summary() string {
 	}
 	if s.Question != nil {
 		fmt.Fprintf(&b, "waiting on your answer to %s: %s\n", s.Question.ID, s.Question.Text)
+	}
+	if sc := s.ActiveSchedules(); len(sc) > 0 {
+		fmt.Fprintf(&b, "timers: %d\n", len(sc))
 	}
 	fmt.Fprintf(&b, "context: %s tokens", humanInt(s.ContextTokens()))
 	fmt.Fprintf(&b, "\n%s", s.UsageLine())

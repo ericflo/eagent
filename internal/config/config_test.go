@@ -13,7 +13,7 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Model != "zai-org/GLM-5.3" || cfg.Model.ReasoningEffort != "low" || cfg.Summarizer.Mode != SummarizerInline || len(cfg.Migrated) != 0 {
+	if cfg.Model.Model != "zai-org/GLM-5.3" || cfg.Model.ReasoningEffort != "medium" || cfg.Summarizer.Mode != SummarizerInline || len(cfg.Migrated) != 0 {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 	os.MkdirAll(filepath.Join(dir, ".agents", "eagent"), 0o755)
@@ -119,9 +119,10 @@ func TestBundlesLayerOverProjectConfig(t *testing.T) {
 	}
 }
 
-// Every preset runs its one model at low effort with the loop's output
-// budget, and loads and validates on its own.
-func TestPresetsRunLowEffort(t *testing.T) {
+// Every preset runs its one model at one effort (medium, or high where the
+// model offers no medium; never none) with the loop's output ceiling, and
+// loads and validates on its own.
+func TestPresetsRunOneEffort(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("EAGENT_PRESET", "")
 	for _, name := range PresetNames() {
@@ -134,8 +135,12 @@ func TestPresetsRunLowEffort(t *testing.T) {
 			t.Errorf("%s: preset %q summarizer %q", name, cfg.Preset, cfg.Summarizer.Mode)
 		}
 		for cur := &cfg.Model; cur != nil; cur = cur.Fallback {
-			if cur.ReasoningEffort != "low" || cur.MaxTokens != 8192 {
-				t.Errorf("%s: %s runs effort %q max_tokens %d, want low and 8192", name, cur.Model, cur.ReasoningEffort, cur.MaxTokens)
+			want := "medium"
+			if m, ok := Lookup(cur.BaseURL, cur.Model); ok && len(m.Efforts) > 0 && !contains(m.Efforts, "medium") {
+				want = "high"
+			}
+			if cur.ReasoningEffort != want || cur.MaxTokens != 32768 {
+				t.Errorf("%s: %s runs effort %q max_tokens %d, want %s and 32768", name, cur.Model, cur.ReasoningEffort, cur.MaxTokens, want)
 			}
 		}
 	}

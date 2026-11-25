@@ -9,7 +9,7 @@
 //	PERSONA.md        (plain text, inserted into EAGENT.md)
 //	USER_MESSAGE.md   {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
 //	USER_ANSWER.md    {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
-//	DOSSIER.md        {{.Reason}} (the request for a briefing before the conversation restarts)
+//	DOSSIER.md        {{.Files}} {{.Index}} {{.Fresh}} {{.Reason}} (the request for a briefing before the conversation restarts)
 //	THREAD-SUMMARY.md (plain text: how a dedicated summarizer writes the title and summary)
 package prompts
 
@@ -34,6 +34,24 @@ var builtin embed.FS
 
 // Names lists the prompt files, in display order.
 var Names = []string{"EAGENT.md", "PERSONA.md", "USER_MESSAGE.md", "USER_ANSWER.md", "DOSSIER.md", "THREAD-SUMMARY.md"}
+
+// Retired are prompt files of the three-actor design. A project's override
+// of one of them is read by nothing now.
+var Retired = []string{"ORCHESTRATOR.md", "NARRATOR.md", "RELAY.md", "TASK-WORKER.md", "FACTS.md", "COMPACTION-DOSSIER.md"}
+
+// Ignored lists a project's overrides of retired prompts: files that used
+// to change how eagent behaves and no longer do. The caller says so, since
+// silently dropping someone's instructions is worse than a line of log.
+func Ignored(project string) []string {
+	var out []string
+	for _, name := range Retired {
+		p := filepath.Join(Dir(project), name)
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }
@@ -103,12 +121,15 @@ type EagentData struct {
 type DossierData struct {
 	// Files is the table of the session's record files, oldest first.
 	Files string
-	// Index lists what happened since the last dossier, one line per event
-	// with its file:line.
+	// Index lists the record by place (file:line): everything before the
+	// last dossier in outline, and what happened since line by line.
 	Index string
 	// Fresh says the model no longer has the conversation in front of it
 	// (the provider refused it as too long) and writes from the files.
 	Fresh bool
+	// Legacy says the record was written by the three-actor design: there
+	// never was a conversation of this model's to restart.
+	Legacy bool
 	// Reason is why the restart is happening ("" when it is only size).
 	Reason string
 }

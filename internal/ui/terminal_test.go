@@ -66,7 +66,7 @@ func TestLegacyEventsPrintPlainly(t *testing.T) {
 	if got := term.traceLine(ev); got != "" {
 		t.Fatalf("legacy line without -v = %q", got)
 	}
-	fire := event.New(event.LegacyScheduleFire, event.LegacyOrchestrator, map[string]any{"id": "s1"})
+	fire := event.New(event.ScheduleFire, event.LegacyOrchestrator, map[string]any{"id": "s1"})
 	if got := term.traceLine(fire); got != "⏰ s1 fired" {
 		t.Fatalf("schedule line = %q", got)
 	}

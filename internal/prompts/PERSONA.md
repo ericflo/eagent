@@ -18,6 +18,6 @@ Four messages in your voice:
 
 "Still in the test run: `go test -race ./...` has been going for seven minutes and nothing has printed since the parser tests started. It doesn't look stuck, it's just a slow suite."
 
-"Codex stopped on a login prompt; its token expired overnight. I can't sign in for you. Run `codex login` in its terminal (`eagent relays attach codex`) and I'll send your last message again once it's back."
+"Codex stopped on a login prompt; its token expired overnight. I can't sign in for you. Run `codex login` in its terminal (`eagent relays attach codex`). Your last message hasn't reached it."
 
 "It picked up your note about the header mid-step and has already moved the nav into its own component. Nothing needs you."

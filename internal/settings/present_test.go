@@ -252,7 +252,7 @@ func TestProjectPresetsSayWhatTheySet(t *testing.T) {
 	}
 	got := presets[i]
 	// The preset's own effort, not the project's: choosing it resets that.
-	if got.Implies["/model/model"] != "claude-fable-5-1" || got.Implies["/model/reasoning_effort"] != "low" || got.Implies["/model/api_key_env"] != "ANTHROPIC_API_KEY" || got.Group != "Anthropic" || got.Detail != "Claude Fable 5.1" {
+	if got.Implies["/model/model"] != "claude-fable-5-1" || got.Implies["/model/reasoning_effort"] != "medium" || got.Implies["/model/api_key_env"] != "ANTHROPIC_API_KEY" || got.Group != "Anthropic" || got.Detail != "Claude Fable 5.1" {
 		t.Fatalf("anthropic-high = %+v", got)
 	}
 	for _, p := range presets {

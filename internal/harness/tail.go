@@ -114,7 +114,7 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 			case wakeTurnEnd:
 				reasons = append(reasons, fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who)))
 			case wakeNotice:
-				reasons = append(reasons, "A notice for you is above. Do what it calls for.")
+				reasons = append(reasons, r.noticeTail())
 			}
 		}
 		if len(reasons) == 0 {
@@ -123,8 +123,19 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 		b.WriteString(strings.Join(reasons, "\n"))
 	case w.look:
 		b.WriteString("A look while the work goes on.")
+	case w.owed:
+		b.WriteString(r.owedTail(who, true))
+	case w.final:
+		if t.saidAt.IsZero() {
+			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. The user has heard nothing from you yet. Send a complete final report, marked important: what was done, where it is, how to run it, what was verified, and what is missing or uncertain. Do not hold.")
+		} else {
+			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. If your last message already covers the final state (what was done, where it is, how to run it, what was verified, what is missing), hold. Otherwise send one final report with what is missing from it. Never repeat yourself.")
+		}
 	default:
 		b.WriteString("Nothing has happened; this look is only about the thread's title and summary.")
+	}
+	if t.owed > 0 && !w.owed {
+		b.WriteString("\n" + r.owedTail(who, false))
 	}
 
 	// What is true right now.
@@ -133,6 +144,20 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 	}
 	for _, rel := range active {
 		fmt.Fprintf(&b, "\n%s", r.agentLine(rel, now))
+		if ap := rel.Autopilot; ap != nil && !w.look && (w.event || w.owed) {
+			// The standing order in full, every time eagent is woken to
+			// act: it is what the decision is made from.
+			fmt.Fprintf(&b, " The standing order: %s. When %s ends a turn having stopped, with nothing of its own still running, send it on with relay_send toward what is still missing", clipRunes(oneLine(ap.Instruction, 300), 300), rel.Who())
+			if ap.Decide {
+				b.WriteString("; when it asks something, decide as the user would, answer it with relay_send, and tell the user what you chose. Do not wait for the user.")
+			} else {
+				b.WriteString("; pass its questions to the user.")
+			}
+			fmt.Fprintf(&b, " When it ends a turn waiting on work of its own (a command, a render, a timer it set, a helper), send nothing: it wakes itself when that work reports, and every message starts another turn. You are woken if it stays idle for %s.", roundDur(autopilotCheckAfter))
+		}
+	}
+	if n := len(r.st.ActiveSchedules()); n > 0 && !w.look {
+		fmt.Fprintf(&b, "\n%d timer(s) of yours are set.", n)
 	}
 	if w.look || (w.event && w.kind == wakeUser) {
 		heard := "so far"
@@ -294,7 +319,7 @@ func (r *Runtime) userTail(who string) string {
 		parts = append(parts, s)
 	}
 	if passed > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written; their own screen shows it as delivered, so say nothing about that. It needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs.", who, who, who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written the moment it arrived. Say in one short line that it reached %s (and, if %s was in the middle of a turn, that it reads it at its next step); do not repeat the message back or answer it. Hold instead if %s has already answered it. Beyond that it needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs (add that with relay_send).", who, who, who, who, who, who))
 	}
 	if len(parts) == 0 {
 		return "The user wrote."
@@ -336,6 +361,41 @@ func (r *Runtime) attentionTail(fallback string) string {
 		}
 	}
 	return fallback + " needs attention; see above."
+}
+
+// noticeTail says what the newest notice still owed a look is: a timer of
+// eagent's own that came due, or a notice from the harness.
+func (r *Runtime) noticeTail() string {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= r.turns.seen {
+			break
+		}
+		if ev.Type == event.ScheduleFire && ev.Actor == event.ActorHarness {
+			return "A timer you set came due; the note you left yourself is above. Do what it says, and cancel the timer with cancel_schedule if it has done its job."
+		}
+	}
+	return "A notice for you is above. Do what it calls for."
+}
+
+// owedTail reminds eagent of a message the user wrote to it that has had
+// no answer. alone says the call was made for this only.
+func (r *Runtime) owedTail(who string, alone bool) string {
+	var text string
+	var at time.Time
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		if ev := r.st.Events[i]; ev.Seq == r.turns.owed {
+			var d event.UserMessageData
+			_ = ev.Decode(&d)
+			text, at = d.Text, ev.Time
+			break
+		}
+	}
+	lead := "Also: the"
+	if alone {
+		lead = "The"
+	}
+	return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was kept for you, so nobody else will answer. Answer it now with send_message, or pass it on with relay_forward if it is for %s.", lead, at.In(r.st.Location()).Format("15:04"), clipRunes(oneLine(text, 300), 300), who)
 }
 
 // threadTail asks about the thread's title and summary.

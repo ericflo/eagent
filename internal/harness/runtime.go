@@ -124,6 +124,7 @@ type Runtime struct {
 	phone          *phone // Finalechat mirror; nil when off
 
 	relays          relaySeats
+	timers          map[string]*time.Timer // timer id -> the timer eagent set with schedule; loop-owned
 	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
@@ -320,6 +321,9 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		return nil, fmt.Errorf("prompts: %w", err)
 	}
 	st.SetPrompts(r.prompts)
+	for _, p := range prompts.Ignored(opts.Project) {
+		ui.Log("%s is no longer read: eagent has one prompt now (EAGENT.md, with PERSONA.md). Move what you still want into an override of those.", p)
+	}
 	routes, err := cfg.Model.Routes()
 	if err != nil {
 		cancel()
@@ -527,6 +531,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 		r.post(func() { r.beginShutdown("interrupted", 130) })
 	}()
 	r.armAutopilots()
+	r.rearmSchedules()
 	r.armTicker()
 	r.startSummaries()
 	defer r.stopSummaries()
@@ -606,7 +611,13 @@ func (r *Runtime) publishStatus() {
 // agent was stopped on purpose (or never started) ends once eagent has had
 // its say and nothing is waiting on the user.
 func (r *Runtime) maybeEnd() {
-	if r.ending || r.turns.busy || r.turns.compacting || r.wakePending() {
+	t := &r.turns
+	if r.ending || t.busy || t.compacting {
+		return
+	}
+	// down: the model has failed twice running, and the user has been told.
+	down := t.failures >= 2
+	if r.wakePending() && (r.opts.Interactive || !down) {
 		return
 	}
 	if r.opts.Interactive {
@@ -617,6 +628,9 @@ func (r *Runtime) maybeEnd() {
 	if len(r.st.ActiveRelays()) > 0 {
 		return
 	}
+	if len(r.st.ActiveSchedules()) > 0 {
+		return // a timer is set: the session stays to keep it
+	}
 	if r.waitingOnPhone() {
 		// A question is open on the user's phone: the session waits for the
 		// answer (or the question's expiry) instead of ending.
@@ -624,6 +638,22 @@ func (r *Runtime) maybeEnd() {
 	}
 	if r.listeningAfterDismissal() {
 		// They closed the question to say something else; wait for it.
+		return
+	}
+	switch {
+	case t.finalAsked:
+	case down:
+		// Nothing is running, nobody is at a terminal and the model cannot
+		// be reached: retrying for hours would watch over nothing. The
+		// session closes in eagent's own words; a reply brings it back.
+		t.finalAsked = true
+		r.fallbackFinal()
+	case r.st.Question == nil:
+		// A session with no terminal does not end in silence: one more
+		// look, for the closing report or to find the last message
+		// already covers it.
+		t.finalAsked = true
+		r.startTurn(wake{final: true})
 		return
 	}
 	if r.finalSummary() {
@@ -850,8 +880,10 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		}
 	case "/status", "/s":
 		r.ui.Log("%s", r.st.Summary())
+	case "/schedules":
+		r.listSchedules()
 	case "/help", "/?":
-		r.ui.Log("eagent: /status /dismiss /quit  (anything else goes to the agent, word for word; start a line with @e to talk to eagent instead)")
+		r.ui.Log("eagent: /status /schedules /dismiss /quit  (anything else goes to the agent, word for word; start a line with @e to talk to eagent instead)")
 		r.ui.Log("the agent: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])

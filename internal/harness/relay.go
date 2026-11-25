@@ -1164,7 +1164,7 @@ func (r *Runtime) relayPassthrough(line, source string) bool {
 		return false // closes eagent's own open question
 	case cmd == "/quit" || cmd == "/exit" || cmd == "/q":
 		return false
-	case cmd == "/status" || cmd == "/s" || cmd == "/help" || cmd == "/?":
+	case cmd == "/status" || cmd == "/s" || cmd == "/schedules" || cmd == "/help" || cmd == "/?":
 		return source != ""
 	}
 	return true

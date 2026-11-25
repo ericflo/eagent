@@ -17,18 +17,15 @@ var LegacyActors = []string{LegacyOrchestrator, LegacyTask, LegacyNarrator}
 
 // Event types that are no longer written.
 const (
-	LegacyTaskCreate     = "task.create"
-	LegacyTaskStart      = "task.start"
-	LegacyTaskEnd        = "task.end"
-	LegacyNote           = "note"
-	LegacyYield          = "yield"
-	LegacyScheduleCreate = "schedule.create"
-	LegacyScheduleFire   = "schedule.fire"
-	LegacyScheduleCancel = "schedule.cancel"
-	LegacyProcStart      = "proc.start"
-	LegacyProcPID        = "proc.pid"
-	LegacyProcExit       = "proc.exit"
-	LegacyNarratorTrim   = "narrator.trim"
+	LegacyTaskCreate   = "task.create"
+	LegacyTaskStart    = "task.start"
+	LegacyTaskEnd      = "task.end"
+	LegacyNote         = "note"
+	LegacyYield        = "yield"
+	LegacyProcStart    = "proc.start"
+	LegacyProcPID      = "proc.pid"
+	LegacyProcExit     = "proc.exit"
+	LegacyNarratorTrim = "narrator.trim"
 )
 
 // LegacyYieldData is the orchestrator declaring it had nothing to do. It is

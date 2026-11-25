@@ -34,6 +34,9 @@ const (
 	UpdateThread   = "update_thread"
 	SessionSearch  = "session_search"
 	SessionRead    = "session_read"
+	ViewImage      = "view_image"
+	Schedule       = "schedule"
+	CancelSchedule = "cancel_schedule"
 )
 
 // builtinProfiles names the relay profiles every build has ("antigravity,
@@ -125,6 +128,17 @@ var all = []llm.Tool{
 			"to":{"type":"integer","description":"Inclusive end line (default: 40 lines on)."},
 			"raw":{"type":"boolean","description":"Full JSON instead of the readable form."}
 		},"required":["file"]}`),
+	def(ViewImage,
+		"Look at an image file (png, jpeg, gif, webp): a screenshot or render the agent made, or a picture the user sent. It is shown to you right after this result.",
+		`{"type":"object","properties":{"path":{"type":"string","description":"As it appears in your conversation."}},"required":["path"]}`),
+	def(Schedule,
+		"Set a timer that wakes you later with a note to yourself: once ('in 10m', or an RFC3339 time) or repeating ('5m', '90s', cron '*/15 * * * *'). The session stays alive while one is set. Not for watching the agent: you are woken when it does something.",
+		`{"type":"object","properties":{
+			"spec":{"type":"string"},
+			"note":{"type":"string","description":"What to do when woken."}
+		},"required":["spec","note"]}`),
+	def(CancelSchedule, "Cancel a timer by its id.",
+		`{"type":"object","properties":{"schedule":{"type":"string"}},"required":["schedule"]}`),
 }
 
 // All returns eagent's tools. The list never changes within a build.
@@ -145,7 +159,7 @@ func Has(name string) bool {
 // that looked gets another call to use what it saw.
 func Looks(name string) bool {
 	switch name {
-	case RelayScreen, SessionSearch, SessionRead:
+	case RelayScreen, SessionSearch, SessionRead, ViewImage:
 		return true
 	}
 	return false

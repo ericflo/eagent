@@ -67,13 +67,17 @@ func (u *fakeUI) snapshot() ([]string, []string, []string) {
 	defer u.mu.Unlock()
 	return append([]string{}, u.messages...), append([]string{}, u.asked...), append([]string{}, u.logs...)
 }
-func (u *fakeUI) said() []string { m, _, _ := u.snapshot(); return m }
+func (u *fakeUI) said() []string   { m, _, _ := u.snapshot(); return m }
+func (u *fakeUI) logged() []string { _, _, l := u.snapshot(); return l }
 
 // request is one call the fake model server received, as sent.
 type request struct {
 	Model    string
 	Messages []json.RawMessage
 	Tools    json.RawMessage
+	// Rest is everything else in the request body (effort, output limit,
+	// cache key and so on), keys sorted.
+	Rest string
 }
 
 // scripted is a fake chat-completions server. brain decides each reply from
@@ -93,6 +97,7 @@ type reply struct {
 	block  <-chan struct{}
 	status int    // an HTTP error instead of a reply
 	body   string // its body
+	finish string // the finish reason, when not the usual one ("length")
 }
 
 var tcSeq atomic.Int64
@@ -124,9 +129,14 @@ func newScripted(brain func(model string, msgs []map[string]any) reply) *scripte
 		for i, m := range body.Messages {
 			_ = json.Unmarshal(m, &msgs[i])
 		}
+		var rest map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &rest)
+		delete(rest, "messages")
+		delete(rest, "tools")
+		restJSON, _ := json.Marshal(rest)
 		s.mu.Lock()
 		s.calls[body.Model]++
-		s.reqs = append(s.reqs, request{Model: body.Model, Messages: body.Messages, Tools: body.Tools})
+		s.reqs = append(s.reqs, request{Model: body.Model, Messages: body.Messages, Tools: body.Tools, Rest: string(restJSON)})
 		s.mu.Unlock()
 		rep := s.brain(body.Model, msgs)
 		if rep.block != nil {
@@ -155,6 +165,9 @@ func newScripted(brain func(model string, msgs []map[string]any) reply) *scripte
 		finish := "stop"
 		if len(rep.calls) > 0 {
 			finish = "tool_calls"
+		}
+		if rep.finish != "" {
+			finish = rep.finish
 		}
 		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}})
 		fmt.Fprintf(w, "data: %s\n\n", chunk)

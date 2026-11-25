@@ -231,7 +231,7 @@ func TestProblemsAreStructured(t *testing.T) {
 	cfg := Defaults()
 	cfg.TickSeconds = 0
 	cfg.QuietSeconds = -1
-	cfg.MaxCallsPerTurn = 33
+	cfg.MaxCallsPerTurn = 201
 	cfg.ReportMaxChars = 100
 	cfg.RolloverTokens = 190_000 // near GLM-5.3's 200k window
 	cfg.Summarizer = Summarizer{Mode: "sometimes", Model: &ModelRoute{Protocol: "openai-chat", BaseURL: "https://s.example/v1", Model: "s", APIKeyEnv: "lower-case"}}

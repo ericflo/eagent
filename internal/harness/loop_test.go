@@ -196,6 +196,11 @@ func TestRequestPrefixIsByteStableAcrossLooksAndTurns(t *testing.T) {
 		if !bytes.Equal(q.Messages[0], reqs[0].Messages[0]) {
 			t.Fatalf("call %d: the system prompt changed", i)
 		}
+		// One effort, one output limit, one cache key: nothing in the
+		// request but its messages differs from call to call.
+		if q.Rest != reqs[0].Rest {
+			t.Fatalf("call %d: the request changed outside its messages:\nfirst %s\nnow   %s", i, reqs[0].Rest, q.Rest)
+		}
 		if i == 0 {
 			continue
 		}
@@ -216,7 +221,10 @@ func TestRequestPrefixIsByteStableAcrossLooksAndTurns(t *testing.T) {
 	if dropped == 0 || extended == 0 {
 		t.Fatalf("want both kinds of step; dropped tail %d, extended %d", dropped, extended)
 	}
-	if !bytes.Contains(reqs[0].Tools, []byte(`"relay_screen"`)) || bytes.Count(reqs[0].Tools, []byte(`"type":"function"`)) != 12 {
+	if !strings.Contains(reqs[0].Rest, `"reasoning_effort"`) || !strings.Contains(reqs[0].Rest, `"max_completion_tokens"`) && !strings.Contains(reqs[0].Rest, `"max_tokens"`) {
+		t.Fatalf("the request carries no effort or output limit to hold steady: %s", reqs[0].Rest)
+	}
+	if !bytes.Contains(reqs[0].Tools, []byte(`"relay_screen"`)) || bytes.Count(reqs[0].Tools, []byte(`"type":"function"`)) != 15 {
 		t.Fatalf("tools = %s", reqs[0].Tools)
 	}
 }

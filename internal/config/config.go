@@ -285,6 +285,22 @@ const loopMaxTokens = 32768
 // effort), and it has one effort for both.
 const loopEffort = "medium"
 
+// presetEffort is loopEffort where the model offers it, and otherwise the
+// nearest effort it does offer, never none. (DeepSeek V4.1 Flash 1017 has
+// no medium; it ran high wherever medium was wanted before, too.)
+func presetEffort(baseURL, model string) string {
+	m, ok := Lookup(baseURL, model)
+	if !ok || len(m.Efforts) == 0 || contains(m.Efforts, loopEffort) {
+		return loopEffort
+	}
+	for _, e := range []string{"high", "low", "xhigh"} {
+		if contains(m.Efforts, e) {
+			return e
+		}
+	}
+	return loopEffort
+}
+
 // glmDescription describes the built-in defaults, which the "glm" preset names.
 const glmDescription = "GLM-5.3 (Together AI)"
 
@@ -307,8 +323,9 @@ func Defaults() Config {
 // (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
 // within one provider; glm is the default.
 //
-// Every preset runs at one effort, medium (see loopEffort), for every call.
-// It always thinks, never none.
+// Every preset runs at one effort for every call: medium, or the nearest
+// the model offers (see loopEffort and presetEffort). It always thinks,
+// never none.
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {
@@ -484,7 +501,7 @@ func openaiRoute(model string) ModelRoute {
 func chatRoute(baseURL, keyEnv, model string, contextTokens int) ModelRoute {
 	return ModelRoute{
 		Protocol: llm.ProtocolChat, BaseURL: baseURL, Model: model,
-		APIKeyEnv: keyEnv, ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
+		APIKeyEnv: keyEnv, ReasoningEffort: presetEffort(baseURL, model), MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
 	}
 }
 

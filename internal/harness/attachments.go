@@ -3,6 +3,10 @@ package harness
 import (
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
@@ -233,6 +237,44 @@ func attachmentSummary(atts []event.Attachment) string {
 		parts = append(parts, fmt.Sprintf("%s (%s, %s)", a.Name, a.ContentType, humanBytes(a.Size)))
 	}
 	return "📎 " + strings.Join(parts, ", ")
+}
+
+// viewImage prepares a picture for eagent's model to look at: the file must
+// be an image of a supported type, and a copy goes into the session so the
+// conversation renders the same bytes every time, whatever happens to the
+// original. Not on the loop goroutine.
+func (r *Runtime) viewImage(p string) (event.Attachment, error) {
+	abs, err := r.locateFile(p)
+	if err != nil {
+		return event.Attachment{}, err
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return event.Attachment{}, fmt.Errorf("%s: %v", p, shortErr(err))
+	}
+	if !st.Mode().IsRegular() || st.Size() == 0 {
+		return event.Attachment{}, fmt.Errorf("%s is not a file with content", p)
+	}
+	if st.Size() > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, fmt.Errorf("%s is %s; images over 10 MB cannot be shown", p, humanBytes(st.Size()))
+	}
+	att, err := r.copyAttachment(abs, "view")
+	if err != nil {
+		return event.Attachment{}, err
+	}
+	switch att.ContentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+	default:
+		_ = os.Remove(att.Path)
+		return event.Attachment{}, fmt.Errorf("%s is %s, not an image you can look at (png, jpeg, gif, webp)", p, att.ContentType)
+	}
+	if f, err := os.Open(att.Path); err == nil {
+		if cfg, _, err := image.DecodeConfig(f); err == nil {
+			att.Width, att.Height = cfg.Width, cfg.Height
+		}
+		f.Close()
+	}
+	return att, nil
 }
 
 // sessionRoots are the folders the session works in: the project and each

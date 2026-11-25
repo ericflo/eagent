@@ -27,21 +27,28 @@ func (r *Runtime) closeInterrupted() {
 	legacy := r.st.Legacy() && r.st.Calls[event.ActorEagent] == 0
 	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed}))
 	if legacy {
-		r.adoptLegacy()
+		// A session written when eagent ran three models (an orchestrator,
+		// task workers and a narrator). Its record stays as it is and stays
+		// readable. Before anything else the one loop writes a dossier from
+		// that record (dossier.go, with a map over every old file, the old
+		// dossiers included) and continues in a new subsession, so its
+		// conversation never has to render events it has no words for.
+		r.turns.adopt = true
 	}
 }
 
-// adoptLegacy continues a session that was written when eagent ran three
-// models (an orchestrator, task workers and a narrator). Its record stays
-// as it is and stays readable; the one loop starts a new subsession from a
-// briefing the harness assembles, so its conversation never has to render
-// events it has no words for. Called before the loop starts.
-func (r *Runtime) adoptLegacy() {
-	covers := r.st.LastSeq()
+// legacyBriefing stands in for the model's part of the dossier that a
+// session of the three-actor design continues from, when the model could
+// not write it: what the user was last told, how the old session left
+// things, the last report of each agent, and the last dossier the old
+// session wrote, in their own words. partial is whatever the model did
+// write. Loop goroutine only.
+func (r *Runtime) legacyBriefing(partial string) string {
 	var b strings.Builder
-	b.WriteString("(This session was started by an earlier eagent, which did the work itself with helpers of its own. That way of working is gone: now a coding agent in a terminal does the work and you stand between it and the user. eagent assembled this briefing from the old record; session_search and session_read reach all of it.)\n")
+	b.WriteString("(This session was started by an earlier eagent, which did the work itself with helpers of its own. That way of working is gone: now a coding agent in a terminal does the work and you stand between it and the user. Your model could not write this briefing, so eagent assembled it from the old record. It has no MAP by topic of its own; the old session's last briefing, below, has one, and session_search and session_read reach all of the record.)\n")
 	var told, notes []string
-	for _, ev := range r.st.Events {
+	var last *event.Event
+	for i, ev := range r.st.Events {
 		switch ev.Type {
 		case event.Message:
 			var d event.MessageData
@@ -57,6 +64,8 @@ func (r *Runtime) adoptLegacy() {
 				}
 				notes = append(notes, fmt.Sprintf("- [%s] %s: %s", r.when(ev.Time), state, clipRunes(oneLine(d.Reason, 500), 500)))
 			}
+		case event.Dossier:
+			last = &r.st.Events[i]
 		}
 	}
 	if len(told) > 0 {
@@ -70,12 +79,14 @@ func (r *Runtime) adoptLegacy() {
 			fmt.Fprintf(&b, "\n%s'S LAST REPORT (%s):\n%s\n", strings.ToUpper(rel.Who()), r.when(rel.LastTurnAt), clipRunes(rel.LastTurn, 3000))
 		}
 	}
-	body := strings.TrimSpace(b.String()) + "\n\n" + r.dossierFacts(covers)
-	if err := r.openSubsession("resumed by an eagent with one loop", "upgrade", r.st.ContextTokens()); err != nil {
-		r.ui.Log("resume: %v", err)
-		return
+	if last != nil {
+		var d event.DossierData
+		if last.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
+			fmt.Fprintf(&b, "\nTHE OLD SESSION'S LAST BRIEFING (%s, written %s; what happened after it is in the files that follow):\n%s\n", last.Source, r.when(last.Time), clipRunes(strings.TrimSpace(d.Text), 16000))
+		}
 	}
-	r.append(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: body, CoversSeq: covers, By: "harness"}))
-	r.turns.promptTokens = 0
-	r.ui.Log("this session was written by an earlier eagent; it continues in a new subsession from a briefing")
+	if strings.TrimSpace(partial) != "" {
+		b.WriteString("\nWHAT THE MODEL DID WRITE:\n" + strings.TrimSpace(partial) + "\n")
+	}
+	return b.String()
 }

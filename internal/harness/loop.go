@@ -141,6 +141,9 @@ type turnState struct {
 	overflowed      bool
 	futileLogged    bool
 	dossierFailedAt time.Time
+	// adopt: the log was written by the three-actor design, and the first
+	// thing this loop does is write a dossier from its files (resume.go).
+	adopt bool
 
 	// owed is a message the user wrote to eagent itself that was looked at
 	// and left with no answer and nothing done about it. Until that
@@ -223,6 +226,10 @@ func wakeFor(ev event.Event) (wakeKind, bool) {
 		if ev.Actor == event.ActorEagent && ev.Task == "" {
 			return wakeNotice, true
 		}
+	case event.ScheduleFire:
+		if ev.Actor == event.ActorHarness {
+			return wakeNotice, true
+		}
 	case event.SessionResume:
 		var d event.SessionResumeData
 		if ev.Decode(&d) == nil && len(d.Closed) > 0 {
@@ -238,6 +245,8 @@ func shows(ev event.Event) bool {
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer, event.RelayStart, event.RelayProgress, event.RelayTurn, event.RelayEnd:
 		return true
+	case event.ScheduleFire:
+		return ev.Actor == event.ActorHarness
 	case event.RelayState, event.RelayDelivered, event.RelayLimit:
 		return state.NeedsAttention(ev)
 	}
@@ -660,8 +669,10 @@ func (r *Runtime) turn(w wake) {
 			if ctx.Err() == nil {
 				out, isErr, more = r.runTool(ctx, tc, c)
 			}
+			images := tc.images
+			tc.images = nil
 			r.sync(func() {
-				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr}))
+				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr, Images: images}))
 			})
 			again = again || more
 		}
@@ -836,6 +847,12 @@ func (r *Runtime) turnFailed(err error) {
 		if active := r.st.ActiveRelays(); len(active) > 0 {
 			who = active[0].Who()
 		}
+		if errors.As(err, &ae) && ae.ContextOverflow() {
+			// Not an outage: the provider refuses the prompt as too long,
+			// and restarting from a dossier did not make it fit.
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
+			return
+		}
 		r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", shortErr(err), who, who)})
 	}
 }
@@ -847,6 +864,9 @@ func (r *Runtime) stopTimers() {
 		if tm != nil {
 			tm.Stop()
 		}
+	}
+	for _, tm := range r.timers {
+		tm.Stop()
 	}
 	for _, tm := range r.autopilotTimers {
 		tm.Stop()

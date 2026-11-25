@@ -57,9 +57,9 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 // it is, with no notes.
 //
 //   - orchestrator becomes model. The one model has one effort for every
-//     call, where the orchestrator and the narrator each had their own.
-//     When the file gave both the same effort it is kept; otherwise it
-//     becomes medium, between the two.
+//     call, where the orchestrator and the narrator each had their own. An
+//     effort the file names for one of them, or the same for both, is kept;
+//     two different ones become medium, between the two.
 //   - narrator_tick_seconds and narrator_quiet_seconds become tick_seconds and
 //     quiet_seconds; relay.quiet_seconds, which replaced the quiet limit in
 //     relay sessions, becomes quiet_seconds too and wins over
@@ -85,20 +85,32 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 		for k, v := range orch {
 			model[k] = v
 		}
-		effort := json.RawMessage(`"` + loopEffort + `"`)
+		// One model has one effort. An effort the file names is kept when
+		// it names only one, or the same for both; when the orchestrator
+		// and the narrator were given different ones it becomes medium,
+		// between the two, and the note says so.
 		oe, hasOE := orch["reasoning_effort"]
 		ne, hasNE := narr["reasoning_effort"]
+		var effort json.RawMessage
+		said := ""
 		switch {
-		case hasOE && hasNE && string(oe) == string(ne), hasOE && narr == nil:
-			effort = oe
-		case hasNE && orch == nil:
-			effort = ne
+		case hasOE && hasNE && string(oe) == string(ne):
+			effort, said = oe, "; its reasoning effort stays "+strings.Trim(string(oe), `"`)
+		case hasOE && hasNE:
+			effort = json.RawMessage(`"` + loopEffort + `"`)
+			said = "; its reasoning effort is " + loopEffort + " (the orchestrator had " + strings.Trim(string(oe), `"`) + " and the narrator " + strings.Trim(string(ne), `"`) + ", and one model has one effort; set model.reasoning_effort to change it)"
+		case hasOE:
+			effort, said = oe, "; its reasoning effort stays "+strings.Trim(string(oe), `"`)+", now for every call"
+		case hasNE:
+			effort, said = ne, "; its reasoning effort is the narrator's, "+strings.Trim(string(ne), `"`)
 		}
-		setEffort(model, effort)
+		if effort != nil {
+			setEffort(model, effort)
+		}
 		if len(model) > 0 {
 			out["model"], _ = json.Marshal(model)
 			if orch != nil {
-				notes = append(notes, "orchestrator is now model, the one model for every call; its reasoning effort is "+strings.Trim(string(effort), `"`)+" (the orchestrator and the narrator each had their own; set model.reasoning_effort to change it)")
+				notes = append(notes, "orchestrator is now model, the one model for every call"+said)
 			} else {
 				notes = append(notes, "the narrator's reasoning effort is now model.reasoning_effort")
 			}

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/sched"
 	"github.com/ericflo/eagent/internal/tools"
 )
 
@@ -17,6 +19,9 @@ type turnCalls struct {
 	// handled: the turn answered the user or did something with the agent,
 	// so a message kept for eagent has not been left lying.
 	handled bool
+	// images are the pictures view_image brought back in the call being
+	// run, recorded with its result.
+	images []event.Attachment
 }
 
 // runTool runs one of eagent's tool calls and returns its result. again
@@ -112,6 +117,57 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return err.Error(), true, true
 		}
 		return out, false, true
+
+	case tools.ViewImage:
+		att, err := r.viewImage(str("path"))
+		if err != nil {
+			return err.Error(), true, true
+		}
+		tc.images = append(tc.images, att)
+		return fmt.Sprintf("showing %s (%s, %dx%d)", att.Name, att.ContentType, att.Width, att.Height), false, true
+
+	case tools.Schedule:
+		spec := strings.TrimSpace(str("spec"))
+		s, err := sched.Parse(spec)
+		if err != nil {
+			return err.Error(), true, true
+		}
+		note := strings.TrimSpace(str("note"))
+		if note == "" {
+			return "note is required: say what to do when the timer comes due", true, true
+		}
+		next := s.Next(time.Now())
+		if next.IsZero() {
+			return "that timer would never come due", true, true
+		}
+		var id string
+		r.sync(func() {
+			id = r.st.NextScheduleID()
+			r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: id, Kind: s.Kind, Spec: spec, Note: note, Next: next}))
+			r.armSchedule(id, next)
+		})
+		tc.handled = true
+		return fmt.Sprintf("timer %s set (%s); it first comes due at %s", id, s.Kind, next.In(r.st.Location()).Format("15:04:05")), false, false
+
+	case tools.CancelSchedule:
+		id := str("schedule")
+		var msg string
+		var bad bool
+		r.sync(func() {
+			sc := r.st.Schedules[id]
+			if sc == nil || sc.Cancelled {
+				msg, bad = "no active timer "+id, true
+				return
+			}
+			if t := r.timers[id]; t != nil {
+				t.Stop()
+				delete(r.timers, id)
+			}
+			r.append(event.New(event.ScheduleCancel, event.ActorEagent, event.ScheduleCancelData{ID: id}))
+			msg = "timer " + id + " cancelled"
+		})
+		tc.handled = tc.handled || !bad
+		return msg, bad, bad
 	}
 	// The rest drive the agent.
 	out, isErr = r.relayTool(c.Name, str, num, list, false)

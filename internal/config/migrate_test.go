@@ -68,27 +68,31 @@ func TestMigrateLegacyOrchestratorAndNarrator(t *testing.T) {
 	}
 }
 
-func TestMigrateLegacyOrchestratorAloneRunsLow(t *testing.T) {
-	out, notes := MigrateLegacy(rawObject(t, `{"orchestrator": {"model": "o/model", "reasoning_effort": "xhigh", "fallback": {"model": "o/fb", "reasoning_effort": "xhigh"}}}`))
+// An effort the file names for the orchestrator alone is the only one the
+// user chose: it is kept, for the model and its fallbacks, and the note
+// says it now holds for every call.
+func TestMigrateLegacyOrchestratorAloneKeepsItsEffort(t *testing.T) {
+	out, notes := MigrateLegacy(rawObject(t, `{"orchestrator": {"model": "o/model", "reasoning_effort": "xhigh", "fallback": {"model": "o/fb", "reasoning_effort": "high"}}}`))
 	m := object(out["model"])
-	if _, ok := m["reasoning_effort"]; ok {
-		t.Fatalf("the orchestrator's effort carried over: %s", out["model"])
+	if string(m["reasoning_effort"]) != `"xhigh"` || string(object(m["fallback"])["reasoning_effort"]) != `"xhigh"` {
+		t.Fatalf("model = %s", out["model"])
 	}
-	if string(object(m["fallback"])["reasoning_effort"]) != `"low"` {
-		t.Fatalf("fallback effort = %s", m["fallback"])
-	}
-	if len(notes) != 1 || !hasNote(notes, "orchestrator is now model") {
+	if len(notes) != 1 || !hasNote(notes, "orchestrator is now model") || !hasNote(notes, "its reasoning effort stays xhigh, now for every call") {
 		t.Fatalf("notes = %v", notes)
 	}
-	// Loaded, the model takes the defaults' low effort.
 	project := t.TempDir()
 	writeConfig(t, project, `{"orchestrator": {"model": "custom/model", "reasoning_effort": "xhigh"}}`)
 	cfg, err := Load(project, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Model != "custom/model" || cfg.Model.ReasoningEffort != "low" {
+	if cfg.Model.Model != "custom/model" || cfg.Model.ReasoningEffort != "xhigh" {
 		t.Fatalf("model = %+v", cfg.Model)
+	}
+	// With no effort named anywhere, none is written: the preset's holds.
+	out, notes = MigrateLegacy(rawObject(t, `{"orchestrator": {"model": "o/model"}, "narrator": {"model": "n/model"}}`))
+	if _, ok := object(out["model"])["reasoning_effort"]; ok || !hasNote(notes, "orchestrator is now model") {
+		t.Fatalf("model = %s notes %v", out["model"], notes)
 	}
 }
 
@@ -240,7 +244,7 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 	t.Setenv("EAGENT_CONFIG", "")
 	writeConfig(t, project, `{
   "orchestrator": {"model": "custom/model"},
-  "narrator": {"reasoning_effort": "medium"},
+  "narrator": {"reasoning_effort": "high"},
   "narrator_tick_seconds": 20,
   "task_concurrency": 3,
   "relay": {"quiet_seconds": 240, "profiles": {"mine": {"agent": "codex", "args": ["--x"]}}},
@@ -282,7 +286,7 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Migrated) != 0 || after.Model.Model != "custom/model" || after.Model.ReasoningEffort != "medium" || after.TickSeconds != 20 || after.QuietSeconds != 240 || after.Persona != "brief" || after.Relay.Default != "mine" || after.Relay.Profiles["mine"].Agent != "codex" {
+	if len(after.Migrated) != 0 || after.Model.Model != "custom/model" || after.Model.ReasoningEffort != "high" || after.TickSeconds != 20 || after.QuietSeconds != 240 || after.Persona != "brief" || after.Relay.Default != "mine" || after.Relay.Profiles["mine"].Agent != "codex" {
 		t.Fatalf("after save: %+v\n%s", after, raw)
 	}
 	// Clearing the default keeps the profiles; with nothing left relay goes.
@@ -312,7 +316,7 @@ func TestEnvOverridesNewAndLegacyNames(t *testing.T) {
 		"EAGENT_MODEL":                       "env/model",
 		"EAGENT_ORCHESTRATOR_MODEL":          "ignored/model",
 		"EAGENT_ORCHESTRATOR_MAX_TOKENS":     "4096",
-		"EAGENT_NARRATOR_REASONING_EFFORT":   "medium",
+		"EAGENT_NARRATOR_REASONING_EFFORT":   "xhigh", // no longer read: the one model has one effort, EAGENT_REASONING_EFFORT
 		"EAGENT_API_KEY_ENV":                 "",
 		"EAGENT_SUMMARIZER_MODE":             "dedicated",
 		"EAGENT_SUMMARIZER_MODEL":            "small/model",
@@ -330,7 +334,6 @@ func TestEnvOverridesNewAndLegacyNames(t *testing.T) {
 	want := map[string]string{
 		"/model/model":                       "EAGENT_MODEL",
 		"/model/max_tokens":                  "EAGENT_ORCHESTRATOR_MAX_TOKENS",
-		"/model/reasoning_effort":            "EAGENT_NARRATOR_REASONING_EFFORT",
 		"/model/api_key_env":                 "EAGENT_API_KEY_ENV",
 		"/summarizer/mode":                   "EAGENT_SUMMARIZER_MODE",
 		"/summarizer/model/model":            "EAGENT_SUMMARIZER_MODEL",
