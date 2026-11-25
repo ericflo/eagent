@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const canonicalEdit = e => JSON.stringify([e.op, e.key, e.value ?? null]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const moduleName = process.env.FINALECHAT_PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(path.isAbsolute(moduleName) ? pathToFileURL(moduleName).href : moduleName);
@@ -136,6 +137,39 @@ try {
   assert.ok(proposal.edits.some(e => e.key === '/summarizer/mode' && e.value === 'dedicated'), JSON.stringify(proposal.edits));
   assert.ok(!proposal.edits.some(e => e.key.startsWith('/relay/profiles')), JSON.stringify(proposal.edits));
   await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  // A fallback the file's preset gives cannot be removed here; choosing
+  // another preset or the defaults, which give none, is not removing it.
+  const capturedSnapshot = await page.evaluate(() => JSON.stringify(fixture.resource.snapshot));
+  await page.evaluate(() => {
+    const s = fixture.resource.snapshot;
+    s.saved['/preset'] = s.effective['/preset'] = 'openai-high';
+    Object.assign(s.effective, { '/model/fallback/model': 'openai/gpt-6-luna', '/model/fallback/base_url': 'https://openrouter.ai/api/v1', '/model/fallback/protocol': 'openai-responses', '/model/fallback/api_key_env': 'OPENROUTER_API_KEY' });
+  });
+  const reloadDefaults = async () => {
+    await frame.getByRole('button', { name: 'Reload current defaults', exact: true }).click();
+    const discard = frame.getByRole('button', { name: 'Discard edits and reload', exact: true });
+    if (await discard.isVisible().catch(() => false)) await discard.click();
+    await frame.locator('#artifact-status').filter({ hasText: 'Editing current project defaults' }).waitFor();
+  };
+  await reloadDefaults();
+  for (const [chipName, presetEdit] of [['glm', { op: 'set', key: '/preset', value: 'glm' }], ['defaults', { op: 'unset', key: '/preset' }]]) {
+    await page.evaluate(() => { window.proposal = null; });
+    await frame.getByRole('button', { name: chipName, exact: true }).click();
+    await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+    await page.waitForFunction(() => window.proposal?.operation === 'settings.apply', null, { timeout: 5000 }).catch(() => {});
+    proposal = await page.evaluate(() => window.proposal);
+    assert.ok(proposal?.edits?.some(e => canonicalEdit(e) === canonicalEdit(presetEdit)), `switching to ${chipName}: ${JSON.stringify(proposal)} ${await frame.locator('#toasts').innerText()}`);
+    await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  }
+  // Removing the preset's fallback while keeping the preset stays refused.
+  await page.evaluate(() => { window.proposal = null; });
+  await frame.locator('.route.model').getByRole('button', { name: 'remove', exact: true }).click();
+  await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+  await frame.getByText(/comes from its preset and cannot be removed/).first().waitFor();
+  assert.equal(await page.evaluate(() => window.proposal), null);
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  await page.evaluate(snapshot => { fixture.resource.snapshot = JSON.parse(snapshot); }, capturedSnapshot);
+  await reloadDefaults();
   // An override of a retired prompt is removed by a staged reset: a
   // sandboxed frame has no confirm().
   await frame.getByRole('button').filter({ hasText: /^NARRATOR\.md/ }).click();
