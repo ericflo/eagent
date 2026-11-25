@@ -94,9 +94,6 @@ type Message struct {
 	// route at another host must rebuild the turn instead of replaying.
 	NativeHost string
 
-	// CacheBreak marks the last stable message (Anthropic cache_control).
-	CacheBreak bool
-
 	// Images are pictures attached to a user message (screenshots the user
 	// sent). Adapters inline them as base64 for models that accept images;
 	// a model that rejects them gets the text alone.
