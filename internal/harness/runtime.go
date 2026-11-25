@@ -423,6 +423,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 					next := m.routes[i+1]
 					r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
 					m.client = r.newClient(next, who)
+					r.flushSilent() // the looks so far were made on the old route
 					r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 						Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
 						Reason: "the configured route is unavailable: " + shortErr(err),
