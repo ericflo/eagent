@@ -534,3 +534,22 @@ func TestNarratorTrimPreservesOpeningRequestForNonRelay(t *testing.T) {
 		t.Fatalf("non-relay recap should preserve opening user request: %q", recap)
 	}
 }
+
+// Who names a relay's agent by the short name relay.start recorded, and,
+// for logs written before that, by the agent's name capitalised.
+func TestRelayWho(t *testing.T) {
+	for _, tc := range []struct {
+		r    Relay
+		want string
+	}{
+		{Relay{Name: "c", Agent: "claude", AgentLabel: "Claude"}, "Claude"},
+		{Relay{Name: "c", Agent: "claude"}, "Claude"},
+		{Relay{Name: "x", Agent: "antigravity"}, "Antigravity"},
+		{Relay{Name: "x", Agent: "pi"}, "Pi"},
+		{Relay{Name: "x"}, "x"},
+	} {
+		if got := tc.r.Who(); got != tc.want {
+			t.Fatalf("%+v: Who = %q, want %q", tc.r, got, tc.want)
+		}
+	}
+}

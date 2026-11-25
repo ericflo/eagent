@@ -37,7 +37,7 @@ type SessionStart struct {
 type SessionRequest struct {
 	Prompt string
 	Dir    string
-	// Relay names a relay profile ("codex", "claude"): the session starts
+	// Relay names a relay profile ("codex", "claude", "pi"): the session starts
 	// that agent in Dir and relays the user's messages to it.
 	Relay string
 	// RelayModel and RelayEffort are that agent's model and reasoning
@@ -336,11 +336,9 @@ func runningRelays(live []string) []map[string]any {
 				continue
 			}
 			name := strings.TrimPrefix(strings.TrimPrefix(l.Name, relay.Prefix), session+"-")
-			agent := name
-			for _, a := range []string{"antigravity", "codex", "claude"} {
-				if strings.HasPrefix(name, a) {
-					agent = a
-				}
+			agent := relay.AgentOf(name)
+			if agent == "" {
+				agent = name
 			}
 			state := "running"
 			if l.Dead {

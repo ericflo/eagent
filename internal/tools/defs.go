@@ -2,8 +2,11 @@ package tools
 
 import (
 	"encoding/json"
+	"strings"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 func def(name, desc string, params string) llm.Tool {
@@ -126,11 +129,29 @@ var orchestratorOnly = []llm.Tool{
 		},"required":["reason"]}`),
 }
 
+// relayAgentsHint names the agents a relay can run and their built-in
+// profiles: "Antigravity, Claude, Codex, or Pi (profiles: 'antigravity',
+// 'claude', 'codex', 'pi')". It is the same on every run, so the tool
+// list stays cacheable.
+func relayAgentsHint() string {
+	var labels, profiles []string
+	for _, a := range relay.Agents() {
+		labels = append(labels, a.Label())
+	}
+	for _, name := range (config.Relay{}).RelayProfileNames() {
+		profiles = append(profiles, "'"+name+"'")
+	}
+	if n := len(labels); n > 1 {
+		labels[n-1] = "or " + labels[n-1]
+	}
+	return strings.Join(labels, ", ") + " (profiles: " + strings.Join(profiles, ", ") + ")"
+}
+
 // relayTools drive an external coding agent (a relay). Only relay_start is
 // exposed before relay mode is active; the rest join when relay mode begins.
 var relayTools = []llm.Tool{
 	def("relay_start",
-		"Start an external coding agent in a managed terminal and switch this session into relay mode. Only use when the user asks for Antigravity, Codex, or Claude (profiles: 'codex', 'claude', 'antigravity').",
+		"Start an external coding agent in a managed terminal and switch this session into relay mode. Only use when the user asks for "+relayAgentsHint()+".",
 		`{"type":"object","properties":{
 			"profile":{"type":"string"},
 			"dir":{"type":"string","description":"Working dir (default: current working dir)."},

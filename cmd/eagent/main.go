@@ -44,7 +44,7 @@ Usage:
   eagent -p [flags] "prompt"         batch mode: run until the work is done, then exit
   eagent -c [flags] [prompt]         continue the most recent session in this project
   eagent relay <profile> [--cwd DIR] [brief]
-                                     start Antigravity, Codex or Claude Code in a terminal
+                                     start Antigravity, Claude Code, Codex or Pi in a terminal
                                      eagent owns and relay to it: your messages go to it verbatim
   eagent relays [attach|stop NAME]   list the relays running on this machine, watch one, or stop one
   eagent resume [flags] <id> [prompt]

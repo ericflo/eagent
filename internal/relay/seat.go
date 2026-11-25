@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -49,11 +50,16 @@ type Spec struct {
 	Name    string // how the session refers to it
 	Profile config.RelayProfile
 	Dir     string
-	// Hook is the shell command Claude Code runs as its Stop hook; Spool is
-	// the directory where messages wait for it.
-	StatusFile string // Antigravity session identity reported by its status line
+	// The rest is what the agent's prepare sets up (relay.Prepare). Hook is
+	// the agent's own hook: Claude Code's Stop hook command, Antigravity's
+	// status-line command, pi's extension file. StatusFile is where that
+	// hook reports the agent's state; Spool is the directory where messages
+	// held for the end of a turn wait for it. Files are written (path to
+	// content) before the agent starts; Env is added to its environment.
+	StatusFile string
 	Hook       string
 	Spool      string
+	Files      map[string]string
 	Env        []string
 }
 
@@ -66,7 +72,7 @@ type Started struct {
 // Seat watches and drives one running agent.
 type Seat struct {
 	spec   Spec
-	agent  agent
+	agent  Agent
 	host   Host
 	target string
 	events chan Event
@@ -90,6 +96,7 @@ type Seat struct {
 	limitMark  float64
 	handled    map[string]time.Time // dialog -> when it was last answered
 	readySince time.Time            // when the screen first looked ready while starting
+	refollow   bool                 // the agent moved to another transcript: find it again
 	closed     bool
 }
 
@@ -102,7 +109,7 @@ type pending struct {
 // Launch starts the agent in a new terminal session and begins watching it.
 // With resume set, innerID names the agent's own session to continue.
 func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
-	a, err := agentFor(spec.Profile.Agent, spec.StatusFile)
+	a, err := agentFor(spec.Profile.Agent)
 	if err != nil {
 		return nil, Started{}, err
 	}
@@ -137,6 +144,14 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 			return nil, Started{}, err
 		}
 	}
+	for path, content := range spec.Files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, Started{}, err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return nil, Started{}, err
+		}
+	}
 	env := append([]string{"PATH=" + os.Getenv("PATH"), "FINALECHAT_MIRROR=off", "EAGENT_RELAY=" + target}, spec.Env...)
 	if err := host.Start(target, spec.Dir, argv, env); err != nil {
 		return nil, Started{}, err
@@ -156,7 +171,7 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 // of the last thing already on the record; earlier transcript lines are
 // skipped.
 func Attach(spec Spec, hostName, target, innerID, transcript string, since time.Time) (*Seat, error) {
-	a, err := agentFor(spec.Profile.Agent, spec.StatusFile)
+	a, err := agentFor(spec.Profile.Agent)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +188,7 @@ func Attach(spec Spec, hostName, target, innerID, transcript string, since time.
 	return s, nil
 }
 
-func newSeat(spec Spec, a agent, host Host, target, innerID string) *Seat {
+func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
 	return &Seat{spec: spec, agent: a, host: host, target: target, inner: innerID,
 		events: make(chan Event, 256), stop: make(chan struct{}), done: make(chan struct{}),
 		state: "starting", stateAt: time.Now(), handled: map[string]time.Time{}}
@@ -286,7 +301,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		}
 		time.Sleep(time.Second)
 	}
-	label := s.agent.label()
+	label := s.agent.Label()
 	switch mode {
 	case "", "queue":
 		mode = "queue"
@@ -364,12 +379,10 @@ func (s *Seat) track(id, text, mode string) {
 	s.mu.Unlock()
 }
 
-// Interrupt stops what the agent is doing (Escape).
+// Interrupt stops what the agent is doing (Escape, unless the agent says
+// otherwise).
 func (s *Seat) Interrupt() error {
-	if s.spec.Profile.Agent == "antigravity" {
-		return s.host.Keys(s.target, "C-c")
-	}
-	return s.host.Keys(s.target, "Escape")
+	return s.host.Keys(s.target, s.agent.interruptKeys()...)
 }
 
 // Keys presses keys in the agent's terminal (answering a dialog).
@@ -436,12 +449,22 @@ func (s *Seat) watch() {
 		case <-tick.C:
 		}
 		now := time.Now()
+		s.mu.Lock()
+		if s.refollow {
+			// The agent moved to another transcript of its own (pi's /new):
+			// let the old one go and find the new one.
+			if s.transcript != "" {
+				claimed.CompareAndDelete(s.transcript, s.target)
+			}
+			s.refollow, s.transcript, tail = false, "", nil
+		}
+		s.mu.Unlock()
 		if tail == nil {
 			s.mu.Lock()
 			path, inner := s.transcript, s.inner
 			s.mu.Unlock()
 			if path == "" {
-				path, inner = s.agent.locate(s.spec.Dir, s.launched, inner)
+				path, inner = s.agent.locate(s.spec, s.launched, inner)
 			}
 			if path != "" {
 				if owner, loaded := claimed.LoadOrStore(path, s.target); loaded && owner != s.target {
@@ -453,7 +476,7 @@ func (s *Seat) watch() {
 				first := s.transcript == ""
 				s.transcript, s.inner = path, inner
 				s.mu.Unlock()
-				tail, p = &tailer{path: path}, s.agent.newParser()
+				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				if !s.since.IsZero() {
 					// Reattached or resumed: the history is already on the
 					// record; read only the end of a long transcript.
@@ -492,8 +515,8 @@ func (s *Seat) watch() {
 				return
 			}
 		}
-		if a, ok := s.agent.(antigravityAgent); ok && tail != nil {
-			a.poll(s, now)
+		if pl, ok := s.agent.(poller); ok && tail != nil {
+			pl.poll(s, now)
 		}
 		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
 			lastDialog = now
@@ -625,20 +648,6 @@ type dialog struct {
 	what  string
 }
 
-var dialogs = []dialog{
-	{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
-	// Claude Code: the default choice is "No, exit".
-	{name: "claude-trust", match: []string{"Yes, I trust this folder"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's folder-trust prompt"},
-	{name: "claude-bypass", match: []string{"Bypass Permissions mode", "Yes, I accept"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's bypass-permissions warning"},
-	// Codex: the default choice is "Trust and continue".
-	{name: "codex-trust", match: []string{"Trust this folder?", "Trust and continue"}, keys: []string{"Enter"}, what: "accepted Codex's folder-trust prompt"},
-	// Codex's update prompt: choose "2. Skip" explicitly (never Escape,
-	// which quits on the trust prompt). Upgrading is the user's call; the
-	// notice says one is available. Without the menu, the "Update
-	// available" box is only a notice above a working prompt.
-	{name: "codex-update", match: []string{"Update now", "Skip until next version"}, keys: []string{"Down", "Enter"}, what: "skipped Codex's update prompt for now (a newer Codex is available; upgrade with `codex update` and a restart)"},
-}
-
 func (s *Seat) checkScreen(now time.Time) {
 	screen, err := s.host.Capture(s.target, 0)
 	if err != nil {
@@ -707,7 +716,7 @@ func (s *Seat) checkScreen(now time.Time) {
 // answerDialog presses the answer to a known dialog on screen, at most once
 // per dialog every few seconds, and reports whether one was showing.
 func (s *Seat) answerDialog(screen string, now time.Time) bool {
-	for _, d := range dialogs {
+	for _, d := range allDialogs() {
 		if !containsAll(screen, d.match) {
 			continue
 		}
@@ -726,9 +735,24 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 	return false
 }
 
-// looksReady recognises an agent at its input prompt.
+// looksReady recognises an agent at its input prompt. Any agent's prompt
+// counts, whichever agent the seat runs.
 func looksReady(screen string) bool {
-	return strings.Contains(screen, "Antigravity relay ·") || strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "Ask Codex to do anything") || strings.Contains(screen, "for shortcuts")
+	for _, a := range Agents() {
+		if a.ready(screen) {
+			return true
+		}
+	}
+	return false
+}
+
+// follow makes the seat find the agent's transcript again on its next
+// tick: the agent switched to another session of its own (id, "" when the
+// agent's locate knows it). Only news from now on counts.
+func (s *Seat) follow(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refollow, s.inner, s.since = true, id, time.Now()
 }
 
 func removePending(list []*pending, x *pending) []*pending {

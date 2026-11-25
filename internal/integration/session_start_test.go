@@ -299,7 +299,7 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	for _, p := range relayProfiles(t.TempDir()) {
 		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
 	}
-	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex" {
+	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex,pi/pi" {
 		t.Fatalf("advertised profiles %v", names)
 	}
 }
@@ -386,7 +386,7 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			start = a
 		}
 	}
-	if len(start.Inputs) != 16 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
+	if len(start.Inputs) != 18 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
 		t.Fatalf("start inputs = %+v", start.Inputs)
 	}
 	// eagent's own models apply only when eagent does the work; each relay
@@ -409,6 +409,13 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	if codexModel.Default != nil || codexModel.Suggest == nil || len(view.Descriptor.Suggestions["codex_models"]) == 0 || view.Descriptor.Suggestions["claude_models"][0].Value != "fable" {
 		t.Fatalf("codex input %+v, lists %d/%d", codexModel, len(view.Descriptor.Suggestions["codex_models"]), len(view.Descriptor.Suggestions["claude_models"]))
+	}
+	piModel, piEffort := inputs["relay_pi_model"], inputs["relay_pi_effort"]
+	if w := piModel.When["relay"]; len(w) != 1 || w[0] != "pi" || piModel.Group != "Pi" || piModel.Suggest == nil || piModel.Suggest.List != "pi_models" || piEffort.Group != "Pi" {
+		t.Fatalf("pi inputs %+v %+v", piModel, piEffort)
+	}
+	if _, ok := view.Descriptor.Suggestions["pi_models"]; !ok {
+		t.Fatal("no pi_models list")
 	}
 	if model, effort := RelayPicks(map[string]any{"relay_claude_model": " sonnet ", "relay_codex_model": "x", "relay_claude_effort": "high"}, "claude"); model != "sonnet" || effort != "high" {
 		t.Fatalf("picks %q %q", model, effort)

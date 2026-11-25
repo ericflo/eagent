@@ -1,14 +1,13 @@
 package relay
 
 import (
-	"bufio"
+	"cmp"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,175 +16,265 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
-// agent is what differs between the programs a relay can run.
-type agent interface {
-	// command is the argv that starts (or, with resume, continues) the agent.
+// Agent is one coding agent a relay can run: everything that differs
+// between Claude Code, Codex, Antigravity, pi and the rest lives behind it.
+// Adding an agent is one file that implements Agent (embedding agentBase
+// for the optional parts) and calls register from its init, plus a line in
+// config.BuiltinRelayProfiles when it should be offered by default.
+//
+// The exported methods are what the rest of eagent reads; the unexported
+// ones are for seats and the choice helpers in this package.
+type Agent interface {
+	// Name is the agent's key: a profile's Agent field ("claude").
+	Name() string
+	// Label is its short name in messages ("Claude": "typed into Claude").
+	Label() string
+	// DisplayName is how people call it ("Claude Code").
+	DisplayName() string
+	// Binary is the program the relay starts ("claude").
+	Binary() string
+
+	// command is the argv that starts (or, with resume, continues) the
+	// agent. hook is what prepare left in Spec.Hook.
 	command(p config.RelayProfile, innerID string, resume bool, hook string) []string
-	// locate finds the agent's transcript for this relay; "" until it exists.
-	locate(dir string, launched time.Time, innerID string) (path, id string)
-	newParser() parser
-	// afterTurn hands text to the agent to read when its current turn ends.
+	// locate finds the agent's transcript for this relay; "" until it
+	// exists. innerID is the agent's own session id when known.
+	locate(spec Spec, launched time.Time, innerID string) (path, id string)
+	// newParser reads the transcript locate found.
+	newParser(spec Spec) parser
+	// afterTurn hands text to the agent to read when its current turn
+	// ends. An error makes the seat type the text instead.
 	afterTurn(s *Seat, id, text string) error
+
+	// Optional, with defaults in agentBase:
+
 	// chooseID returns the session id eagent picks up front, or "".
 	chooseID() string
-	label() string
+	// prepare fills in a relay's launch-time extras (hook, status file,
+	// spool, files to write, environment). stateDir is a directory the
+	// relay owns. It must not start anything: it also runs on reattach.
+	prepare(spec *Spec, stateDir string) error
+	// interruptKeys stop what the agent is doing.
+	interruptKeys() []string
+	// ready recognises the agent at its input prompt.
+	ready(screen string) bool
+	// dialogs are screens it can show that the relay answers itself.
+	dialogs() []dialog
+	// defaults are the model and effort it starts with when given none.
+	defaults() (model, effort string)
+	// models lists the models it can run, best first.
+	models(project string) []ModelChoice
+	// efforts lists the reasoning efforts it accepts, mildest first.
+	efforts() []string
+	// modelLabel is how one of its models reads in a relay's label.
+	modelLabel(c ModelChoice) string
+	// trimModelLabel shortens a model label that already says the effort.
+	trimModelLabel(label, effort string) string
+	// validModel says whether a model name is worth passing to it.
+	validModel(model string) bool
+	// checkPick refuses a model and effort it cannot run, before anything
+	// stops or starts. p already carries the picks.
+	checkPick(p config.RelayProfile) error
 }
 
-func agentFor(name, statusFile string) (agent, error) {
-	switch name {
-	case "antigravity":
-		return antigravityAgent{statusFile: statusFile}, nil
-	case "codex":
-		return codexAgent{}, nil
-	case "claude":
-		return claudeAgent{}, nil
+// Optional behaviours whose default needs the agent itself (embedding
+// cannot reach the outer type), so they are separate interfaces.
+type (
+	// resolver fills a profile's model and effort in its own way; without
+	// it, each one left empty comes from defaults.
+	resolver interface {
+		resolve(model, effort string) (string, string)
 	}
-	return nil, fmt.Errorf("unknown relay agent %q (antigravity, codex or claude)", name)
+	// upgrader names the agent's updater; without it, `<binary> update`.
+	upgrader interface {
+		upgradeCommand() []string
+	}
+	// modelSharer runs another agent's models and shares its suggestion
+	// list (ModelListName), since a settings descriptor holds few lists.
+	modelSharer interface {
+		modelsOf() string
+	}
+)
+
+// poller is an agent whose seat also reads something besides the
+// transcript on every tick (a status file).
+type poller interface {
+	poll(s *Seat, now time.Time)
 }
 
-// AgentLabel is the human name of an agent program.
+// agentBase gives an agent the default for every optional method. An
+// agent embeds it and overrides what differs.
+type agentBase struct{}
+
+func (agentBase) chooseID() string                    { return "" }
+func (agentBase) prepare(*Spec, string) error         { return nil }
+func (agentBase) interruptKeys() []string             { return []string{"Escape"} }
+func (agentBase) ready(string) bool                   { return false }
+func (agentBase) dialogs() []dialog                   { return nil }
+func (agentBase) defaults() (string, string)          { return "", "" }
+func (agentBase) models(string) []ModelChoice         { return nil }
+func (agentBase) efforts() []string                   { return nil }
+func (agentBase) modelLabel(c ModelChoice) string     { return c.Label }
+func (agentBase) trimModelLabel(l, _ string) string   { return l }
+func (agentBase) validModel(m string) bool            { return !strings.Contains(m, " ") }
+func (agentBase) checkPick(config.RelayProfile) error { return nil }
+
+// resolve is ProfileDefaults for one agent.
+func resolve(a Agent, model, effort string) (string, string) {
+	if r, ok := a.(resolver); ok {
+		return r.resolve(model, effort)
+	}
+	return resolveDefaults(a, model, effort)
+}
+
+// resolveDefaults fills each value left empty from the agent's defaults.
+func resolveDefaults(a Agent, model, effort string) (string, string) {
+	defModel, defEffort := a.defaults()
+	return cmp.Or(model, defModel), cmp.Or(effort, defEffort)
+}
+
+// ---- registry -----------------------------------------------------------------
+
+var registry = map[string]Agent{}
+
+// register adds an agent; each agent's file calls it from init.
+func register(a Agent) {
+	if a.Name() == "" || registry[a.Name()] != nil {
+		panic("relay: bad or duplicate agent " + a.Name())
+	}
+	registry[a.Name()] = a
+}
+
+// Agents lists every agent a relay can run, by name.
+func Agents() []Agent {
+	out := make([]Agent, 0, len(registry))
+	for _, a := range registry {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
+}
+
+// AgentNames lists the agents' names, sorted.
+func AgentNames() []string {
+	var names []string
+	for _, a := range Agents() {
+		names = append(names, a.Name())
+	}
+	return names
+}
+
+// AgentByName finds an agent; nil when there is none by that name.
+func AgentByName(name string) Agent { return registry[name] }
+
+func agentFor(name string) (Agent, error) {
+	if a := AgentByName(name); a != nil {
+		return a, nil
+	}
+	return nil, fmt.Errorf("unknown relay agent %q (%s)", name, strings.Join(AgentNames(), ", "))
+}
+
+// AgentLabel is the short name of an agent program ("Claude").
 func AgentLabel(name string) string {
-	if a, err := agentFor(name, ""); err == nil {
-		return a.label()
+	if a := AgentByName(name); a != nil {
+		return a.Label()
 	}
 	return name
 }
+
+// AgentOf reads which agent a relay runs from its name ("codex-2" runs
+// codex), for relays found running without their session's log. The
+// longest agent name that starts it wins; "" when none does.
+func AgentOf(relayName string) string {
+	best := ""
+	for _, a := range Agents() {
+		if strings.HasPrefix(relayName, a.Name()) && len(a.Name()) > len(best) {
+			best = a.Name()
+		}
+	}
+	return best
+}
+
+// Prepare fills in what the profile's agent needs at launch (a hook, a
+// status file, a spool). stateDir is a directory the relay owns. An
+// unknown agent is left for Launch to refuse.
+func Prepare(spec *Spec, stateDir string) error {
+	if a := AgentByName(spec.Profile.Agent); a != nil {
+		return a.prepare(spec, stateDir)
+	}
+	return nil
+}
+
+// CheckPick refuses a session's model and effort picks that the profile's
+// agent cannot take, before anything starts.
+func CheckPick(p config.RelayProfile, model, effort string) error {
+	if efforts := AgentEfforts(p.Agent); effort != "" && len(efforts) > 0 && !slices.Contains(efforts, effort) {
+		return fmt.Errorf("%s takes reasoning effort %s, not %q", AgentName(p.Agent), strings.Join(efforts, ", "), effort)
+	}
+	a := AgentByName(p.Agent)
+	if len(model) > 200 || strings.ContainsAny(model, "\r\t\n") || a != nil && !a.validModel(model) || a == nil && strings.Contains(model, " ") {
+		return fmt.Errorf("%q is not a model name", model)
+	}
+	if a == nil {
+		return nil
+	}
+	return a.checkPick(p.With(model, effort))
+}
+
+// UpgradeCommand is the argv that updates an agent's CLI.
+func UpgradeCommand(agent string) ([]string, error) {
+	a := AgentByName(agent)
+	if a == nil {
+		return nil, fmt.Errorf("no upgrade command for %s", agent)
+	}
+	if u, ok := a.(upgrader); ok {
+		return u.upgradeCommand(), nil
+	}
+	return []string{a.Binary(), "update"}, nil
+}
+
+// allDialogs are every agent's dialogs, in agent order. A seat answers any
+// of them, whichever agent it runs.
+func allDialogs() []dialog {
+	var out []dialog
+	for _, a := range Agents() {
+		out = append(out, a.dialogs()...)
+	}
+	return out
+}
+
+// ---- shared helpers -------------------------------------------------------------
 
 // claimed holds transcripts already followed by a relay in this process, so
 // two relays started in one directory never follow the same file.
 var claimed sync.Map
 
-// ---- Codex ------------------------------------------------------------------
-
-type codexAgent struct{}
-
-func (codexAgent) label() string     { return "Codex" }
-func (codexAgent) chooseID() string  { return "" }
-func (codexAgent) newParser() parser { return codexParser{} }
-
-func (codexAgent) command(p config.RelayProfile, innerID string, resume bool, _ string) []string {
-	argv := []string{"codex"}
-	if resume && innerID != "" {
-		argv = append(argv, "resume", innerID)
-	}
-	argv = append(argv, p.Args...)
-	if p.Model != "" {
-		argv = append(argv, "-m", p.Model)
-	}
-	if p.Effort != "" {
-		argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", p.Effort))
-	}
-	return argv
+// newUUID is a random (version 4) UUID, for agents whose session id eagent
+// picks.
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func codexHome() string {
-	if h := os.Getenv("CODEX_HOME"); h != "" {
-		return h
+// spoolMessage leaves text in a relay's spool, where the agent's own hook
+// picks it up when its turn ends. The write is atomic: a reader sees the
+// whole file or none.
+func spoolMessage(spool, id, text string) error {
+	if spool == "" {
+		return errors.New("no hook spool for this relay")
 	}
-	return filepath.Join(home(), ".codex")
-}
-
-// locate scans the rollout folders for the days around the launch for the
-// TUI session that started in dir after the launch (or, on a resume, the
-// newest rollout of the known id).
-func (codexAgent) locate(dir string, launched time.Time, innerID string) (string, string) {
-	root := filepath.Join(codexHome(), "sessions")
-	want := cleanDir(dir)
-	type cand struct {
-		path, id string
-		start    time.Time
-		mod      time.Time
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		return err
 	}
-	var cands []cand
-	// A known id names its rollout, whatever day it began (a resumed
-	// session appends to the rollout it started, possibly days ago);
-	// otherwise the new session's rollout is in the days around the launch.
-	var paths []string
-	if innerID != "" {
-		paths, _ = filepath.Glob(filepath.Join(root, "*", "*", "*", "rollout-*-"+innerID+".jsonl"))
+	name := fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), id)
+	tmp := filepath.Join(spool, "."+name)
+	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
+		return err
 	}
-	if len(paths) == 0 {
-		for _, day := range []time.Time{launched.Add(-24 * time.Hour), launched, launched.Add(24 * time.Hour)} {
-			folder := filepath.Join(root, day.Format("2006"), day.Format("01"), day.Format("02"))
-			entries, _ := os.ReadDir(folder)
-			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), "rollout-") && strings.HasSuffix(e.Name(), ".jsonl") {
-					paths = append(paths, filepath.Join(folder, e.Name()))
-				}
-			}
-		}
-	}
-	for _, path := range paths {
-		info, err := os.Stat(path)
-		if err != nil || info.ModTime().Before(launched.Add(-5*time.Second)) {
-			continue
-		}
-		if _, taken := claimed.Load(path); taken {
-			continue
-		}
-		meta, ok := codexMeta(path)
-		if !ok {
-			continue
-		}
-		if innerID != "" {
-			if meta.ID == innerID {
-				cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
-			}
-			continue
-		}
-		if cleanDir(meta.Cwd) != want || meta.start.Before(launched.Add(-10*time.Second)) {
-			continue
-		}
-		cands = append(cands, cand{path, meta.ID, meta.start, info.ModTime()})
-	}
-	if len(cands) == 0 {
-		return "", ""
-	}
-	if innerID != "" {
-		sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
-	} else {
-		sort.Slice(cands, func(i, j int) bool { return cands[i].start.Before(cands[j].start) })
-	}
-	return cands[0].path, cands[0].id
-}
-
-type rolloutMeta struct {
-	ID, Cwd string
-	start   time.Time
-}
-
-func codexMeta(path string) (rolloutMeta, bool) {
-	f, err := os.Open(path)
-	if err != nil {
-		return rolloutMeta{}, false
-	}
-	defer f.Close()
-	r := bufio.NewReaderSize(f, 256<<10)
-	line, err := r.ReadSlice('\n')
-	if err != nil && !errors.Is(err, bufio.ErrBufferFull) && !errors.Is(err, io.EOF) {
-		return rolloutMeta{}, false
-	}
-	// The meta line carries the whole base prompt; only its head is needed,
-	// and a cut-off line still has the fields that come first.
-	var ev struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ID        string `json:"id"`
-			Cwd       string `json:"cwd"`
-			Timestamp string `json:"timestamp"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(line, &ev) != nil {
-		head := string(line)
-		ev.Type = between(head, `"type":"`, `"`)
-		ev.Payload.ID = between(head, `"id":"`, `"`)
-		ev.Payload.Cwd = between(head, `"cwd":"`, `"`)
-		ev.Payload.Timestamp = between(head[strings.Index(head, `"payload"`)+1:], `"timestamp":"`, `"`)
-	}
-	if ev.Type != "session_meta" || ev.Payload.ID == "" {
-		return rolloutMeta{}, false
-	}
-	return rolloutMeta{ID: ev.Payload.ID, Cwd: ev.Payload.Cwd, start: parseTime(ev.Payload.Timestamp)}, true
+	return os.Rename(tmp, filepath.Join(spool, name))
 }
 
 func between(s, open, close string) string {
@@ -198,129 +287,6 @@ func between(s, open, close string) string {
 		return s[:j]
 	}
 	return ""
-}
-
-// afterTurn uses Codex's own queue: the message becomes the next turn.
-func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
-	id := s.innerID()
-	if id == "" {
-		return errors.New("Codex's session id is not known yet")
-	}
-	cmd, cancel := bounded(time.Minute, "codex", "queue", "--thread", id, "--message", text)
-	defer cancel()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// ---- Claude Code --------------------------------------------------------------
-
-type claudeAgent struct{}
-
-func (claudeAgent) label() string     { return "Claude" }
-func (claudeAgent) newParser() parser { return &claudeParser{} }
-
-func (claudeAgent) chooseID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-func (claudeAgent) command(p config.RelayProfile, innerID string, resume bool, hook string) []string {
-	argv := []string{"claude"}
-	if resume {
-		argv = append(argv, "--resume", innerID)
-	} else {
-		argv = append(argv, "--session-id", innerID)
-	}
-	if p.Model != "" {
-		argv = append(argv, "--model", p.Model)
-	}
-	if p.Effort != "" {
-		argv = append(argv, "--effort", p.Effort)
-	}
-	if hook != "" {
-		settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hook}}}}}})
-		argv = append(argv, "--settings", string(settings))
-	}
-	return append(argv, p.Args...)
-}
-
-func claudeHome() string {
-	if h := os.Getenv("CLAUDE_CONFIG_DIR"); h != "" {
-		return h
-	}
-	return filepath.Join(home(), ".claude")
-}
-
-func (claudeAgent) locate(_ string, _ time.Time, innerID string) (string, string) {
-	if innerID == "" {
-		return "", ""
-	}
-	matches, _ := filepath.Glob(filepath.Join(claudeHome(), "projects", "*", innerID+".jsonl"))
-	if len(matches) == 0 {
-		return "", ""
-	}
-	return matches[0], innerID
-}
-
-// afterTurn leaves the text in the spool the Stop hook reads: when Claude's
-// turn ends, the hook hands it over as the next thing to do.
-func (claudeAgent) afterTurn(s *Seat, id, text string) error {
-	if s.spec.Spool == "" {
-		return errors.New("no hook spool for this relay")
-	}
-	if err := os.MkdirAll(s.spec.Spool, 0o755); err != nil {
-		return err
-	}
-	name := fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), id)
-	tmp := filepath.Join(s.spec.Spool, "."+name)
-	if err := os.WriteFile(tmp, []byte(text), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(s.spec.Spool, name))
-}
-
-// RunStopHook is Claude Code's Stop hook for a relay: it takes every message
-// waiting in spool and returns them as the reason to keep going, which
-// Claude reads as its next instruction. With nothing waiting it lets the
-// turn end.
-func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
-	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
-	entries, err := os.ReadDir(spool)
-	if err != nil {
-		return 0
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".txt") && !strings.HasPrefix(e.Name(), ".") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-	var texts []string
-	for _, name := range names {
-		path := filepath.Join(spool, name)
-		taken := path + ".taken"
-		if os.Rename(path, taken) != nil {
-			continue // another hook got it
-		}
-		raw, err := os.ReadFile(taken)
-		if err == nil && strings.TrimSpace(string(raw)) != "" {
-			texts = append(texts, strings.TrimSpace(string(raw)))
-		}
-		_ = os.Remove(taken)
-	}
-	if len(texts) == 0 {
-		return 0
-	}
-	out, _ := json.Marshal(map[string]string{"decision": "block", "reason": strings.Join(texts, "\n\n")})
-	fmt.Fprintln(stdout, string(out))
-	return 0
 }
 
 func cleanDir(dir string) string {

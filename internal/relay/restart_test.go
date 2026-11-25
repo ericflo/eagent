@@ -83,7 +83,7 @@ func TestCodexResumeFindsAnOldRollout(t *testing.T) {
 	path := writeRollout(t, home, time.Now().Add(-72*time.Hour), "inner-old", work)
 	now := time.Now()
 	_ = os.Chtimes(path, now, now) // appended to by the resume
-	if got, _ := (codexAgent{}).locate(work, now.Add(-time.Second), "inner-old"); got != path {
+	if got, _ := (codexAgent{}).locate(Spec{Dir: work}, now.Add(-time.Second), "inner-old"); got != path {
 		t.Fatalf("locate = %q, want %q", got, path)
 	}
 }

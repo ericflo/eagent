@@ -302,11 +302,11 @@ func TestCodexLocate(t *testing.T) {
 	write("rollout-a.jsonl", "old", work, launched.Add(-time.Hour))
 	write("rollout-b.jsonl", "elsewhere", t.TempDir(), launched.Add(time.Second))
 	want := write("rollout-c.jsonl", "mine", work, launched.Add(2*time.Second))
-	path, id := codexAgent{}.locate(work, launched, "")
+	path, id := codexAgent{}.locate(Spec{Dir: work}, launched, "")
 	if path != want || id != "mine" {
 		t.Fatalf("locate = %s %s", path, id)
 	}
-	if p, _ := (codexAgent{}).locate(work, launched, "old"); p == "" {
+	if p, _ := (codexAgent{}).locate(Spec{Dir: work}, launched, "old"); p == "" {
 		t.Fatalf("resume lookup by id found nothing")
 	}
 }

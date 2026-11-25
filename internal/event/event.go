@@ -473,14 +473,17 @@ type ErrorData struct {
 // session refers to it ("codex"); Target is the terminal session that hosts
 // it, so a resumed eagent can find it again.
 type RelayStartData struct {
-	Name    string   `json:"name"`
-	Profile string   `json:"profile"`
-	Agent   string   `json:"agent"` // codex | claude
-	Label   string   `json:"label,omitempty"`
-	Dir     string   `json:"dir"`
-	Host    string   `json:"host"` // tmux | screen
-	Target  string   `json:"target"`
-	Command []string `json:"command"`
+	Name    string `json:"name"`
+	Profile string `json:"profile"`
+	Agent   string `json:"agent"` // a relay agent's name: claude, codex, antigravity, pi
+	// AgentLabel is the agent's short name for people ("Claude"); logs
+	// written before it existed leave it out.
+	AgentLabel string   `json:"agent_label,omitempty"`
+	Label      string   `json:"label,omitempty"`
+	Dir        string   `json:"dir"`
+	Host       string   `json:"host"` // tmux | screen
+	Target     string   `json:"target"`
+	Command    []string `json:"command"`
 	// InnerID is the agent's own session id when eagent chose it up front
 	// (Claude Code's --session-id) or resumed it; empty until relay.inner
 	// otherwise.

@@ -286,19 +286,34 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	out.Descriptor.Actions = s.Actions(grant)
 	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions(s.Project)}
-	for _, a := range out.Descriptor.Actions {
+	for ai := range out.Descriptor.Actions {
+		a := &out.Descriptor.Actions[ai]
 		if a.Operation != "session.start" {
 			continue
 		}
-		out.Descriptor.Suggestions["models"] = ModelSuggestions(s.Project)
-		// Each relayed agent's models, for its model input.
-		for _, in := range a.Inputs {
-			if in.Suggest != nil && in.Suggest.List != "models" {
-				if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
-					out.Descriptor.Suggestions[in.Suggest.List] = RelayModelSuggestions(agent, s.Project)
+		// Each relayed agent's models, for its model input. A descriptor
+		// holds at most eight lists (the "models" list is the eighth here);
+		// an input whose list does not fit is left to typing. eagent's own
+		// model list keeps to what the relay lists leave of its budget.
+		relayBytes := 0
+		for i := range a.Inputs {
+			in := &a.Inputs[i]
+			if in.Suggest == nil || in.Suggest.List == "models" {
+				continue
+			}
+			if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
+				if len(out.Descriptor.Suggestions) >= 7 {
+					in.Suggest = nil
+					continue
 				}
+				list := RelayModelSuggestions(agent, s.Project)
+				for _, sug := range list {
+					relayBytes += suggestionSize(sug)
+				}
+				out.Descriptor.Suggestions[in.Suggest.List] = list
 			}
 		}
+		out.Descriptor.Suggestions["models"] = modelSuggestionsWithin(s.Project, modelListBudget-relayBytes)
 	}
 	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < 8 {
 		out.Descriptor.Suggestions["bundles"] = bundleSugs

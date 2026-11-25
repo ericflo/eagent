@@ -100,9 +100,9 @@ type Config struct {
 // settings editor (which walks scalar fields) never offers them: a profile
 // names a program to run.
 type Relay struct {
-	// Profiles are named ways to start an agent. The built-in "antigravity", "codex" and
-	// "claude" are always available; a profile here with the same name
-	// replaces the built-in one.
+	// Profiles are named ways to start an agent. The built-in ones
+	// (BuiltinRelayProfiles) are always available; a profile here with the
+	// same name replaces the built-in one.
 	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
 	// QuietSeconds, when set, replaces NarratorQuietSeconds while a relayed
 	// agent works. Unset, a relay session keeps the same limit as any other.
@@ -111,13 +111,15 @@ type Relay struct {
 
 // RelayProfile is one way to start an external agent.
 type RelayProfile struct {
-	// Agent is the relay agent: "antigravity", "codex" or "claude".
+	// Agent is the relay agent, by the name its adapter registers in the
+	// relay package: "antigravity", "claude", "codex" or "pi".
 	Agent string `json:"agent"`
 	// Label is shown on the phone ("Codex"); empty reads as the agent's name
 	// with the model it runs.
 	Label string `json:"label,omitempty"`
 	// Model and Effort are passed to the agent (codex -m and
-	// model_reasoning_effort, claude --model and --effort). Empty passes
+	// model_reasoning_effort, claude --model and --effort, pi --model and
+	// --thinking). Empty passes
 	// nothing, so the agent uses its own configured default. A session may
 	// pick others when it starts the relay, and change them while it runs.
 	Model  string `json:"model,omitempty"`
@@ -140,6 +142,7 @@ func BuiltinRelayProfiles() map[string]RelayProfile {
 		"antigravity": {Agent: "antigravity", Label: "Antigravity", Args: []string{"--dangerously-skip-permissions"}},
 		"codex":       {Agent: "codex", Label: "Codex", Args: []string{"--yolo"}},
 		"claude":      {Agent: "claude", Label: "Claude Code", Args: []string{"--dangerously-skip-permissions"}},
+		"pi":          {Agent: "pi", Label: "Pi"},
 	}
 }
 

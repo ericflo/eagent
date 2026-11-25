@@ -13,6 +13,8 @@ import (
 // the log, not anything a model remembers, is what makes a session a relay.
 type Relay struct {
 	Name, Profile, Agent, Label string
+	// AgentLabel is the agent's short name ("Claude"), from relay.start.
+	AgentLabel string
 	// Model and Effort are the session's picks over the profile's ("" for
 	// the profile's own).
 	Model, Effort       string
@@ -45,15 +47,15 @@ type Relay struct {
 	LastEventAt time.Time
 }
 
-// Who names the agent for people: its label's program name or its name.
+// Who names the agent for people: the short name relay.start recorded,
+// else (older logs) the agent's name capitalised ("Codex"), else the
+// relay's name.
 func (r *Relay) Who() string {
-	switch r.Agent {
-	case "antigravity":
-		return "Antigravity"
-	case "codex":
-		return "Codex"
-	case "claude":
-		return "Claude"
+	if r.AgentLabel != "" {
+		return r.AgentLabel
+	}
+	if r.Agent != "" {
+		return strings.ToUpper(r.Agent[:1]) + r.Agent[1:]
 	}
 	return r.Name
 }
@@ -123,7 +125,7 @@ func (s *State) applyRelay(ev event.Event) {
 		var d event.RelayStartData
 		_ = ev.Decode(&d)
 		prev := r
-		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
+		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, AgentLabel: d.AgentLabel, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
 		if prev != nil {
 			// A restart continues the same relay: its history stays.

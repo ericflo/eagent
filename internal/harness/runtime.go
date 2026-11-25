@@ -63,7 +63,7 @@ type Options struct {
 	// of the project root; it is recorded as the first working-directory
 	// move so the log, the phone and the UI show it from the start.
 	StartDir string
-	// Relay, when set, names a relay profile ("codex", "claude"): the new
+	// Relay, when set, names a relay profile ("codex", "claude", "pi"): the new
 	// session starts that agent in StartDir (or the project) and is a relay
 	// to it from the first message.
 	Relay string

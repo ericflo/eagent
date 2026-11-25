@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -188,13 +189,17 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 	if _, err := os.Stat(config.File(project)); !os.IsNotExist(err) {
 		t.Fatal("standalone /save_preset unexpectedly created config.json")
 	}
-	// /default_config unlocks and carries bundle suggestions.
-	if len(v1.Descriptor.Suggestions["bundles"]) != 1 || v1.Descriptor.Suggestions["bundles"][0].Value != "my-baseline" {
-		t.Fatalf("bundles suggestions = %+v", v1.Descriptor.Suggestions["bundles"])
+	// /default_config unlocks and offers the bundle. Its suggestion list,
+	// which adds what the bundle runs, comes only when the descriptor has
+	// room for a ninth list beside every relay agent's models (it holds
+	// eight at most).
+	bundles, listed := v1.Descriptor.Suggestions["bundles"]
+	if listed && (len(bundles) != 1 || bundles[0].Value != "my-baseline") || !listed && len(v1.Descriptor.Suggestions) < 8 {
+		t.Fatalf("bundles suggestions = %+v (%d lists)", bundles, len(v1.Descriptor.Suggestions))
 	}
 	for _, f := range v1.Descriptor.Fields {
 		if f.Key == "/default_config" {
-			if !f.Writable || f.Suggest == nil || f.Suggest.List != "bundles" {
+			if !f.Writable || !slices.Contains(f.Shape.Enum, any("my-baseline")) || listed != (f.Suggest != nil && f.Suggest.List == "bundles") {
 				t.Fatalf("/default_config after save = %+v", f)
 			}
 		}
