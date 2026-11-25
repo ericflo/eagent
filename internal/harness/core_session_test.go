@@ -149,8 +149,8 @@ func TestCoreInterruptEndsTheRunAndResumePicksUpTheOwedLook(t *testing.T) {
 	if got := s2.ui.said()[0]; got != "Codex merged #42 and #44; main is green at c92b5bad." {
 		t.Fatalf("said %q", got)
 	}
-	if len(*attached) != 1 {
-		t.Fatalf("reattached %d agents", len(*attached))
+	if len(attachedTargets(attached)) != 1 {
+		t.Fatalf("reattached %d agents", len(attachedTargets(attached)))
 	}
 	var resumes int
 	s2.read(func(st *state.State) { resumes = st.Resumes })
@@ -397,8 +397,8 @@ func TestCoreStartDirIsWhereTheAgentStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.sess.Close()
-	if len(*launched) != 1 || !sameDir((*launched)[0].Dir, elsewhere) {
-		t.Fatalf("the agent was started in %v, want %s", *launched, elsewhere)
+	if len(launchedSpecs(launched)) != 1 || !sameDir(launchedSpecs(launched)[0].Dir, elsewhere) {
+		t.Fatalf("the agent was started in %v, want %s", launchedSpecs(launched), elsewhere)
 	}
 	st := state.Replay(mustReadCore(t, rt.sess.Path))
 	if !sameDir(st.WorkDir(), elsewhere) || st.Cwd != project {

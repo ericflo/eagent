@@ -561,8 +561,8 @@ func TestOldSessionIsContinuedFromADossierWrittenFromItsRecord(t *testing.T) {
 	if got := s.seat.sentTexts()[0]; got != "fill in the changelog too" {
 		t.Fatalf("the agent was sent %q", got)
 	}
-	if len(*launched) != 1 {
-		t.Fatalf("launched %d agents", len(*launched))
+	if len(launchedSpecs(launched)) != 1 {
+		t.Fatalf("launched %d agents", len(launchedSpecs(launched)))
 	}
 	var subs []state.Subsession
 	s.read(func(st *state.State) { subs = append(subs, st.Subsessions...) })

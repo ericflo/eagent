@@ -85,8 +85,8 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rt.sess.Close() })
-	if len(*launched) != 1 || (*launched)[0].Profile.Model != "gpt-6.2-sol" || (*launched)[0].Profile.Effort != "high" {
-		t.Fatalf("launched %+v", *launched)
+	if len(launchedSpecs(launched)) != 1 || launchedSpecs(launched)[0].Profile.Model != "gpt-6.2-sol" || launchedSpecs(launched)[0].Profile.Effort != "high" {
+		t.Fatalf("launched %+v", launchedSpecs(launched))
 	}
 	rel := rt.st.Relays["codex"]
 	if rel == nil || rel.Model != "gpt-6.2-sol" || rel.Effort != "high" || rel.Label != "Codex · gpt-6.2-sol high" {
@@ -106,8 +106,8 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 	// Mid-turn: the change waits.
 	rel.State = "working"
 	msg, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""})
-	if err != nil || !strings.Contains(msg, "when the turn ends") || len(*launched) != 1 {
-		t.Fatalf("repick mid-turn: %q %v, launched %d", msg, err, len(*launched))
+	if err != nil || !strings.Contains(msg, "when the turn ends") || len(launchedSpecs(launched)) != 1 {
+		t.Fatalf("repick mid-turn: %q %v, launched %d", msg, err, len(launchedSpecs(launched)))
 	}
 	if got := rt.activeSettings.Relays["codex"]; !got.Waiting || got.Model != "gpt-6.2-astra" || got.Effort != "" {
 		t.Fatalf("waiting change not shown: %+v", got)
@@ -117,8 +117,8 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 	relayServeLoop(t, rt)
 	rt.sync(func() { rt.onRelayEvent("codex", relay.Event{Kind: relay.KindTurn, Text: "finished"}) })
 	waitRelayStarts(t, rt)
-	if len(*launched) != 2 || (*launched)[1].Profile.Model != "gpt-6.2-astra" || (*launched)[1].Profile.Effort != "" || !seat.wasKilled() {
-		t.Fatalf("after the turn: launched %+v killed %v", *launched, seat.wasKilled())
+	if len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "gpt-6.2-astra" || launchedSpecs(launched)[1].Profile.Effort != "" || !seat.wasKilled() {
+		t.Fatalf("after the turn: launched %+v killed %v", launchedSpecs(launched), seat.wasKilled())
 	}
 	if rel := rt.st.Relays["codex"]; rel.Model != "gpt-6.2-astra" || rel.Effort != "" || rel.Label != "Codex · gpt-6.2-astra xhigh" {
 		t.Fatalf("restarted relay %+v", rel)
@@ -133,11 +133,11 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 		_, err = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", "max"})
 	})
 	waitRelayStarts(t, rt)
-	if err != nil || len(*launched) != 3 || (*launched)[2].Profile.Effort != "max" {
-		t.Fatalf("idle repick: %v launched %d", err, len(*launched))
+	if err != nil || len(launchedSpecs(launched)) != 3 || launchedSpecs(launched)[2].Profile.Effort != "max" {
+		t.Fatalf("idle repick: %v launched %d", err, len(launchedSpecs(launched)))
 	}
 	rt.sync(func() { msg, err = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", "max"}) })
-	if err != nil || !strings.Contains(msg, "already") || len(*launched) != 3 {
+	if err != nil || !strings.Contains(msg, "already") || len(launchedSpecs(launched)) != 3 {
 		t.Fatalf("unchanged repick: %q %v", msg, err)
 	}
 }
@@ -160,7 +160,7 @@ func TestRelayControlModelKeepsTheOtherPick(t *testing.T) {
 	out, isErr := rt.relayTool("relay_control", argStr(args), argNum(args), argList(args), false)
 	waitRelayStarts(t, rt)
 	var specs []relay.Spec
-	rt.sync(func() { specs = append(specs, *launched...) })
+	rt.sync(func() { specs = append(specs, launchedSpecs(launched)...) })
 	if isErr || len(specs) != 2 || specs[1].Profile.Model != "opus" || specs[1].Profile.Effort != "" {
 		t.Fatalf("%q, launched %+v", out, specs)
 	}
@@ -183,7 +183,7 @@ func TestModelCommand(t *testing.T) {
 	relayServeLoop(t, rt)
 	launches := func() []relay.Spec {
 		var out []relay.Spec
-		rt.sync(func() { out = append(out, *launched...) })
+		rt.sync(func() { out = append(out, launchedSpecs(launched)...) })
 		return out
 	}
 	wait := func(what string, cond func() bool) {
@@ -257,14 +257,14 @@ func TestRelayChangeFromLiveSettings(t *testing.T) {
 	}
 	c.Values = values // as the controller does once applied
 	rt.pollRuntimeSettings()
-	if got := c.Values.Relays["claude"]; !got.Waiting || got.Model != "sonnet" || len(*launched) != 1 {
-		t.Fatalf("published %+v, launched %d", got, len(*launched))
+	if got := c.Values.Relays["claude"]; !got.Waiting || got.Model != "sonnet" || len(launchedSpecs(launched)) != 1 {
+		t.Fatalf("published %+v, launched %d", got, len(launchedSpecs(launched)))
 	}
 	relayServeLoop(t, rt)
 	rt.sync(func() { rt.onRelayEvent("claude", relay.Event{Kind: relay.KindState, State: "idle"}) })
 	waitRelayStarts(t, rt)
 	rt.sync(func() { rt.pollRuntimeSettings() })
-	if got := c.Values.Relays["claude"]; got.Waiting || len(*launched) != 2 || (*launched)[1].Profile.Model != "sonnet" {
-		t.Fatalf("after the turn: published %+v, launched %+v", got, *launched)
+	if got := c.Values.Relays["claude"]; got.Waiting || len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "sonnet" {
+		t.Fatalf("after the turn: published %+v, launched %+v", got, launchedSpecs(launched))
 	}
 }

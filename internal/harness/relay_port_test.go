@@ -52,8 +52,8 @@ func TestRelayBriefGoesOnceAndStopEndsTheAgent(t *testing.T) {
 	if got := seat.sentTexts(); len(got) != 1 || got[0] != brief {
 		t.Fatalf("sent to the agent %q, want the brief verbatim once", got)
 	}
-	if len(*launched) != 1 || (*launched)[0].Profile.Model != "" || (*launched)[0].Dir != rt.projectPath() {
-		t.Fatalf("launched %+v", *launched)
+	if len(launchedSpecs(launched)) != 1 || launchedSpecs(launched)[0].Profile.Model != "" || launchedSpecs(launched)[0].Dir != rt.projectPath() {
+		t.Fatalf("launched %+v", launchedSpecs(launched))
 	}
 	if !seat.wasKilled() {
 		t.Fatal("relay_control stop did not end the agent")
@@ -214,8 +214,8 @@ func TestRelayIsReattachedOnResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt2.sess.Close()
-	if len(*attached) != 1 || !strings.HasPrefix((*attached)[0], relay.Target(rt.sess.ID, "claude")+"@") || strings.HasSuffix((*attached)[0], "@0001-01-01T00:00:00Z") {
-		t.Fatalf("attached %v", *attached)
+	if len(attachedTargets(attached)) != 1 || !strings.HasPrefix(attachedTargets(attached)[0], relay.Target(rt.sess.ID, "claude")+"@") || strings.HasSuffix(attachedTargets(attached)[0], "@0001-01-01T00:00:00Z") {
+		t.Fatalf("attached %v", attachedTargets(attached))
 	}
 }
 
@@ -660,11 +660,11 @@ func TestRelayStartReadsTheHomeFolder(t *testing.T) {
 	s.type_("@e start codex in ~/Development/snowdown")
 	s.waitFor("the second agent", func() bool {
 		n := 0
-		s.rt.sync(func() { n = len(*launched) })
+		s.rt.sync(func() { n = len(launchedSpecs(launched)) })
 		return n == 1
 	})
 	var dir string
-	s.rt.sync(func() { dir = (*launched)[0].Dir })
+	s.rt.sync(func() { dir = launchedSpecs(launched)[0].Dir })
 	if dir != want {
 		t.Fatalf("launched in %s, want %s", dir, want)
 	}

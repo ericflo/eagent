@@ -422,7 +422,7 @@ func (f *fakeSeat) emit(evs ...relay.Event) {
 // given seat.
 func useFakeRelays(t *testing.T, seat *fakeSeat) (*[]relay.Spec, *[]string) {
 	t.Helper()
-	var mu sync.Mutex
+	mu := &fakeRelaysMu
 	var launched []relay.Spec
 	var attached []string
 	oldLaunch, oldAttach := launchRelay, attachRelay
@@ -440,6 +440,23 @@ func useFakeRelays(t *testing.T, seat *fakeSeat) (*[]relay.Spec, *[]string) {
 	}
 	t.Cleanup(func() { launchRelay, attachRelay = oldLaunch, oldAttach })
 	return &launched, &attached
+}
+
+// fakeRelaysMu guards the lists useFakeRelays fills: agents are started
+// off the loop goroutine, so a test reads them through launchedSpecs and
+// attachedTargets, never directly.
+var fakeRelaysMu sync.Mutex
+
+func launchedSpecs(p *[]relay.Spec) []relay.Spec {
+	fakeRelaysMu.Lock()
+	defer fakeRelaysMu.Unlock()
+	return append([]relay.Spec(nil), *p...)
+}
+
+func attachedTargets(p *[]string) []string {
+	fakeRelaysMu.Lock()
+	defer fakeRelaysMu.Unlock()
+	return append([]string(nil), *p...)
 }
 
 // session is a running test session: an interactive runtime with a fake
