@@ -24,8 +24,9 @@ import (
 //     with a message_start and no agent_start of its own; otherwise it
 //     starts a run: agent_start, then message_start for the user message;
 //   - typed messages take the same path with source "interactive";
-//   - an interrupt puts queued messages back in the editor and the run
-//     settles aborted.
+//   - an interrupt puts queued messages back in the editor, ahead of
+//     what is in it, before the run settles aborted; an extension can
+//     read the editor's text.
 //
 // STEPS is a JSON list of [ms, action, text]: "type" a message, or "spool"
 // one for the extension. Every observation is a JSON line.
@@ -43,9 +44,11 @@ const preflight = Number(process.env.PREFLIGHT_MS || 10);
 const runMs = Number(process.env.RUN_EACH_MS || 300);
 const log = (o) => console.log(JSON.stringify(o));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let editor = "";
 const ctx = {
 	isIdle: () => !running,
 	hasPendingMessages: () => queue.length > 0,
+	ui: { getEditorText: () => editor },
 	sessionManager: { getEntries: () => [], getSessionFile: () => "", getSessionId: () => "x" },
 };
 async function emit(name, ev) {
@@ -63,6 +66,7 @@ async function startRun(text, source) {
 		if (abortQueued) {
 			abortQueued = false;
 			const back = queue.splice(0);
+			editor = [back.map((q) => q.text).join("\n\n"), editor].filter((t) => t.trim()).join("\n\n");
 			log({ editor: back.map((q) => q.text) });
 			aborted = true;
 			break;

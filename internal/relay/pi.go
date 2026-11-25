@@ -255,15 +255,23 @@ export default function (pi: any) {
 		// A run settles only once pi has delivered what was queued into
 		// it, so a queued hand-over no longer pending went with it (under
 		// another text, should a later hook have changed it). And an
-		// interrupt puts the messages pi had queued back in its editor, a
-		// hand-over among them: it is the person's now, as every message
-		// they queued is. Either way, handing it over again would send it
-		// twice.
+		// interrupt puts the messages pi had queued back in its editor
+		// before the run settles, a hand-over among them: it is the
+		// person's now, as every message they queued is. Either way,
+		// handing it over again would send it twice.
+		// An interrupted run says nothing about a hand-over pi refused
+		// after the hook (no model, no key): every interrupted run
+		// settles aborted, whatever was queued. Only one that is in the
+		// editor was put back there; one that is not stays to be retried.
 		let pending = false;
 		try {
 			pending = !!(ctx && ctx.hasPendingMessages());
 		} catch {}
-		if (handing && handing.seen && !pending && (handing.queued || aborted)) handed();
+		let inEditor = false;
+		try {
+			inEditor = !!(handing && aborted && ctx && ctx.ui && String(ctx.ui.getEditorText()).includes(handing.text));
+		} catch {}
+		if (handing && handing.seen && !pending && (handing.queued || inEditor)) handed();
 		try {
 			pi.appendEntry("` + piSettledEntry + `", { aborted });
 		} catch {}
