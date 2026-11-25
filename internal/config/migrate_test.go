@@ -20,6 +20,20 @@ func rawObject(t *testing.T, s string) map[string]json.RawMessage {
 
 func canonString(raw json.RawMessage) string { return string(canon(raw)) }
 
+// noEagentEnv blanks every EAGENT_* variable the test process inherited, so
+// a test that loads a configuration sees only what it sets itself. (CI runs
+// the suite with EAGENT_FINALECHAT=off.)
+func noEagentEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "EAGENT_") {
+			t.Setenv(k, "")
+		}
+	}
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+}
+
 func hasNote(notes []string, part string) bool {
 	for _, n := range notes {
 		if strings.Contains(n, part) {
@@ -164,8 +178,7 @@ func TestMigrateLegacyLeavesCurrentObjectsAlone(t *testing.T) {
 // A project config.json written for the three-model design loads end to end.
 func TestLoadLegacyProjectFile(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	legacy := `{
   "preset": "anthropic-med",
   "orchestrator": {"model": "claude-fable-5-1", "reasoning_effort": "xhigh"},
@@ -249,8 +262,7 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 // keys only, keeping keys it does not own and relay profiles as written.
 func TestEditorRewritesLegacyFile(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	writeConfig(t, project, `{
   "orchestrator": {"model": "custom/model", "reasoning_effort": "low"},
   "narrator": {"reasoning_effort": "low"},
@@ -319,8 +331,7 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 
 func TestEnvOverridesNewAndLegacyNames(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	set := map[string]string{
 		"EAGENT_MODEL":                       "env/model",
 		"EAGENT_ORCHESTRATOR_MODEL":          "ignored/model",
@@ -435,8 +446,7 @@ func TestMigrateLegacyEffortRules(t *testing.T) {
 	// End to end: the narrator's low never becomes the effort of every call;
 	// the preset's applies, which is the level its orchestrator ran at.
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	writeConfig(t, project, `{"orchestrator": {"model": "z-ai/glm-5.3"}, "narrator": {"reasoning_effort": "low"}}`)
 	cfg, err := Load(project, "")
 	if err != nil {
@@ -486,8 +496,7 @@ func TestMigrateLegacyNotesEveryChange(t *testing.T) {
 // keep eagent from starting; the new key itself is still checked.
 func TestMigrateLegacyClampsCallsPerTurn(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	writeConfig(t, project, `{"max_orchestrator_calls_per_turn": 500, "rollover_tokens": 150000}`)
 	cfg, err := Load(project, "")
 	if err != nil {
@@ -516,8 +525,7 @@ func TestMigrateLegacyClampsCallsPerTurn(t *testing.T) {
 // named, never with its value.
 func TestLegacyEnvVars(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	t.Setenv("EAGENT_REASONING_EFFORT", "")
 	t.Setenv("EAGENT_ORCHESTRATOR_REASONING_EFFORT", "xhigh")
 	cfg, err := Load(project, "")
@@ -581,8 +589,7 @@ func TestLegacyEnvVars(t *testing.T) {
 // in the three-actor design.
 func TestLoadInstructionsFallsBackToAgentsMD(t *testing.T) {
 	project := t.TempDir()
-	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_CONFIG", "")
+	noEagentEnv(t)
 	if cfg, err := Load(project, ""); err != nil || cfg.Instructions != "" {
 		t.Fatalf("none: %v %q", err, cfg.Instructions)
 	}
