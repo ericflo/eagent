@@ -126,7 +126,8 @@ var all = []llm.Tool{
 			"file":{"type":"string"},
 			"from":{"type":"integer","description":"1-based start line (default 1)."},
 			"to":{"type":"integer","description":"Inclusive end line (default: 40 lines on)."},
-			"raw":{"type":"boolean","description":"Full JSON instead of the readable form."}
+			"raw":{"type":"boolean","description":"Full JSON instead of the readable form."},
+			"offset":{"type":"integer","description":"Read line from alone, whole, from this offset: what a cut-off result says to pass."}
 		},"required":["file"]}`),
 	def(ViewImage,
 		"Look at an image file (png, jpeg, gif, webp): a screenshot or render the agent made, or a picture the user sent. It is shown to you right after this result.",

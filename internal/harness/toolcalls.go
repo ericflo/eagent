@@ -119,13 +119,14 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 
 	case tools.SessionRead:
 		raw, _ := args["raw"].(bool)
-		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, loopReadChars)
+		out, err := r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, num("offset", -1), loopReadChars)
 		if err != nil {
 			return err.Error(), true, true
 		}
 		if len(out) > loopReadChars+2000 {
-			// The reader stops between lines; one line can be longer than
-			// the whole bound (a pasted message read raw).
+			// The reader stops between lines and cuts a line longer than
+			// the bound into pieces it says how to reach; this is only a
+			// backstop.
 			out = clipRunes(out, loopReadChars) + "\n[... cut here; this line is longer than one read may return ...]"
 		}
 		return out, false, true

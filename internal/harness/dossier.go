@@ -64,9 +64,13 @@ var (
 	dossierMinCites = 3                // fewer places than this is not a map
 	dossierMaxCalls = 40               // lookups plus the writing
 	dossierRetry    = 10 * time.Minute // after the files could not be rotated
-	// The whole pass: past this the model is told to write with what it
-	// has. One failed call is made again after dossierErrorPause.
+	// The pass reads for dossierPassTime; then the model is told to write
+	// with what it has, and the writing has dossierWriteTime more. That is
+	// one deadline for the whole pass (every call, the wait before a call
+	// is made again, the writing): at it the harness writes the briefing.
+	// One failed call is made again after dossierErrorPause.
 	dossierPassTime   = 15 * time.Minute
+	dossierWriteTime  = 4 * time.Minute
 	dossierErrorPause = 5 * time.Second
 )
 
@@ -310,18 +314,23 @@ func (r *Runtime) unseenBytes() int {
 // citation matches a place in the record: file:line or file:line-line.
 var citation = regexp.MustCompile(`(\d{10,}\.jsonl):(\d+)(?:-(\d+))?`)
 
-// checkCitations counts the places a text cites and lists those that do
-// not exist: a file the session does not have, or a line past its end.
+// checkCitations counts the distinct places a text cites that exist, and
+// lists those that do not: a file the session does not have, or a line
+// past its end. A place is a file and the line reading starts at, so
+// file:10, file:10-20 and file:10 again are one place; file:12 is another.
 func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 	seen := map[string]bool{}
 	for _, m := range citation.FindAllStringSubmatch(text, -1) {
-		n++
 		from, _ := strconv.Atoi(m[2])
 		to := from
 		if m[3] != "" {
 			to, _ = strconv.Atoi(m[3])
 		}
 		if max, ok := lines[m[1]]; ok && from >= 1 && to >= from && to <= max {
+			if place := m[1] + ":" + m[2]; !seen[place] {
+				seen[place] = true
+				n++
+			}
 			continue
 		}
 		if !seen[m[0]] {
@@ -330,6 +339,38 @@ func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 		}
 	}
 	return n, bad
+}
+
+// mapProblem says why a text's citations do not make a map ("" when they
+// do): fewer than dossierMinCites distinct places that exist, or places
+// that do not exist.
+func mapProblem(text string, lines map[string]int) string {
+	cites, bad := checkCitations(text, lines)
+	var why []string
+	if cites < dossierMinCites {
+		noun := "places"
+		if cites == 1 {
+			noun = "place"
+		}
+		w := fmt.Sprintf("its MAP cites %d %s in the record", cites, noun)
+		if all := len(citation.FindAllString(text, -1)); all > cites+len(bad) {
+			w += fmt.Sprintf(" (%d citations, but the same place cited again is still one place)", all)
+		}
+		why = append(why, w+"; a map names the distinct place of every topic that matters, as file:line")
+	}
+	if len(bad) > 0 {
+		why = append(why, "these places do not exist in the record: "+strings.Join(bad[:min(len(bad), 12)], ", ")+". Cite only places you were shown, and check with session_read if unsure")
+	}
+	return strings.Join(why, "; and ")
+}
+
+// noMapReason says why a text kept after it was sent back is a summary and
+// not a map ("" when it is a map, if a partly wrong one).
+func noMapReason(text string, lines map[string]int) string {
+	if n, _ := checkCitations(text, lines); n < dossierMinCites {
+		return fmt.Sprintf("it cites %d distinct places that exist in the record", n)
+	}
+	return ""
 }
 
 // writeDossier runs the pass: the model looks up what it needs in the
@@ -343,14 +384,38 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 	// lookedAt is where the last lookups begin in msgs (0 for none), and
 	// dropped says a round of them was already taken out again.
 	lookedAt, dropped := 0, false
-	started := time.Now()
+	// readEnd is when the writer is told to write; passEnd is when the pass
+	// is over whatever it is doing. A call made before the writer is told
+	// may run at most half the writing time past readEnd, so a lookup that
+	// is slow to come back cannot take the writing's time.
+	readEnd := time.Now().Add(dossierPassTime)
+	passEnd := readEnd.Add(dossierWriteTime)
 	for res.calls < dossierMaxCalls {
-		ctx, cancel := context.WithTimeout(r.ctx, dossierTimeout)
+		bound := passEnd
+		if !last {
+			bound = readEnd.Add(dossierWriteTime / 2)
+		}
+		deadline := time.Now().Add(dossierTimeout)
+		if deadline.After(bound) {
+			deadline = bound
+		}
+		ctx, cancel := context.WithDeadline(r.ctx, deadline)
 		resp, err := r.complete(ctx, event.ActorEagent, llm.Request{System: r.system, Messages: msgs, Tools: r.toolset, CacheKey: r.sess.ID}, nil)
 		cancel()
 		if err != nil {
 			if r.ctx.Err() != nil {
 				return res
+			}
+			if deadline.Equal(bound) && !time.Now().Before(bound) {
+				// The pass's time ran out during the call.
+				if last {
+					r.ui.Log("dossier: the pass ran out of time before a briefing was written")
+					return res
+				}
+				last = true
+				msgs = withNote(msgs, "[eagent] The time for looking things up is over, and your last call was cut off. Write the briefing now from what is above, as your whole reply, with no tool call.")
+				r.ui.Log("dossier: the time for reading ran out; asking for the briefing")
+				continue
 			}
 			r.ui.Log("dossier: model call failed: %s", shortErr(err))
 			var ae *llm.APIError
@@ -376,7 +441,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 				}
 				return res
 			}
-			if retried || time.Since(started) > dossierPassTime {
+			if retried || time.Now().Add(dossierErrorPause).After(passEnd) {
 				return res
 			}
 			// One hiccup does not cost the session its map: the call is
@@ -410,7 +475,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			if last {
 				break // told to write and looked things up again instead
 			}
-			if res.calls == dossierMaxCalls-1 || time.Since(started) > dossierPassTime {
+			if res.calls == dossierMaxCalls-1 || !time.Now().Before(readEnd) {
 				// The pass is bounded in calls and in time: while it runs
 				// eagent says nothing else to the user.
 				last = true
@@ -419,15 +484,10 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			continue
 		}
 		text := strings.TrimSpace(resp.Text)
-		cites, bad := checkCitations(text, job.lines)
-		var why string
-		switch {
-		case len(text) < dossierMinChars:
+		_, bad := checkCitations(text, job.lines)
+		why := mapProblem(text, job.lines)
+		if len(text) < dossierMinChars {
 			why = fmt.Sprintf("it is too short to be a briefing (%d characters)", len(text))
-		case cites < dossierMinCites:
-			why = fmt.Sprintf("its MAP cites %d places in the record; a map names the place of every topic that matters, as file:line", cites)
-		case len(bad) > 0:
-			why = "these places do not exist in the record: " + strings.Join(bad[:min(len(bad), 12)], ", ") + ". Cite only places you were shown, and check with session_read if unsure"
 		}
 		if len(text) > len(res.text) || why == "" {
 			res.text, res.bad = text, bad
@@ -441,9 +501,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			// beats none: it is kept when it reads as a briefing, with the
 			// wrong places named, and one with no map is labelled as that.
 			res.ok = len(res.text) >= dossierMinChars
-			if n, _ := checkCitations(res.text, job.lines); n < dossierMinCites {
-				res.noMap = fmt.Sprintf("it cites %d places in the record", n)
-			}
+			res.noMap = noMapReason(res.text, job.lines)
 			return res
 		}
 		rejected = true
@@ -451,10 +509,24 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		msgs = append(msgs, llm.Message{Role: "user", Text: "[eagent] That cannot be used: " + why + ". Write the whole briefing again, all six parts, as plain text."})
 	}
 	res.ok = len(res.text) >= dossierMinChars
-	if n, _ := checkCitations(res.text, job.lines); res.ok && n < dossierMinCites {
-		res.noMap = fmt.Sprintf("it cites %d places in the record", n)
+	if res.ok {
+		res.noMap = noMapReason(res.text, job.lines)
 	}
 	return res
+}
+
+// withNote adds a note from eagent to the end of a pass's messages: as a
+// message of its own after tool results, or added to the request or
+// send-back it follows, so no two user messages are in a row. msgs is
+// not changed.
+func withNote(msgs []llm.Message, note string) []llm.Message {
+	n := len(msgs)
+	if n > 0 && msgs[n-1].Role == "user" {
+		m := msgs[n-1]
+		m.Text = strings.TrimRight(m.Text, "\n") + "\n\n" + note
+		return append(msgs[:n-1:n-1], m)
+	}
+	return append(msgs[:n:n], llm.Message{Role: "user", Text: note})
 }
 
 // dossierLookup runs one tool call of a dossier pass. Only the two that
@@ -477,8 +549,13 @@ func (r *Runtime) dossierLookup(c event.ToolCall, read *int, budget int, res *do
 		out, err = r.archive.Search(str("query"), str("file"), num("max_results", 40))
 	} else {
 		raw, _ := args["raw"].(bool)
-		res.consulted = append(res.consulted, fmt.Sprintf("read %s:%d-%d", str("file"), num("from", 1), num("to", 0)))
-		out, err = r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, dossierReadChars)
+		offset := num("offset", -1)
+		place := fmt.Sprintf("read %s:%d-%d", str("file"), num("from", 1), num("to", 0))
+		if offset >= 0 {
+			place = fmt.Sprintf("read %s:%d from offset %d", str("file"), num("from", 1), offset)
+		}
+		res.consulted = append(res.consulted, place)
+		out, err = r.archive.Read(str("file"), num("from", 1), num("to", 0), raw, offset, dossierReadChars)
 	}
 	if err != nil {
 		return err.Error(), true
