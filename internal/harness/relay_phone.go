@@ -26,8 +26,88 @@ type relayReceipt struct {
 // maxReceipts bounds the thread meta: only recent messages carry one.
 const maxReceipts = 40
 
+// loadReceipts rebuilds the receipts and which send forwarded which user
+// message from the record, the first time either is needed: a resumed
+// session keeps the receipts set before it stopped (every patch carries
+// them all), and a confirmation of an earlier send still lands. sendSeq
+// is nil until this has run. Loop goroutine.
+func (p *phone) loadReceipts(r *Runtime) {
+	p.mu.Lock()
+	loaded := p.sendSeq != nil
+	p.mu.Unlock()
+	if loaded {
+		return
+	}
+	sendSeq := map[string]int64{}
+	var receipts []relayReceipt
+	phoneIDs := map[int64]string{}
+	active := map[string]bool{}
+	set := func(seq int64, status string) {
+		for i := range receipts {
+			if receipts[i].seq == seq {
+				receipts[i].status = status
+				return
+			}
+		}
+		receipts = append(receipts, relayReceipt{seq: seq, phoneID: phoneIDs[seq], status: status})
+	}
+	for _, ev := range r.st.Events {
+		switch ev.Type {
+		case event.RelayStart, event.RelayEnd:
+			var d struct {
+				Name string `json:"name"`
+			}
+			if ev.Decode(&d) == nil {
+				active[d.Name] = ev.Type == event.RelayStart
+				if !active[d.Name] {
+					delete(active, d.Name)
+				}
+			}
+		case event.UserMessage:
+			var d event.UserMessageData
+			if ev.Decode(&d) != nil {
+				continue
+			}
+			phoneIDs[ev.Seq] = d.PhoneID
+			if d.Held != "" && len(active) > 0 {
+				set(ev.Seq, "eagent") // as userMessage marks it
+			}
+		case event.RelaySend:
+			var d event.RelaySendData
+			if ev.Decode(&d) != nil || d.From != "user" || d.Seq == 0 {
+				continue
+			}
+			sendSeq[d.ID] = d.Seq
+			status := "sent"
+			if d.Mode == "after_turn" {
+				status = "held"
+			}
+			set(d.Seq, status)
+		case event.RelayDelivered:
+			var d event.RelayDeliveredData
+			if ev.Decode(&d) != nil || sendSeq[d.ID] == 0 {
+				continue
+			}
+			status := "delivered"
+			if !d.OK {
+				status = "failed"
+			}
+			set(sendSeq[d.ID], status)
+		}
+	}
+	if len(receipts) > maxReceipts {
+		receipts = receipts[len(receipts)-maxReceipts:]
+	}
+	p.mu.Lock()
+	if p.sendSeq == nil {
+		p.sendSeq, p.receipts = sendSeq, receipts
+	}
+	p.mu.Unlock()
+}
+
 // setReceipt records a receipt and republishes them. Loop goroutine.
 func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
+	p.loadReceipts(r)
 	phoneID := ""
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		if ev := r.st.Events[i]; ev.Seq == seq {
@@ -78,15 +158,16 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 // posts each turn's report. Loop goroutine.
 func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 	switch ev.Type {
+	case event.RelaySend, event.RelayDelivered:
+		p.loadReceipts(r)
+	}
+	switch ev.Type {
 	case event.RelaySend:
 		var d event.RelaySendData
 		if ev.Decode(&d) != nil || d.From != "user" || d.Seq == 0 {
 			return
 		}
 		p.mu.Lock()
-		if p.sendSeq == nil {
-			p.sendSeq = map[string]int64{}
-		}
 		p.sendSeq[d.ID] = d.Seq
 		p.mu.Unlock()
 		status := "sent"
