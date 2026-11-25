@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -213,8 +214,10 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 			images = []string{}
 		}
 		// The whole report, in as many posts as FinaleChat needs to take
-		// it, each saying which part it is; the first keeps the key and
-		// the buzz a single post had.
+		// it. Every part is a report of this agent; the first keeps the key
+		// and the buzz a single post had, and the figures about the turn
+		// ride on the last, so a reader that shows them per post shows
+		// them once, under the end of the report.
 		buzz := r.relayNotifyDone[d.Name]
 		if buzz {
 			delete(r.relayNotifyDone, d.Name)
@@ -226,17 +229,30 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 			if i > 0 {
 				key += "." + strconv.Itoa(i+1)
 			}
-			meta := map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "duration_ms": d.DurationMS, "tools": d.Tools, "interrupted": d.Interrupted, "images": images, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}
+			meta := map[string]any{"eagent": "relay", "kind": "relay_report", "relay": d.Name, "agent": agent, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}
+			if i == len(parts)-1 {
+				meta["duration_ms"], meta["tools"], meta["interrupted"], meta["images"] = d.DurationMS, d.Tools, d.Interrupted, images
+			}
 			if len(parts) > 1 {
 				meta["part"], meta["parts"] = i+1, len(parts)
 			}
-			req := finalechat.PostRequest{Body: part, Notify: boolPtr(false), ClientKey: p.key("rt", key), Meta: meta}
+			req := finalechat.PostRequest{Body: part, Notify: boolPtr(false), Meta: meta}
 			if buzz && i == 0 {
 				req.Notify, req.Importance = nil, "important"
 			}
 			p.enqueue(func(ctx context.Context) {
+				// The key and the status are read here, on the worker: until
+				// the first call has learned what the server supports, a key
+				// made on the loop would be empty, and the post would lose
+				// both its idempotency and its patient retries. An agent's
+				// post without a status clears the thread's line, so each
+				// part carries the one the work is in, as a message does.
+				req.ClientKey = p.key("rt", key)
+				act := p.attach()
+				req.Activity = act
 				if msg, _, err := p.client.Post(ctx, p.ref, req); err == nil {
 					p.remember(msg.ID)
+					p.markSent(act)
 				}
 			})
 		}
@@ -251,49 +267,121 @@ const phoneReportPart = 128 << 10
 
 // splitReport cuts a report too long for one post into parts of at most
 // limit bytes, at line ends where it can and never inside a UTF-8
-// sequence. When there are several, each starts with "(part i of n)", and a code block cut in two is closed at the end
-// of one part and opened again at the start of the next, so each part
-// reads on its own.
+// sequence. When there are several, each ends with "(part i of n)" on a
+// line of its own after a blank line, so its first line is the report's
+// own words (the line a list shows and a reply quotes). A code block cut
+// in two is closed at the end of one part and opened again at the start
+// of the next with the same fence and language, so each part reads on
+// its own.
 func splitReport(body string, limit int) []string {
 	if len(body) <= limit {
 		return []string{body}
 	}
-	const room = 64 // the part line, and a fence closed and opened again
-	budget := limit - room
+	const marker = 32 // room for "\n\n_(part i of n)_"
 	var parts []string
-	inFence := false
+	fence, open := "", "" // the code block open where the rest starts
+	lineStart := true     // the rest starts at the start of a line
 	for rest := body; rest != ""; {
-		cut := len(rest)
-		if cut > budget {
-			cut = budget
-			if i := strings.LastIndexByte(rest[:cut], '\n'); i >= budget/2 {
-				cut = i + 1
-			} else {
-				for cut > 0 && rest[cut]&0xC0 == 0x80 {
-					cut--
+		head := ""
+		if open != "" {
+			head = open + "\n"
+			if len(head) > limit/4 {
+				head = fence + "\n" // an info string too long to repeat
+			}
+		}
+		room := limit - marker
+		budget := room - len(head)
+		var part, nextFence, nextOpen string
+		var cut int
+		for {
+			cut = reportCut(rest, budget)
+			chunk := rest[:cut]
+			nextFence, nextOpen = reportFences(chunk, lineStart, fence, open)
+			part = head + chunk
+			if nextFence != "" && cut < len(rest) {
+				if !strings.HasSuffix(chunk, "\n") {
+					part += "\n"
 				}
+				part += nextFence
 			}
+			if len(part) <= room || budget <= 1 {
+				break
+			}
+			budget -= len(part) - room
 		}
-		chunk := rest[:cut]
+		lineStart = strings.HasSuffix(rest[:cut], "\n")
 		rest = rest[cut:]
-		part := chunk
-		if inFence {
-			part = "```\n" + part
-		}
-		for _, line := range strings.Split(chunk, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "```") {
-				inFence = !inFence
-			}
-		}
-		if inFence && rest != "" {
-			part = strings.TrimRight(part, "\n") + "\n```"
-		}
+		fence, open = nextFence, nextOpen
 		parts = append(parts, part)
 	}
 	for i := range parts {
-		parts[i] = fmt.Sprintf("_(part %d of %d)_\n\n", i+1, len(parts)) + parts[i]
+		parts[i] += fmt.Sprintf("\n\n_(part %d of %d)_", i+1, len(parts))
 	}
 	return parts
+}
+
+// reportCut is where the next part of rest ends: all of it when it fits,
+// else at the last line end in the second half of the budget, else at the
+// budget, moved back to the start of a UTF-8 sequence. Never 0.
+func reportCut(rest string, budget int) int {
+	if len(rest) <= budget {
+		return len(rest)
+	}
+	if budget < 1 {
+		budget = 1
+	}
+	cut := budget
+	if i := strings.LastIndexByte(rest[:cut], '\n'); i >= budget/2 {
+		return i + 1
+	}
+	for cut > 0 && !utf8.RuneStart(rest[cut]) {
+		cut--
+	}
+	if cut == 0 {
+		_, cut = utf8.DecodeRuneInString(rest)
+	}
+	return cut
+}
+
+// reportFences follows fenced code blocks through text, as CommonMark
+// reads them: a line of three or more backticks or tildes (indented at
+// most three spaces) opens one, with what follows as its info string, and
+// only a line of the same character, at least as long and with nothing
+// after it, closes it. fence and open are the block open where text
+// starts (its fence and its whole opening line); the result is the block
+// open where it ends. Only whole lines count: a piece of a line cut
+// between parts is not read (a fence line is short, so it is never the
+// line a cut falls inside).
+func reportFences(text string, lineStart bool, fence, open string) (string, string) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if (i == 0 && !lineStart) || i == len(lines)-1 {
+			// The end of a line the last part began, or what follows the
+			// last line end: "" or the start of a line the next part ends.
+			continue
+		}
+		s := strings.TrimLeft(line, " ")
+		if len(line)-len(s) > 3 || len(s) < 3 || (s[0] != '`' && s[0] != '~') {
+			continue
+		}
+		n := 0
+		for n < len(s) && s[n] == s[0] {
+			n++
+		}
+		if n < 3 {
+			continue
+		}
+		switch {
+		case fence == "":
+			if s[0] == '`' && strings.ContainsRune(s[n:], '`') {
+				continue // inline code, not a fence
+			}
+			fence, open = s[:n], strings.TrimRight(line, " \t\r")
+		case s[0] == fence[0] && n >= len(fence) && strings.TrimSpace(s[n:]) == "":
+			fence, open = "", ""
+		}
+	}
+	return fence, open
 }
 
 // postRelayScreen shows the agent's terminal in the thread. Any goroutine.

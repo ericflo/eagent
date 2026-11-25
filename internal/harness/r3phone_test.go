@@ -24,7 +24,9 @@ var partMarker = regexp.MustCompile(`\n\n_\(part (\d+) of (\d+)\)_$`)
 // unsplit takes the parts of a report back to the report: the marker each
 // ends with goes, and so do the fence lines added where a code block was
 // cut (a closing line at the end of a part, the same opening line at the
-// start of the next).
+// start of the next). It reads a part's fences before taking its opening
+// line away. The code blocks it is given are cut at line ends, where the
+// closing fence is added after the part's own last line end.
 func unsplit(t *testing.T, parts []string) string {
 	t.Helper()
 	var b strings.Builder
@@ -36,22 +38,20 @@ func unsplit(t *testing.T, parts []string) string {
 			}
 			p = p[:loc[0]]
 		}
+		if i < len(parts)-1 {
+			if fence := openFenceAtEnd(p); fence != "" {
+				if !strings.HasSuffix(p, "\n"+fence) {
+					t.Fatalf("part %d leaves a %q block open", i+1, fence)
+				}
+				p = strings.TrimSuffix(p, fence)
+			}
+		}
 		if i > 0 {
 			if open := reopened(parts[i-1]); open != "" {
 				if !strings.HasPrefix(p, open+"\n") {
 					t.Fatalf("part %d does not reopen the code block with %q: %q", i+1, open, p[:min(len(p), 40)])
 				}
 				p = strings.TrimPrefix(p, open+"\n")
-			}
-		}
-		if i < len(parts)-1 {
-			if fence := openFenceAtEnd(p); fence != "" {
-				// The part closed its block: drop the "\n" + closing fence
-				// that was added.
-				if !strings.HasSuffix(p, "\n"+fence) {
-					t.Fatalf("part %d leaves a %q block open", i+1, fence)
-				}
-				p = strings.TrimSuffix(p, "\n"+fence)
 			}
 		}
 		b.WriteString(p)
