@@ -101,7 +101,7 @@ func TestBundleResourceAndActiveDeletionGuard(t *testing.T) {
 		t.Fatal("deleted active default bundle")
 	}
 	p.Operation = "bundle.save"
-	p.Parameters = map[string]any{"name": "unsafe", "config_json": `{"task":{"base_url":"https://unregistered.invalid","api_key_env":"SECRET"}}`}
+	p.Parameters = map[string]any{"name": "unsafe", "config_json": `{"model":{"base_url":"https://unregistered.invalid","api_key_env":"SECRET"}}`}
 	if _, err := s.PrepareResource(editor, p, s.Grant()); err == nil {
 		t.Fatal("accepted unregistered endpoint/key through bundle action")
 	}
@@ -207,7 +207,7 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 		SchemaVersion:   SchemaVersion,
 		ExpectedVersion: v1.Snapshot.Version,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/task_concurrency", Value: float64(7)},
+			{Op: "set", Key: "/max_calls_per_turn", Value: float64(7)},
 			{Op: "set", Key: "/save_preset", Value: "fast-seven"},
 		},
 	}
@@ -223,7 +223,7 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 		t.Fatalf("config.json leaked save_preset key: %s", rawCfg)
 	}
 	loaded, err := config.Load(project, "fast-seven")
-	if err != nil || loaded.TaskConcurrency != 7 {
+	if err != nil || loaded.MaxCallsPerTurn != 7 {
 		t.Fatalf("saved preset fast-seven = %+v err=%v", loaded, err)
 	}
 	if _, exists := v2.Snapshot.Saved["/save_preset"]; exists {

@@ -49,15 +49,15 @@ func TestRuntimeSwitchToKeylessRegisteredServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Descriptor includes the custom provider in the orchestrator provider enum.
+	// Descriptor includes the custom provider in the model's provider enum.
 	foundProv := false
 	for _, f := range view.Descriptor.Fields {
-		if f.Key == "/routes/orchestrator/provider" {
+		if f.Key == "/routes/eagent/provider" {
 			foundProv = slices.Contains(f.Shape.Enum, any("box-local"))
 		}
 	}
 	if !foundProv {
-		t.Fatal("runtime descriptor missing registered custom server in /routes/orchestrator/provider enum")
+		t.Fatal("runtime descriptor missing registered custom server in /routes/eagent/provider enum")
 	}
 
 	proposal := control.Proposal{
@@ -66,18 +66,18 @@ func TestRuntimeSwitchToKeylessRegisteredServer(t *testing.T) {
 		ExpectedVersion: view.Snapshot.Version,
 		Generation:      view.Generation,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/routes/orchestrator/provider", Value: "box-local"},
-			{Op: "set", Key: "/routes/orchestrator/model", Value: "local-fast"},
-			{Op: "set", Key: "/routes/orchestrator/effort", Value: "low"},
+			{Op: "set", Key: "/routes/eagent/provider", Value: "box-local"},
+			{Op: "set", Key: "/routes/eagent/model", Value: "local-fast"},
+			{Op: "set", Key: "/routes/eagent/effort", Value: "low"},
 		},
 	}
 	nextState, err := ApplyValues(project, cur, proposal, view, grant)
 	if err != nil {
 		t.Fatalf("ApplyValues to keyless local server failed: %v", err)
 	}
-	got := nextState.Routes["orchestrator"]
+	got := nextState.Routes[RouteEagent]
 	if got.Provider != "box-local" || got.Model != "local-fast" || got.Effort != "low" {
-		t.Fatalf("nextState.Routes[orchestrator] = %+v", got)
+		t.Fatalf("nextState.Routes[eagent] = %+v", got)
 	}
 }
 
@@ -134,16 +134,16 @@ func TestRuntimeSavePresetFromRunningSession(t *testing.T) {
 		t.Fatal("expected built-in preset name to be rejected in running session")
 	}
 
-	// Switch orchestrator to the keyless local server AND save as a new preset in one tap.
+	// Switch the model to the keyless local server AND save as a new preset in one tap.
 	prop := control.Proposal{
 		Operation:       "settings.apply",
 		SchemaVersion:   Schema,
 		ExpectedVersion: view.Snapshot.Version,
 		Generation:      c.Generation,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/routes/orchestrator/provider", Value: "box-local"},
-			{Op: "set", Key: "/routes/orchestrator/model", Value: "local-fast"},
-			{Op: "set", Key: "/routes/orchestrator/effort", Value: "high"},
+			{Op: "set", Key: "/routes/eagent/provider", Value: "box-local"},
+			{Op: "set", Key: "/routes/eagent/model", Value: "local-fast"},
+			{Op: "set", Key: "/routes/eagent/effort", Value: "high"},
 			{Op: "set", Key: "/save_preset", Value: "my-session-preset"},
 		},
 	}
@@ -171,15 +171,16 @@ func TestRuntimeSavePresetFromRunningSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(my-session-preset): %v", err)
 	}
-	if savedCfg.Orchestrator.Model != "local-fast" || savedCfg.Orchestrator.APIKeyEnv != "" || savedCfg.Orchestrator.ReasoningEffort != "high" || savedCfg.Orchestrator.Fallback != nil {
-		t.Fatalf("savedCfg.Orchestrator = %+v", savedCfg.Orchestrator)
+	if savedCfg.Model.Model != "local-fast" || savedCfg.Model.APIKeyEnv != "" || savedCfg.Model.ReasoningEffort != "high" || savedCfg.Model.Fallback != nil || savedCfg.Summarizer.Mode != config.SummarizerInline {
+		t.Fatalf("savedCfg = %+v", savedCfg)
 	}
 	// The next View includes the newly saved preset in /config enum.
 	nextView, err := View(project, "s-save", c.Generation, applied, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(nextView.Descriptor.Fields[0].Shape.Enum, any("bundle:my-session-preset")) {
-		t.Fatalf("/config enum missing newly saved preset: %v", nextView.Descriptor.Fields[0].Shape.Enum)
+	at := slices.IndexFunc(nextView.Descriptor.Fields, func(f control.Field) bool { return f.Key == "/config" })
+	if at < 0 || !slices.Contains(nextView.Descriptor.Fields[at].Shape.Enum, any("bundle:my-session-preset")) {
+		t.Fatalf("/config enum missing newly saved preset: %v", nextView.Descriptor.Fields)
 	}
 }

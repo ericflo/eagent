@@ -16,7 +16,7 @@ func TestEditorDataUsesCapturedBundlesAndExcludesPrivateValues(t *testing.T) {
 	if err := os.MkdirAll(config.BundlesDir(project), 0700); err != nil {
 		t.Fatal(err)
 	}
-	raw := []byte(`{"preset":"glm","task_concurrency":7,"unknown_private":"never-publish","instructions":"private-instructions"}`)
+	raw := []byte(`{"preset":"glm","max_calls_per_turn":7,"unknown_private":"never-publish","instructions":"private-instructions"}`)
 	if err := os.WriteFile(config.BundlePath(project, "fixture"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestEditorDataUsesCapturedBundlesAndExcludesPrivateValues(t *testing.T) {
 		}
 	}
 	bundle := view["bundles"].(map[string]any)["fixture"].(map[string]any)
-	if bundle["sha256"] != artifact.Digest(raw) || bundle["config"].(config.Config).TaskConcurrency != 7 {
+	if bundle["sha256"] != artifact.Digest(raw) || bundle["config"].(config.Config).MaxCallsPerTurn != 7 {
 		t.Fatalf("bundle identity and values do not match captured bytes: hash=%v want=%v config=%+v", bundle["sha256"], artifact.Digest(raw), bundle["config"])
 	}
 	if len(view["presets"].(map[string]config.Config)) != len(config.PresetNames()) {

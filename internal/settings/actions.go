@@ -29,7 +29,7 @@ func (s *Service) Actions(grant control.Grant) []control.Action {
 	}
 	actions := []control.Action{
 		{Operation: "settings.undo", Label: "Undo reviewed settings change", Class: "preference", Parameters: object(map[string]control.Shape{"command_id": text(80), "restore_sha256": text(64)}, "command_id", "restore_sha256")},
-		{Operation: "route.test", Label: "Test saved model route", Class: "cost", Parameters: object(map[string]control.Shape{"actor": choices([]string{"orchestrator", "task", "narrator"}), "route": choices([]string{"primary", "fallback"}), "effort": text(32)}, "actor")},
+		{Operation: "route.test", Label: "Test saved model route", Class: "cost", Parameters: object(map[string]control.Shape{"target": choices([]string{"model", "summarizer"}), "route": choices([]string{"primary", "fallback"}), "effort": text(32)}, "target")},
 		{Operation: "prompt.set", Label: "Save prompt override", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names), "text": text(32768)}, "name", "text")},
 		{Operation: "prompt.reset", Label: "Restore built-in prompt", Class: "preference", Parameters: object(map[string]control.Shape{"name": choices(prompts.Names)}, "name")},
 		{Operation: "bundle.save", Label: "Save named configuration", Class: "permissions", Parameters: object(map[string]control.Shape{"name": text(64), "description": text(1024), "from": text(64), "config_json": text(32768)}, "name")},
@@ -175,14 +175,14 @@ func ResourceEffect(change ResourceChange) map[string]any {
 	return map[string]any{"key": strings.Join([]string{change.Kind, change.Name}, ":"), "saved": true, "runtime_applied": false, "effective_when": "new_or_resumed_session"}
 }
 
-// relayChoices are the values session.start accepts for relay: "" (eagent
-// does the work) or a relay profile name.
+// relayChoices are the values session.start accepts for relay: the relay
+// profile names.
 func (s *Service) relayChoices() []string {
 	cfg, err := config.Load(s.Project, "")
 	if err != nil {
 		cfg = config.Defaults()
 	}
-	return append([]string{""}, cfg.Relay.RelayProfileNames()...)
+	return cfg.Relay.RelayProfileNames()
 }
 
 // RelayInput names the session.start input for a relay profile's model or
@@ -255,59 +255,12 @@ func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]
 	return inputs
 }
 
-// Actors whose model a new session may pick, in the order they are offered.
-var StartActors = []string{"orchestrator", "task", "narrator"}
-
 // sessionStartAction declares what a session started from the phone may
-// choose: the first message, where it starts, an agent to relay to, and
-// (asked of the user, in this order) the configuration it starts from and
-// each actor's provider, model and reasoning effort, or, with an agent to
-// relay to, that agent's model and effort. Each choice left out comes from
-// the project's own configuration (or the agent's), which each input's
-// default shows; what a configuration gives each actor is in its
-// suggestion.
+// choose: the first message, where it starts, the agent it runs, and that
+// agent's model and effort. Each choice left out comes from the project's
+// own configuration (or the agent's), which each input's default shows.
 func (s *Service) sessionStartAction(text func(int) control.Shape, choices func([]string) control.Shape, object func(map[string]control.Shape, ...string) control.Shape) control.Action {
 	params := map[string]control.Shape{"prompt": text(32768), "cwd": text(4096), "relay": choices(s.relayChoices())}
-	configs := ConfigChoices(s.Project)
-	params["config"] = choices(configs)
-	// eagent's own models are asked for only when eagent does the work.
-	eagentOnly := map[string][]any{"relay": {""}}
-	configInput := control.Input{Name: "config", Label: "Configuration", Description: "The models and settings this session starts from. The project's own settings still apply on top.", Suggest: &control.Suggest{List: "configs"}, When: eagentOnly}
-	// What a session started with no choices runs: the project as it loads.
-	project, err := config.LoadBundle(s.Project, "", "")
-	if err == nil {
-		switch {
-		case project.Name != "" && slices.Contains(configs, "bundle:"+project.Name):
-			configInput.Default = "bundle:" + project.Name
-		case slices.Contains(configs, project.Preset):
-			configInput.Default = project.Preset
-		case project.Preset == "" && project.Name == "":
-			configInput.Default = "glm" // the built-in defaults are its lineup
-		}
-	}
-	inputs := []control.Input{configInput}
-	var providers []string
-	for _, pr := range config.AllProviders(s.Project) {
-		providers = append(providers, pr.ID)
-	}
-	for _, actor := range StartActors {
-		name := actorName(actor)
-		params[actor+"_provider"] = choices(providers)
-		params[actor+"_model"] = text(200)
-		params[actor+"_effort"] = choices(config.EffortOrder)
-		provider := control.Input{Name: actor + "_provider", Label: "Provider", Group: name, Suggest: &control.Suggest{List: "providers"}, When: eagentOnly}
-		model := control.Input{Name: actor + "_model", Label: "Model", Group: name, Suggest: &control.Suggest{List: "models", GroupBy: actor + "_provider"}, When: eagentOnly}
-		effort := control.Input{Name: actor + "_effort", Label: "Reasoning effort", Group: name, When: eagentOnly}
-		if err == nil {
-			route := routeInputs(s.Project, map[string]config.Actor{"orchestrator": project.Orchestrator, "task": project.Task, "narrator": project.Narrator}[actor])
-			for in, key := range map[*control.Input]string{&provider: "provider", &model: "model", &effort: "effort"} {
-				if v, ok := route[key]; ok {
-					in.Default = v
-				}
-			}
-		}
-		inputs = append(inputs, provider, model, effort)
-	}
-	inputs = append(inputs, s.relayStartInputs(text, choices, params)...)
+	inputs := s.relayStartInputs(text, choices, params)
 	return control.Action{Operation: "session.start", Label: "Start a new session", Class: "cost", Parameters: object(params, "prompt"), Inputs: inputs}
 }

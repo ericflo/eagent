@@ -362,8 +362,12 @@ func (s *Service) SaveRaw(ctx context.Context, b RawRequest) (Result, error) {
 	if err := json.Unmarshal([]byte(b.Raw), &probe); err != nil {
 		return Result{}, &Error{Status: 422, Message: "not valid JSON: " + err.Error()}
 	}
+	// Check the routes as they will load: keys of eagent's earlier design
+	// are carried over first.
+	probe, _ = config.MigrateLegacy(probe)
+	migrated, _ := json.Marshal(probe)
 	trial := config.Defaults()
-	if err := json.Unmarshal([]byte(b.Raw), &trial); err != nil {
+	if err := json.Unmarshal(migrated, &trial); err != nil {
 		return Result{}, &Error{Status: 422, Message: err.Error()}
 	}
 	if err := s.CheckRoutes(trial); err != nil {

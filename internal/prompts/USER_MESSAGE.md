@@ -1,4 +1,4 @@
-{{/* USER_MESSAGE.md renders one user.message event for the orchestrator.
+{{/* USER_MESSAGE.md renders one user.message event in eagent's conversation.
 
   Data:
     .Text        the message text

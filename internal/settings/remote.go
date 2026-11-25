@@ -43,17 +43,14 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	if res.LoadError != "" {
 		return RemoteView{}, fmt.Errorf("repair the local configuration before remote editing: %s", res.LoadError)
 	}
-	var effective, onDisk map[string]any
+	var effective map[string]any
 	raw, _ := json.Marshal(res.Effective)
 	_ = json.Unmarshal(raw, &effective)
-	if res.File.Raw != "" {
-		if err := json.Unmarshal([]byte(res.File.Raw), &onDisk); err != nil {
-			return RemoteView{}, err
-		}
+	onDisk, err := fileValues(res.File.Raw)
+	if err != nil {
+		return RemoteView{}, err
 	}
-	if onDisk == nil {
-		onDisk = map[string]any{}
-	}
+	dedicated := res.Effective.Summarizer.Mode == config.SummarizerDedicated
 	out := RemoteView{Key: grant.Key, Label: grant.Label, Scope: grant.Scope, Descriptor: control.Descriptor{Format: control.Format, SchemaVersion: SchemaVersion, AdapterVersion: "1", Fields: []control.Field{}}, Snapshot: control.Snapshot{Context: s.Project, Saved: map[string]any{}, Effective: map[string]any{}, RuntimeKnown: false}}
 	var visit func(reflect.Type, string, int)
 	visit = func(t reflect.Type, prefix string, depth int) {
@@ -68,6 +65,10 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				field := t.Field(i)
 				name := strings.Split(field.Tag.Get("json"), ",")[0]
 				if name == "" || name == "-" || (prefix == "" && (name == "name" || name == "description")) {
+					continue
+				}
+				// The summarizer's own route matters only when it is dedicated.
+				if prefix == "/summarizer" && name == "model" && !dedicated {
 					continue
 				}
 				visit(field.Type, prefix+"/"+name, depth+1)
@@ -91,7 +92,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		if strings.HasSuffix(prefix, "/api_key_env") || strings.HasSuffix(prefix, "/base_url") || prefix == "/finalechat/token_env" {
 			class = "credential_reference"
 		}
-		if prefix == "/allow_outside_project" || prefix == "/default_config" {
+		if prefix == "/default_config" {
 			class = "permissions"
 		}
 		field := control.Field{Key: prefix, Label: strings.ReplaceAll(strings.TrimPrefix(prefix, "/"), "_", " "), Shape: shape, Writable: true, Unset: true, Class: class, EffectiveWhen: "new_or_resumed_session", Source: res.Sources[prefix]}
@@ -127,6 +128,21 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			for _, v := range names {
 				field.Shape.Enum = append(field.Shape.Enum, v)
 			}
+		}
+		if prefix == "/relay/default" {
+			field.Shape.Enum = []any{}
+			for _, v := range res.Effective.Relay.RelayProfileNames() {
+				field.Shape.Enum = append(field.Shape.Enum, v)
+			}
+		}
+		// A route's model offers the models eagent knows of, registered
+		// servers' first; any other id can still be typed.
+		if prefix == "/model/model" || prefix == "/summarizer/model/model" {
+			field.Suggest = &control.Suggest{List: "models"}
+		}
+		if prefix == "/summarizer/mode" {
+			field.Shape.Enum = []any{config.SummarizerInline, config.SummarizerDedicated}
+			field.Suggest = &control.Suggest{List: "summarizer_modes"}
 		}
 		placeProjectField(&field)
 		if prefix == "/default_config" && len(field.Shape.Enum) == 0 {
@@ -266,13 +282,16 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		keys[key] = os.Getenv(key) != ""
 	}
 	out.Snapshot.Details = map[string]any{"project": s.Project, "file_etag": res.File.ETag, "sources": res.Sources, "active": res.Active, "keys_present": keys, "context_digests": contextFiles, "prompts": promptViews, "bundles": names, "servers": servers}
-	// The effective per-actor routes, so a reader can show what is actually
-	// in force (file overrides included) rather than the preset's own lineup.
-	out.Snapshot.Details["effective_routes"] = map[string]any{
-		"orchestrator": map[string]any{"model": res.Effective.Orchestrator.Model, "base_url": res.Effective.Orchestrator.BaseURL, "reasoning_effort": res.Effective.Orchestrator.ReasoningEffort},
-		"task":         map[string]any{"model": res.Effective.Task.Model, "base_url": res.Effective.Task.BaseURL, "reasoning_effort": res.Effective.Task.ReasoningEffort},
-		"narrator":     map[string]any{"model": res.Effective.Narrator.Model, "base_url": res.Effective.Narrator.BaseURL, "reasoning_effort": res.Effective.Narrator.ReasoningEffort},
+	// The effective routes, so a reader can show what is actually in force
+	// (file overrides included) rather than the preset's own model.
+	routeView := func(a config.ModelRoute) map[string]any {
+		return map[string]any{"model": a.Model, "base_url": a.BaseURL, "reasoning_effort": a.ReasoningEffort}
 	}
+	effectiveRoutes := map[string]any{"model": routeView(res.Effective.Model)}
+	if dedicated {
+		effectiveRoutes["summarizer"] = routeView(res.Effective.Summarizer.Route(res.Effective.Model))
+	}
+	out.Snapshot.Details["effective_routes"] = effectiveRoutes
 	// One configuration version is shared by its archive and every reader.
 	// Per-connector write permissions are applied after hashing capabilities.
 	for i := range out.Descriptor.Fields {
@@ -285,15 +304,14 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Actions = s.Actions(grant)
-	out.Descriptor.Suggestions = map[string][]control.Suggestion{"configs": ConfigSuggestions(s.Project), "presets": PresetSuggestions(s.Project), "providers": ProviderSuggestions(s.Project)}
+	out.Descriptor.Suggestions = map[string][]control.Suggestion{"presets": PresetSuggestions(s.Project), "summarizer_modes": SummarizerModeSuggestions(), "models": ModelSuggestions(s.Project)}
 	for _, a := range out.Descriptor.Actions {
 		if a.Operation != "session.start" {
 			continue
 		}
-		out.Descriptor.Suggestions["models"] = ModelSuggestions(s.Project)
-		// Each relayed agent's models, for its model input.
+		// Each agent's models, for its model input.
 		for _, in := range a.Inputs {
-			if in.Suggest != nil && in.Suggest.List != "models" {
+			if in.Suggest != nil {
 				if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
 					out.Descriptor.Suggestions[in.Suggest.List] = RelayModelSuggestions(agent, s.Project)
 				}
@@ -313,6 +331,29 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		return out, err
 	}
 	return out, out.Snapshot.Validate()
+}
+
+// fileValues decodes config.json's bytes, carried over to today's keys when
+// the file still uses those of eagent's earlier design, so every pointer
+// reads and edits today's layout and a remote save writes it.
+func fileValues(raw string) (map[string]any, error) {
+	values := map[string]any{}
+	if raw == "" {
+		return values, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, err
+	}
+	if !config.HasLegacyKeys(m) {
+		return values, json.Unmarshal([]byte(raw), &values)
+	}
+	m, _ = config.MigrateLegacy(m)
+	migrated, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return values, json.Unmarshal(migrated, &values)
 }
 
 func pointerValue(m map[string]any, p string) (any, bool) {
@@ -572,12 +613,9 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	}
 	res := config.Resolve(s.Project, s.Preset, s.Bundle)
 	etag = res.File.ETag
-	values := map[string]any{}
-	if res.File.Raw != "" {
-		err = json.Unmarshal([]byte(res.File.Raw), &values)
-		if err != nil {
-			return
-		}
+	var values map[string]any
+	if values, err = fileValues(res.File.Raw); err != nil {
+		return
 	}
 	for _, e := range p.Edits {
 		if e.Key == "/add_server_url" || e.Key == "/servers" {

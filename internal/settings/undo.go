@@ -16,8 +16,8 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	if original.Operation != "settings.apply" || len(original.Edits) == 0 {
 		return inverse, fmt.Errorf("this command has no reversible settings edits")
 	}
-	var before map[string]any
-	if err := json.Unmarshal([]byte(beforeRaw), &before); err != nil {
+	before, err := fileValues(beforeRaw)
+	if err != nil {
 		return inverse, err
 	}
 	for _, edit := range original.Edits {
@@ -35,15 +35,14 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 // under the caller's project lock, then uses today's ordinary typed writer.
 // Unrelated local edits are preserved; changed affected fields cause conflict.
 func (s *Service) PrepareUndo(inverse control.Proposal, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
-	var desired, current map[string]any
+	var desired map[string]any
 	if err := json.Unmarshal([]byte(desiredRaw), &desired); err != nil {
 		return "", "", RemoteView{}, err
 	}
 	res := config.Resolve(s.Project, s.Preset, s.Bundle)
-	if res.File.Raw != "" {
-		if err := json.Unmarshal([]byte(res.File.Raw), &current); err != nil {
-			return "", "", RemoteView{}, err
-		}
+	current, err := fileValues(res.File.Raw)
+	if err != nil {
+		return "", "", RemoteView{}, err
 	}
 	for _, edit := range inverse.Edits {
 		want, wantExists := pointerValue(desired, edit.Key)

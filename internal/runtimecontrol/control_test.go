@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,7 @@ func requestFor(t *testing.T, c *Controller, value float64) Request {
 		t.Fatal(err)
 	}
 	grant, _ := Grant(c.Project, c.Session)
-	p := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation, Edits: []control.Edit{{Op: "set", Key: "/task_concurrency", Value: value}}}
+	p := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation, Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: value}}}
 	raw, _ := json.Marshal(p)
 	return Request{ID: newID(), UserID: "fixture-user", Proposal: p, Digest: artifact.Digest(raw), Expires: time.Now().Add(2 * time.Second), Grant: grant}
 }
@@ -87,7 +88,7 @@ func TestRuntimeAcknowledgementDuplicateAndReplacement(t *testing.T) {
 		t.Fatal("stale version applied", stale, err)
 	}
 	stop()
-	if c.Values.TaskConcurrency != 5 || c.Values.Revision != 1 {
+	if c.Values.TickSeconds != 5 || c.Values.Revision != 1 {
 		t.Fatal("acknowledgement preceded application")
 	}
 	if err := c.Close(); err != nil {
@@ -98,7 +99,7 @@ func TestRuntimeAcknowledgementDuplicateAndReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer next.Close()
-	if next.Generation == c.Generation || next.Values.TaskConcurrency != config.Defaults().TaskConcurrency {
+	if next.Generation == c.Generation || next.Values.TickSeconds != config.Defaults().TickSeconds {
 		t.Fatal("replacement inherited the prior process override")
 	}
 	// A new request for the old generation. Reusing q.ID would read back
@@ -162,16 +163,16 @@ func TestRuntimeStatusOrderingSurvivesClockRollback(t *testing.T) {
 	}
 	defer c.Close()
 	c.statusSerial = time.Now().Add(time.Hour).UnixNano()
-	c.Values.TaskConcurrency = 7
+	c.Values.TickSeconds = 7
 	if err := c.heartbeat(true); err != nil {
 		t.Fatal(err)
 	}
-	c.Values.TaskConcurrency = 8
+	c.Values.TickSeconds = 8
 	if err := c.heartbeat(true); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ReadStatus(c.Project, c.Session)
-	if err != nil || got.Values.TaskConcurrency != 8 {
+	if err != nil || got.Values.TickSeconds != 8 {
 		t.Fatal("wall-clock ordering hid current status", got, err)
 	}
 }
@@ -268,9 +269,9 @@ func TestApplyValuesRoutes(t *testing.T) {
 	}
 	routeEdits := func(provider, model, effort string) []control.Edit {
 		return []control.Edit{
-			{Op: "set", Key: "/routes/orchestrator/provider", Value: provider},
-			{Op: "set", Key: "/routes/orchestrator/model", Value: model},
-			{Op: "set", Key: "/routes/orchestrator/effort", Value: effort},
+			{Op: "set", Key: "/routes/eagent/provider", Value: provider},
+			{Op: "set", Key: "/routes/eagent/model", Value: model},
+			{Op: "set", Key: "/routes/eagent/effort", Value: effort},
 		}
 	}
 	// A pick whose key is not set where the session runs is rejected.
@@ -284,12 +285,11 @@ func TestApplyValuesRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Routes["orchestrator"] != (Route{Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"}) {
+	if out.Routes[RouteEagent] != (Route{Provider: "openrouter", Model: "reflection/beam-1.0-501b-a23b", Effort: "xhigh"}) || len(out.Routes) != 1 {
 		t.Fatalf("routes = %+v", out.Routes)
 	}
-	// Untouched actors keep their initial routes.
-	if out.Routes["task"].Model != c.Values.Routes["task"].Model {
-		t.Fatalf("untouched actor changed: %+v", out.Routes["task"])
+	if c.Values.Routes[RouteEagent].Model == out.Routes[RouteEagent].Model {
+		t.Fatal("the controller's own routes changed under the proposal")
 	}
 	// Unknown model at a known provider is rejected.
 	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "nope/nothing", "low")...), view, grant); err == nil {
@@ -304,12 +304,15 @@ func TestApplyValuesRoutes(t *testing.T) {
 		t.Fatal("unlisted effort accepted")
 	}
 	// Unset on a route field is rejected.
-	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "unset", Key: "/routes/orchestrator/model"}), view, grant); err == nil {
+	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "unset", Key: "/routes/eagent/model"}), view, grant); err == nil {
 		t.Fatal("unset of route field accepted")
 	}
-	// Unknown actor is rejected.
-	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/routes/root/model", Value: "x"}), view, grant); err == nil {
-		t.Fatal("unknown actor accepted")
+	// A route the session does not have is rejected: here the summarizer
+	// is inline.
+	for _, key := range []string{"/routes/root/model", "/routes/summarizer/model"} {
+		if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: key, Value: "x"}), view, grant); err == nil {
+			t.Fatalf("%s accepted", key)
+		}
 	}
 	// The view exposes the route fields in the route class, writable when available.
 	routeFields := 0
@@ -321,15 +324,15 @@ func TestApplyValuesRoutes(t *testing.T) {
 			}
 		}
 	}
-	if routeFields != 9 {
-		t.Fatalf("route fields = %d, want 9", routeFields)
+	if routeFields != 3 {
+		t.Fatalf("route fields = %d, want 3", routeFields)
 	}
-	if view.Snapshot.Saved["/routes/orchestrator/model"] != c.Values.Routes["orchestrator"].Model {
-		t.Fatalf("saved route = %v", view.Snapshot.Saved["/routes/orchestrator/model"])
+	if view.Snapshot.Saved["/routes/eagent/model"] != c.Values.Routes[RouteEagent].Model {
+		t.Fatalf("saved route = %v", view.Snapshot.Saved["/routes/eagent/model"])
 	}
 }
 
-// Choosing a configuration sets every actor's route to what it runs here,
+// Choosing a configuration sets the session's routes to what it runs here,
 // and route edits in the same proposal apply on top of it.
 func TestApplyValuesConfiguration(t *testing.T) {
 	project := t.TempDir()
@@ -345,8 +348,8 @@ func TestApplyValuesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Snapshot.Effective["/config"] != "glm" || view.Descriptor.Fields[0].Key != "/config" {
-		t.Fatalf("configuration = %v, first field %s", view.Snapshot.Effective["/config"], view.Descriptor.Fields[0].Key)
+	if view.Snapshot.Effective["/config"] != "glm" {
+		t.Fatalf("configuration = %v", view.Snapshot.Effective["/config"])
 	}
 	grant, _ := Grant(project, "session")
 	proposal := func(edits ...control.Edit) control.Proposal {
@@ -366,14 +369,14 @@ func TestApplyValuesConfiguration(t *testing.T) {
 	if out.Config != "anthropic-high" || !reflect.DeepEqual(out.Routes, FromConfig(want).Routes) {
 		t.Fatalf("after anthropic-high: %+v", out)
 	}
-	if c.Values.Routes["orchestrator"].Model == out.Routes["orchestrator"].Model {
+	if c.Values.Routes[RouteEagent].Model == out.Routes[RouteEagent].Model {
 		t.Fatal("the controller's own routes changed under the proposal")
 	}
-	out, err = ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/routes/narrator/model", Value: "claude-opus-5-5"}, choose), view, grant)
+	out, err = ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/routes/eagent/model", Value: "claude-opus-5-5"}, choose), view, grant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Routes["narrator"].Model != "claude-opus-5-5" || out.Routes["task"] != FromConfig(want).Routes["task"] {
+	if got := out.Routes[RouteEagent]; got.Model != "claude-opus-5-5" || got.Provider != "anthropic" {
 		t.Fatalf("a change on top: %+v", out.Routes)
 	}
 	if _, err := ApplyValues(project, c.Values, proposal(control.Edit{Op: "set", Key: "/config", Value: "no-such"}), view, grant); err == nil {
@@ -403,8 +406,8 @@ func TestResolveLiveModelStaticAndCached(t *testing.T) {
 	}
 }
 
-// A relay's model and effort are session settings: shown first, with what
-// leaving them alone gives, settable and resettable.
+// A relay's model and effort are session settings: shown after eagent's own,
+// with what leaving them alone gives, settable and resettable.
 func TestRelayFields(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
@@ -419,7 +422,11 @@ func TestRelayFields(t *testing.T) {
 	if err := view.Descriptor.Validate(grant); err != nil {
 		t.Fatal(err)
 	}
-	model, effort := view.Descriptor.Fields[0], view.Descriptor.Fields[1]
+	at := slices.IndexFunc(view.Descriptor.Fields, func(f control.Field) bool { return strings.HasPrefix(f.Key, "/relays/") })
+	if at < 0 || at+1 >= len(view.Descriptor.Fields) {
+		t.Fatal("no relay fields")
+	}
+	model, effort := view.Descriptor.Fields[at], view.Descriptor.Fields[at+1]
 	if model.Key != "/relays/claude/model" || model.Group != "Claude Code" || !model.Unset || model.Suggest == nil || model.Suggest.List != "claude_models" || len(view.Descriptor.Suggestions["claude_models"]) == 0 {
 		t.Fatalf("model field %+v", model)
 	}
@@ -444,5 +451,77 @@ func TestRelayFields(t *testing.T) {
 	}
 	if _, err := ApplyValues(project, values, proposal(control.Edit{Op: "set", Key: "/relays/claude/effort", Value: "ultra"}), view, grant); err == nil {
 		t.Fatal("an effort Claude Code does not take was accepted")
+	}
+}
+
+// A session reads as eagent's model, its progress settings, then the agents'
+// own; a dedicated summarizer gets a card of its own.
+func TestSessionViewReadsNaturally(t *testing.T) {
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	project := t.TempDir()
+	values := FromConfig(config.Defaults())
+	values.Relays = map[string]RelayRoute{"claude": {Agent: "claude"}}
+	view, err := View(project, "session", "gen", values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, _ := Grant(project, "session")
+	if err := view.Descriptor.Validate(grant); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range view.Descriptor.Fields {
+		got = append(got, f.Group+": "+f.Label)
+		for _, word := range []string{"orchestrat", "narrat", "task", "actor", "lineup"} {
+			if strings.Contains(strings.ToLower(f.Label+" "+f.Group+" "+f.Description), word) {
+				t.Errorf("%s says %q", f.Key, word)
+			}
+		}
+	}
+	want := []string{
+		"Model: Provider", "Model: Model", "Model: Reasoning effort",
+		"Progress: Seconds between progress looks", "Progress: Longest silence while the agent works",
+		"Claude Code: Model", "Claude Code: Reasoning effort",
+		"Configuration: Configuration", "Configuration: Save as new preset",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fields:\n got %q\nwant %q", got, want)
+	}
+	if view.Descriptor.SchemaVersion != "eagent.runtime-settings/v2" || view.Snapshot.Effective["/tick_seconds"] != 30 || view.Snapshot.Effective["/quiet_seconds"] != 180 {
+		t.Fatalf("schema %s effective %v", view.Descriptor.SchemaVersion, view.Snapshot.Effective)
+	}
+
+	cfg := config.Defaults()
+	cfg.Summarizer = config.Summarizer{Mode: config.SummarizerDedicated, Model: &config.ModelRoute{Protocol: "openai-chat", BaseURL: "https://openrouter.ai/api/v1", Model: "z-ai/glm-5.3-flash", APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: "low"}}
+	values = FromConfig(cfg)
+	if values.Routes[RouteSummarizer] != (Route{Provider: "openrouter", Model: "z-ai/glm-5.3-flash", Effort: "low"}) || values.Routes[RouteEagent].Model != "zai-org/GLM-5.3" {
+		t.Fatalf("dedicated routes = %+v", values.Routes)
+	}
+	view, err = View(project, "session", "gen", values, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := map[string]int{}
+	for _, f := range view.Descriptor.Fields {
+		groups[f.Group]++
+	}
+	if groups["Model"] != 3 || groups["Summarizer"] != 3 {
+		t.Fatalf("groups = %v", groups)
+	}
+	// Choosing a configuration keeps the session's summarizer route, set to
+	// what that configuration would give it.
+	t.Setenv("ANTHROPIC_API_KEY", "test")
+	p := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: "gen", Edits: []control.Edit{{Op: "set", Key: "/config", Value: "anthropic-med"}, {Op: "set", Key: "/quiet_seconds", Value: float64(0)}}}
+	out, err := ApplyValues(project, values, p, view, grant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Routes[RouteEagent].Model != "claude-opus-5-5" || out.Routes[RouteSummarizer].Model != "claude-opus-5-5" || out.QuietSeconds != 0 {
+		t.Fatalf("after anthropic-med: %+v", out)
+	}
+	// An inline session has no summarizer route at all.
+	if _, ok := FromConfig(config.Defaults()).Routes[RouteSummarizer]; ok {
+		t.Fatal("inline summarizer has a route")
 	}
 }
