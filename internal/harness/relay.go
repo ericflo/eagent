@@ -188,10 +188,12 @@ type relayLaunch struct {
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
 	held      []heldSend
-	// brief, for a switch, is the handoff brief, typed into the new agent
-	// before anything that waited for it; briefAuto marks its send as the
-	// harness's own. briefDone hears how typing it went, and drained when
-	// what waited during the launch has been typed too.
+	// handover, for a switch, is what the handoff brief is written from;
+	// brief is that brief, written when the agent is up (finishLaunch) and
+	// typed into it before anything that waited for it. briefAuto marks its
+	// send as the harness's own. briefDone hears how typing it went, and
+	// drained when what waited during the launch has been typed too.
+	handover           *handover
 	brief, briefID     string
 	briefAuto          bool
 	briefDone, drained chan sendResult
@@ -222,7 +224,55 @@ type heldSend struct {
 	on string
 	// brief marks a switch's handoff brief: written for the agent that
 	// switch started, and no use to another that takes over from it.
-	brief bool
+	// handover is what it was written from, which a switch that takes over
+	// before it is typed carries on.
+	brief    bool
+	handover *handover
+}
+
+// handover is what a handoff brief tells the agent taking over. It is taken
+// from the record when the switch begins, so it still holds when a later
+// start reuses the name. When an agent is replaced before its own brief was
+// typed, the next brief is written from that agent's handover, extended:
+// the new agent hears about the one that did the work, not one that never
+// got to start.
+type handover struct {
+	// who, dir and transcript are the agent that did the work.
+	who, dir, transcript string
+	// reportBy and report are the latest turn report in the chain.
+	reportBy, report string
+	// via are the agents started in between that never received the brief,
+	// oldest first ("Claude", or "Claude (session log …)").
+	via []string
+	// names are the relays whose user sends the brief quotes.
+	names []string
+}
+
+// handoverFrom is a handover from a relay, as it is on the record now.
+// Loop goroutine.
+func handoverFrom(rel *state.Relay) *handover {
+	h := &handover{who: rel.Who(), dir: rel.Dir, transcript: rel.Transcript, names: []string{rel.Name}}
+	if rel.LastTurn != "" {
+		h.reportBy, h.report = rel.Who(), rel.LastTurn
+	}
+	return h
+}
+
+// through extends a handover whose brief never reached rel: rel is named as
+// started in between, its user sends count too, and a report of its own,
+// if it made one, is the latest. Loop goroutine.
+func (h *handover) through(rel *state.Relay) *handover {
+	n := *h
+	via := rel.Who()
+	if rel.Transcript != "" {
+		via += " (its session log is " + rel.Transcript + ")"
+	}
+	n.via = append(append([]string(nil), h.via...), via)
+	n.names = append(append([]string(nil), h.names...), rel.Name)
+	if rel.LastTurn != "" {
+		n.reportBy, n.report = rel.Who(), rel.LastTurn
+	}
+	return &n
 }
 
 // sendResult is how typing one send went.
@@ -531,6 +581,28 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		r.syncRelaySettings()
 		return "", err
 	}
+	if job.handover != nil {
+		// Written now, with what waited for this start in hand. A brief
+		// still waiting for the agent this switch replaced never reached
+		// it: this one hands over from the agent that brief was about, with
+		// the replaced one in between. What waits to be typed is typed
+		// after the brief as its own send (with its id, receipt and
+		// confirmation), so the brief does not quote it as already said.
+		ho := job.handover
+		pending := map[string]bool{}
+		for _, h := range held {
+			switch {
+			case h.brief && h.handover != nil:
+				if rel := r.st.Relays[job.replaces]; rel != nil {
+					ho = h.handover.through(rel)
+				}
+			case !h.barrier:
+				pending[h.id] = true
+			}
+		}
+		job.handover = ho
+		job.brief = r.writeBrief(ho, pending)
+	}
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
@@ -550,7 +622,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		id := r.st.NextRelaySendID()
 		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
-		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true})
+		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true, handover: job.handover})
 	}
 	for _, h := range held {
 		if h.brief && job.brief != "" {
@@ -1314,7 +1386,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					return nil, fmt.Errorf("%s is starting again; wait for it", cur.Who())
 				}
 				job.endOld = "handed over to " + profile
-				job.brief, job.briefAuto, job.briefDone, job.drained = r.handoffBrief(cur), auto, briefDone, drained
+				job.handover, job.briefAuto, job.briefDone, job.drained = handoverFrom(cur), auto, briefDone, drained
 				r.beginLaunch(job, cur.Name)
 				sw = job
 				return job, nil
@@ -1498,18 +1570,53 @@ func lastLine(s string) string {
 // instructions, verbatim, and the old agent's last word, from the record.
 // Loop goroutine.
 func (r *Runtime) handoffBrief(rel *state.Relay) string {
+	return r.writeBrief(handoverFrom(rel), nil)
+}
+
+// writeBrief writes a handoff brief. The user's sends to the relays in the
+// handover are quoted once each, oldest first, except those in pending
+// (typed into the new agent on their own after the brief). Loop goroutine.
+func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are taking over this work from %s, which was working in %s.", rel.Who(), rel.Dir)
-	if rel.Transcript != "" {
-		fmt.Fprintf(&b, " Its full session log is %s (JSONL) if you need detail.", rel.Transcript)
+	fmt.Fprintf(&b, "You are taking over this work from %s, which was working in %s.", ho.who, ho.dir)
+	if ho.transcript != "" {
+		fmt.Fprintf(&b, " Its full session log is %s (JSONL) if you need detail.", ho.transcript)
+	}
+	if len(ho.via) > 0 {
+		fmt.Fprintf(&b, " %s was started to take over in between and stopped before it was told the work.", strings.Join(ho.via, ", then "))
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	relaySendsTo(r.st, rel.Name, func(_ event.Event, d event.RelaySendData) {
-		if d.From == "user" {
-			texts = append(texts, d.Text)
+	seen := map[string]bool{}
+	for _, name := range ho.names {
+		seen[name] = true
+	}
+	quoted := map[string]bool{}
+	// One pass in record order over every relay in the handover, so the
+	// order is the order the user wrote them and a send moved from one to
+	// the next is quoted once.
+	for _, ev := range r.st.Events {
+		var d event.RelaySendData
+		switch ev.Type {
+		case event.RelaySend:
+			if ev.Decode(&d) != nil {
+				continue
+			}
+		case event.RelayMoved:
+			var m event.RelayMovedData
+			if ev.Decode(&m) != nil {
+				continue
+			}
+			d = m.RelaySendData
+		default:
+			continue
 		}
-	})
+		if !seen[d.Name] || d.From != "user" || quoted[d.ID] || pending[d.ID] {
+			continue
+		}
+		quoted[d.ID] = true
+		texts = append(texts, d.Text)
+	}
 	if len(texts) > 12 {
 		texts = texts[len(texts)-12:]
 		b.WriteString("(the latest 12)\n")
@@ -1517,8 +1624,8 @@ func (r *Runtime) handoffBrief(rel *state.Relay) string {
 	for _, t := range texts {
 		b.WriteString("- " + clipRunes(strings.ReplaceAll(strings.TrimSpace(t), "\n", "\n  "), 3000) + "\n")
 	}
-	if rel.LastTurn != "" {
-		fmt.Fprintf(&b, "\n%s's last report:\n%s\n", rel.Who(), clipRunes(rel.LastTurn, 6000))
+	if ho.report != "" {
+		fmt.Fprintf(&b, "\n%s's last report:\n%s\n", ho.reportBy, clipRunes(ho.report, 6000))
 	}
 	b.WriteString("\nCheck the working tree and recent commits, then continue where it left off.")
 	return b.String()
