@@ -767,7 +767,7 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	if err != nil {
 		return
 	}
-	if err = s.CheckRoutes(cfg); err != nil {
+	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil {
 		return
 	}
 	for _, problem := range cfg.Problems() {

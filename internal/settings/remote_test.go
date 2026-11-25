@@ -33,7 +33,8 @@ func TestArchiveAndRestrictedConnectorShareConfigurationVersion(t *testing.T) {
 	if _, _, _, err := s.Prepare(p, grant); err != nil {
 		t.Fatal("permitted edit could not use the captured configuration version", err)
 	}
-	p.Edits = []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENROUTER_API_KEY"}}
+	// A key variable the route may take (none), so only the grant refuses it.
+	p.Edits = []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: ""}}
 	if _, _, _, err := s.Prepare(p, grant); err == nil {
 		t.Fatal("shared configuration version bypassed the narrower grant")
 	}

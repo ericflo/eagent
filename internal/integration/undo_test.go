@@ -99,12 +99,13 @@ func TestUndoConflictsOnAffectedFieldsAndRequiresExactReviewedTarget(t *testing.
 
 func TestUndoRechecksCurrentFieldPermissionsAndOverrides(t *testing.T) {
 	s, g, _ := fixtureCommand(t)
-	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENROUTER_API_KEY"}}})
+	// A credential reference the route may take: no key at all.
+	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: ""}}})
 	first := executeExpected(t, s, g, q, "succeeded")
 	restricted := g
 	restricted.Classes = []string{"preference"}
 	executeExpected(t, s, restricted, reviewedUndo(t, s, restricted, first), "rejected")
-	if config.Resolve(s.Project, "", "").Effective.Model.APIKeyEnv != "OPENROUTER_API_KEY" {
+	if config.Resolve(s.Project, "", "").Effective.Model.APIKeyEnv != "" {
 		t.Fatal("undo bypassed the current permission grant")
 	}
 	q = reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: float64(60)}}})
