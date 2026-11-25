@@ -24,7 +24,7 @@ func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Re
 // call, not just one per client, gets its retry).
 func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
-	messages := anthropicMessages(req, c.Endpoint.BaseURL)
+	messages := anthropicMessagesFor(req, c.Endpoint.BaseURL, c.Endpoint.Model)
 	cached := anthropicBridge(messages, int(c.anthropicCached.Load()))
 	body := map[string]any{
 		"model":      c.Endpoint.Model,
@@ -295,9 +295,14 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	return out, nil
 }
 
-// anthropicMessages renders history with strict user/assistant alternation
-// and cache breakpoints on its last two blocks.
+// anthropicMessages renders history for a model it does not name.
 func anthropicMessages(req Request, host string) []map[string]any {
+	return anthropicMessagesFor(req, host, "")
+}
+
+// anthropicMessagesFor renders history for model with strict user/assistant
+// alternation and cache breakpoints on its last two blocks.
+func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 	var msgs []map[string]any
 	push := func(role string, content []map[string]any) {
 		if len(msgs) > 0 && msgs[len(msgs)-1]["role"] == role {
@@ -325,7 +330,7 @@ func anthropicMessages(req Request, host string) []map[string]any {
 			var content []map[string]any
 			// Signed thinking blocks are bound to the account that produced
 			// them; replay them only at the host that did.
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && anthropicReplays(m, model) {
 				var native []map[string]any
 				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
 					content = native

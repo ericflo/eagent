@@ -17,7 +17,7 @@ import (
 func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	body := map[string]any{
 		"model":             c.Endpoint.Model,
-		"input":             responsesInput(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL),
+		"input":             responsesInputFor(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL, c.Endpoint.Model),
 		"stream":            true,
 		"store":             false,
 		"max_output_tokens": c.maxTokens(req),
@@ -344,7 +344,13 @@ func sanitizeNativeArgs(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
+// responsesInput renders history for a model it does not name.
 func responsesInput(req Request, replayReasoning bool, host string) []any {
+	return responsesInputFor(req, replayReasoning, host, "")
+}
+
+// responsesInputFor renders history as input items for model.
+func responsesInputFor(req Request, replayReasoning bool, host, model string) []any {
 	var items []any
 	for _, m := range req.Messages {
 		switch m.Role {
@@ -363,8 +369,10 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 		case "assistant":
 			// Native items replay only at the host that minted them: encrypted
 			// reasoning and rs_/fc_ ids belong to that account, and a fallback
-			// route elsewhere would be rejected on every turn.
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+			// route elsewhere would be rejected on every turn. They replay only
+			// to the model that made them, too: another model at the same host
+			// gets the turn rebuilt, which every model takes.
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && sameModel(m.NativeModel, model) {
 				var native []json.RawMessage
 				if json.Unmarshal(m.Native, &native) == nil {
 					if replayReasoning {
