@@ -163,7 +163,8 @@ func run(args []string) int {
 		helpFlag  = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
-	rest, err := parseInterleaved(fs, args)
+	// Arguments after "--" are the prompt's words, never a command.
+	rest, commands, err := parseArgs(fs, args)
 	if err != nil {
 		return 64 // EX_USAGE
 	}
@@ -172,10 +173,10 @@ func run(args []string) int {
 		return 0
 	}
 	harness.Version = version
-	if len(rest) == 2 && rest[0] == "relay-agy-status" {
+	if commands > 0 && len(rest) == 2 && rest[0] == "relay-agy-status" {
 		return relay.WriteAntigravityStatus(rest[1], os.Stdin, os.Stdout)
 	}
-	if len(rest) > 0 && rest[0] == "relay-hook" {
+	if commands > 0 && rest[0] == "relay-hook" {
 		// Claude Code's Stop hook for a relay: fast, and silent unless it
 		// has messages to hand over.
 		if len(rest) < 2 {
@@ -190,7 +191,7 @@ func run(args []string) int {
 	}
 
 	cmd := ""
-	if len(rest) > 0 {
+	if commands > 0 {
 		switch rest[0] {
 		case "sessions", "show", "replay", "resume", "doctor", "config", "presets", "preset", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
@@ -398,22 +399,42 @@ func viewIgnoredFlags(w io.Writer, actor, task string) {
 // `eagent show <id> --raw` and `eagent resume <id> --answer yes` both work.
 // A literal `--` ends flag parsing.
 func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	rest, _, err := parseArgs(fs, args)
+	return rest, err
+}
+
+// parseArgs is parseInterleaved that also says how many of the positional
+// arguments came before a "--". Everything after "--" is positional, flags
+// included: a prompt that starts with "-" or reads "help" stays a prompt.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, int, error) {
 	var positional []string
+	before := -1
 	for len(args) > 0 {
 		if args[0] == "--" {
+			before = len(positional)
 			positional = append(positional, args[1:]...)
 			break
 		}
 		if err := fs.Parse(args); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		args = fs.Args()
+		rest := fs.Args()
+		// flag.Parse stops at a "--" and drops it.
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			before = len(positional)
+			positional = append(positional, rest...)
+			break
+		}
+		args = rest
 		if len(args) > 0 {
 			positional = append(positional, args[0])
 			args = args[1:]
 		}
 	}
-	return positional, nil
+	if before < 0 {
+		before = len(positional)
+	}
+	return positional, before, nil
 }
 
 func readAll(f *os.File) ([]byte, error) {

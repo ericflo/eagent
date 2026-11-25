@@ -112,7 +112,9 @@ var spawnCommand = func(project string, req SessionRequest, announce string) (*e
 		}
 	}
 	env := append(os.Environ(), AnnounceEnv+"="+announce)
-	cmd := exec.Command(exe, append(args, req.Prompt)...)
+	// "--": the prompt is the session's first message, word for word, even
+	// when it starts with "-" or is the name of a command.
+	cmd := exec.Command(exe, append(args, "--", req.Prompt)...)
 	cmd.Env = env
 	return cmd, nil
 }

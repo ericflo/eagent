@@ -312,6 +312,14 @@ func TestSpawnCommandCarriesTheAgentPicks(t *testing.T) {
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--relay claude --relay-model sonnet --relay-effort high") {
 		t.Fatalf("relay args = %v", cmd.Args)
 	}
+	// The prompt is the last argument, after "--": a bullet or a command's
+	// name is still the first message.
+	for _, prompt := range []string{"- fix login", "help", "--version"} {
+		cmd, _ := spawnCommand(project, SessionRequest{Prompt: prompt}, filepath.Join(project, "announce"))
+		if n := len(cmd.Args); n < 2 || cmd.Args[n-2] != "--" || cmd.Args[n-1] != prompt {
+			t.Fatalf("args for %q = %v", prompt, cmd.Args)
+		}
+	}
 }
 
 // The project's start action offers each agent's models, and a session's

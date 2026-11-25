@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -32,6 +34,31 @@ func TestParseInterleaved(t *testing.T) {
 	rest, _ = parseInterleaved(fs3, []string{"-p", "--", "--not-a-flag", "prompt"})
 	if strings.Join(rest, " ") != "--not-a-flag prompt" {
 		t.Fatalf("rest=%v", rest)
+	}
+}
+
+// Words after "--" are a prompt: never flags, never a command.
+func TestArgsAfterTerminatorAreWords(t *testing.T) {
+	for _, c := range []struct {
+		args     []string
+		rest     string
+		commands int
+	}{
+		{[]string{"-C", "x", "-p", "--", "help"}, "help", 0},
+		{[]string{"-p", "--", "- fix login"}, "- fix login", 0},
+		{[]string{"-p", "--", "-v"}, "-v", 0},
+		{[]string{"--", "doctor", "-p"}, "doctor -p", 0},
+		{[]string{"doctor"}, "doctor", 1},
+		{[]string{"-p", "resume", "1788", "--", "-go on"}, "resume 1788 -go on", 2},
+	} {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.Bool("p", false, "")
+		verbose := fs.Bool("v", false, "")
+		fs.String("C", "", "")
+		rest, commands, err := parseArgs(fs, c.args)
+		if err != nil || strings.Join(rest, " ") != c.rest || commands != c.commands || *verbose {
+			t.Errorf("%v: rest=%q commands=%d verbose=%v err=%v", c.args, rest, commands, *verbose, err)
+		}
 	}
 }
 
@@ -69,6 +96,38 @@ func TestCmdServersLifecycle(t *testing.T) {
 	}
 	if cfg.Model.BaseURL != mock.URL+"/v1" || cfg.Model.Model != "cli-test-model" || cfg.Model.Protocol != llm.ProtocolResponses || cfg.Model.APIKeyEnv != "" {
 		t.Fatalf("cfg.Model = %+v", cfg.Model)
+	}
+	if cfg.Model.ContextTokens != 65536 {
+		t.Fatalf("context_tokens = %d, want the picked model's", cfg.Model.ContextTokens)
+	}
+	// A model the server has not listed: its window is unknown, not the
+	// one of the model before.
+	if code := cmdServers(project, []string{"use", "cli-box", "not-listed-model"}, serverCLIOpts{}); code != 0 {
+		t.Fatalf("use exit code = %d", code)
+	}
+	if cfg, err = config.Load(project, ""); err != nil || cfg.Model.Model != "not-listed-model" || cfg.Model.ContextTokens != 0 {
+		t.Fatalf("after use of an unlisted model: %+v %v", cfg.Model, err)
+	}
+	// Chat Completions reads replay_reasoning too: a switch to it keeps the
+	// setting.
+	raw, err := os.ReadFile(config.File(project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file map[string]map[string]any
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	file["model"]["replay_reasoning"] = false
+	raw, _ = json.Marshal(file)
+	if err := os.WriteFile(config.File(project), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := cmdServers(project, []string{"use", "cli-box", "cli-test-model"}, serverCLIOpts{protocol: llm.ProtocolChat}); code != 0 {
+		t.Fatalf("use exit code = %d", code)
+	}
+	if cfg, err = config.Load(project, ""); err != nil || cfg.Model.Protocol != llm.ProtocolChat || cfg.Model.ReplayReasoning == nil || *cfg.Model.ReplayReasoning {
+		t.Fatalf("after a switch to Chat Completions: %+v %v", cfg.Model, err)
 	}
 	if code := cmdServers(project, []string{"refresh", "cli-box"}, serverCLIOpts{}); code != 0 {
 		t.Fatalf("refresh exit code = %d", code)
