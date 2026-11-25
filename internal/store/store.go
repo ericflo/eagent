@@ -63,19 +63,7 @@ func List(root string) ([]Info, error) {
 		if !e.IsDir() {
 			continue
 		}
-		info := Info{ID: e.Name(), Path: filepath.Join(root, e.Name())}
-		files, _ := subsessionFiles(info.Path)
-		info.Subsessions = len(files)
-		for _, f := range files {
-			st, err := os.Stat(filepath.Join(info.Path, f))
-			if err != nil {
-				continue
-			}
-			info.Size += st.Size()
-			if st.ModTime().After(info.Modified) {
-				info.Modified = st.ModTime()
-			}
-		}
+		info := Refresh(Info{ID: e.Name(), Path: filepath.Join(root, e.Name())})
 		if ms, err := strconv.ParseInt(strings.TrimLeft(e.Name(), "0"), 10, 64); err == nil {
 			info.Started = time.UnixMilli(ms)
 		} else if st, err := e.Info(); err == nil {
@@ -85,6 +73,25 @@ func List(root string) ([]Info, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// Refresh measures a session again: its subsessions, size and last change,
+// which grow while it runs.
+func Refresh(info Info) Info {
+	info.Subsessions, info.Size, info.Modified = 0, 0, time.Time{}
+	files, _ := subsessionFiles(info.Path)
+	info.Subsessions = len(files)
+	for _, f := range files {
+		st, err := os.Stat(filepath.Join(info.Path, f))
+		if err != nil {
+			continue
+		}
+		info.Size += st.Size()
+		if st.ModTime().After(info.Modified) {
+			info.Modified = st.ModTime()
+		}
+	}
+	return info
 }
 
 // Resolve finds a session by exact id, unique prefix, or "latest".

@@ -179,7 +179,6 @@ type SessionSummary = projection.SessionSummary
 type SessionDetail = projection.SessionDetail
 type UsageView = projection.UsageView
 
-var priceFor = projection.PriceFor
 var estimateCost = projection.EstimateCost
 
 func projectionInfo(info store.Info) projection.Metadata {
@@ -395,7 +394,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	statusTick := time.NewTicker(2 * time.Second)
 	defer statusTick.Stop()
-	emitStatus := func() { send("status", s.detailState(info, st)) }
+	// The session grows while it is followed: a rollover adds a subsession.
+	emitStatus := func() { info = store.Refresh(info); send("status", s.detailState(info, st)) }
 	emitStatus()
 	tail := newTailer(info.Path, after)
 	for {
