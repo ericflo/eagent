@@ -334,6 +334,34 @@ func AutoRollover(window, maxTokens int) int {
 	return max(n/1000*1000, 20_000)
 }
 
+// AutoRolloverWithin is AutoRollover held inside what the route can take
+// as input: its window less the reply ceiling (or the 16,384 tokens a call
+// asks for when the route sets none), of which fixed tokens are the system
+// prompt and the tool list that open every request. A conversation may
+// fill three quarters of what is left beside them, which leaves the rest
+// for the turn that carries it past the line. On a window where
+// AutoRollover's number already fits (every ordinary cloud model) the
+// number is AutoRollover's. A window too small to hold the fixed part at
+// all is left at AutoRollover's: no restart can make room there.
+func AutoRolloverWithin(window, maxTokens, fixed int) int {
+	n := AutoRollover(window, maxTokens)
+	if window <= 0 {
+		window = 200_000
+	}
+	if maxTokens <= 0 {
+		maxTokens = 16384
+	}
+	room := window - maxTokens - max(fixed, 0)
+	if room <= 0 {
+		return n
+	}
+	limit := max(fixed, 0) + room*3/4
+	if limit/1000*1000 > max(fixed, 0) {
+		limit = limit / 1000 * 1000
+	}
+	return min(n, limit)
+}
+
 // rolloverReserve is what a restart needs beside the conversation and the
 // reply: 8,000 tokens of slack and the least the dossier pass reads of the
 // record (60,000 characters, about 25,000 tokens with a fifth held back).
@@ -345,7 +373,9 @@ func (c Config) Rollover() int {
 	if c.RolloverTokens > 0 {
 		return c.RolloverTokens
 	}
-	return AutoRollover(c.Model.ContextTokens, c.Model.MaxTokens)
+	// The system prompt is not known here; a running session takes it off
+	// too, so on a small window it restarts a little later than this says.
+	return AutoRolloverWithin(c.Model.ContextTokens, c.Model.MaxTokens, 0)
 }
 
 // glmDescription describes the built-in defaults, which the "glm" preset names.
