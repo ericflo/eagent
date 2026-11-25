@@ -778,6 +778,30 @@ function openPicker(card, a, key, forFallback) {
 }
 
 // ---- summarizer, agent, behavior, phone, prompts, advanced --------------------------------------
+// ownSummarizerRoute is a copy of eagent's route for the summarizer to
+// start from, as the preset and the file give it: a value an EAGENT_*
+// variable puts in force is the shell's, and the summarizer's route is
+// written to the file, so such a value is never copied. Where the layers
+// have none, the field is left for the user to pick.
+async function ownSummarizerRoute() {
+  const c = clone(E.cfg.model); delete c.fallback;
+  const pinned = Object.keys(c).filter(k => envVar('/model/' + k));
+  if (!pinned.length) return c;
+  // A window is its model's: one the environment's model brought goes with it.
+  if (pinned.includes('model') && !pinned.includes('context_tokens')) pinned.push('context_tokens');
+  let layered = {};
+  try { layered = clone(E.base ? (await api(`/api/config/presets/${encodeURIComponent(E.base)}?kind=preset`)).config.model : E.c.defaults.model); } catch { /* no base to read: the pinned fields are left empty */ }
+  if (E.base === E.loadedBase) {
+    let file = {};
+    try { file = JSON.parse(E.c.resolution.file.raw || '{}').model || {}; } catch { /* an unreadable file sets nothing */ }
+    if (file.model !== undefined && file.context_tokens === undefined) delete layered.context_tokens;
+    Object.assign(layered, file);
+  }
+  delete layered.fallback;
+  for (const k of pinned) { if (layered[k] === undefined || layered[k] === null) delete c[k]; else c[k] = clone(layered[k]); }
+  return c;
+}
+
 // summarizerCard chooses how the thread's title and summary are kept and,
 // when a dedicated call keeps them, the route it calls.
 function summarizerCard() {
@@ -789,7 +813,7 @@ function summarizerCard() {
   const modeField = field('Title and summary', [seg], [srcNode('/summarizer/mode'), h('span', {class: 'src'}, mode === 'inline' ? 'eagent keeps them itself; no extra model calls.' : 'A separate call keeps them.'), ...problemNodes('/summarizer/mode')]);
   if (mode === 'dedicated' && sm.model && sm.model.model) return routeCard(ROUTES.summarizer, modeField);
   const own = mode === 'dedicated' && !lockedField('/summarizer/model/model')
-    ? h('button', {class: 'small', onclick: () => { const c = clone(E.cfg.model); delete c.fallback; sm.model = c; rerender(); }}, 'Give it its own model')
+    ? h('button', {class: 'small', onclick: async () => { try { sm.model = await ownSummarizerRoute(); rerender(); } catch (e) { toast(e.message, 'bad'); } }}, 'Give it its own model')
     : null;
   return h('div', {class: 'card route summarizer'}, h('div', {class: 'rhead'}, h('h3', null, h('span', {class: 'swatch'}), ROUTES.summarizer.name), h('p', {class: 'sub role'}, 'How the thread\'s title and summary are kept.')),
     modeField, mode === 'dedicated' ? h('div', {class: 'row'}, h('span', {class: 'sub'}, 'It calls eagent\'s model.'), own) : null, ...problemNodes('/summarizer/model'));
