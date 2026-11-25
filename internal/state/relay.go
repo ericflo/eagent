@@ -121,13 +121,21 @@ func (s *State) applyRelay(ev event.Event) {
 		prev := r
 		r = &Relay{Name: d.Name, Profile: d.Profile, Agent: d.Agent, AgentLabel: d.AgentLabel, Label: d.Label, Model: d.Model, Effort: d.Effort, Dir: d.Dir, Host: d.Host, Target: d.Target, Command: d.Command,
 			InnerID: d.InnerID, Transcript: d.Transcript, State: "starting", StateSince: ev.Time, StartSeq: ev.Seq, Undelivered: map[string]string{}}
-		if prev != nil {
-			// A restart continues the same relay: its history stays.
+		switch {
+		case prev != nil && (d.Resumed || !prev.Ended):
+			// A restart continues the same relay: its history stays. That
+			// is a start of a relay that was never stopped (a restart or a
+			// model change), or one that continues its own conversation.
 			r.Turns, r.LastTurn, r.LastTurnAt, r.Sends, r.LastSendFrom, r.LastSendAt, r.Recent, r.Limit, r.Autopilot = prev.Turns, prev.LastTurn, prev.LastTurnAt, prev.Sends, prev.LastSendFrom, prev.LastSendAt, prev.Recent, prev.Limit, prev.Autopilot
 			if r.InnerID == "" {
 				r.InnerID = prev.InnerID
 			}
-		} else {
+		case prev != nil:
+			// A new agent under the name of one that was stopped (a switch
+			// back, a new start) is a new conversation. Only the usage
+			// budget, which is the agent account's, carries over.
+			r.Limit = prev.Limit
+		default:
 			s.RelayOrder = append(s.RelayOrder, d.Name)
 		}
 		s.Relays[d.Name] = r
