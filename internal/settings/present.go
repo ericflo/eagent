@@ -248,7 +248,13 @@ func SessionConfigSuggestions(project string) []control.Suggestion {
 		if bundle != "" {
 			s.Label = bundle
 		}
-		cfg, err := config.LoadBundleWithFile(project, preset, bundle, file)
+		var cfg config.Config
+		var err error
+		if bundle != "" {
+			cfg, err = config.LoadBundleWithFile(project, "", bundle, file)
+		} else {
+			cfg, err = config.ChosenPresetWithFile(project, preset, file)
+		}
 		if err == nil {
 			detail := lineup(project, cfg)
 			if bundle != "" && cfg.Description != "" {

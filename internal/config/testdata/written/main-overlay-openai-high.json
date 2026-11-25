@@ -1,0 +1,8 @@
+{
+  "preset": "openai-high",
+  "orchestrator": {
+    "fallback": null,
+    "reasoning_effort": null
+  },
+  "finalechat": {}
+}

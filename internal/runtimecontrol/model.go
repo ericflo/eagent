@@ -341,6 +341,10 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		}
 	}
 	touched := map[string]bool{}
+	// effortNamed marks the routes whose effort this proposal names; any
+	// other touched route keeps its effort where the new model offers it,
+	// else takes the nearest it does.
+	effortNamed := map[string]bool{}
 	savePreset := ""
 	// A configuration chosen sets every route to what it runs here; route
 	// edits in the same proposal then apply on top of it.
@@ -352,11 +356,13 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if edit.Op != "set" || !ok {
 			return before, fmt.Errorf("choose a configuration by name")
 		}
-		preset, bundle := name, ""
+		var cfg config.Config
+		var err error
 		if b, isBundle := strings.CutPrefix(name, "bundle:"); isBundle {
-			preset, bundle = "", b
+			cfg, err = config.LoadBundle(project, "", b)
+		} else {
+			cfg, err = config.ChosenPreset(project, name)
 		}
-		cfg, err := config.LoadBundle(project, preset, bundle)
 		if err != nil {
 			return before, fmt.Errorf("configuration %s: %w", name, err)
 		}
@@ -441,6 +447,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 				rt.Model = s
 			case "effort":
 				rt.Effort = s
+				effortNamed[key] = true
 			default:
 				return before, fmt.Errorf("unsupported route field %q", field)
 			}
@@ -470,10 +477,21 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if rt.Provider == "" || rt.Model == "" {
 			return before, fmt.Errorf("%s needs both a provider and a model", label)
 		}
-		picked, err := config.PickRoute(project, config.ModelRoute{}, rt.Provider, rt.Model, rt.Effort)
+		// The same rule as the project settings' (config.PickRoute with no
+		// effort named): an effort the new model lacks becomes the nearest
+		// one it offers. The pick then names the effort, so the session
+		// sends the effort it reports (it applies the pick to its own
+		// configured route, whose effort may differ).
+		base, effort := config.ModelRoute{}, rt.Effort
+		if !effortNamed[key] {
+			base.ReasoningEffort, effort = rt.Effort, ""
+		}
+		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, effort)
 		if err != nil {
 			return before, err
 		}
+		rt.Effort = picked.ReasoningEffort
+		routes[key] = rt
 		if picked.APIKeyEnv != "" && os.Getenv(picked.APIKeyEnv) == "" {
 			return before, fmt.Errorf("%s is not set where this session runs, so %s cannot use %s", picked.APIKeyEnv, label, rt.Provider)
 		}

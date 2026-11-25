@@ -75,6 +75,15 @@ try {
     await page.getByRole('button', { name: 'Start', exact: true }).click();
     for (let i = 0; i < 50 && !started; i++) await page.waitForTimeout(100);
     assert.equal(started?.use_project, true, JSON.stringify(started));
+  } else if (mode === 'effort') {
+    // On Chat Completions a route with no effort sends none: 'default' is
+    // lit, not 'none' (which would send "none"), on a model whose efforts
+    // are checked and include none.
+    await page.goto(`${base}/#/config`);
+    await page.locator('.seg').first().waitFor();
+    const lit = await page.locator('.routes .card').first().locator('.seg button.on .e').allInnerTexts();
+    assert.ok(lit.includes('default') && !lit.includes('none'), `lit: ${JSON.stringify(lit)}`);
+    assert.match(await page.locator('.routes .card').first().innerText(), /no reasoning_effort is sent/);
   } else {
     for (const id of sessions) {
       for (const tab of ['chat', 'timeline', 'usage']) {

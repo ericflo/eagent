@@ -70,7 +70,7 @@ func TestBundlesLayerOverProjectConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Name != "mine" || cfg.Preset != "anthropic" {
+	if cfg.Name != "mine" || cfg.Preset != "anthropic-high" { // the older name reads as the preset it stands for
 		t.Fatalf("name=%q preset=%q", cfg.Name, cfg.Preset)
 	}
 	if cfg.Model.Model != "claude-x" || cfg.Model.Protocol != "anthropic" {

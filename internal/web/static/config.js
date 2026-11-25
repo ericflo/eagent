@@ -556,7 +556,10 @@ function routeCard(slot, top) {
 
   // Effort
   const {list, checked} = effortsFor(a);
-  const showDefault = a.protocol === 'openai-chat' && !checked;
+  // On Chat Completions no effort sends nothing (the provider's default),
+  // which is not 'none': 'default' is shown, and lit, whenever it is the
+  // route's effort, even on a model whose efforts are checked.
+  const showDefault = a.protocol === 'openai-chat' && (!checked || !a.reasoning_effort);
   const displayList = showDefault ? ['default', ...list] : list;
   const cur = a.reasoning_effort || (a.protocol === 'openai-chat' ? (showDefault ? 'default' : '') : 'none');
   const anyCheck = list.some(e => checkFor(a, e)) || (showDefault && checkFor(a, ''));
@@ -688,7 +691,7 @@ function fallbackLine(card, a, slot) {
   const inert = trimSlash(fb.base_url) === trimSlash(a.base_url) && fb.model === a.model;
   const sameProv = !inert && trimSlash(fb.base_url) === trimSlash(a.base_url);
   const {list, checked} = effortsFor(fb);
-  const showDefault = fb.protocol === 'openai-chat' && !checked;
+  const showDefault = fb.protocol === 'openai-chat' && (!checked || !fb.reasoning_effort);
   const displayList = showDefault ? ['default', ...list] : list;
   const cur = fb.reasoning_effort || (fb.protocol === 'openai-chat' ? (showDefault ? 'default' : '') : 'none');
   const sel = h('select', {class: 'mini', disabled: lockedField(`${base}/fallback/reasoning_effort`), onchange: ev => {

@@ -229,6 +229,15 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 	if res.LoadError != "" {
 		return fail(errors.New(res.LoadError))
 	}
+	// The save skips what the environment pins, so a pinned field of the
+	// route would leave the file with half of it: another server's address
+	// with the pinned model. Nothing is written instead.
+	pinned := config.EnvOverrides()
+	for _, field := range []string{"model", "base_url", "protocol", "api_key_env"} {
+		if name, ok := pinned["/model/"+field]; ok {
+			return fail(fmt.Errorf("%s sets eagent's %s here, so the model cannot be changed in the file; unset it first", name, field))
+		}
+	}
 	cfg := res.Effective
 	a := &cfg.Model
 	picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)

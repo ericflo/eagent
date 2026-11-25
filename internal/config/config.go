@@ -212,8 +212,10 @@ func (r Relay) RelayProfileNames() []string {
 type Finalechat struct {
 	// Artifacts enables proactive upload of native session logs and portable
 	// viewers, independently of conversation mirroring. On by default; set
-	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out.
-	Artifacts bool `json:"artifacts,omitempty"`
+	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out. Always written:
+	// false is the opt-out, and a file that left it out would read as on.
+	// A file without the key means on, as it always has.
+	Artifacts bool `json:"artifacts"`
 	// Enabled: nil means "on when a token is found"; false turns it off even
 	// when a token is present; true makes a missing token an error at start.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -644,23 +646,10 @@ func BundleBytes(name, description string, cfg Config) ([]byte, error) {
 		cfg.Description = description
 	}
 	cfg.DefaultConfig = ""
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, err
-	}
-	// Spell out "fallback": null when the model has no fallback so loading
-	// this saved preset on top of a project file whose preset carries one
-	// (such as openai-high) clears it instead of inheriting it.
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	if cfg.Model.Fallback == nil {
-		if m, ok := obj["model"].(map[string]any); ok {
-			m["fallback"] = nil
-		}
-	}
-	pretty, err := json.MarshalIndent(obj, "", "  ")
+	// A saved preset loads over the project file and the preset that file
+	// names, so every value it leaves empty is spelled out (spelled): a
+	// missing fallback or effort would otherwise be the file's or preset's.
+	pretty, err := json.MarshalIndent(spelled(cfg), "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -797,6 +786,62 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	normalize(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
+}
+
+// ChosenPreset is a built-in preset as a running session gets it when the
+// user picks it from the list of configurations: the project file's
+// settings over the preset, as at a start with --preset, except which model
+// the file names and where it is reached (and its default_config). The
+// model is what picking a preset chooses; the file's own would make every
+// preset the same model, or a broken one (a model name over another
+// provider's address). The file's effort and reply ceiling still apply.
+func ChosenPreset(project, preset string) (Config, error) {
+	file, err := readJSONMap(File(project))
+	if err != nil {
+		return Defaults(), err
+	}
+	return ChosenPresetWithFile(project, preset, file)
+}
+
+// ChosenPresetWithFile is ChosenPreset over given file contents.
+func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessage) (Config, error) {
+	if _, ok := ResolvePreset(preset); !ok {
+		return Defaults(), fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
+	}
+	rest, _ := DropModelChoice(file)
+	delete(rest, "default_config")
+	delete(rest, "preset")
+	return LoadBundleWithFile(project, preset, "", rest)
+}
+
+// modelChoiceFields are the fields of a route that say which model it is
+// and where it is reached: what choosing a preset chooses.
+var modelChoiceFields = []string{"protocol", "base_url", "model", "api_key_env", "context_tokens", "fallback"}
+
+// DropModelChoice returns a configuration object, carried over to today's
+// keys, without the model its route names or where it is reached, so a
+// preset under it decides them; the route's other settings (its effort,
+// its reply ceiling) stay. dropped is the model it named, "" when none.
+func DropModelChoice(file map[string]json.RawMessage) (out map[string]json.RawMessage, dropped string) {
+	migrated, _ := MigrateLegacy(file)
+	out = make(map[string]json.RawMessage, len(migrated))
+	for k, v := range migrated {
+		out[k] = v
+	}
+	route := object(out["model"])
+	if route == nil {
+		return out, ""
+	}
+	_ = json.Unmarshal(route["model"], &dropped)
+	for _, k := range modelChoiceFields {
+		delete(route, k)
+	}
+	if len(route) == 0 {
+		delete(out, "model")
+	} else {
+		out["model"], _ = json.Marshal(route)
+	}
+	return out, dropped
 }
 
 // normalize spells out what an empty setting means: an empty summarizer
@@ -987,7 +1032,9 @@ func applyEnv(project string, cfg *Config) {
 		}
 		cfg.Summarizer.Model = &route
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v > 0 {
+	// 0 is a value of its own: follow the model in use, over a number the
+	// file fixes.
+	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v >= 0 {
 		cfg.RolloverTokens = v
 	}
 	if v, err := strconv.Atoi(envFirst("EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
@@ -1132,12 +1179,14 @@ func Write(project string, cfg Config) (string, error) {
 		return path, err
 	}
 	defer editor.Close()
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	// The file builds on the preset it names, so what cfg leaves empty is
+	// spelled out to stay empty.
+	raw, err := marshalOrdered(spelled(cfg))
 	if err != nil {
 		return path, err
 	}
-	if len(raw)+1 > 1<<20 {
+	if len(raw) > 1<<20 {
 		return path, fmt.Errorf("configuration exceeds 1 MiB")
 	}
-	return path, filelock.CreateFile(path, append(raw, '\n'), 0o644)
+	return path, filelock.CreateFile(path, raw, 0o644)
 }
