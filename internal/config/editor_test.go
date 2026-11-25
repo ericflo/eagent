@@ -94,7 +94,7 @@ func TestCatalogIsConsistent(t *testing.T) {
 func TestResolveExplainsLayersAndActive(t *testing.T) {
 	project := t.TempDir()
 	t.Setenv("EAGENT_PRESET", "")
-	t.Setenv("EAGENT_REASONING_EFFORT", "high")
+	t.Setenv("EAGENT_REASONING_EFFORT", "low")
 	res := Resolve(project, "", "")
 	if res.LoadError != "" {
 		t.Fatalf("load error: %s", res.LoadError)
@@ -105,7 +105,7 @@ func TestResolveExplainsLayersAndActive(t *testing.T) {
 	if res.Sources["/model/model"] != "default" {
 		t.Fatalf("model source = %s", res.Sources["/model/model"])
 	}
-	if res.Sources["/model/reasoning_effort"] != "env:EAGENT_REASONING_EFFORT" || res.Effective.Model.ReasoningEffort != "high" {
+	if res.Sources["/model/reasoning_effort"] != "env:EAGENT_REASONING_EFFORT" || res.Effective.Model.ReasoningEffort != "low" {
 		t.Fatalf("env source = %s value=%s", res.Sources["/model/reasoning_effort"], res.Effective.Model.ReasoningEffort)
 	}
 	t.Setenv("EAGENT_REASONING_EFFORT", "")

@@ -51,33 +51,32 @@ func TestMigrateLegacyOrchestratorAndNarrator(t *testing.T) {
 	if err := json.Unmarshal(out["model"], &model); err != nil {
 		t.Fatal(err)
 	}
-	// Two different efforts: neither is written, down the fallbacks too, so
-	// the preset's applies.
-	if model.Model != "o/model" || model.BaseURL != "https://o.example/v1" || model.ReasoningEffort != "" {
+	// The orchestrator's route is carried over as written: its effort,
+	// and its fallbacks with theirs. The narrator's effort is not.
+	if model.Model != "o/model" || model.BaseURL != "https://o.example/v1" || model.ReasoningEffort != "xhigh" {
 		t.Fatalf("model = %+v", model)
 	}
-	if model.Fallback == nil || model.Fallback.Model != "o/fb" || model.Fallback.ReasoningEffort != "" ||
-		model.Fallback.Fallback == nil || model.Fallback.Fallback.ReasoningEffort != "" {
-		t.Fatalf("fallbacks must carry no effort: %+v", model.Fallback)
+	if model.Fallback == nil || model.Fallback.Model != "o/fb" || model.Fallback.ReasoningEffort != "high" ||
+		model.Fallback.Fallback == nil || model.Fallback.Fallback.Model != "o/fb2" || model.Fallback.Fallback.ReasoningEffort != "" {
+		t.Fatalf("fallbacks must be carried over as written: %+v", model.Fallback)
 	}
 	if string(out["persona"]) != `"terse"` {
 		t.Fatalf("persona = %s", out["persona"])
 	}
-	for _, n := range []string{"orchestrator is now model", "narrator was dropped", "task was dropped",
-		"orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (medium) differ"} {
+	for _, n := range []string{"orchestrator is now model", "its reasoning effort stays xhigh, now for every call", "narrator was dropped", "task was dropped",
+		"narrator.reasoning_effort (medium) is not carried over: one model has one effort, and it is the orchestrator's (xhigh)"} {
 		if !hasNote(notes, n) {
 			t.Errorf("no note %q in %v", n, notes)
 		}
 	}
 }
 
-// An effort the file names for the orchestrator alone is the only one the
-// user chose: it is kept, for the model and its fallbacks, and the note
-// says it now holds for every call.
+// An effort the file names for the orchestrator is kept, its fallbacks
+// keep theirs, and the note says it now holds for every call.
 func TestMigrateLegacyOrchestratorAloneKeepsItsEffort(t *testing.T) {
 	out, notes := MigrateLegacy(rawObject(t, `{"orchestrator": {"model": "o/model", "reasoning_effort": "xhigh", "fallback": {"model": "o/fb", "reasoning_effort": "high"}}}`))
 	m := object(out["model"])
-	if string(m["reasoning_effort"]) != `"xhigh"` || string(object(m["fallback"])["reasoning_effort"]) != `"xhigh"` {
+	if string(m["reasoning_effort"]) != `"xhigh"` || string(object(m["fallback"])["reasoning_effort"]) != `"high"` {
 		t.Fatalf("model = %s", out["model"])
 	}
 	if !hasNote(notes, "orchestrator is now model") || !hasNote(notes, "its reasoning effort stays xhigh, now for every call") || hasNote(notes, "narrator.reasoning_effort") {
@@ -186,7 +185,7 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 	Presets["anthropic-med"](&want)
 	want.Preset = "anthropic-med"
 	want.Model.Model = "claude-fable-5-1"
-	want.Model.ReasoningEffort = "medium"
+	want.Model.ReasoningEffort = "xhigh" // the orchestrator's, as the file wrote it
 	want.TickSeconds = 20
 	want.QuietSeconds = 240
 	want.RolloverTokens = 90000
@@ -211,7 +210,7 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 			"config.json: task_concurrency was dropped",
 			"config.json: max_task_turns was dropped",
 			"config.json: allow_outside_project was dropped",
-			"config.json: orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (medium) differ",
+			"config.json: narrator.reasoning_effort (medium) is not carried over: one model has one effort, and it is the orchestrator's (xhigh)",
 		} {
 			if !hasNote(notes, n) {
 				t.Errorf("%s: no note %q in %v", name, n, notes)
@@ -231,17 +230,17 @@ func TestLoadLegacyProjectFile(t *testing.T) {
 	if err := os.MkdirAll(BundlesDir(project), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(BundlePath(project, "old"), []byte(`{"narrator": {"reasoning_effort": "high"}}`), 0o644); err != nil {
+	if err := os.WriteFile(BundlePath(project, "old"), []byte(`{"narrator": {"reasoning_effort": "low"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = LoadBundle(project, "", "old")
 	// The narrator's effort alone is not carried over: the effort stays the
 	// preset's.
-	if err != nil || cfg.Model.ReasoningEffort != want.Model.ReasoningEffort || cfg.Model.Model != "claude-fable-5-1" || !hasNote(cfg.Migrated, "old.json: narrator.reasoning_effort (high) is not carried over") {
+	if err != nil || cfg.Model.ReasoningEffort != want.Model.ReasoningEffort || cfg.Model.Model != "claude-fable-5-1" || !hasNote(cfg.Migrated, "old.json: narrator.reasoning_effort (low) is not carried over") {
 		t.Fatalf("bundle: %v %+v %v", err, cfg.Model, cfg.Migrated)
 	}
 	alone, err := BundleAlone(project, "old")
-	if err != nil || alone.Model.ReasoningEffort == "high" {
+	if err != nil || alone.Model.ReasoningEffort == "low" {
 		t.Fatalf("BundleAlone: %v %+v", err, alone.Model)
 	}
 }
@@ -253,8 +252,8 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 	t.Setenv("EAGENT_PRESET", "")
 	t.Setenv("EAGENT_CONFIG", "")
 	writeConfig(t, project, `{
-  "orchestrator": {"model": "custom/model", "reasoning_effort": "high"},
-  "narrator": {"reasoning_effort": "high"},
+  "orchestrator": {"model": "custom/model", "reasoning_effort": "low"},
+  "narrator": {"reasoning_effort": "low"},
   "narrator_tick_seconds": 20,
   "task_concurrency": 3,
   "relay": {"quiet_seconds": 240, "profiles": {"mine": {"agent": "codex", "args": ["--x"]}}},
@@ -296,7 +295,7 @@ func TestEditorRewritesLegacyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.Migrated) != 0 || after.Model.Model != "custom/model" || after.Model.ReasoningEffort != "high" || after.TickSeconds != 20 || after.QuietSeconds != 240 || after.Persona != "brief" || after.Relay.Default != "mine" || after.Relay.Profiles["mine"].Agent != "codex" {
+	if len(after.Migrated) != 0 || after.Model.Model != "custom/model" || after.Model.ReasoningEffort != "low" || after.TickSeconds != 20 || after.QuietSeconds != 240 || after.Persona != "brief" || after.Relay.Default != "mine" || after.Relay.Profiles["mine"].Agent != "codex" {
 		t.Fatalf("after save: %+v\n%s", after, raw)
 	}
 	// Clearing the default keeps the profiles; with nothing left relay goes.
@@ -363,7 +362,7 @@ func TestEnvOverridesNewAndLegacyNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := cfg.Summarizer.Route(cfg.Model)
-	if cfg.Model.Model != "env/model" || cfg.Model.MaxTokens != 4096 || cfg.Model.ReasoningEffort != "medium" || cfg.Model.APIKeyEnv != "" ||
+	if cfg.Model.Model != "env/model" || cfg.Model.MaxTokens != 4096 || cfg.Model.ReasoningEffort != "high" || cfg.Model.APIKeyEnv != "" ||
 		cfg.Summarizer.Mode != SummarizerDedicated || sum.Model != "small/model" || sum.ReasoningEffort != "none" || sum.BaseURL != cfg.Model.BaseURL ||
 		cfg.TickSeconds != 15 || cfg.QuietSeconds != 0 || cfg.RolloverTokens != 50000 || cfg.Persona != "chatty" || cfg.Relay.Default != "codex" || cfg.Finalechat.Wanted() {
 		t.Fatalf("loaded = %+v summarizer %+v", cfg, sum)
@@ -408,13 +407,13 @@ func mustMarshal(t *testing.T, v any) json.RawMessage {
 
 // One effort for every call: the rules for an older file's two efforts.
 func TestMigrateLegacyEffortRules(t *testing.T) {
-	const narratorAlone = "narrator.reasoning_effort (low) is not carried over: the one model does the orchestrator's work too. Set model.reasoning_effort to choose a level."
+	const narratorAlone = "narrator.reasoning_effort (low) is not carried over: the one model does the orchestrator's work too, at the effort the orchestrator ran at. Set model.reasoning_effort to choose another level."
 	for _, c := range []struct {
 		name, in, effort, note string // effort "" means none is written
 	}{
-		{"both, equal", `{"orchestrator": {"model": "m", "reasoning_effort": "high"}, "narrator": {"reasoning_effort": "high"}}`, "high", "its reasoning effort stays high"},
-		{"both, different", `{"orchestrator": {"model": "m", "reasoning_effort": "xhigh"}, "narrator": {"reasoning_effort": "low"}}`, "",
-			"orchestrator.reasoning_effort (xhigh) and narrator.reasoning_effort (low) differ and one model has one effort, so neither is carried over and the preset's effort applies. Set model.reasoning_effort to choose a level."},
+		{"both, equal", `{"orchestrator": {"model": "m", "reasoning_effort": "high"}, "narrator": {"reasoning_effort": "high"}}`, "high", "its reasoning effort stays high, now for every call"},
+		{"both, different", `{"orchestrator": {"model": "m", "reasoning_effort": "xhigh"}, "narrator": {"reasoning_effort": "low"}}`, "xhigh",
+			"narrator.reasoning_effort (low) is not carried over: one model has one effort, and it is the orchestrator's (xhigh). Set model.reasoning_effort to choose another level."},
 		{"orchestrator alone", `{"orchestrator": {"model": "m", "reasoning_effort": "xhigh"}, "narrator": {"model": "n"}}`, "xhigh", "its reasoning effort stays xhigh, now for every call"},
 		{"narrator alone", `{"orchestrator": {"model": "z-ai/glm-5.3"}, "narrator": {"reasoning_effort": "low"}}`, "", narratorAlone},
 		{"narrator alone, no orchestrator", `{"narrator": {"reasoning_effort": "low"}}`, "", narratorAlone},
@@ -434,7 +433,7 @@ func TestMigrateLegacyEffortRules(t *testing.T) {
 		}
 	}
 	// End to end: the narrator's low never becomes the effort of every call;
-	// the preset's applies.
+	// the preset's applies, which is the level its orchestrator ran at.
 	project := t.TempDir()
 	t.Setenv("EAGENT_PRESET", "")
 	t.Setenv("EAGENT_CONFIG", "")

@@ -157,7 +157,7 @@ What the agent says and does is read from its own transcript, not scraped from t
 | `finalechat` | on when a token is found | The phone mirror and session archives. |
 | `persona` | | Replaces the voice in `PERSONA.md`. |
 
-Presets name one model each (`eagent config list`). They run it at medium effort, or high where the model offers no medium.
+Presets name one model each (`eagent config list`). They run it at the effort their orchestrator ran at before: `xhigh`, or the highest the model offers below `max` (`high` for GLM, Kimi, Mistral and DeepSeek). `model.reasoning_effort` sets another level.
 
 Prompts are Markdown files embedded in the binary: `EAGENT.md`, `PERSONA.md`, `DOSSIER.md`, `THREAD-SUMMARY.md`, `USER_MESSAGE.md`, `USER_ANSWER.md`. A file of the same name in `.agents/eagent/prompts/` overrides one.
 
@@ -165,7 +165,7 @@ Prompts are Markdown files embedded in the binary: `EAGENT.md`, `PERSONA.md`, `D
 
 eagent used to run an orchestrator, task workers and a narrator. The one loop does the narrator's job and the part of the orchestrator's job that concerned an agent in a terminal.
 
-**Config files still load.** `orchestrator` becomes `model`. The orchestrator's reasoning effort is kept and now applies to every call; if the file gave the narrator a different one, neither is carried over and the preset's applies; an effort named for the narrator alone is not carried over. `narrator_tick_seconds` and `narrator_quiet_seconds` become `tick_seconds` and `quiet_seconds`, and `max_orchestrator_calls_per_turn` becomes `max_calls_per_turn` (values above 200 are read as 200). `task`, `narrator` and the settings of task workers and shell tools are dropped. A file that does not set `rollover_tokens` gets the new default. Every key that was carried over, changed or dropped has a line in `eagent doctor`, and a run says in one line that there are some.
+**Config files still load.** `orchestrator` becomes `model`. The orchestrator's route is carried over as written, so its reasoning effort is kept and now applies to every call. The narrator's effort is never carried over; a file that named no orchestrator effort gets the preset's. `narrator_tick_seconds` and `narrator_quiet_seconds` become `tick_seconds` and `quiet_seconds`, and `max_orchestrator_calls_per_turn` becomes `max_calls_per_turn` (values above 200 are read as 200). `task`, `narrator` and the settings of task workers and shell tools are dropped. A file that does not set `rollover_tokens` gets the new default. Every key that was carried over, changed or dropped has a line in `eagent doctor`, and a run says in one line that there are some.
 
 **Old sessions still work.** They list, show, export and replay as before, and resume as described under the dossier.
 
@@ -197,5 +197,5 @@ eagent used to run an orchestrator, task workers and a narrator. The one loop do
 | | Before | Now | Why |
 |---|---|---|---|
 | `rollover_tokens` default | 150,000 | 64,000 | Every look re-reads the conversation from cache, so its length is the price of each look. A dossier loses nothing, since the record is kept whole and mapped. |
-| Reasoning effort | Orchestrator high, narrator low | One, medium in the presets | A call's effort is part of what the cache is keyed on. |
+| Reasoning effort | Orchestrator `xhigh` (or `high`), narrator `low` | One for every call: the orchestrator's | A call's effort is part of what the cache is keyed on, so the frequent looks the narrator made at `low` now run at the one effort too. |
 | Output ceiling | Per actor | 32,768 for every call | Same reason. |

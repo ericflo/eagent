@@ -13,7 +13,7 @@ func TestLoadDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Model != "zai-org/GLM-5.3" || cfg.Model.ReasoningEffort != "medium" || cfg.Summarizer.Mode != SummarizerInline || len(cfg.Migrated) != 0 {
+	if cfg.Model.Model != "zai-org/GLM-5.3" || cfg.Model.ReasoningEffort != "high" || cfg.Summarizer.Mode != SummarizerInline || len(cfg.Migrated) != 0 {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 	os.MkdirAll(filepath.Join(dir, ".agents", "eagent"), 0o755)
@@ -119,9 +119,11 @@ func TestBundlesLayerOverProjectConfig(t *testing.T) {
 	}
 }
 
-// Every preset runs its one model at one effort (medium, or high where the
-// model offers no medium; never none) with the loop's output ceiling, and
-// loads and validates on its own.
+// Every preset runs its one model at the effort its orchestrator ran at in
+// the three-actor design (git main before the one-loop change; the values
+// are copied from main's Presets): xhigh, or high where the model offers no
+// xhigh. Fallbacks run the same effort. Each has the loop's output ceiling
+// and loads and validates on its own.
 func TestPresetsRunOneEffort(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("EAGENT_PRESET", "")
@@ -134,11 +136,11 @@ func TestPresetsRunOneEffort(t *testing.T) {
 		if cfg.Preset != name || cfg.Summarizer.Mode != SummarizerInline {
 			t.Errorf("%s: preset %q summarizer %q", name, cfg.Preset, cfg.Summarizer.Mode)
 		}
+		want, listed := mainOrchestratorEffort[name]
+		if !listed {
+			t.Errorf("%s: no effort listed from main", name)
+		}
 		for cur := &cfg.Model; cur != nil; cur = cur.Fallback {
-			want := "medium"
-			if m, ok := Lookup(cur.BaseURL, cur.Model); ok && len(m.Efforts) > 0 && !contains(m.Efforts, "medium") {
-				want = "high"
-			}
 			if cur.ReasoningEffort != want || cur.MaxTokens != 32768 {
 				t.Errorf("%s: %s runs effort %q max_tokens %d, want %s and 32768", name, cur.Model, cur.ReasoningEffort, cur.MaxTokens, want)
 			}
@@ -232,4 +234,17 @@ func TestSavedPresetResolvesViaPresetFlagRejectsBuiltInAndClearsFallback(t *test
 	if _, err := os.Stat(BundlePath(dir, "my-local")); !os.IsNotExist(err) {
 		t.Fatal("deleted preset file still exists")
 	}
+}
+
+// mainOrchestratorEffort is the reasoning effort of each preset's
+// orchestrator on main, before the one-loop change.
+var mainOrchestratorEffort = map[string]string{
+	"glm": "high", "astra": "xhigh", "openai-high": "xhigh", "openai-med": "xhigh", "openai-low": "xhigh",
+	"openrouter-high": "high", "openrouter-med": "high", "openrouter-low": "high",
+	"anthropic-high": "xhigh", "anthropic-med": "xhigh",
+	"deepinfra-high": "high", "deepinfra-med": "high", "deepinfra-low": "high",
+	"fireworks-high": "high", "fireworks-med": "high", "fireworks-low": "high",
+	"opencode-high": "xhigh", "opencode-med": "high", "opencode-low": "high",
+	"nous-high": "high", "nous-med": "high", "nous-low": "high",
+	"deepseek": "high", "qwen": "xhigh", "muse": "xhigh", "mistral": "high", "muse-open": "xhigh", "beam": "xhigh", "deepseek-1017": "high",
 }

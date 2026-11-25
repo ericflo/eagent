@@ -281,33 +281,43 @@ const (
 // costs nothing when a reply is short.
 const loopMaxTokens = 32768
 
-// loopEffort is the effort the presets run at. One model both watches the
-// agent (often, where low would do) and decides for the user (a stuck
-// terminal, autopilot, where the three-actor design used its highest
-// effort), and it has one effort for both.
-const loopEffort = "medium"
+// loopEffort is the effort the presets run at: the one the orchestrator of
+// the three-actor design ran at. The one model makes the same decisions (a
+// stuck terminal, autopilot, what to tell the user), and it has one effort
+// for every call of a session, because many engines put the effort into
+// the prompt and a change of effort would cost the provider's cache of the
+// conversation. model.reasoning_effort sets another level.
+const loopEffort = "xhigh"
 
 // presetEffort is loopEffort where the model offers it, and otherwise the
-// nearest effort it does offer, never none. (DeepSeek V4.1 Flash 1017 has
-// no medium; it ran high wherever medium was wanted before, too.)
+// highest effort it offers below max: high for GLM, Kimi, Mistral and
+// DeepSeek. Never none, never max.
 func presetEffort(baseURL, model string) string {
 	m, ok := Lookup(baseURL, model)
 	if !ok || len(m.Efforts) == 0 || contains(m.Efforts, loopEffort) {
 		return loopEffort
 	}
-	for _, e := range []string{"high", "low", "xhigh"} {
-		if contains(m.Efforts, e) {
-			return e
+	best := ""
+	for _, e := range m.Efforts {
+		if e == "none" || e == "max" {
+			continue
+		}
+		if best == "" || EffortIndex(e) > EffortIndex(best) {
+			best = e
 		}
 	}
-	return loopEffort
+	if best == "" {
+		return loopEffort
+	}
+	return best
 }
 
 // glmDescription describes the built-in defaults, which the "glm" preset names.
 const glmDescription = "GLM-5.3 (Together AI)"
 
-// Defaults is the shipped configuration: GLM-5.3 on Together AI, thinking a
-// little, with the thread's title and summary kept inline.
+// Defaults is the shipped configuration: GLM-5.3 on Together AI at the
+// effort its orchestrator ran at (high, the most GLM offers), with the
+// thread's title and summary kept inline.
 func Defaults() Config {
 	return Config{
 		Model:           chatRoute(togetherURL, "TOGETHER_API_KEY", "zai-org/GLM-5.3", 200_000),
@@ -328,9 +338,9 @@ func Defaults() Config {
 // Each preset runs the model its orchestrator ran in the three-actor design,
 // on the same route (presets_test.go holds the list).
 //
-// Every preset runs at one effort for every call: medium, or the nearest
-// the model offers (see loopEffort and presetEffort). It always thinks,
-// never none.
+// Every preset runs at one effort for every call, the one its orchestrator
+// ran at: xhigh, or the highest the model offers below max (see loopEffort
+// and presetEffort).
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {

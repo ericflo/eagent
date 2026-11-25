@@ -77,10 +77,10 @@ func HasLegacyKeys(m map[string]json.RawMessage) bool {
 //   - orchestrator becomes model, unless the object already has model, in
 //     which case orchestrator is ignored. The one model has one effort for
 //     every call, where the orchestrator and the narrator each had their own:
-//     the orchestrator's effort is kept when the file names it alone or the
-//     same for both. Two different ones are not carried over, and neither is
-//     the narrator's alone (the one model makes the orchestrator's decisions
-//     too), so the preset's effort applies.
+//     the orchestrator's effort is kept whenever the file names it, since
+//     the one model makes the orchestrator's decisions. The narrator's is
+//     never carried over; with no orchestrator effort in the file the
+//     preset's applies, which is the level its orchestrator ran at.
 //   - narrator_tick_seconds and narrator_quiet_seconds become tick_seconds and
 //     quiet_seconds; relay.quiet_seconds, which replaced the quiet limit in
 //     relay sessions, becomes quiet_seconds too and wins over
@@ -118,17 +118,10 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 		for k, v := range orch {
 			model[k] = v
 		}
+		// The route is carried over as the file wrote it, fallbacks and
+		// their efforts included.
 		said := ""
-		switch {
-		case hasOE && hasNE && string(oe) == string(ne):
-			setEffort(model, oe)
-			said = "; its reasoning effort stays " + effortName(oe)
-		case hasOE && hasNE:
-			clearEffort(model)
-			notes = append(notes, "orchestrator.reasoning_effort ("+effortName(oe)+") and narrator.reasoning_effort ("+effortName(ne)+
-				") differ and one model has one effort, so neither is carried over and the preset's effort applies. Set model.reasoning_effort to choose a level.")
-		case hasOE:
-			setEffort(model, oe)
+		if hasOE {
 			said = "; its reasoning effort stays " + effortName(oe) + ", now for every call"
 		}
 		if len(model) > 0 {
@@ -136,8 +129,14 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 			notes = append(notes, "orchestrator is now model, the one model for every call"+said)
 		}
 	}
-	if hasNE && !hasOE {
-		notes = append(notes, "narrator.reasoning_effort ("+effortName(ne)+") is not carried over: the one model does the orchestrator's work too. Set model.reasoning_effort to choose a level.")
+	switch carried := hasOE && !hasModel; {
+	case !hasNE, carried && string(oe) == string(ne):
+		// No narrator effort, or the same level as the orchestrator's.
+	case carried:
+		notes = append(notes, "narrator.reasoning_effort ("+effortName(ne)+") is not carried over: one model has one effort, and it is the orchestrator's ("+effortName(oe)+
+			"). Set model.reasoning_effort to choose another level.")
+	default:
+		notes = append(notes, "narrator.reasoning_effort ("+effortName(ne)+") is not carried over: the one model does the orchestrator's work too, at the effort the orchestrator ran at. Set model.reasoning_effort to choose another level.")
 	}
 	if hasOrch {
 		delete(out, "orchestrator")
@@ -202,25 +201,6 @@ func MigrateLegacy(m map[string]json.RawMessage) (map[string]json.RawMessage, []
 			" where it was "+strconv.Itoa(legacyRolloverTokens)+" ("+strconv.Itoa(legacyPresetRolloverTokens)+" in some presets); set rollover_tokens to keep the old value")
 	}
 	return out, notes
-}
-
-// setEffort gives a route, and its fallbacks all the way down, one effort.
-func setEffort(route map[string]json.RawMessage, effort json.RawMessage) {
-	route["reasoning_effort"] = effort
-	if fb := object(route["fallback"]); fb != nil {
-		setEffort(fb, effort)
-		route["fallback"], _ = json.Marshal(fb)
-	}
-}
-
-// clearEffort removes the effort from a route and its fallbacks, so the
-// preset's holds.
-func clearEffort(route map[string]json.RawMessage) {
-	delete(route, "reasoning_effort")
-	if fb := object(route["fallback"]); fb != nil {
-		clearEffort(fb)
-		route["fallback"], _ = json.Marshal(fb)
-	}
 }
 
 // object decodes a JSON object, or returns nil for anything else.
