@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -147,4 +148,95 @@ func TestSendCutOffByAStopIsRecordedUndelivered(t *testing.T) {
 		d, failed := failedDeliveries(rt)[id]
 		return failed && strings.Contains(d.Detail, "not running")
 	})
+}
+
+// Once the session has ended the loop runs nothing, so a tool call that
+// arrives then (a late turn, a slash command's goroutine) learns nothing
+// about the relay. It says the session is ending; it never panics.
+func TestRelayToolsSayTheSessionIsEndingOnceItHasEnded(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	relayAgentHomes(t)
+	useGatedLaunches(t, []relaySeat{newFakeSeat("one")}, nil)
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt.sess.Close() })
+	close(rt.closed) // the loop has stopped; nothing serves r.sync
+	for _, c := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"relay_send", map[string]any{"text": "hello"}},
+		{"relay_forward", map[string]any{"seq": 1}},
+		{"relay_screen", map[string]any{}},
+		{"relay_status", map[string]any{}},
+		{"relay_autopilot", map[string]any{}},
+		{"relay_control", map[string]any{"action": "interrupt"}},
+		{"relay_control", map[string]any{"action": "stop"}},
+		{"relay_control", map[string]any{"action": "restart"}},
+		{"relay_control", map[string]any{"action": "model", "model": "gpt-6.2-astra"}},
+		{"relay_control", map[string]any{"action": "switch", "profile": "claude"}},
+		{"relay_start", map[string]any{"profile": "claude"}},
+	} {
+		func() {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("%s %v panicked: %v", c.tool, c.args, p)
+				}
+			}()
+			text, isErr := rt.relayTool(c.tool, argStr(c.args), argNum(c.args), argList(c.args), false)
+			if !isErr || !strings.Contains(text, "ending") {
+				t.Errorf("%s %v: %q (error %v), want that the session is ending", c.tool, c.args, text, isErr)
+			}
+		}()
+	}
+}
+
+// Stop session while a restart started from a slash command (/restart) or
+// a model change is launching: the process does not end before the agent
+// that start brings up is stopped, so no agent is left running that the
+// record does not know about.
+func TestStopSessionWaitsForARestartStartedOffTheTurn(t *testing.T) {
+	for _, how := range []string{"/restart", "model change"} {
+		t.Run(how, func(t *testing.T) {
+			first, next := newFakeSeat("one"), newFakeSeat("two")
+			g := useGatedLaunches(t, []relaySeat{first, next}, nil)
+			t.Setenv("EAGENT_TEST_KEY", "x")
+			relayAgentHomes(t)
+			ui := &fakeUI{input: make(chan string, 16)}
+			rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex", Interactive: true}, ui)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			done := make(chan int, 1)
+			go func() { done <- rt.Run(ctx) }()
+			rt.sync(func() {
+				rt.st.Relays["codex"].State = "idle"
+				if how == "/restart" {
+					rt.relayCommand([]string{"/restart"}, nil)
+				} else if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+					t.Errorf("repick: %v", err)
+				}
+			})
+			g.waitEntered(t)
+			rt.sync(func() { rt.stopSession("stopped from the app") })
+			select {
+			case <-done:
+				t.Fatal("the session ended while an agent was still starting")
+			case <-time.After(500 * time.Millisecond):
+			}
+			g.release <- struct{}{}
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the session did not end")
+			}
+			if !next.wasKilled() {
+				t.Fatal("the session ended and left the agent the restart brought up running")
+			}
+		})
+	}
 }

@@ -355,6 +355,11 @@ func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
 // prepareLaunch settles what a start launches. Loop goroutine (or before
 // the loop starts).
 func (r *Runtime) prepareLaunch(profile, dir, name string, resume bool, pick relayPick) (*relayLaunch, error) {
+	if r.ending {
+		// Nothing would watch it, and the session's end may not wait for
+		// it: no agent is started once the session is ending.
+		return nil, errEnding
+	}
 	if name == "" {
 		name = profile
 		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active() || r.relays.launch(name) != nil; i++ {
@@ -393,6 +398,9 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	if rel := r.st.Relays[replaces]; replaces != "" && rel != nil && rel.Active() {
 		job.wasActive = true
 	}
+	// Waited for at the session's end (finish), which must not exit while
+	// an agent is coming up; finishLaunch or abandonLaunch marks it done.
+	r.relayOps.Add(1)
 	r.relays.mu.Lock()
 	if r.relays.launching == nil {
 		r.relays.launching = map[string]*relayLaunch{}
@@ -449,6 +457,7 @@ const oldSendSettle = 15 * time.Second
 // handoff brief and before anything sent from now on (or are recorded as
 // undelivered when the start failed). Loop goroutine.
 func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
+	defer r.relayOps.Done()
 	var held []heldSend
 	r.relays.mu.Lock()
 	for name, j := range r.relays.launching {
@@ -474,7 +483,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				// everything" leaves none behind.
 				_ = seat.Kill()
 			} else {
-				go func() { _ = seat.Kill() }()
+				r.relayOps.Add(1)
+				go func() {
+					defer r.relayOps.Done()
+					_ = seat.Kill()
+				}()
 			}
 		}
 	}
@@ -534,6 +547,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 // session ended: the new agent is stopped, as nothing would watch it, and
 // whoever waits on a send held for it is told. Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
+	defer r.relayOps.Done()
 	if job.err == nil {
 		_ = job.seat.Kill()
 	}
@@ -1013,6 +1027,19 @@ func (r *Runtime) resolveRelay(name string) (*state.Relay, error) {
 
 // ---- tools ----------------------------------------------------------------
 
+// errEnding is a tool's answer once the session has ended: the loop runs
+// nothing more, so nothing about a relay can be learnt or changed.
+var errEnding = errors.New("the session is ending")
+
+// onLoop runs fn on the loop goroutine, as r.sync does, and reports whether
+// it ran: once the session has ended it does not, and whatever fn would have
+// set is still unset.
+func (r *Runtime) onLoop(fn func()) bool {
+	ran := false
+	r.sync(func() { fn(); ran = true })
+	return ran
+}
+
 // relayTool runs one of the tools that drive an agent. auto says the call
 // is the harness's own (a command the user typed), not the model's: what it
 // sends the agent is then marked so, and shows in the model's conversation
@@ -1046,7 +1073,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		var seat relaySeat
 		held := false
 		done := make(chan sendResult, 1)
-		r.sync(func() {
+		ran := r.onLoop(func() {
 			if rel, err = r.resolveRelay(str("relay")); err != nil {
 				return
 			}
@@ -1092,6 +1119,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: "the agent is not running"}))
 			}
 		})
+		if !ran {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1113,12 +1143,14 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_status":
 		var name string
 		var err error
-		r.sync(func() {
+		if !r.onLoop(func() {
 			var rel *state.Relay
 			if rel, err = r.resolveRelay(str("relay")); err == nil {
 				name = rel.Name
 			}
-		})
+		}) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1126,7 +1158,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_screen":
 		var rel *state.Relay
 		var err error
-		r.sync(func() { rel, err = r.resolveRelay(str("relay")) })
+		if !r.onLoop(func() { rel, err = r.resolveRelay(str("relay")) }) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1143,7 +1177,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		action := str("action")
 		var rel *state.Relay
 		var err error
-		r.sync(func() { rel, err = r.resolveRelay(str("relay")) })
+		if !r.onLoop(func() { rel, err = r.resolveRelay(str("relay")) }) {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
@@ -1237,7 +1273,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return "model: say the model, the effort, or both (\"default\" goes back to the agent's own)", true
 			}
 			var msg string
-			r.sync(func() {
+			ran := r.onLoop(func() {
 				// "default" clears that pick; the other one is kept.
 				next := relayPick{rel.Model, rel.Effort}
 				if p, ok := r.relayRepick[rel.Name]; ok {
@@ -1256,6 +1292,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				}
 				msg, err = r.repickRelay(rel.Name, next)
 			})
+			if !ran {
+				return errEnding.Error(), true
+			}
 			if err != nil {
 				return err.Error(), true
 			}
@@ -1265,14 +1304,20 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			// above: a restart may have finished in between, and its new
 			// agent is the one to stop.
 			var current relaySeat
-			r.sync(func() {
+			if !r.onLoop(func() {
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
+					// The session's end waits for the kill, so the agent
+					// is not left running once the record says stopped.
+					r.relayOps.Add(1)
 				}
 				r.stopLaunches(rel.Name, "stopped")
-			})
+			}) {
+				return errEnding.Error(), true
+			}
 			if current != nil {
 				_ = current.Kill()
+				r.relayOps.Done()
 			}
 			r.sync(func() {
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
@@ -1284,7 +1329,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_autopilot":
 		var out string
 		var err error
-		r.sync(func() {
+		ran := r.onLoop(func() {
 			var rel *state.Relay
 			if rel, err = r.resolveRelay(str("relay")); err != nil {
 				return
@@ -1317,6 +1362,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			r.append(event.New(event.RelayAutopilot, event.ActorHarness, d))
 			r.armAutopilots()
 		})
+		if !ran {
+			return errEnding.Error(), true
+		}
 		if err != nil {
 			return err.Error(), true
 		}
