@@ -611,8 +611,16 @@ func (p *piParser) line(raw []byte) []obs {
 	m := ev.Message
 	switch m.Role {
 	case "user":
+		// pi takes a message sent while it works into the run that is
+		// going. What it had just said was then its reply to the message
+		// before, and no run end will carry it: it is reported as a step
+		// rather than lost.
+		var out []obs
+		if p.held != "" {
+			out = append(out, obs{kind: "progress", text: p.held, at: at})
+		}
 		p.held, p.failed = "", ""
-		return []obs{{kind: "user", text: piText(m.Content), at: at}, {kind: "working", at: at}}
+		return append(out, obs{kind: "user", text: piText(m.Content), at: at}, obs{kind: "working", at: at})
 	case "assistant":
 	default:
 		return nil

@@ -427,3 +427,56 @@ func TestPiExtensionHandsAMessageOverOnce(t *testing.T) {
 		t.Fatalf("spool %v", got)
 	}
 }
+
+// pi runs a message sent while it works inside the run that is going, so
+// one run can answer two messages. The reply to the first is not the
+// run's report (that is the last one), and it must not vanish: it is
+// reported as a step.
+func TestPiReplyBeforeAMessageTakenMidRunIsNotLost(t *testing.T) {
+	p := &piParser{exact: true}
+	var got []obs
+	for _, line := range []string{
+		`{"type":"message","id":"1","timestamp":"2026-11-25T10:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"message","id":"2","timestamp":"2026-11-25T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Reply to the first."}],"stopReason":"stop"}}`,
+		`{"type":"message","id":"3","timestamp":"2026-11-25T10:00:06Z","message":{"role":"user","content":"second"}}`,
+		`{"type":"message","id":"4","timestamp":"2026-11-25T10:00:09Z","message":{"role":"assistant","content":[{"type":"text","text":"Reply to the second."}],"stopReason":"stop"}}`,
+		`{"type":"custom","id":"5","timestamp":"2026-11-25T10:00:10Z","customType":"` + piSettledEntry + `","data":{"aborted":false}}`,
+	} {
+		got = append(got, p.line([]byte(line))...)
+	}
+	var steps, turns []string
+	for _, o := range got {
+		switch o.kind {
+		case "progress":
+			steps = append(steps, o.text)
+		case "turn":
+			turns = append(turns, o.text)
+		}
+	}
+	if len(steps) != 1 || steps[0] != "Reply to the first." {
+		t.Fatalf("the reply to the first message was reported as %q, want it once as a step", steps)
+	}
+	if len(turns) != 1 || turns[0] != "Reply to the second." {
+		t.Fatalf("the run was reported as %q, want one turn ending on the last reply", turns)
+	}
+}
+
+// Between two ordinary runs nothing is held, and a new message brings no
+// step with it.
+func TestPiMessageAfterASettledRunBringsNoStep(t *testing.T) {
+	p := &piParser{exact: true}
+	var got []obs
+	for _, line := range []string{
+		`{"type":"message","id":"1","timestamp":"2026-11-25T10:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"message","id":"2","timestamp":"2026-11-25T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Reply to the first."}],"stopReason":"stop"}}`,
+		`{"type":"custom","id":"3","timestamp":"2026-11-25T10:00:06Z","customType":"` + piSettledEntry + `","data":{"aborted":false}}`,
+		`{"type":"message","id":"4","timestamp":"2026-11-25T10:00:09Z","message":{"role":"user","content":"second"}}`,
+	} {
+		got = append(got, p.line([]byte(line))...)
+	}
+	for _, o := range got {
+		if o.kind == "progress" {
+			t.Fatalf("a step %q was reported between two settled runs", o.text)
+		}
+	}
+}
