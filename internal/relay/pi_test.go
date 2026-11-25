@@ -324,7 +324,7 @@ func TestRegistry(t *testing.T) {
 	if len(builtin) != len(Agents()) {
 		t.Fatalf("%d built-in profiles for %d agents", len(builtin), len(Agents()))
 	}
-	for relayName, want := range map[string]string{"pi": "pi", "pi-2": "pi", "codex-3": "codex", "claude": "claude", "antigravity-x": "antigravity", "other": ""} {
+	for relayName, want := range map[string]string{"pi": "pi", "pi-2": "pi", "codex-3": "codex", "claude": "claude", "antigravity-x": "antigravity", "other": "", "pipeline": "", "pipeline-2": "", "codexer": "", "claude-fast": "claude"} {
 		if got := AgentOf(relayName); got != want {
 			t.Fatalf("AgentOf(%s) = %q", relayName, got)
 		}

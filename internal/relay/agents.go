@@ -202,12 +202,15 @@ func Installed(agent string) bool {
 }
 
 // AgentOf reads which agent a relay runs from its name ("codex-2" runs
-// codex), for relays found running without their session's log. The
-// longest agent name that starts it wins; "" when none does.
+// codex), for relays found running without their session's log: the name
+// is the agent's, or the agent's followed by "-" and more. The longest
+// such agent name wins; "" when none does, so a custom profile named
+// "pipeline" is not taken for pi.
 func AgentOf(relayName string) string {
 	best := ""
 	for _, a := range Agents() {
-		if strings.HasPrefix(relayName, a.Name()) && len(a.Name()) > len(best) {
+		n := a.Name()
+		if (relayName == n || strings.HasPrefix(relayName, n+"-")) && len(n) > len(best) {
 			best = a.Name()
 		}
 	}
