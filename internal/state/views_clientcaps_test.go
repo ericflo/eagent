@@ -78,7 +78,7 @@ func TestUserAnswerWithCapsRendersClientLine(t *testing.T) {
 	}
 	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Pick one", Options: []string{"a", "b"}}))
+	add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Pick one", Options: []string{"a", "b"}}))
 	atev := add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{
 		QuestionID: "q1",
 		Text:       "a",

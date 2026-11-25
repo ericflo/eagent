@@ -20,8 +20,8 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 )
 
-// Actor configures one model route.
-type Actor struct {
+// ModelRoute configures one model endpoint.
+type ModelRoute struct {
 	Protocol        string `json:"protocol"` // openai-chat | openai-responses | anthropic
 	BaseURL         string `json:"base_url"`
 	Model           string `json:"model"`
@@ -34,12 +34,41 @@ type Actor struct {
 	// prompts.
 	ReplayReasoning *bool `json:"replay_reasoning,omitempty"`
 	MaxTokens       int   `json:"max_tokens,omitempty"`
-	// ContextTokens is the model's usable window; the orchestrator rolls
-	// over to a new subsession when its prompt approaches RolloverTokens.
+	// ContextTokens is the model's usable window. The session starts a new
+	// subsession long before it, at RolloverTokens.
 	ContextTokens int `json:"context_tokens,omitempty"`
 	// Fallback is tried when the primary route is unroutable (bad key, no
 	// access to the model, exhausted credits).
-	Fallback *Actor `json:"fallback,omitempty"`
+	Fallback *ModelRoute `json:"fallback,omitempty"`
+}
+
+// Summarizer modes.
+const (
+	// SummarizerInline has eagent's own loop keep the thread's title and
+	// summary, with the update_thread tool, on the prompt it already has
+	// cached.
+	SummarizerInline = "inline"
+	// SummarizerDedicated makes a separate small call for them, on a route
+	// of its own.
+	SummarizerDedicated = "dedicated"
+)
+
+// Summarizer says how the thread's title and summary are written.
+type Summarizer struct {
+	// Mode is "inline" (the default) or "dedicated".
+	Mode string `json:"mode"`
+	// Model is the route a dedicated summarizer calls, exactly as written
+	// here: nothing about it is adjusted behind the scenes. Left out, a
+	// dedicated summarizer uses the main model's route. Ignored when inline.
+	Model *ModelRoute `json:"model,omitempty"`
+}
+
+// Route is the route a dedicated summarizer calls: its own, else main.
+func (s Summarizer) Route(main ModelRoute) ModelRoute {
+	if s.Model != nil && s.Model.Model != "" {
+		return *s.Model
+	}
+	return main
 }
 
 // Config is the full effective configuration.
@@ -52,48 +81,41 @@ type Config struct {
 	// neither --config nor EAGENT_CONFIG is given.
 	DefaultConfig string `json:"default_config,omitempty"`
 
-	Preset       string `json:"preset,omitempty"`
-	Orchestrator Actor  `json:"orchestrator"`
-	Task         Actor  `json:"task"`
-	Narrator     Actor  `json:"narrator"`
+	Preset string `json:"preset,omitempty"`
+	// Model is the one model eagent runs on: it reads what the agent does,
+	// talks to the user, and drives the agent's terminal.
+	Model ModelRoute `json:"model"`
+	// Summarizer is how the thread's title and summary are kept.
+	Summarizer Summarizer `json:"summarizer"`
 
-	// TaskConcurrency caps simultaneously running task-worker tasks.
-	TaskConcurrency int `json:"task_concurrency"`
-	// MaxTaskTurns bounds model calls per task before it is failed.
-	MaxTaskTurns int `json:"max_task_turns"`
-	// MaxOrchestratorCallsPerTurn is the consecutive tool-calling round count
-	// at which the harness steers the orchestrator to delegate, wait, or
-	// yield. A nudge, not a hard cap.
-	MaxOrchestratorCallsPerTurn int `json:"max_orchestrator_calls_per_turn"`
-	// NarratorTickSeconds is how often the narrator is woken while the
-	// orchestrator is busy and nothing else has woken it.
-	NarratorTickSeconds int `json:"narrator_tick_seconds"`
-	// NarratorQuietSeconds is how long the user may go without hearing from
-	// the narrator while work continues before the steer asks for a short
-	// progress line. 0 disables the reminder.
-	NarratorQuietSeconds int `json:"narrator_quiet_seconds"`
-	// RolloverTokens is the orchestrator prompt size that triggers a new
-	// subsession and a dossier.
+	// MaxCallsPerTurn bounds the model calls one wake may make (a look at
+	// the screen, a key press, another look, ...).
+	MaxCallsPerTurn int `json:"max_calls_per_turn"`
+	// TickSeconds is how often eagent considers saying something while the
+	// agent works. A tick with nothing new costs no model call.
+	TickSeconds int `json:"tick_seconds"`
+	// QuietSeconds is the longest the user goes without a progress line
+	// while the agent works. 0 disables the limit.
+	QuietSeconds int `json:"quiet_seconds"`
+	// RolloverTokens is the prompt size at which the conversation is
+	// restarted from a dossier in a new subsession.
 	RolloverTokens int `json:"rollover_tokens"`
-	// BashWaitSeconds is how long `bash` waits inline for a command before
-	// returning its handle.
-	BashWaitSeconds int `json:"bash_wait_seconds"`
-	// BashTimeoutSeconds is the default deadline for a command.
-	BashTimeoutSeconds int `json:"bash_timeout_seconds"`
-	// ToolOutputMaxChars truncates any single tool result.
-	ToolOutputMaxChars int `json:"tool_output_max_chars"`
-	// Persona overrides the narrator's voice.
+	// ReportMaxChars bounds how much of an agent's turn report eagent's own
+	// prompt carries. The user always gets the whole report.
+	ReportMaxChars int `json:"report_max_chars"`
+	// Persona overrides eagent's voice.
 	Persona string `json:"persona,omitempty"`
 	// Finalechat mirrors the conversation to the user's phone. It is on
 	// whenever a token is found unless enabled is explicitly false.
 	Finalechat Finalechat `json:"finalechat"`
-	// AllowOutsideProject lets file tools touch paths outside the project.
-	AllowOutsideProject bool `json:"allow_outside_project"`
-	// Relay configures relay sessions, where eagent runs an external coding
-	// agent (Codex, Claude Code) and passes the user's words to it.
+	// Relay configures the coding agents eagent can run.
 	Relay Relay `json:"relay,omitzero"`
-	// Instructions is loaded from AGENTS.md / .agents/eagent/INSTRUCTIONS.md.
+	// Instructions is loaded from .agents/eagent/INSTRUCTIONS.md: notes for
+	// eagent itself. (The agent reads the project's AGENTS.md on its own.)
 	Instructions string `json:"-"`
+	// Migrated lists what was carried over from keys of the three-actor
+	// design when this configuration was read, for `eagent doctor`.
+	Migrated []string `json:"-"`
 }
 
 // Relay configures relay sessions. Profiles are kept in a map so the remote
@@ -104,9 +126,9 @@ type Relay struct {
 	// "claude" are always available; a profile here with the same name
 	// replaces the built-in one.
 	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
-	// QuietSeconds, when set, replaces NarratorQuietSeconds while a relayed
-	// agent works. Unset, a relay session keeps the same limit as any other.
-	QuietSeconds int `json:"quiet_seconds,omitempty"`
+	// Default names the profile a session starts when it is not told which.
+	// Empty picks the first built-in agent that is installed.
+	Default string `json:"default,omitempty"`
 }
 
 // RelayProfile is one way to start an external agent.
@@ -243,267 +265,148 @@ const (
 	nousURL       = "https://inference-api.nousresearch.com/v1"
 )
 
-// Defaults is the shipped configuration: GLM-5.3 orchestrating, GLM-5.3-Flash
-// doing the work, DeepSeek V4.1 Flash 1017 narrating, all on Together AI.
+// loopMaxTokens is the output budget of one call: a message, a few tool
+// calls, or a one-page dossier.
+const loopMaxTokens = 8192
+
+// glmDescription describes the built-in defaults, which the "glm" preset names.
+const glmDescription = "GLM-5.3 (Together AI)"
+
+// Defaults is the shipped configuration: GLM-5.3 on Together AI, thinking a
+// little, with the thread's title and summary kept inline.
 func Defaults() Config {
 	return Config{
-		Orchestrator: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "zai-org/GLM-5.3",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "high", MaxTokens: 32768, ContextTokens: 200_000,
-		},
-		Task: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "zai-org/GLM-5.3-Flash",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 200_000,
-		},
-		Narrator: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "low", MaxTokens: 4096, ContextTokens: 1_048_576,
-		},
-		TaskConcurrency:             3,
-		MaxTaskTurns:                150,
-		MaxOrchestratorCallsPerTurn: 30,
-		NarratorTickSeconds:         30,
-		NarratorQuietSeconds:        180,
-		RolloverTokens:              150_000,
-		BashWaitSeconds:             20,
-		BashTimeoutSeconds:          600,
-		ToolOutputMaxChars:          24_000,
-		Finalechat:                  Finalechat{Artifacts: true},
+		Model:           chatRoute(togetherURL, "TOGETHER_API_KEY", "zai-org/GLM-5.3", 200_000),
+		Summarizer:      Summarizer{Mode: SummarizerInline},
+		MaxCallsPerTurn: 8,
+		TickSeconds:     30,
+		QuietSeconds:    180,
+		RolloverTokens:  64_000,
+		ReportMaxChars:  6000,
+		Finalechat:      Finalechat{Artifacts: true},
 	}
 }
 
-// Presets are named alternative routings. The provider-tier names
+// Presets are named models to run eagent on. The provider-tier names
 // (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
-// within one provider; glm is the default and astra is the spec's hybrid.
+// within one provider; glm is the default.
 //
-// Reasoning effort follows one policy in every preset: the orchestrator
-// runs at its model's highest effort below max (xhigh where the model has
-// it, otherwise high); the task worker runs high when it is a full-size
-// model and medium when it is a flash-class one, except GPT-6 Luna,
-// which always gets xhigh, and DeepSeek V4.1 Flash 1017, which offers no
-// medium and so runs high; the narrator always thinks a little (low),
-// never none.
+// Every preset runs at low reasoning effort: eagent is called often, on a
+// prompt it has mostly seen before, to make small decisions. It always thinks
+// a little, never none.
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
 	"astra": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating (OpenAI, OpenRouter fallback); GLM-5.3-Flash and DeepSeek V4.1 Flash 1017 on Together"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6-astra")
 	},
-
-	// OpenAI: direct API first, the same model through OpenRouter when the
-	// direct route is unroutable (no key, no access, no credits).
 	"openai-high": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating, GPT-6.1 Sol working, GPT-6 Luna narrating"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6.1-sol", "high", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6-astra")
 	},
 	"openai-med": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating, GPT-6.1 Terra working, GPT-6 Luna narrating"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6.1-terra", "high", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6.1 Sol (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6.1-sol")
 	},
 	"openai-low": func(c *Config) {
-		c.Description = "GPT-6.1 Sol orchestrating, GPT-6 Luna working and narrating"
-		c.Orchestrator = openaiActor("gpt-6.1-sol", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6-luna", "xhigh", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6 Luna (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6-luna")
 	},
-
-	// OpenRouter: one key, many labs.
 	"openrouter-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenRouter)"
-		c.Orchestrator = openrouterActor("moonshotai/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = openrouterActor("z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Narrator = openrouterActor("z-ai/glm-5.3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (OpenRouter)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "moonshotai/kimi-k3", 1_000_000)
 	},
 	"openrouter-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (OpenRouter)"
-		c.Orchestrator = openrouterActor("z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Task = openrouterActor("z-ai/glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (OpenRouter)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "z-ai/glm-5.3", 200_000)
 	},
 	"openrouter-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (OpenRouter; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = openrouterActor("z-ai/glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (OpenRouter; cheapest)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "z-ai/glm-5.3-flash", 200_000)
 	},
-
-	// Anthropic.
 	"anthropic-high": func(c *Config) {
-		c.Description = "Claude Fable 5.1 orchestrating, Opus 5.5 working, Sonnet 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-fable-5-1", "xhigh", 32768)
-		c.Task = anthropicActor("claude-opus-5-5", "high", 32768)
-		c.Narrator = anthropicActor("claude-sonnet-5-5", "low", 4096)
+		c.Description = "Claude Fable 5.1"
+		c.Model = anthropicRoute("claude-fable-5-1")
 	},
 	"anthropic-med": func(c *Config) {
-		c.Description = "Claude Opus 5.5 orchestrating, Sonnet 5.5 working, Haiku 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-opus-5-5", "xhigh", 32768)
-		c.Task = anthropicActor("claude-sonnet-5-5", "medium", 32768)
-		c.Narrator = anthropicActor("claude-haiku-5-5", "low", 4096)
+		c.Description = "Claude Opus 5.5"
+		c.Model = anthropicRoute("claude-opus-5-5")
 	},
-
-	// DeepInfra.
 	"deepinfra-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (DeepInfra)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "moonshotai/Kimi-K3", "high", 32768, 1_000_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (DeepInfra)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "moonshotai/Kimi-K3", 1_000_000)
 	},
 	"deepinfra-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (DeepInfra)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (DeepInfra)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", 200_000)
 	},
 	"deepinfra-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (DeepInfra; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "high", 32768, 200_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (DeepInfra; cheapest)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", 200_000)
 	},
-
-	// Fireworks.
 	"fireworks-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Fireworks)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "high", 32768, 200_000)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (Fireworks)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/kimi-k3", 1_000_000)
 	},
 	"fireworks-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Fireworks)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "high", 32768, 200_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (Fireworks)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", 200_000)
 	},
 	"fireworks-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (Fireworks; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (Fireworks; cheapest)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", 200_000)
 	},
-
-	// OpenCode Zen: one key for OpenAI, Anthropic, and open models at cost.
-	// (Zen's free-tier models only answer the OpenCode client, so there is
-	// no free preset.)
 	"opencode-high": func(c *Config) {
-		c.Description = "Claude Fable 5.1 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenCode Zen)"
-		c.Orchestrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1",
-			APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "xhigh", MaxTokens: 32768, ContextTokens: 1_000_000,
-		}
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 4096, 200_000)
-		c.RolloverTokens = 300_000
+		c.Description = "Claude Fable 5.1 (OpenCode Zen)"
+		c.Model = ModelRoute{Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1", APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"opencode-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (OpenCode Zen)"
-		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (OpenCode Zen)"
+		c.Model = chatRoute(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", 200_000)
 	},
 	"opencode-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (OpenCode Zen; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (OpenCode Zen; cheapest)"
+		c.Model = chatRoute(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", 200_000)
 	},
-
-	// Nous Portal.
 	"nous-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Nous Portal)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "moonshotai/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (Nous Portal)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "moonshotai/kimi-k3", 1_000_000)
 	},
 	"nous-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Nous Portal)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (Nous Portal)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", 200_000)
 	},
 	"nous-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (Nous Portal; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (Nous Portal; cheapest)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", 200_000)
 	},
-
-	// Single-model shapes: what you would get from one local model.
 	"deepseek": func(c *Config) {
-		c.Description = "DeepSeek V4.1 Flash 1017 for all three actors (Together; cheap; the shape of a single local model; no medium effort, so the task worker runs high)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, togetherURL, "TOGETHER_API_KEY"
-			a.Model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "DeepSeek V4.1 Flash 1017 (Together; cheap; the shape of a single local model)"
+		c.Model = chatRoute(togetherURL, "TOGETHER_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", 1_048_576)
 	},
 	"muse": func(c *Config) {
-		c.Description = "Muse Spark 1.3 Contributor (Meta) for all three actors"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolResponses, metaURL, "META_API_KEY"
-			a.Model = "muse-spark-1.3-contributor"
-			a.ContextTokens = 1_000_000
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Muse Spark 1.3 Contributor (Meta)"
+		c.Model = ModelRoute{Protocol: llm.ProtocolResponses, BaseURL: metaURL, Model: "muse-spark-1.3-contributor", APIKeyEnv: "META_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"qwen": func(c *Config) {
-		c.Description = "Qwen 3.8 27B (via OpenRouter) for all three actors; a dense model you could run locally"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "qwen/qwen3.8-27b"
-			a.ContextTokens = 200_000
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "medium", "low"
+		c.Description = "Qwen 3.8 27B (OpenRouter; a dense model you could run locally)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "qwen/qwen3.8-27b", 200_000)
 	},
 	"mistral": func(c *Config) {
-		c.Description = "Mistral Large 4 for all three actors (OpenRouter; 1M context)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "mistralai/mistral-large-4-0"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Mistral Large 4 (OpenRouter; 1M context)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "mistralai/mistral-large-4-0", 1_048_576)
 	},
 	"muse-open": func(c *Config) {
-		c.Description = "Muse Spark Open, Meta's open-weight model, for all three actors (OpenRouter; 1M context)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "meta/muse-spark-open"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Muse Spark Open, Meta's open-weight model (OpenRouter; 1M context)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "meta/muse-spark-open", 1_048_576)
 	},
 	"beam": func(c *Config) {
-		c.Description = "Reflection Beam 1.0 501B A23B for all three actors (OpenRouter; 1M context, thinking always on)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "reflection/beam-1.0-501b-a23b"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Reflection Beam 1.0 501B A23B (OpenRouter; 1M context, thinking always on)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "reflection/beam-1.0-501b-a23b", 1_048_576)
 	},
 	"deepseek-1017": func(c *Config) {
-		c.Description = "DeepSeek V4.1 Flash 1017 for all three actors (OpenRouter; 1M context, weekday peak hours cost double; no medium effort, so the task worker runs high)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "deepseek/deepseek-v4.1-flash-1017"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "DeepSeek V4.1 Flash 1017 (OpenRouter; 1M context, weekday peak hours cost double)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "deepseek/deepseek-v4.1-flash-1017", 1_048_576)
 	},
 }
 
@@ -540,7 +443,7 @@ func ResolvePreset(name string) (string, bool) {
 func PresetDescription(name string) string {
 	c := Defaults()
 	if name == "glm" {
-		return "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Together AI)"
+		return glmDescription
 	}
 	if canon, ok := ResolvePreset(name); ok {
 		Presets[canon](&c)
@@ -548,33 +451,32 @@ func PresetDescription(name string) string {
 	return c.Description
 }
 
-func openaiActor(model, effort string, maxTokens int) Actor {
-	return Actor{
+// openaiRoute is a model on OpenAI's Responses API, with the same model
+// through OpenRouter when the direct route is unroutable (no key, no access,
+// no credits).
+func openaiRoute(model string) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: model,
-		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_050_000,
-		Fallback: &Actor{
+		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
+		Fallback: &ModelRoute{
 			Protocol: llm.ProtocolResponses, BaseURL: openrouterURL, Model: "openai/" + model,
-			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_050_000,
+			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
 		},
 	}
 }
 
-func openrouterActor(model, effort string, maxTokens, contextTokens int) Actor {
-	return chatActor(openrouterURL, "OPENROUTER_API_KEY", model, effort, maxTokens, contextTokens)
-}
-
-// chatActor is an OpenAI-compatible chat route on any provider.
-func chatActor(baseURL, keyEnv, model, effort string, maxTokens, contextTokens int) Actor {
-	return Actor{
+// chatRoute is an OpenAI-compatible chat route on any provider.
+func chatRoute(baseURL, keyEnv, model string, contextTokens int) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolChat, BaseURL: baseURL, Model: model,
-		APIKeyEnv: keyEnv, ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: contextTokens,
+		APIKeyEnv: keyEnv, ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
 	}
 }
 
-func anthropicActor(model, effort string, maxTokens int) Actor {
-	return Actor{
+func anthropicRoute(model string) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: model,
-		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_000_000,
+		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: "low", MaxTokens: loopMaxTokens, ContextTokens: 1_000_000,
 	}
 }
 
@@ -653,18 +555,16 @@ func BundleBytes(name, description string, cfg Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Spell out "fallback": null when an actor has no fallback so loading this
-	// saved preset on top of a project file whose preset carries fallbacks
-	// (such as openai-high) clears them instead of inheriting them.
+	// Spell out "fallback": null when the model has no fallback so loading
+	// this saved preset on top of a project file whose preset carries one
+	// (such as openai-high) clears it instead of inheriting it.
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, err
 	}
-	for actorName, actor := range map[string]Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
-		if actor.Fallback == nil {
-			if m, ok := obj[actorName].(map[string]any); ok {
-				m["fallback"] = nil
-			}
+	if cfg.Model.Fallback == nil {
+		if m, ok := obj["model"].(map[string]any); ok {
+			m["fallback"] = nil
 		}
 	}
 	pretty, err := json.MarshalIndent(obj, "", "  ")
@@ -817,11 +717,16 @@ func readJSONMap(path string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-// overlay merges a JSON object into cfg. Actor objects merge field by field
-// so a bundle can change just a model name.
+// overlay merges a JSON object into cfg, carrying over any keys of the
+// three-actor design first. Route objects merge field by field so a bundle
+// can change just a model name.
 func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
 	if len(m) == 0 {
 		return nil
+	}
+	m, notes := MigrateLegacy(m)
+	for _, n := range notes {
+		cfg.Migrated = append(cfg.Migrated, filepath.Base(source)+": "+n)
 	}
 	raw, _ := json.Marshal(m)
 	if err := json.Unmarshal(raw, cfg); err != nil {
@@ -830,53 +735,97 @@ func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
 	return nil
 }
 
+// envFirst returns the first of the named variables that is set and not
+// empty.
+func envFirst(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// applyRouteEnv overrides a route from EAGENT_<prefix>* variables; legacy
+// lists the prefixes the same settings had in the three-actor design, read
+// when the current name is unset.
+func applyRouteEnv(a *ModelRoute, prefix string, legacy ...string) {
+	names := func(suffix string) []string {
+		out := []string{"EAGENT_" + prefix + suffix}
+		for _, l := range legacy {
+			out = append(out, "EAGENT_"+l+suffix)
+		}
+		return out
+	}
+	if v := envFirst(names("MODEL")...); v != "" {
+		a.Model = v
+	}
+	if v := envFirst(names("PROTOCOL")...); v != "" {
+		a.Protocol = v
+	}
+	if v := envFirst(names("BASE_URL")...); v != "" {
+		a.BaseURL = v
+	}
+	for _, n := range names("API_KEY_ENV") {
+		if v, ok := os.LookupEnv(n); ok {
+			a.APIKeyEnv = v
+			break
+		}
+	}
+	if v, err := strconv.Atoi(envFirst(names("MAX_TOKENS")...)); err == nil && v > 0 {
+		a.MaxTokens = v
+	}
+	switch strings.ToLower(envFirst(names("REPLAY_REASONING")...)) {
+	case "1", "true", "on", "yes":
+		on := true
+		a.ReplayReasoning = &on
+	case "0", "false", "off", "no":
+		off := false
+		a.ReplayReasoning = &off
+	}
+}
+
 func applyEnv(cfg *Config) {
 	if value, err := strconv.ParseBool(os.Getenv("EAGENT_FINALECHAT_ARTIFACTS")); err == nil {
 		cfg.Finalechat.Artifacts = value
 	}
-	actors := map[string]*Actor{"ORCHESTRATOR": &cfg.Orchestrator, "TASK": &cfg.Task, "NARRATOR": &cfg.Narrator}
-	for name, a := range actors {
-		if v := os.Getenv("EAGENT_" + name + "_MODEL"); v != "" {
-			a.Model = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_PROTOCOL"); v != "" {
-			a.Protocol = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_BASE_URL"); v != "" {
-			a.BaseURL = v
-		}
-		if v, ok := os.LookupEnv("EAGENT_" + name + "_API_KEY_ENV"); ok {
-			a.APIKeyEnv = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_REASONING_EFFORT"); v != "" {
-			a.ReasoningEffort = v
-		}
-		if v, err := strconv.Atoi(os.Getenv("EAGENT_" + name + "_MAX_TOKENS")); err == nil && v > 0 {
-			a.MaxTokens = v
-		}
-		switch strings.ToLower(os.Getenv("EAGENT_" + name + "_REPLAY_REASONING")) {
-		case "1", "true", "on", "yes":
-			on := true
-			a.ReplayReasoning = &on
-		case "0", "false", "off", "no":
-			off := false
-			a.ReplayReasoning = &off
-		}
+	// EAGENT_MODEL, EAGENT_PROTOCOL, EAGENT_BASE_URL, ... The orchestrator's
+	// old names still name the model; its effort does not carry over (the
+	// narrator's did the talking, and its name is read instead).
+	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
+	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_NARRATOR_REASONING_EFFORT"); v != "" {
+		cfg.Model.ReasoningEffort = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_TASK_CONCURRENCY")); err == nil && v > 0 {
-		cfg.TaskConcurrency = v
+	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {
+		cfg.Summarizer.Mode = v
+	}
+	if os.Getenv("EAGENT_SUMMARIZER_MODEL") != "" || cfg.Summarizer.Model != nil {
+		route := cfg.Summarizer.Route(cfg.Model)
+		route.Fallback = nil
+		if cfg.Summarizer.Model != nil {
+			route = *cfg.Summarizer.Model
+		}
+		applyRouteEnv(&route, "SUMMARIZER_")
+		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
+			route.ReasoningEffort = v
+		}
+		cfg.Summarizer.Model = &route
 	}
 	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v > 0 {
 		cfg.RolloverTokens = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
-		cfg.NarratorQuietSeconds = v
+	if v, err := strconv.Atoi(envFirst("EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
+		cfg.QuietSeconds = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_TICK_SECONDS")); err == nil && v > 0 {
-		cfg.NarratorTickSeconds = v
+	if v, err := strconv.Atoi(envFirst("EAGENT_TICK_SECONDS", "EAGENT_NARRATOR_TICK_SECONDS")); err == nil && v > 0 {
+		cfg.TickSeconds = v
 	}
 	if v := os.Getenv("EAGENT_PERSONA"); v != "" {
 		cfg.Persona = v
+	}
+	// (EAGENT_RELAY is taken: it is set inside an agent's terminal.)
+	if v := os.Getenv("EAGENT_DEFAULT_RELAY"); v != "" {
+		cfg.Relay.Default = v
 	}
 	switch strings.ToLower(os.Getenv("EAGENT_FINALECHAT")) {
 	case "0", "off", "false", "no":
@@ -888,14 +837,12 @@ func applyEnv(cfg *Config) {
 	}
 }
 
+// loadInstructions reads the project's notes for eagent itself. The agent
+// eagent runs reads AGENTS.md on its own, so that file is not eagent's.
 func loadInstructions(project string) string {
-	for _, name := range []string{
-		filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md"),
-		filepath.Join(project, "AGENTS.md"),
-	} {
-		if raw, err := boundedfile.Read(name, 1<<20); err == nil && strings.TrimSpace(string(raw)) != "" {
-			return strings.TrimSpace(string(raw))
-		}
+	name := filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md")
+	if raw, err := boundedfile.Read(name, 1<<20); err == nil && strings.TrimSpace(string(raw)) != "" {
+		return strings.TrimSpace(string(raw))
 	}
 	return ""
 }
@@ -916,7 +863,7 @@ func (c Config) Validate() error {
 
 // Endpoint builds the wire endpoint, reading the key from the environment
 // when APIKeyEnv is set (an empty APIKeyEnv means no key is needed).
-func (a Actor) Endpoint() (llm.Endpoint, error) {
+func (a ModelRoute) Endpoint() (llm.Endpoint, error) {
 	var key string
 	if a.APIKeyEnv != "" {
 		key = os.Getenv(a.APIKeyEnv)
@@ -944,7 +891,7 @@ func (a Actor) Endpoint() (llm.Endpoint, error) {
 
 // Routes returns the primary endpoint followed by any fallbacks whose keys
 // are present. An error is returned only if no route has a key.
-func (a Actor) Routes() ([]llm.Endpoint, error) {
+func (a ModelRoute) Routes() ([]llm.Endpoint, error) {
 	var eps []llm.Endpoint
 	var errs []string
 	for cur := &a; cur != nil; cur = cur.Fallback {

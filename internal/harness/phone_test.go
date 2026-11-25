@@ -449,7 +449,7 @@ func questionTrace(rt *Runtime, fp *fakePhone, ui *fakeUI) string {
 	evs, _ := store.Read(rt.sess.Path)
 	for _, ev := range evs {
 		switch ev.Type {
-		case event.NarratorQuestion, event.UserAnswer, event.UserMessage, event.PhoneQuestion:
+		case event.Question, event.UserAnswer, event.UserMessage, event.PhoneQuestion:
 			fmt.Fprintf(&b, "event %d %s %s %s\n", ev.Seq, ev.Time.Format("15:04:05.000"), ev.Type, ev.Data)
 		}
 	}
@@ -558,12 +558,12 @@ func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 		t.Fatalf("phone thread not recorded: %+v", st.Phone)
 	}
 	var answer event.UserAnswerData
-	var final event.NarratorMessageData
+	var final event.MessageData
 	for _, ev := range evs {
 		switch ev.Type {
 		case event.UserAnswer:
 			_ = ev.Decode(&answer)
-		case event.NarratorMessage:
+		case event.Message:
 			_ = ev.Decode(&final)
 		}
 	}
@@ -908,8 +908,8 @@ func TestPhoneAttachmentsBothWays(t *testing.T) {
 			if d.Source == "finalechat" {
 				in = d.Attachments
 			}
-		case event.NarratorMessage:
-			var d event.NarratorMessageData
+		case event.Message:
+			var d event.MessageData
 			_ = ev.Decode(&d)
 			out = d.Attachments
 		}
@@ -1614,7 +1614,7 @@ func TestPhoneDismissedQuestionIsNotAskedAgain(t *testing.T) {
 	asked, refused := 0, false
 	for _, ev := range evs {
 		switch ev.Type {
-		case event.NarratorQuestion:
+		case event.Question:
 			asked++
 		case event.UserAnswer:
 			t.Fatal("an answer was recorded for a dismissed question")
@@ -1693,7 +1693,7 @@ func TestPhoneDismissedWhileSessionWasDown(t *testing.T) {
 	dismissals, messages, asked := 0, 0, 0
 	for _, ev := range evs {
 		switch ev.Type {
-		case event.NarratorQuestion:
+		case event.Question:
 			asked++
 		case event.UserAnswer:
 			var d event.UserAnswerData

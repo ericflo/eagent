@@ -293,7 +293,7 @@ func (r *Runtime) narratorTurn(reason string, check *progressCheck) string {
 				var id string
 				r.sync(func() {
 					id = r.st.NextQuestionID()
-					r.append(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: id, Text: text, Options: opts}))
+					r.append(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: id, Text: text, Options: opts}))
 					r.narrLastSaid = text
 					r.narrSaidAt = time.Now()
 				})
@@ -365,7 +365,7 @@ func (r *Runtime) deliverMessage(text string, important bool, atts ...event.Atta
 		if r.st.LastYield != nil && r.st.LastYield.Done {
 			important = true // the final report always earns the notification
 		}
-		ev := r.append(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: text, Important: important, Attachments: atts}))
+		ev := r.append(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: text, Important: important, Attachments: atts}))
 		r.narrLastSaid = text
 		r.narrSaidSeq = ev.Seq
 		r.narrSaidAt = time.Now()

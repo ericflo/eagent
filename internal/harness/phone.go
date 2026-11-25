@@ -101,9 +101,9 @@ func (r *Runtime) startPhone() {
 	go p.worker()
 
 	resumed := r.st.Resumes > 0
-	var pending *event.NarratorQuestionData
+	var pending *event.QuestionData
 	if q := r.st.Question; q != nil {
-		pending = &event.NarratorQuestionData{ID: q.ID, Text: q.Text, Options: q.Options}
+		pending = &event.QuestionData{ID: q.ID, Text: q.Text, Options: q.Options}
 	}
 	// The message the session was started or resumed with. It was appended
 	// before the mirror existed, so observe() never saw it; it is posted
@@ -361,8 +361,8 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 	}
 	seq := strconv.FormatInt(ev.Seq, 10)
 	switch ev.Type {
-	case event.NarratorMessage:
-		var d event.NarratorMessageData
+	case event.Message:
+		var d event.MessageData
 		_ = ev.Decode(&d)
 		importance := "normal"
 		if d.Important {
@@ -387,8 +387,8 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				p.markSent(act)
 			}
 		})
-	case event.NarratorQuestion:
-		var d event.NarratorQuestionData
+	case event.Question:
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		p.ask(r, d.ID, d.Text, d.Options)
 	case event.CwdChange:

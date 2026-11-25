@@ -117,7 +117,7 @@ func TestNarratorViewBatchesObservations(t *testing.T) {
 	b.add(event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "internal"}).WithTask("t1"))                                                          // 7
 	b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "second"}))                                                                             // 8
 	b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call("n1", "send_message", `{"text":"hi"}`)}, SeenSeq: 6})) // 9
-	b.add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "hi"}))                                                               // 10
+	b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "hi"}))                                                               // 10
 	b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: "n1", Name: "send_message", Output: "delivered"}))                            // 11
 
 	st := Replay(b.events)
@@ -253,7 +253,7 @@ func TestAnswerAcrossRolloverCarriesTheQuestion(t *testing.T) {
 	}
 	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
+	add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
 	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
 	add(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: "t9", Kind: "dossier", Title: "Dossier"}))
@@ -372,7 +372,7 @@ func TestNarratorViewTrim(t *testing.T) {
 		b.add(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "remark " + id + " " + strings.Repeat("x", 300)}))
 		seen := b.seq
 		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
-		b.add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "said " + id}))
+		b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "said " + id}))
 		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
 	}
 	st := Replay(b.events)
@@ -412,7 +412,7 @@ func TestNarratorViewTrim(t *testing.T) {
 // Progress checks that said nothing are counted for their tokens only.
 func TestNarratorChecksCountTowardTotals(t *testing.T) {
 	b := newBuilder()
-	b.add(event.New(event.NarratorChecks, event.ActorNarrator, event.NarratorChecksData{Count: 3, Usage: event.Usage{Input: 3000, Output: 30, Cached: 2700}}))
+	b.add(event.New(event.Checks, event.ActorNarrator, event.ChecksData{Count: 3, Usage: event.Usage{Input: 3000, Output: 30, Cached: 2700}}))
 	st := Replay(b.events)
 	if tot := st.Totals[event.ActorNarrator]; tot.Input != 3000 || tot.Cached != 2700 || st.Calls[event.ActorNarrator] != 3 {
 		t.Fatalf("totals %+v, calls %d", tot, st.Calls[event.ActorNarrator])
@@ -434,7 +434,7 @@ func TestDismissClosesQuestionWithoutWaking(t *testing.T) {
 	b.add(event.New(event.Assistant, event.ActorOrchestrator, event.AssistantData{ToolCalls: []event.ToolCall{call("c1", "yield", `{}`)}, SeenSeq: 3}))  // 4
 	b.add(event.New(event.ToolResult, event.ActorOrchestrator, event.ToolResultData{CallID: "c1", Name: "yield", Output: "ok"}))                         // 5
 	b.add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: false, Reason: "waiting for the colour"}))                               // 6
-	b.add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Which colour?", Options: []string{"red"}})) // 7
+	b.add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Which colour?", Options: []string{"red"}})) // 7
 	st := Replay(b.events)
 	if st.Question == nil || st.DismissalStands() {
 		t.Fatalf("before the dismissal: question=%v stands=%v", st.Question, st.DismissalStands())
@@ -522,7 +522,7 @@ func TestNarratorTrimPreservesOpeningRequestForNonRelay(t *testing.T) {
 		b.add(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "milestone " + id + " " + strings.Repeat("z", 350)}))
 		seen := b.seq
 		b.add(event.New(event.Assistant, event.ActorNarrator, event.AssistantData{ToolCalls: []event.ToolCall{call(id, "send_message", `{"text":"said `+id+`"}`)}, SeenSeq: seen}))
-		b.add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "said " + id}))
+		b.add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "said " + id}))
 		b.add(event.New(event.ToolResult, event.ActorNarrator, event.ToolResultData{CallID: id, Name: "send_message", Output: "delivered"}))
 	}
 	st := Replay(b.events)

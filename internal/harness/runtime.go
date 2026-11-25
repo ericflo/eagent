@@ -143,7 +143,7 @@ type Runtime struct {
 	checkSeenSteps int
 	checkedAt      time.Time
 	checkFailedAt  time.Time
-	quietChecks    event.NarratorChecksData
+	quietChecks    event.ChecksData
 	toolImagesMu   sync.Mutex
 	memoMu         sync.Mutex
 	memo           map[string]fileMark           // what each caller last read or viewed, to skip repeats
@@ -872,8 +872,8 @@ drain:
 	}
 	// Direct writes: the loop is no longer running.
 	if r.quietChecks.Count > 0 {
-		r.appendDirect(event.New(event.NarratorChecks, event.ActorNarrator, r.quietChecks))
-		r.quietChecks = event.NarratorChecksData{}
+		r.appendDirect(event.New(event.Checks, event.ActorNarrator, r.quietChecks))
+		r.quietChecks = event.ChecksData{}
 	}
 	for _, p := range r.procs.All() {
 		if sp := r.st.Procs[p.Handle]; sp != nil && sp.Status == "running" {

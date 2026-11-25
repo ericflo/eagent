@@ -106,7 +106,7 @@ func TestUserAnswerTemplateCarriesQuestion(t *testing.T) {
 	}
 	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
+	add(event.New(event.Question, event.ActorNarrator, event.QuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
 	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
 	add(event.New(event.TaskCreate, event.ActorHarness, event.TaskCreateData{ID: "t9", Kind: "dossier", Title: "Dossier"}))

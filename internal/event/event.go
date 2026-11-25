@@ -15,17 +15,22 @@ import (
 )
 
 // Actor names. The user and the harness are actors too so that every line has
-// an unambiguous origin.
+// an unambiguous origin. eagent is the one model-driven actor: it reads what
+// the relayed agent does, talks to the user, and drives the agent's terminal.
+// (Logs written before there was one loop name three others; see legacy.go.)
 const (
-	ActorUser         = "user"
-	ActorHarness      = "harness"
-	ActorOrchestrator = "orchestrator"
-	ActorTask         = "task"
-	ActorNarrator     = "narrator"
+	ActorUser    = "user"
+	ActorHarness = "harness"
+	ActorEagent  = "eagent"
+	// ActorSummarizer is the dedicated thread summarizer, when one is
+	// configured. It appears only in usage accounting and route events.
+	ActorSummarizer = "summarizer"
 )
 
 // Event types. Names are dotted and stable; adding a type is backwards
-// compatible, renaming one is not.
+// compatible, renaming one is not. That is why what eagent says to the user
+// is still written as narrator.message: the name dates from when a separate
+// narrator did the talking, and old logs and their readers know it.
 const (
 	SessionStart    = "session.start"
 	SessionResume   = "session.resume"
@@ -35,42 +40,29 @@ const (
 
 	UserMessage = "user.message"
 	UserAnswer  = "user.answer"
-	UserDismiss = "user.dismiss" // the user closed a narrator question without answering it
+	UserDismiss = "user.dismiss" // the user closed a question without answering it
 
 	TurnStart  = "turn.start"
 	TurnEnd    = "turn.end"
 	Assistant  = "assistant"
 	ToolResult = "tool.result"
 
-	TaskCreate = "task.create"
-	TaskStart  = "task.start"
-	TaskEnd    = "task.end"
+	Message  = "narrator.message"  // something eagent told the user
+	Question = "narrator.question" // something eagent asked the user
+	Checks   = "narrator.checks"   // looks that ended in silence, counted for their tokens only
 
-	Note             = "note"
-	NarratorMessage  = "narrator.message"
-	NarratorQuestion = "narrator.question"
-
-	ScheduleCreate = "schedule.create"
-	ScheduleFire   = "schedule.fire"
-	ScheduleCancel = "schedule.cancel"
-
-	ProcStart = "proc.start"
-	ProcPID   = "proc.pid"
-	ProcExit  = "proc.exit"
-
-	Dossier        = "dossier"
-	HarnessMessage = "harness.message"
-	Yield          = "yield"
+	Dossier        = "dossier"         // the briefing that opens a subsession after a rollover
+	HarnessMessage = "harness.message" // a notice from the harness in eagent's conversation
 	Route          = "route"
 	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
-	PhoneQuestion  = "phone.question" // a narrator question was posted to the phone as a card
+	PhoneQuestion  = "phone.question" // a question was posted to the phone as a card
 	ThreadTitle    = "thread.title"   // the session's title and summary (whole session so far), mirrored to FinaleChat when the phone is on
-	Steer          = "steer"          // the harness's per-call instruction to an actor, kept so every prompt extends the last
-	CwdChange      = "cwd.change"     // an actor's working directory moved: a cd in one of its commands that persists for its later ones
+	Steer          = "steer"          // what eagent was shown at the end of its prompt for a look it acted on, kept so every prompt extends the last
+	CwdChange      = "cwd.change"     // the folder the session works in, when it is not the project root
 	Error          = "error"
 
-	// A relay is an external coding agent (Codex, Claude Code) that eagent
-	// runs in a terminal it owns and passes the user's words to.
+	// A relay is a coding agent (Claude Code, Codex, Antigravity, pi) that
+	// eagent runs in a terminal it owns and passes the user's words to.
 	RelayStart     = "relay.start"     // the agent was launched (or relaunched)
 	RelayInner     = "relay.inner"     // the agent's own session id and transcript were found
 	RelaySend      = "relay.send"      // text was typed into the agent
@@ -81,8 +73,6 @@ const (
 	RelayLimit     = "relay.limit"     // the agent's usage budget crossed a threshold or ran out
 	RelayEnd       = "relay.end"       // the agent was stopped on purpose
 	RelayAutopilot = "relay.autopilot" // a standing order to keep the agent going (or its end)
-	NarratorTrim   = "narrator.trim"   // the narrator's view of the session now starts later, to keep its prompt short
-	NarratorChecks = "narrator.checks" // progress checks that ended in silence, counted for their tokens only
 )
 
 // Event is one line of the session log.
@@ -148,6 +138,11 @@ type SessionStartData struct {
 	Endpoints   map[string]string `json:"endpoints,omitempty"` // actor -> base URL actually in use
 	Efforts     map[string]string `json:"efforts,omitempty"`   // actor -> reasoning effort in use
 	Config      string            `json:"config,omitempty"`    // bundle or preset name
+	// TZ is the IANA time zone the session's clock times are written in for
+	// the model ("America/Los_Angeles"). It is fixed at the start so the
+	// same event always renders the same text, wherever the session is
+	// resumed. Empty in older logs, which render in the reader's zone.
+	TZ string `json:"tz,omitempty"`
 }
 
 // SessionResumeData records a restart and what the replay had to close.
@@ -172,7 +167,7 @@ type SubsessionStartData struct {
 type SubsessionEndData struct {
 	Reason      string `json:"reason"`
 	NextFile    string `json:"next_file"`
-	InputTokens int    `json:"input_tokens"` // orchestrator context size that triggered the rollover
+	InputTokens int    `json:"input_tokens"` // prompt size that triggered the rollover
 }
 
 // UserMessageData is text from the user.
@@ -196,7 +191,7 @@ type UserMessageData struct {
 }
 
 // Attachment is a file carried by a message: a screenshot the user sent
-// from their phone, or one the narrator attached to a report. Bytes live
+// from their phone, or one eagent attached to a message. Bytes live
 // at Path, under the session's attachments/ directory.
 type Attachment struct {
 	Path        string `json:"path"`
@@ -218,7 +213,7 @@ func (a Attachment) IsImage() bool {
 	return a.Kind == "image"
 }
 
-// UserAnswerData answers a narrator question.
+// UserAnswerData answers a question.
 type UserAnswerData struct {
 	QuestionID  string           `json:"question_id"`
 	Text        string           `json:"text"`
@@ -227,14 +222,15 @@ type UserAnswerData struct {
 	Attachments []Attachment     `json:"attachments,omitempty"`
 }
 
-// UserDismissData closes a narrator question with no answer. It is not a
-// reply: nothing is decided and no actor is woken by it.
+// UserDismissData closes a question with no answer. It is not a reply:
+// nothing is decided and nobody is woken by it.
 type UserDismissData struct {
 	QuestionID string `json:"question_id"`
 	Source     string `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
 }
 
-// TurnData brackets one actor turn (one or more model calls).
+// TurnData brackets one turn of eagent's that went on the record (one or
+// more model calls, at least one of which did something).
 type TurnData struct {
 	Reason string `json:"reason,omitempty"`
 }
@@ -278,55 +274,29 @@ type ToolResultData struct {
 	Name    string `json:"name"`
 	Output  string `json:"output"`
 	IsError bool   `json:"is_error,omitempty"`
-	// Images are pictures the tool produced for the model to look at
-	// (view_image); they follow the result as a user message with the image.
+	// Images are pictures a tool produced for the model to look at, in logs
+	// from when eagent had such a tool.
 	Images []Attachment `json:"images,omitempty"`
 }
 
-// TaskCreateData delegates work to the task worker.
-type TaskCreateData struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Kind        string `json:"kind"` // work | dossier
-}
-
-// TaskEndData reports a task's outcome.
-type TaskEndData struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"` // completed | failed | cancelled | interrupted
-	Summary string `json:"summary"`
-	Turns   int    `json:"turns,omitempty"`
-	Usage   Usage  `json:"usage"`
-}
-
-// NoteData is an orchestrator hint for the narrator.
-type NoteData struct {
-	Text string `json:"text"`
-	// Answer marks a note that answers a question the user asked. The
-	// narrator relays it as the answer rather than deciding whether to.
-	Answer bool `json:"answer,omitempty"`
-}
-
-// CwdChangeData records that an actor's working directory moved: a cd in one
-// of its commands that persists for its later commands. The event's actor and
-// task say whose directory it is.
+// CwdChangeData records the folder the session works in when it is not the
+// project root: where its agents start unless told otherwise.
 type CwdChangeData struct {
 	Path     string `json:"path"`
 	Previous string `json:"previous,omitempty"`
 }
 
-// NarratorMessageData is user-visible output.
-type NarratorMessageData struct {
+// MessageData is something eagent told the user.
+type MessageData struct {
 	Text string `json:"text"`
-	// Important marks a message the narrator wanted to buzz the user's
-	// phone for (a finished job, a blocker, a finding).
+	// Important marks a message worth buzzing the user's phone for (a
+	// finished job, a blocker, a finding).
 	Important bool `json:"important,omitempty"`
 	// Attachments are files sent with the message (screenshots, logs).
 	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
-// PhoneQuestionData records which phone card carries a narrator question,
+// PhoneQuestionData records which phone card carries a question,
 // so a later run can withdraw it when the question is answered elsewhere.
 type PhoneQuestionData struct {
 	QuestionID string `json:"question_id"`
@@ -346,112 +316,65 @@ type PhoneThreadData struct {
 // previous one; an empty Title or Description leaves that field unchanged.
 // The phone mirror PATCHes the same values to FinaleChat.
 //
-// The harness writes these itself as the session moves (By "summary"), so
-// the thread list stays readable without the orchestrator remembering to.
-// The orchestrator's retitle_thread (By "") is for a name the user asked
-// for, and the mirror records what FinaleChat already shows when it attaches
-// (By "finalechat").
+// By "summary" is the running summary: eagent's own update_thread calls, or
+// the dedicated summarizer's. By "" is a name the user asked for, and By
+// "finalechat" is what the app already shows when the mirror attaches.
 type ThreadTitleData struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
-	// By is who wrote it: "" the orchestrator, "summary" the harness's own
-	// summary of the session, "finalechat" the thread as the app has it.
+	// By is who wrote it: "summary" the running summary, "" a name the
+	// user asked for, "finalechat" the thread as the app has it.
 	By string `json:"by,omitempty"`
 	// Pin marks a title someone chose on purpose (the user in the app, or
-	// the orchestrator at the user's request): later summaries keep it.
+	// eagent at the user's request): later summaries keep it.
 	Pin bool `json:"pin,omitempty"`
 	// SeenSeq is the newest event a summary took into account.
 	SeenSeq int64 `json:"seen_seq,omitempty"`
-	// Usage and ElapsedMS account for the model call behind a summary. It
-	// runs on the narrator's route and is counted with the narrator's.
+	// Usage and ElapsedMS account for a dedicated summarizer's model call.
+	// An inline update has none: it is part of one of eagent's own calls.
 	Usage     *Usage `json:"usage,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
 }
 
-// NarratorQuestionData is a question that blocks on the user.
-type NarratorQuestionData struct {
+// QuestionData is a question that waits on the user.
+type QuestionData struct {
 	ID      string   `json:"id"`
 	Text    string   `json:"text"`
 	Options []string `json:"options,omitempty"`
 }
 
-// ScheduleCreateData registers a loop, cron, or one-shot wake.
-type ScheduleCreateData struct {
-	ID   string    `json:"id"`
-	Kind string    `json:"kind"` // loop | cron | once
-	Spec string    `json:"spec"` // "45s", "*/5 * * * *", or RFC3339 time
-	Note string    `json:"note"`
-	Next time.Time `json:"next"`
-}
-
-// ScheduleFireData records one firing.
-type ScheduleFireData struct {
-	ID   string    `json:"id"`
-	Note string    `json:"note"`
-	Next time.Time `json:"next"`
-}
-
-// ScheduleCancelData removes a schedule.
-type ScheduleCancelData struct {
-	ID     string `json:"id"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// ProcStartData records a backgrounded shell command.
-type ProcStartData struct {
-	Handle   string `json:"handle"`
-	Command  string `json:"command"`
-	Cwd      string `json:"cwd,omitempty"`
-	TimeoutS int    `json:"timeout_s"`
-}
-
-// ProcPIDData records a started command's pid and start instant, so a
-// resume after a hard kill can find and stop what it left running.
-type ProcPIDData struct {
-	Handle    string    `json:"handle"`
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"started_at"`
-}
-
-// ProcExitData records how a command ended.
-type ProcExitData struct {
-	Handle     string `json:"handle"`
-	ExitCode   int    `json:"exit_code"`
-	Reason     string `json:"reason"` // exited | killed | timeout | lost
-	DurationMS int64  `json:"duration_ms"`
-	Tail       string `json:"tail,omitempty"`
-	// Notify is true when the owning actor had already moved on, so the exit
-	// is delivered as a notification on its next turn.
-	Notify bool `json:"notify,omitempty"`
-}
-
-// DossierData opens a subsession with the task worker's briefing.
+// DossierData opens a subsession with a briefing: what eagent wrote about
+// the session so far, with the facts the harness adds around it.
 type DossierData struct {
-	TaskID string `json:"task_id"`
-	Text   string `json:"text"`
+	Text string `json:"text"`
+	// CoversSeq is the last event the briefing took into account. The new
+	// subsession's conversation is the briefing followed by every event
+	// after it, so nothing that arrived while it was being written is lost.
+	CoversSeq int64 `json:"covers_seq,omitempty"`
+	// By is who wrote the body: "eagent" (the model, on its cached prompt)
+	// or "harness" (built from the log alone, when the model could not).
+	By string `json:"by,omitempty"`
+	// Usage and ElapsedMS account for the model call that wrote it.
+	Usage     *Usage `json:"usage,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	// TaskID names the task worker that wrote it, in logs from before
+	// eagent wrote its own.
+	TaskID string `json:"task_id,omitempty"`
 }
 
-// HarnessMessageData is text the harness injects into an actor's context.
+// HarnessMessageData is a notice the harness puts in eagent's conversation.
 type HarnessMessageData struct {
 	Text string `json:"text"`
 }
 
-// SteerData is the short instruction the harness puts in front of a model
-// call (wake reason, context budget, what to do now). It is recorded in the
-// log, addressed by the event's actor and task, so the prompt an actor sees
-// is a strict extension of its previous prompt and provider prompt caches
-// keep hitting.
+// SteerData is the end of the prompt for one look: why eagent was woken,
+// what the agent is doing right now, how long the user has heard nothing.
+// It is recorded only when eagent acted on that look, so its conversation
+// reads as what it saw and then did, and each prompt is a strict extension
+// of the one before (provider prompt caches keep hitting). A look that ended
+// in silence leaves nothing.
 type SteerData struct {
 	Text string `json:"text"`
-}
-
-// YieldData records the orchestrator declaring it has nothing to do. Forced
-// yields are issued by the harness (repeated failures, refusal to call tools)
-// and always make the session idle, even if unseen events arrived.
-type YieldData struct {
-	Done   bool   `json:"done"`
-	Reason string `json:"reason,omitempty"`
-	Forced bool   `json:"forced,omitempty"`
 }
 
 // RouteData records a provider routing decision (e.g. Astra fallback).
@@ -463,7 +386,7 @@ type RouteData struct {
 	Reason   string `json:"reason"`
 }
 
-// ErrorData records a non-fatal failure for humans and the narrator.
+// ErrorData records a non-fatal failure.
 type ErrorData struct {
 	Where string `json:"where"`
 	Text  string `json:"text"`
@@ -475,7 +398,7 @@ type ErrorData struct {
 type RelayStartData struct {
 	Name    string   `json:"name"`
 	Profile string   `json:"profile"`
-	Agent   string   `json:"agent"` // codex | claude
+	Agent   string   `json:"agent"` // the adapter: claude, codex, antigravity, pi
 	Label   string   `json:"label,omitempty"`
 	Dir     string   `json:"dir"`
 	Host    string   `json:"host"` // tmux | screen
@@ -512,7 +435,7 @@ type RelaySendData struct {
 	Mode string `json:"mode"`
 	Text string `json:"text"`
 	// Auto marks a user message the harness forwarded the moment it
-	// arrived, without waiting for the orchestrator.
+	// arrived, with no model call.
 	Auto bool `json:"auto,omitempty"`
 }
 
@@ -575,18 +498,10 @@ type RelayAutopilotData struct {
 	Off         bool   `json:"off,omitempty"`
 }
 
-// NarratorTrimData moves the start of the narrator's view: events up to
-// FromSeq are no longer rendered for it, and Recap (what it told the user
-// before that) stands in their place.
-type NarratorTrimData struct {
-	FromSeq int64  `json:"from_seq"`
-	Recap   string `json:"recap,omitempty"`
-}
-
-// NarratorChecksData totals the narrator's progress checks that said
-// nothing since the last such record. They leave no turn in its
-// conversation; this keeps their tokens in the session's totals.
-type NarratorChecksData struct {
+// ChecksData totals the looks that ended in silence since the last such
+// record. They leave nothing in eagent's conversation; this keeps their
+// tokens in the session's totals.
+type ChecksData struct {
 	Count     int   `json:"count"`
 	Usage     Usage `json:"usage"`
 	ElapsedMS int64 `json:"elapsed_ms,omitempty"`

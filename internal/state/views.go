@@ -27,10 +27,10 @@ var DefaultViewOptions = ViewOptions{ObservationChars: 1500}
 func (s *State) QuestionText(id string) string {
 	for i := len(s.Events) - 1; i >= 0; i-- {
 		ev := s.Events[i]
-		if ev.Type != event.NarratorQuestion {
+		if ev.Type != event.Question {
 			continue
 		}
-		var d event.NarratorQuestionData
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		if d.ID != id {
 			continue
@@ -66,8 +66,8 @@ func (s *State) OrchestratorView() []llm.Message {
 	events := s.currentEvents()
 	asked := map[string]bool{}
 	for _, ev := range events {
-		if ev.Type == event.NarratorQuestion {
-			var d event.NarratorQuestionData
+		if ev.Type == event.Question {
+			var d event.QuestionData
 			_ = ev.Decode(&d)
 			asked[d.ID] = true
 		}
@@ -360,10 +360,10 @@ func (s *State) orchestratorNotification(ev event.Event) string {
 		var d event.UserMessageData
 		_ = ev.Decode(&d)
 		return s.renderUserMessage(ev, d)
-	case event.NarratorQuestion:
+	case event.Question:
 		// The answer that follows names this question; without it a terse
 		// option like "Yes" would be unreadable.
-		var d event.NarratorQuestionData
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		s := fmt.Sprintf("[The narrator asked the user question %s]\n%s", d.ID, d.Text)
 		if len(d.Options) > 0 {
@@ -622,8 +622,8 @@ func (s *State) NarratorTrimPoint(keepChars int) (from int64, recap string, ok b
 				opening = clip(oneLine(d.Text), 400)
 			}
 		}
-		if ev.Type == event.NarratorMessage {
-			var d event.NarratorMessageData
+		if ev.Type == event.Message {
+			var d event.MessageData
 			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
 				said = append(said, fmt.Sprintf("- %s %s", ev.Time.Local().Format("15:04"), clip(oneLine(d.Text), 400)))
 			}

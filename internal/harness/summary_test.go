@@ -162,7 +162,7 @@ func TestSummaryInput(t *testing.T) {
 	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/stop-relay"}))
 	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/model opus high"}))
 	add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "/home/u/fence.jpg is the colour"}))
-	add(event.New(event.NarratorMessage, event.ActorNarrator, event.NarratorMessageData{Text: "First coat is on."}))
+	add(event.New(event.Message, event.ActorNarrator, event.MessageData{Text: "First coat is on."}))
 	add(event.New(event.Yield, event.ActorOrchestrator, event.YieldData{Done: true, Reason: "both coats are dry"}))
 
 	in := summaryInput(st, "Development", at.Add(time.Hour))

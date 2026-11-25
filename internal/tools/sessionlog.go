@@ -5,65 +5,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/store"
 )
 
-// Archive exposes a session's own log to actors, so a dossier can cite
-// exactly where in the JSONL files to look.
+// Archive exposes a session's own log to eagent, so it can follow the
+// file:line places its briefing cites and look up what the briefing left out.
 type Archive struct {
 	Path string // session directory
-}
-
-// List describes every subsession file.
-func (a Archive) List() (string, error) {
-	entries, err := os.ReadDir(a.Path)
-	if err != nil {
-		return "", err
-	}
-	var names []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".jsonl") {
-			names = append(names, e.Name())
-		}
-	}
-	sort.Strings(names)
-	var b strings.Builder
-	fmt.Fprintf(&b, "Session directory: %s\n", a.Path)
-	for i, name := range names {
-		evs, err := store.ReadFile(filepath.Join(a.Path, name))
-		if err != nil {
-			fmt.Fprintf(&b, "%s: unreadable (%v)\n", name, err)
-			continue
-		}
-		var first, last string
-		var users int
-		var tasks int
-		if len(evs) > 0 {
-			first = evs[0].Time.Format("2006-01-02 15:04:05")
-			last = evs[len(evs)-1].Time.Format("15:04:05")
-		}
-		for _, ev := range evs {
-			switch ev.Type {
-			case event.UserMessage:
-				users++
-			case event.TaskCreate:
-				tasks++
-			}
-		}
-		fmt.Fprintf(&b, "%d. %s  %d lines  %s -> %s  (%d user messages, %d tasks)\n", i+1, name, len(evs), first, last, users, tasks)
-	}
-	return b.String(), nil
 }
 
 // Read renders lines from..to (1-based, inclusive) of one file. Each line is
 // prefixed with file:line so it can be cited.
 func (a Archive) Read(file string, from, to int, raw bool, maxChars int) (string, error) {
 	if strings.ContainsAny(file, "/\\") || !strings.HasSuffix(file, ".jsonl") {
-		return "", fmt.Errorf("file must be a subsession file name like 1788740857293.jsonl (see session_list)")
+		return "", fmt.Errorf("file must be one of the session's record files, named like 1788740857293.jsonl")
 	}
 	evs, err := store.ReadFile(filepath.Join(a.Path, file))
 	if err != nil {
@@ -72,7 +31,10 @@ func (a Archive) Read(file string, from, to int, raw bool, maxChars int) (string
 	if from < 1 {
 		from = 1
 	}
-	if to < from || to > len(evs) {
+	if to < from {
+		to = from + 39
+	}
+	if to > len(evs) {
 		to = len(evs)
 	}
 	if from > len(evs) {
@@ -176,24 +138,12 @@ func Summarize(ev event.Event, max int) string {
 		if d.IsError {
 			body = d.Name + " ERROR -> " + d.Output
 		}
-	case event.TaskCreate:
-		var d event.TaskCreateData
-		_ = ev.Decode(&d)
-		body = d.ID + " " + d.Title + ": " + d.Description
-	case event.TaskEnd:
-		var d event.TaskEndData
-		_ = ev.Decode(&d)
-		body = d.ID + " " + d.Status + ": " + d.Summary
-	case event.Note:
-		var d event.NoteData
+	case event.Message:
+		var d event.MessageData
 		_ = ev.Decode(&d)
 		body = d.Text
-	case event.NarratorMessage:
-		var d event.NarratorMessageData
-		_ = ev.Decode(&d)
-		body = d.Text
-	case event.NarratorQuestion:
-		var d event.NarratorQuestionData
+	case event.Question:
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		body = d.Text
 	case event.Dossier:
@@ -204,14 +154,6 @@ func Summarize(ev event.Event, max int) string {
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
 		body = d.Text
-	case event.ProcStart:
-		var d event.ProcStartData
-		_ = ev.Decode(&d)
-		body = d.Handle + " " + d.Command
-	case event.ProcExit:
-		var d event.ProcExitData
-		_ = ev.Decode(&d)
-		body = fmt.Sprintf("%s %s code=%d", d.Handle, d.Reason, d.ExitCode)
 	default:
 		body = string(ev.Data)
 	}
@@ -227,4 +169,22 @@ func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\n", "⏎ ")
 	return strings.TrimSpace(s)
+}
+
+// Truncate bounds text to about max characters, keeping the head and the
+// tail, without splitting a UTF-8 sequence.
+func Truncate(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	head := max * 2 / 3
+	tail := max - head
+	for head > 0 && !utf8.RuneStart(s[head]) {
+		head--
+	}
+	tailStart := len(s) - tail
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
+	return s[:head] + fmt.Sprintf("\n\n[... %d characters omitted; %d total ...]\n\n", tailStart-head, len(s)) + s[tailStart:]
 }

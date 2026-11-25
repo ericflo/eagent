@@ -705,12 +705,12 @@ func transcriptLine(ev event.Event) string {
 		var d event.UserDismissData
 		_ = ev.Decode(&d)
 		return block("USER", "dismissed question "+d.QuestionID+" without answering")
-	case event.NarratorMessage:
-		var d event.NarratorMessageData
+	case event.Message:
+		var d event.MessageData
 		_ = ev.Decode(&d)
 		return block("NARRATOR", d.Text)
-	case event.NarratorQuestion:
-		var d event.NarratorQuestionData
+	case event.Question:
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		text := d.Text
 		for i, o := range d.Options {

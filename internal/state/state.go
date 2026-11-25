@@ -507,8 +507,8 @@ func (s *State) Apply(ev event.Event) {
 		var d event.NoteData
 		_ = ev.Decode(&d)
 		s.Notes = append(s.Notes, Note{Seq: ev.Seq, Text: d.Text, Time: ev.Time})
-	case event.NarratorQuestion:
-		var d event.NarratorQuestionData
+	case event.Question:
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		bump(&s.questionSeq, d.ID, "q")
 		s.Question = &Question{ID: d.ID, Text: d.Text, Options: d.Options, Seq: ev.Seq}
@@ -582,8 +582,8 @@ func (s *State) Apply(ev event.Event) {
 		if ev.Decode(&d) == nil {
 			s.NarratorTrim = &d
 		}
-	case event.NarratorChecks:
-		var d event.NarratorChecksData
+	case event.Checks:
+		var d event.ChecksData
 		if ev.Decode(&d) == nil && d.Count > 0 {
 			key := event.ActorNarrator
 			tot := s.Totals[key]

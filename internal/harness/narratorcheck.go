@@ -199,8 +199,8 @@ func (r *Runtime) flushQuietChecks() {
 		return
 	}
 	d := r.quietChecks
-	r.quietChecks = event.NarratorChecksData{}
-	r.append(event.New(event.NarratorChecks, event.ActorNarrator, d))
+	r.quietChecks = event.ChecksData{}
+	r.append(event.New(event.Checks, event.ActorNarrator, d))
 }
 
 // maybeTrimNarrator shortens the narrator view once its prompt grows past the

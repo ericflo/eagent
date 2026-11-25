@@ -167,7 +167,7 @@ func TestProgressCheckOnARelay(t *testing.T) {
 	eventually(t, rt, "the progress line", func() bool { return strings.HasPrefix(rt.narrLastSaid, "Codex found two open PRs") })
 	var tail []string
 	var view string
-	var checks event.NarratorChecksData
+	var checks event.ChecksData
 	rt.sync(func() {
 		log := narratorLog(rt)
 		tail = log[len(before):]
@@ -175,12 +175,12 @@ func TestProgressCheckOnARelay(t *testing.T) {
 			view += m.Text + "\n"
 		}
 		for _, ev := range rt.st.Events {
-			if ev.Type == event.NarratorChecks {
+			if ev.Type == event.Checks {
 				_ = ev.Decode(&checks)
 			}
 		}
 	})
-	want := []string{event.NarratorChecks, event.TurnStart, event.Steer, event.Assistant, event.NarratorMessage, event.ToolResult, event.TurnEnd}
+	want := []string{event.Checks, event.TurnStart, event.Steer, event.Assistant, event.Message, event.ToolResult, event.TurnEnd}
 	if strings.Join(tail, " ") != strings.Join(want, " ") {
 		t.Fatalf("recorded %v, want %v", tail, want)
 	}

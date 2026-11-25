@@ -137,7 +137,7 @@ func (r *Runtime) noteSummary(ev event.Event) {
 			return // a turn that only said "still waiting" is not news
 		}
 		due = notBefore(summaryTurnGap)
-	case event.Yield, event.RelayEnd, event.NarratorQuestion, event.UserDismiss:
+	case event.Yield, event.RelayEnd, event.Question, event.UserDismiss:
 		due = notBefore(summaryTurnGap)
 	case event.TaskEnd:
 		var d event.TaskEndData
@@ -146,7 +146,7 @@ func (r *Runtime) noteSummary(ev event.Event) {
 			return
 		}
 		due = notBefore(summaryTalkGap)
-	case event.NarratorMessage:
+	case event.Message:
 		due = notBefore(summaryTalkGap)
 	case event.RelayProgress:
 		due = notBefore(summaryLongGap)
@@ -505,8 +505,8 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 				}
 				user = append(user, line{ev.Time, text})
 			}
-		case event.NarratorMessage:
-			var d event.NarratorMessageData
+		case event.Message:
+			var d event.MessageData
 			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
 				told = append(told, line{ev.Time, d.Text})
 			}

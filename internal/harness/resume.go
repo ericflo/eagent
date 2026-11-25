@@ -100,8 +100,8 @@ func (r *Runtime) closeInterrupted() {
 			_ = ev.Decode(&d)
 			r.narrLastSeen = d.SeenSeq
 		}
-		if ev.Type == event.NarratorMessage {
-			var d event.NarratorMessageData
+		if ev.Type == event.Message {
+			var d event.MessageData
 			_ = ev.Decode(&d)
 			r.narrLastSaid = d.Text
 			r.narrSaidSeq = ev.Seq

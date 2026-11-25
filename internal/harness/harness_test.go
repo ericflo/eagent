@@ -1055,8 +1055,8 @@ func TestNarratorAnswersWithTheOrchestratorNotAheadOfIt(t *testing.T) {
 			if ev.Decode(&d) == nil && d.Answer && d.Text == "No, only the summary." {
 				answerSeq = ev.Seq
 			}
-		case event.NarratorMessage:
-			var d event.NarratorMessageData
+		case event.Message:
+			var d event.MessageData
 			if ev.Decode(&d) == nil && d.Text == "No, only the summary." {
 				relaySeq = ev.Seq
 			}
