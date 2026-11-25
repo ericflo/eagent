@@ -47,3 +47,23 @@ func TestReplyServedByTheOldRouteIsCountedOnIt(t *testing.T) {
 		t.Fatalf("by route: %+v", st.ByRoute)
 	}
 }
+
+// A reply says which model it was asked of, so a call still in flight
+// when the route changes to another model at the same host is priced on
+// the model that served it.
+func TestReplyInFlightThroughAModelChangeOnOneHostIsCountedOnItsOwnModel(t *testing.T) {
+	const host = "https://a.example/v1"
+	b := newBuilder()
+	b.add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, BaseURL: host, Model: "model-a"}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Model: "a-snapshot", Asked: "model-a", Host: host, Usage: event.Usage{Input: 100}}))
+	b.add(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, BaseURL: host, Model: "model-b"}))
+	// The call that started before the change comes back after it.
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Model: "a-snapshot", Asked: "model-a", Host: host, Usage: event.Usage{Input: 10}}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Model: "model-b", Asked: "model-b", Host: host, Usage: event.Usage{Input: 1}}))
+	st := Replay(b.events)
+	a := st.ByRoute[RouteKey{Actor: event.ActorEagent, Host: host, Model: "model-a"}]
+	bb := st.ByRoute[RouteKey{Actor: event.ActorEagent, Host: host, Model: "model-b"}]
+	if a.Input != 110 || bb.Input != 1 || len(st.ByRoute) != 2 {
+		t.Fatalf("by route: %+v", st.ByRoute)
+	}
+}

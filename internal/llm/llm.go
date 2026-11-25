@@ -100,8 +100,9 @@ type Message struct {
 	// and item ids are bound to the account that minted them, so a fallback
 	// route at another host must rebuild the turn instead of replaying.
 	NativeHost string
-	// NativeModel is the model that produced Native, as the response named
-	// it (which can be a dated variant of the model that was asked for).
+	// NativeModel is the model that produced Native: the one the request
+	// asked for, or, for a record that only kept the name the response
+	// gave, that name (which can be a dated variant of the one asked for).
 	// Empty when the record does not say.
 	NativeModel string
 
@@ -378,10 +379,21 @@ type Response struct {
 	Native    json.RawMessage
 	Protocol  string
 	BaseURL   string // the endpoint that produced this response
-	Model     string
+	Model     string // as the response named it; the endpoint's model when it named none
+	Asked     string // the model the request asked for
 	Usage     event.Usage
 	Stop      string // "stop" | "tool_calls" | "length" | other provider value
 	Elapsed   time.Duration
+}
+
+// By is the model to hold this response's native items to when they are
+// replayed: the one that was asked for. A provider may name the model that
+// ran in its own way, and that name need not look like the one asked for.
+func (r *Response) By() string {
+	if r.Asked != "" {
+		return r.Asked
+	}
+	return r.Model
 }
 
 // Truncated reports whether the output hit the token limit.
@@ -685,6 +697,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
 			resp.BaseURL = c.Endpoint.BaseURL
+			resp.Asked = c.Endpoint.Model
 			if resp.Model == "" {
 				resp.Model = c.Endpoint.Model
 			}

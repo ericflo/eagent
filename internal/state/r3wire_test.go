@@ -24,3 +24,21 @@ func TestARenderedTurnNamesTheModelThatMadeIt(t *testing.T) {
 	}
 	t.Fatal("no assistant turn rendered")
 }
+
+// A record that says which model was asked is held to that name: the
+// provider's own name for the model that ran need not look like it.
+func TestARenderedTurnIsHeldToTheModelThatWasAsked(t *testing.T) {
+	b := newBuilder()
+	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "status?"}))
+	b.add(event.New(event.Assistant, event.ActorEagent, event.AssistantData{Provider: "openai", Model: "sol-snapshot-b", Asked: "gpt-6.1-sol", Host: "https://api.openai.com/v1",
+		Text: "fine", Native: []byte(`[{"type":"message"}]`), SeenSeq: 2}))
+	for _, m := range Replay(b.events).View(nil) {
+		if m.Role == "assistant" {
+			if m.NativeModel != "gpt-6.1-sol" {
+				t.Fatalf("NativeModel = %q", m.NativeModel)
+			}
+			return
+		}
+	}
+	t.Fatal("no assistant turn rendered")
+}

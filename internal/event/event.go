@@ -262,8 +262,13 @@ type Usage struct {
 
 // AssistantData is one model response.
 type AssistantData struct {
-	Provider  string          `json:"provider"`
-	Model     string          `json:"model"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"` // as the response named it
+	// Asked is the model the request asked for. The response's name for
+	// it can differ (a dated variant, a router's alias), and it is the
+	// asked name that says which route served the call and which model
+	// the native items can go back to. Absent in older records.
+	Asked     string          `json:"asked,omitempty"`
 	Host      string          `json:"host,omitempty"` // the base URL that served the call; Native replays only there
 	Text      string          `json:"text,omitempty"`
 	Reasoning string          `json:"reasoning,omitempty"` // summary, for humans

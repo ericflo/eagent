@@ -479,7 +479,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		if len(resp.ToolCalls) > 0 {
 			lookedAt = len(msgs)
 		}
-		msgs = append(msgs, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.Model})
+		msgs = append(msgs, llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.By()})
 		if len(resp.ToolCalls) > 0 {
 			// Looking things up before writing.
 			results := llm.Message{Role: "tool"}

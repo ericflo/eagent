@@ -481,7 +481,7 @@ func (r *Runtime) answeredSince(seen int64) bool {
 // try without recording it: its reply, then why it will not do. A reply
 // that called hold gets the reason as that call's result.
 func sentBack(resp *llm.Response, why string) []llm.Message {
-	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.Model}}
+	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.By()}}
 	if len(resp.ToolCalls) == 0 {
 		return append(out, llm.Message{Role: "user", Text: "[eagent] " + why})
 	}
@@ -787,7 +787,7 @@ func (r *Runtime) turn(w wake) {
 					r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
 				}
 				r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
-					Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+					Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 				}))
 				r.looked(covered, resp.Usage.Input, w)
@@ -840,7 +840,7 @@ func (r *Runtime) turn(w wake) {
 			rewrote = true
 			r.sync(func() { r.noteSilent(resp, 0, wake{}) })
 			extra = append(extra,
-				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.Model},
+				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.By()},
 				rewriteRequest(resp, leak),
 			)
 			continue
@@ -856,7 +856,7 @@ func (r *Runtime) turn(w wake) {
 				r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
 			}
 			r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
-				Provider: resp.Protocol, Model: resp.Model, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+				Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 				ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
 				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 			}))

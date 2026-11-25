@@ -15,4 +15,10 @@ func TestASentBackReplyNamesTheModelThatWroteIt(t *testing.T) {
 	if got := sentBack(resp, "why")[0].NativeModel; got != "claude-opus-5-5" {
 		t.Fatalf("NativeModel = %q", got)
 	}
+	// The name to hold it to is the one that was asked for, when the
+	// provider names the model that ran differently.
+	resp.Model, resp.Asked = "opus-snapshot", "claude-opus-5-5"
+	if got := sentBack(resp, "why")[0].NativeModel; got != "claude-opus-5-5" {
+		t.Fatalf("NativeModel = %q for a reply that says what was asked", got)
+	}
 }

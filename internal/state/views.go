@@ -1,6 +1,7 @@
 package state
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 	"sync"
@@ -263,7 +264,7 @@ func renderActor(events []event.Event, actor string, notify func(event.Event) st
 			_ = ev.Decode(&d)
 			msgs = append(msgs, llm.Message{
 				Role: "assistant", Text: d.Text, ToolCalls: d.ToolCalls,
-				Native: d.Native, NativeProtocol: d.Provider, NativeHost: d.Host, NativeModel: d.Model,
+				Native: d.Native, NativeProtocol: d.Provider, NativeHost: d.Host, NativeModel: cmp.Or(d.Asked, d.Model),
 			})
 			if len(d.ToolCalls) > 0 {
 				tm := llm.Message{Role: "tool"}

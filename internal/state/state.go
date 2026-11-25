@@ -233,15 +233,16 @@ func (s *State) Location() *time.Location {
 func (s *State) clock(t time.Time) string { return t.In(s.Location()).Format("15:04:05") }
 
 // account adds model usage to an actor's totals, and to the route that
-// served it (servedBy; host is "" when the record does not say).
-func (s *State) account(actor, host string, u event.Usage, calls int, elapsedMS int64) {
+// served it (servedBy; host and asked are "" when the record does not
+// say).
+func (s *State) account(actor, host, asked string, u event.Usage, calls int, elapsedMS int64) {
 	tot := s.Totals[actor]
 	tot.Input += u.Input
 	tot.Output += u.Output
 	tot.Cached += u.Cached
 	tot.Reasoning += u.Reasoning
 	s.Totals[actor] = tot
-	rk := s.servedBy(actor, host)
+	rk := s.servedBy(actor, host, asked)
 	ru := s.ByRoute[rk]
 	ru.Input += u.Input
 	ru.Output += u.Output
@@ -254,13 +255,18 @@ func (s *State) account(actor, host string, u event.Usage, calls int, elapsedMS 
 	}
 }
 
-// servedBy is the route a reply that names the host that served it was
-// priced on: the route in use, or, when the reply came from another host
-// (a call still in flight when the route changed), the model last routed
-// to that host. A reply that names no host, or a host no route named, is
-// put on the route in use.
-func (s *State) servedBy(actor, host string) RouteKey {
+// servedBy is the route a reply was priced on. A reply that names its
+// host and the model that was asked for names its route, whatever is in
+// use now (a call can still be in flight when the route changes). An
+// older record names only the host: it goes on the route in use, or, when
+// it came from another host, on the model last routed to that host. A
+// reply that names no host, or a host no route named, is put on the route
+// in use.
+func (s *State) servedBy(actor, host, asked string) RouteKey {
 	rk := RouteKey{Actor: actor, Host: s.Hosts[actor], Model: s.Models[actor]}
+	if host != "" && asked != "" {
+		return RouteKey{Actor: actor, Host: host, Model: asked}
+	}
 	if host == "" || host == rk.Host {
 		return rk
 	}
@@ -323,7 +329,7 @@ func (s *State) Apply(ev event.Event) {
 					s.SummarySeq = d.SeenSeq
 				}
 				if d.Usage != nil {
-					s.account(summaryActor(ev), "", *d.Usage, 1, d.ElapsedMS)
+					s.account(summaryActor(ev), "", "", *d.Usage, 1, d.ElapsedMS)
 				}
 			}
 		}
@@ -395,7 +401,7 @@ func (s *State) Apply(ev event.Event) {
 			// A dossier is written in several calls (the lookups, then the
 			// text): each counts, and the latency kept is one call's share.
 			calls := max(d.Calls, 1)
-			s.account(event.ActorEagent, "", *d.Usage, calls, d.ElapsedMS/int64(calls))
+			s.account(event.ActorEagent, "", "", *d.Usage, calls, d.ElapsedMS/int64(calls))
 		}
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
@@ -423,7 +429,7 @@ func (s *State) Apply(ev event.Event) {
 		if ev.Task == "" {
 			s.LastUsage[ev.Actor] = d.Usage
 		}
-		s.account(ev.Actor, d.Host, d.Usage, 1, d.ElapsedMS)
+		s.account(ev.Actor, d.Host, d.Asked, d.Usage, 1, d.ElapsedMS)
 	case event.Question:
 		var d event.QuestionData
 		_ = ev.Decode(&d)
@@ -461,7 +467,7 @@ func (s *State) Apply(ev event.Event) {
 		var d event.ChecksData
 		if ev.Decode(&d) == nil && d.Count > 0 {
 			actor := ev.Actor
-			s.account(actor, "", d.Usage, d.Count, 0)
+			s.account(actor, "", "", d.Usage, d.Count, 0)
 			if d.PromptTokens > 0 {
 				u := s.LastUsage[actor]
 				u.Input = d.PromptTokens
