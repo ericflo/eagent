@@ -197,6 +197,14 @@ func checkStartDir(dir string) error {
 	return nil
 }
 
+// builtinOrder is the order a session tries the built-in agents in when no
+// default is set (harness defaultProfile).
+var builtinOrder = []string{"claude", "codex", "antigravity", "pi"}
+
+// agentInstalled reports whether an agent's program is on this machine;
+// tests replace it.
+var agentInstalled = relay.Installed
+
 // relayProfiles describes the agents a session started from the phone may
 // relay to, for the app's agent picker: name, program, and a label.
 func relayProfiles(project string) []map[string]any {
@@ -206,10 +214,28 @@ func relayProfiles(project string) []map[string]any {
 	}
 	out := []map[string]any{}
 	profiles := cfg.Relay.RelayProfiles()
-	names := cfg.Relay.RelayProfileNames()
-	// The project's default agent comes first: a client that sends no
-	// choice gets it, and a picker that preselects the first entry agrees.
-	if i := slices.Index(names, cfg.Relay.Default); i > 0 {
+	// The built-in agents in the order a session prefers them, then the
+	// project's own profiles.
+	names := []string{}
+	for _, name := range append(append([]string{}, builtinOrder...), cfg.Relay.RelayProfileNames()...) {
+		if _, ok := profiles[name]; ok && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	// The agent a session starts when it is not told which comes first, as
+	// the harness picks it (relay.default, else the first installed): a
+	// client that sends no choice gets it, and a picker that preselects the
+	// first entry agrees.
+	def := strings.TrimSpace(cfg.Relay.Default)
+	if def == "" {
+		for _, name := range names {
+			if agentInstalled(profiles[name].Agent) {
+				def = name
+				break
+			}
+		}
+	}
+	if i := slices.Index(names, def); i > 0 {
 		names = append([]string{names[i]}, append(names[:i:i], names[i+1:]...)...)
 	}
 	for _, name := range names {

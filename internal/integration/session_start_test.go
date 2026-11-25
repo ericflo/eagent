@@ -294,12 +294,25 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	if res, err := executeCommand(context.Background(), s, g, q, false); err != nil || res.Status != "rejected" || got.Relay != "" {
 		t.Fatalf("unknown profile: %s %v %#v", res.Status, res.Result, got)
 	}
-	var names []string
-	for _, p := range relayProfiles(t.TempDir()) {
-		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
-	}
-	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex,pi/pi" {
-		t.Fatalf("advertised profiles %v", names)
+	// The agents come in the order a session prefers them, the one it
+	// would start first.
+	installed := agentInstalled
+	defer func() { agentInstalled = installed }()
+	for _, c := range []struct {
+		installed []string
+		want      string
+	}{
+		{nil, "claude/claude,codex/codex,antigravity/antigravity,pi/pi"},
+		{[]string{"codex", "pi"}, "codex/codex,claude/claude,antigravity/antigravity,pi/pi"},
+	} {
+		agentInstalled = func(agent string) bool { return slices.Contains(c.installed, agent) }
+		var names []string
+		for _, p := range relayProfiles(t.TempDir()) {
+			names = append(names, p["name"].(string)+"/"+p["agent"].(string))
+		}
+		if strings.Join(names, ",") != c.want {
+			t.Fatalf("installed %v: advertised profiles %v", c.installed, names)
+		}
 	}
 }
 
