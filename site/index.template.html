@@ -1464,7 +1464,7 @@
             </summary>
             <p>
               Your messages still reach the agent, since forwarding happens
-              before any model call. A failed call is retried after 5 seconds, a
+              before any model call. A failed call is retried at once, then after a
               minute, then 5, 15 and 30 minutes, then hourly. After the second
               failure eagent tells you it cannot reach its model. A configured
               fallback route takes over when the first is unroutable, for

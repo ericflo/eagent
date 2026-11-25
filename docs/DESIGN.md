@@ -39,7 +39,7 @@ Routing is code, and it happens before any model call (`routeUserMessage` in `re
 | Starts with `@e`, or the client marked it for eagent | Kept for the model. |
 | Asks about the session ("how's it going?", "is it stuck?") | Kept for the model, which answers from the record and the screen without disturbing the agent. |
 | No agent is running, or more than one is | Kept for the model, which starts one or picks one and passes the message on with `relay_forward`. |
-| A slash command (`/screen`, `/model`, `/restart`, `/switch`, `/autopilot`, `/interrupt`, `/notify-done`, `/stop-relay`, `/schedules`, `/status`, `/dismiss`) | Carried out by the harness. No model call. |
+| A slash command (`/screen`, `/model`, `/restart`, `/switch`, `/autopilot`, `/interrupt`, `/notify-done`, `/stop-relay`, `/schedules`, `/status`, `/dismiss`) | Carried out by the harness. No model call. From the phone or the web, while an agent runs, `/status` and `/schedules` (and `/help`) go to the agent instead, since eagent's own output for them shows only in its terminal. While an agent runs, `/dismiss` with no question of eagent's open goes to the agent too. |
 
 So the agent hears the user even while eagent's own model is slow or unreachable. Each message gets a delivery receipt when the agent's transcript shows it arrived.
 
