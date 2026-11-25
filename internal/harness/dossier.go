@@ -244,11 +244,16 @@ func (r *Runtime) startDossier() {
 		// be the prompt. The model works from the files instead.
 		r.dossierFromFiles(&job, dossierRefused)
 		r.ui.Log("the model refused the conversation as too long; restarting it from a dossier")
-	case r.dossierBudget(job.tokens, false) < dossierReadMin:
-		// The conversation leaves the window too little room to read the
-		// record on top of it. Written inside it, the pass would be
+	case r.dossierBudget(job.tokens, false) < dossierReadChars:
+		// The conversation leaves the window too little room to read even
+		// one lookup on top of it. Written inside it, the pass would be
 		// refused as too long at its first lookups, or write a map
-		// without having read anything.
+		// without having read anything. (The bar is one lookup, not
+		// dossierReadMin: an automatic rollover holds back about that
+		// much, and the prompt that sets it off is always somewhat past
+		// the threshold, so a bar of dossierReadMin would send every pass
+		// of a window under ~130k tokens to the files. A pass that reads
+		// more than fits is made smaller in writeDossier.)
 		r.dossierFromFiles(&job, "the conversation fills too much of the model's context window to write a briefing inside it")
 		r.ui.Log("the conversation reached %dk tokens, too near the model's window to write a dossier inside it; writing one from the record", job.tokens/1000)
 	default:
