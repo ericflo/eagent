@@ -364,7 +364,7 @@ func TestAThinkingOnlyReplyIsSentBackAsNoOutput(t *testing.T) {
 				{Role: "user", Text: "[eagent] Your reply was cut off by the output limit."},
 			}
 		})
-		if got := toJSON(msgs[1]); got != `{"content":[{"text":"(no output)","type":"text"}],"role":"assistant"}` {
+		if got := withoutBreakpoints(msgs[1:2]); got != `[{"content":[{"text":"(no output)","type":"text"}],"role":"assistant"}]` {
 			t.Fatalf("%s went back as %s", native, got)
 		}
 	}

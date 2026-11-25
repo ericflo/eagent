@@ -270,7 +270,10 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		case "thinking":
 			b.Thinking = b.partial.String()
 			reasoning.WriteString(b.Thinking)
-			native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			// Cut off before its signature came: Claude would refuse it back.
+			if b.Signature != "" || !claudeModel(c.Endpoint.Model) {
+				native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			}
 		case "redacted_thinking":
 			native = append(native, map[string]any{"type": "redacted_thinking", "data": b.partial.String()})
 		}
@@ -333,7 +336,12 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 			// them; replay them only at the host that did.
 			if len(m.Native) > 0 && m.NativeProtocol == ProtocolAnthropic && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && anthropicReplays(m, model) {
 				var native []map[string]any
-				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
+				if json.Unmarshal(m.Native, &native) != nil {
+					native = nil
+				} else if claudeModel(model) {
+					native = claudeThinking(native)
+				}
+				if len(native) > 0 {
 					content = native
 					var own []string
 					for _, b := range native {
@@ -495,7 +503,9 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 			native = append(native, map[string]any{"type": "tool_use", "id": b.ID, "name": b.Name, "input": input})
 		case "thinking":
 			reasoning.WriteString(b.Thinking)
-			native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			if b.Signature != "" || !claudeModel(c.Endpoint.Model) {
+				native = append(native, map[string]any{"type": "thinking", "thinking": b.Thinking, "signature": b.Signature})
+			}
 		case "redacted_thinking":
 			native = append(native, map[string]any{"type": "redacted_thinking", "data": b.Data})
 		}

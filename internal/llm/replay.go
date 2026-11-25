@@ -116,3 +116,30 @@ var anthropicAccepts = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString
 
 // responsesAccepts takes any id that is there: nothing narrower is known.
 func responsesAccepts(id string) bool { return id != "" }
+
+// claudeThinking returns the blocks of a turn of Claude's that can go back
+// to Claude. A thinking block without a signature (the output limit cut it
+// off before the signature came) is refused, so it is left out; leaving out
+// the trailing blocks of a turn does not disturb the signatures of earlier
+// ones. A turn that is only thinking would not be taken either: it returns
+// nil, and the turn is rebuilt from its text and calls.
+func claudeThinking(native []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(native))
+	said := false
+	for _, b := range native {
+		switch b["type"] {
+		case "thinking":
+			if sig, _ := b["signature"].(string); sig == "" {
+				continue
+			}
+		case "redacted_thinking":
+		default:
+			said = true
+		}
+		out = append(out, b)
+	}
+	if !said {
+		return nil
+	}
+	return out
+}
