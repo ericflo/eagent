@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -50,3 +51,68 @@ func claudeModel(model string) bool {
 func anthropicReplays(m Message, model string) bool {
 	return m.NativeModel == "" || !claudeModel(model) || claudeModel(m.NativeModel)
 }
+
+// callIDs decides the tool-call ids a request carries. Some providers give
+// every reply the same ids (Kimi sends functions.relay_screen:0 each time),
+// or write characters another protocol refuses. Replayed to the provider
+// that wrote them, a turn's own items keep their ids. A turn rebuilt from
+// its text and calls keeps an id the target accepts, byte for byte; an id
+// it would refuse, or one already used earlier in the request, is replaced
+// by one made from the turn's place in the conversation, and the results
+// that follow the turn are given the same replacement. Each decision looks
+// only at what came before it, so a conversation that grows renders its
+// earlier turns the same way every time.
+type callIDs struct {
+	accepts func(string) bool
+	seen    map[string]bool
+	// given maps each id of the latest assistant turn to what it was sent
+	// as, in call order (one reply may use an id twice).
+	given map[string][]string
+}
+
+func newCallIDs(accepts func(string) bool) *callIDs {
+	return &callIDs{accepts: accepts, seen: map[string]bool{}}
+}
+
+// kept starts a turn whose own items go out as they are.
+func (c *callIDs) kept(ids []string) {
+	c.given = nil
+	for _, id := range ids {
+		c.seen[id] = true
+	}
+}
+
+// rebuilt starts a turn rendered from its calls.
+func (c *callIDs) rebuilt() { c.given = map[string][]string{} }
+
+// call returns the id call j of a rebuilt turn, message msg of the
+// conversation, goes out with.
+func (c *callIDs) call(msg, j int, id string) string {
+	out := id
+	if !c.accepts(id) || c.seen[id] {
+		out = fmt.Sprintf("eagent_%d_%d", msg, j)
+		for c.seen[out] {
+			out += "_"
+		}
+	}
+	c.seen[out] = true
+	if c.given != nil {
+		c.given[id] = append(c.given[id], out)
+	}
+	return out
+}
+
+// result returns the id a result for id goes out with.
+func (c *callIDs) result(id string) string {
+	if q := c.given[id]; len(q) > 0 {
+		c.given[id] = q[1:]
+		return q[0]
+	}
+	return id
+}
+
+// anthropicAccepts is the pattern Anthropic holds tool_use ids to.
+var anthropicAccepts = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString
+
+// responsesAccepts takes any id that is there: nothing narrower is known.
+func responsesAccepts(id string) bool { return id != "" }

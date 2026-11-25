@@ -352,7 +352,8 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 // responsesInputFor renders history as input items for model.
 func responsesInputFor(req Request, replayReasoning bool, host, model string) []any {
 	var items []any
-	for _, m := range req.Messages {
+	ids := newCallIDs(responsesAccepts)
+	for i, m := range req.Messages {
 		switch m.Role {
 		case "user":
 			if len(m.Images) == 0 {
@@ -382,19 +383,29 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 					}
 				}
 				if len(native) > 0 {
+					var own []string
 					for _, it := range native {
+						var probe struct {
+							Type   string `json:"type"`
+							CallID string `json:"call_id"`
+						}
+						if json.Unmarshal(it, &probe) == nil && probe.Type == "function_call" {
+							own = append(own, probe.CallID)
+						}
 						items = append(items, sanitizeNativeArgs(it))
 					}
+					ids.kept(own)
 					continue
 				}
 			}
+			ids.rebuilt()
 			if m.Text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": m.Text})
 			}
-			for _, tc := range m.ToolCalls {
+			for j, tc := range m.ToolCalls {
 				items = append(items, map[string]any{
 					"type":      "function_call",
-					"call_id":   tc.ID,
+					"call_id":   ids.call(i, j, tc.ID),
 					"name":      tc.Name,
 					"arguments": argsString(tc.Args),
 				})
@@ -403,7 +414,7 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 			for _, r := range m.Results {
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
-					"call_id": r.CallID,
+					"call_id": ids.result(r.CallID),
 					"output":  r.Output,
 				})
 			}

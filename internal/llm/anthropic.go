@@ -312,7 +312,8 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 		}
 		msgs = append(msgs, map[string]any{"role": role, "content": content})
 	}
-	for _, m := range req.Messages {
+	ids := newCallIDs(anthropicAccepts)
+	for i, m := range req.Messages {
 		switch m.Role {
 		case "user":
 			text := m.Text
@@ -334,18 +335,26 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 				var native []map[string]any
 				if json.Unmarshal(m.Native, &native) == nil && len(native) > 0 {
 					content = native
+					var own []string
+					for _, b := range native {
+						if id, _ := b["id"].(string); b["type"] == "tool_use" {
+							own = append(own, id)
+						}
+					}
+					ids.kept(own)
 				}
 			}
 			if content == nil {
+				ids.rebuilt()
 				if m.Text != "" {
 					content = append(content, map[string]any{"type": "text", "text": m.Text})
 				}
-				for _, tc := range m.ToolCalls {
+				for j, tc := range m.ToolCalls {
 					var input any = json.RawMessage(`{}`)
 					if obj, err := ArgsObject(tc.Args); err == nil {
 						input = obj
 					}
-					content = append(content, map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": input})
+					content = append(content, map[string]any{"type": "tool_use", "id": ids.call(i, j, tc.ID), "name": tc.Name, "input": input})
 				}
 			}
 			if len(content) == 0 {
@@ -355,7 +364,7 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 		case "tool":
 			var content []map[string]any
 			for _, r := range m.Results {
-				block := map[string]any{"type": "tool_result", "tool_use_id": r.CallID, "content": r.Output}
+				block := map[string]any{"type": "tool_result", "tool_use_id": ids.result(r.CallID), "content": r.Output}
 				if r.IsError {
 					block["is_error"] = true
 				}
