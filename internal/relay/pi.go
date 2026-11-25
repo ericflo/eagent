@@ -117,7 +117,15 @@ export default function (pi: any) {
 	}
 
 	pi.on("session_start", (_event: any, ctx: any) => {
-		save({ state: "idle", session_file: ctx.sessionManager.getSessionFile() || "", session_id: ctx.sessionManager.getSessionId() || "" });
+		// session_entries: what the session already held when pi opened it
+		// (a resumed conversation, the turns a fork keeps) is history to
+		// eagent; everything after it is news, also a turn that finishes
+		// before eagent notices the switch.
+		let entries = -1;
+		try {
+			entries = ctx.sessionManager.getEntries().length;
+		} catch {}
+		save({ state: "idle", session_file: ctx.sessionManager.getSessionFile() || "", session_id: ctx.sessionManager.getSessionId() || "", session_entries: entries });
 		// A message held just as a run ended waits here until pi is idle.
 		clearInterval(timer);
 		timer = setInterval(() => {
@@ -232,8 +240,12 @@ type piStatus struct {
 	Prompt      string `json:"prompt"`
 	SessionFile string `json:"session_file"`
 	SessionID   string `json:"session_id"`
-	Settled     int    `json:"settled"`
-	At          string `json:"at"`
+	// SessionEntries is how many entries the session held when pi opened it
+	// (its session_start): what came before is history, what comes after
+	// is news. Absent from the status of an older extension.
+	SessionEntries *int   `json:"session_entries,omitempty"`
+	Settled        int    `json:"settled"`
+	At             string `json:"at"`
 }
 
 func readPiStatus(file string) (piStatus, bool) {
@@ -295,16 +307,33 @@ func globEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, "*", `\*`, "?", `\?`, "[", `\[`).Replace(s)
 }
 
-// poll follows pi to another session of its own (/new, /resume, /fork):
-// the status file then names a session the seat does not follow.
-func (piAgent) poll(s *Seat, _ time.Time) {
+// poll follows pi to another session of its own (/new, /resume, /fork, an
+// extension's ctx.newSession): the status file then names a session the
+// seat does not follow. pi may have written a whole turn there already;
+// startEntries says where the new session's news begins.
+func (piAgent) poll(s *Seat, now time.Time) {
 	st, ok := readPiStatus(s.spec.StatusFile)
 	if !ok || st.SessionID == "" {
 		return
 	}
-	if inner := s.innerID(); inner != "" && inner != st.SessionID {
+	switch inner := s.innerID(); {
+	case inner == st.SessionID:
+		s.onSession(now)
+	case inner != "":
 		s.follow(st.SessionID)
 	}
+}
+
+// startEntries is how many entries the session file at path held when pi
+// opened it, as the extension recorded at session_start: those are its
+// history (a resumed conversation, the turns a fork keeps). An older
+// extension does not record it; then the seat goes by time.
+func (piAgent) startEntries(spec Spec, path string) (int, bool) {
+	st, ok := readPiStatus(spec.StatusFile)
+	if !ok || st.SessionEntries == nil || st.SessionFile != path || *st.SessionEntries < 0 {
+		return 0, false
+	}
+	return *st.SessionEntries, true
 }
 
 // reportedDialog is the dialog the extension says pi waits on (its
@@ -429,7 +458,12 @@ type piParser struct {
 	exact      bool   // the extension is marking run ends
 	held       string // the latest assistant text: progress, or the turn's report
 	failed     string // the error the run last stopped on, until it moves on
+	skip       int    // entries still to pass over: the session's history
 }
+
+// skipEntries passes over the first n entries (the header is not one):
+// what the session held when pi opened it.
+func (p *piParser) skipEntries(n int) { p.skip = n }
 
 func (p *piParser) marked() bool {
 	if !p.exact && p.statusFile != "" {
@@ -455,6 +489,13 @@ func (p *piParser) line(raw []byte) []obs {
 		} `json:"message"`
 	}
 	if json.Unmarshal(raw, &ev) != nil {
+		return nil
+	}
+	if p.skip > 0 && ev.Type != "session" {
+		p.skip--
+		if ev.Type == "custom" && ev.CustomType == piSettledEntry {
+			p.exact = true
+		}
 		return nil
 	}
 	at := parseTime(ev.Timestamp)

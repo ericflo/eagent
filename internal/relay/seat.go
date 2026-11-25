@@ -97,6 +97,9 @@ type Seat struct {
 	handled    map[string]time.Time // dialog -> when it was last answered
 	readySince time.Time            // when the screen first looked ready while starting
 	refollow   bool                 // the agent moved to another transcript: find it again
+	followed   bool                 // ...and where its news begins is decided when it opens
+	sinceKept  time.Time            // since as it was before the move
+	onAt       time.Time            // when the agent was last seen on the session the seat follows
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
 	closed     bool
@@ -474,12 +477,28 @@ func (s *Seat) watch() {
 				}
 			}
 			if path != "" {
+				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
 				first := s.transcript == ""
 				s.transcript, s.inner = path, inner
+				exact := false
+				if s.followed {
+					// The agent moved here itself. If it says how much the
+					// transcript held when it opened it, exactly that is
+					// history; news written before this look is still news.
+					s.followed = false
+					if ss, ok := s.agent.(sessionStarter); ok {
+						if sk, ok := p.(entrySkipper); ok {
+							if n, ok := ss.startEntries(s.spec, path); ok {
+								sk.skipEntries(n)
+								s.since, exact = s.sinceKept, true
+							}
+						}
+					}
+				}
+				since := s.since
 				s.mu.Unlock()
-				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
-				if !s.since.IsZero() {
+				if !since.IsZero() && !exact {
 					// Reattached or resumed: the history is already on the
 					// record; read only the end of a long transcript.
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
@@ -804,13 +823,48 @@ func looksReady(screen string) bool {
 	return false
 }
 
+// sessionStarter is an agent that can say how many entries a transcript
+// held when the agent opened it (pi's extension records it): those are
+// history, the rest is news.
+type sessionStarter interface {
+	startEntries(spec Spec, path string) (int, bool)
+}
+
+// entrySkipper is a parser told to pass over a transcript's history.
+type entrySkipper interface {
+	skipEntries(n int)
+}
+
+// onSession notes that the agent was still on the session the seat follows
+// at now (the agent's poll read it so).
+func (s *Seat) onSession(now time.Time) {
+	s.mu.Lock()
+	s.onAt = now
+	s.mu.Unlock()
+}
+
 // follow makes the seat find the agent's transcript again on its next
 // tick: the agent switched to another session of its own (id, "" when the
-// agent's locate knows it). Only news from now on counts.
+// agent's locate knows it). Where the new transcript's news begins is
+// decided when it opens: the agent's sessionStarter says exactly, if it
+// can. Otherwise news is what was written after the agent was last seen on
+// the old session (it switched after that), less a millisecond for
+// transcripts that stamp to the millisecond; never earlier than what the
+// seat already ignored. Without that sighting, news is from now on.
 func (s *Seat) follow(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.refollow, s.inner, s.since = true, id, time.Now()
+	if !s.followed {
+		s.sinceKept = s.since
+	}
+	cut := time.Now()
+	if !s.onAt.IsZero() && s.onAt.Before(cut) {
+		cut = s.onAt.Add(-time.Millisecond)
+	}
+	if cut.Before(s.sinceKept) {
+		cut = s.sinceKept
+	}
+	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, cut, time.Time{}
 }
 
 func removePending(list []*pending, x *pending) []*pending {
