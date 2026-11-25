@@ -76,7 +76,7 @@ var all = []llm.Tool{
 			"mode":{"type":"string","enum":["queue","interrupt","after_turn"]}
 		},"required":["text"]}`),
 	def(RelayScreen,
-		"Read the agent's terminal: what is on screen now, with some scrollback. For dialogs, prompts, and checking what it is running.",
+		"Read the agent's terminal: what is on screen now, with some scrollback. Only for a dialog or prompt on its screen, or when the user asks what the screen shows. What the agent says and does reaches you from its transcript, not from here.",
 		`{"type":"object","properties":{"relay":{"type":"string"},"lines":{"type":"integer","description":"Scrollback lines (default 60)."}}}`),
 	def(RelayControl,
 		"Drive the agent's terminal: interrupt; keys (Enter, Escape, Up, Down, Tab, C-c, or text to type; returns the screen afterwards); restart (continues its session); model (change model or effort, 'default' for its own); upgrade (update its CLI, then restart); switch (hand the work to another profile); stop.",
