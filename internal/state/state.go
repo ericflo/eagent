@@ -98,6 +98,9 @@ type State struct {
 	// ByRoute accumulates usage under the route that actually served each
 	// call, so a mid-session fallback does not reprice tokens already spent.
 	ByRoute map[RouteKey]event.Usage
+	// RefusedImages are pictures a provider refused (images.refused), by
+	// path: the conversation carries a note in their place.
+	RefusedImages map[string]bool
 	// hostModels is the model last routed to each actor's hosts (Model
 	// left empty in the key), to price a reply that came back from the
 	// route before the one in use.
@@ -355,6 +358,16 @@ func (s *State) Apply(ev event.Event) {
 			}
 			if h, m := s.Hosts[d.Actor], s.Models[d.Actor]; h != "" && m != "" {
 				s.hostModels[RouteKey{Actor: d.Actor, Host: h}] = m
+			}
+		}
+	case event.ImagesRefused:
+		var d event.ImagesRefusedData
+		if ev.Decode(&d) == nil && len(d.Paths) > 0 {
+			if s.RefusedImages == nil {
+				s.RefusedImages = map[string]bool{}
+			}
+			for _, p := range d.Paths {
+				s.RefusedImages[p] = true
 			}
 		}
 	case event.SessionResume:

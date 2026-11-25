@@ -146,18 +146,22 @@ func claudeThinking(native []map[string]any) []map[string]any {
 }
 
 // reasoningUnreplayable reports whether a Responses turn holds a reasoning
-// item that cannot go back with store off: one without its encrypted
-// content (made while reasoning replay was off) would be looked up by id on
-// a server that kept nothing. Such a turn is rebuilt from its text and
-// calls rather than sent without that one item, since its other items may
-// name the reasoning that came with them.
+// item that cannot go back with store off: one that carries neither its
+// encrypted content nor its own text would be looked up by id on a server
+// that kept nothing (OpenAI writes such an item while reasoning replay is
+// off). A local server that returns the reasoning in the item itself
+// (content, as LM Studio does) gave a whole item, and that one goes back
+// as it came. Such a turn is rebuilt from its text and calls rather than
+// sent without that one item, since its other items may name the
+// reasoning that came with them.
 func reasoningUnreplayable(items []json.RawMessage) bool {
 	for _, it := range items {
 		var probe struct {
-			Type      string `json:"type"`
-			Encrypted string `json:"encrypted_content"`
+			Type      string            `json:"type"`
+			Encrypted string            `json:"encrypted_content"`
+			Content   []json.RawMessage `json:"content"`
 		}
-		if json.Unmarshal(it, &probe) == nil && probe.Type == "reasoning" && probe.Encrypted == "" {
+		if json.Unmarshal(it, &probe) == nil && probe.Type == "reasoning" && probe.Encrypted == "" && len(probe.Content) == 0 {
 			return true
 		}
 	}

@@ -418,6 +418,16 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			if offline > 0 {
 				r.ui.Log("%s: %s is reachable again", who, client.Endpoint.BaseURL)
 			}
+			if len(resp.RefusedImages) > 0 {
+				// The provider would not take these pictures and the call
+				// went through without them. Written down, so the
+				// conversation is rendered without them by any client
+				// from here on (another route, this session resumed) and
+				// they are not uploaded to be refused again.
+				r.sync(func() {
+					r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: resp.RefusedImages}))
+				})
+			}
 			return resp, nil
 		}
 		if ctx.Err() == nil && networkDown(err) {

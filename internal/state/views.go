@@ -132,7 +132,7 @@ func (s *State) View(opts *ViewOptions) []llm.Message {
 	if dossier != nil {
 		msgs = append(msgs, llm.Message{Role: "user", Text: s.notice(*dossier, *opts)})
 	}
-	return append(msgs, renderActor(events, event.ActorEagent, func(ev event.Event) string {
+	msgs = append(msgs, renderActor(events, event.ActorEagent, func(ev event.Event) string {
 		switch ev.Type {
 		case event.Dossier:
 			return "" // the opening message, above
@@ -149,6 +149,16 @@ func (s *State) View(opts *ViewOptions) []llm.Message {
 		}
 		return s.notice(ev, *opts)
 	})...)
+	// A picture a provider refused is marked, so every request from here
+	// on carries the same note in its place.
+	for i := range msgs {
+		for j := range msgs[i].Images {
+			if s.RefusedImages[msgs[i].Images[j].Path] {
+				msgs[i].Images[j].Refused = true
+			}
+		}
+	}
+	return msgs
 }
 
 // remoteChanges finds the moments the user said they went away from, or

@@ -72,35 +72,42 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 	if err != nil {
 		var ae *APIError
 		if fallbacks > 0 && errors.As(err, &ae) && (ae.Status == 400 || ae.Status == 422) {
-			// Drop the field the error seems to be about and try again. When
-			// that is refused as well, the field was not the problem: it
-			// comes back (unless another call had already dropped it), so
-			// that a guess that did not help does not cost every later
-			// call its cache.
-			without := func(flag *atomic.Bool) (*Response, error) {
+			// Drop the field the error seems to be about and try again.
+			// When that is refused in the same words, the field was not
+			// the problem: it comes back (unless another call had already
+			// dropped it), so that a guess that did not help does not
+			// cost every later call its cache. A different refusal is the
+			// next thing in the way (a picture a text-only model cannot
+			// take, a conversation too long): the field stays dropped and
+			// that error is the one the caller acts on.
+			without := func(flag *atomic.Bool, same func(body string) bool) (*Response, error) {
 				set := flag.CompareAndSwap(false, true)
 				out, rerr := c.chatTry(ctx, req, obs, fallbacks-1)
 				var again *APIError
-				if rerr != nil && set && errors.As(rerr, &again) && (again.Status == 400 || again.Status == 422) {
+				if rerr != nil && set && errors.As(rerr, &again) && (again.Status == 400 || again.Status == 422) && (again.Body == ae.Body || same(again.Body)) {
 					flag.CompareAndSwap(true, false)
 					return nil, err
 				}
 				return out, rerr
 			}
-			if sentCacheKey && chatFieldRejected(ae.Body, "prompt_cache_key") {
-				return without(&c.chatNoCacheKey)
+			aboutCacheKey := func(body string) bool { return chatFieldRejected(body, "prompt_cache_key") }
+			aboutReasoning := func(body string) bool {
+				return chatFieldRejected(body, "reasoning_content") || chatFieldRejected(body, "reasoning")
 			}
-			if replayedReasoning && (chatFieldRejected(ae.Body, "reasoning_content") || chatFieldRejected(ae.Body, "reasoning")) {
-				return without(&c.chatNoReplayReasoning)
+			if sentCacheKey && aboutCacheKey(ae.Body) {
+				return without(&c.chatNoCacheKey, aboutCacheKey)
+			}
+			if replayedReasoning && aboutReasoning(ae.Body) {
+				return without(&c.chatNoReplayReasoning, aboutReasoning)
 			}
 			// Generic unknown-field error (e.g. strict schema validation):
 			// shed prompt_cache_key first, then reasoning replay.
 			if chatGenericExtraFieldError(ae.Body) {
 				if sentCacheKey {
-					return without(&c.chatNoCacheKey)
+					return without(&c.chatNoCacheKey, chatGenericExtraFieldError)
 				}
 				if replayedReasoning {
-					return without(&c.chatNoReplayReasoning)
+					return without(&c.chatNoReplayReasoning, chatGenericExtraFieldError)
 				}
 			}
 		}
