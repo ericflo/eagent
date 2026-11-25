@@ -244,14 +244,22 @@ type handover struct {
 	// via are the agents started in between that never received the brief,
 	// oldest first ("Claude", or "Claude (session log …)").
 	via []string
-	// names are the relays whose user sends the brief quotes.
-	names []string
+	// names are the relays whose user sends the brief quotes, each with
+	// the sequence at which that agent first started under its name. An
+	// agent started later under the same name is another conversation:
+	// what the user tells it is not part of this work.
+	names []handoverName
+}
+
+type handoverName struct {
+	name  string
+	start int64
 }
 
 // handoverFrom is a handover from a relay, as it is on the record now.
 // Loop goroutine.
 func handoverFrom(rel *state.Relay) *handover {
-	h := &handover{who: rel.Who(), dir: rel.Dir, transcript: rel.Transcript, names: []string{rel.Name}}
+	h := &handover{who: rel.Who(), dir: rel.Dir, transcript: rel.Transcript, names: []handoverName{{rel.Name, rel.StartSeq}}}
 	if rel.LastTurn != "" {
 		h.reportBy, h.report = rel.Who(), rel.LastTurn
 	}
@@ -268,7 +276,7 @@ func (h *handover) through(rel *state.Relay) *handover {
 		via += " (its session log is " + rel.Transcript + ")"
 	}
 	n.via = append(append([]string(nil), h.via...), via)
-	n.names = append(append([]string(nil), h.names...), rel.Name)
+	n.names = append(append([]handoverName(nil), h.names...), handoverName{rel.Name, rel.StartSeq})
 	if rel.LastTurn != "" {
 		n.reportBy, n.report = rel.Who(), rel.LastTurn
 	}
@@ -1587,9 +1595,9 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	seen := map[string]bool{}
-	for _, name := range ho.names {
-		seen[name] = true
+	seen := map[string]int64{}
+	for _, n := range ho.names {
+		seen[n.name] = n.start
 	}
 	quoted := map[string]bool{}
 	// One pass in record order over every relay in the handover, so the
@@ -1611,8 +1619,12 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		if !seen[d.Name] || d.From != "user" || quoted[d.ID] || pending[d.ID] {
+		start, ok := seen[d.Name]
+		if !ok || d.From != "user" || quoted[d.ID] || pending[d.ID] {
 			continue
+		}
+		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && at.StartSeq > start {
+			continue // said to a later agent that took the name
 		}
 		quoted[d.ID] = true
 		texts = append(texts, d.Text)
