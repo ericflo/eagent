@@ -340,10 +340,12 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 	}
 	out.Descriptor.Actions = s.Actions(grant)
 	// A descriptor holds at most suggestionLists lists. Presets, the summarizer's
-	// modes and eagent's own model list always have theirs; each agent's
-	// models take one while there is room, and an input whose list does not
-	// fit is left to typing. eagent's model list keeps to what the agents'
-	// lists leave of its budget.
+	// modes, eagent's own model list and the providers (which name the groups
+	// every model picker shows) always have theirs; each agent's models take
+	// one while there is room, and an input whose list does not fit is left
+	// to typing. eagent's model list keeps to what the agents' lists leave of
+	// its budget. Saved presets' list comes last: /default_config offers
+	// their names without it.
 	out.Descriptor.Suggestions = map[string][]control.Suggestion{"presets": PresetSuggestions(s.Project), "summarizer_modes": SummarizerModeSuggestions()}
 	relayBytes := 0
 	for ai := range out.Descriptor.Actions {
@@ -357,7 +359,7 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 				continue
 			}
 			if agent, ok := strings.CutSuffix(in.Suggest.List, "_models"); ok && out.Descriptor.Suggestions[in.Suggest.List] == nil {
-				if len(out.Descriptor.Suggestions) >= suggestionLists-1 {
+				if len(out.Descriptor.Suggestions) >= suggestionLists-2 {
 					in.Suggest = nil
 					continue
 				}
@@ -370,22 +372,20 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 		}
 	}
 	out.Descriptor.Suggestions["models"] = projectModelSuggestions(s.Project, modelListBudget-relayBytes)
+	// The providers name the groups models come in, by address: a reader
+	// shows "Together AI", not its URL.
+	out.Descriptor.Suggestions["providers"] = providerAddressSuggestions(s.Project, baseURLs)
+	for i := range out.Descriptor.Fields {
+		if f := &out.Descriptor.Fields[i]; strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url" {
+			f.Suggest = &control.Suggest{List: "providers"}
+		}
+	}
 	if bundleSugs := BundleSuggestions(s.Project); len(bundleSugs) > 0 && len(out.Descriptor.Suggestions) < suggestionLists {
 		out.Descriptor.Suggestions["bundles"] = bundleSugs
 		for i := range out.Descriptor.Fields {
 			if out.Descriptor.Fields[i].Key == "/default_config" {
 				out.Descriptor.Fields[i].Suggest = &control.Suggest{List: "bundles"}
 				break
-			}
-		}
-	}
-	// The providers name the groups models come in, by address; while there
-	// is room for the list, a reader shows "Together AI", not its URL.
-	if len(out.Descriptor.Suggestions) < suggestionLists {
-		out.Descriptor.Suggestions["providers"] = providerAddressSuggestions(s.Project, baseURLs)
-		for i := range out.Descriptor.Fields {
-			if f := &out.Descriptor.Fields[i]; strings.HasSuffix(f.Key, "/base_url") && f.Key != "/finalechat/base_url" {
-				f.Suggest = &control.Suggest{List: "providers"}
 			}
 		}
 	}
@@ -586,7 +586,62 @@ func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (
 	if p.Operation != "settings.apply" {
 		return RemoteView{}, fmt.Errorf("operation is not a configuration edit")
 	}
+	for _, e := range p.Edits {
+		if e.Key != "/servers" || e.Op == "unset" {
+			continue
+		}
+		specs, err := serverSpecs(e.Value)
+		if err != nil {
+			return RemoteView{}, err
+		}
+		if err := s.checkServerKeys(specs); err != nil {
+			return RemoteView{}, err
+		}
+	}
 	return before, nil
+}
+
+func serverSpecs(v any) ([]config.SyncServerSpec, error) {
+	var specs []config.SyncServerSpec
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("/servers: %w", err)
+	}
+	if err := json.Unmarshal(raw, &specs); err != nil {
+		return nil, fmt.Errorf("/servers: %w", err)
+	}
+	return specs, nil
+}
+
+// checkServerKeys holds a remote server list to the rule CheckRoutes holds
+// routes to: probing or saving a server sends its key variable's value to its
+// address, so a remote edit may name a key variable only for an address the
+// local user registered with that same variable. Anything else is registered
+// without a key, or from the CLI or the local web UI.
+func (s *Service) checkServerKeys(specs []config.SyncServerSpec) error {
+	var existing []config.RegisteredServer
+	for _, sp := range specs {
+		keyEnv := strings.TrimSpace(sp.KeyEnv)
+		if keyEnv == "" {
+			continue
+		}
+		if existing == nil {
+			var err error
+			if existing, err = config.LoadServers(s.Project); err != nil {
+				return err
+			}
+		}
+		cands, _, err := config.NormalizeServerURL(sp.URL)
+		if err != nil {
+			return fmt.Errorf("/servers: %w", err)
+		}
+		if !slices.ContainsFunc(existing, func(r config.RegisteredServer) bool {
+			return r.KeyEnv == keyEnv && slices.Contains(cands, strings.TrimRight(r.BaseURL, "/"))
+		}) {
+			return fmt.Errorf("/servers: %s is not the key variable registered for %s; a server's key is set from the CLI (eagent servers) or eagent's own web UI", keyEnv, strings.TrimSpace(sp.URL))
+		}
+	}
+	return nil
 }
 
 // ApplyServerEdits executes /servers and /add_server_url edits from a validated
@@ -606,12 +661,9 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 				specs = nil
 				continue
 			}
-			raw, err := json.Marshal(e.Value)
-			if err != nil {
-				return nil, fmt.Errorf("/servers: %w", err)
-			}
-			if err := json.Unmarshal(raw, &specs); err != nil {
-				return nil, fmt.Errorf("/servers: %w", err)
+			var err error
+			if specs, err = serverSpecs(e.Value); err != nil {
+				return nil, err
 			}
 		case "/add_server_url":
 			if e.Op == "set" {
@@ -621,6 +673,11 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 		}
 	}
 	if hasServers {
+		// Checked again here: servers.json may have changed since the
+		// proposal was reviewed.
+		if err := s.checkServerKeys(specs); err != nil {
+			return nil, err
+		}
 		if addURL != "" {
 			specs = append(specs, config.SyncServerSpec{URL: addURL})
 		}
@@ -688,7 +745,10 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
 	}
-	if err = s.routePicks(values, p.Edits, res.Effective, before.Descriptor); err != nil {
+	// Picks are compared with the layers the file builds on, which the
+	// summarizer's route above is seeded from: what the environment makes
+	// of a route is not the file's.
+	if err = s.routePicks(values, p.Edits, res.Layered, before.Descriptor); err != nil {
 		return
 	}
 	var candidate []byte
@@ -725,7 +785,8 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 // local editor does: its protocol, key variable, an effort it accepts, and
 // the new model's context window (routePickFields). A field the proposal
 // sets itself, or one the connector may not write, is left as it is. A
-// model no list knows keeps the rest of the route, and its window becomes
+// model no list knows gets the provider's protocol and key variable when
+// the address changes, keeps the rest of the route, and its window becomes
 // unknown. The fallback is kept, as the local editor keeps it.
 func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, d control.Descriptor) error {
 	writable := map[string]bool{}
@@ -748,20 +809,46 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	if prior.Summarizer.Model == nil {
 		summarizer.Fallback = nil
 	}
+	// after has the environment applied; a field a variable sets is not
+	// the proposal's to change, so it reads as the layers have it.
+	env := config.EnvOverrides()
+	layered := func(r config.ModelRoute, ptr string, base config.ModelRoute) config.ModelRoute {
+		for leaf, f := range map[string][2]*string{
+			"model":            {&r.Model, &base.Model},
+			"base_url":         {&r.BaseURL, &base.BaseURL},
+			"protocol":         {&r.Protocol, &base.Protocol},
+			"api_key_env":      {&r.APIKeyEnv, &base.APIKeyEnv},
+			"reasoning_effort": {&r.ReasoningEffort, &base.ReasoningEffort},
+		} {
+			if _, ok := env[ptr+"/"+leaf]; ok {
+				*f[0] = *f[1]
+			}
+		}
+		return r
+	}
+	afterMain := layered(after.Model, "/model", prior.Model)
+	afterSummarizer := afterMain
+	if after.Summarizer.Model != nil && after.Summarizer.Model.Model != "" {
+		afterSummarizer = layered(*after.Summarizer.Model, "/summarizer/model", summarizer)
+	}
 	for _, r := range []struct {
 		ptr           string
 		before, after config.ModelRoute
 	}{
-		{"/model", prior.Model, after.Model},
-		{"/summarizer/model", summarizer, after.Summarizer.Route(after.Model)},
+		{"/model", prior.Model, afterMain},
+		{"/summarizer/model", summarizer, afterSummarizer},
 	} {
-		set := map[string]bool{}
+		// set holds the fields the proposal names, which keep its values;
+		// only setting a model or an address is a pick. Unsetting one goes
+		// back to what the layers beneath say, the rest of the route with it.
+		set, isPick := map[string]bool{}, false
 		for _, e := range edits {
 			if leaf, ok := strings.CutPrefix(e.Key, r.ptr+"/"); ok {
 				set[leaf] = true
+				isPick = isPick || (e.Op == "set" && (leaf == "model" || leaf == "base_url"))
 			}
 		}
-		if !set["model"] && !set["base_url"] {
+		if !isPick {
 			continue
 		}
 		if r.after.Model == r.before.Model && strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
@@ -781,7 +868,14 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		}
 		picked, err := config.PickRoute(s.Project, r.before, pr.ID, r.after.Model, "")
 		if err != nil {
-			continue // a model no list knows: the rest of the route stays
+			// A model no list knows keeps the rest of the route at the same
+			// provider. At a new address it takes that provider's protocol
+			// and key variable: the old provider's key is not sent there.
+			if strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
+				continue
+			}
+			picked = r.after
+			picked.Protocol, picked.APIKeyEnv = pr.Protocol, pr.KeyEnv
 		}
 		if picked.Protocol != r.after.Protocol {
 			give("protocol", picked.Protocol)
