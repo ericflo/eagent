@@ -831,24 +831,46 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	if after.Summarizer.Model != nil && after.Summarizer.Model.Model != "" {
 		afterSummarizer = layered(*after.Summarizer.Model, "/summarizer/model", summarizer)
 	}
-	for _, r := range []struct {
+	// Every route the file can hold: each one's fallback is a route too,
+	// with an address and a key variable of its own.
+	type routePair struct {
 		ptr           string
 		before, after config.ModelRoute
-	}{
-		{"/model", prior.Model, afterMain},
-		{"/summarizer/model", summarizer, afterSummarizer},
-	} {
-		// set holds the fields the proposal names, which keep its values;
-		// only setting a model or an address is a pick. Unsetting one goes
-		// back to what the layers beneath say, the rest of the route with it.
+	}
+	var routes []routePair
+	var walk func(ptr string, before, after *config.ModelRoute, depth int)
+	walk = func(ptr string, before, after *config.ModelRoute, depth int) {
+		if after == nil || depth > 3 {
+			return
+		}
+		var b config.ModelRoute
+		if before != nil {
+			b = *before
+		}
+		routes = append(routes, routePair{ptr, b, *after})
+		walk(ptr+"/fallback", b.Fallback, after.Fallback, depth+1)
+	}
+	walk("/model", &prior.Model, &afterMain, 0)
+	walk("/summarizer/model", &summarizer, &afterSummarizer, 0)
+	for _, r := range routes {
+		// set holds the fields the proposal names, which keep its values.
+		// Setting or unsetting a model or an address is a pick: the route
+		// is reached at what results, and the rest of it must match. A
+		// route the edit leaves with no field of its own in the file is the
+		// layers' as a whole, and nothing is given to it.
 		set, isPick := map[string]bool{}, false
 		for _, e := range edits {
-			if leaf, ok := strings.CutPrefix(e.Key, r.ptr+"/"); ok {
+			if leaf, ok := strings.CutPrefix(e.Key, r.ptr+"/"); ok && !strings.Contains(leaf, "/") {
 				set[leaf] = true
-				isPick = isPick || (e.Op == "set" && (leaf == "model" || leaf == "base_url"))
+				isPick = isPick || leaf == "model" || leaf == "base_url"
 			}
 		}
 		if !isPick {
+			continue
+		}
+		own, _ := pointerValue(values, r.ptr)
+		leaves, _ := own.(map[string]any)
+		if len(leaves) == 0 || len(leaves) == 1 && leaves["fallback"] != nil {
 			continue
 		}
 		if r.after.Model == r.before.Model && strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
