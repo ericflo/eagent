@@ -145,12 +145,16 @@ function checkFor(a, effort) { return E.cat.checks[`${trimSlash(a.base_url)}|${a
 function setModel(a, m) {
   const p = E.cat.providers.find(x => x.id === m.provider);
   a.base_url = p.base_url; a.protocol = protocolOf(m); a.api_key_env = p.key_env || ''; a.model = m.id;
-  if (m.context) a.context_tokens = m.context;
+  // The window is the new model's; 0 is unknown, never the old model's.
+  a.context_tokens = m.context || 0;
   if (m.efforts && m.efforts.length && !m.efforts.includes(a.reasoning_effort || 'none')) {
     a.reasoning_effort = m.efforts.includes('medium') ? 'medium' : m.efforts[Math.floor(m.efforts.length / 2)];
   }
-  if (a.protocol !== 'openai-responses') delete a.replay_reasoning;
+  if (!replays(a)) delete a.replay_reasoning;
 }
+// replays reports whether a route's protocol can send the model its earlier
+// reasoning back: Chat Completions and Responses can (replay_reasoning).
+function replays(a) { return a.protocol === 'openai-chat' || a.protocol === 'openai-responses'; }
 function sentFor(a) {
   const e = a.reasoning_effort || '';
   if (a.protocol === 'openai-responses') return !e || e === 'none' ? 'no reasoning parameter is sent' : `"reasoning": {"effort": "${e}"}`;
@@ -174,7 +178,7 @@ async function load() {
   // The base is what the file itself builds on. A preset the server was
   // started with (or EAGENT_PRESET) shapes the values shown, but saving must
   // not silently rewrite the file's own preset to it.
-  const fileBase = res.file.exists && res.file.preset ? res.file.preset : (res.preset || '');
+  const fileBase = res.file.exists ? (res.file.preset || '') : (res.preset || '');
   E = Object.assign(E || {}, {c, cat, sources: res.sources || {}, cfg: strip(res.effective), loaded: strip(res.effective), base: fileBase, loadedBase: fileBase, etag: res.file.etag || '', rawDraft: undefined, mode: E && E.mode || 'overlay', problems: [], tests: E && E.tests || {}, open: E && E.open || {}});
 }
 function draw() {
@@ -342,7 +346,7 @@ function serversCard() {
       ? h('button', {class: 'small', title: `Use ${ms[0].id} on ${s.label} as eagent's model`, onclick: () => {
           setModel(E.cfg.model, ms[0]);
           E.cfg.model.protocol = s.protocol || protocolOf(ms[0]);
-          if (E.cfg.model.protocol !== 'openai-responses') delete E.cfg.model.replay_reasoning;
+          if (!replays(E.cfg.model)) delete E.cfg.model.replay_reasoning;
           if (ms[0].context && E.cfg.rollover_tokens > Math.floor(ms[0].context * 0.85)) {
             E.cfg.rollover_tokens = Math.max(20000, Math.floor(ms[0].context * 0.75));
           }
@@ -543,7 +547,7 @@ function routeCard(slot, top) {
       const ok = supported.includes(p);
       pseg.append(h('button', {class: (a.protocol === p ? 'on' : '') + (ok ? ' tool_call' : ''), disabled: locked('protocol'), title: E.cat.transports[p] || p, onclick: () => {
         a.protocol = p;
-        if (a.protocol !== 'openai-responses') delete a.replay_reasoning;
+        if (!replays(a)) delete a.replay_reasoning;
         rerender();
       }}, h('span', {class: 'e'}, PROTO_LABELS[p]), supported.length ? h('span', {class: 'ann'}, ok ? '✓' : '—') : null));
     }
@@ -588,8 +592,8 @@ function routeCard(slot, top) {
   det.append(h('div', {class: 'adv'},
     num('max_tokens', 'Max output tokens', 'per call; reasoning counts toward it on most providers'),
     num('context_tokens', 'Context window', 'the model\'s usable window; the conversation restarts from a dossier at half of it unless a rollover number is set'),
-    a.protocol === 'openai-responses' ? field('Replay reasoning', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: a.replay_reasoning !== false, disabled: locked('replay_reasoning'), onchange: ev => { if (ev.target.checked) delete a.replay_reasoning; else a.replay_reasoning = false; rerender(); }}), 'keep the model\'s reasoning items across turns (recommended; keeps the prompt cache warm)')], [srcNode(ptr('replay_reasoning'))]) : null,
-    field('Protocol', [h('select', {disabled: locked('protocol'), onchange: ev => { a.protocol = ev.target.value; if (a.protocol !== 'openai-responses') delete a.replay_reasoning; rerender(); }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: a.protocol === p}, `${p} · ${E.cat.transports[p] || ''}`)))], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]),
+    replays(a) ? field('Replay reasoning', [h('label', {class: 'check'}, h('input', {type: 'checkbox', checked: a.replay_reasoning !== false, disabled: locked('replay_reasoning'), onchange: ev => { if (ev.target.checked) delete a.replay_reasoning; else a.replay_reasoning = false; rerender(); }}), a.protocol === 'openai-responses' ? 'keep the model\'s reasoning items across turns (recommended; keeps the prompt cache warm)' : 'send the model its earlier reasoning back (reasoning_content); turn off for a server that rejects it')], [srcNode(ptr('replay_reasoning'))]) : null,
+    field('Protocol', [h('select', {disabled: locked('protocol'), onchange: ev => { a.protocol = ev.target.value; if (!replays(a)) delete a.replay_reasoning; rerender(); }}, ...['openai-chat', 'openai-responses', 'anthropic'].map(p => h('option', {value: p, selected: a.protocol === p}, `${p} · ${E.cat.transports[p] || ''}`)))], [srcNode(ptr('protocol')), ...problemNodes(ptr('protocol'))]),
     field('Provider address', [h('select', {disabled: locked('base_url'), onchange: ev => { a.base_url = ev.target.value; const p = providerOf(a.base_url); if (p) { a.api_key_env = p.key_env || ''; if (!lookup(a)) a.protocol = p.protocol; } rerender(); }}, ...providerOptions(a.base_url))], [srcNode(ptr('base_url')), h('span', {class: 'src'}, 'Register custom or local servers above; catalog and registered servers appear here.'), ...problemNodes(ptr('base_url'))]),
     field('Key variable', [h('select', {disabled: locked('api_key_env'), onchange: ev => { a.api_key_env = ev.target.value; rerender(); }}, ...keyOptions(a.api_key_env))], [srcNode(ptr('api_key_env')), h('span', {class: 'src'}, 'Only the variable name is stored; leave empty for keyless local servers.'), ...problemNodes(ptr('api_key_env'))]),
   ));
@@ -863,12 +867,14 @@ function phoneCard() {
 function promptsCard() {
   const HELP = {'EAGENT.md': 'what eagent does: passing your words on, watching the agent, answering its terminal, telling you how it goes', 'PERSONA.md': 'eagent\'s voice', 'USER_MESSAGE.md': 'how a message you write is put to eagent', 'USER_ANSWER.md': 'how your answer to a question is put to eagent', 'DOSSIER.md': 'the briefing written before a fresh conversation', 'THREAD-SUMMARY.md': 'how a session\'s title and summary in the thread list are written'};
   return h('div', {class: 'card'}, h('h3', null, 'Prompts'), h('p', {class: 'sub'}, 'The instructions eagent works from. Click one to read or edit it; edits are saved as project overrides.'),
-    h('div', {class: 'plist2'}, ...E.c.prompts.map(p => p.retired ? h('button', {class: 'prompt-row', onclick: () => removeRetiredPrompt(p.name)},
+    h('div', {class: 'plist2'}, ...E.c.prompts.map(p => p.retired ? h('button', {class: 'prompt-row', disabled: X.readOnly?.() || !canAction('prompt.reset'), onclick: () => removeRetiredPrompt(p.name)},
       h('code', {class: 'inline'}, p.name), h('span', {class: 'badge blocked'}, 'no longer read'), h('span', {class: 'sub'}, 'An override from the eagent that ran three models. Nothing reads it now. Click to remove it.')) : h('button', {class: 'prompt-row', onclick: () => X.promptEditor(p.name)},
       h('code', {class: 'inline'}, p.name), h('span', {class: 'badge' + (p.source === 'built-in' ? '' : ' completed')}, p.source === 'built-in' ? 'built-in' : 'override'), h('span', {class: 'sub'}, HELP[p.name] || '')))));
 }
 async function removeRetiredPrompt(name) {
-  if (!confirm(`Remove the override of ${name}? eagent has one prompt now (EAGENT.md, with PERSONA.md), and nothing reads this file. Removing it cannot be undone from here.`)) return;
+  // In FinaleChat the removal is staged for review there; a sandboxed frame
+  // has no confirm().
+  if (!X.remote && !confirm(`Remove the override of ${name}? eagent has one prompt now (EAGENT.md, with PERSONA.md), and nothing reads this file. Removing it cannot be undone from here.`)) return;
   try {
     const r = await api(`/api/prompts/${encodeURIComponent(name)}`, {method: 'DELETE'});
     if (r && r.staged) { toast('Ready for review in FinaleChat.'); return; }

@@ -193,8 +193,17 @@
         if (!base) throw new Error('The base preset is unavailable in this archive.');
         const baseValues = flatten(base), loaded = resource.snapshot.effective, desired = clone(resource.snapshot.saved), form = flatten(cfg);
         const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url', '/save_preset']);
+        // Relay profiles name programs to run: a captured bundle may carry
+        // them, and they stay as config.json has them.
+        const kept = key => omitted.has(key) || key.startsWith('/relay/profiles/');
+        // A fallback the preset gives cannot be removed by unsetting its
+        // fields: say so rather than save as if it were gone.
+        for (const route of ['/model', '/summarizer/model']) {
+          const has = values => Object.keys(values).some(key => key.startsWith(route + '/fallback/'));
+          if (has(loaded) && !has(form) && !has(resource.snapshot.saved)) throw new Error('The fallback this route has comes from its preset and cannot be removed from FinaleChat. Remove it in the local editor, or pick another model.');
+        }
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
-          if (omitted.has(key)) continue;
+          if (kept(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
           if (!canEdit(key)) continue;
           if (body.mode !== 'pin' && canonical(form[key]) === canonical(loaded[key]) && body.base_preset === (resource.snapshot.saved['/preset'] || '')) continue;

@@ -841,15 +841,30 @@ func chainModels(a *ModelRoute) []string {
 // the new model's context window (0 when it is not known), unless layer,
 // the route object that changed it, names a context window itself. A
 // window is the model's: one kept from the model before would be wrong.
+//
+// A null in layer clears what the layers below set: the editor writes one
+// where it leaves a field empty that the preset sets, such as an effort of
+// "" (send none, the provider's default) under a preset's "high".
 func followModel(project string, a *ModelRoute, before []string, layer json.RawMessage) {
 	obj := object(layer)
+	null := func(k string) bool { v, ok := obj[k]; return ok && string(v) == "null" }
 	for i, cur := 0, a; cur != nil; i, cur = i+1, cur.Fallback {
 		prev := ""
 		if i < len(before) {
 			prev = before[i]
 		}
-		if v, set := obj["context_tokens"]; cur.Model != prev && (!set || string(v) == "null") {
+		_, window := obj["context_tokens"]
+		switch {
+		case cur.Model != prev && (!window || null("context_tokens")):
 			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
+		case null("context_tokens"):
+			cur.ContextTokens = 0
+		}
+		if null("reasoning_effort") {
+			cur.ReasoningEffort = ""
+		}
+		if null("max_tokens") {
+			cur.MaxTokens = 0
 		}
 		obj = object(obj["fallback"])
 	}

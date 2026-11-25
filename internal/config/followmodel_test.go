@@ -148,3 +148,27 @@ func TestInlineSummarizerRouteIsNotValidated(t *testing.T) {
 		t.Fatal("a dedicated summarizer with no model loaded")
 	}
 }
+
+// The editor leaves an effort of "" (send none) as a null under a preset
+// that sets one; it loads as "", not as the preset's effort.
+func TestNullEffortClearsThePresets(t *testing.T) {
+	unsetEnv(t, routeEnvNames()...)
+	project := t.TempDir()
+	cfg := Defaults()
+	Presets["openrouter-high"](&cfg)
+	cfg.Model.ReasoningEffort = ""
+	edits, err := Overlay(cfg, "openrouter-high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveFile(project, edits, "", false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Model.ReasoningEffort != "" || loaded.Model.Model != cfg.Model.Model {
+		t.Fatalf("effort = %q, model %q", loaded.Model.ReasoningEffort, loaded.Model.Model)
+	}
+}

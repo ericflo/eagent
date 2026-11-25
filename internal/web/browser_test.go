@@ -61,6 +61,29 @@ func TestBrowserOldSession(t *testing.T) {
 	}
 }
 
+// TestBrowserNewSessionWithThis: the configuration page's "New session
+// with this" starts on the project's own configuration (use_project), not
+// the server's --preset. Runs by hand, like TestBrowserOldSession.
+func TestBrowserNewSessionWithThis(t *testing.T) {
+	module := os.Getenv("EAGENT_PLAYWRIGHT_MODULE")
+	if module == "" {
+		t.Skip("set EAGENT_PLAYWRIGHT_MODULE to run the browser test")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not installed")
+	}
+	s, _ := newTestServer(t)
+	srv := httptest.NewServer(s.loopbackOnly(s.Handler()))
+	defer srv.Close()
+	cmd := exec.Command("node", filepath.Join("testdata", "old-session-browser.mjs"), srv.URL, "config", "")
+	cmd.Env = append(os.Environ(), "EAGENT_PLAYWRIGHT_MODULE="+module)
+	out, err := cmd.CombinedOutput()
+	t.Logf("%s", out)
+	if err != nil {
+		t.Fatalf("browser test failed: %v", err)
+	}
+}
+
 // oldSessionFixtures writes two sessions from before eagent was one loop:
 // one that finished, and one the current eagent took over.
 func oldSessionFixtures(t *testing.T, project string) (done, upgraded string) {
@@ -80,6 +103,7 @@ func oldSessionFixtures(t *testing.T, project string) (done, upgraded string) {
 			{Type: event.LegacyProcStart, Actor: event.LegacyTask, Task: "t1", Data: []byte(`{"handle":"p1","command":"go test ./parser","timeout_s":600}`)},
 			{Type: event.LegacyProcExit, Actor: event.LegacyTask, Task: "t1", Data: []byte(`{"handle":"p1","exit_code":0,"reason":"exited","duration_ms":900}`)},
 			{Type: event.LegacyTaskEnd, Actor: event.ActorHarness, Task: "t1", Data: []byte(`{"id":"t1","status":"completed","summary":"found one off-by-one bug in peek"}`)},
+			event.New(event.LegacyNarratorTrim, event.LegacyNarrator, map[string]any{"from_seq": 3, "recap": "told the user the tokenizer review began"}),
 			event.New(event.Message, event.LegacyNarrator, map[string]any{"text": "The tokenizer had one bug, in peek; it is fixed."}),
 			event.New(event.LegacyYield, event.LegacyOrchestrator, event.LegacyYieldData{Done: true, Reason: "reviewed the tokenizer and fixed peek"}),
 		}
@@ -98,6 +122,7 @@ func oldSessionFixtures(t *testing.T, project string) (done, upgraded string) {
 		event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{Index: 1, Reason: "upgrade"}),
 		event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "briefing"}),
 		event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "now the lexer"}),
+		event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "codex", State: "working"}),
 	)
 	return done, upgraded
 }

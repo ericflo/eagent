@@ -43,6 +43,13 @@ func main() {
 	}
 	_, err := config.SaveBundle(project, "fixture", "Browser fixture", cfg)
 	must(err)
+	// A saved preset with a dedicated summarizer of its own and an agent
+	// profile, which the settings page loads into its form.
+	must(os.WriteFile(config.BundlePath(project, "summarized"), []byte(`{"preset":"glm","description":"Dedicated summaries","summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3-Flash","api_key_env":"TOGETHER_API_KEY","reasoning_effort":"low"}},"relay":{"profiles":{"fixture-agent":{"agent":"claude","label":"Fixture agent"}}}}`), 0600))
+	// An override of a prompt eagent no longer reads, which the page offers
+	// to remove.
+	must(os.MkdirAll(filepath.Join(project, ".agents", "eagent", "prompts"), 0700))
+	must(os.WriteFile(filepath.Join(project, ".agents", "eagent", "prompts", "NARRATOR.md"), []byte("An old narrator override.\n"), 0600))
 	session, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
 	must(err)
 	start := event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Models: map[string]string{event.ActorEagent: cfg.Model.Model}, Endpoints: map[string]string{event.ActorEagent: cfg.Model.BaseURL}})

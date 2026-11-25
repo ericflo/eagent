@@ -387,7 +387,11 @@ function chatNode(ev) {
       if (!sent || sent.data.from !== 'user') return null;
       return h('div', {class: 'receipt' + (d.ok ? '' : ' bad')}, d.ok ? `delivered to ${agentWho(d.name)}` : `did not reach ${agentWho(d.name)}` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
     }
-    case 'relay.state': return d.state === 'blocked' ? h('div', {class: 'notice'}, `${agentWho(d.name)} is stopped on a dialog` + (d.detail ? ': ' + clip(d.detail, 160) : '')) : d.state === 'exited' ? h('div', {class: 'notice'}, `${agentWho(d.name)} exited` + (d.detail ? ': ' + clip(d.detail, 160) : '')) : null;
+    case 'relay.state':
+      // A stop on a dialog and an exit are notices; the rest is activity.
+      if (d.state === 'blocked') return h('div', {class: 'notice'}, `${agentWho(d.name)} is stopped on a dialog` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+      if (d.state === 'exited') return h('div', {class: 'notice'}, `${agentWho(d.name)} exited` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+      break;
     case 'relay.limit': return h('div', {class: 'notice'}, `${agentWho(d.name)} usage` + (d.exhausted ? ' ran out' : d.used_percent ? ` at ${Math.round(d.used_percent)}%` : '') + (d.window ? ` (${d.window})` : '') + (d.resets_at ? `, resets ${fmtDate(d.resets_at)}` : '') + (d.text ? ': ' + clip(d.text, 160) : ''));
     case 'relay.autopilot': return h('div', {class: 'notice'}, d.off ? `autopilot off for ${agentWho(d.name)}` : `autopilot on for ${agentWho(d.name)}` + (d.until ? ` until ${fmtDate(d.until)}` : '') + (d.instruction ? ': ' + clip(d.instruction, 160) : ''));
     case 'error': return h('div', {class: 'act bad'}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, 'error'), h('span', null, clip(d.where + ': ' + d.text, 200)));
@@ -414,6 +418,7 @@ function chatNode(ev) {
     case 'proc.start': return act(ev, '', `${d.handle} started` + (ev.task ? ' · ' + ev.task : ''), '$ ' + d.command);
     case 'proc.exit': return act(ev, d.exit_code === 0 ? '' : 'bad', `${d.handle} ${d.reason}`, `exit ${d.exit_code}` + (d.duration_ms ? ' after ' + dur(d.duration_ms) : '') + (d.tail ? ' · ' + d.tail : ''));
     case 'proc.pid': return null;
+    case 'narrator.trim': return act(ev, '', 'narrator trimmed', `its view starts at #${d.from_seq}` + (d.recap ? ': ' + clip(d.recap, 200) : ''));
   }
   if (LEGACY_TYPES.has(ev.type)) return act(ev, '', ev.type + (ev.task ? ' ' + ev.task : ''), legacyText(d));
   return null;
@@ -643,7 +648,9 @@ async function promptEditor(name) {
 // A new session is a first message, the folder its agent starts in, the
 // agent profile (the project's default preselected) and, optionally, that
 // agent's model and effort. eagent's own model comes from the configuration.
-async function newSessionDialog() {
+// opts.project starts it on the project's own configuration, not the
+// server's --preset or --config.
+async function newSessionDialog(opts = {}) {
   const ta = h('textarea', {placeholder: 'What should the agent do? This is sent to it word for word.'});
   const dir = h('input', {class: 'search', placeholder: 'folder (default: the project root)', autocomplete: 'off', style: 'flex:1; min-width:0'});
   const agentSel = h('select', null, h('option', {value: ''}, 'loading agents…'));
@@ -668,11 +675,12 @@ async function newSessionDialog() {
     const prompt = ta.value.trim(); if (!prompt) return;
     start.disabled = true;
     const body = {prompt, dir: dir.value.trim(), relay: agentSel.value, relay_model: model.value.trim(), relay_effort: effortSel.value, client: clientCaps()};
+    if (opts.project) body.use_project = true;
     try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify(body)}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
     catch (e) { toast(e.message, 'bad'); start.disabled = false; }
   }}, 'Start');
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) start.click(); });
-  showModal(h('div', null, h('h2', null, 'New session'), ta,
+  showModal(h('div', null, h('h2', null, 'New session'), opts.project ? h('p', {class: 'sub'}, 'It runs on the project\'s configuration as saved.') : null, ta,
     h('div', {class: 'row'}, h('span', {class: 'sub'}, 'folder'), dir),
     h('div', {class: 'row'}, h('span', {class: 'sub'}, 'agent'), agentSel),
     h('div', {class: 'row'}, h('span', {class: 'sub'}, 'its model'), model, modelList, effortSel),

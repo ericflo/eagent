@@ -116,6 +116,32 @@ try {
   await page.evaluate(p => complete(p, { route_test: { route: 'primary', model: 'fixture-model', effort: 'high', base_url: 'https://fixture.invalid', status: 'tool_call', ms: 250, usage: { input: 1, output: 2 }, at: '2026-09-08T12:00:00Z' } }), proposal);
   await frame.locator('.route.model').getByText(/fixture-model/).waitFor();
 
+  // Chat Completions routes replay reasoning too, so the setting is there.
+  await frame.locator('.route.model summary').filter({ hasText: 'Advanced' }).click();
+  await frame.locator('.route.model').getByText('Replay reasoning', { exact: true }).waitFor();
+  // A dedicated summarizer can be given a model of its own here, though it
+  // is inline in the snapshot.
+  await frame.locator('.route.summarizer').getByRole('button', { name: 'Dedicated', exact: true }).click();
+  await frame.getByRole('button', { name: 'Give it its own model', exact: true }).click();
+  await frame.locator('.route.summarizer .rhead').waitFor();
+  assert.equal(await frame.locator('.route.summarizer').getByText('Model', { exact: true }).count() > 0, true, 'the summarizer got no route card');
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  // A saved preset with a summarizer of its own and an agent profile loads
+  // whole, and reviews without an error.
+  await frame.getByRole('button', { name: 'summarized', exact: true }).click();
+  await frame.locator('.route.summarizer').getByText('GLM-5.3-Flash').first().waitFor();
+  await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+  await page.waitForFunction(() => window.proposal?.operation === 'settings.apply' && window.proposal.edits.some(e => e.key === '/summarizer/model/model'));
+  proposal = await page.evaluate(() => window.proposal);
+  assert.ok(proposal.edits.some(e => e.key === '/summarizer/mode' && e.value === 'dedicated'), JSON.stringify(proposal.edits));
+  assert.ok(!proposal.edits.some(e => e.key.startsWith('/relay/profiles')), JSON.stringify(proposal.edits));
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  // An override of a retired prompt is removed by a staged reset: a
+  // sandboxed frame has no confirm().
+  await frame.getByRole('button').filter({ hasText: /^NARRATOR\.md/ }).click();
+  await page.waitForFunction(() => window.proposal?.operation === 'prompt.reset');
+  assert.equal((await page.evaluate(() => window.proposal)).parameters.name, 'NARRATOR.md');
+
   // Prompt and bundle actions use the same editor but remain proposals.
   await frame.getByRole('button').filter({ hasText: /^PERSONA.md/ }).click();
   await frame.locator('#modal textarea').fill('Fixture persona {{.Name}}');
