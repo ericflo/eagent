@@ -64,9 +64,13 @@ var (
 	dossierMinCites = 3                // fewer places than this is not a map
 	dossierMaxCalls = 40               // lookups plus the writing
 	dossierRetry    = 10 * time.Minute // after the files could not be rotated
-	// The whole pass: past this the model is told to write with what it
-	// has. One failed call is made again after dossierErrorPause.
+	// The pass reads for dossierPassTime; then the model is told to write
+	// with what it has, and the writing has dossierWriteTime more. That is
+	// one deadline for the whole pass (every call, the wait before a call
+	// is made again, the writing): at it the harness writes the briefing.
+	// One failed call is made again after dossierErrorPause.
 	dossierPassTime   = 15 * time.Minute
+	dossierWriteTime  = 4 * time.Minute
 	dossierErrorPause = 5 * time.Second
 )
 
@@ -380,14 +384,38 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 	// lookedAt is where the last lookups begin in msgs (0 for none), and
 	// dropped says a round of them was already taken out again.
 	lookedAt, dropped := 0, false
-	started := time.Now()
+	// readEnd is when the writer is told to write; passEnd is when the pass
+	// is over whatever it is doing. A call made before the writer is told
+	// may run at most half the writing time past readEnd, so a lookup that
+	// is slow to come back cannot take the writing's time.
+	readEnd := time.Now().Add(dossierPassTime)
+	passEnd := readEnd.Add(dossierWriteTime)
 	for res.calls < dossierMaxCalls {
-		ctx, cancel := context.WithTimeout(r.ctx, dossierTimeout)
+		bound := passEnd
+		if !last {
+			bound = readEnd.Add(dossierWriteTime / 2)
+		}
+		deadline := time.Now().Add(dossierTimeout)
+		if deadline.After(bound) {
+			deadline = bound
+		}
+		ctx, cancel := context.WithDeadline(r.ctx, deadline)
 		resp, err := r.complete(ctx, event.ActorEagent, llm.Request{System: r.system, Messages: msgs, Tools: r.toolset, CacheKey: r.sess.ID}, nil)
 		cancel()
 		if err != nil {
 			if r.ctx.Err() != nil {
 				return res
+			}
+			if deadline.Equal(bound) && !time.Now().Before(bound) {
+				// The pass's time ran out during the call.
+				if last {
+					r.ui.Log("dossier: the pass ran out of time before a briefing was written")
+					return res
+				}
+				last = true
+				msgs = withNote(msgs, "[eagent] The time for looking things up is over, and your last call was cut off. Write the briefing now from what is above, as your whole reply, with no tool call.")
+				r.ui.Log("dossier: the time for reading ran out; asking for the briefing")
+				continue
 			}
 			r.ui.Log("dossier: model call failed: %s", shortErr(err))
 			var ae *llm.APIError
@@ -413,7 +441,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 				}
 				return res
 			}
-			if retried || time.Since(started) > dossierPassTime {
+			if retried || time.Now().Add(dossierErrorPause).After(passEnd) {
 				return res
 			}
 			// One hiccup does not cost the session its map: the call is
@@ -447,7 +475,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			if last {
 				break // told to write and looked things up again instead
 			}
-			if res.calls == dossierMaxCalls-1 || time.Since(started) > dossierPassTime {
+			if res.calls == dossierMaxCalls-1 || !time.Now().Before(readEnd) {
 				// The pass is bounded in calls and in time: while it runs
 				// eagent says nothing else to the user.
 				last = true
@@ -485,6 +513,20 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		res.noMap = noMapReason(res.text, job.lines)
 	}
 	return res
+}
+
+// withNote adds a note from eagent to the end of a pass's messages: as a
+// message of its own after tool results, or added to the request or
+// send-back it follows, so no two user messages are in a row. msgs is
+// not changed.
+func withNote(msgs []llm.Message, note string) []llm.Message {
+	n := len(msgs)
+	if n > 0 && msgs[n-1].Role == "user" {
+		m := msgs[n-1]
+		m.Text = strings.TrimRight(m.Text, "\n") + "\n\n" + note
+		return append(msgs[:n-1:n-1], m)
+	}
+	return append(msgs[:n:n], llm.Message{Role: "user", Text: note})
 }
 
 // dossierLookup runs one tool call of a dossier pass. Only the two that

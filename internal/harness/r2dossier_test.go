@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -247,5 +248,82 @@ func TestR2DossierCitationsCountDistinctPlaces(t *testing.T) {
 		if n != c.n || len(bad) != c.bad {
 			t.Errorf("%q: %d places, %d bad; want %d, %d", c.text, n, len(bad), c.n, c.bad)
 		}
+	}
+}
+
+// r2DossierTime scales the dossier pass for a test: pass of reading time,
+// write more reserved for the writing.
+func r2DossierTime(t *testing.T, pass, write time.Duration) {
+	oldPass := dossierPassTime
+	dossierPassTime = pass
+	t.Cleanup(func() { dossierPassTime = oldPass })
+	oldWrite := dossierWriteTime
+	dossierWriteTime = write
+	t.Cleanup(func() { dossierWriteTime = oldWrite })
+}
+
+// after is a reply's block that opens d from now.
+func after(d time.Duration) <-chan struct{} {
+	ch := make(chan struct{})
+	time.AfterFunc(d, func() { close(ch) })
+	return ch
+}
+
+// The reviewer's case: the pass's reading time scaled to 150 ms, every
+// call a lookup that takes 350 ms. One deadline bounds the whole pass, so
+// the harness writes the briefing and the loop answers again by the time
+// the reading and the writing allowed (150+100 ms), not two calls later.
+func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
+	r2DossierTime(t, 150*time.Millisecond, 100*time.Millisecond)
+	var mu sync.Mutex
+	var first time.Time
+	var told []string
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		mu.Lock()
+		if n == 1 {
+			first = time.Now()
+		}
+		told = append(told, lastText(msgs))
+		mu.Unlock()
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(350 * time.Millisecond)}
+	})
+	took := time.Since(first)
+	if d := s.dossiers()[0]; d.By != "harness" {
+		t.Fatalf("dossier by %q", d.By)
+	}
+	if took > 500*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 250ms", took)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 2 || !strings.Contains(told[1], "Write the briefing now") {
+		t.Fatalf("the writer was not told to write in its reserved time: %q", told)
+	}
+}
+
+// A lookup still running when the reading time is over is cut short so
+// the writing keeps its reserved time, and the model's briefing is kept.
+func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
+	r2DossierTime(t, 150*time.Millisecond, 300*time.Millisecond)
+	var mu sync.Mutex
+	var first time.Time
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		mu.Lock()
+		defer mu.Unlock()
+		if n == 1 {
+			first = time.Now()
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(2 * time.Second)}
+		}
+		if !strings.Contains(lastText(msgs), "Write the briefing now") {
+			return reply{text: "not told to write"}
+		}
+		return reply{text: briefing(places(dossierRequest(msgs))[:3])}
+	})
+	took := time.Since(first)
+	if d := s.dossiers()[0]; d.By != "eagent" || d.NoMap {
+		t.Fatalf("dossier by %q nomap=%v:\n%s", d.By, d.NoMap, d.Text)
+	}
+	if took > 700*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 450ms", took)
 	}
 }
