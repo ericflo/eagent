@@ -389,7 +389,7 @@ func TestUnsignedThinkingStaysForAModelThatIsNotClaude(t *testing.T) {
 
 // With store off, a reasoning item is replayed by its encrypted content; one
 // without it (made while replay was off) would be looked up by id and not
-// found, so it is not sent.
+// found. Its turn is rebuilt instead, without item ids.
 func TestReasoningWithoutEncryptedContentIsNotReplayed(t *testing.T) {
 	items := responsesWire(t, "gpt-6", func(host string) []Message {
 		return []Message{
@@ -401,7 +401,7 @@ func TestReasoningWithoutEncryptedContentIsNotReplayed(t *testing.T) {
 		}
 	})
 	got := toJSON(items)
-	if strings.Contains(got, "rs_plain") || !strings.Contains(got, `"id":"fc_1"`) {
+	if strings.Contains(got, "rs_plain") || strings.Contains(got, "fc_1") || !strings.Contains(got, `"call_id":"call_1"`) {
 		t.Fatalf("input = %s", got)
 	}
 }

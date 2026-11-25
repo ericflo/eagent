@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -142,4 +143,23 @@ func claudeThinking(native []map[string]any) []map[string]any {
 		return nil
 	}
 	return out
+}
+
+// reasoningUnreplayable reports whether a Responses turn holds a reasoning
+// item that cannot go back with store off: one without its encrypted
+// content (made while reasoning replay was off) would be looked up by id on
+// a server that kept nothing. Such a turn is rebuilt from its text and
+// calls rather than sent without that one item, since its other items may
+// name the reasoning that came with them.
+func reasoningUnreplayable(items []json.RawMessage) bool {
+	for _, it := range items {
+		var probe struct {
+			Type      string `json:"type"`
+			Encrypted string `json:"encrypted_content"`
+		}
+		if json.Unmarshal(it, &probe) == nil && probe.Type == "reasoning" && probe.Encrypted == "" {
+			return true
+		}
+	}
+	return false
 }

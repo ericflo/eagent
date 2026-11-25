@@ -378,6 +378,9 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 				if json.Unmarshal(m.Native, &native) == nil {
 					if replayReasoning {
 						native = dropDanglingReasoning(native)
+						if reasoningUnreplayable(native) {
+							native = nil
+						}
 					} else {
 						native = dropReasoning(native)
 					}
