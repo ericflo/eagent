@@ -14,12 +14,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ericflo/eagent/internal/netx"
+	"image"
+	_ "image/gif" // image.DecodeConfig reads the size of these
+	_ "image/jpeg"
+	_ "image/png"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ericflo/eagent/internal/netx"
 
 	"github.com/ericflo/eagent/internal/event"
 )
@@ -108,6 +115,155 @@ type Image struct {
 
 // maxInlineImage caps what is inlined into a request.
 const maxInlineImage = 10 << 20
+
+// Anthropic refuses a picture over 10 MB once base64-encoded, or over 8000
+// pixels on a side (the Messages API's vision limits). Bedrock and Google's
+// own Vertex take 5 MB; a refusal there is handled when it comes
+// (Client.refusedImages).
+const (
+	anthropicMaxImageBase64 = 10 << 20
+	anthropicMaxImageSide   = 8000
+)
+
+// tooBigFor reports why the provider behind protocol will certainly refuse
+// the picture, or "" when it may take it. It looks at the file alone, so
+// the same record always renders the same request.
+func (im Image) tooBigFor(protocol string) string {
+	st, err := os.Stat(im.Path)
+	if err != nil {
+		return "" // unreadable: the adapter leaves it out, as before
+	}
+	if st.Size() > maxInlineImage {
+		return fmt.Sprintf("it is %.1f MB, over the %d MB that can be sent", float64(st.Size())/(1<<20), maxInlineImage>>20)
+	}
+	if protocol != ProtocolAnthropic {
+		return ""
+	}
+	if enc := (st.Size() + 2) / 3 * 4; enc > anthropicMaxImageBase64 {
+		return fmt.Sprintf("it is %.1f MB encoded, over the %d MB this provider takes", float64(enc)/(1<<20), anthropicMaxImageBase64>>20)
+	}
+	if f, err := os.Open(im.Path); err == nil {
+		cfg, _, err := image.DecodeConfig(f)
+		f.Close()
+		if err == nil && (cfg.Width > anthropicMaxImageSide || cfg.Height > anthropicMaxImageSide) {
+			return fmt.Sprintf("it is %dx%d pixels, over the %d a side this provider takes", cfg.Width, cfg.Height, anthropicMaxImageSide)
+		}
+	}
+	return ""
+}
+
+// fitImages replaces each picture the provider will certainly refuse for
+// its size with a note saying so, instead of uploading it to be refused.
+func fitImages(req Request, protocol string) Request {
+	return replaceImages(req, func(im Image) string {
+		if why := im.tooBigFor(protocol); why != "" {
+			return "[" + filepath.Base(im.Path) + " could not be shown to this model: " + why + ". The file is on disk.]"
+		}
+		return ""
+	})
+}
+
+// replaceImages returns the request with each picture for which note says
+// something taken out and the note added to its message's text. The
+// request is returned as it is when nothing is replaced.
+func replaceImages(req Request, note func(Image) string) Request {
+	var out []Message
+	for i, m := range req.Messages {
+		var kept []Image
+		var notes []string
+		for _, im := range m.Images {
+			if n := note(im); n != "" {
+				notes = append(notes, n)
+			} else {
+				kept = append(kept, im)
+			}
+		}
+		if len(notes) == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), req.Messages...)
+		}
+		m.Images = kept
+		m.Text = strings.TrimSpace(m.Text + "\n" + strings.Join(notes, "\n"))
+		out[i] = m
+	}
+	if out != nil {
+		req.Messages = out
+	}
+	return req
+}
+
+// imagePaths lists the pictures a request carries.
+func imagePaths(req Request) []string {
+	var out []string
+	for _, m := range req.Messages {
+		for _, im := range m.Images {
+			out = append(out, im.Path)
+		}
+	}
+	return out
+}
+
+// imageMemory remembers, for one client, the pictures its provider took
+// and the ones it refused for a reason that could not be told in advance
+// (undecodable, a limit of a gateway's own). A refused picture is left out
+// of every later request with a note, instead of being uploaded to be
+// refused again; the session's pictures are copies that never change, so
+// the path names the bytes.
+type imageMemory struct {
+	mu       sync.Mutex
+	accepted map[string]bool
+	refused  map[string]bool
+}
+
+func (m *imageMemory) accept(paths []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.accepted == nil {
+		m.accepted = map[string]bool{}
+	}
+	for _, p := range paths {
+		m.accepted[p] = true
+	}
+}
+
+// refuse remembers the pictures of a refused request that were never
+// taken before: the refusal is about one of them. When every one of them
+// was taken before (or none was ever taken), all of them.
+func (m *imageMemory) refuse(paths []string, all bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refused == nil {
+		m.refused = map[string]bool{}
+	}
+	var fresh []string
+	for _, p := range paths {
+		if !m.accepted[p] {
+			fresh = append(fresh, p)
+		}
+	}
+	if all || len(fresh) == 0 {
+		fresh = paths
+	}
+	for _, p := range fresh {
+		m.refused[p] = true
+	}
+}
+
+func (m *imageMemory) leaveOut(req Request) Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.refused) == 0 {
+		return req
+	}
+	return replaceImages(req, func(im Image) string {
+		if m.refused[im.Path] {
+			return "[" + filepath.Base(im.Path) + " could not be shown to this model: the provider refused it. The file is on disk.]"
+		}
+		return ""
+	})
+}
 
 // dataURL reads the image and returns a data: URL, or "" when unreadable.
 func (im Image) dataURL() string {
@@ -284,6 +440,9 @@ type Client struct {
 	// rejectsImages remembers that this model refused pictures, so later
 	// calls send the text alone instead of re-uploading and re-failing.
 	rejectsImages atomic.Bool
+	// images remembers the pictures this model took and the ones it
+	// refused, so that a refused one is not uploaded on every later call.
+	images imageMemory
 	// chatNoCacheKey remembers that this Chat Completions endpoint rejected
 	// prompt_cache_key, so later calls omit it.
 	chatNoCacheKey atomic.Bool
@@ -480,19 +639,36 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		if c.rejectsImages.Load() && hasImages(req) {
 			req = withoutImages(req)
 		}
+		if hasImages(req) {
+			req = c.images.leaveOut(fitImages(req, c.Endpoint.Protocol))
+		}
 		resp, err := c.once(callCtx, req, obs)
-		if err != nil && hasImages(req) {
-			var ae *APIError
-			if errors.As(err, &ae) && ae.RejectsImages() {
-				if ae.badImage() {
-					// This picture was refused (too big, undecodable): go on
-					// without it this once, and say why. The model can see.
-					if c.OnRetry != nil {
-						c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text alone", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
-					}
-				} else if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
-					// A text-only model: say so once and go on without pictures,
-					// on this call and every later one through this client.
+		var ae *APIError
+		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
+			if ae.badImage() || ae.Status == 413 {
+				// A picture was refused (undecodable, too big for a limit
+				// of this provider's own): go on without it, and say why.
+				// The model can see. The one refused is left out of later
+				// calls too; the ones taken before stay.
+				if c.OnRetry != nil {
+					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
+				}
+				c.images.refuse(imagePaths(req), false)
+				req = c.images.leaveOut(req)
+				obs.reset()
+				resp, err = c.once(callCtx, req, obs)
+				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
+					// Still refused over pictures: leave them all out.
+					c.images.refuse(imagePaths(req), true)
+					req = c.images.leaveOut(req)
+					obs.reset()
+					resp, err = c.once(callCtx, req, obs)
+				}
+			} else {
+				if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+					// A text-only model: say so once and go on without
+					// pictures, on this call and every later one through
+					// this client.
 					c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
 				}
 				req = withoutImages(req)
@@ -501,6 +677,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			}
 		}
 		if err == nil {
+			c.images.accept(imagePaths(req))
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
 			resp.BaseURL = c.Endpoint.BaseURL
