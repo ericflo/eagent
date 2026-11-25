@@ -310,18 +310,23 @@ func (r *Runtime) unseenBytes() int {
 // citation matches a place in the record: file:line or file:line-line.
 var citation = regexp.MustCompile(`(\d{10,}\.jsonl):(\d+)(?:-(\d+))?`)
 
-// checkCitations counts the places a text cites and lists those that do
-// not exist: a file the session does not have, or a line past its end.
+// checkCitations counts the distinct places a text cites that exist, and
+// lists those that do not: a file the session does not have, or a line
+// past its end. A place is a file and the line reading starts at, so
+// file:10, file:10-20 and file:10 again are one place; file:12 is another.
 func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 	seen := map[string]bool{}
 	for _, m := range citation.FindAllStringSubmatch(text, -1) {
-		n++
 		from, _ := strconv.Atoi(m[2])
 		to := from
 		if m[3] != "" {
 			to, _ = strconv.Atoi(m[3])
 		}
 		if max, ok := lines[m[1]]; ok && from >= 1 && to >= from && to <= max {
+			if place := m[1] + ":" + m[2]; !seen[place] {
+				seen[place] = true
+				n++
+			}
 			continue
 		}
 		if !seen[m[0]] {
@@ -330,6 +335,38 @@ func checkCitations(text string, lines map[string]int) (n int, bad []string) {
 		}
 	}
 	return n, bad
+}
+
+// mapProblem says why a text's citations do not make a map ("" when they
+// do): fewer than dossierMinCites distinct places that exist, or places
+// that do not exist.
+func mapProblem(text string, lines map[string]int) string {
+	cites, bad := checkCitations(text, lines)
+	var why []string
+	if cites < dossierMinCites {
+		noun := "places"
+		if cites == 1 {
+			noun = "place"
+		}
+		w := fmt.Sprintf("its MAP cites %d %s in the record", cites, noun)
+		if all := len(citation.FindAllString(text, -1)); all > cites+len(bad) {
+			w += fmt.Sprintf(" (%d citations, but the same place cited again is still one place)", all)
+		}
+		why = append(why, w+"; a map names the distinct place of every topic that matters, as file:line")
+	}
+	if len(bad) > 0 {
+		why = append(why, "these places do not exist in the record: "+strings.Join(bad[:min(len(bad), 12)], ", ")+". Cite only places you were shown, and check with session_read if unsure")
+	}
+	return strings.Join(why, "; and ")
+}
+
+// noMapReason says why a text kept after it was sent back is a summary and
+// not a map ("" when it is a map, if a partly wrong one).
+func noMapReason(text string, lines map[string]int) string {
+	if n, _ := checkCitations(text, lines); n < dossierMinCites {
+		return fmt.Sprintf("it cites %d distinct places that exist in the record", n)
+	}
+	return ""
 }
 
 // writeDossier runs the pass: the model looks up what it needs in the
@@ -419,15 +456,10 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			continue
 		}
 		text := strings.TrimSpace(resp.Text)
-		cites, bad := checkCitations(text, job.lines)
-		var why string
-		switch {
-		case len(text) < dossierMinChars:
+		_, bad := checkCitations(text, job.lines)
+		why := mapProblem(text, job.lines)
+		if len(text) < dossierMinChars {
 			why = fmt.Sprintf("it is too short to be a briefing (%d characters)", len(text))
-		case cites < dossierMinCites:
-			why = fmt.Sprintf("its MAP cites %d places in the record; a map names the place of every topic that matters, as file:line", cites)
-		case len(bad) > 0:
-			why = "these places do not exist in the record: " + strings.Join(bad[:min(len(bad), 12)], ", ") + ". Cite only places you were shown, and check with session_read if unsure"
 		}
 		if len(text) > len(res.text) || why == "" {
 			res.text, res.bad = text, bad
@@ -441,9 +473,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			// beats none: it is kept when it reads as a briefing, with the
 			// wrong places named, and one with no map is labelled as that.
 			res.ok = len(res.text) >= dossierMinChars
-			if n, _ := checkCitations(res.text, job.lines); n < dossierMinCites {
-				res.noMap = fmt.Sprintf("it cites %d places in the record", n)
-			}
+			res.noMap = noMapReason(res.text, job.lines)
 			return res
 		}
 		rejected = true
@@ -451,8 +481,8 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 		msgs = append(msgs, llm.Message{Role: "user", Text: "[eagent] That cannot be used: " + why + ". Write the whole briefing again, all six parts, as plain text."})
 	}
 	res.ok = len(res.text) >= dossierMinChars
-	if n, _ := checkCitations(res.text, job.lines); res.ok && n < dossierMinCites {
-		res.noMap = fmt.Sprintf("it cites %d places in the record", n)
+	if res.ok {
+		res.noMap = noMapReason(res.text, job.lines)
 	}
 	return res
 }

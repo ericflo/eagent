@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -173,5 +174,78 @@ func TestR2DossierSearchHitInALongLineCanBeRead(t *testing.T) {
 	got, isErr, _ := s.rt.runTool(context.Background(), &turnCalls{}, tc("session_read", fmt.Sprintf(`{"file":%q,"from":%s,"offset":%s}`, file, c[1], c[2])))
 	if isErr || !strings.Contains(got, "ZEBRAFINCH") || len(got) > loopReadChars+400 {
 		t.Fatalf("reading from the hit's offset (%d characters) does not show the match:\n%.600s", len(got), got)
+	}
+}
+
+// A briefing that cites one place three times is sent back, saying a
+// place cited again is still one place, and kept as a summary when it
+// comes back the same.
+func TestR2DossierOnePlaceThreeTimesIsNotAMap(t *testing.T) {
+	var mu sync.Mutex
+	var sentBack string
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		p := places(dossierRequest(msgs))[0]
+		if n == 2 {
+			mu.Lock()
+			sentBack = lastUserText(msgs)
+			mu.Unlock()
+		}
+		return reply{text: briefing([]string{p, p, p})}
+	})
+	d := s.dossiers()[0]
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(sentBack, "That cannot be used: its MAP cites 1 place in the record") || !strings.Contains(sentBack, "the same place cited again is still one place") {
+		t.Fatalf("sent back with %q", sentBack)
+	}
+	if d.By != "eagent" || !d.NoMap || d.Calls != 2 || !strings.HasPrefix(d.Text, "(eagent checked this briefing and it is not a map") {
+		t.Fatalf("dossier by %q nomap=%v after %d calls:\n%s", d.By, d.NoMap, d.Calls, d.Text)
+	}
+}
+
+// Places that do not exist do not count toward a map: a briefing that
+// cites only three of them twice is kept as a summary, with them named.
+func TestR2DossierNonexistentPlacesDoNotMakeAMap(t *testing.T) {
+	var mu sync.Mutex
+	var sentBack string
+	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
+		if n == 2 {
+			mu.Lock()
+			sentBack = lastUserText(msgs)
+			mu.Unlock()
+		}
+		return reply{text: briefing([]string{"1111111111111.jsonl:5", "1111111111111.jsonl:6", "1111111111111.jsonl:7"})}
+	})
+	d := s.dossiers()[0]
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(sentBack, "its MAP cites 0 places in the record") || !strings.Contains(sentBack, "these places do not exist in the record: 1111111111111.jsonl:5") {
+		t.Fatalf("sent back with %q", sentBack)
+	}
+	if !d.NoMap || !strings.HasPrefix(d.Text, "(eagent checked this briefing and it is not a map") || !strings.Contains(d.Text, "disregard them: 1111111111111.jsonl:5, 1111111111111.jsonl:6, 1111111111111.jsonl:7") {
+		t.Fatalf("dossier by %q nomap=%v:\n%s", d.By, d.NoMap, d.Text)
+	}
+}
+
+// What counts is distinct places that exist, by file and first line: a
+// range and a line it starts with are one place; a line inside a range
+// is another.
+func TestR2DossierCitationsCountDistinctPlaces(t *testing.T) {
+	lines := map[string]int{"1700000000000.jsonl": 30, "1700000000001.jsonl": 5}
+	for _, c := range []struct {
+		text string
+		n    int
+		bad  int
+	}{
+		{"1700000000000.jsonl:10 1700000000000.jsonl:10 1700000000000.jsonl:10", 1, 0},
+		{"1700000000000.jsonl:10-20 1700000000000.jsonl:10 1700000000000.jsonl:10-10", 1, 0},
+		{"1700000000000.jsonl:10-20 1700000000000.jsonl:12 1700000000001.jsonl:10", 2, 1},
+		{"1700000000000.jsonl:31 1700000000000.jsonl:31 1700000000002.jsonl:1", 0, 2},
+		{"1700000000000.jsonl:1 1700000000000.jsonl:2 1700000000001.jsonl:5", 3, 0},
+	} {
+		n, bad := checkCitations(c.text, lines)
+		if n != c.n || len(bad) != c.bad {
+			t.Errorf("%q: %d places, %d bad; want %d, %d", c.text, n, len(bad), c.n, c.bad)
+		}
 	}
 }
