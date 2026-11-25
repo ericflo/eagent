@@ -26,6 +26,7 @@ import (
 //   - typed messages take the same path with source "interactive";
 //   - an interrupt puts queued messages back in the editor and the run
 //     settles aborted.
+//
 // STEPS is a JSON list of [ms, action, text]: "type" a message, or "spool"
 // one for the extension. Every observation is a JSON line.
 const piPromptPath = `import { pathToFileURL } from "node:url";

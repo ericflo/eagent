@@ -82,10 +82,14 @@ export default function (pi: any) {
 
 	// A hand-over pi has not taken yet. pi.sendUserMessage returns nothing
 	// and a refusal (a prompt while pi compacts, no model) shows only as an
-	// extension error, so the claimed files stay until pi starts the run
-	// that carries them; if it stays idle instead, they go back to wait.
+	// extension error, so the claimed files stay until pi has taken this
+	// message into its conversation (accepted); if it stays idle instead,
+	// they go back to wait.
 	// seen: pi passed the hand-over to the input hook, which is the first
 	// thing it does with a message it has not refused outright.
+	// queued: the hook saw a run going, so pi queues it into that run.
+	// others: prompts that went through the hook after it (typed ones):
+	// a run starting then may be theirs.
 	let handing: any = null;
 	let tries = 0;
 	let retryAt = 0;
@@ -164,7 +168,7 @@ export default function (pi: any) {
 		if (prompting || handing || Date.now() < retryAt) return;
 		const { text, files } = take();
 		if (!files.length) return;
-		handing = { files, at: Date.now(), text, seen: false };
+		handing = { files, at: Date.now(), text, seen: false, queued: false, others: 0 };
 		if (!text) {
 			handed();
 			return;
@@ -208,16 +212,58 @@ export default function (pi: any) {
 	pi.on("session_shutdown", () => {
 		clearInterval(timer);
 	});
+	// userText is a user message's text, as pi joins it.
+	function userText(message: any): string {
+		const c = message && message.content;
+		if (typeof c === "string") return c;
+		if (!Array.isArray(c)) return "";
+		return c.filter((p: any) => p && p.type === "text").map((p: any) => p.text).join("\n");
+	}
+
 	pi.on("input", (event: any) => {
 		// Returns nothing: the message goes on as it is.
-		if (handing && event && event.source === "extension" && event.text === handing.text) handing.seen = true;
+		if (!handing || !event) return;
+		if (event.source === "extension" && event.text === handing.text && !handing.seen) {
+			handing.seen = true;
+			handing.queued = event.streamingBehavior === "followUp";
+		} else if (handing.seen) {
+			handing.others++;
+		}
+	});
+	// pi has taken the hand-over into its conversation when its user
+	// message starts: the first message of a run it started, or a queued
+	// one the run that was going delivers. That names this message, where
+	// a run starting may be another prompt's.
+	pi.on("message_start", (event: any) => {
+		const m = event && event.message;
+		if (!handing || !m || m.role !== "user") return;
+		const text = userText(m);
+		if (text === handing.text) handed();
 	});
 	pi.on("agent_start", () => {
-		handed();
+		// A run that starts after pi passed the hand-over through the hook,
+		// with no other prompt through it since, is the hand-over's run
+		// (should a later extension's hook have changed its text, the
+		// message no longer matches). A run started by anything else
+		// leaves it waiting: pi refused it before the hook (compacting),
+		// or after (no model, no key).
+		if (handing && handing.seen && !handing.queued && handing.others === 0) handed();
 		save({ state: "working", aborted: false });
 	});
-	pi.on("agent_settled", (event: any) => {
+	pi.on("agent_settled", (event: any, ctx: any) => {
 		const aborted = !!(event && event.aborted);
+		// A run settles only once pi has delivered what was queued into
+		// it, so a queued hand-over no longer pending went with it (under
+		// another text, should a later hook have changed it). And an
+		// interrupt puts the messages pi had queued back in its editor, a
+		// hand-over among them: it is the person's now, as every message
+		// they queued is. Either way, handing it over again would send it
+		// twice.
+		let pending = false;
+		try {
+			pending = !!(ctx && ctx.hasPendingMessages());
+		} catch {}
+		if (handing && handing.seen && !pending && (handing.queued || aborted)) handed();
 		try {
 			pi.appendEntry("` + piSettledEntry + `", { aborted });
 		} catch {}
