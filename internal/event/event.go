@@ -50,6 +50,7 @@ const (
 	Message  = "narrator.message"  // something eagent told the user
 	Question = "narrator.question" // something eagent asked the user
 	Checks   = "narrator.checks"   // looks that ended in silence, counted for their tokens only
+	Owed     = "answer.owed"       // what the user wrote to eagent that is still owed an answer, and the reminders it has had
 
 	Dossier        = "dossier"         // the briefing that opens a subsession after a rollover
 	HarnessMessage = "harness.message" // a notice from the harness in eagent's conversation
@@ -606,6 +607,24 @@ type ChecksData struct {
 	// SeenSeq is the newest event the last of those looks had in view, so
 	// a resumed session does not look again at what was already weighed.
 	SeenSeq int64 `json:"seen_seq,omitempty"`
+}
+
+// OwedData is what eagent still owes the user, as it stands after the
+// change it records: the oldest message kept for eagent that was looked at
+// and left with no answer and nothing done about it (or, with Answer, the
+// user's answer to eagent's question that it held on), and how many
+// reminder calls have been arranged for it. Seq 0 says nothing is owed any
+// more. A resumed session reads the newest one to keep asking where the
+// last run stopped. It renders nothing in eagent's conversation.
+type OwedData struct {
+	Seq    int64 `json:"seq"`
+	Answer bool  `json:"answer,omitempty"`
+	// Tries counts the reminder calls arranged so far, the one waiting on
+	// its delay included.
+	Tries int `json:"tries,omitempty"`
+	// Started says reminder number Tries has gone out: a resumed session
+	// counts it as made, whether or not it came back.
+	Started bool `json:"started,omitempty"`
 }
 
 // RelayEndData records the agent being stopped on purpose.
