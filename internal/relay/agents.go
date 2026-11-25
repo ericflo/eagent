@@ -103,6 +103,14 @@ type poller interface {
 	poll(s *Seat, now time.Time)
 }
 
+// dialogReporter is an agent that says itself when it waits on a dialog
+// (pi's extension writes it into its status file). The seat reads it on
+// every tick, also before a transcript exists, and holds the relay blocked
+// until the dialog ends. It returns the dialog's title, "" when none is up.
+type dialogReporter interface {
+	reportedDialog(s *Seat) string
+}
+
 // agentBase gives an agent the default for every optional method. An
 // agent embeds it and overrides what differs.
 type agentBase struct{}

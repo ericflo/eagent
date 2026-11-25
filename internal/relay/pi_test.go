@@ -82,8 +82,10 @@ func TestPiParserWithExtension(t *testing.T) {
 	if piKinds(got) != "user working limit aborted" || !got[2].exhausted || !strings.Contains(got[3].text, "usage limit") {
 		t.Fatalf("gave up: %+v", got)
 	}
+	// A dialog is no progress (it would make pi look busy): the seat reads
+	// it from the status file and holds the relay blocked.
 	got = feed(p, piCompaction, piOtherCustom, piPrompt)
-	if piKinds(got) != "compact progress" || !strings.Contains(got[1].text, "Replace the goal?") {
+	if piKinds(got) != "compact" {
 		t.Fatalf("compaction and prompt: %+v", got)
 	}
 }

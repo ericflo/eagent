@@ -97,6 +97,8 @@ type Seat struct {
 	handled    map[string]time.Time // dialog -> when it was last answered
 	readySince time.Time            // when the screen first looked ready while starting
 	refollow   bool                 // the agent moved to another transcript: find it again
+	dialogUp   string               // the dialog the agent itself reports waiting on
+	dialogPrev string               // the state to go back to when it ends
 	closed     bool
 }
 
@@ -518,6 +520,9 @@ func (s *Seat) watch() {
 		if pl, ok := s.agent.(poller); ok && tail != nil {
 			pl.poll(s, now)
 		}
+		if dr, ok := s.agent.(dialogReporter); ok {
+			s.reportDialog(dr.reportedDialog(s))
+		}
 		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
 			lastDialog = now
 			s.checkScreen(now)
@@ -546,7 +551,7 @@ func (s *Seat) fold(o obs) {
 		}
 	case "working":
 		s.mu.Lock()
-		fresh := s.state != "working"
+		fresh := s.state != "working" && !s.heldByDialog("working")
 		if fresh {
 			s.turnStart, s.turnTools, s.turnImages = o.at, 0, nil
 		}
@@ -584,7 +589,12 @@ func (s *Seat) fold(o obs) {
 		s.turnTools, s.turnImages, s.activity = 0, nil, ""
 		s.mu.Unlock()
 		s.emit(ev)
-		s.setState("idle", "")
+		s.mu.Lock()
+		held := s.heldByDialog("idle")
+		s.mu.Unlock()
+		if !held {
+			s.setState("idle", "")
+		}
 	case "limit":
 		if o.exhausted {
 			s.emit(Event{Kind: KindLimit, Text: o.text, Exhausted: true})
@@ -610,7 +620,7 @@ func (s *Seat) fold(o obs) {
 
 func (s *Seat) ensureWorking(at time.Time) {
 	s.mu.Lock()
-	working := s.state == "working"
+	working := s.state == "working" || s.heldByDialog("working")
 	if !working {
 		s.turnStart, s.turnTools, s.turnImages = at, 0, nil
 	}
@@ -708,9 +718,57 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
-	} else if state == "blocked" && looksReady(screen) {
+	} else if state == "blocked" && looksReady(screen) && !s.dialogShowing() {
 		s.setState("idle", "")
 	}
+}
+
+// heldByDialog reports whether a dialog the agent reported holds the seat
+// blocked; if so, state is what the seat goes back to when it ends. The
+// caller holds s.mu.
+func (s *Seat) heldByDialog(state string) bool {
+	if s.dialogUp == "" || s.state != "blocked" {
+		return false
+	}
+	s.dialogPrev = state
+	return true
+}
+
+func (s *Seat) dialogShowing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dialogUp != ""
+}
+
+// reportDialog follows the dialog the agent says it waits on (title, ""
+// when none): the seat is blocked while one is up, so eagent is told and
+// nothing is typed into it, and goes back to what it was doing after.
+func (s *Seat) reportDialog(title string) {
+	s.mu.Lock()
+	prev, state := s.dialogUp, s.state
+	if state == "exited" || title == prev {
+		s.mu.Unlock()
+		return
+	}
+	s.dialogUp = title
+	if title != "" {
+		if prev == "" {
+			s.dialogPrev = state
+		}
+		s.mu.Unlock()
+		s.setState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys")
+		return
+	}
+	back := s.dialogPrev
+	s.dialogPrev = ""
+	s.mu.Unlock()
+	if state != "blocked" {
+		return
+	}
+	if back == "" || back == "blocked" {
+		back = "idle"
+	}
+	s.setState(back, "")
 }
 
 // answerDialog presses the answer to a known dialog on screen, at most once
