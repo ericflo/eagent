@@ -2,8 +2,10 @@ package harness
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 )
@@ -132,5 +134,96 @@ func TestAMessageArrivingMidTurnIsAnsweredInThatTurn(t *testing.T) {
 	}
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("the two messages took %d calls, want 2", n)
+	}
+}
+
+// phoneShows waits up to within for the phone's status line to read text.
+func phoneShows(fp *phoneFake, text string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		for _, a := range fp.statuses() {
+			if a["text"] == text {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// While a model call is out the phone says eagent is thinking. Starting a
+// call records nothing, so the status has to follow the runtime's state and
+// not only the record.
+func TestPhoneSaysEagentIsThinkingWhileACallIsOut(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	var out atomic.Bool
+	brain := func(_ string, msgs []map[string]any) reply {
+		if strings.Contains(lastUserText(msgs), "kept for you") {
+			out.Store(true)
+			return reply{block: gate, calls: say("Codex is idle.").calls}
+		}
+		return hold()
+	}
+	g := phoneStart(t, fp, "", true, brain, nil)
+	t.Cleanup(release) // before the model server is closed
+	waitFor(t, "the first status", func() bool { return len(fp.statuses()) > 0 })
+	g.ui.input <- "@e what is Codex doing?"
+	waitFor(t, "the call to go out", out.Load)
+	shown := phoneShows(fp, "Thinking about the next step", 8*time.Second)
+	release()
+	if !shown {
+		t.Fatalf("the phone never said eagent was thinking while its call was out; it showed %v", fp.statuses())
+	}
+	// And the line goes back when the call is over.
+	waitFor(t, "the answer", func() bool { return g.ui.messageCount() > 0 })
+	waitFor(t, "the status to leave thinking", func() bool {
+		st := fp.statuses()
+		return len(st) > 0 && st[len(st)-1]["text"] != "Thinking about the next step"
+	})
+}
+
+// A dossier pass takes minutes and eagent says nothing else meanwhile. The
+// phone says the session is being reread, also when the pass starts
+// without recording anything first.
+func TestPhoneSaysTheSessionIsBeingRereadDuringADossier(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	var prompt atomic.Int64
+	var writing atomic.Bool
+	brain := func(_ string, msgs []map[string]any) reply {
+		if ask := dossierRequest(msgs); ask != "" {
+			writing.Store(true)
+			p := places(ask)
+			return reply{block: gate, text: briefing(p[:min(len(p), 4)])}
+		}
+		r := hold()
+		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
+			r = say("Here.")
+		}
+		if p := prompt.Swap(0); p > 0 {
+			r.prompt = int(p)
+		}
+		return r
+	}
+	g := phoneStart(t, fp, brief, true, brain, nil)
+	t.Cleanup(release)
+	waitFor(t, "the agent's turn", func() bool { return len(g.events(event.RelayTurn)) == 1 })
+	waitFor(t, "the first status", func() bool { return len(fp.statuses()) > 0 })
+	prompt.Store(21_000) // over the test's rollover size: the next turn starts a dossier
+	g.ui.input <- "@e hello"
+	waitFor(t, "the dossier call to go out", writing.Load)
+	shown := phoneShows(fp, "Rereading the session so far, to carry on with a clear head", 8*time.Second)
+	release()
+	if !shown {
+		t.Fatalf("the phone never said the session was being reread; it showed %v", fp.statuses())
 	}
 }

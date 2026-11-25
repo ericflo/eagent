@@ -618,6 +618,13 @@ func (r *Runtime) publishStatus() {
 		s.Agents = append(s.Agents, AgentStatus{Name: rel.Name, Who: rel.Who(), State: rel.State})
 	}
 	r.ui.Status(s)
+	if r.phone != nil {
+		// The phone's status line follows the same state. Starting a model
+		// call or a dossier pass records nothing, and a call turns into a
+		// long one with no event at all, so the line cannot be worked out
+		// only when something is recorded (phone.observe).
+		r.phone.noteState(r)
+	}
 }
 
 // maybeEnd decides whether the session is finished. A session with an
