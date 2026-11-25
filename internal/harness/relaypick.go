@@ -96,10 +96,20 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta() // the thread header says a change is waiting
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
-	if _, err := r.restartRelayWith(rel, pick); err != nil {
+	if r.relays.launch(name) != nil {
+		// A start is under way; the change applies when it is up.
+		if r.relayRepick == nil {
+			r.relayRepick = map[string]relayPick{}
+		}
+		r.relayRepick[name] = pick
+		r.syncRelaySettings()
+		r.publishRelayMeta()
+		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
+	}
+	if err := r.restartRelayWith(rel, pick); err != nil {
 		return "", err
 	}
-	return rel.Who() + " started again with " + r.pickText(rel, pick) + ", continuing its own conversation.", nil
+	return rel.Who() + " is starting again with " + r.pickText(rel, pick) + ", continuing its own conversation.", nil
 }
 
 // pickText says what a relay runs with a pick: "sonnet at high".
@@ -118,16 +128,43 @@ func (r *Runtime) pickText(rel *state.Relay, pick relayPick) string {
 }
 
 // restartRelayWith ends a relay's agent and starts it again on its own
-// conversation with the picks. Loop goroutine.
-func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) (string, error) {
-	delete(r.relayRepick, rel.Name)
-	if seat := r.relays.get(rel.Name); seat != nil {
-		_ = seat.Kill()
-		r.relays.drop(rel.Name, seat)
+// conversation with the picks. Loop goroutine; the stop and the launch run
+// off it, and how the start went is recorded when it is done: started, or
+// exited with the reason (and an error notice) when it could not start.
+// The pick stays the waiting change until then. What is sent to the relay
+// meanwhile waits and is typed into the new agent.
+func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
+	job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, pick)
+	if err != nil {
+		delete(r.relayRepick, rel.Name)
+		r.syncRelaySettings()
+		r.publishRelayMeta()
+		return err
 	}
-	started, err := r.startRelay(rel.Profile, rel.Dir, rel.Name, true, pick)
-	r.syncRelaySettings()
-	return started, err
+	if r.relayRepick == nil {
+		r.relayRepick = map[string]relayPick{}
+	}
+	r.relayRepick[rel.Name] = pick
+	r.beginLaunch(job, rel.Name)
+	who, text := rel.Who(), r.pickText(rel, pick)
+	go func() {
+		job.run()
+		ran := false
+		r.sync(func() {
+			ran = true
+			name, held, err := r.finishLaunch(job)
+			if err != nil {
+				r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + who + " again with " + text + ": " + err.Error()}))
+				r.ui.Log("relay %s: %v", job.name, err)
+				return
+			}
+			go r.sendHeld(name, job.seat, held)
+		})
+		if !ran && job.err == nil {
+			_ = job.seat.Kill() // the session ended meanwhile: nothing would watch it
+		}
+	}()
+	return nil
 }
 
 // applyWaitingRepick starts a relay again with a change that waited for its
@@ -143,7 +180,10 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		r.syncRelaySettings()
 		return
 	}
-	if _, err := r.restartRelayWith(rel, pick); err != nil {
+	if r.relays.launch(name) != nil {
+		return // a start under way applies it when it is up
+	}
+	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
 		r.ui.Log("relay %s: %v", name, err)
 	}

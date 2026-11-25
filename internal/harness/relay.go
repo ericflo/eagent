@@ -58,6 +58,9 @@ type relaySeats struct {
 	// many it has taken in all (not logged; see tail.go).
 	steps     map[string][]relayStep
 	stepCount int
+	// launching are the starts under way off the loop goroutine, by the
+	// name they start and the name of the relay they replace.
+	launching map[string]*relayLaunch
 }
 
 type relayActivity struct {
@@ -86,6 +89,14 @@ func (s *relaySeats) drop(name string, seat relaySeat) {
 	if s.seats[name] == seat {
 		delete(s.seats, name)
 	}
+}
+
+// launch is the start under way for a relay name (the one it starts or
+// the one it replaces), or nil.
+func (s *relaySeats) launch(name string) *relayLaunch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.launching[name]
 }
 
 func (s *relaySeats) all() map[string]relaySeat {
@@ -145,19 +156,43 @@ func (r *Runtime) checkRelayPick(profile string, pick relayPick) error {
 	return relay.CheckPick(p, pick.Model, pick.Effort)
 }
 
-// startRelay launches an agent in a terminal of its own, with the session's
-// model and effort picks. resume continues the named relay's
-// own session (a restart). Loop goroutine (or before the loop starts).
-func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayPick) (_ string, err error) {
-	// A session with no terminal that ends without ever having had an
-	// agent, after a start that failed, did not do what it was started
-	// for (maybeEnd).
-	defer func() { r.startFailed = err != nil }()
+// relayLaunch is one start of an agent. Its name, spec and the seat it
+// replaces are settled on the loop goroutine (prepareLaunch, beginLaunch);
+// killing the old seat and launching (which can wait on a git pull and the
+// terminal) happen off it (run); the result is recorded on it again
+// (finishLaunch). Sends that arrive meanwhile wait in held.
+type relayLaunch struct {
+	name, profile, dir string
+	resume             bool // continues the named relay's own session
+	pick               relayPick
+	spec               relay.Spec
+	innerID            string
+	// replaces is the relay whose agent this start stops first (a restart
+	// replaces itself; a switch the agent it hands over from). endOld, for
+	// a switch, is why that relay ends.
+	replaces, endOld string
+	old              relaySeat
+	held             []heldSend
+	launch           func(relay.Spec, string, bool) (relaySeat, relay.Started, error)
+
+	seat    relaySeat
+	started relay.Started
+	err     error
+}
+
+// heldSend is a send that waits for a relay to finish starting.
+type heldSend struct{ id, text, mode string }
+
+// prepareLaunch settles what a start launches. Loop goroutine (or before
+// the loop starts).
+func (r *Runtime) prepareLaunch(profile, dir, name string, resume bool, pick relayPick) (*relayLaunch, error) {
 	if name == "" {
 		name = profile
-		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active(); i++ {
+		for i := 2; r.st.Relays[name] != nil && r.st.Relays[name].Active() || r.relays.launch(name) != nil; i++ {
 			name = fmt.Sprintf("%s-%d", profile, i)
 		}
+	} else if r.relays.launch(name) != nil {
+		return nil, fmt.Errorf("%s is already starting; wait for it", name)
 	}
 	if dir == "" {
 		dir = r.workDir()
@@ -167,30 +202,204 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayP
 	}
 	if !resume {
 		if err := r.checkRelayPick(profile, pick); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 	spec, err := r.relaySpec(name, profile, dir, pick)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	innerID := ""
+	job := &relayLaunch{name: name, profile: profile, dir: dir, resume: resume, pick: pick, spec: spec, launch: launchRelay}
 	if prev := r.st.Relays[name]; prev != nil && resume {
-		innerID = prev.InnerID
+		job.innerID = prev.InnerID
 	}
-	seat, started, err := launchRelay(spec, innerID, resume && innerID != "")
+	return job, nil
+}
+
+// beginLaunch claims the job's names and takes the seat it replaces out of
+// use, so nothing is typed into an agent about to be stopped and its late
+// news is not taken for the new one's. Loop goroutine.
+func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
+	job.replaces = replaces
+	r.relays.mu.Lock()
+	if r.relays.launching == nil {
+		r.relays.launching = map[string]*relayLaunch{}
+	}
+	r.relays.launching[job.name] = job
+	if replaces != "" {
+		r.relays.launching[replaces] = job
+		job.old = r.relays.seats[replaces]
+		delete(r.relays.seats, replaces)
+	}
+	r.relays.mu.Unlock()
+}
+
+// run stops the replaced agent and launches the new one. Never on the loop
+// goroutine: both can take many seconds.
+func (job *relayLaunch) run() {
+	if job.old != nil {
+		_ = job.old.Kill()
+	}
+	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
+}
+
+// finishLaunch records how a start went and returns the relay's name and
+// the sends that waited for it (they go to the new seat, or are recorded
+// as undelivered when the start failed). Loop goroutine.
+func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, held []heldSend, err error) {
+	r.relays.mu.Lock()
+	for name, j := range r.relays.launching {
+		if j == job {
+			delete(r.relays.launching, name)
+		}
+	}
+	held, job.held = job.held, nil
+	r.relays.mu.Unlock()
+	err = job.err
+	if err == nil && job.replaces != "" && job.endOld == "" {
+		if rel := r.st.Relays[job.replaces]; rel == nil || !rel.Active() {
+			// Stopped while it started again: it stays stopped.
+			err = fmt.Errorf("%s was stopped while it started again", job.replaces)
+			seat := job.seat
+			go func() { _ = seat.Kill() }()
+		}
+	}
+	r.startFailed = err != nil
+	if pick, ok := r.relayRepick[job.name]; ok && (err != nil || pick == job.pick) {
+		delete(r.relayRepick, job.name)
+	}
+	if err != nil {
+		switch rel := r.st.Relays[job.replaces]; {
+		case job.endOld != "" && rel != nil && rel.Active():
+			r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld + ", which could not start: " + err.Error()}))
+		case job.endOld == "" && rel != nil && rel.Active() && rel.State != "exited":
+			// Its agent was stopped and no other runs in its place: it is
+			// on the record as exited, so eagent is told and can start it
+			// again or stop it.
+			r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: job.replaces, State: "exited", Detail: clipRunes("it was stopped to start again and could not start: "+err.Error(), 2000)}))
+		}
+		for _, h := range held {
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: job.replaces, ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+		}
+		r.syncRelaySettings()
+		return "", nil, err
+	}
+	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
+		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
+	}
+	r.summary.final = false // a session with an agent started is not ending
+	spec, started := job.spec, job.started
+	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
+		Name: job.name, Profile: job.profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: job.dir,
+		Host: started.Host, Target: started.Target, Command: started.Command, InnerID: started.InnerID, Resumed: job.resume && job.innerID != "",
+		Model: job.pick.Model, Effort: job.pick.Effort,
+	}))
+	r.syncRelaySettings()
+	r.watchSeat(job.name, job.seat)
+	return job.name, held, nil
+}
+
+// holdSend keeps a send for a relay that is starting (again), to type once
+// it is up; false when none is. Loop goroutine.
+func (r *Runtime) holdSend(name, id, text, mode string) bool {
+	r.relays.mu.Lock()
+	defer r.relays.mu.Unlock()
+	job := r.relays.launching[name]
+	if job == nil {
+		return false
+	}
+	job.held = append(job.held, heldSend{id, text, mode})
+	return true
+}
+
+// sendHeld types the sends that waited for a start into the new agent, in
+// the order they came. Not on the loop goroutine.
+func (r *Runtime) sendHeld(name string, seat relaySeat, held []heldSend) {
+	for _, h := range held {
+		if _, err := seat.Send(h.id, h.text, h.mode); err != nil {
+			h := h
+			r.post(func() {
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: h.id, OK: false, Detail: clipRunes(err.Error(), 2000)}))
+			})
+		}
+	}
+}
+
+// launchOffLoop runs a start from a tool's goroutine: prepare is run on
+// the loop goroutine and returns the job (or an error), the launch runs
+// here, and the result is recorded on the loop again. Sends that waited
+// for it are typed after.
+func (r *Runtime) launchOffLoop(prepare func() (*relayLaunch, error)) (string, relaySeat, []heldSend, error) {
+	var job *relayLaunch
+	var err error
+	r.sync(func() { job, err = prepare() })
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if job == nil {
+		return "", nil, nil, fmt.Errorf("the session is ending")
+	}
+	job.run()
+	var name string
+	var held []heldSend
+	ran := false
+	r.sync(func() {
+		ran = true
+		name, held, err = r.finishLaunch(job)
+	})
+	if !ran {
+		// The session ended meanwhile: nothing will watch the new agent
+		// or know it runs.
+		if job.err == nil {
+			_ = job.seat.Kill()
+		}
+		return "", nil, nil, fmt.Errorf("the session is ending")
+	}
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return name, job.seat, held, nil
+}
+
+// relaunch starts a relay again on its own session with its picks, from a
+// tool's goroutine, and types what waited for it.
+func (r *Runtime) relaunch(name string) (string, error) {
+	started, seat, held, err := r.launchOffLoop(func() (*relayLaunch, error) {
+		rel := r.st.Relays[name]
+		if rel == nil {
+			return nil, fmt.Errorf("no agent named %q here", name)
+		}
+		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
+		if err != nil {
+			return nil, err
+		}
+		r.beginLaunch(job, rel.Name)
+		return job, nil
+	})
+	if err == nil {
+		go r.sendHeld(started, seat, held)
+	}
+	return started, err
+}
+
+// startRelay launches an agent in a terminal of its own, with the session's
+// model and effort picks, and waits for it. resume continues the named
+// relay's own session. Before the loop starts: on the loop goroutine, use
+// launchOffLoop or restartRelayWith, which do not hold the loop while the
+// agent launches.
+func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayPick) (_ string, err error) {
+	// A session with no terminal that ends without ever having had an
+	// agent, after a start that failed, did not do what it was started
+	// for (maybeEnd).
+	defer func() { r.startFailed = err != nil }()
+	job, err := r.prepareLaunch(profile, dir, name, resume, pick)
 	if err != nil {
 		return "", err
 	}
-	r.summary.final = false // a session with an agent started is not ending
-	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
-		Name: name, Profile: profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: dir,
-		Host: started.Host, Target: started.Target, Command: started.Command, InnerID: started.InnerID, Resumed: resume && innerID != "",
-		Model: pick.Model, Effort: pick.Effort,
-	}))
-	r.syncRelaySettings()
-	r.watchSeat(name, seat)
-	return name, nil
+	r.beginLaunch(job, "")
+	job.run()
+	started, _, err := r.finishLaunch(job)
+	return started, err
 }
 
 // watchSeat pumps a seat's observations into the log.
@@ -199,7 +408,13 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 	go func() {
 		for ev := range seat.Events() {
 			ev := ev
-			r.post(func() { r.onRelayEvent(name, ev) })
+			r.post(func() {
+				// News from a seat that is no longer the relay's (stopped
+				// for a restart, a switch or a stop) is not the new one's.
+				if r.relays.get(name) == seat {
+					r.onRelayEvent(name, ev)
+				}
+			})
 		}
 		r.post(func() { r.relays.drop(name, seat) })
 	}()
@@ -461,7 +676,8 @@ func (r *Runtime) routeUserMessage(d event.UserMessageData) (rel *state.Relay, h
 		return nil, "more than one agent is running"
 	}
 	rel = active[0]
-	if rel.State == "exited" || r.relays.get(rel.Name) == nil {
+	// One starting again takes the message once it is up.
+	if r.relays.launch(rel.Name) == nil && (rel.State == "exited" || r.relays.get(rel.Name) == nil) {
 		return nil, "the agent is not running"
 	}
 	if d.Route != "agent" {
@@ -494,7 +710,9 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 	r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: name, ID: id, From: "user", Seq: seq, Mode: mode, Text: text, Auto: true}))
 	seat := r.relays.get(name)
 	if seat == nil {
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Detail: "the agent is not running"}))
+		if !r.holdSend(name, id, text, mode) {
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Detail: "the agent is not running"}))
+		}
 		return
 	}
 	go func() {
@@ -566,13 +784,17 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 	case "relay_start":
 		profile := strings.TrimSpace(str("profile"))
 		dir := relay.ExpandHome(strings.TrimSpace(str("dir")))
-		var started string
-		var err error
-		r.sync(func() {
+		started, _, _, err := r.launchOffLoop(func() (*relayLaunch, error) {
 			if dir != "" && !filepath.IsAbs(dir) {
 				dir = filepath.Join(r.workDir(), dir)
 			}
-			started, err = r.startRelay(profile, dir, "", false, relayPick{pickArg(str("model")), pickArg(str("effort"))})
+			job, err := r.prepareLaunch(profile, dir, "", false, relayPick{pickArg(str("model")), pickArg(str("effort"))})
+			if err != nil {
+				r.startFailed = true
+				return nil, err
+			}
+			r.beginLaunch(job, "")
+			return job, nil
 		})
 		if err != nil {
 			return "Could not start the agent: " + err.Error(), true
@@ -623,11 +845,20 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		if err != nil {
 			return err.Error(), true
 		}
-		seat := r.relays.get(rel.Name)
-		if seat == nil {
-			r.sync(func() {
+		var seat relaySeat
+		held := false
+		r.sync(func() {
+			if seat = r.relays.get(rel.Name); seat != nil {
+				return
+			}
+			if held = r.holdSend(rel.Name, id, text, mode); !held {
 				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: "the agent is not running"}))
-			})
+			}
+		})
+		if held {
+			return fmt.Sprintf("%s is starting; the message (%s) is typed in once it is up. Its transcript will confirm arrival; you are told only if it does not.", rel.Who(), id), false
+		}
+		if seat == nil {
 			return rel.Who() + " is not running; restart it with relay_control restart.", true
 		}
 		how, err := seat.Send(id, text, mode)
@@ -705,14 +936,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			}
 			return "Keys sent. The screen now:\n" + strings.TrimRight(screen, "\n"), false
 		case "restart":
-			if seat != nil {
-				_ = seat.Kill()
-				r.relays.drop(rel.Name, seat)
-			}
-			var started string
-			r.sync(func() {
-				started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
-			})
+			started, err := r.relaunch(rel.Name)
 			if err != nil {
 				return "Could not restart: " + err.Error(), true
 			}
@@ -722,14 +946,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			if uerr != nil {
 				return "The upgrade failed, so nothing was restarted: " + uerr.Error() + "\n" + out, true
 			}
-			if seat != nil {
-				_ = seat.Kill()
-				r.relays.drop(rel.Name, seat)
-			}
-			var started string
-			r.sync(func() {
-				started, err = r.startRelay(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
-			})
+			started, err := r.relaunch(rel.Name)
 			if err != nil {
 				return "Upgraded, but the restart failed: " + err.Error() + "\n" + out, true
 			}
@@ -739,35 +956,42 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			if profile == "" {
 				return "switch: say which profile to hand over to (" + strings.Join(r.cfg.Relay.RelayProfileNames(), ", ") + ")", true
 			}
-			var brief, started string
-			r.sync(func() {
+			var brief string
+			// The old agent is stopped and the new one launched off the loop
+			// goroutine; the old one ends on the record just before the new
+			// one starts.
+			started, next, held, err := r.launchOffLoop(func() (*relayLaunch, error) {
 				brief = r.handoffBrief(rel)
 				// Checked before the running agent is stopped: a model or
 				// effort the new one cannot take must leave this one working.
 				pick := relayPick{pickArg(str("model")), pickArg(str("effort"))}
-				if err = r.checkRelayPick(profile, pick); err != nil {
-					return
+				if err := r.checkRelayPick(profile, pick); err != nil {
+					return nil, err
 				}
-				if seat != nil {
-					_ = seat.Kill()
-					r.relays.drop(rel.Name, seat)
+				job, err := r.prepareLaunch(profile, rel.Dir, "", false, pick)
+				if err != nil {
+					return nil, err
 				}
-				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "handed over to " + profile}))
-				started, err = r.startRelay(profile, rel.Dir, "", false, pick)
+				if r.relays.launch(rel.Name) != nil {
+					return nil, fmt.Errorf("%s is starting again; wait for it", rel.Who())
+				}
+				job.endOld = "handed over to " + profile
+				r.beginLaunch(job, rel.Name)
+				return job, nil
 			})
 			if err != nil {
 				return "Could not switch: " + err.Error(), true
 			}
-			next := r.relays.get(started)
 			id := ""
 			r.sync(func() {
 				id = r.st.NextRelaySendID()
 				r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: started, ID: id, From: "eagent", Mode: "queue", Text: brief, Auto: auto}))
 			})
-			if next != nil {
-				if _, err := next.Send(id, brief, "queue"); err != nil {
-					return "Switched to " + started + ", but the handoff brief could not be typed: " + err.Error(), true
-				}
+			_, berr := next.Send(id, brief, "queue")
+			// What the user sent during the handover follows the brief.
+			r.sendHeld(started, next, held)
+			if berr != nil {
+				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
 			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false
 		case "model":
