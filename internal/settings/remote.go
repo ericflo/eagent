@@ -745,7 +745,10 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
 	}
-	if err = s.routePicks(values, p.Edits, res.Effective, before.Descriptor); err != nil {
+	// Picks are compared with the layers the file builds on, which the
+	// summarizer's route above is seeded from: what the environment makes
+	// of a route is not the file's.
+	if err = s.routePicks(values, p.Edits, res.Layered, before.Descriptor); err != nil {
 		return
 	}
 	var candidate []byte
@@ -805,20 +808,46 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	if prior.Summarizer.Model == nil {
 		summarizer.Fallback = nil
 	}
+	// after has the environment applied; a field a variable sets is not
+	// the proposal's to change, so it reads as the layers have it.
+	env := config.EnvOverrides()
+	layered := func(r config.ModelRoute, ptr string, base config.ModelRoute) config.ModelRoute {
+		for leaf, f := range map[string][2]*string{
+			"model":            {&r.Model, &base.Model},
+			"base_url":         {&r.BaseURL, &base.BaseURL},
+			"protocol":         {&r.Protocol, &base.Protocol},
+			"api_key_env":      {&r.APIKeyEnv, &base.APIKeyEnv},
+			"reasoning_effort": {&r.ReasoningEffort, &base.ReasoningEffort},
+		} {
+			if _, ok := env[ptr+"/"+leaf]; ok {
+				*f[0] = *f[1]
+			}
+		}
+		return r
+	}
+	afterMain := layered(after.Model, "/model", prior.Model)
+	afterSummarizer := afterMain
+	if after.Summarizer.Model != nil && after.Summarizer.Model.Model != "" {
+		afterSummarizer = layered(*after.Summarizer.Model, "/summarizer/model", summarizer)
+	}
 	for _, r := range []struct {
 		ptr           string
 		before, after config.ModelRoute
 	}{
-		{"/model", prior.Model, after.Model},
-		{"/summarizer/model", summarizer, after.Summarizer.Route(after.Model)},
+		{"/model", prior.Model, afterMain},
+		{"/summarizer/model", summarizer, afterSummarizer},
 	} {
-		set := map[string]bool{}
+		// set holds the fields the proposal names, which keep its values;
+		// only setting a model or an address is a pick. Unsetting one goes
+		// back to what the layers beneath say, the rest of the route with it.
+		set, isPick := map[string]bool{}, false
 		for _, e := range edits {
 			if leaf, ok := strings.CutPrefix(e.Key, r.ptr+"/"); ok {
 				set[leaf] = true
+				isPick = isPick || (e.Op == "set" && (leaf == "model" || leaf == "base_url"))
 			}
 		}
-		if !set["model"] && !set["base_url"] {
+		if !isPick {
 			continue
 		}
 		if r.after.Model == r.before.Model && strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
