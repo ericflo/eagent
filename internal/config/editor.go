@@ -161,7 +161,7 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	if fileMap != nil && len(fileMap) > 0 {
-		if err := overlay(&cfg, fileMap, path); err != nil {
+		if err := overlay(project, &cfg, fileMap, path); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -172,7 +172,7 @@ func Resolve(project, preset, bundle string) Resolution {
 		res.LoadError = path + ": " + res.File.ParseError
 	}
 	if bundle != "" && len(bundleMap) > 0 {
-		if err := overlay(&cfg, bundleMap, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle)); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -182,16 +182,19 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	envVars := EnvOverrides()
-	applyEnv(&cfg)
+	applyEnv(project, &cfg)
 	normalize(&cfg)
 	cur := flatten(cfg)
 	for k, v := range cur {
 		if prev[k] != v {
 			if name, ok := envVars[k]; ok {
 				res.Sources[k] = "env:" + name
-			} else if name, ok := envVars["/summarizer/model/model"]; ok && strings.HasPrefix(k, "/summarizer/model/") {
+			} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
 				// The rest of a summarizer route the environment created is
 				// copied from the main model because of that variable.
+				res.Sources[k] = "env:" + name
+			} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
+				// The window follows the model the variable names.
 				res.Sources[k] = "env:" + name
 			} else {
 				res.Sources[k] = "env"
@@ -412,7 +415,7 @@ func BundleFromBytes(name string, raw []byte) (Config, error) {
 		Presets[canon](&cfg)
 		preset = canon
 	}
-	if err := overlay(&cfg, m, "bundle "+name); err != nil {
+	if err := overlay("", &cfg, m, "bundle "+name); err != nil {
 		return Config{}, err
 	}
 	normalize(&cfg)
@@ -734,7 +737,9 @@ func (c Config) Problems() []Problem {
 		out = append(out, Problem{Path: path, Code: code, Message: msg, Severity: sev})
 	}
 	out = append(out, routeProblems("/model", c.Model, 0)...)
-	if c.Summarizer.Model != nil {
+	// An inline summarizer calls no route, so one left written is not checked:
+	// it cannot fail a load or a save it plays no part in.
+	if c.Summarizer.Model != nil && c.Summarizer.Mode != SummarizerInline && c.Summarizer.Mode != "" {
 		out = append(out, routeProblems("/summarizer/model", *c.Summarizer.Model, 0)...)
 	}
 	switch c.Summarizer.Mode {

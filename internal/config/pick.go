@@ -13,7 +13,8 @@ import (
 // limits; picking a different model drops its fallback chain, which belonged
 // to the old model. An empty effort keeps the route's when the model accepts
 // it, else takes the nearest level the model offers. An empty provider is
-// inferred from the model.
+// inferred from the model. The context window becomes the new model's, or 0
+// (unknown) when no list says it.
 func PickRoute(project string, a ModelRoute, providerID, modelID, effort string) (ModelRoute, error) {
 	if providerID == "" {
 		// No provider named: the route's own, when it lists the model, or
@@ -37,9 +38,7 @@ func PickRoute(project string, a ModelRoute, providerID, modelID, effort string)
 	}
 	if a.BaseURL != pr.BaseURL || a.Model != m.ID {
 		a.Protocol, a.BaseURL, a.Model, a.APIKeyEnv, a.Fallback = m.ProtocolForProvider(pr), pr.BaseURL, m.ID, pr.KeyEnv, nil
-		if m.Context > 0 {
-			a.ContextTokens = m.Context
-		}
+		a.ContextTokens = m.Context
 	}
 	switch {
 	case effort != "":
@@ -48,6 +47,22 @@ func PickRoute(project string, a ModelRoute, providerID, modelID, effort string)
 		a.ReasoningEffort = NearestEffort(m.Efforts, a.ReasoningEffort)
 	}
 	return a, nil
+}
+
+// KnownContext is a model's context window as the built-in catalog or the
+// project's cached live list gives it, or 0 when neither knows the model or
+// its window. It never touches the network.
+func KnownContext(project, baseURL, model string) int {
+	if project == "" {
+		m, _ := Lookup(baseURL, model)
+		return m.Context
+	}
+	if pr, ok := ProviderForURLFor(project, baseURL); ok {
+		if m, _, ok := ResolveLiveModel(project, pr.ID, model); ok {
+			return m.Context
+		}
+	}
+	return 0
 }
 
 // NearestEffort is the offered level closest to want (the lower one on a

@@ -233,6 +233,23 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 			_ = json.Unmarshal(raw, &onDisk)
 		}
 		onDisk, _ = config.MigrateLegacy(onDisk)
+		// With no summarizer route written, the one in effect is made by the
+		// environment from the main model's: it is the environment's as a
+		// whole, and none of it is written.
+		if _, written := pointerIn(onDisk, []string{"summarizer", "model"}); !written {
+			name := ""
+			for ptr, v := range env {
+				if strings.HasPrefix(ptr, "/summarizer/model/") {
+					if name == "" || v < name {
+						name = v
+					}
+					delete(env, ptr)
+				}
+			}
+			if name != "" {
+				env["/summarizer/model"] = name
+			}
+		}
 		var ptrs []string
 		for ptr := range env {
 			ptrs = append(ptrs, ptr)
