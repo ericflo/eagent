@@ -485,16 +485,12 @@ func Export(ctx context.Context, project, session, version, destination string) 
 		return err
 	}
 	defer snapshot.Close()
-	// Reserve a new destination atomically. A directory created by another
-	// writer while the snapshot was built must never be silently replaced.
-	if err := os.Mkdir(absolute, 0o700); err != nil {
-		return err
-	}
-	if err := os.Rename(snapshot.Dir, absolute); err != nil {
-		_ = os.Remove(absolute)
-		return err
-	}
-	return nil
+	// Move the finished snapshot into place. Anything another writer put at
+	// the destination while the snapshot was built is never replaced: Go's
+	// Rename refuses an existing directory, and a directory cannot be
+	// renamed onto a file. (Reserving the destination with Mkdir first, as
+	// this once did, made every export fail for that very reason.)
+	return os.Rename(snapshot.Dir, absolute)
 }
 
 func IsArtifactEnabled(project string) bool {
