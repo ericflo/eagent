@@ -73,6 +73,7 @@ type phone struct {
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
 	threadID   string
 	threadSeen bool
+	dropping   bool // the last enqueue found the queue full
 	// resumedBy is the thread message that resumed the session, and
 	// fallback the session's own first post: the reply poll reads on from
 	// the first, so what the user sent while the session was coming back
@@ -395,13 +396,33 @@ func (p *phone) mirror1(seq int64, id string) {
 	p.mirrored[seq] = id
 }
 
-// enqueue schedules an outbound call; drops it if the mirror is closing.
-func (p *phone) enqueue(fn func(context.Context)) {
+// enqueue schedules an outbound call and reports whether it was queued.
+// A full queue means the service has been unreachable for a while; losing
+// a mirror call is better than blocking the loop, but it is said, once
+// per stretch of drops, so it is never silent.
+func (p *phone) enqueue(fn func(context.Context)) bool {
 	select {
 	case p.queue <- fn:
+		p.mu.Lock()
+		p.dropping = false
+		p.mu.Unlock()
+		return true
 	default:
-		// A full queue means the service is unreachable; losing a mirror
-		// message is better than blocking the loop.
+		p.mu.Lock()
+		first := !p.dropping
+		p.dropping = true
+		p.mu.Unlock()
+		if first {
+			p.say("finalechat: the phone has not taken what was sent for a while; updates to the thread are being dropped until it does")
+		}
+		return false
+	}
+}
+
+// say logs a line where the user reads the session's log. Any goroutine.
+func (p *phone) say(format string, args ...any) {
+	if p.logf != nil {
+		p.logf(format, args...)
 	}
 }
 
@@ -644,7 +665,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
 	p.mu.Unlock()
-	p.enqueue(func(ctx context.Context) {
+	queued := p.enqueue(func(ctx context.Context) {
 		var act *finalechat.Activity
 		if p.has("activity") {
 			act = &finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL, Seq: time.Now().UnixNano()}
@@ -684,6 +705,15 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.wg.Add(1)
 		go p.watchQuestion(r, q.ID, qid)
 	})
+	if !queued {
+		// The card will never be posted: the question is not waiting on
+		// the phone (as when the ask call fails), or a session with no
+		// terminal would wait for an answer nobody can give.
+		p.mu.Lock()
+		p.gone[qid] = true
+		p.mu.Unlock()
+		p.say("finalechat: the question %q was not posted to the phone", clipLabel(text, 80))
+	}
 }
 
 func (p *phone) remember(id string) {
