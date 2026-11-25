@@ -530,7 +530,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	// The facts are written now that the next file is open, so the table
 	// of files shows the closed one whole and says where this dossier sits.
 	body := strings.TrimSpace(text) + "\n\n" + r.dossierFacts(job.covers, next)
-	d := event.DossierData{Text: body, CoversSeq: job.covers, By: by, NoMap: by == "eagent" && res.noMap != "", ElapsedMS: res.elapsed.Milliseconds(), Calls: res.calls, Consulted: res.consulted}
+	d := event.DossierData{Text: body, CoversSeq: job.covers, CoversNone: job.covers == 0, By: by, NoMap: by == "eagent" && res.noMap != "", ElapsedMS: res.elapsed.Milliseconds(), Calls: res.calls, Consulted: res.consulted}
 	if res.usage != (event.Usage{}) {
 		d.Usage = &res.usage
 	}
@@ -648,7 +648,7 @@ func (r *Runtime) dossierIndex() string {
 	var from int64
 	if cur := r.st.Current(); cur != nil {
 		from = cur.StartSeq
-		if cur.CoversSeq > 0 {
+		if cur.CoversSeq > 0 || cur.CoversNone {
 			from = cur.CoversSeq + 1
 		}
 	}

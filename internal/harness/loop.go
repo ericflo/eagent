@@ -198,6 +198,51 @@ func (t *turnState) init(st *state.State) {
 		}
 	}
 	t.promptTokens = st.ContextTokens()
+	// How many calls the conversation in the current file has made, and how
+	// long its first prompt was: the rollover guard (needsDossier) reads
+	// them to tell a conversation that was too long from its first call,
+	// which restarting cannot shrink, from one that grew. Left at zero, the
+	// first call of this process would be taken for the first call of the
+	// conversation, and a resumed session whose prompt the provider then
+	// refused would never be restarted from a dossier again.
+	if cur := st.Current(); cur != nil {
+		for _, ev := range st.Events {
+			if ev.Seq < cur.StartSeq || ev.Actor != event.ActorEagent || ev.Task != "" {
+				continue
+			}
+			switch ev.Type {
+			case event.Assistant:
+				var d event.AssistantData
+				if ev.Decode(&d) == nil {
+					if t.subCalls == 0 {
+						t.firstPrompt = d.Usage.Input
+					}
+					t.subCalls++
+				}
+			case event.Checks:
+				var d event.ChecksData
+				if ev.Decode(&d) == nil && d.Count > 0 {
+					if t.subCalls == 0 {
+						// The looks that left no record are kept as a
+						// total. The first prompt is known when the record
+						// says it, or when there was one look. A record
+						// from before it said so leaves it unknown (0):
+						// the guard then lets a refused conversation be
+						// restarted, which costs one dossier if it was in
+						// fact too long from the start, where a guess that
+						// was too high would switch restarts off.
+						switch {
+						case d.FirstPrompt > 0:
+							t.firstPrompt = d.FirstPrompt
+						case d.Count == 1:
+							t.firstPrompt = d.Usage.Input
+						}
+					}
+					t.subCalls += d.Count
+				}
+			}
+		}
+	}
 	if st.Legacy() && !st.Upgraded() {
 		// A log from the three-actor design: its events were weighed by
 		// actors that no longer exist. Nothing in it is owed a look; the
@@ -751,11 +796,20 @@ func (r *Runtime) turn(w wake) {
 			recorded, tailKept, tc.spoke, tc.handled = true, true, true, true
 			break
 		}
+		// last: no call is left in this turn. A reply sent back now would
+		// never be answered, and the wake would stay unsettled, so the next
+		// turn would start at once with the same wake and its reminders
+		// unspent: with max_calls_per_turn at 1, a model that held on a
+		// message kept for eagent was called again without end. On the last
+		// call a reply stands as it came, and what is still owed is asked
+		// for again later (oweAnswer, the closing word's fallback).
+		last := call == maxCalls
 		if acts == 0 {
 			// A reply that reaches no one. Some are sent back once, off the
 			// record, with the reason; after that it is taken for a hold.
 			var back string
 			switch {
+			case last:
 			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
 				cut = true
 				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
@@ -779,7 +833,7 @@ func (r *Runtime) turn(w wake) {
 			})
 			break
 		}
-		if leak := leakingMessage(resp); leak != "" && !rewrote {
+		if leak := leakingMessage(resp); leak != "" && !rewrote && !last {
 			// The machinery has names inside; the user hears "I". One
 			// rewrite is asked for, off the record, and nothing in the
 			// reply is run; after that the words go out as they are.
@@ -985,6 +1039,9 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	t.silent.ElapsedMS += resp.Elapsed.Milliseconds()
 	if resp.Usage.Input > 0 {
 		t.silent.PromptTokens = resp.Usage.Input
+		if t.silent.FirstPrompt == 0 {
+			t.silent.FirstPrompt = resp.Usage.Input
+		}
 	}
 	if seen > 0 {
 		t.silent.SeenSeq = seen

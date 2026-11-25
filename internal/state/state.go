@@ -34,8 +34,11 @@ type Subsession struct {
 	EndSeq   int64 // 0 while open
 	// Dossier is the briefing the subsession opened with ("" for the
 	// first), and CoversSeq the last event that briefing took in.
-	Dossier   string
-	CoversSeq int64
+	// CoversNone: it took in none, which a CoversSeq of 0 alone does not
+	// say (older logs leave it out).
+	Dossier    string
+	CoversSeq  int64
+	CoversNone bool
 }
 
 // State is everything derived from the log.
@@ -361,7 +364,7 @@ func (s *State) Apply(ev event.Event) {
 		_ = ev.Decode(&d)
 		if cur := s.Current(); cur != nil {
 			cur.Dossier = d.Text
-			cur.CoversSeq = d.CoversSeq
+			cur.CoversSeq, cur.CoversNone = d.CoversSeq, d.CoversNone && d.CoversSeq == 0
 		}
 		if d.Usage != nil {
 			// A dossier is written in several calls (the lookups, then the
@@ -455,9 +458,13 @@ func summaryActor(ev event.Event) string {
 
 // DanglingCalls finds an actor's tool calls that never got a result, for
 // example because the process died mid-turn.
+//
+// A result answers a call of the reply it follows, as the conversation is
+// rendered (renderActor): a call id alone does not say which call, because
+// some providers use the same ids in every response, and an earlier call's
+// result would pass for the result of a later call that never got one.
 func (s *State) DanglingCalls(actor string) []event.ToolCall {
-	results := map[string]bool{}
-	var calls []event.ToolCall
+	var out, open []event.ToolCall // open: the latest reply's calls still without a result
 	for _, ev := range s.Events {
 		if ev.Actor != actor || ev.Task != "" {
 			continue
@@ -466,20 +473,20 @@ func (s *State) DanglingCalls(actor string) []event.ToolCall {
 		case event.Assistant:
 			var d event.AssistantData
 			_ = ev.Decode(&d)
-			calls = append(calls, d.ToolCalls...)
+			out = append(out, open...)
+			open = append([]event.ToolCall(nil), d.ToolCalls...)
 		case event.ToolResult:
 			var d event.ToolResultData
 			_ = ev.Decode(&d)
-			results[d.CallID] = true
+			for i, c := range open {
+				if c.ID == d.CallID {
+					open = append(open[:i], open[i+1:]...)
+					break
+				}
+			}
 		}
 	}
-	var out []event.ToolCall
-	for _, c := range calls {
-		if !results[c.ID] {
-			out = append(out, c)
-		}
-	}
-	return out
+	return append(out, open...)
 }
 
 // ContextTokens is the size of eagent's last recorded prompt.

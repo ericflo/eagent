@@ -368,6 +368,11 @@ type DossierData struct {
 	// subsession's conversation is the briefing followed by every event
 	// after it, so nothing that arrived while it was being written is lost.
 	CoversSeq int64 `json:"covers_seq,omitempty"`
+	// CoversNone says the briefing took in no event at all: no call had
+	// seen anything when it was written (the session's first request was
+	// refused as too long). Everything on record follows it. Without it a
+	// CoversSeq of 0 is an older log that does not say.
+	CoversNone bool `json:"covers_none,omitempty"`
 	// By is who wrote the body: "eagent" (the model, on its cached prompt)
 	// or "harness" (built from the log alone, when the model could not).
 	By string `json:"by,omitempty"`
@@ -559,6 +564,10 @@ type ChecksData struct {
 	// PromptTokens is the size of the last of those prompts, so a reader
 	// of the log knows how full the conversation is.
 	PromptTokens int `json:"prompt_tokens,omitempty"`
+	// FirstPrompt is the size of the first of those prompts. A resumed
+	// session reads it to know how long the conversation was at its first
+	// call, when that call left no record of its own.
+	FirstPrompt int `json:"first_prompt,omitempty"`
 	// SeenSeq is the newest event the last of those looks had in view, so
 	// a resumed session does not look again at what was already weighed.
 	SeenSeq int64 `json:"seen_seq,omitempty"`

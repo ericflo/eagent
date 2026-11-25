@@ -74,7 +74,10 @@ func (s *State) viewEvents() ([]event.Event, *event.Event) {
 			break
 		}
 	}
-	if dossier == nil || cur.CoversSeq <= 0 {
+	if dossier == nil || (cur.CoversSeq <= 0 && !cur.CoversNone) {
+		// No briefing, or one that does not say what it took in (an older
+		// log): the subsession shows its own file. A briefing that took in
+		// nothing at all (CoversNone) is followed by the whole record.
 		return s.Events[start:], dossier
 	}
 	from := start
@@ -188,13 +191,25 @@ func (s *State) remoteChanges(events []event.Event) map[int64]string {
 // their tool results, and notifications produced by notify.
 func renderActor(events []event.Event, actor string, notify func(event.Event) string) []llm.Message {
 	mine := func(ev event.Event) bool { return ev.Actor == actor && ev.Task == "" }
-	// Index tool results by call id.
-	results := map[string]event.ToolResultData{}
-	for _, ev := range events {
-		if ev.Type == event.ToolResult && mine(ev) {
+	// A tool result answers a call of the reply it follows in the log: the
+	// results between one reply and the next are that reply's, in order. A
+	// call id alone does not say which call a result answers, because some
+	// providers number their calls from 0 in every response, and matching
+	// by id would put the newest result under every earlier call with that
+	// id and rewrite a conversation that was already sent.
+	results := map[int]map[string][]event.ToolResultData{}
+	reply := -1
+	for i, ev := range events {
+		switch {
+		case ev.Type == event.Assistant && mine(ev):
+			reply = i
+		case ev.Type == event.ToolResult && mine(ev) && reply >= 0:
 			var d event.ToolResultData
 			_ = ev.Decode(&d)
-			results[d.CallID] = d
+			if results[reply] == nil {
+				results[reply] = map[string][]event.ToolResultData{}
+			}
+			results[reply][d.CallID] = append(results[reply][d.CallID], d)
 		}
 	}
 	// Assistant events with the window of seqs their call spanned.
@@ -252,27 +267,29 @@ func renderActor(events []event.Event, actor string, notify func(event.Event) st
 			})
 			if len(d.ToolCalls) > 0 {
 				tm := llm.Message{Role: "tool"}
-				for _, tc := range d.ToolCalls {
-					r, ok := results[tc.ID]
-					if !ok {
-						r = event.ToolResultData{CallID: tc.ID, Name: tc.Name, Output: "(no result: the session was interrupted before this finished)", IsError: true}
-					}
-					tm.Results = append(tm.Results, llm.ToolResult{CallID: r.CallID, Name: r.Name, Output: r.Output, IsError: r.IsError})
-				}
-				msgs = append(msgs, tm)
 				// Pictures a call brought back follow its result. They are
 				// read from the copy kept in the session, so the message is
 				// the same bytes every time it is rendered.
 				var pics []llm.Image
 				var names []string
+				// Two calls of one reply with the same id take its results
+				// in the order they were recorded.
+				took := map[string]int{}
 				for _, tc := range d.ToolCalls {
-					for _, a := range results[tc.ID].Images {
+					r := event.ToolResultData{CallID: tc.ID, Name: tc.Name, Output: "(no result: the session was interrupted before this finished)", IsError: true}
+					if got := results[i][tc.ID]; took[tc.ID] < len(got) {
+						r = got[took[tc.ID]]
+						took[tc.ID]++
+					}
+					tm.Results = append(tm.Results, llm.ToolResult{CallID: r.CallID, Name: r.Name, Output: r.Output, IsError: r.IsError})
+					for _, a := range r.Images {
 						if a.IsImage() {
 							pics = append(pics, llm.Image{Path: a.Path, MediaType: a.ContentType})
 							names = append(names, a.Name)
 						}
 					}
 				}
+				msgs = append(msgs, tm)
 				if len(pics) > 0 {
 					msgs = append(msgs, llm.Message{Role: "user", Text: "[image from view_image: " + strings.Join(names, ", ") + "]", Images: pics})
 				}
