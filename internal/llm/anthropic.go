@@ -320,7 +320,7 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 		switch m.Role {
 		case "user":
 			text := m.Text
-			if text == "" {
+			if strings.TrimSpace(text) == "" { // the API refuses a blank text block
 				text = "(empty)"
 			}
 			blocks := []map[string]any{{"type": "text", "text": text}}
@@ -354,7 +354,7 @@ func anthropicMessagesFor(req Request, host, model string) []map[string]any {
 			}
 			if content == nil {
 				ids.rebuilt()
-				if m.Text != "" {
+				if strings.TrimSpace(m.Text) != "" {
 					content = append(content, map[string]any{"type": "text", "text": m.Text})
 				}
 				for j, tc := range m.ToolCalls {
@@ -408,7 +408,13 @@ func anthropicStable(msgs []map[string]any) []map[string]any {
 			case "thinking", "redacted_thinking":
 				continue
 			case "text":
-				if s, _ := b["text"].(string); s == "" {
+				if s, _ := b["text"].(string); strings.TrimSpace(s) == "" {
+					continue
+				}
+			case "tool_result":
+				// A blank screen comes back as an empty result, and a
+				// breakpoint may not sit on an empty block.
+				if s, ok := b["content"].(string); ok && strings.TrimSpace(s) == "" {
 					continue
 				}
 			}
