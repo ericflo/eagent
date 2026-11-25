@@ -98,7 +98,11 @@ type State struct {
 	// ByRoute accumulates usage under the route that actually served each
 	// call, so a mid-session fallback does not reprice tokens already spent.
 	ByRoute map[RouteKey]event.Usage
-	Calls   map[string]int
+	// hostModels is the model last routed to each actor's hosts (Model
+	// left empty in the key), to price a reply that came back from the
+	// route before the one in use.
+	hostModels map[RouteKey]string
+	Calls      map[string]int
 	// Latencies holds every model call's wall time per actor, for percentiles.
 	Latencies map[string][]int64
 
@@ -131,17 +135,18 @@ type RouteKey struct{ Actor, Host, Model string }
 // New returns an empty state.
 func New() *State {
 	return &State{
-		Models:    map[string]string{},
-		Efforts:   map[string]string{},
-		Hosts:     map[string]string{},
-		LastUsage: map[string]event.Usage{},
-		Totals:    map[string]event.Usage{},
-		ByRoute:   map[RouteKey]event.Usage{},
-		Calls:     map[string]int{},
-		Latencies: map[string][]int64{},
-		Schedules: map[string]*Schedule{},
-		Turns:     map[string]int{},
-		TurnSince: map[string]time.Time{},
+		Models:     map[string]string{},
+		Efforts:    map[string]string{},
+		Hosts:      map[string]string{},
+		LastUsage:  map[string]event.Usage{},
+		Totals:     map[string]event.Usage{},
+		ByRoute:    map[RouteKey]event.Usage{},
+		hostModels: map[RouteKey]string{},
+		Calls:      map[string]int{},
+		Latencies:  map[string][]int64{},
+		Schedules:  map[string]*Schedule{},
+		Turns:      map[string]int{},
+		TurnSince:  map[string]time.Time{},
 	}
 }
 
@@ -227,15 +232,16 @@ func (s *State) Location() *time.Location {
 // clock renders a time of day in the session's zone.
 func (s *State) clock(t time.Time) string { return t.In(s.Location()).Format("15:04:05") }
 
-// account adds model usage to an actor's totals.
-func (s *State) account(actor string, u event.Usage, calls int, elapsedMS int64) {
+// account adds model usage to an actor's totals, and to the route that
+// served it (servedBy; host is "" when the record does not say).
+func (s *State) account(actor, host string, u event.Usage, calls int, elapsedMS int64) {
 	tot := s.Totals[actor]
 	tot.Input += u.Input
 	tot.Output += u.Output
 	tot.Cached += u.Cached
 	tot.Reasoning += u.Reasoning
 	s.Totals[actor] = tot
-	rk := RouteKey{Actor: actor, Host: s.Hosts[actor], Model: s.Models[actor]}
+	rk := s.servedBy(actor, host)
 	ru := s.ByRoute[rk]
 	ru.Input += u.Input
 	ru.Output += u.Output
@@ -246,6 +252,22 @@ func (s *State) account(actor string, u event.Usage, calls int, elapsedMS int64)
 	if elapsedMS > 0 {
 		s.Latencies[actor] = append(s.Latencies[actor], elapsedMS)
 	}
+}
+
+// servedBy is the route a reply that names the host that served it was
+// priced on: the route in use, or, when the reply came from another host
+// (a call still in flight when the route changed), the model last routed
+// to that host. A reply that names no host, or a host no route named, is
+// put on the route in use.
+func (s *State) servedBy(actor, host string) RouteKey {
+	rk := RouteKey{Actor: actor, Host: s.Hosts[actor], Model: s.Models[actor]}
+	if host == "" || host == rk.Host {
+		return rk
+	}
+	if m := s.hostModels[RouteKey{Actor: actor, Host: host}]; m != "" {
+		return RouteKey{Actor: actor, Host: host, Model: m}
+	}
+	return rk
 }
 
 // Apply folds one event.
@@ -301,7 +323,7 @@ func (s *State) Apply(ev event.Event) {
 					s.SummarySeq = d.SeenSeq
 				}
 				if d.Usage != nil {
-					s.account(summaryActor(ev), *d.Usage, 1, d.ElapsedMS)
+					s.account(summaryActor(ev), "", *d.Usage, 1, d.ElapsedMS)
 				}
 			}
 		}
@@ -324,6 +346,9 @@ func (s *State) Apply(ev event.Event) {
 			}
 			if d.BaseURL != "" {
 				s.Hosts[d.Actor] = d.BaseURL
+			}
+			if h, m := s.Hosts[d.Actor], s.Models[d.Actor]; h != "" && m != "" {
+				s.hostModels[RouteKey{Actor: d.Actor, Host: h}] = m
 			}
 		}
 	case event.SessionResume:
@@ -370,7 +395,7 @@ func (s *State) Apply(ev event.Event) {
 			// A dossier is written in several calls (the lookups, then the
 			// text): each counts, and the latency kept is one call's share.
 			calls := max(d.Calls, 1)
-			s.account(event.ActorEagent, *d.Usage, calls, d.ElapsedMS/int64(calls))
+			s.account(event.ActorEagent, "", *d.Usage, calls, d.ElapsedMS/int64(calls))
 		}
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
@@ -398,7 +423,7 @@ func (s *State) Apply(ev event.Event) {
 		if ev.Task == "" {
 			s.LastUsage[ev.Actor] = d.Usage
 		}
-		s.account(ev.Actor, d.Usage, 1, d.ElapsedMS)
+		s.account(ev.Actor, d.Host, d.Usage, 1, d.ElapsedMS)
 	case event.Question:
 		var d event.QuestionData
 		_ = ev.Decode(&d)
@@ -436,7 +461,7 @@ func (s *State) Apply(ev event.Event) {
 		var d event.ChecksData
 		if ev.Decode(&d) == nil && d.Count > 0 {
 			actor := ev.Actor
-			s.account(actor, d.Usage, d.Count, 0)
+			s.account(actor, "", d.Usage, d.Count, 0)
 			if d.PromptTokens > 0 {
 				u := s.LastUsage[actor]
 				u.Input = d.PromptTokens
@@ -473,6 +498,13 @@ func summaryActor(ev event.Event) string {
 func (s *State) DanglingCalls(actor string) []event.ToolCall {
 	var open []event.ToolCall // the latest reply's calls still without a result
 	for _, ev := range s.Events {
+		if ev.Type == event.SubsessionStart {
+			// A new conversation file: a result written now lands in it,
+			// where the earlier file's calls are not, so it would answer
+			// none of them.
+			open = nil
+			continue
+		}
 		if ev.Actor != actor || ev.Task != "" {
 			continue
 		}
