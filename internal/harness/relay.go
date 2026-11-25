@@ -69,6 +69,22 @@ type relaySeats struct {
 	// name, each closed when it is gone. Both share a terminal name, so a
 	// start under that name waits for it rather than racing the kill.
 	stopping map[string]chan struct{}
+	// briefed are the agents a switch handed the work to with a brief, by
+	// relay name. Loop goroutine only (not under mu). Kept in memory: an
+	// eagent resumed while one is still in its first turn writes the next
+	// brief directly from it, as before.
+	briefed map[string]briefedAgent
+}
+
+// briefedAgent is an agent handed the work by a brief: the agent under its
+// name that started at start, the turns it had finished when the brief was
+// queued, and what the brief was written from. failed: the brief could not
+// be typed, so it was never told the work.
+type briefedAgent struct {
+	start  int64
+	turns  int
+	ho     *handover
+	failed bool
 }
 
 type relayActivity struct {
@@ -241,14 +257,22 @@ type handover struct {
 	who, dir, transcript string
 	// reportBy and report are the latest turn report in the chain.
 	reportBy, report string
-	// via are the agents started in between that never received the brief,
-	// oldest first ("Claude", or "Claude (session log …)").
-	via []string
+	// via are the agents started in between, oldest first: ones replaced
+	// before their brief was typed, and ones told the work and replaced
+	// before they finished a turn.
+	via []viaAgent
 	// names are the relays whose user sends the brief quotes, each with
 	// the sequence at which that agent first started under its name. An
 	// agent started later under the same name is another conversation:
 	// what the user tells it is not part of this work.
 	names []handoverName
+}
+
+// viaAgent is an agent in between: "Claude", or "Claude (its session log
+// is …)"; told says its brief was typed.
+type viaAgent struct {
+	text string
+	told bool
 }
 
 type handoverName struct {
@@ -266,21 +290,37 @@ func handoverFrom(rel *state.Relay) *handover {
 	return h
 }
 
-// through extends a handover whose brief never reached rel: rel is named as
-// started in between, its user sends count too, and a report of its own,
-// if it made one, is the latest. Loop goroutine.
-func (h *handover) through(rel *state.Relay) *handover {
+// through extends a handover to rel, which was replaced before it did the
+// work: either before its brief was typed (told false), or after, before it
+// finished a turn (told true). rel is named in between and its user sends
+// count too. A report of its own is the latest only when it was never told
+// the work: one made before then is from the same chain (told agents start
+// fresh and have none). Loop goroutine.
+func (h *handover) through(rel *state.Relay, told bool) *handover {
 	n := *h
 	via := rel.Who()
 	if rel.Transcript != "" {
 		via += " (its session log is " + rel.Transcript + ")"
 	}
-	n.via = append(append([]string(nil), h.via...), via)
+	n.via = append(append([]viaAgent(nil), h.via...), viaAgent{via, told})
 	n.names = append(append([]handoverName(nil), h.names...), handoverName{rel.Name, rel.StartSeq})
-	if rel.LastTurn != "" {
+	if rel.LastTurn != "" && !told {
 		n.reportBy, n.report = rel.Who(), rel.LastTurn
 	}
 	return &n
+}
+
+// handoverFor is what a switch away from rel writes its brief from: from
+// rel itself, unless rel was handed the work by a brief and has not
+// finished a turn since (it is the same agent and conversation: a restart
+// keeps its first start). Then its own record does not describe the work,
+// and the brief hands over from what rel's brief was written from, with rel
+// in between. Loop goroutine.
+func (r *Runtime) handoverFor(rel *state.Relay) *handover {
+	if b, ok := r.relays.briefed[rel.Name]; ok && b.start == rel.StartSeq && rel.Turns == b.turns {
+		return b.ho.through(rel, !b.failed)
+	}
+	return handoverFrom(rel)
 }
 
 // sendResult is how typing one send went.
@@ -602,7 +642,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			switch {
 			case h.brief && h.handover != nil:
 				if rel := r.st.Relays[job.replaces]; rel != nil {
-					ho = h.handover.through(rel)
+					ho = h.handover.through(rel, false)
 				}
 			case !h.barrier:
 				pending[h.id] = true
@@ -631,6 +671,12 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true, handover: job.handover})
+		if rel := r.st.Relays[job.name]; rel != nil {
+			if r.relays.briefed == nil {
+				r.relays.briefed = map[string]briefedAgent{}
+			}
+			r.relays.briefed[job.name] = briefedAgent{start: rel.StartSeq, turns: rel.Turns, ho: job.handover}
+		}
 	}
 	for _, h := range held {
 		if h.brief && job.brief != "" {
@@ -1394,7 +1440,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					return nil, fmt.Errorf("%s is starting again; wait for it", cur.Who())
 				}
 				job.endOld = "handed over to " + profile
-				job.handover, job.briefAuto, job.briefDone, job.drained = handoverFrom(cur), auto, briefDone, drained
+				job.handover, job.briefAuto, job.briefDone, job.drained = r.handoverFor(cur), auto, briefDone, drained
 				r.beginLaunch(job, cur.Name)
 				sw = job
 				return job, nil
@@ -1411,6 +1457,11 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				// and the new relay stops waiting for its arrival.
 				r.sync(func() {
 					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Detail: clipRunes(berr.Error(), 2000)}))
+					// It was never told the work: a switch away from it says so.
+					if b, ok := r.relays.briefed[started]; ok && b.ho == sw.handover {
+						b.failed = true
+						r.relays.briefed[started] = b
+					}
 				})
 				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
@@ -1590,8 +1641,20 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	if ho.transcript != "" {
 		fmt.Fprintf(&b, " Its full session log is %s (JSONL) if you need detail.", ho.transcript)
 	}
-	if len(ho.via) > 0 {
-		fmt.Fprintf(&b, " %s was started to take over in between and stopped before it was told the work.", strings.Join(ho.via, ", then "))
+	// The agents in between, in order; neighbours of one kind in one
+	// sentence.
+	for i := 0; i < len(ho.via); {
+		j := i
+		var names []string
+		for ; j < len(ho.via) && ho.via[j].told == ho.via[i].told; j++ {
+			names = append(names, ho.via[j].text)
+		}
+		if ho.via[i].told {
+			fmt.Fprintf(&b, " %s was told the work in between and stopped before it finished a turn; it may have changed files.", strings.Join(names, ", then "))
+		} else {
+			fmt.Fprintf(&b, " %s was started to take over in between and stopped before it was told the work.", strings.Join(names, ", then "))
+		}
+		i = j
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
