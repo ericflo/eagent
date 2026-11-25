@@ -138,6 +138,9 @@ func (s *State) applyRelay(ev event.Event) {
 				r.InnerID = prev.InnerID
 			}
 			r.PrevEnded = prev.PrevEnded
+			// Its earlier events are still its own: the name is held from
+			// its first start, not from this restart.
+			r.StartSeq = prev.StartSeq
 			if h := s.relayHolders[d.Name]; len(h) > 0 {
 				h[len(h)-1] = r
 			}

@@ -405,14 +405,28 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 	offline := 0 // consecutive calls the network kept from the provider
 	for {
 		var client *llm.Client
+		var known []string
 		r.sync(func() {
 			if m := r.models[who]; m != nil {
 				client = m.client
+			}
+			for _, m := range req.Messages {
+				for _, im := range m.Images {
+					if !im.Refused && r.st.RefusedImages[im.Path] {
+						known = append(known, im.Path)
+					}
+				}
 			}
 		})
 		if client == nil {
 			return nil, fmt.Errorf("no model is configured for %s", who)
 		}
+		// A request may have been rendered before a refusal was written
+		// down: a call sent back within its turn starts from the turn's
+		// first render, and the pass below may itself record one and go
+		// on to another route. It goes out as the record renders it now,
+		// so no client is sent a picture the record says was refused.
+		req = req.WithRefused(known)
 		resp, err := client.Complete(ctx, req, obs)
 		// Pictures the provider would not take, whether the call then
 		// went through without them or failed for another reason.
@@ -427,10 +441,6 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			r.sync(func() {
 				r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: refused}))
 			})
-			// The request in hand was rendered before that was written:
-			// should it go on to another route, it goes as the record
-			// now renders it.
-			req = req.WithRefused(refused)
 		}
 		if err == nil {
 			if offline > 0 {
