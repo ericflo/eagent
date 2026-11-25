@@ -544,3 +544,36 @@ func TestSessionSearchIsBoundedInTheLoop(t *testing.T) {
 		t.Fatalf("the search returned %d lines; the limit is %d", n, tools.MaxSearchResults)
 	}
 }
+
+// A session started with summaries written inline has no summarizer in its
+// record. Resumed with a summarizer of its own, the record is told that
+// model too, so its calls are priced under a route with a name and the
+// session's cost does not read as unknown.
+func TestResumeRecordsADedicatedSummarizersModel(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.settled()
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	cfg := testConfig(s.model.srv.URL)
+	own := cfg.Model
+	own.Model, own.Fallback = "summary-model", nil
+	cfg.Summarizer.Mode, cfg.Summarizer.Model = "dedicated", &own
+	s2 := audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, newFakeSeat("ok"), s.model)
+	s2.settled()
+	var model, host string
+	s2.read(func(st *state.State) { model, host = st.Models[event.ActorSummarizer], st.Hosts[event.ActorSummarizer] })
+	s2.stop()
+	if model != "summary-model" || host != s.model.srv.URL {
+		t.Fatalf("the record names the summarizer as %q at %q", model, host)
+	}
+	n := 0
+	for _, ev := range mustReadCore(t, path) {
+		var d event.RouteData
+		if ev.Type == event.Route && ev.Decode(&d) == nil && d.Actor == event.ActorSummarizer {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d route events for the summarizer", n)
+	}
+}

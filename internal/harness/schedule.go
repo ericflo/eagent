@@ -56,9 +56,17 @@ func (r *Runtime) armSchedule(id string, at time.Time) {
 		r.timers[id] = t
 		return
 	}
-	r.timers[id] = time.AfterFunc(d, func() {
-		r.post(func() { r.fireSchedule(id) })
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
+		r.post(func() {
+			// A timer that was cancelled or set again after this one
+			// had already gone off must not fire in its place.
+			if r.timers[id] == t {
+				r.fireSchedule(id)
+			}
+		})
 	})
+	r.timers[id] = t
 }
 
 func (r *Runtime) fireSchedule(id string) {

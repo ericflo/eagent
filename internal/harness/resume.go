@@ -31,10 +31,18 @@ func (r *Runtime) closeInterrupted() {
 	// The record names the model that speaks as eagent, and the phone and
 	// the views show it from there. A session last run with another model,
 	// or by the eagent of three models (which had none under this name),
-	// gets the one in use now written down.
-	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
-		if ep := m.client.Endpoint; ep.Model != "" && (r.st.Models[event.ActorEagent] != ep.Model || r.st.Hosts[event.ActorEagent] != ep.BaseURL) {
-			r.append(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: event.ActorEagent, Provider: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model, Reason: "the session was resumed with this model"}))
+	// gets the one in use now written down. So does a summarizer with a
+	// model of its own that the record does not know yet (the session was
+	// started with summaries inline): its calls are priced by the route
+	// the record names, and with none named the session's cost reads as
+	// unknown.
+	for _, who := range []string{event.ActorEagent, event.ActorSummarizer} {
+		m := r.models[who]
+		if m == nil || m.client == nil {
+			continue
+		}
+		if ep := m.client.Endpoint; ep.Model != "" && (r.st.Models[who] != ep.Model || r.st.Hosts[who] != ep.BaseURL) {
+			r.append(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: who, Provider: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model, Reason: "the session was resumed with this model"}))
 		}
 	}
 	if cut && !legacy {
