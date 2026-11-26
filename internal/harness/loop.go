@@ -800,7 +800,7 @@ func (r *Runtime) turn(w wake) {
 	var extra []llm.Message
 	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
 	end := "done"
-	closedOut := false // the closing word failed and fallbackFinal spoke
+	closedOut := false // a closing turn whose call failed: it owes nothing
 	// tail is the end of the prompt: written when the turn starts, and
 	// again when something that asks for a look arrives while the turn is
 	// running (the user writes, the agent ends a turn), so that nothing
@@ -965,8 +965,10 @@ func (r *Runtime) turn(w wake) {
 				if w.final && mustSpeak && !tc.spoke {
 					// The user must still get something.
 					r.fallbackFinal()
-					closedOut = true
 				}
+				// The closing turn has had its word (the model's report,
+				// or eagent's own above): nothing is owed after it.
+				closedOut = w.final
 			})
 			end = "error"
 			break
@@ -1119,9 +1121,10 @@ func (r *Runtime) turn(w wake) {
 		if recorded {
 			reason := end
 			if closedOut {
-				// The closing word failed and eagent closed in its own
-				// words: nothing is owed (an "error" end is; wakeFor).
-				reason = "error, closed in eagent's words"
+				// The closing turn failed after its word (the model's
+				// report or eagent's own): nothing is owed, where an
+				// "error" end owes the failed call (wakeFor).
+				reason = "error, closing"
 			}
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
 		}
