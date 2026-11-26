@@ -23,8 +23,11 @@ func (r *Runtime) closeInterrupted() {
 			CallID: tc.ID, Name: tc.Name, Output: "interrupted: eagent restarted before this finished", IsError: true,
 		}))
 	}
-	cut := len(dangling) > 0 || r.st.Turns[event.ActorEagent] > 0 || r.lastTurnCutOff()
-	if r.st.Turns[event.ActorEagent] > 0 {
+	// A turn is open where the record stops in its middle, or where the
+	// run's shutdown gave up waiting for it and recorded the end over it.
+	open := r.st.Turns[event.ActorEagent] > 0 || r.st.OpenAtEnd[event.ActorEagent] > 0
+	cut := len(dangling) > 0 || open || r.lastTurnCutOff()
+	if open {
 		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
 	legacy := r.st.Legacy() && !r.st.Upgraded()

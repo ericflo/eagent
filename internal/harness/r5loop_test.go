@@ -202,3 +202,36 @@ func TestAFailedLastSummaryLeavesTheBatchSessionsEndAsItWas(t *testing.T) {
 		})
 	}
 }
+
+// A run whose shutdown did not wait out a turn (its call outlived the
+// grace) records the session's end with that turn still open. The resume
+// closes the turn and tells eagent it was cut off, as it does when the
+// record simply stops.
+func TestATurnLeftOpenAtTheSessionsEndIsTakenUpOnResume(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.settled()
+	s.rt.sync(func() {
+		s.rt.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: "the user wrote"}))
+	})
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	if evs := mustReadCore(t, path); evs[len(evs)-1].Type != event.SessionEnd {
+		t.Fatalf("the log ends with %s", evs[len(evs)-1].Type)
+	}
+	s2, _ := coreResume(t, path, project, s.model, newFakeSeat("ok"))
+	s2.settled()
+	cut, told := false, false
+	for _, ev := range s2.events(event.TurnEnd, event.HarnessMessage) {
+		var td event.TurnData
+		var hd event.HarnessMessageData
+		switch {
+		case ev.Type == event.TurnEnd && ev.Decode(&td) == nil && td.Reason == "interrupted":
+			cut = true
+		case ev.Type == event.HarnessMessage && ev.Decode(&hd) == nil && strings.Contains(hd.Text, "restarted in the middle of a turn"):
+			told = true
+		}
+	}
+	if !cut || !told {
+		t.Fatalf("after a resume: turn closed as interrupted %v, eagent told %v", cut, told)
+	}
+}
