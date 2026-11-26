@@ -18,22 +18,29 @@ const maxNameBytes = 120
 
 // SafeFileName reduces a file's name to something a shell and a browser
 // both like: no directory, nothing but letters, digits, dots, dashes and
-// underscores, at most 120 bytes. A long name keeps its start and its
-// extension, so the file still opens as what it is.
+// underscores, at most 120 bytes. The extension is made safe on its own,
+// so a name whose stem is all replaced ("日本語.pdf") keeps ".pdf" and is
+// saved as "file.pdf", as is a name that is only an extension. A long name
+// keeps its start and its extension, so the file still opens as what it is.
 func SafeFileName(name string) string {
 	name = filepath.Base(strings.TrimSpace(name))
-	name = strings.Trim(unsafeFileName.ReplaceAllString(name, "_"), "._")
-	if name == "" {
-		return "file"
-	}
-	if len(name) <= maxNameBytes {
-		return name
+	if name == "." || name == "/" {
+		name = ""
 	}
 	ext := filepath.Ext(name)
-	if len(ext) > 20 {
-		ext = ""
+	if len(ext) > 21 {
+		ext = "" // not an extension: a dot in a long name
 	}
-	return clipBytes(strings.TrimSuffix(name, ext), maxNameBytes-len(ext)) + ext
+	stem := strings.TrimSuffix(name, ext)
+	ext = strings.Trim(unsafeFileName.ReplaceAllString(strings.TrimPrefix(ext, "."), "_"), "._")
+	if ext != "" {
+		ext = "." + ext
+	}
+	stem = strings.Trim(unsafeFileName.ReplaceAllString(stem, "_"), "._")
+	if stem == "" {
+		stem = "file"
+	}
+	return clipBytes(stem, maxNameBytes-len(ext)) + ext
 }
 
 // InboundFileName is the name a file the user sent from the phone is saved
