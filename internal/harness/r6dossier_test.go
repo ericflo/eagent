@@ -571,19 +571,8 @@ func r6Instructions(n int) string {
 // restart can make room: the user is told so once, and the restarts stop.
 func r6ProviderCountsMore(t *testing.T) {
 	const window, ceiling = 200_000, 16384
-	route := &r5PictureRoute{window: window, ceiling: ceiling, picture: 30000}
-	inner := route.brain()
-	brain := func(model string, m []map[string]any) reply {
-		r := inner(model, m)
-		if dossierRequest(m) != "" || r.status != 0 {
-			return r
-		}
-		r.prompt = r.prompt * 145 / 100
-		if r.prompt > window-ceiling {
-			return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
-		}
-		return r
-	}
+	// Every request counted the same way, dossier passes included.
+	brain := r6Brain(window, ceiling, 145)
 	s := r4StartSession(t, "", brain, func(c *config.Config) {
 		c.RolloverTokens = 0
 		c.Model.ContextTokens, c.Model.MaxTokens = window, ceiling

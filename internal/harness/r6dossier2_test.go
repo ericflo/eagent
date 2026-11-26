@@ -20,7 +20,13 @@ import (
 func TestAConversationThatGrowsToTheWindowAfterTheBoundIsRestarted(t *testing.T) {
 	r4ParallelSessions(t)
 	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	// Pictures arrive during each of the first three passes, so that run
+	// of restarts ends in the bound; after it, nothing more arrives
+	// during a pass.
 	s, _ := r6QuietRestart(t, 200_000, func(s *session, pass int) {
+		if pass > 3 {
+			return
+		}
 		r6SendEach(s, 1, func(int) event.UserMessageData {
 			return r6WithPictures(fmt.Sprintf("@e more screenshots, set %d", pass), 7, s)
 		})
@@ -38,6 +44,7 @@ func TestAConversationThatGrowsToTheWindowAfterTheBoundIsRestarted(t *testing.T)
 		return r6WithPictures("@e and these, from the phone", 6, s)
 	})
 	r6Until(t, "an answer after the window was reached", func() bool { return r5Told(s, "Noted.") > noted })
+	t.Logf("%d restarts in all, told full %d times", r6Dossiers(s), r6ToldFull(s))
 	if n := r6Dossiers(s); n < 4 {
 		t.Fatalf("%d restarts, want the one more the window needed", n)
 	}

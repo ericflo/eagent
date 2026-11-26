@@ -125,6 +125,25 @@ func TestWhenAnotherRestartIsWorthTrying(t *testing.T) {
 			t.Errorf("%+v: the user would be told cause %d, want %d", f, causeOf(f), c.cause)
 		}
 	}
+	// Refused after calls of this conversation went through (it grew to
+	// the window): always a restart, whatever was found before about
+	// restarts made for size. After "three times in a row" (rescues 2)
+	// and after "the notes and instructions alone" when that was found on
+	// a first call that went through (openingFits false), calls go
+	// through and a later refusal is this row. When "the notes and
+	// instructions alone" was found on a refused first call, no call of
+	// that conversation ever goes through, so this row never follows it.
+	for _, f := range []restartFacts{
+		{refusedAfterCalls: true, rescues: 2},
+		{refusedAfterCalls: true, rescues: 2, decided: true},
+		{refusedAfterCalls: true, openingFits: false},
+		{refusedAfterCalls: true, carried: carriedNothing, retried: true},
+		{refusedAfterCalls: true, rescues: 7},
+	} {
+		if !restartHelps(f) {
+			t.Errorf("%+v: no restart, though the conversation grew to the window", f)
+		}
+	}
 }
 
 // r5FullSession runs a session on a small route that refuses everything but
