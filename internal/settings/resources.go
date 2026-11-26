@@ -29,11 +29,21 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var cfg config.Config
 	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
-		cfg = config.Defaults()
-		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&cfg); err != nil {
+		// Read as a bundle file is (a saved bundle comes back here on an
+		// undo); a key no version of eagent had is still refused.
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b.Config, &m); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
+		}
+		today, _ := config.MigrateLegacy(m)
+		raw, _ := json.Marshal(today)
+		dec := json.NewDecoder(strings.NewReader(string(raw)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(new(config.Config)); err != nil {
+			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
+		}
+		if cfg, err = config.OverDefaults(s.Project, m); err != nil {
+			return cfg, &Error{Status: 400, Message: err.Error()}
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
