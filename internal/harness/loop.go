@@ -985,7 +985,7 @@ func (r *Runtime) turn(w wake) {
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
-		tc.said = false
+		tc.said, tc.stamped, tc.own = false, false, nil
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
 			if ctx.Err() == nil {
@@ -1002,6 +1002,9 @@ func (r *Runtime) turn(w wake) {
 				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr, Images: images}))
 			})
 			again = again || more
+		}
+		if tc.stamped && len(tc.own) > 0 {
+			r.sync(func() { r.coverOwnWords(tc.own) })
 		}
 		if w.final && mustSpeak {
 			// The closing word belongs to a session that is ending. One

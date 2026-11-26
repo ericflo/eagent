@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -123,11 +124,57 @@ func (r *Runtime) stopSummaries() {
 	}
 }
 
+// summaryNews reports an event that is news for the thread list: one that
+// noteSummary schedules a summary for.
+func summaryNews(ev event.Event) bool {
+	switch ev.Type {
+	case event.UserMessage, event.UserAnswer, event.RelayEnd, event.Question, event.UserDismiss, event.Message, event.RelayProgress:
+		return true
+	case event.RelayTurn:
+		var d event.RelayTurnData
+		return ev.Decode(&d) == nil && !d.Idle
+	}
+	return false
+}
+
+// coverOwnWords moves the mark of how far the title and summary are right
+// past what the reply that set them did itself (own: the message it sent,
+// the question it asked, the agent it stopped). The model wrote them
+// knowing all of that, so asking again for it alone would be a call that
+// can only repeat them. The mark stops at the first piece of news that is
+// not the reply's own: that one is still owed a look. Loop goroutine only.
+func (r *Runtime) coverOwnWords(own []int64) {
+	k := &r.summary
+	if !k.on {
+		return
+	}
+	mine := make(map[int64]bool, len(own))
+	for _, seq := range own {
+		mine[seq] = true
+	}
+	evs := r.st.Events
+	from := sort.Search(len(evs), func(i int) bool { return evs[i].Seq > k.seen })
+	seen := k.seen
+	for _, ev := range evs[from:] {
+		if mine[ev.Seq] {
+			seen = ev.Seq
+		} else if summaryNews(ev) {
+			break
+		}
+	}
+	if seen > k.seen {
+		// On the record too, as a mark with nothing changed (threadKept), so
+		// a resumed session knows it.
+		r.append(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{By: "summary", SeenSeq: seen}))
+		k.seen = seen
+	}
+}
+
 // noteSummary decides whether an event is news for the thread list and when
 // to act on it. Loop goroutine only.
 func (r *Runtime) noteSummary(ev event.Event) {
 	k := &r.summary
-	if !k.on || r.ending {
+	if !k.on || r.ending || !summaryNews(ev) {
 		return
 	}
 	now := time.Now()
