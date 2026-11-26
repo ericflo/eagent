@@ -960,11 +960,9 @@ async function save() {
     const prev = E.c.resolution.file.raw, prevExists = E.c.resolution.file.exists;
     E.problems = [];
     const skipped = (r.skipped_by_env || []).filter(x => changed.includes(x.pointer));
-    const bundled = (r.skipped_by_bundle || []).filter(x => changed.includes(x.pointer));
     await load(); rerender();
     undoToast(prev, prevExists, r.saved.etag);
     for (const x of skipped) toast(`${label(x.pointer)} was not written: $${x.env} pins it in this shell`, 'warn');
-    for (const x of bundled) toast(`${label(x.pointer)} was not written: the saved configuration ${x.env.replace(/^bundle:/, '')} sets it`, 'warn');
   } catch (e) {
     if (e.status === 409 && !X.remote) { conflictDialog(e.body); return; }
     if (e.status === 422 && e.body && e.body.problems) { E.problems = e.body.problems; rerender(); toast('fix the highlighted fields', 'bad'); const first = $('#main .problem.error'); if (first) first.scrollIntoView({block: 'center'}); return; }

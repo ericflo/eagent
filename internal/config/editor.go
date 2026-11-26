@@ -124,16 +124,6 @@ func Resolve(project, preset, bundle string) Resolution {
 			}
 		}
 	}
-	// Then the saved configuration a session would load with no name
-	// given, in LoadBundle's order, so what is shown is what runs.
-	if bundle == "" {
-		bundle = os.Getenv("EAGENT_CONFIG")
-	}
-	if bundle == "" && fileMap != nil {
-		if raw, ok := fileMap["default_config"]; ok {
-			_ = json.Unmarshal(raw, &bundle)
-		}
-	}
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
 		if canon, isPreset := ResolvePreset(bundle); isPreset {

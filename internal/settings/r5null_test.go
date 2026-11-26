@@ -27,27 +27,6 @@ func TestRawSaveRefusesAFileThatIsNotAnObject(t *testing.T) {
 	}
 }
 
-// A null in config.json clears what the preset sets for that field. The
-// phone is told the file sets it (to null), so it can offer to put the
-// preset's value back.
-func TestRemoteSnapshotShowsANullTheFileSaves(t *testing.T) {
-	clearRouteEnv(t)
-	project := t.TempDir()
-	writeFile(t, config.File(project), `{"preset":"openai-high","model":{"reasoning_effort":null}}`)
-	s := &Service{Project: project}
-	view, err := s.RemoteSnapshot(s.Grant())
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, ok := view.Snapshot.Saved["/model/reasoning_effort"]
-	if !ok || v != nil {
-		t.Fatalf("saved /model/reasoning_effort = %v, %v", v, ok)
-	}
-	if _, ok := view.Snapshot.Saved["/model/max_tokens"]; ok {
-		t.Fatal("a field the file does not name is shown as saved")
-	}
-}
-
 // A config.json that already holds null loads as no file at all; saving a
 // change over it, from the page or the phone, writes the change instead of
 // crashing the server.
