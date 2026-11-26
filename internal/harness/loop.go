@@ -948,7 +948,7 @@ func (r *Runtime) turn(w wake) {
 				acts++
 			}
 		}
-		if acts == 0 && mustSpeak && len(resp.ToolCalls) == 0 && strings.TrimSpace(resp.Text) != "" {
+		if acts == 0 && mustSpeak && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != "" {
 			// The closing report came as plain text: the text is the report.
 			r.sync(func() {
 				r.flushSilent()

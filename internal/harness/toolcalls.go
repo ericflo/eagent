@@ -108,7 +108,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		return "ok", false, false
 
 	case tools.SendMessage:
-		text := strings.TrimSpace(str("text"))
+		text := cleanNarration(str("text"))
 		if text == "" {
 			return "text is required", true, true
 		}
