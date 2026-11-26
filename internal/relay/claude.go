@@ -122,7 +122,9 @@ func (a claudeAgent) canResume(spec Spec, innerID string) bool {
 // turn end.
 func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
-	taken, texts := takeSpool(spool)
+	// A held command is left for the seat to type at the prompt: handed
+	// over here it would be read as text, not run.
+	taken, texts := takeSpool(spool, false)
 	for _, path := range taken {
 		_ = os.Remove(path)
 	}
@@ -134,10 +136,14 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
-// takeSpool claims every message waiting in spool, oldest first, renaming
-// each to .taken first so the Stop hook and the seat never both hand one
-// over. It returns the claimed files and their texts.
-func takeSpool(spool string) (taken, texts []string) {
+// takeSpool claims the next messages waiting in spool, oldest first,
+// renaming each to .taken first so the Stop hook and the seat never both
+// hand one over. A message that is the agent's own command ("/compact")
+// only runs typed at its prompt on its own: the messages before it are
+// claimed without it, and with command set one that comes first is
+// claimed alone (without, it and what follows stay). It returns the
+// claimed files and their texts.
+func takeSpool(spool string, command bool) (taken, texts []string) {
 	entries, err := os.ReadDir(spool)
 	if err != nil {
 		return nil, nil
@@ -151,13 +157,24 @@ func takeSpool(spool string) (taken, texts []string) {
 	sort.Strings(names)
 	for _, name := range names {
 		path := filepath.Join(spool, name)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue // another taker got it
+		}
+		text := strings.TrimSpace(string(raw))
+		isCommand := strings.HasPrefix(text, "/")
+		if isCommand && (len(taken) > 0 || !command) {
+			break
+		}
 		if os.Rename(path, path+".taken") != nil {
 			continue // another taker got it
 		}
 		taken = append(taken, path+".taken")
-		raw, err := os.ReadFile(path + ".taken")
-		if err == nil && strings.TrimSpace(string(raw)) != "" {
-			texts = append(texts, strings.TrimSpace(string(raw)))
+		if text != "" {
+			texts = append(texts, text)
+		}
+		if isCommand {
+			break
 		}
 	}
 	return taken, texts

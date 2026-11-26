@@ -103,6 +103,7 @@ type Seat struct {
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
+	releasedAt time.Time            // when the seat last typed a held message
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	closed     bool
@@ -303,14 +304,13 @@ type Status struct {
 	Transcript string
 	Target     string
 	Pending    []string
-	Attach     []string
 }
 
 // Snapshot describes the seat now.
 func (s *Seat) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target, Attach: s.host.Attach(s.target)}
+	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target}
 	for _, p := range s.pending {
 		st.Pending = append(st.Pending, fmt.Sprintf("%s (%s, %s ago): %s", p.id, p.mode, time.Since(p.at).Round(time.Second), oneLine(p.text, 80)))
 	}
@@ -332,6 +332,19 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return "", errors.New("the agent is not running")
 	}
 	state, err := s.waitReady(40 * time.Second)
+	if errors.Is(err, errUnknownScreen) && mode == "interrupt" {
+		// Quiet for ten minutes on a screen the seat does not know: the
+		// interrupt itself goes (it is how a stuck agent is got back), its
+		// text only if the agent's prompt shows after it.
+		if err := s.Interrupt(); err != nil {
+			return "", err
+		}
+		time.Sleep(interruptPause)
+		if !s.atOwnScreen() {
+			return "", fmt.Errorf("interrupted %s, but its screen still shows something that is not its prompt; the message was not typed. Check relay_screen", s.agent.Label())
+		}
+		state, err, mode = "idle", nil, "queue"
+	}
 	if err != nil {
 		return "", err
 	}
@@ -352,14 +365,20 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err := s.Interrupt(); err != nil {
 				return "", err
 			}
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(interruptPause)
 		}
 	case "after_turn":
 		if state == "working" {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
 				// An agent with a spool holds it there; one without has typed
 				// it into its own queue, and it is watched as typed.
-				s.trackHeld(id, text, mode, s.spec.Spool != "")
+				held := s.spec.Spool != ""
+				if !held && strings.HasPrefix(strings.TrimSpace(text), "/") {
+					// The agent's own command, in its own queue: it runs it,
+					// and no message arrives to confirm.
+					return fmt.Sprintf("queued the command for %s; it runs when its current turn ends", label), nil
+				}
+				s.trackHeld(id, text, mode, held)
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -383,6 +402,32 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return fmt.Sprintf("typed into %s while it works; it reads it at its next step", label), nil
 	}
 	return fmt.Sprintf("typed into %s", label), nil
+}
+
+// interruptPause is how long a send waits after interrupting the agent
+// before it types. Tests shorten it.
+var interruptPause = 1500 * time.Millisecond
+
+// errUnknownScreen is a seat quiet for ten minutes whose screen shows
+// neither the agent's prompt nor its busy line: maybe a dialog the seat
+// does not know. Only an interrupt goes to it.
+var errUnknownScreen = errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
+
+// atOwnScreen says whether the agent is at its own prompt or visibly busy:
+// its screen shows either, or its own status says it works (pi reports its
+// dialogs itself, so working is no dialog).
+func (s *Seat) atOwnScreen() bool {
+	if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
+		return true
+	}
+	screen, err := s.host.Capture(s.target, 0)
+	return err == nil && (s.ready(screen) || s.busy(screen))
+}
+
+// workReporter is an agent whose hook says whether it is in a turn (pi's
+// status file).
+type workReporter interface {
+	reportedWorking(s *Seat) bool
 }
 
 // ErrClosed is a send to a seat that was closed or killed (the relay was
@@ -419,9 +464,10 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 				// agent only while the screen shows its own prompt or busy
 				// line. Anything else may be a dialog the seat does not know,
 				// and the Enter would answer it.
-				if screen, err := s.host.Capture(s.target, 0); err == nil && (s.ready(screen) || s.busy(screen)) {
+				if s.atOwnScreen() {
 					return "working", nil
 				}
+				return state, errUnknownScreen
 			}
 			return state, errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
 		case "exited":
@@ -466,12 +512,14 @@ func (s *Seat) releaseHeld(now time.Time) {
 		return
 	}
 	s.mu.Lock()
-	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace
+	// After one it typed, the next waits as long again: a command it typed
+	// (/compact) runs before what was held after it is typed.
+	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace && now.Sub(s.releasedAt) >= heldGrace
 	s.mu.Unlock()
 	if !idle {
 		return
 	}
-	taken, texts := takeSpool(s.spec.Spool)
+	taken, texts := takeSpool(s.spec.Spool, true)
 	if len(taken) == 0 {
 		return
 	}
@@ -496,6 +544,7 @@ func (s *Seat) releaseHeld(now time.Time) {
 	command := strings.HasPrefix(text, "/")
 	var done []string
 	s.mu.Lock()
+	s.releasedAt = now
 	keep := s.pending[:0]
 	for _, p := range s.pending {
 		if p.held && ids[p.id] {
@@ -554,9 +603,19 @@ func (s *Seat) matchPending(text string) []string {
 // apart. A transcript that shows only a shortened start of the message
 // counts as well.
 func arrived(got, want string) bool {
-	if i := strings.Index(got, head(want, 160)); i >= 0 {
-		rest := got[i:]
-		return strings.HasPrefix(rest, want) || strings.HasPrefix(want, strings.TrimSuffix(rest, "…"))
+	h := head(want, 160)
+	for from := 0; ; {
+		i := strings.Index(got[from:], h)
+		if i < 0 {
+			break
+		}
+		// Every place it starts counts: held messages with a common start
+		// arrive joined in one record.
+		rest := got[from+i:]
+		if strings.HasPrefix(rest, want) || strings.HasPrefix(want, strings.TrimSuffix(rest, "…")) {
+			return true
+		}
+		from += i + 1
 	}
 	return len(got) > 20 && strings.Contains(want, strings.TrimSuffix(got, "…"))
 }
