@@ -234,8 +234,12 @@ func (Tmux) List() ([]Listed, error) {
 	return listed, nil
 }
 
+// Attach names the session exactly, like every other tmux call, so an
+// ended relay's command never opens a sibling whose name starts with its
+// own. The target is joined to -t: a person pastes this line into a shell,
+// and zsh replaces a word that starts with "=" by a command's path.
 func (Tmux) Attach(name string) []string {
-	return []string{"tmux", "-L", Socket, "attach-session", "-t", name}
+	return []string{"tmux", "-L", Socket, "attach-session", "-t" + tmuxSession(name)}
 }
 
 // ---- screen -----------------------------------------------------------------
@@ -390,7 +394,15 @@ func (Screen) List() ([]Listed, error) {
 	return listed, nil
 }
 
-func (Screen) Attach(name string) []string { return []string{"screen", "-r", name} }
+// Attach names the live session as pid.name, as the other screen calls do:
+// screen -r takes a bare name as the start of any session's. When the
+// session is gone the command says so rather than attach to a sibling.
+func (Screen) Attach(name string) []string {
+	if pid := (Screen{}).PID(name); pid > 0 {
+		return []string{"screen", "-r", strconv.Itoa(pid) + "." + name}
+	}
+	return []string{"sh", "-c", `echo "screen session $1 is not running" >&2; exit 1`, "sh", name}
+}
 
 // Target is the terminal session name for a relay: the eagent session id
 // and the relay's name, so two sessions' relays never collide.
