@@ -549,10 +549,7 @@ func (a piAgent) models(string) []ModelChoice {
 	piCatalog.Lock()
 	defer piCatalog.Unlock()
 	if time.Now().After(piCatalog.retry) {
-		cmd, cancel := bounded(8*time.Second, a.binary, "--offline", "--list-models")
-		cmd.Env = append(os.Environ(), "PI_SKIP_VERSION_CHECK=1")
-		raw, err := cmd.Output()
-		cancel()
+		raw, err := catalog(8*time.Second, []string{"PI_SKIP_VERSION_CHECK=1"}, a.binary, "--offline", "--list-models")
 		piCatalog.retry = time.Now().Add(time.Minute)
 		if err == nil {
 			defModel, _ := a.defaults()

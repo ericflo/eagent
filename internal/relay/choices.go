@@ -1,7 +1,10 @@
 package relay
 
 import (
+	"errors"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Model and effort choices for the agents a relay runs. A profile without a
@@ -15,6 +18,41 @@ import (
 // ModelChoice is one model an agent can run.
 type ModelChoice struct {
 	ID, Label, Detail string
+}
+
+// catalogs is how an agent's own CLI is asked for its models
+// (`pi --list-models`, `agy models`): the command's output, with env added
+// to the environment. OfflineCatalogs replaces it.
+var catalogs = struct {
+	sync.Mutex
+	run func(timeout time.Duration, env []string, name string, args ...string) ([]byte, error)
+}{run: func(timeout time.Duration, env []string, name string, args ...string) ([]byte, error) {
+	cmd, cancel := bounded(timeout, name, args...)
+	defer cancel()
+	if len(env) > 0 {
+		cmd.Env = append(cmd.Environ(), env...)
+	}
+	return cmd.Output()
+}}
+
+func catalog(timeout time.Duration, env []string, name string, args ...string) ([]byte, error) {
+	catalogs.Lock()
+	run := catalogs.run
+	catalogs.Unlock()
+	return run(timeout, env, name, args...)
+}
+
+// OfflineCatalogs makes every agent's model list come back as it does where
+// the agent is not installed, without starting its CLI. Tests outside this
+// package call it from TestMain: a test must never run the agents on the
+// developer's machine (pi takes a second or two to list its models, and
+// agy asks the network for them).
+func OfflineCatalogs() {
+	catalogs.Lock()
+	defer catalogs.Unlock()
+	catalogs.run = func(time.Duration, []string, string, ...string) ([]byte, error) {
+		return nil, errors.New("agent CLIs are not run in tests")
+	}
 }
 
 // standardEfforts are the levels accepted by the Claude and Antigravity CLIs.

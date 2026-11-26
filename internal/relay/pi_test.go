@@ -348,7 +348,9 @@ func TestRegistry(t *testing.T) {
 func TestPiLabelNeverRunsPi(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "ran")
-	script := "#!/bin/sh\ntouch " + marker + "\n"
+	// ": >" is the shell's own: with only dir on the PATH, touch would not
+	// be found and the marker would never be written.
+	script := "#!/bin/sh\n: > " + marker + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "pi"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -248,9 +248,7 @@ func antigravityModels() []ModelChoice {
 	agyCatalog.Lock()
 	defer agyCatalog.Unlock()
 	if time.Now().After(agyCatalog.retry) {
-		cmd, cancel := bounded(8*time.Second, "agy", "models")
-		defer cancel()
-		raw, err := cmd.Output()
+		raw, err := catalog(8*time.Second, nil, "agy", "models")
 		agyCatalog.retry = time.Now().Add(time.Minute)
 		if err == nil {
 			var models []ModelChoice
