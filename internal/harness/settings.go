@@ -253,10 +253,14 @@ func (r *Runtime) configRoute(who string) config.ModelRoute {
 func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
 	moved := true
-	if old := r.models[sw.who]; old != nil && old.client != nil {
+	old := r.models[sw.who]
+	if old != nil && old.client != nil {
 		moved = !llm.SameBaseURL(old.client.Endpoint.BaseURL, sw.eps[0].BaseURL) || old.client.Endpoint.Model != sw.eps[0].Model
 	}
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
+	if !moved {
+		r.models[sw.who].out = old.out // the same model at the same address: an outage goes on
+	}
 	if sw.who == event.ActorEagent && moved {
 		// What the old model did belongs to it: its failures and the wait
 		// before the next try (up to an hour), a refusal of the prompt as

@@ -955,7 +955,7 @@ func (r *Runtime) turn(w wake) {
 					Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 				}))
-				r.looked(covered, r.promptOf(resp), w)
+				r.looked(covered, resp, w)
 				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
 			})
 			recorded, tailKept, tc.spoke = true, true, true
@@ -1026,7 +1026,7 @@ func (r *Runtime) turn(w wake) {
 				ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
 				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 			}))
-			r.looked(covered, r.promptOf(resp), w)
+			r.looked(covered, resp, w)
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
@@ -1295,15 +1295,17 @@ func (r *Runtime) fallbackFinal() {
 
 // looked notes that a call came back having seen everything up to seen.
 // Loop goroutine.
-func (r *Runtime) looked(seen int64, promptTokens int, w wake) {
+func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	t := &r.turns
 	if seen > t.seen {
 		t.seen = seen
 	}
-	if promptTokens > 0 {
-		t.promptTokens = promptTokens
+	if p := r.promptOf(resp); p > 0 {
+		t.promptTokens = p
 	}
-	r.called(promptTokens)
+	// The first prompt is the conversation's, whichever model counted it,
+	// as a resumed session reads it from the record (turnState.init).
+	r.called(resp.Usage.Input)
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
@@ -1355,9 +1357,9 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	}
 	if seen > 0 {
 		t.silent.SeenSeq = seen
-		r.looked(seen, r.promptOf(resp), w)
+		r.looked(seen, resp, w)
 	} else {
-		r.called(r.promptOf(resp))
+		r.called(resp.Usage.Input)
 	}
 	if t.silent.Count >= 20 {
 		r.flushSilent()
