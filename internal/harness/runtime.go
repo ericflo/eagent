@@ -546,6 +546,11 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		writeRefused := func() {
 			if len(refused) > 0 {
 				r.append(event.New(event.ImagesRefused, event.ActorHarness, event.ImagesRefusedData{Paths: refused}))
+				// A refused picture is not in the conversation, so a look at
+				// its file again must not be told it is. Which file a copy
+				// came from is not kept, so every look is forgotten: at
+				// worst a picture that did go in is sent once more.
+				r.viewed = nil
 			}
 		}
 		if probe < 0 && len(refused) > 0 {
