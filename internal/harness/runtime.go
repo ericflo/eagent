@@ -66,6 +66,10 @@ type Options struct {
 	// "to eagent / to the agent" and "queue / interrupt / after this turn"
 	// choices, as a running session reads them off the message.
 	PromptPhoneID, PromptRoute, PromptDelivery string
+	// PromptAnswers is, for a Prompt the user wrote on a question's card on
+	// the phone, the card's id (the message's meta says so): the Prompt is
+	// that question's answer.
+	PromptAnswers string
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string
@@ -326,7 +330,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
-	cardUnknown := r.settleDismissedWhileAway()
+	// A card's state that could not be learned holds back only words from
+	// the phone that do not say they answer the card: a dismissal is made
+	// on the phone, and what the person types at the terminal or in the
+	// web UI answers the question they see there.
+	cardUnknown := r.settleDismissedWhileAway() && opts.PromptSource == "finalechat" && !r.answersOpenCard(opts.PromptAnswers)
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil {
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
@@ -996,10 +1004,10 @@ func (r *Runtime) dismissQuestion(qid, source string) {
 // settleDismissedWhileAway records a dismissal the session was not running
 // to hear: the user closed the open question's card on the phone while the
 // session was down. Without this, what they wrote next (the message that
-// resumes the session) would be taken for the answer. Every card recorded
-// for the question is asked about, newest first: a re-ask may have moved
-// the question to a later card, or a lost record left an earlier one
-// newest. One the service no longer has went with its thread. It reports
+// resumes the session) would be taken for the answer. Every recorded card
+// that may still be open is asked about (liveCards: the newest of each
+// thread, newest first). One the service no longer has went with its
+// thread. It reports
 // unknown when a card's state could not be learned (the service could not
 // be reached): the card may have been dismissed, so the caller must not
 // take the resuming message as its answer. Called before the loop starts.
@@ -1008,17 +1016,7 @@ func (r *Runtime) settleDismissedWhileAway() (unknown bool) {
 	if q == nil {
 		return false
 	}
-	var cards []string
-	seen := map[string]bool{}
-	for i := len(r.st.Events) - 1; i >= 0; i-- {
-		if ev := r.st.Events[i]; ev.Type == event.PhoneQuestion {
-			var d event.PhoneQuestionData
-			if ev.Decode(&d) == nil && d.QuestionID == q.ID && d.CardID != "" && !seen[d.CardID] {
-				seen[d.CardID] = true
-				cards = append(cards, d.CardID)
-			}
-		}
-	}
+	cards := liveCards(r.st, q.ID)
 	fc := r.cfg.Finalechat
 	if len(cards) == 0 || !fc.Wanted() || finalechat.Disabled() {
 		return false
