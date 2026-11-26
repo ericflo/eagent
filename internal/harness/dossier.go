@@ -418,7 +418,9 @@ func (r *Runtime) restartFactsNow(limit int) restartFacts {
 		span, _, carry := r.smallBudget()
 		f.openingFits = span > 0 && r.provider(fixed)+carry < limit
 	} else {
-		f.openingFits = r.provider(fixed+r.carryBytes()*2/7) < limit
+		// Ordinary routes are sized by the estimate, never by the
+		// provider's ratio (scale), as their restart size is.
+		f.openingFits = fixed+r.carryBytes()*2/7 < limit
 	}
 	return f
 }

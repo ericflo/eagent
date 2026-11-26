@@ -28,7 +28,23 @@ func r6Excerpt(i int) string {
 // r6Burst is how many 82 KiB excerpts are more than a route of this window
 // can take in one request.
 func r6Burst(window int) int {
-	return window/(82*1024*2/7) + 1
+	return window/r6ExcerptTokens + 1
+}
+
+// r6ExcerptTokens is what eagent's estimate makes of one 82 KiB excerpt.
+const r6ExcerptTokens = 82 * 1024 * 2 / 7
+
+// r6Weight marks a short excerpt that the fake provider counts as a whole
+// 82 KiB one (r6ExcerptTokens): bursts on the larger routes and in the
+// cases beside the first are sent this way, so the tests do not push
+// megabytes through the race detector. It sits past the first 1,500
+// characters, which is as much of a message as a dossier's facts quote,
+// so it is counted only where the message is whole.
+const r6Weight = "[[r6-weighs-82KiB]]"
+
+// r6ShortExcerpt is the i-th excerpt of a burst, short, carrying r6Weight.
+func r6ShortExcerpt(i int) string {
+	return fmt.Sprintf("@e excerpt %d of the build log:\n%s %s END-OF-EXCERPT-%d", i, strings.Repeat("compiled internal/harness in 1.9s; ", 48), r6Weight, i)
 }
 
 // r6QuietRestart runs a session on a route of the given window, whose
@@ -53,6 +69,7 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 	held := make(chan int, 8)
 	release := make(chan struct{}, 8)
 	var s *session
+	tooLong := reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
 	brain := func(model string, m []map[string]any) reply {
 		if dossierRequest(m) != "" {
 			n := int(passes.Add(1))
@@ -61,6 +78,17 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 			return inner(model, m)
 		}
 		r := inner(model, m)
+		if r.status == 0 {
+			// Each short excerpt weighs as much as a whole one.
+			weight := 0
+			for _, msg := range m {
+				weight += strings.Count(allText([]map[string]any{msg}), r6Weight) * r6ExcerptTokens
+			}
+			if r.prompt+weight > window-route.ceiling {
+				return tooLong
+			}
+			r.prompt += weight
+		}
 		if r.status == 0 && answers.Add(1) == 1 {
 			if first != nil {
 				first(s)
@@ -105,11 +133,21 @@ func r6ToldFull(s *session) int {
 	return n
 }
 
-// r6SendBurst sends n excerpts to eagent and returns their events.
+// r6SendBurst sends n excerpts of 82 KiB to eagent and returns their
+// events.
 func r6SendBurst(s *session, n int) []event.Event {
+	return r6Send(s, n, r6Excerpt)
+}
+
+// r6SendShort sends n short excerpts that weigh as whole ones.
+func r6SendShort(s *session, n int) []event.Event {
+	return r6Send(s, n, r6ShortExcerpt)
+}
+
+func r6Send(s *session, n int, excerpt func(int) string) []event.Event {
 	var out []event.Event
 	for i := 1; i <= n; i++ {
-		text := r6Excerpt(i)
+		text := excerpt(i)
 		s.rt.sync(func() {
 			s.rt.userMessage(event.UserMessageData{Text: text, Route: "eagent"})
 			out = append(out, s.rt.st.Events[len(s.rt.st.Events)-1])
@@ -178,7 +216,13 @@ func TestABurstDuringAPassGetsOneMoreRestartOnEveryRouteSize(t *testing.T) {
 			var sent []event.Event
 			s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 				if pass == 1 {
-					sent = r6SendBurst(s, r6Burst(window))
+					if window == 128_000 {
+						// The reviewer's case as it was: six excerpts of
+						// 82 KiB, whole in the record and in the request.
+						sent = r6SendBurst(s, r6Burst(window))
+					} else {
+						sent = r6SendShort(s, r6Burst(window))
+					}
 				}
 			})
 			if n := r6ToldFull(s); n != 0 {
@@ -217,7 +261,9 @@ func TestOneExcerptDuringAPassFitsWithoutAnotherRestart(t *testing.T) {
 // where each excerpt is.
 func TestABurstJustBeforeAPassIsGivenByPlaceAtOnce(t *testing.T) {
 	var sent []event.Event
-	s, _ := r6Restart(t, 128_000, func(s *session) { sent = r6SendBurst(s, r6Burst(128_000)) }, func(*session, int) {})
+	// Two whole excerpts are already past what a restart carries whole
+	// (80,000 bytes); six would be given by place the same way.
+	s, _ := r6Restart(t, 128_000, func(s *session) { sent = r6SendBurst(s, 2) }, func(*session, int) {})
 	if n := len(s.events(event.Dossier)); n != 1 {
 		t.Fatalf("%d restarts, want 1", n)
 	}
@@ -274,7 +320,7 @@ func TestABurstDuringBothPassesStopsAtTheBoundAndSaysWhatHappened(t *testing.T) 
 	var last []event.Event
 	s, _ := r6QuietRestart(t, 128_000, func(s *session, pass int) {
 		if pass <= 2 {
-			last = r6SendBurst(s, r6Burst(128_000))
+			last = r6SendShort(s, r6Burst(128_000))
 		}
 	})
 	calls := s.model.count(testModel)
@@ -322,6 +368,12 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 			return inner(model, m)
 		}
 		r := inner(model, m)
+		if r.status == 0 {
+			weight := strings.Count(allText(m), r6Weight) * r6ExcerptTokens
+			if r.prompt+weight > route.window-route.ceiling {
+				r = reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
+			}
+		}
 		if r.status != 0 {
 			refused.Add(1)
 			return r
@@ -340,7 +392,7 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	s.settled()
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e hello", Route: "eagent"}) })
 	<-inPass
-	sent := r6SendBurst(s, r6Burst(128_000))
+	sent := r6SendShort(s, r6Burst(128_000))
 	close(release)
 	r4Until(t, "the refused first call after the restart", func() bool { return refused.Load() >= 1 })
 	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
@@ -371,7 +423,7 @@ func TestABurstPastTheRestartSizeButInsideTheWindowIsRestartedNormally(t *testin
 	const window = 200_000
 	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 		if pass == 1 {
-			r6SendBurst(s, 5) // about 117k tokens: past half the window, inside it
+			r6SendShort(s, 5) // about 120k tokens: past half the window, inside it
 		}
 	})
 	if n := r5Told(s, "Noted."); n < 2 {
