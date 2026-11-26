@@ -274,10 +274,22 @@ func (r *Runtime) startPhone() {
 		// record by an eagent without the ledger, or a ledger run cut before
 		// it read the thread): the messages that waited are found by time,
 		// and the poll reads on from just before the earliest of them.
-		waited, waitedPrev := false, ""
+		// The read is retried as the first call is; one that never succeeds
+		// leaves the cursor unrecorded rather than past what waited.
+		waited, waitedPrev, unread := false, "", false
 		if resumed && r.opts.PromptPhoneID == "" && !(ledger.Keeps && ledger.Cursor != "") {
-			if _, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); err == nil && found {
-				waited, waitedPrev = true, prev
+			for attempt := 1; ; attempt++ {
+				_, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{})
+				if err == nil || ctx.Err() != nil || !finalechat.Transient(err) {
+					waited, waitedPrev, unread = err == nil && found, prev, err != nil
+					break
+				}
+				timer := time.NewTimer(min(time.Duration(attempt)*phoneRetryStep, time.Minute))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+				case <-timer.C:
+				}
 			}
 		}
 		p.mu.Lock()
@@ -314,9 +326,11 @@ func (r *Runtime) startPhone() {
 		// The cursor: the poll reads on after anchor, and everything it
 		// takes in is recorded. (That this run keeps the ledger was said in
 		// its first write, on session.start or session.resume.)
-		r.post(func() {
-			r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
-		})
+		if !unread {
+			r.post(func() {
+				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
+			})
+		}
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
@@ -360,7 +374,7 @@ func (r *Runtime) startPhone() {
 			})
 		}
 		p.wg.Add(2)
-		go p.poll(r)
+		go p.poll(r, started)
 		go p.keeper(r)
 	})
 	// The message the session was started or resumed with is passed to
@@ -965,7 +979,8 @@ var (
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
-func (p *phone) poll(r *Runtime) {
+// started is the ledger as this run's first write starts it (startPhone).
+func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
@@ -982,15 +997,24 @@ func (p *phone) poll(r *Runtime) {
 		if err == nil && anchorUnknown && after != "" && after == resumedBy {
 			// The message that resumed the session is not in the thread the
 			// server has (it was taken back, or the thread was recreated):
-			// read on from the session's own first post instead of from the
+			// read on from just before the earliest message that waited,
+			// judged by time as a resume with no cursor judges it, or from
+			// the session's own first post when none waited; never from the
 			// thread's start, which would take old messages again.
-			p.mu.Lock()
-			if p.lastID == after {
-				p.lastID = fallback
+			if _, prev, found, werr := started.Waiting(p.ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); werr != nil {
+				msgs, anchorUnknown, err = nil, false, werr // backs off, then asks again
+			} else {
+				if found && prev != after {
+					fallback = prev
+				}
+				p.mu.Lock()
+				if p.lastID == after {
+					p.lastID = fallback
+				}
+				p.resumedBy = ""
+				p.mu.Unlock()
+				continue
 			}
-			p.resumedBy = ""
-			p.mu.Unlock()
-			continue
 		}
 		if anchorUnknown && !saidRecreated {
 			// The thread was deleted from the app and recreated under the same
@@ -1048,6 +1072,11 @@ func (p *phone) poll(r *Runtime) {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
+					if r.ctx.Err() != nil {
+						// The session is shutting down, which failed the
+						// fetch: the message is left for the next run.
+						return
+					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
 					// without a word.
