@@ -316,6 +316,17 @@ func (r *Runtime) restartFull(limit int) bool {
 	if _, small := r.room(); !small {
 		return true
 	}
+	if r.refusedFirst() {
+		// Refused before any call of this conversation went through. When
+		// it holds more than its opening (what the restart carried whole,
+		// what came while the dossier was written), the next restart takes
+		// that in by place and carries nothing (startDossier), so it can
+		// make room. When it holds its opening alone, no restart can. Once
+		// that is decided it stands until a call goes through: what is
+		// added after the refusal (the notice that says so, a message)
+		// cannot make the opening fit.
+		return r.turns.futileLogged || len(r.st.View(&r.view)) <= 1
+	}
 	_, fixed := r.inputRoom()
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
 		fixed += llm.EstimateTokens(v[0].Text)
@@ -324,6 +335,15 @@ func (r *Runtime) restartFull(limit int) bool {
 	// without it another restart could only open on the same full prompt.
 	span, _, carry := r.smallBudget()
 	return span <= 0 || r.provider(fixed)+carry >= limit
+}
+
+// refusedFirst reports that the conversation was begun by a restart and
+// the provider refused it as too long before any of its calls went
+// through. Loop goroutine only.
+func (r *Runtime) refusedFirst() bool {
+	t := &r.turns
+	cur := r.st.Current()
+	return t.overflowed && t.subCalls == 0 && cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade")
 }
 
 // fullNotice opens the message that tells the user the conversation cannot
@@ -385,14 +405,17 @@ func (r *Runtime) startDossier() {
 		// conversation being replaced is as long as when it was closed.
 		job.tokens = max(job.tokens, r.closedTokens())
 	}
-	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= r.carryBytes() {
+	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= r.carryBytes() && !r.refusedFirst() {
 		// Something arrived that no look has taken in yet: the message
 		// or the turn end that set this restart off. The briefing does
 		// not stand in for it. The new conversation shows it whole, with
 		// its pictures, because it starts after the last thing seen.
 		// (Unless a great deal piled up unseen, as when the model was
 		// unreachable for hours: carrying all of that over would undo
-		// the restart, and the facts list it with its places.)
+		// the restart, and the facts list it with its places. Nor when
+		// the conversation being replaced was itself begun by a restart
+		// and refused on its first call: what that restart carried did
+		// not fit, and carrying it again would only be refused again.)
 		job.covers = t.seen
 	}
 	switch {
@@ -508,15 +531,35 @@ func (r *Runtime) smallRoute() bool {
 	return small
 }
 
-// unseenBytes sizes what the record holds after the last look. Loop
-// goroutine only.
+// unseenBytes sizes what the record holds after the last look, with each
+// picture a message carries (and that is not refused) as pictureTokens:
+// the record holds only its path, and the new conversation would carry the
+// picture itself. Loop goroutine only.
 func (r *Runtime) unseenBytes() int {
 	n := 0
 	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > r.turns.seen; i-- {
-		n += len(r.st.Events[i].Data)
+		ev := r.st.Events[i]
+		n += len(ev.Data)
+		var d struct {
+			Attachments []event.Attachment `json:"attachments"`
+		}
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil {
+			for _, a := range d.Attachments {
+				if a.IsImage() && !r.st.RefusedImages[a.Path] {
+					n += pictureTokens * 7 / 2
+				}
+			}
+		}
 	}
 	return n
 }
+
+// pictureTokens is about what a provider counts for one picture: Anthropic
+// counts about 1,600 tokens for one at the size it scales pictures down
+// to, and OpenAI's high-detail tiles come to less. Some count more; a
+// carried picture that turns out not to fit is taken care of by the next
+// restart (startDossier).
+const pictureTokens = 1600
 
 // citation matches a place in the record: file:line or file:line-line.
 var citation = regexp.MustCompile(`(\d{10,}\.jsonl):(\d+)(?:-(\d+))?`)

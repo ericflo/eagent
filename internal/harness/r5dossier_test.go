@@ -95,6 +95,7 @@ func TestAPictureThatCannotFitDoesNotRestartTheConversationForever(t *testing.T)
 		c.RolloverTokens = 0
 		c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
 	})
+	r5LogOnFailure(s)
 	s.settled()
 	r5SendPicture(s, "@e what does this screenshot show?")
 	r4Until(t, "the answer, or a restart loop", func() bool {
@@ -128,6 +129,7 @@ func TestARestartThatCannotMakeRoomForAPictureSaysSoOnceAndStops(t *testing.T) {
 				c.RolloverTokens = 0
 				c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
 			})
+			r5LogOnFailure(s)
 			s.settled()
 			route.refuseAll.Store(true)
 			r5SendPicture(s, "@e what does this screenshot show?")
@@ -160,4 +162,19 @@ func r5Told(s *session, prefix string) int {
 		}
 	}
 	return n
+}
+
+// r5LogOnFailure prints what the session logged about its restarts when the
+// test fails.
+func r5LogOnFailure(s *session) {
+	s.t.Cleanup(func() {
+		if !s.t.Failed() {
+			return
+		}
+		for _, l := range s.ui.logged() {
+			if strings.Contains(l, "restart") || strings.Contains(l, "dossier") || strings.Contains(l, "too long") || strings.Contains(l, "subsession") || strings.Contains(l, "room") {
+				s.t.Log(l)
+			}
+		}
+	})
 }
