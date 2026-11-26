@@ -383,3 +383,41 @@ func TestR7ACutReminderWaitsForTheOwedBackoff(t *testing.T) {
 	}
 	s.stop()
 }
+
+// A debt whose reminder falls due just as another turn starts: that turn
+// ends with nothing done and was not cut. The due reminder is made at the
+// next tick, not put off by another backoff (an independent read's case).
+func TestR7ADueReminderAfterAnotherTurnIsNotPutOff(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{time.Hour, time.Hour, time.Hour}
+	defer func() { owedRetryDelays = old }()
+	var alone, looks atomic.Int32
+	brain := func(_ string, msgs []map[string]any) reply {
+		last := lastUserText(msgs)
+		if strings.Contains(last, "A look while the work goes on.") {
+			looks.Add(1)
+		} else if strings.Contains(last, owedPhrase) && msgs[len(msgs)-1]["role"] != "tool" {
+			alone.Add(1)
+		}
+		return hold()
+	}
+	s := startSession(t, "", brain, nil)
+	s.settled()
+	s.type_("@e what is Codex up to?")
+	s.waitFor("the debt", func() bool {
+		var ok bool
+		s.rt.sync(func() { ok = s.rt.turns.owed > 0 && s.rt.turns.owedTimer != nil })
+		return ok
+	})
+	s.settled()
+	before := alone.Load()
+	// The reminder falls due, and in the same moment a look starts first.
+	s.rt.sync(func() {
+		s.rt.turns.owedTimer.Stop()
+		s.rt.turns.owedTimer = nil
+		s.rt.startTurn(wake{look: true})
+	})
+	s.waitFor("the look", func() bool { return looks.Load() >= 1 })
+	s.waitFor("the due reminder after the look", func() bool { return alone.Load() > before })
+	s.stop()
+}
