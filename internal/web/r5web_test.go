@@ -205,11 +205,7 @@ func TestBrowserClosedQuestionsAndTheToolbarFollowTheStream(t *testing.T) {
 	}
 	// The session answers one question, dismisses the other, changes model
 	// and stops being hosted here.
-	evs, err := store.Read(info.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := store.Open(info.Path, evs[len(evs)-1].Seq, time.Now())
+	again, _, err := store.Open(info.Path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
