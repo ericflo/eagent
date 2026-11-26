@@ -53,10 +53,12 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 			reverse.Op, reverse.Value = "set", value
 		// A field the file cleared with null is cleared again with the
 		// value the remote editor clears it with, which loads as the null
-		// did. A null replay_reasoning has no such value and is unset.
+		// did. A null replay_reasoning has no such value and is unset, and
+		// so is a null context window: a window follows the model in use
+		// (a 0 would pin it where the null let it follow a changed model).
 		case exists && strings.HasSuffix(key, "/reasoning_effort"):
 			reverse.Op, reverse.Value = "set", ""
-		case exists && (strings.HasSuffix(key, "/max_tokens") || strings.HasSuffix(key, "/context_tokens")):
+		case exists && strings.HasSuffix(key, "/max_tokens"):
 			reverse.Op, reverse.Value = "set", float64(0)
 		}
 		inverse.Edits = append(inverse.Edits, reverse)

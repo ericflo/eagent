@@ -9,9 +9,10 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
-// Finding 21: a field the file cleared with an explicit null (an effort,
-// a reply ceiling or a window under a preset that sets one) is cleared
-// again by the undo of a remote edit of it, not unset to the preset's.
+// Finding 21: a field the file cleared with an explicit null (an effort or
+// a reply ceiling under a preset that sets one) is cleared again by the
+// undo of a remote edit of it, not unset to the preset's. (A window
+// follows the model in use, by the owner's rule, and is unset as before.)
 func TestR10UndoKeepsANullClearedField(t *testing.T) {
 	clearRouteEnv(t)
 	for _, c := range []struct {
@@ -20,7 +21,6 @@ func TestR10UndoKeepsANullClearedField(t *testing.T) {
 	}{
 		{"reasoning_effort", "low"},
 		{"max_tokens", float64(4096)},
-		{"context_tokens", float64(100000)},
 	} {
 		t.Run(c.leaf, func(t *testing.T) {
 			project := t.TempDir()
