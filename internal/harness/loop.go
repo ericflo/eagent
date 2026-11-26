@@ -343,6 +343,16 @@ func wakeFor(ev event.Event) (wakeKind, bool) {
 		if ev.Decode(&d) == nil && len(d.Closed) > 0 {
 			return wakeNotice, true
 		}
+	case event.TurnEnd:
+		// A turn that acted, asked for another call (to use what it read,
+		// or for what it still owed) and had that call fail: refused as
+		// too long, or not answered. The call is still owed, and is made
+		// when the failure lets it (the retry, the restart, a resumed run),
+		// on the record as it stands: what the turn did is not done again.
+		var d event.TurnData
+		if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && d.Reason == "error" {
+			return wakeNotice, true
+		}
 	}
 	return 0, false
 }

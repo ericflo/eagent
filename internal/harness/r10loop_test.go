@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // When the restart a refusal called for could not be made (the file for
@@ -124,6 +126,174 @@ func TestAFallbackWithALargerWindowGetsItsOwnRestart(t *testing.T) {
 	if r5Told(s, "Noted.") == 0 {
 		t.Fatalf("on the 128k fallback (asked %d times): refused %d times, %d restarts, told the message waits %d times; the message is unanswered, though one restart makes room",
 			fallback.count("other-model"), refused.Load(), r6Dossiers(s)-before, r5Told(s, stillFullNotice))
+	}
+}
+
+// r10Runs counts the results recorded for a tool: each is one run of it.
+func r10Runs(s *session, name string) int {
+	n := 0
+	for _, ev := range s.events(event.ToolResult) {
+		var d event.ToolResultData
+		if ev.Decode(&d) == nil && d.Name == name {
+			n++
+		}
+	}
+	return n
+}
+
+// r10Bad is a call that fails, and is not one the client tries again
+// itself: what a turn gets from a provider that keeps failing.
+var r10Bad = reply{status: 400, body: `{"error":{"message":"bad request shape","type":"invalid_request_error"}}`}
+
+// A message to the agent did not go. eagent reads the screen, a call that
+// asks for another, and that next call is refused as too long. The
+// conversation is restarted, and then eagent is called again to carry on:
+// the message goes, and the screen was read once.
+func TestACarryOnRefusedAsTooLongIsMadeAfterTheRestart(t *testing.T) {
+	var phase atomic.Int32
+	var stuck atomic.Pointer[fakeSeat] // the agent, once its dialog is to be cleared
+	s := startSession(t, "", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			phase.CompareAndSwap(3, 4)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case phase.Load() == 1 && strings.Contains(allText(m), "did not go"):
+			phase.Store(2)
+			return reply{calls: []event.ToolCall{tc("relay_screen", `{}`)}}
+		case phase.Load() == 2:
+			phase.Store(3)
+			stuck.Load().setSendErr(nil) // what was on its screen has gone
+			return r7TooLong             // the screen it read did not fit
+		case phase.CompareAndSwap(4, 5):
+			return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"deploy to staging"}`)}}
+		}
+		return hold()
+	}, nil)
+	s.type_("start on the release")
+	s.waitFor("the message to reach the agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	s.seat.setSendErr(errors.New("the agent is showing something that needs an answer first"))
+	stuck.Store(s.seat)
+	phase.Store(1)
+	s.type_("deploy to staging")
+	s.waitFor("the restart", func() bool { return len(s.dossiers()) == 1 })
+	s.waitFor("the message sent after the restart", func() bool { return len(s.seat.sentTexts()) == 2 })
+	s.settled()
+	if n := r10Runs(s, "relay_screen"); n != 1 {
+		t.Fatalf("the screen was read %d times, want once", n)
+	}
+	if sent := s.seat.sentTexts(); len(sent) != 2 || sent[1] != "deploy to staging" {
+		t.Fatalf("typed into the agent: %q", sent)
+	}
+}
+
+// r10HeldSchedule has the user write to eagent; eagent sets a timer, a call
+// that asks for another, and that next call fails. It returns the session,
+// and the phase the model is in (3 once the failure is out; answering
+// moves it to 4).
+func r10HeldSchedule(t *testing.T) (*session, *atomic.Int32) {
+	t.Helper()
+	var phase atomic.Int32
+	s := startSession(t, brief, func(_ string, m []map[string]any) reply {
+		switch {
+		case phase.Load() == 1 && strings.Contains(lastUserText(m), "kept for you"):
+			phase.Store(2)
+			return reply{calls: []event.ToolCall{tc("schedule", `{"spec":"1h","note":"Remind the user to check staging."}`)}}
+		case phase.Load() == 2:
+			phase.Store(3)
+			return r10Bad
+		case phase.CompareAndSwap(3, 4):
+			return say("I'll remind you to check staging in an hour.")
+		}
+		return hold()
+	}, nil)
+	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	s.settled()
+	phase.Store(1)
+	s.type_("@e remind me to check staging in an hour")
+	s.waitFor("the failed call", func() bool { return phase.Load() >= 3 && len(s.events(event.Error)) == 1 })
+	return s, &phase
+}
+
+// The failed call is tried again: the user's message to eagent is
+// answered, and the timer is set once.
+func TestACarryOnThatFailedIsTriedAgain(t *testing.T) {
+	s, _ := r10HeldSchedule(t)
+	s.waitFor("the answer", func() bool { return r5Told(s, "I'll remind you") == 1 })
+	s.settled()
+	if n := len(s.events(event.ScheduleCreate)); n != 1 {
+		t.Fatalf("%d timers set, want one", n)
+	}
+}
+
+// The same, stopped before the failed call is tried again (it waits an
+// hour): the resumed session tries it, and the timer is still set once.
+func TestACarryOnThatFailedIsTriedAgainOnResume(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Hour})
+	s, phase := r10HeldSchedule(t)
+	s.waitFor("the turn to end", func() bool {
+		busy := true
+		s.rt.sync(func() { busy = s.rt.turns.busy })
+		return !busy && len(s.events(event.TurnEnd)) > 0
+	})
+	if phase.Load() != 3 || r5Told(s, "I'll remind you") != 0 {
+		t.Fatalf("tried again before the stop (phase %d)", phase.Load())
+	}
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	ui2 := &fakeUI{input: make(chan string, 4)}
+	rt2, err := Resume(testConfig(s.model.srv.URL), Options{Project: project, Interactive: true}, ui2, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2 := &session{t: t, rt: rt2, ui: ui2, seat: s.seat, model: s.model, done: make(chan int, 1)}
+	ctx, cancel := contextWithCancel()
+	s2.cancel = cancel
+	go func() { s2.done <- rt2.Run(ctx) }()
+	t.Cleanup(s2.stop)
+	s2.waitFor("the answer after the resume", func() bool { return r5Told(s2, "I'll remind you") == 1 })
+	s2.settled()
+	if n := len(s2.events(event.ScheduleCreate)); n != 1 {
+		t.Fatalf("%d timers set, want one", n)
+	}
+}
+
+// An agent is stuck on a dialog. eagent reads its screen, a call that asks
+// for another, and that next call fails. It is tried again, and the agent
+// gets its keys; the screen was read once.
+func TestACarryOnForAStuckAgentIsTriedAgain(t *testing.T) {
+	var phase atomic.Int32
+	s := startSession(t, brief, func(_ string, m []map[string]any) reply {
+		switch {
+		case phase.Load() == 1 && strings.Contains(allText(m), "needs attention"):
+			phase.Store(2)
+			return reply{calls: []event.ToolCall{tc("relay_screen", `{}`)}}
+		case phase.Load() == 2:
+			phase.Store(3)
+			return r10Bad
+		case phase.CompareAndSwap(3, 4):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"keys","keys":["1","Enter"]}`)}}
+		}
+		return hold()
+	}, nil)
+	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	s.settled()
+	phase.Store(1)
+	s.seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: "Do you trust this folder? 1. Yes 2. No"})
+	keys := func() [][]string {
+		s.seat.mu.Lock()
+		defer s.seat.mu.Unlock()
+		return append([][]string(nil), s.seat.keys...)
+	}
+	s.waitFor("the keys", func() bool { return len(keys()) > 0 })
+	s.settled()
+	if k := keys(); len(k) != 1 {
+		t.Fatalf("keys sent: %q, want once", k)
+	}
+	if n := r10Runs(s, "relay_screen"); n != 1 {
+		t.Fatalf("the screen was read %d times, want once", n)
 	}
 }
 
