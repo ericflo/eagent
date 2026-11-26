@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -380,14 +379,8 @@ func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msg
 	_, _, _ = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
 }
 
-var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-// unsafeAttachmentID is what may not stay of a server's attachment id in a
-// file name: anything but letters, digits and dashes (an id is a uuid).
-var unsafeAttachmentID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
-
 // saveAttachment downloads a phone attachment under the session directory,
-// named the way the running mirror names them.
+// named the way the running mirror names them (finalechat.InboundFileName).
 func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath string, a finalechat.Attachment) (event.Attachment, error) {
 	dir := filepath.Join(sessionPath, "attachments")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -396,19 +389,8 @@ func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath 
 	if a.Size > finalechat.MaxAttachmentSize {
 		return event.Attachment{}, finalechat.ErrTooLarge
 	}
-	// Both come from the server: neither may bring a "/" or ".." into the
-	// path. The whole id names the file: the service's ids are UUIDv7,
-	// whose first characters are a clock, so a prefix is shared by every
-	// file sent within a minute or so.
-	id := unsafeAttachmentID.ReplaceAllString(a.ID, "_")
-	if len(id) > 64 {
-		id = id[:64]
-	}
-	name := strings.Trim(unsafeAttachmentName.ReplaceAllString(filepath.Base(strings.TrimSpace(a.Filename)), "_"), "._")
-	if name == "" {
-		name = "file"
-	}
-	dst := filepath.Join(dir, "in-"+id+"-"+name)
+	file, name := finalechat.InboundFileName(a.ID, a.Filename)
+	dst := filepath.Join(dir, file)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

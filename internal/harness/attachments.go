@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -29,24 +28,8 @@ import (
 // attachmentsDir is where a session keeps message files.
 func attachmentsDir(sessionPath string) string { return filepath.Join(sessionPath, "attachments") }
 
-var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-// unsafeID is what may not stay of a server's attachment id in a file name.
-var unsafeID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
-
 // safeName reduces a filename to something a shell and a browser both like.
-func safeName(name string) string {
-	name = filepath.Base(strings.TrimSpace(name))
-	name = unsafeName.ReplaceAllString(name, "_")
-	name = strings.Trim(name, "._")
-	if name == "" {
-		name = "file"
-	}
-	if len(name) > 120 {
-		name = name[len(name)-120:]
-	}
-	return name
-}
+func safeName(name string) string { return finalechat.SafeFileName(name) }
 
 // contentTypeFor guesses a file's type from its extension, then its bytes.
 func contentTypeFor(name string, head []byte) string {
@@ -182,17 +165,8 @@ func (r *Runtime) downloadAttachment(client *finalechat.Client, a finalechat.Att
 	if a.Size > finalechat.MaxAttachmentSize {
 		return event.Attachment{}, finalechat.ErrTooLarge
 	}
-	// Both come from the server: neither may bring a "/" or ".." into the
-	// path. An id is a uuid; anything but letters, digits and dashes goes.
-	// The whole id names the file: the service's ids are UUIDv7, whose
-	// first characters are a clock, so two files of one name sent within
-	// a minute share a prefix and the second would overwrite the first.
-	id := unsafeID.ReplaceAllString(a.ID, "_")
-	if len(id) > 64 {
-		id = id[:64]
-	}
-	name := safeName(a.Filename)
-	dst := filepath.Join(dir, "in-"+id+"-"+name)
+	file, name := finalechat.InboundFileName(a.ID, a.Filename)
+	dst := filepath.Join(dir, file)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err
