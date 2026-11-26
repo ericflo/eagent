@@ -31,7 +31,7 @@ func (r *Runtime) closeInterrupted() {
 		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
 	legacy := r.st.Legacy() && !r.st.Upgraded()
-	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed}))
+	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed, PhoneLedger: true}))
 	// The record names the model that speaks as eagent, and the phone and
 	// the views show it from there. A session last run with another model,
 	// or by the eagent of three models (which had none under this name),

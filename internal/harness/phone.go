@@ -290,10 +290,9 @@ func (r *Runtime) startPhone() {
 		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
 			p.recordMirror(r, promptSeq, msg.ID)
 		}
-		// This run keeps the ledger from here: the poll reads on after
-		// anchor, and everything it takes in is recorded. Written by every
-		// run, so a run by an eagent without the ledger shows by its
-		// absence (integration.PhoneLedger.Keeps).
+		// The cursor: the poll reads on after anchor, and everything it
+		// takes in is recorded. (That this run keeps the ledger was said in
+		// its first write, on session.start or session.resume.)
 		r.post(func() {
 			r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
 		})
@@ -507,11 +506,16 @@ func (p *phone) close(reason string) {
 	select {
 	case <-sent:
 	case <-p.ctx.Done(): // the mirror already gave up (startup failure)
-	case <-time.After(8 * time.Second):
+	case <-time.After(phoneCloseWait):
 	}
 	p.cancel()
 	p.wg.Wait()
 }
+
+// phoneCloseWait bounds how long a shutdown waits for the closing note
+// (the worker may be stuck behind a service that cannot be reached); a
+// variable so tests can shorten it.
+var phoneCloseWait = 8 * time.Second
 
 func boolPtr(b bool) *bool { return &b }
 
