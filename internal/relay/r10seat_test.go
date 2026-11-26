@@ -1,7 +1,11 @@
 package relay
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,5 +25,92 @@ func TestR10AnEntryInTheSendsMillisecondConfirmsARestoredSend(t *testing.T) {
 	}
 	if ok := claudeLines(s, claudeUser(sec.Add(123*time.Millisecond), "count the chairs")); !slices.Equal(ok, []string{"r1"}) {
 		t.Fatalf("an entry in r1's millisecond confirmed %v, want r1", ok)
+	}
+}
+
+// Finding 10, agents with a queue of their own: an after-turn "/compact"
+// handed to Codex's or Antigravity's queue is the agent's own command,
+// which shows no arrival. It is delivered once handed over, as a command
+// typed into the prompt is once typed, and is not left waiting.
+func TestR10AnAfterTurnCommandHandedToAnAgentsQueueIsDelivered(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, c := range []struct {
+		agent Agent
+		inner string
+		typed int
+	}{{antigravityAgent{}, "", 1}, {codexAgent{}, "0b8f6a52-6d1e-4c8e-9f55-3f2d8b8f1a11", 0}} {
+		h := &fakeHost{alive: true}
+		s := newSeat(Spec{Name: "x"}, c.agent, h, "x", c.inner)
+		s.state = "working"
+		if msg, err := s.Send("c1", "/compact", "after_turn"); err != nil || !strings.Contains(msg, "held for") {
+			t.Fatalf("%T: send: %q %v", c.agent, msg, err)
+		}
+		var got []string
+		for _, ev := range deliveries(drain(s.events)) {
+			got = append(got, fmt.Sprintf("%s:%v", ev.SendID, ev.OK))
+		}
+		if !slices.Equal(got, []string{"c1:true"}) || len(s.Snapshot().Pending) != 0 || len(h.typed) != c.typed {
+			t.Errorf("%T: reports %v, still pending %v, typed %q", c.agent, got, s.Snapshot().Pending, h.typed)
+		}
+	}
+}
+
+// Finding 10, agents with a spool: Claude's Stop hook hands a held
+// "/compact" over as text, so its arrival shows as a held message's does.
+// One the hook took and never handed over is reported unconfirmed after
+// the usual wait, as such a message is, once; never typed or pressed.
+func TestR10AHeldCommandTheHookLostIsReportedUnconfirmed(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
+	s, h, spool := heldClaudeSeat(t, "/compact")
+	killedHook(spool)
+	s.fold(obs{kind: "turn", text: "Done."})
+	drain(s.events)
+	seen := time.Now().Add(20 * time.Second)
+	for _, after := range []time.Duration{0, 46, 120} {
+		s.reportLeftOvers(seen.Add(after * time.Second))
+		s.checkScreen(seen.Add(after * time.Second))
+	}
+	got := deliveries(drain(s.events))
+	if len(got) != 1 || got[0].SendID != "r1" || got[0].OK || got[0].Outcome != OutcomeUnconfirmed {
+		t.Fatalf("deliveries %+v, want r1 unconfirmed once", got)
+	}
+	if len(h.typed) != 0 || len(h.keys) != 0 || len(s.Snapshot().Pending) != 0 {
+		t.Fatalf("typed %q, pressed %q, pending %v", h.typed, h.keys, s.Snapshot().Pending)
+	}
+}
+
+// Finding 10, the hand-over that works: a held "/compact" the Stop hook
+// hands over is confirmed by its arrival, and nothing more is reported.
+func TestR10AHeldCommandTheHookHandsOverIsConfirmedByItsArrival(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
+	s, _, spool := heldClaudeSeat(t, "/compact")
+	var out strings.Builder
+	RunStopHook(spool, strings.NewReader("{}"), &out)
+	if !strings.Contains(out.String(), `"reason":"/compact"`) {
+		t.Fatalf("hook said %q", out.String())
+	}
+	at := time.Now()
+	feedback := fmt.Sprintf(`{"type":"user","isMeta":true,"timestamp":"%s","message":{"content":"Stop hook feedback:\n/compact"}}`, stamp(at))
+	if ok := claudeLines(s, feedback, fmt.Sprintf(`{"type":"system","subtype":"turn_duration","timestamp":"%s","durationMs":2}`, stamp(at.Add(time.Second)))); !slices.Equal(ok, []string{"r1"}) {
+		t.Fatalf("the hand-over confirmed %v, want r1", ok)
+	}
+	later := time.Now().Add(20 * time.Second)
+	for _, after := range []time.Duration{0, 46, 120} {
+		s.reportLeftOvers(later.Add(after * time.Second))
+		s.checkScreen(later.Add(after * time.Second))
+	}
+	if got := deliveries(drain(s.events)); len(got) != 0 {
+		t.Fatalf("reported again: %+v", got)
 	}
 }

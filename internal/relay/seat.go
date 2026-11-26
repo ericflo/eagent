@@ -488,6 +488,13 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			// through the spool.
 			s.trackHeld(id, text, mode, s.spec.Spool != "")
 			err := s.agent.afterTurn(s, id, text)
+			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
+				// The agent's own command in its own queue: it runs it
+				// rather than recording a message, so handed over is
+				// delivered, as typed is below. (A spool hands one over
+				// as text, which arrives as a held message does.)
+				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+			}
 			if err == nil || !s.untrack(id) {
 				// Handed over, or already confirmed or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
@@ -692,7 +699,7 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolHolds(names, p.id) && !isAgentCommand(p.text) {
+		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolHolds(names, p.id) {
 			p.lost, p.at = true, now
 		}
 		keep = append(keep, p)
