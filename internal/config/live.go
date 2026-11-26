@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -682,8 +683,7 @@ func readLiveCache(project string) *LiveCache {
 	cacheMemo.Lock()
 	defer cacheMemo.Unlock()
 	if m, ok := cacheMemo.byPath[path]; ok && m.size == st.Size() && m.mod.Equal(st.ModTime()) {
-		c := *m.cache
-		return &c
+		return m.cache.clone()
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -694,7 +694,16 @@ func readLiveCache(project string) *LiveCache {
 		return nil
 	}
 	cacheMemo.byPath[path] = memoEntry{size: st.Size(), mod: st.ModTime(), cache: &c}
-	out := c
+	return c.clone()
+}
+
+// clone is a copy that shares no slice or map with c. The memoized cache
+// is read by callers that encode it outside any lock while others edit
+// their copy in place, so each gets its own.
+func (c *LiveCache) clone() *LiveCache {
+	out := *c
+	out.Models = slices.Clone(c.Models)
+	out.Errors = maps.Clone(c.Errors)
 	return &out
 }
 
