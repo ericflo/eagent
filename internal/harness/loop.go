@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
@@ -105,7 +106,10 @@ type turnState struct {
 	settle *time.Timer
 
 	// What the user last heard from eagent, and what eagent had seen when
-	// it said it.
+	// it said it. saidAt counts a notice eagent wrote by itself (Auto: a
+	// command's outcome, word that its model cannot be reached); saidSeq
+	// does not: such a notice is no answer to the user, and the closing
+	// word is still owed after it.
 	saidAt   time.Time
 	saidSeq  int64
 	saidSeen int64
@@ -202,9 +206,9 @@ func (t *turnState) init(st *state.State) {
 		case ev.Type == event.Message:
 			var d event.MessageData
 			if ev.Decode(&d) == nil {
-				t.saidAt, t.saidSeq = ev.Time, ev.Seq
+				t.saidAt = ev.Time
 				if !d.Auto {
-					t.lastSaid, t.saidSeen = d.Text, t.seen
+					t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
 				}
 			}
 		case ev.Type == event.Question:
@@ -360,9 +364,18 @@ func (r *Runtime) noteWake(ev event.Event) {
 	if t.settle != nil {
 		t.settle.Stop()
 	}
-	t.settle = time.AfterFunc(wakeSettle, func() {
-		r.post(func() { r.turns.settle = nil })
+	// A timer that fired while the loop was busy has its callback queued
+	// behind this one: it clears only itself, never the timer that took
+	// its place.
+	var tm *time.Timer
+	tm = time.AfterFunc(wakeSettle, func() {
+		r.post(func() {
+			if r.turns.settle == tm {
+				r.turns.settle = nil
+			}
+		})
 	})
+	t.settle = tm
 }
 
 // wakePending reports whether something still asks for a look.
@@ -474,9 +487,17 @@ func (r *Runtime) armOwed(d time.Duration) {
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
 	}
-	t.owedTimer = time.AfterFunc(d, func() {
-		r.post(func() { r.turns.owedTimer = nil })
+	// As for the settle timer (noteWake): a stale callback clears only
+	// its own timer, or the next reminder would go out at once.
+	var tm *time.Timer
+	tm = time.AfterFunc(d, func() {
+		r.post(func() {
+			if r.turns.owedTimer == tm {
+				r.turns.owedTimer = nil
+			}
+		})
 	})
+	t.owedTimer = tm
 }
 
 // recordOwed writes the debt as it now stands (event.Owed), so that a
@@ -763,8 +784,12 @@ func (r *Runtime) turn(w wake) {
 	var held, covered int64
 	// answerSeq is the answer this turn was woken for (0 for none), and
 	// answerDebt says the turn was told of an answer owed a reminder.
+	// answerMark is how many calls had dealt with something (tc.dealt)
+	// when the answer was first shown: only one after that deals with it.
 	var answerSeq int64
 	answerDebt := false
+	answerMark := 0
+	answerDealt := func() bool { return answerSeq == 0 || tc.dealt > answerMark }
 	var base []llm.Message
 	refresh := true
 	who := "the agent"
@@ -782,7 +807,7 @@ func (r *Runtime) turn(w wake) {
 				last = " What you just did is not an answer to it."
 			}
 			return "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + "." + last
-		case answered && !remindedAnswer && !tc.handled:
+		case answered && !remindedAnswer && !answerDealt():
 			remindedAnswer = true
 			last := " Hold again only if the answer needs nothing done."
 			if acted {
@@ -847,7 +872,11 @@ func (r *Runtime) turn(w wake) {
 					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {
-					answered, answerSeq = true, seq
+					// One that arrives while the turn runs is not dealt
+					// with by what the turn did before it came, and is
+					// owed its own reminder.
+					answered, answerSeq, answerMark = true, seq, tc.dealt
+					remindedAnswer = remindedAnswer && first
 				}
 				// The closing word is owed whenever the user has not heard
 				// from eagent since they last wrote (or ever).
@@ -875,6 +904,17 @@ func (r *Runtime) turn(w wake) {
 				break
 			}
 			r.sync(func() {
+				if w.wait > 0 && !w.event && !w.final && r.summary.final {
+					// The last title and summary of a session that is
+					// ending is one attempt, like the dedicated call's
+					// (summary.go). Taken for an outage it would be tried
+					// again at once, tell the user after their closing
+					// report that the model cannot be reached, or restart
+					// the conversation, and end the session as one that
+					// waits on them.
+					r.ui.Log("thread summary: %s; the title and summary keep their last values", shortErr(err))
+					return
+				}
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				if w.final && mustSpeak && !tc.spoke {
@@ -914,7 +954,8 @@ func (r *Runtime) turn(w wake) {
 				r.looked(covered, resp.Usage.Input, w)
 				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
 			})
-			recorded, tailKept, tc.spoke, tc.handled = true, true, true, true
+			recorded, tailKept, tc.spoke = true, true, true
+			tc.handle()
 			break
 		}
 		// last: no call is left in this turn. A reply sent back now would
@@ -985,7 +1026,7 @@ func (r *Runtime) turn(w wake) {
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
-		tc.said = false
+		tc.said, tc.stamped, tc.own = false, false, nil
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
 			if ctx.Err() == nil {
@@ -1002,6 +1043,9 @@ func (r *Runtime) turn(w wake) {
 				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr, Images: images}))
 			})
 			again = again || more
+		}
+		if tc.stamped && len(tc.own) > 0 {
+			r.sync(func() { r.coverOwnWords(tc.own) })
 		}
 		if w.final && mustSpeak {
 			// The closing word belongs to a session that is ending. One
@@ -1030,23 +1074,27 @@ func (r *Runtime) turn(w wake) {
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
 		}
 		switch {
-		case tc.handled:
+		case tc.handled && answerDealt():
 			// Dealt with, however the turn then ended: a turn cut off or
 			// failed after its answer went out owes that message nothing,
 			// in this run or in one resumed from the record.
 			r.clearOwed()
 		case end == "error" || end == "interrupted" || end == "timeout":
 			// What asked for the look is still owed one.
-		case held > 0:
+		case held > 0 && !tc.handled:
 			r.oweAnswer(held)
-		case answerDebt:
+		case answerSeq > 0 && !remindedAnswer:
+			// It held on the user's answer and the turn had no call left
+			// to send that back (owes): it is said once, later. What the
+			// turn dealt with before the answer came is settled.
+			if tc.handled {
+				r.clearOwed()
+			}
+			r.oweReminder(answerSeq)
+		case answerDebt || tc.handled:
 			// It was told, in this turn's tail, that the answer has
 			// reached nobody else. A hold after that stands.
 			r.clearOwed()
-		case answerSeq > 0 && !remindedAnswer:
-			// It held on the user's answer and the turn had no call left
-			// to send that back (owes): it is said once, later.
-			r.oweReminder(answerSeq)
 		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
@@ -1306,7 +1354,13 @@ func (r *Runtime) observer() *llm.Observer {
 func summarizeReasoning(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 4000 {
-		return s[:4000] + "..."
+		// On a whole character: half of one is not valid text, and the log
+		// would hold a replacement mark instead.
+		cut := 4000
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }
@@ -1382,9 +1436,9 @@ func (r *Runtime) recordMessage(d event.MessageData) {
 	}
 	t := &r.turns
 	ev := r.append(event.New(event.Message, event.ActorEagent, d))
-	t.saidAt, t.saidSeq = time.Now(), ev.Seq
+	t.saidAt = time.Now()
 	if !d.Auto {
-		t.lastSaid, t.saidSeen = d.Text, t.seen
+		t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
 	}
 	text := d.Text
 	if s := attachmentSummary(d.Attachments); s != "" {
