@@ -23,6 +23,13 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	if err != nil {
 		return inverse, err
 	}
+	// A fallback the file turned off with null, over a preset that gives
+	// one, cannot be turned off again by a remote edit (no field says
+	// "none"): unsetting its keys would bring the preset's back while the
+	// undo said it worked. It is refused instead, with where to do it.
+	if v, had := pointerValue(before, "/model/fallback"); had && v == nil && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return strings.HasPrefix(e.Key, "/model/fallback/") }) {
+		return inverse, fmt.Errorf("this undo would turn the preset's fallback model back on, which the project file had turned off (\"fallback\": null); put that back in %s by hand", config.File(""))
+	}
 	keys := []string{}
 	for _, edit := range original.Edits {
 		keys = append(keys, edit.Key)
