@@ -207,7 +207,9 @@ func (t *turnState) init(st *state.State) {
 		case ev.Type == event.Message:
 			var d event.MessageData
 			if ev.Decode(&d) == nil {
-				t.saidAt = ev.Time
+				if !d.Auto || d.Text != rereadNotice { // the reread notice is not eagent speaking (tellRereading)
+					t.saidAt = ev.Time
+				}
 				if !d.Auto {
 					t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
 				}

@@ -193,8 +193,9 @@ func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale
 
 // calibrate learns from one of eagent's calls how its provider counts
 // against the estimate (see scale). Any goroutine: what it learns is
-// applied on the loop, to the route in use then (a call that moves to a
-// fallback route posts this before the move).
+// applied on the loop, and only while ep, the route that served the call,
+// is still the route in use: a reading that lands after a fallback or a
+// model picked in the thread's settings is the old route's.
 //
 // A picture that goes out with the request teaches nothing: a provider
 // counts one as anything from a few hundred tokens to many thousands, and
@@ -205,7 +206,7 @@ func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale
 // a request that carries it only teaches a ratio at least this high, and
 // never lowers one learned before. Nor does a request too small to measure
 // by teach anything.
-func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err error) {
+func (r *Runtime) calibrate(who string, ep llm.Endpoint, req llm.Request, resp *llm.Response, err error) {
 	if who != event.ActorEagent {
 		return
 	}
@@ -234,7 +235,11 @@ func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err
 	// learn sets the ratio to k, or (raise) only raises it. On the loop.
 	learn := func(k int, raise bool) {
 		k = min(k, scaleMax)
-		if key := r.routeKey(); r.tokenScaleOn != key {
+		key := r.routeKey()
+		if key != ep.BaseURL+" "+ep.Model {
+			return // the route changed while the call was out
+		}
+		if r.tokenScaleOn != key {
 			r.tokenScale, r.tokenScaleOn = 0, key
 		}
 		if raise && k <= r.scale() {
@@ -371,11 +376,14 @@ func (r *Runtime) restartFull(limit int) bool {
 		// it holds more than its opening (what the restart carried whole,
 		// what came while the dossier was written), the next restart takes
 		// that in by place and carries nothing (startDossier), so it can
-		// make room. When it holds its opening alone, no restart can. Once
-		// that is decided it stands until a call goes through: what is
-		// added after the refusal (the notice that says so, a message)
-		// cannot make the opening fit.
-		return r.turns.futileLogged || len(r.st.View(&r.view)) <= 1
+		// make room. When it holds its opening alone, no restart can; the
+		// harness's own words (the reread notice, the notices that say the
+		// conversation is full) are not something a restart could take in.
+		// Once that is decided it stands until a call goes through: what
+		// is added after the refusal (a message) cannot make the opening
+		// fit. The decision is read from the record too (toldFull), so a
+		// resumed session does not start the restarts again.
+		return r.turns.futileLogged || r.toldFull() || !r.carriesMore()
 	}
 	_, fixed := r.inputRoom()
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
@@ -385,6 +393,35 @@ func (r *Runtime) restartFull(limit int) bool {
 	// without it another restart could only open on the same full prompt.
 	span, _, carry := r.smallBudget()
 	return span <= 0 || r.provider(fixed)+carry >= limit
+}
+
+// carriesMore reports that the conversation holds something past its
+// opening that a restart could take in by place: an event after what its
+// dossier covers that shows in the conversation and is not eagent's or
+// the harness's own (shows). Loop goroutine only.
+func (r *Runtime) carriesMore() bool {
+	cur := r.st.Current()
+	if cur == nil {
+		return false
+	}
+	covers := int64(-1)
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
+		if ev := r.st.Events[i]; ev.Type == event.Dossier {
+			var d event.DossierData
+			if ev.Decode(&d) == nil {
+				covers = d.CoversSeq
+			}
+		}
+	}
+	if covers < 0 {
+		return false
+	}
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > covers; i-- {
+		if shows(r.st.Events[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
@@ -449,6 +486,9 @@ func (r *Runtime) startDossier() {
 	t := &r.turns
 	t.busy, t.compacting, t.callAt, t.rereadTold = true, true, time.Now(), false
 	r.flushSilent()
+	// Said before the place the dossier covers is fixed: a restart that
+	// carries nothing then carries the notice neither.
+	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
 	if r.st.Unfinished() {
 		// The new file's start set the prompt's size back to nothing; the
@@ -498,7 +538,6 @@ func (r *Runtime) startDossier() {
 		job.msgs = state.WithTail(r.st.View(&r.view), r.prompts.Render("DOSSIER.md", data))
 		r.ui.Log("the conversation reached %dk tokens; restarting it from a dossier", job.tokens/1000)
 	}
-	r.tellRereading()
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()

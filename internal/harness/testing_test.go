@@ -61,7 +61,21 @@ func (u *fakeUI) Idle(on bool) {
 }
 func (u *fakeUI) askedCount() int   { u.mu.Lock(); defer u.mu.Unlock(); return len(u.asked) }
 func (u *fakeUI) messageCount() int { u.mu.Lock(); defer u.mu.Unlock(); return len(u.messages) }
-func (u *fakeUI) idleCount() int    { u.mu.Lock(); defer u.mu.Unlock(); return u.idles }
+
+// answerCount is messageCount without the harness's notice that the session
+// is being reread (rereadNotice): what the model said.
+func (u *fakeUI) answerCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	n := 0
+	for _, m := range u.messages {
+		if m != rereadNotice {
+			n++
+		}
+	}
+	return n
+}
+func (u *fakeUI) idleCount() int { u.mu.Lock(); defer u.mu.Unlock(); return u.idles }
 func (u *fakeUI) snapshot() ([]string, []string, []string) {
 	u.mu.Lock()
 	defer u.mu.Unlock()

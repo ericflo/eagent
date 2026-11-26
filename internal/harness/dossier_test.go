@@ -439,7 +439,7 @@ func TestRefusedConversationIsRestartedFromTheFiles(t *testing.T) {
 	tooLong.Store(true)
 	s.type_("@e are you there?")
 	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
-	s.waitFor("the answer after the restart", func() bool { return s.ui.messageCount() == 1 })
+	s.waitFor("the answer after the restart", func() bool { return s.ui.answerCount() == 1 })
 	d := s.dossiers()[0]
 	if d.By != "eagent" || len(d.Consulted) != 1 || !strings.HasPrefix(d.Consulted[0], "read ") {
 		t.Fatalf("dossier by %q, consulted %v", d.By, d.Consulted)

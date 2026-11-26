@@ -182,9 +182,9 @@ func r4SmallWindow(t *testing.T, perRound, total int) int {
 				sent++
 			}
 		})
-		before := s.ui.messageCount()
+		before := s.ui.answerCount()
 		s.type_(fmt.Sprintf("@e round %d", sent))
-		r4Until(t, "the answer to round "+fmt.Sprint(sent), func() bool { return s.ui.messageCount() > before })
+		r4Until(t, "the answer to round "+fmt.Sprint(sent), func() bool { return s.ui.answerCount() > before })
 		r4Settled(s)
 	}
 	mu.Lock()

@@ -476,7 +476,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		// so no client is sent a picture the record says was refused.
 		req = req.WithRefused(known)
 		resp, err := client.Complete(ctx, req, obs)
-		r.calibrate(who, req, resp, err)
+		r.calibrate(who, client.Endpoint, req, resp, err)
 		// Pictures the provider would not take, whether the call then
 		// went through without them or failed for another reason.
 		// Written down, so the conversation is rendered without them by

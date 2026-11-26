@@ -139,7 +139,7 @@ func r4CheckResumed(t *testing.T, dir string, wantDossiers int) {
 	})
 	r4Settled(s)
 	s.type_("@e what next?")
-	r4Until(t, "the answer", func() bool { return s.ui.messageCount() >= 1 })
+	r4Until(t, "the answer", func() bool { return s.ui.answerCount() >= 1 })
 	r4Settled(s)
 	reqs := requests()
 	if len(reqs) == 0 {
@@ -230,7 +230,7 @@ func TestResumeAfterTheDossierIsUnchanged(t *testing.T) {
 	view, _ := json.Marshal(st.View(nil))
 	s, requests := r4Resume(t, dir)
 	s.type_("@e what next?")
-	r4Until(t, "the answer", func() bool { return s.ui.messageCount() >= 1 })
+	r4Until(t, "the answer", func() bool { return s.ui.answerCount() >= 1 })
 	r4Settled(s)
 	if n := len(s.dossiers()); n != 1 {
 		t.Fatalf("a whole record was restarted again: %d dossiers", n)
