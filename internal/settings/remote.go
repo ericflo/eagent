@@ -721,8 +721,8 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	}
 	// A dedicated summarizer with no route written calls the main model's.
 	// An edit of its route starts from that one, so a model picked alone
-	// keeps the provider it is reached by.
-	if _, written := pointerValue(values, "/summarizer/model"); !written && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
+	// keeps the provider it is reached by. A route written as null is none.
+	if v, written := pointerValue(values, "/summarizer/model"); (!written || v == nil) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
 		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
 	}) {
 		// The route as the layers write it: a variable's value is not the

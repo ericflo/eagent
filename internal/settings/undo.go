@@ -29,14 +29,14 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	}
 	// Applying a pick of a route's model also set the fields that go with it
 	// (routePicks), and an edit of a dedicated summarizer with no route of
-	// its own wrote it one: those are put back too.
+	// its own (none, or null) wrote it one: those are put back too.
 	for _, route := range []string{"/model", "/model/fallback", "/summarizer/model", "/summarizer/model/fallback"} {
 		picked := slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == route+"/model" || e.Key == route+"/base_url" })
 		extra := []string{}
 		if picked {
 			extra = routePickFields
 		}
-		if _, had := pointerValue(before, route); !had && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
+		if v, had := pointerValue(before, route); (!had || v == nil) && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
 			extra = routeLeaves
 		}
 		for _, leaf := range extra {
