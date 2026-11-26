@@ -450,7 +450,7 @@ type dossierResult struct {
 // until it lands. Loop goroutine only.
 func (r *Runtime) startDossier() {
 	t := &r.turns
-	t.busy, t.compacting, t.callAt = true, true, time.Now()
+	t.busy, t.compacting, t.callAt, t.rereadTold = true, true, time.Now(), false
 	r.flushSilent()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
 	if r.st.Unfinished() {
@@ -501,12 +501,52 @@ func (r *Runtime) startDossier() {
 		job.msgs = state.WithTail(r.st.View(&r.view), r.prompts.Render("DOSSIER.md", data))
 		r.ui.Log("the conversation reached %dk tokens; restarting it from a dossier", job.tokens/1000)
 	}
+	r.tellRereading()
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		res := r.writeDossier(job)
 		r.post(func() { r.finishDossier(job, res) })
 	}()
+}
+
+// rereadNotice is what the user is told, in the harness's own words, when
+// what they wrote to eagent waits on a dossier pass: the pass takes
+// minutes, and eagent makes no other model call until it is over.
+const rereadNotice = "I'm rereading the session so far, to carry on with a clear head. I'll answer you as soon as that's done."
+
+// tellRereading tells the user once per pass, as soon as it is so, that a
+// message or an answer of theirs for eagent waits on the pass: one written
+// during it, or one no look had taken in when it began. A message typed
+// straight into the agent's terminal is not waiting on eagent and says
+// nothing. It is recorded as eagent's words and shown in the next
+// conversation, so the model knows what the user was told; it is not
+// taken for an answer (saidAt and saidSeq stay as they were). Loop
+// goroutine only.
+func (r *Runtime) tellRereading() {
+	t := &r.turns
+	if !t.compacting || t.rereadTold || r.ending {
+		return
+	}
+	waiting := false
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > t.seen; i-- {
+		ev := r.st.Events[i]
+		switch ev.Type {
+		case event.UserAnswer:
+			waiting = true
+		case event.UserMessage:
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && d.Held != "" {
+				waiting = true
+			}
+		}
+	}
+	if !waiting {
+		return
+	}
+	t.rereadTold = true
+	r.append(event.New(event.Message, event.ActorEagent, event.MessageData{Auto: true, Text: rereadNotice}))
+	r.ui.Say(rereadNotice)
 }
 
 // dossierRefused is why a pass is written from the files after the
