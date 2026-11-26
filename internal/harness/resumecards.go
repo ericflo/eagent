@@ -54,6 +54,9 @@ type resumePlan struct {
 	CardAnswer    *cardState
 	CardAsMessage bool
 	Words         wordsFate
+	// WordsCard is the card the words were written on, to be marked taken
+	// once the words are recorded ("" when whose card it is is unknown).
+	WordsCard string
 }
 
 // decideResume applies the rules in order; the first that matches wins.
@@ -129,9 +132,10 @@ func decideResume(cards []cardState, m resumeWords) resumePlan {
 // readCards asks the service about every card of the open question that
 // may still be open (liveCards), and about the card the words name when
 // the record does not hold it (a stop between an ask and its record): its
-// own meta says whose it is. Nil when there is no question, no card, or no
-// phone configured. One shared 5-second budget; what it cannot ask in time
-// is "unknown". Called before the loop starts.
+// own meta says whose it is. Nil when there is no question or no card. When
+// the service cannot be asked at all, every card is "unknown". One shared
+// 5-second budget; what it cannot ask in time is "unknown". Called before
+// the loop starts.
 func (r *Runtime) readCards(named string) []cardState {
 	q := r.st.Question
 	if q == nil {
@@ -150,13 +154,26 @@ func (r *Runtime) readCards(named string) []cardState {
 	} else if named != "" {
 		ids = append(ids, named)
 	}
-	fc := r.cfg.Finalechat
-	if len(ids) == 0 || !fc.Wanted() || finalechat.Disabled() {
+	if len(ids) == 0 {
 		return nil
+	}
+	// A service that cannot be asked at all (no phone in this process's
+	// configuration, the kill switch, no token) leaves every card's state
+	// unknown; whose each card is still follows from the record.
+	cantAsk := func() []cardState {
+		out := make([]cardState, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, cardState{ID: id, Status: "unknown", OfOpen: ofOpen[id]})
+		}
+		return out
+	}
+	fc := r.cfg.Finalechat
+	if !fc.Wanted() || finalechat.Disabled() {
+		return cantAsk()
 	}
 	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
 	if !ok {
-		return nil
+		return cantAsk()
 	}
 	client.UserAgent = "eagent/" + Version
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -213,18 +230,15 @@ func (r *Runtime) planResume(opts Options) resumePlan {
 		}
 		r.markAnswerTaken(c.ID)
 	}
-	// The words are about to be recorded, as the answer or as a message:
-	// the card they were written on is taken, unless whose card it is
-	// could not be learned (then a re-ask that finds it the open
-	// question's, answered, closes the question with it).
+	// The words are recorded next, as the answer or as a message; once they
+	// are, the card they were written on is taken (Resume marks it), unless
+	// whose card it is could not be learned (then a re-ask that finds it
+	// the open question's, answered, closes the question with it).
 	if card := opts.PromptAnswers; card != "" {
 		for _, c := range cards {
-			if c.ID == card && c.Status != "unknown" {
-				r.markAnswerTaken(card)
+			if c.ID == card && (c.Status != "unknown" || c.OfOpen) {
+				plan.WordsCard = card
 			}
-		}
-		if len(cards) == 0 && r.answersOpenCard(card) {
-			r.markAnswerTaken(card)
 		}
 	}
 	return plan
