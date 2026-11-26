@@ -197,14 +197,16 @@ func TestAnInterruptReachesAQuietSeatButTypesOnlyAtThePrompt(t *testing.T) {
 	}
 }
 
-// An after-turn text handed to an agent's own queue (typed into agy) is
-// watched like any message, a command too, as at 80f4746.
+// An after-turn message handed to an agent's own queue (typed into agy) is
+// watched like any message, as at 80f4746. (The agent's own command shows
+// no arrival: it is delivered once handed over, see
+// TestR10AnAfterTurnCommandHandedToAnAgentsQueueIsDelivered.)
 func TestAnAfterTurnCommandInAnAgentsOwnQueueIsTracked(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true}
 	s := newSeat(Spec{Name: "antigravity"}, antigravityAgent{}, h, "x", "")
 	s.state = "working"
-	if _, err := s.Send("c1", "/compact", "after_turn"); err != nil {
+	if _, err := s.Send("c1", "then run the tests", "after_turn"); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.Snapshot().Pending) != 1 {
