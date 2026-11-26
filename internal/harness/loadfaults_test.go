@@ -63,3 +63,33 @@ func TestAStatusAPostCarriedIsNotLeftUpWhenANewerOneOvertookIt(t *testing.T) {
 		t.Fatalf("the phone shows %q after the post that carried it, but the session wants %q", got, want)
 	}
 }
+
+// A batch session's user writes to eagent while the call that makes
+// eagent's last message is out. That message was written without seeing
+// theirs, but it is later on the record, so at the end the user is taken
+// for having heard back: the closing look is not told they are owed a
+// word, and with the model stopping the agent instead of answering, the
+// session ends and the question is never answered. Written after the
+// reply is shown (TestAudit2ClosingWord) the same message is owed one.
+// Seen under load as that test failing: its message then landed mid-call.
+func TestAMessageWrittenWhileTheLastReplyWasOutIsStillOwedAWord(t *testing.T) {
+	if !runKnownFaults {
+		t.Skip("known fault, not fixed yet: a message written during eagent's last call is taken as heard (see the comment)")
+	}
+	s, seen, code := audit2ClosingAt(t, true, func(msgs []map[string]any) reply {
+		if strings.Contains(lastText(msgs), "Holding is not allowed here") {
+			return say("Final: #42 and #44 are merged; #45 is not.")
+		}
+		return hold()
+	})
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if seen.find("The user has written since you last spoke and has heard nothing back") == "" {
+		t.Errorf("the closing look did not say the user is owed a word; they were told %q", s.ui.said())
+	}
+	said := s.ui.said()
+	if len(said) == 0 || said[len(said)-1] != "Final: #42 and #44 are merged; #45 is not." {
+		t.Fatalf("the session ended on %q, not on a word for the user", said)
+	}
+}

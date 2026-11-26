@@ -19,6 +19,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // Tests that pin down the fixes made after the second behaviour audit, one
@@ -322,11 +323,29 @@ func TestAudit2ArrivalMidTurnGetsATailOfItsOwn(t *testing.T) {
 // audit2Closing runs a batch session in which eagent speaks at the agent's
 // turn end, then the user writes to eagent (through the inbox), eagent
 // stops the agent without answering, and the closing look is left to final.
+// The user's message is posted once eagent's message is shown, so it comes
+// after it whatever the load: posted from inside the call, it would be read
+// at the loop's next inbox tick, before or after the reply landed depending
+// on how fast the reply came back (audit2ClosingDuring is that case).
 func audit2Closing(t *testing.T, final func(msgs []map[string]any) reply) (*session, *tails, int) {
+	return audit2ClosingAt(t, false, final)
+}
+
+// audit2ClosingAt is audit2Closing with the user's message written after
+// eagent's reply is shown (during false), or while the call that makes it
+// is out, held until the message is on the record (during true).
+func audit2ClosingAt(t *testing.T, during bool, final func(msgs []map[string]any) reply) (*session, *tails, int) {
 	t.Helper()
 	var seen tails
 	var path atomic.Pointer[string]
 	var posted atomic.Bool
+	replied := make(chan struct{})
+	const question = "@e is #45 merged too?"
+	post := func() {
+		if err := PostInbox(*path.Load(), InboxMessage{Type: "message", Text: question, From: "web"}); err != nil {
+			t.Error(err)
+		}
+	}
 	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
 		tail := lastUserText(msgs)
 		seen.add(tail)
@@ -338,8 +357,18 @@ func audit2Closing(t *testing.T, final func(msgs []map[string]any) reply) (*sess
 		case strings.Contains(tail, "kept for you"):
 			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
 		case strings.Contains(tail, "finished a turn") && posted.CompareAndSwap(false, true):
-			if err := PostInbox(*path.Load(), InboxMessage{Type: "message", Text: "@e is #45 merged too?", From: "web"}); err != nil {
-				t.Error(err)
+			if during {
+				post()
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					evs, _ := store.Read(*path.Load())
+					if strings.Contains(fmt.Sprint(audit2UserTexts(evs)), question) {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			} else {
+				close(replied)
 			}
 			return say("Codex merged #42 and #44.")
 		}
@@ -349,8 +378,39 @@ func audit2Closing(t *testing.T, final func(msgs []map[string]any) reply) (*sess
 		p := rt.sess.Path
 		path.Store(&p)
 	})
+	if !during {
+		go func() {
+			select {
+			case <-replied:
+			case <-time.After(15 * time.Second):
+				return
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				for _, m := range s.ui.said() {
+					if m == "Codex merged #42 and #44." {
+						post()
+						return
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}()
+	}
 	code := coreExit(s)
 	return s, &seen, code
+}
+
+// audit2UserTexts is what the user wrote, on the record.
+func audit2UserTexts(evs []event.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil {
+			out = append(out, d.Text)
+		}
+	}
+	return out
 }
 
 // The closing word of a session with no terminal: it is owed when the user
