@@ -359,6 +359,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q["status"] = "dismissed"
+		q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 		f.dismissedByToken = append(f.dismissedByToken, id)
 		f.cond.Broadcast()
 		q = phoneCopy(q)
@@ -370,6 +371,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		f.cancelled = append(f.cancelled, id)
 		if q := f.questions[id]; q != nil && q["status"] == "pending" {
 			q["status"] = "cancelled"
+			q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 		}
 		f.cond.Broadcast()
 		q := phoneCopy(f.questions[id])
@@ -499,6 +501,7 @@ func (f *phoneFake) answer(label, text string) bool {
 			continue
 		}
 		q["status"] = "answered"
+		q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 		q["answer"] = map[string]any{"selected": []string{label}, "text": text}
 		body := label
 		if text != "" {
@@ -612,6 +615,7 @@ func (f *phoneFake) dismiss() bool {
 	for _, q := range f.questions {
 		if q["status"] == "pending" {
 			q["status"] = "dismissed"
+			q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 			q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 			any = true
 		}
@@ -655,6 +659,7 @@ func (f *phoneFake) expire() int {
 	for _, q := range f.questions {
 		if q["status"] == "pending" {
 			q["status"] = "expired"
+			q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 			n++
 		}
 	}
@@ -680,6 +685,7 @@ func (f *phoneFake) answerQuestion(fid, label string) {
 	defer f.mu.Unlock()
 	q := f.questions[fid]
 	q["status"] = "answered"
+	q["answered_at"] = time.Now().UTC().Format(time.RFC3339Nano) // as the service stamps a resolution
 	q["answer"] = map[string]any{"selected": []string{label}}
 	f.messages = append(f.messages, map[string]any{"id": f.nextID(), "thread_id": "t1", "sender": "user", "origin": "session", "body": label, "format": "text", "importance": "normal", "meta": map[string]any{"kind": "answer", "question_id": fid}, "created_at": time.Now().UTC().Format(time.RFC3339Nano)})
 	f.cond.Broadcast()
