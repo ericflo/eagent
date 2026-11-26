@@ -235,3 +235,35 @@ func TestATurnLeftOpenAtTheSessionsEndIsTakenUpOnResume(t *testing.T) {
 		t.Fatalf("after a resume: turn closed as interrupted %v, eagent told %v", cut, told)
 	}
 }
+
+// A notice eagent writes by itself (here: that its model cannot be
+// reached) is not its answer to the user. A batch session whose user has
+// heard only that since they wrote still owes them a closing report.
+func TestAnAutomaticNoticeDoesNotStandInForTheClosingReport(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, 10 * time.Millisecond, 10 * time.Millisecond})
+	var fails atomic.Int32
+	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case msgs[len(msgs)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(tail, "finished a turn") && fails.Load() < 2:
+			fails.Add(1)
+			return reply{status: 400, body: `{"error":{"message":"bad request shape","type":"invalid_request_error"}}`}
+		case strings.Contains(tail, "finished a turn"):
+			return stopsWhenDone()
+		case strings.Contains(tail, "has heard nothing back"):
+			return say("Final report: Codex merged #42 and #44 on main.")
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief + " Stop when done."}, newFakeSeat("Merged #42 and #44."), model, nil)
+	coreExit(s)
+	said := s.ui.said()
+	if len(said) == 0 || !strings.Contains(said[0], "can't reach my own model") {
+		t.Fatalf("the notice was not given: %q", said)
+	}
+	if last := said[len(said)-1]; !strings.HasPrefix(last, "Final report") {
+		t.Fatalf("the session ended without a closing report; said %q", said)
+	}
+}

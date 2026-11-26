@@ -105,7 +105,10 @@ type turnState struct {
 	settle *time.Timer
 
 	// What the user last heard from eagent, and what eagent had seen when
-	// it said it.
+	// it said it. saidAt counts a notice eagent wrote by itself (Auto: a
+	// command's outcome, word that its model cannot be reached); saidSeq
+	// does not: such a notice is no answer to the user, and the closing
+	// word is still owed after it.
 	saidAt   time.Time
 	saidSeq  int64
 	saidSeen int64
@@ -202,9 +205,9 @@ func (t *turnState) init(st *state.State) {
 		case ev.Type == event.Message:
 			var d event.MessageData
 			if ev.Decode(&d) == nil {
-				t.saidAt, t.saidSeq = ev.Time, ev.Seq
+				t.saidAt = ev.Time
 				if !d.Auto {
-					t.lastSaid, t.saidSeen = d.Text, t.seen
+					t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
 				}
 			}
 		case ev.Type == event.Question:
@@ -1409,9 +1412,9 @@ func (r *Runtime) recordMessage(d event.MessageData) {
 	}
 	t := &r.turns
 	ev := r.append(event.New(event.Message, event.ActorEagent, d))
-	t.saidAt, t.saidSeq = time.Now(), ev.Seq
+	t.saidAt = time.Now()
 	if !d.Auto {
-		t.lastSaid, t.saidSeen = d.Text, t.seen
+		t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
 	}
 	text := d.Text
 	if s := attachmentSummary(d.Attachments); s != "" {
