@@ -53,10 +53,12 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 		idle = 120 * time.Second
 	}
 	reqCtx, cancel := context.WithCancel(ctx)
-	var waited atomic.Bool
-	timer := idleAfterFunc(idle, func() { waited.Store(true); cancel() })
+	timer := idleAfterFunc(idle, cancel)
 	resp, err := c.HTTP.Do(req.WithContext(reqCtx))
-	if !timer.Stop() && waited.Load() {
+	if !timer.Stop() && ctx.Err() == nil {
+		// The limit ran out, even if the response came in the same
+		// moment: the request is being cancelled under it, and reading
+		// it would fail as a cancelled call no retry is made for.
 		if err == nil {
 			resp.Body.Close()
 		}
@@ -159,6 +161,11 @@ func (c *Client) readSSE(ctx context.Context, resp *http.Response, fn func(ev ss
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// A last line the server closed without a newline after
+				// is still a line.
+				if len(bytes.TrimRight(line, "\r\n")) > 0 {
+					sseField(&ev, &data, line)
+				}
 				if ferr := flush(); ferr != nil && !errors.Is(ferr, errStop) {
 					return ferr
 				}
@@ -182,18 +189,25 @@ func (c *Client) readSSE(ctx context.Context, resp *http.Response, fn func(ev ss
 			}
 			continue
 		}
-		if line[0] == ':' {
-			continue // comment / keepalive
-		}
-		field, value, _ := bytes.Cut(line, []byte(":"))
-		value = bytes.TrimPrefix(value, []byte(" "))
-		switch string(field) {
-		case "event":
-			ev.Event = string(value)
-		case "data":
-			data.Write(value)
-			data.WriteByte('\n')
-		}
+		sseField(&ev, &data, line)
+	}
+}
+
+// sseField reads one non-blank line of an event stream into the event
+// being built.
+func sseField(ev *sseEvent, data *bytes.Buffer, line []byte) {
+	line = bytes.TrimRight(line, "\r\n")
+	if line[0] == ':' {
+		return // comment / keepalive
+	}
+	field, value, _ := bytes.Cut(line, []byte(":"))
+	value = bytes.TrimPrefix(value, []byte(" "))
+	switch string(field) {
+	case "event":
+		ev.Event = string(value)
+	case "data":
+		data.Write(value)
+		data.WriteByte('\n')
 	}
 }
 
