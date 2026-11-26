@@ -26,6 +26,7 @@ type r6Thread struct {
 
 func newR6Thread(t *testing.T) *r6Thread {
 	t.Helper()
+	t.Setenv("EAGENT_FINALECHAT", "") // the gate also runs with the phone switched off
 	f := &r6Thread{threads: map[string][]map[string]any{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
