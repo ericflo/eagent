@@ -264,6 +264,16 @@ func TestMain(m *testing.M) {
 	// A minute for the closing word and 75 seconds of grace at shutdown
 	// are real waits when a test's model is already gone.
 	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
+	// Sessions record to temporary directories (t.TempDir) and fsync every
+	// event; on a memory filesystem that costs nothing. All of it is
+	// removed when the run ends.
+	var memTmp string
+	if dir := memoryDisk(); dir != "" {
+		if d, err := os.MkdirTemp(dir, "eagent-harness-test"); err == nil {
+			memTmp = d
+			os.Setenv("TMPDIR", d)
+		}
+	}
 	os.Setenv("EAGENT_FINALECHAT", "off")
 	// The thread's title and summary are kept by the loop's own model, which
 	// would add a call most scripts have no reply for; the tests that cover
@@ -279,6 +289,9 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("FINALECHAT_URL")
 	http.DefaultTransport = loopbackOnlyTransport{base: http.DefaultTransport}
 	code := m.Run()
+	if memTmp != "" {
+		os.RemoveAll(memTmp)
+	}
 	if n := testDeniedHTTP.Load(); n != 0 {
 		fmt.Fprintf(os.Stderr, "hermetic test guard: %d non-loopback HTTP requests were refused\n", n)
 		if code == 0 {
