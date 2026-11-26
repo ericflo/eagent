@@ -2613,9 +2613,25 @@ var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/mode
 // goroutine (an upgrade takes minutes) and the outcome is told to the user
 // directly, in plain words, without waiting for a model.
 func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
+	// A session with no terminal ends by itself (maybeEnd), also while a
+	// command's work is under way: that work is then the session's in
+	// flight, as a turn is (r.wg), and the end runs its steps on the loop
+	// until it is done (finish), so it is done and told first. A session
+	// at a terminal ends when the user ends it; nothing is added once the
+	// session is ending.
+	off := func(fn func()) {
+		if r.ending || r.opts.Interactive {
+			go fn()
+			return
+		}
+		r.wg.Add(1)
+		go func() { defer r.wg.Done(); fn() }()
+	}
 	if len(r.st.RelayOrder) == 0 {
 		r.ui.Log("no agent has been started in this session")
-		go r.tell("No agent has been started in this session yet. Ask me to start one ("+strings.Join(r.cfg.Relay.RelayProfileNames(), ", ")+").", false)
+		off(func() {
+			r.tell("No agent has been started in this session yet. Ask me to start one ("+strings.Join(r.cfg.Relay.RelayProfileNames(), ", ")+").", false)
+		})
 		return
 	}
 	cmd, args := fields[0], fields[1:]
@@ -2623,7 +2639,9 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	case "/updates":
 		// No longer a setting (older clients still send it): eagent says
 		// what the agent is doing as it goes.
-		go r.tell("Updates are not a setting any more. While the agent works I tell you what it is doing as it goes, and you never wait more than a few minutes to hear.", false)
+		off(func() {
+			r.tell("Updates are not a setting any more. While the agent works I tell you what it is doing as it goes, and you never wait more than a few minutes to hear.", false)
+		})
 		return
 	case "/notify-done":
 		r.armNotifyDone()
@@ -2631,11 +2649,11 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 	case "/screen":
 		active := r.st.ActiveRelays()
 		if len(active) == 0 {
-			go r.tell("No agent is running.", false)
+			off(func() { r.tell("No agent is running.", false) })
 			return
 		}
 		name, seat, phone := active[0].Name, r.relays.get(active[0].Name), r.phone
-		go func() {
+		off(func() {
 			if seat == nil {
 				r.tell("The agent is not running, so there is no screen to show.", false)
 				return
@@ -2649,10 +2667,10 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 			if phone != nil {
 				phone.postRelayScreen(name, screen)
 			}
-		}()
+		})
 		return
 	}
-	go func() {
+	off(func() {
 		params := map[string]any{}
 		tool, ack := "relay_control", ""
 		switch cmd {
@@ -2745,7 +2763,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 		default:
 			r.tell(out, false)
 		}
-	}()
+	})
 }
 
 // armNotifyDone handles /notify-done: the agent's next turn report buzzes

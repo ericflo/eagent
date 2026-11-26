@@ -1165,7 +1165,13 @@ func (r *Runtime) maybeEnd() {
 	// running. The agent keeps running in its own terminal, and the
 	// resumed session picks it up.
 	unanswerable := r.st.Question != nil && r.phone == nil
-	if len(r.st.ActiveRelays()) > 0 && !unanswerable {
+	// An agent being started (a command's /restart of a stopped one, say)
+	// counts as running, as for the check on idle agents: a session that
+	// ended under the start would stop the agent it brings up.
+	r.relays.mu.Lock()
+	starting := len(r.relays.launching) > 0
+	r.relays.mu.Unlock()
+	if (len(r.st.ActiveRelays()) > 0 || starting) && !unanswerable {
 		r.checkIdleAgents()
 		return
 	}
