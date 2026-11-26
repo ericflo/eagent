@@ -63,6 +63,11 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	}
 	thinking := false
 	budgeted := c.anthropicBudgeted.Load() // the flavour this call sends
+	if budgeted && !noThinking && c.anthropicTurnRuled.Load() && anthropicToolLoopWithoutThinking(req, messages) {
+		// This provider has refused this shape once already: send at the
+		// first try what the retry below would send.
+		noThinking = true
+	}
 	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" && !noThinking {
 		thinking = true
 		if budgeted {
@@ -116,8 +121,12 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			// Budgeted thinking wants the last assistant turn of a tool
 			// loop to start with a thinking block, and that turn has none
 			// (another model wrote it, so it was rebuilt from its text and
-			// calls). Adaptive thinking has no such rule. This one call
-			// goes without thinking; the next turn thinks again.
+			// calls). Adaptive thinking has no such rule. The call goes
+			// without thinking. Its reply has no thinking block either, so
+			// the rest of this tool loop goes without thinking too, decided
+			// up front from here on (anthropicToolLoopWithoutThinking); the
+			// first request after the person's next message thinks again.
+			c.anthropicTurnRuled.Store(true)
 			return c.anthropicTry(ctx, req, obs, false, true)
 		}
 		return nil, err
@@ -663,6 +672,27 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 		}
 	}
 	return out, nil
+}
+
+// anthropicToolLoopWithoutThinking reports a request of the shape budgeted
+// thinking refuses: its last message is tool results, and the last
+// assistant turn, as rendered, does not start with a thinking block.
+func anthropicToolLoopWithoutThinking(req Request, msgs []map[string]any) bool {
+	if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "tool" {
+		return false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i]["role"] != "assistant" {
+			continue
+		}
+		content, _ := msgs[i]["content"].([]map[string]any)
+		if len(content) == 0 {
+			return true
+		}
+		t, _ := content[0]["type"].(string)
+		return t != "thinking" && t != "redacted_thinking"
+	}
+	return false
 }
 
 // anthropicThinkingTurnRequired reports Anthropic's refusal of thinking
