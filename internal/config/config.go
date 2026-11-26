@@ -825,14 +825,29 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	return cfg, cfg.Validate()
 }
 
-// OverDefaults is a bundle's contents over the built-in defaults, laid on
-// as LoadBundle lays a bundle file (overlay): keys of the three-actor
-// design carried over, a null clearing what the defaults set. Nothing else
-// is read: no preset, project file or environment variable.
-func OverDefaults(project string, bundle map[string]json.RawMessage) (Config, error) {
-	cfg := Defaults()
-	err := overlay(project, &cfg, bundle, "config")
-	return cfg, err
+// ClearNulls empties, in each route of the main and summarizer chains, a
+// context window, effort or reply ceiling that m gives as null: what the
+// editor writes for a field it leaves empty. It is for a whole
+// configuration decoded onto the defaults, where nothing lies below to
+// clear; a layer over a preset is overlay's (followModel).
+func ClearNulls(cfg *Config, m map[string]json.RawMessage) {
+	clear := func(a *ModelRoute, layer json.RawMessage) {
+		obj := object(layer)
+		for cur := a; cur != nil && obj != nil; cur = cur.Fallback {
+			if string(obj["context_tokens"]) == "null" {
+				cur.ContextTokens = 0
+			}
+			if string(obj["reasoning_effort"]) == "null" {
+				cur.ReasoningEffort = ""
+			}
+			if string(obj["max_tokens"]) == "null" {
+				cur.MaxTokens = 0
+			}
+			obj = object(obj["fallback"])
+		}
+	}
+	clear(&cfg.Model, m["model"])
+	clear(cfg.Summarizer.Model, object(m["summarizer"])["model"])
 }
 
 // ChosenPreset is a built-in preset as a running session gets it when the

@@ -37,14 +37,13 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		}
 		today, _ := config.MigrateLegacy(m)
 		raw, _ := json.Marshal(today)
+		cfg = config.Defaults()
 		dec := json.NewDecoder(strings.NewReader(string(raw)))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(new(config.Config)); err != nil {
+		if err := dec.Decode(&cfg); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
 		}
-		if cfg, err = config.OverDefaults(s.Project, m); err != nil {
-			return cfg, &Error{Status: 400, Message: err.Error()}
-		}
+		config.ClearNulls(&cfg, today)
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
 		cfg, err = config.LoadBundle(s.Project, "", b.From)
