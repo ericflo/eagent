@@ -350,3 +350,24 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	}
 	r6Reachable(t, s2, sent)
 }
+
+// A burst during the pass that the window takes, but that puts the first
+// call past the restart size: nothing was refused, the model saw it and
+// answered. The opening itself leaves room, so the conversation is
+// restarted again at the next look, as any conversation past the size is,
+// and the user is not told the notes are too large.
+func TestABurstPastTheRestartSizeButInsideTheWindowIsRestartedNormally(t *testing.T) {
+	const window = 200_000
+	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
+		if pass == 1 {
+			r6SendBurst(s, 5) // about 117k tokens: past half the window, inside it
+		}
+	})
+	if n := r5Told(s, "Noted."); n < 2 {
+		t.Fatal("the burst was not answered")
+	}
+	r4Until(t, "the next restart", func() bool { return len(s.events(event.Dossier)) == 2 || r6ToldFull(s) > 0 })
+	if n := r6ToldFull(s); n != 0 {
+		t.Fatal("the user was told the notes and instructions are too large, and the opening leaves room")
+	}
+}
