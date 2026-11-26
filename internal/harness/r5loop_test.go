@@ -70,7 +70,9 @@ func TestAThreadUpdateInTheReplyThatReportsCoversThatReport(t *testing.T) {
 func TestAThreadUpdateInTheReplyThatAnswersCoversTheAnswer(t *testing.T) {
 	coreSummariesOn(t, true)
 	var threadCalls atomic.Int32
-	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+	var s *session
+	var ready atomic.Bool
+	s = startSession(t, "", func(_ string, msgs []map[string]any) reply {
 		tail := lastUserText(msgs)
 		switch {
 		case msgs[len(msgs)-1]["role"] == "tool":
@@ -79,17 +81,32 @@ func TestAThreadUpdateInTheReplyThatAnswersCoversTheAnswer(t *testing.T) {
 			threadCalls.Add(1)
 			return reply{calls: []event.ToolCall{tc("update_thread", `{"summary":"Codex is merging the PRs."}`)}}
 		case strings.Contains(tail, "kept for you"):
+			// The summary timer the message armed comes due while this
+			// call is out, and asks for a look the reply then makes.
+			for deadline := time.Now().Add(2 * time.Second); ready.Load() && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+				var due bool
+				s.rt.sync(func() { due = s.rt.turns.threadDue })
+				if due {
+					break
+				}
+			}
 			r := say("Codex is idle; nothing is running.")
 			r.calls = append(r.calls, tc("update_thread", `{"title":"Codex status","summary":"Asked what Codex is doing; it is idle."}`))
 			return r
 		}
 		return hold()
 	}, nil)
+	ready.Store(true)
 	s.type_("@e what is Codex up to?")
 	s.waitFor("the answer", func() bool { return s.ui.messageCount() == 1 })
 	s.settled()
-	// A thread-only call would come one talk gap after the answer.
-	time.Sleep(summaryWorkDelay + 3*summaryTalkGap)
+	// A thread-only call would be asked for when the summary timer the
+	// answer armed comes due.
+	s.waitFor("the summary timer to come due", func() bool {
+		var armed bool
+		s.rt.sync(func() { armed = s.rt.summary.timer != nil })
+		return !armed
+	})
 	s.settled()
 	if n := threadCalls.Load(); n != 0 {
 		t.Fatalf("%d call(s) were made only for the title and summary after the reply that set them with its answer", n)

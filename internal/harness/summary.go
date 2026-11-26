@@ -312,6 +312,11 @@ func (r *Runtime) threadAsked(answered bool) {
 	}
 	if answered || k.worthy <= k.seen {
 		k.fails, k.notBefore = 0, time.Time{}
+		if k.worthy <= k.seen {
+			// A timer that came due while the call ran asked for a look
+			// that this call has made: nothing is left for it.
+			r.turns.threadDue = false
+		}
 		return
 	}
 	k.fails++
