@@ -1096,11 +1096,17 @@ func (r *Runtime) turn(w wake) {
 		if tc.stamped && len(tc.own) > 0 {
 			r.sync(func() { r.coverOwnWords(tc.own) })
 		}
-		if w.final && mustSpeak {
+		if w.final {
 			// The closing word belongs to a session that is ending. One
-			// that started an agent in this very turn is not: nothing is
-			// owed, and nothing may say "nothing is running now".
-			r.sync(func() { mustSpeak = len(r.st.ActiveRelays()) == 0 })
+			// that started an agent or set a timer in this very turn is
+			// not: from here on the turn is not its closing turn, no
+			// closing word is owed, nothing may say "nothing is running
+			// now", and a call that fails is owed as any turn's is.
+			r.sync(func() {
+				if len(r.st.ActiveRelays()) > 0 || len(r.st.ActiveSchedules()) > 0 {
+					w.final, tc.wake.final, mustSpeak = false, false, false
+				}
+			})
 		}
 		if !again && end == "done" && call < maxCalls {
 			// The turn would end here. A reply that did something else
