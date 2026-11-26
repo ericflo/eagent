@@ -193,6 +193,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err)
 			continue
 		}
 		msg.Attachments = append(msg.Attachments, saved)
@@ -357,12 +358,26 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			// It will never fit: the session comes back with the rest of
+			// the message, and the sender is told about the file.
+			tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, err)
+			continue
+		}
 		if err != nil {
 			return PhoneMessage{}, false, err
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
 	return msg, msg.Text != "" || len(msg.Attachments) > 0, nil
+}
+
+// tellRefused posts, in the thread, why a file the user sent was not
+// taken. The key makes it once per file whoever notices first.
+func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) {
+	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+	defer stop()
+	_, _, _ = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
 }
 
 var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -378,17 +393,22 @@ func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
+	if a.Size > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, finalechat.ErrTooLarge
+	}
 	// Both come from the server: neither may bring a "/" or ".." into the
-	// path.
-	short := unsafeAttachmentID.ReplaceAllString(a.ID, "_")
-	if len(short) > 8 {
-		short = short[:8]
+	// path. The whole id names the file: the service's ids are UUIDv7,
+	// whose first characters are a clock, so a prefix is shared by every
+	// file sent within a minute or so.
+	id := unsafeAttachmentID.ReplaceAllString(a.ID, "_")
+	if len(id) > 64 {
+		id = id[:64]
 	}
 	name := strings.Trim(unsafeAttachmentName.ReplaceAllString(filepath.Base(strings.TrimSpace(a.Filename)), "_"), "._")
 	if name == "" {
 		name = "file"
 	}
-	dst := filepath.Join(dir, "in-"+short+"-"+name)
+	dst := filepath.Join(dir, "in-"+id+"-"+name)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

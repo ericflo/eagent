@@ -168,14 +168,20 @@ func (r *Runtime) downloadAttachment(client *finalechat.Client, a finalechat.Att
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
+	if a.Size > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, finalechat.ErrTooLarge
+	}
 	// Both come from the server: neither may bring a "/" or ".." into the
 	// path. An id is a uuid; anything but letters, digits and dashes goes.
-	short := unsafeID.ReplaceAllString(a.ID, "_")
-	if len(short) > 8 {
-		short = short[:8]
+	// The whole id names the file: the service's ids are UUIDv7, whose
+	// first characters are a clock, so two files of one name sent within
+	// a minute share a prefix and the second would overwrite the first.
+	id := unsafeID.ReplaceAllString(a.ID, "_")
+	if len(id) > 64 {
+		id = id[:64]
 	}
 	name := safeName(a.Filename)
-	dst := filepath.Join(dir, "in-"+short+"-"+name)
+	dst := filepath.Join(dir, "in-"+id+"-"+name)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

@@ -950,6 +950,18 @@ func (p *phone) poll(r *Runtime) {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
+					// The person who sent it is on the phone, not at the
+					// terminal: tell them there, or the file is dropped
+					// without a word.
+					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
+					p.enqueue(func(ctx context.Context) {
+						act := p.attach()
+						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
+						if err == nil {
+							p.remember(msg.ID)
+							p.markSent(act)
+						}
+					})
 					continue
 				}
 				atts = append(atts, saved)

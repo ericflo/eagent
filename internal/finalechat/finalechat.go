@@ -179,6 +179,23 @@ const (
 // kept cut short.
 var ErrTooLarge = fmt.Errorf("finalechat: the file is over the %d MB limit", MaxAttachmentSize>>20)
 
+// RefusedNote is what the person who sent a file from the phone is told
+// when it could not be taken, so it is not dropped without a word.
+func RefusedNote(filename string, err error) string {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "a file you sent"
+	}
+	if errors.Is(err, ErrTooLarge) {
+		return fmt.Sprintf("eagent did not take %s: it is over %d MB, the largest file eagent takes from the phone, so none of it was saved. Send a smaller file.", name, MaxAttachmentSize>>20)
+	}
+	why := strings.ReplaceAll(err.Error(), "\n", " ")
+	if len(why) > 200 {
+		why = why[:200] + "..."
+	}
+	return fmt.Sprintf("eagent could not fetch %s from the phone (%s), so it was not passed on. Send it again.", name, why)
+}
+
 // IsAnswer reports whether the message records the answer to a question,
 // and returns that question's id.
 func (m Message) IsAnswer() (string, bool) {
@@ -559,8 +576,17 @@ func (c *Client) Download(ctx context.Context, urlOrID string, w io.Writer) (con
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", &Error{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
 	}
-	if _, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1)); err != nil {
+	if resp.ContentLength > MaxAttachmentSize {
+		return "", "", ErrTooLarge
+	}
+	n, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1))
+	if err != nil {
 		return "", "", fmt.Errorf("finalechat: %w", err)
+	}
+	if n > MaxAttachmentSize {
+		// What was written is only the start of the file: the caller must
+		// drop it, not keep it as if whole.
+		return "", "", ErrTooLarge
 	}
 	filename = ""
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
