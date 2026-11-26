@@ -96,6 +96,12 @@ type modelRoute struct {
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
+	// downSince is when the first call that found the route in use
+	// unreachable was sent (zero while it answers), and told says the user
+	// has heard of that outage. Shared by the calls in flight, so one
+	// outage is timed once and said once; a new route starts clean.
+	downSince time.Time
+	told      bool
 }
 
 // confAt is the configured route the client is on: the at-th of the chain
@@ -464,11 +470,21 @@ func (r *Runtime) renderSystem() {
 
 // complete calls a model through its current route and, when that route
 // cannot serve the model at all (bad key, no access, no credits), moves to
-// the next configured route and tries again. Every switch is logged in the
-// session so replay and the UI know which model actually answered. Safe to
-// call from any goroutine.
+// the next configured route and tries again. When the route cannot be
+// reached it waits for the network; past offlineSwitch the other routes
+// are asked in turn, the first to answer takes over, and the user is told
+// when none does (netStep). Every switch is logged in the session so
+// replay and the UI know which model actually answered. Safe to call from
+// any goroutine.
 func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs *llm.Observer) (*llm.Response, error) {
-	offline := 0 // consecutive calls the network kept from the provider
+	offline := 0 // rounds in a row in which no route could be reached
+	// onRoute is the client of the route in use when this call last
+	// looked. During an outage probe is the route of the chain asked in
+	// its place (-1: none), through probeClient, which is installed only
+	// if it answers.
+	var onRoute, probeClient *llm.Client
+	probe := -1
+	var downErr error // the last failure of the route in use to be reached
 	for {
 		var client *llm.Client
 		var known []string
@@ -487,12 +503,21 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		if client == nil {
 			return nil, fmt.Errorf("no model is configured for %s", who)
 		}
+		if client != onRoute {
+			// The first try, or another call (or the settings) moved the
+			// route while this one was out: go on from the new one.
+			onRoute, probe, probeClient = client, -1, nil
+		}
+		if probe >= 0 {
+			client = probeClient
+		}
 		// A request may have been rendered before a refusal was written
 		// down: a call sent back within its turn starts from the turn's
 		// first render, and the pass below may itself record one and go
 		// on to another route. It goes out as the record renders it now,
 		// so no client is sent a picture the record says was refused.
 		req = req.WithRefused(known)
+		sent := time.Now()
 		resp, err := client.Complete(ctx, req, obs)
 		r.calibrate(who, client.Endpoint, req, resp, err)
 		// Pictures the provider would not take, whether the call then
@@ -510,19 +535,122 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			})
 		}
 		if err == nil {
-			if offline > 0 {
+			r.sync(func() {
+				m := r.models[who]
+				if m == nil || m.client != onRoute {
+					return // the route moved on while the call was out
+				}
+				// A route of the chain answered while the one in use could
+				// not be reached: the session goes on with it, as after a
+				// route that cannot serve the model. Not when the one in use
+				// has answered another call meanwhile: it is back.
+				down := !m.downSince.IsZero()
+				m.downSince, m.told = time.Time{}, false
+				if probe >= 0 && down {
+					probeClient.MaxAttempts = onRoute.MaxAttempts
+					r.takeRoute(who, m, probe, probeClient, "cannot be reached", downErr)
+				}
+			})
+			if offline > 0 && probe < 0 {
 				r.ui.Log("%s: %s is reachable again", who, client.Endpoint.BaseURL)
 			}
 			return resp, nil
 		}
-		if ctx.Err() == nil && networkDown(err) {
+		last := failOther
+		var ae *llm.APIError
+		switch {
+		case probe >= 0 || networkDown(err):
+			// A route asked in place of the one in use is asked only while
+			// that one cannot be reached: however it failed, that is what
+			// still stands.
+			last = failNetwork
+		case errors.As(err, &ae) && ae.Unroutable():
+			last = failUnroutable
+		}
+		if ctx.Err() != nil {
+			return nil, err // stopped, or out of time: nothing was learned of the route
+		}
+		if probe < 0 && last == failNetwork {
+			downErr = err
+		}
+		step, moved, next := stepGiveUp, false, -1
+		var down time.Duration
+		var ep llm.Endpoint // the route asked next
+		r.sync(func() {
+			m := r.models[who]
+			if m == nil || m.client != onRoute {
+				moved = true // another call already moved on; use its route
+				return
+			}
+			if probe < 0 {
+				if last != failNetwork {
+					m.downSince, m.told = time.Time{}, false // it answered
+				} else if m.downSince.IsZero() {
+					m.downSince = sent
+				}
+			}
+			others := false
+			switch last {
+			case failNetwork:
+				if !m.downSince.IsZero() {
+					down = time.Since(m.downSince)
+				}
+				// The routes are asked in turn from the one after the one
+				// in use, once a round.
+				if n := len(m.routes); n > 1 {
+					from := probe
+					if from < 0 {
+						from = m.at
+					}
+					if i := (from + 1) % n; i != m.at {
+						next, others = i, true
+					}
+				}
+			case failUnroutable:
+				others = m.at+1 < len(m.routes)
+			}
+			// Only eagent's own model speaks for the session.
+			told := m.told || who != event.ActorEagent
+			step = netStep(down, others, last, told)
+			if step == stepTell {
+				m.told = true
+				r.recordMessage(r.unreachableNotice(downErr))
+				step = netStep(down, others, last, true)
+			}
+			switch {
+			case step == stepNext && last == failUnroutable:
+				// The next route after the one that failed, each tried
+				// once: the last one failing ends the call.
+				r.takeRoute(who, m, m.at+1, r.newClient(m.routes[m.at+1], who), "is unavailable", err)
+			case step == stepNext:
+				ep = m.routes[next]
+			}
+		})
+		if moved {
+			continue
+		}
+		switch {
+		case step == stepNext && last == failUnroutable:
+			continue
+		case step == stepNext:
+			if probe < 0 {
+				r.ui.Log("%s: %s has not been reachable for %s; asking %s in its place", who, onRoute.Endpoint.BaseURL, roundDur(down), ep)
+			}
+			// One attempt: it is asked whether it answers, and the round goes
+			// on to the next route at once if it does not.
+			probe, probeClient = next, r.newClient(ep, who)
+			probeClient.MaxAttempts = 1
+			continue
+		case step == stepRetry:
 			// The provider cannot be reached at all (no DNS, no route, the
 			// connection refused or dropped). That passes: wait for the
-			// network instead of failing the turn.
+			// network instead of failing the turn, then go round again
+			// from the route in use.
+			probe, probeClient = -1, nil
 			offline++
 			wait := min(time.Duration(offline)*offlineWait, 4*offlineWait)
 			if offline == 1 {
-				r.ui.Log("%s: cannot reach %s (%s); waiting for the network", who, client.Endpoint.BaseURL, shortErr(err))
+				r.ui.Log("%s: cannot reach %s (%s); waiting for the network", who, onRoute.Endpoint.BaseURL, shortErr(downErr))
 			}
 			select {
 			case <-ctx.Done():
@@ -531,37 +659,83 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			}
 			continue
 		}
-		var ae *llm.APIError
-		if !errors.As(err, &ae) || !ae.Unroutable() {
-			return nil, err
-		}
-		var switched bool
-		r.sync(func() {
-			m := r.models[who]
-			if m.client != client {
-				switched = true // another call already moved on; use its route
-				return
-			}
-			// The next route after the one that failed, each tried once:
-			// the last one failing ends the call.
-			if m.at+1 < len(m.routes) {
-				m.at++
-				next := m.routes[m.at]
-				r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
-				m.client = r.newClient(next, who)
-				r.flushSilent() // the looks so far were made on the old route
-				r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-					Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
-					Reason: "the configured route is unavailable: " + shortErr(err),
-				}))
-				r.followRoute(who)
-				switched = true
-			}
-		})
-		if !switched {
-			return nil, err
-		}
+		return nil, err
 	}
+}
+
+// takeRoute moves who's calls to the at-th route of its chain through
+// client, after the one in use failed as why says (with err), and writes
+// it down: the log, the Route event replay and the phone's model chip
+// read, and the live settings. Loop goroutine.
+func (r *Runtime) takeRoute(who string, m *modelRoute, at int, client *llm.Client, why string, err error) {
+	next := m.routes[at]
+	r.ui.Log("%s: %s %s (%s); switching to %s", who, m.client.Endpoint, why, shortErr(err), next)
+	m.at, m.client = at, client
+	m.downSince, m.told = time.Time{}, false
+	r.flushSilent() // the looks so far were made on the old route
+	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+		Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
+		Reason: "the configured route " + why + ": " + shortErr(err),
+	}))
+	r.followRoute(who)
+}
+
+// How a model call failed, as netStep weighs it.
+type failKind int
+
+const (
+	failOther      failKind = iota // the route answered with a failure that is the caller's
+	failNetwork                    // the route in use could not be reached at all
+	failUnroutable                 // the route answered that it cannot serve the model
+)
+
+// What complete does after a call failed.
+type callStep int
+
+const (
+	stepRetry  callStep = iota // wait, then call the route in use again
+	stepNext                   // call the next route of the chain
+	stepTell                   // tell the user the model cannot be reached, then decide again
+	stepGiveUp                 // return the failure to the caller
+)
+
+// netStep is what complete does after a failed call. down is how long the
+// route in use has been unreachable (read with last = failNetwork only);
+// others says there is another route to ask: for an unroutable answer, one
+// after it in the chain; for an outage, one not asked yet in this round;
+// told says the user has heard of this outage.
+//
+//	last         down          others  told   step
+//	other        -             -       -      give up
+//	unroutable   -             yes     -      next (the session moves to it, as always)
+//	unroutable   -             no      -      give up
+//	network      under bound   -       -      retry (a blip, a server reloading)
+//	network      bound or more yes     -      next (asked once; it takes over only if it answers)
+//	network      bound or more no      no     tell
+//	network      bound or more no      yes    retry (the round starts again from the route in use)
+//
+// An outage is never given up on: the network coming back is waited for,
+// and the route in use is asked first in every round, so a machine that was
+// offline for a while carries on with the route it had.
+func netStep(down time.Duration, others bool, last failKind, told bool) callStep {
+	switch last {
+	case failUnroutable:
+		if others {
+			return stepNext
+		}
+		return stepGiveUp
+	case failNetwork:
+		switch {
+		case down < offlineSwitch:
+			return stepRetry
+		case others:
+			return stepNext
+		case !told:
+			return stepTell
+		}
+		return stepRetry
+	}
+	return stepGiveUp
 }
 
 // followRoute brings the live settings' pick for who up to date with the
@@ -596,6 +770,14 @@ func (r *Runtime) followRoute(who string) {
 
 // offlineWait paces calls while the network is down (up to four times it).
 var offlineWait = 15 * time.Second
+
+// offlineSwitch is how long the route in use may stay out of reach before
+// the other routes of its chain are asked, and the user is told when none
+// of them answers. Long enough for a local model server to reload: with
+// the client's own retries (about half a minute a try) and the first wait,
+// the first try past it, and so the first fallback asked, comes some 77
+// seconds after the first refusal.
+var offlineSwitch = 60 * time.Second
 
 // loopPoll is how often the loop reads its inbox and live settings and
 // looks at the time-based parts of its state; a variable so tests can

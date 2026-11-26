@@ -404,6 +404,12 @@ type ThreadTitleData struct {
 	// An inline update has none: it is part of one of eagent's own calls.
 	Usage     *Usage `json:"usage,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	// Host and Asked are the route that served that call, as on an
+	// assistant reply. Neither is written when its calls were served by
+	// two routes, nor in a record from before they were: the call then
+	// goes on the route in use where it stands.
+	Host  string `json:"host,omitempty"`
+	Asked string `json:"asked,omitempty"`
 }
 
 // QuestionData is a question that waits on the user.
@@ -442,9 +448,27 @@ type DossierData struct {
 	ElapsedMS int64    `json:"elapsed_ms,omitempty"`
 	Calls     int      `json:"calls,omitempty"`
 	Consulted []string `json:"consulted,omitempty"`
+	// Host and Asked are the route that served the calls in Usage, as on
+	// an assistant reply. Earlier holds the calls of the same pass that
+	// another route served before it took over (the model changed while
+	// the pass ran), each priced on its own; Usage is then the last
+	// route's alone, and Calls still counts them all. A record from before
+	// they were written names no route, and the pass goes on the route in
+	// use where it stands.
+	Host    string       `json:"host,omitempty"`
+	Asked   string       `json:"asked,omitempty"`
+	Earlier []RouteUsage `json:"earlier,omitempty"`
 	// TaskID names the task worker that wrote it, in logs from before
 	// eagent wrote its own.
 	TaskID string `json:"task_id,omitempty"`
+}
+
+// RouteUsage is what some calls served by one route used.
+type RouteUsage struct {
+	Host  string `json:"host"`
+	Asked string `json:"asked"`
+	Usage Usage  `json:"usage"`
+	Calls int    `json:"calls"`
 }
 
 // HarnessMessageData is a notice the harness puts in eagent's conversation.
@@ -649,6 +673,13 @@ type ChecksData struct {
 	// SeenSeq is the newest event the last of those looks had in view, so
 	// a resumed session does not look again at what was already weighed.
 	SeenSeq int64 `json:"seen_seq,omitempty"`
+	// Host and Asked are the route that served those looks, its address
+	// and the model asked for, as on an assistant reply: a look still out
+	// when the model changed is priced on the model that made it. A record
+	// from before they were written names neither, and its looks go on the
+	// route in use where it stands.
+	Host  string `json:"host,omitempty"`
+	Asked string `json:"asked,omitempty"`
 }
 
 // OwedData is what eagent still owes the user, as it stands after the

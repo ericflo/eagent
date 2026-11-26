@@ -424,7 +424,7 @@ func (r *Runtime) applySummary(project string, seen int64, out summaryResult) {
 	title, description := acceptSummary(r.st, project, out)
 	usage := out.Usage
 	r.append(event.New(event.ThreadTitle, event.ActorSummarizer, event.ThreadTitleData{
-		Title: title, Description: description, By: "summary", SeenSeq: seen, Usage: &usage, ElapsedMS: out.Elapsed.Milliseconds(),
+		Title: title, Description: description, By: "summary", SeenSeq: seen, Usage: &usage, ElapsedMS: out.Elapsed.Milliseconds(), Host: out.Host, Asked: out.Asked,
 	}))
 	if r.phone != nil && (title != "" || description != "") {
 		r.phone.RetitleThread(r, title, description)
@@ -509,6 +509,8 @@ type summaryResult struct {
 	Title, Summary string
 	Usage          event.Usage
 	Elapsed        time.Duration
+	// Host and Asked: the route that served its calls ("" when two did).
+	Host, Asked string
 }
 
 // summarize asks the model once, and once more if the answer was not the
@@ -520,6 +522,11 @@ func summarize(ctx context.Context, complete func(context.Context, llm.Request) 
 		resp, err := complete(ctx, req)
 		if err != nil {
 			return out, err
+		}
+		if attempt == 0 {
+			out.Host, out.Asked = resp.BaseURL, resp.Asked
+		} else if out.Host != resp.BaseURL || out.Asked != resp.Asked {
+			out.Host, out.Asked = "", ""
 		}
 		out.Usage.Input += resp.Usage.Input
 		out.Usage.Output += resp.Usage.Output
