@@ -94,6 +94,17 @@ func (r *Runtime) pollInbox() {
 			// session lock was meant for an earlier run; it must not quit
 			// this one before its first tick. Messages and answers are kept.
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
+		case !inboxWords(msg, r.ownCommand):
+			// A command, a stop or a dismissal leaves no event that names
+			// its file, so a later run could not tell that it was carried
+			// out. Its file goes first, as it always did, and it is carried
+			// out only once the file is gone: a cut in between loses the
+			// command and never repeats it.
+			if err := os.Remove(path); err != nil {
+				r.ui.Log("inbox: %s was not carried out: its file could not be removed (%v)", name, err)
+			} else {
+				r.handleInboxFile(msg, name)
+			}
 		default:
 			r.handleInboxFile(msg, name)
 		}
@@ -103,6 +114,19 @@ func (r *Runtime) pollInbox() {
 		r.inboxTaken[name] = true
 		_ = os.Remove(path)
 	}
+}
+
+// inboxWords reports whether an inbox message is words of the user's (it
+// becomes a user.message or user.answer, or nothing), as opposed to a
+// command of eagent's own, a stop or a dismissal.
+func inboxWords(msg InboxMessage, command func(line, source string) bool) bool {
+	switch msg.Type {
+	case "answer":
+		return true
+	case "message", "":
+		return !command(strings.TrimSpace(msg.Text), msg.From)
+	}
+	return false
 }
 
 // inboxRecorded reports whether the record holds the user.message or

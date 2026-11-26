@@ -191,3 +191,58 @@ func TestR8InboxNameOnlyOnInboxWords(t *testing.T) {
 		}
 	}
 }
+
+// A command sent through the inbox leaves no event that names its file, so
+// its file goes before it is carried out (found by an independent reader of
+// the change above: carried out first, a /quit left behind by a cut was
+// carried out again by the resumed run). When the file cannot be removed
+// the command is not carried out; the run that can remove it carries it
+// out, once.
+func TestR8InboxCommandIsCarriedOutOnlyOnceItsFileIsGone(t *testing.T) {
+	ui := &fakeUI{}
+	rt := r8cNew(t, ui)
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/quit", From: "web"})
+	r8cLock(t, rt)
+	rt.pollInbox()
+	rt.pollInbox()
+	if rt.ending {
+		t.Fatalf("/quit was carried out although its file could not be removed: a later run would carry it out again")
+	}
+	if n := strings.Count(strings.Join(ui.logged(), "\n"), "was not carried out"); n != 1 {
+		t.Fatalf("said %d times that it was not carried out, want once: %v", n, ui.logged())
+	}
+	path := rt.sess.Path
+	rt.sess.Close()
+	if err := os.Chmod(InboxDir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt2.sess.Close()
+	rt2.pollInbox()
+	if entries, _ := os.ReadDir(InboxDir(path)); !rt2.ending || len(entries) != 0 {
+		t.Fatalf("the run that could remove the file: ending %v, %d files left; want it carried out and gone", rt2.ending, len(entries))
+	}
+}
+
+// What is words and what is a command, a stop or a dismissal.
+func TestR8InboxWords(t *testing.T) {
+	slash := func(line, _ string) bool { return strings.HasPrefix(line, "/") }
+	for _, tc := range []struct {
+		msg  InboxMessage
+		want bool
+	}{
+		{InboxMessage{Type: "message", Text: "run the tests"}, true},
+		{InboxMessage{Text: "run the tests"}, true},
+		{InboxMessage{Type: "answer", Text: "blue"}, true},
+		{InboxMessage{Type: "message", Text: "  /quit"}, false},
+		{InboxMessage{Type: "stop"}, false},
+		{InboxMessage{Type: "dismiss", QuestionID: "q1"}, false},
+	} {
+		if got := inboxWords(tc.msg, slash); got != tc.want {
+			t.Fatalf("%+v: words = %v, want %v", tc.msg, got, tc.want)
+		}
+	}
+}
