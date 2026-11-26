@@ -210,13 +210,19 @@ func TestAMovedSendCountsForTheReceiptByItsOutcomeWhereItWent(t *testing.T) {
 }
 
 // relay_forward's duplicate check counts every send of the message to any
-// agent that held the relay's name, replayed from the record. One row is a
-// known wrong refusal, older than send outcomes: an agent started fresh
-// under a stopped name never saw the message, yet forwarding it is refused
-// (relay_send still sends it). It is left because counting only the agent
-// holding the name now let a message be typed twice (after a switch back,
-// whose brief quotes it, and for a send held while a fresh start launched).
+// agent that held the relay's name, replayed from the record. An agent
+// started fresh under a stopped name never saw the message as its own, yet
+// forwarding it is refused (relay_send still sends it): counting only the
+// agent holding the name now let a message be typed twice (after a switch
+// back, whose brief quotes it, and for a send held while a fresh start
+// launched). The refusal's words say so when the record proves it: every
+// send arrived before the stop of the agent that held the name then, and
+// the agent holding it now started after that stop.
 func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
+	const old = "that message already went to Codex as written (r1); to add to it, use relay_send"
+	const stopped = "that message went as written (r1) to the agent that held the name codex before, which was stopped; Codex, running now, was not sent it as its own message (its hand-over brief may quote it); to give it to this one, send the words with relay_send"
+	const waiting = "that message is already on its way to Codex as written (r1), and its transcript has not shown it yet; to add to it, use relay_send"
+	const heldOld = "that message already went to Codex as written (r2); to add to it, use relay_send"
 	type step func(r *relayRecord)
 	stop := func(r *relayRecord) { r.add(event.RelayEnd, event.RelayEndData{Name: "codex", Reason: "stopped"}) }
 	fresh := func(r *relayRecord) { r.start("codex", "codex") }
@@ -231,22 +237,36 @@ func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
 		r.add(event.RelayEnd, event.RelayEndData{Name: "claude", Reason: "handed over to codex"})
 		r.start("codex", "codex")
 	}
+	var seq int64
+	// heldForStart is a send recorded while the fresh agent started, then
+	// typed into it and confirmed there.
+	heldForStart := func(r *relayRecord) {
+		r.send("codex", "r2", seq)
+		r.start("codex", "codex")
+		r.add(event.RelayDelivered, event.RelayDeliveredData{Name: "codex", ID: "r2", OK: true})
+	}
 	for _, c := range []struct {
-		name    string
-		after   []step
-		refused bool
+		name        string
+		unconfirmed bool // r1 is never confirmed
+		after       []step
+		refused     bool
+		why         string
 	}{
-		{"the same agent", nil, true},
-		{"stopped, then started fresh (known wrong refusal)", []step{stop, fresh}, true},
-		{"restarted, continuing its conversation", []step{continues}, true},
-		{"stopped, then started again on its own conversation", []step{stop, continues}, true},
-		{"a switch away and back", []step{switchAway, switchBack}, true},
+		{"the same agent", false, nil, true, old},
+		{"stopped, then started fresh", false, []step{stop, fresh}, true, stopped},
+		{"restarted, continuing its conversation", false, []step{continues}, true, old},
+		{"stopped, then started again on its own conversation", false, []step{stop, continues}, true, old},
+		{"a switch away and back", false, []step{switchAway, switchBack}, true, stopped},
+		{"still unconfirmed, then stopped and started fresh", true, []step{stop, fresh}, true, waiting},
+		{"stopped, then a send held while a fresh agent started", false, []step{stop, heldForStart}, true, heldOld},
 	} {
 		rec := &relayRecord{t: time.Now()}
 		rec.start("codex", "codex")
-		seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
+		seq = rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
 		rec.send("codex", "r1", seq)
-		rec.add(event.RelayDelivered, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: true})
+		if !c.unconfirmed {
+			rec.add(event.RelayDelivered, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: true})
+		}
 		for _, s := range c.after {
 			s(rec)
 		}
@@ -254,6 +274,9 @@ func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
 		id, why := forwardedAs(state.Replay(rec.evs), "codex", seq, "")
 		if refused := id != ""; refused != c.refused {
 			t.Errorf("%s: refused %v (%q), want %v", c.name, refused, why, c.refused)
+		}
+		if why != c.why {
+			t.Errorf("%s: refusal\n %q\nwant\n %q", c.name, why, c.why)
 		}
 	}
 }
