@@ -9,7 +9,6 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
-	"github.com/ericflo/eagent/internal/state"
 )
 
 // What a relay thread on the phone shows beyond the narrator: a receipt
@@ -49,7 +48,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 	set := func(seq int64, status string) {
 		for i := range receipts {
 			if receipts[i].seq == seq {
-				receipts[i].status = mergeReceipt(receipts[i].status, status)
+				receipts[i].status = status
 				return
 			}
 		}
@@ -87,17 +86,14 @@ func (p *phone) loadReceipts(r *Runtime) {
 				continue
 			}
 			sendSeq[d.ID] = d.Seq
-			status := "sent"
-			if d.Mode == "after_turn" {
-				status = "held"
-			}
-			set(d.Seq, status)
+			// From every send of the message, as the live path does.
+			set(d.Seq, sendsReceipt(r.st, sendSeq, d.Seq))
 		case event.RelayDelivered:
 			var d event.RelayDeliveredData
 			if ev.Decode(&d) != nil || sendSeq[d.ID] == 0 {
 				continue
 			}
-			set(sendSeq[d.ID], judgeSend(state.DeliveryOutcome(d), "", d.ID, "", "").receipt)
+			set(sendSeq[d.ID], sendsReceipt(r.st, sendSeq, sendSeq[d.ID]))
 		}
 	}
 	if len(receipts) > maxReceipts {
@@ -134,7 +130,7 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 	found := false
 	for i := range p.receipts {
 		if p.receipts[i].seq == seq {
-			p.receipts[i].status = mergeReceipt(p.receipts[i].status, status)
+			p.receipts[i].status = status
 			found = true
 		}
 	}
@@ -181,11 +177,8 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		}
 		p.mu.Lock()
 		p.sendSeq[d.ID] = d.Seq
+		status := sendsReceipt(r.st, p.sendSeq, d.Seq)
 		p.mu.Unlock()
-		status := "sent"
-		if d.Mode == "after_turn" {
-			status = "held"
-		}
 		p.setReceipt(r, d.Seq, status)
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
@@ -194,11 +187,12 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		}
 		p.mu.Lock()
 		seq := p.sendSeq[d.ID]
+		status := sendsReceipt(r.st, p.sendSeq, seq)
 		p.mu.Unlock()
 		if seq == 0 {
 			return
 		}
-		p.setReceipt(r, seq, judgeSend(state.DeliveryOutcome(d), "", d.ID, "", "").receipt)
+		p.setReceipt(r, seq, status)
 	case event.RelayTurn:
 		var d event.RelayTurnData
 		if ev.Decode(&d) != nil {

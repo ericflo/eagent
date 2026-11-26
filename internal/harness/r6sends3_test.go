@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -55,39 +56,152 @@ func TestThePhoneShowsATypingFailureAsSent(t *testing.T) {
 	}
 }
 
-// One user message sent to two agents has one receipt. Once an agent has
-// it, a send elsewhere that is on its way or fails does not take that
-// back; a failure first and an arrival after ends delivered too. Late
-// confirmation of an unconfirmed send turns it into delivered.
-func TestOneReceiptForAMessageSentToTwoAgents(t *testing.T) {
+// The receipt rule, row by row.
+func TestMessageReceiptRule(t *testing.T) {
+	a, w, h, u, n := state.SendArrived, state.SendWaiting, state.SendHeld, state.SendUnconfirmed, state.SendNotSent
 	for _, c := range []struct {
-		name  string
-		steps []string
+		sends []state.SendOutcome
 		want  string
 	}{
-		{"arrived at the first, failed at the second", []string{"sent", "delivered", "sent", "failed"}, "delivered"},
-		{"failed at the first, arrived at the second", []string{"sent", "failed", "sent", "delivered"}, "delivered"},
-		{"failed at both", []string{"sent", "failed", "sent", "failed"}, "failed"},
-		{"unconfirmed, then confirmed late", []string{"sent", "sent", "delivered"}, "delivered"},
-		{"unconfirmed", []string{"sent", "sent"}, "sent"},
+		{nil, ""},
+		{[]state.SendOutcome{a}, "delivered"},
+		{[]state.SendOutcome{n, a}, "delivered"},
+		{[]state.SendOutcome{u, n}, "sent"},
+		{[]state.SendOutcome{w, n}, "sent"},
+		{[]state.SendOutcome{h, n}, "held"},
+		{[]state.SendOutcome{h, u}, "sent"},
+		{[]state.SendOutcome{n, n, n}, "failed"},
+		{[]state.SendOutcome{""}, "sent"},
 	} {
-		got := ""
-		for _, s := range c.steps {
-			got = mergeReceipt(got, s)
-		}
-		if got != c.want {
-			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		if got := messageReceipt(c.sends); got != c.want {
+			t.Errorf("%v: %q, want %q", c.sends, got, c.want)
 		}
 	}
-	// The same through the record, as a resumed session rebuilds it.
+}
+
+// receiptWant is the rule written out for the test, from the sends'
+// final outcomes.
+func receiptWant(os []state.SendOutcome) string {
+	has := func(want ...state.SendOutcome) bool {
+		for _, o := range os {
+			for _, w := range want {
+				if o == w {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch {
+	case has(state.SendArrived):
+		return "delivered"
+	case has(state.SendWaiting, state.SendUnconfirmed):
+		return "sent"
+	case has(state.SendHeld):
+		return "held"
+	}
+	return "failed"
+}
+
+func permutations(xs []state.SendOutcome) [][]state.SendOutcome {
+	if len(xs) <= 1 {
+		return [][]state.SendOutcome{append([]state.SendOutcome(nil), xs...)}
+	}
+	var out [][]state.SendOutcome
+	for i := range xs {
+		rest := append(append([]state.SendOutcome(nil), xs[:i]...), xs[i+1:]...)
+		for _, p := range permutations(rest) {
+			out = append(out, append([]state.SendOutcome{xs[i]}, p...))
+		}
+	}
+	return out
+}
+
+// One user message sent two or three times, to different agents, in every
+// order of every mix of outcomes: its one phone receipt follows the rule
+// over all its sends, never just the newest event, and the receipt worked
+// out live (after each event, as observeRelay does) agrees with the one a
+// resumed session rebuilds from the record (loadReceipts). The reader's
+// case, typed into Codex and never confirmed and then certainly failed at
+// Claude, is the row [unconfirmed not_sent]: "sent", no Retry.
+func TestOneReceiptForAMessageSentToSeveralAgents(t *testing.T) {
+	kinds := []state.SendOutcome{state.SendArrived, state.SendWaiting, state.SendHeld, state.SendUnconfirmed, state.SendNotSent}
+	var mixes [][]state.SendOutcome
+	for i := range kinds {
+		for j := i; j < len(kinds); j++ {
+			mixes = append(mixes, []state.SendOutcome{kinds[i], kinds[j]})
+			for k := j; k < len(kinds); k++ {
+				mixes = append(mixes, []state.SendOutcome{kinds[i], kinds[j], kinds[k]})
+			}
+		}
+	}
+	agents := []string{"codex", "claude", "pi"}
+	for _, mix := range mixes {
+		for _, order := range permutations(mix) {
+			rec := &relayRecord{t: time.Now()}
+			for _, a := range agents {
+				rec.start(a, a)
+			}
+			seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
+			for i, o := range order {
+				name, id := agents[i], fmt.Sprintf("r%d", i+1)
+				mode := "queue"
+				if o == state.SendHeld {
+					mode = "after_turn"
+				}
+				rec.add(event.RelaySend, event.RelaySendData{Name: name, ID: id, From: "user", Seq: seq, Mode: mode, Text: "check the version"})
+				switch o {
+				case state.SendArrived:
+					rec.add(event.RelayDelivered, event.RelayDeliveredData{Name: name, ID: id, OK: true})
+				case state.SendUnconfirmed:
+					rec.failed(name, id, event.DeliveryUnconfirmed)
+				case state.SendNotSent:
+					rec.failed(name, id, event.DeliveryNotSent)
+				}
+			}
+			want := receiptWant(order)
+			// Live: the state as it stood at each event, the receipt worked
+			// out from it then.
+			st := state.Replay(nil)
+			sendSeq := map[string]int64{}
+			live := ""
+			for _, ev := range rec.evs {
+				st.Apply(ev)
+				var d struct {
+					ID string `json:"id"`
+				}
+				switch ev.Type {
+				case event.RelaySend:
+					_ = ev.Decode(&d)
+					sendSeq[d.ID] = seq
+					live = sendsReceipt(st, sendSeq, seq)
+				case event.RelayDelivered:
+					live = sendsReceipt(st, sendSeq, seq)
+				}
+			}
+			p := &phone{}
+			p.loadReceipts(&Runtime{st: state.Replay(rec.evs)})
+			rebuilt := ""
+			if len(p.receipts) == 1 {
+				rebuilt = p.receipts[0].status
+			}
+			if live != want || rebuilt != want {
+				t.Errorf("%v: live %q, rebuilt %q, want %q", order, live, rebuilt, want)
+			}
+		}
+	}
+}
+
+// A send a switch moved to another agent counts by its outcome there.
+func TestAMovedSendCountsForTheReceiptByItsOutcomeWhereItWent(t *testing.T) {
 	rec := &relayRecord{t: time.Now()}
 	rec.start("codex", "codex")
-	rec.start("claude", "claude")
 	seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
 	rec.send("codex", "r1", seq)
-	rec.add(event.RelayDelivered, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: true})
-	rec.send("claude", "r2", seq)
-	rec.failed("claude", "r2", event.DeliveryNotSent)
+	rec.add(event.RelayEnd, event.RelayEndData{Name: "codex", Reason: "handed over to claude"})
+	rec.start("claude", "claude")
+	rec.add(event.RelayMoved, event.RelayMovedData{RelaySendData: event.RelaySendData{Name: "claude", ID: "r1", From: "user", Seq: seq, Mode: "queue", Text: "check the version"}, Prev: "codex"})
+	rec.add(event.RelayDelivered, event.RelayDeliveredData{Name: "claude", ID: "r1", OK: true})
 	p := &phone{}
 	p.loadReceipts(&Runtime{st: state.Replay(rec.evs)})
 	if len(p.receipts) != 1 || p.receipts[0].status != "delivered" {

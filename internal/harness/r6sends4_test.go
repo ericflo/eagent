@@ -3,10 +3,35 @@ package harness
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
 )
+
+// One message, two agents: typed into Codex and never confirmed (it may
+// have arrived), then a forward to Claude, which is stopped, certainly did
+// not go. The phone keeps "sent": a "Not delivered" Retry would type the
+// words into Codex again.
+func TestAFailureElsewhereDoesNotOfferRetryForAMessageThatMayHaveArrived(t *testing.T) {
+	if got := messageReceipt([]state.SendOutcome{state.SendUnconfirmed, state.SendNotSent}); got == "failed" {
+		t.Errorf("live: unconfirmed at codex, then not_sent at claude: %q", got)
+	}
+	rec := &relayRecord{t: time.Now()}
+	rec.start("codex", "codex")
+	rec.start("claude", "claude")
+	rec.add(event.RelayEnd, event.RelayEndData{Name: "claude", Reason: "stopped"})
+	seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
+	rec.send("codex", "r1", seq)
+	rec.failed("codex", "r1", event.DeliveryUnconfirmed)
+	rec.send("claude", "r2", seq)
+	rec.failed("claude", "r2", event.DeliveryNotSent)
+	p := &phone{}
+	p.loadReceipts(&Runtime{st: state.Replay(rec.evs)})
+	if len(p.receipts) != 1 || p.receipts[0].status != "sent" {
+		t.Errorf("rebuilt: %+v", p.receipts)
+	}
+}
 
 func timesIn(texts []string, s string) int {
 	n := 0
