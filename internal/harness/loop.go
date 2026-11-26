@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
@@ -1336,7 +1337,13 @@ func (r *Runtime) observer() *llm.Observer {
 func summarizeReasoning(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 4000 {
-		return s[:4000] + "..."
+		// On a whole character: half of one is not valid text, and the log
+		// would hold a replacement mark instead.
+		cut := 4000
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }

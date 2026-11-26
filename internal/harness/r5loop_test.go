@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/state"
@@ -265,5 +266,16 @@ func TestAnAutomaticNoticeDoesNotStandInForTheClosingReport(t *testing.T) {
 	}
 	if last := said[len(said)-1]; !strings.HasPrefix(last, "Final report") {
 		t.Fatalf("the session ended without a closing report; said %q", said)
+	}
+}
+
+// Reasoning kept for the log is cut on a whole character.
+func TestKeptReasoningIsCutOnAWholeCharacter(t *testing.T) {
+	got := summarizeReasoning(strings.Repeat("a", 3999) + strings.Repeat("é", 10))
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "...") {
+		t.Fatalf("cut reasoning is not valid UTF-8 or not marked: %q", got[len(got)-8:])
+	}
+	if short := summarizeReasoning(" think "); short != "think" {
+		t.Fatalf("short reasoning changed: %q", short)
 	}
 }
