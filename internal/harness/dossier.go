@@ -94,18 +94,19 @@ const (
 
 // dossierBudget is how many characters of the record one pass may read
 // back: what the model's window has left after the prompt it already
-// holds and the room it needs to write, up to a fixed bound. It is small
-// or negative when the prompt nearly fills the window (rollover_tokens
-// fixed close to it, or one turn that took the conversation far past the
-// limit); such a pass is not written inside the conversation
-// (startDossier). Loop goroutine only.
+// holds and the room it needs to write (the reply ceiling, or the 16,384
+// tokens a call asks for when the route sets none), up to a fixed bound.
+// It is small or negative when the prompt nearly fills the window
+// (rollover_tokens fixed close to it, or one turn that took the
+// conversation far past the limit); such a pass is not written inside the
+// conversation (startDossier). Loop goroutine only.
 func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
-	window, reply := r.window()
+	input, _ := r.inputRoom()
 	limit := dossierReadMax
 	if fresh {
 		limit, promptTokens = dossierFreshMax, 8000
 	}
-	free := window - promptTokens - reply - 8000
+	free := input - promptTokens - 8000
 	// About three characters of the record to a token, with a fifth held back.
 	return min(limit, free*3*4/5)
 }

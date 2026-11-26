@@ -261,3 +261,20 @@ func TestTheProviderRatioIsNotCarriedToAnotherRoute(t *testing.T) {
 		t.Fatalf("ratio %d on another route, want 1000", k)
 	}
 }
+
+// A route that sets no reply ceiling still asks for 16,384 tokens of reply
+// on every call (llm.Client), and the dossier pass's reading is held to
+// what the window has left beside that, as it is on a route that sets one.
+func TestTheDossiersReadingLeavesRoomForTheDefaultReply(t *testing.T) {
+	for _, ceiling := range []int{0, 16384} {
+		s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, func(c *config.Config) {
+			c.Model.ContextTokens, c.Model.MaxTokens = 200_000, ceiling
+		})
+		got := 0
+		s.rt.sync(func() { got = s.rt.dossierBudget(100_000, false) })
+		if want := (200_000 - 100_000 - 16384 - 8000) * 3 * 4 / 5; got != want {
+			t.Errorf("reply ceiling %d: the pass may read %d characters, want %d", ceiling, got, want)
+		}
+		s.stop()
+	}
+}
