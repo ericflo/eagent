@@ -202,6 +202,9 @@ type UserMessageData struct {
 	// PhoneID is the Finalechat message id when the message came from the
 	// phone, so the thread can show what became of it (relay receipts).
 	PhoneID string `json:"phone_id,omitempty"`
+	// CardID is the phone card whose answer these words are, when a card's
+	// answer was kept as a message (its question was settled another way).
+	CardID string `json:"card_id,omitempty"`
 }
 
 // Attachment is a file carried by a message: a screenshot the user sent
@@ -234,6 +237,12 @@ type UserAnswerData struct {
 	Source      string           `json:"source,omitempty"` // "" (terminal), "web", or "finalechat"
 	Client      *clientcaps.Caps `json:"client,omitempty"`
 	Attachments []Attachment     `json:"attachments,omitempty"`
+	// PhoneID is the app message the answer came from, and CardID the card
+	// it was written on, when it came from the phone: in the one write that
+	// records the answer, the session's ledger of app messages taken in
+	// (phone.read) learns both.
+	PhoneID string `json:"phone_id,omitempty"`
+	CardID  string `json:"card_id,omitempty"`
 }
 
 // ImagesRefusedData lists pictures (by the path of the session's own copy)
