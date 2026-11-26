@@ -44,6 +44,13 @@ type phoneFake struct {
 	features         []string                 // what /me advertises
 	activity         []map[string]any         // bodies of POST …/activity
 	cleared          int                      // DELETE …/activity calls
+	// The status line as the service holds it: what shows, until when,
+	// the seq it was set with, and the watermark of the latest clear.
+	live                *phoneFakeStatus
+	liveSeq, clearedSeq float64
+	// rejectActivity makes every POST …/activity answer applied=false,
+	// as the service does when a newer status is live.
+	rejectActivity bool
 	keys             map[string]string        // client_key -> message id
 	qkeys            map[string]string        // client_key -> question id, whatever its status (as the service keeps it)
 	dupes            int                      // posts answered from a known key
@@ -75,6 +82,75 @@ func (f *phoneFake) threadTitle() (title, desc string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.title, f.desc
+}
+
+type phoneFakeStatus struct {
+	text, kind string
+	expires    time.Time
+}
+
+// setStatus applies a status line as the service does; seq orders it.
+// force is a post carrying the line, which the service applies whatever
+// the seqs say. Call with f.mu held. It reports whether it applied.
+func (f *phoneFake) setStatus(a map[string]any, force bool) bool {
+	text, _ := a["text"].(string)
+	kind, _ := a["kind"].(string)
+	seq, _ := a["seq"].(float64)
+	ttl, _ := a["ttl_seconds"].(float64)
+	if ttl == 0 {
+		ttl = 90
+	}
+	if text == "" {
+		f.clearStatus(seq)
+		return true
+	}
+	now := time.Now()
+	cur := f.live
+	if cur != nil && !now.Before(cur.expires) {
+		cur = nil
+	}
+	if !force {
+		if cur != nil && cur.text == text && cur.kind == kind && cur.expires.Sub(now) > time.Duration(ttl)*time.Second/2 {
+			return false // a repeat with most of its life left
+		}
+		if seq != 0 && (seq <= f.clearedSeq || (cur != nil && seq <= f.liveSeq)) {
+			return false // a newer clear, or a newer status still live
+		}
+	}
+	f.live = &phoneFakeStatus{text: text, kind: kind, expires: now.Add(time.Duration(ttl) * time.Second)}
+	f.liveSeq = max(f.liveSeq, seq)
+	f.cond.Broadcast()
+	return true
+}
+
+// clearStatus drops the line, keeping the highest clear's seq. Call with
+// f.mu held.
+func (f *phoneFake) clearStatus(seq float64) {
+	f.live = nil
+	f.clearedSeq = max(f.clearedSeq, seq)
+	f.cond.Broadcast()
+}
+
+// postStatus is what a post does to the line: one carrying a status sets
+// it, the user's own words leave it, anything else clears it. Call with
+// f.mu held.
+func (f *phoneFake) postStatus(body map[string]any, sender string) {
+	if a, ok := body["activity"].(map[string]any); ok {
+		f.setStatus(a, true)
+		return
+	}
+	if sender != "user" {
+		seq, _ := body["clear_seq"].(float64)
+		f.clearStatus(seq)
+	}
+}
+
+// liveJSON is the line as a thread carries it. Call with f.mu held.
+func (f *phoneFake) liveJSON() any {
+	if f.live == nil || !time.Now().Before(f.live.expires) {
+		return nil
+	}
+	return map[string]any{"text": f.live.text, "kind": f.live.kind}
 }
 
 type phoneFakeFile struct {
@@ -187,6 +263,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.messages = append(f.messages, m)
 		f.posts = append(f.posts, body)
+		f.postStatus(body, sender)
 		// Only the post that creates the thread names it.
 		if title, _ := body["title"].(string); f.title == "" && len(f.posts) == 1 {
 			f.title = title
@@ -262,6 +339,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 			f.qkeys[key] = q["id"].(string)
 		}
 		f.asks = append(f.asks, body)
+		f.postStatus(body, "agent")
 		f.cond.Broadcast()
 		q = phoneCopy(q)
 		f.mu.Unlock()
@@ -326,11 +404,16 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.activity = append(f.activity, body)
+		applied := !f.rejectActivity && f.setStatus(body, false)
+		shown := f.liveJSON()
 		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"applied": true, "thread": map[string]any{"id": "t1", "activity": map[string]any{"text": body["text"], "kind": body["kind"]}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"applied": applied, "thread": map[string]any{"id": "t1", "activity": shown}})
 	case strings.HasSuffix(path, "/activity") && r.Method == http.MethodDelete:
 		f.mu.Lock()
 		f.cleared++
+		var seq float64
+		fmt.Sscanf(r.URL.Query().Get("seq"), "%g", &seq)
+		f.clearStatus(seq)
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"thread": map[string]any{"id": "t1"}})
 	case strings.HasPrefix(path, "/api/v1/threads/") && r.Method == http.MethodPatch:
@@ -532,30 +615,16 @@ func (f *phoneFake) statuses() []map[string]any {
 	return append([]map[string]any(nil), f.activity...)
 }
 
-// shownStatus is the status line the app shows now: the newest by seq of
-// what was set through …/activity and what rode on a post, as the service
-// applies both. A post can carry the line's latest change, after which the
-// keeper has nothing left to write.
+// shownStatus is the status line the app shows now, as the service keeps
+// it: …/activity writes ordered by seq, a post carrying a line setting it,
+// an agent's post without one clearing it, the user's words leaving it.
 func (f *phoneFake) shownStatus() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var best float64
-	text := ""
-	consider := func(a map[string]any) {
-		if seq, _ := a["seq"].(float64); seq >= best {
-			best = seq
-			text, _ = a["text"].(string)
-		}
+	if f.live == nil || !time.Now().Before(f.live.expires) {
+		return ""
 	}
-	for _, a := range f.activity {
-		consider(a)
-	}
-	for _, p := range f.posts {
-		if a, ok := p["activity"].(map[string]any); ok {
-			consider(a)
-		}
-	}
-	return text
+	return f.live.text
 }
 
 func (f *phoneFake) clearedCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cleared }

@@ -229,3 +229,101 @@ func TestPhoneIsToldWhenAFileItSentIsTooLarge(t *testing.T) {
 		t.Fatalf("left behind %v", entries)
 	}
 }
+
+// r5Working starts a session whose agent is mid-turn on a step, and waits
+// until the phone shows that step and the status keeper has nothing armed.
+func r5Working(t *testing.T, fp *phoneFake) (*phoneRig, string) {
+	t.Helper()
+	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
+	g.seat.mu.Lock()
+	g.seat.hang = true
+	g.seat.mu.Unlock()
+	waitFor(t, "the thread", func() bool { return fp.postCount() >= 1 })
+	if err := PostInbox(g.rt.sess.Path, InboxMessage{Type: "message", Text: "run it", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the message to reach the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
+	g.seat.emit(agentDoes("running go test ./..."))
+	const line = "Codex: running go test ./..."
+	waitFor(t, "the status to name the step", func() bool { return fp.shownStatus() == line })
+	g.statusIdle()
+	var name string
+	g.rt.sync(func() { name = g.rt.st.ActiveRelays()[0].Name })
+	return g, name
+}
+
+// r5LineHolds fails unless the phone still shows line once the post
+// kind has gone up, for a window of many status gaps.
+func r5LineHolds(t *testing.T, fp *phoneFake, kind, line string) {
+	t.Helper()
+	waitFor(t, "the "+kind+" post", func() bool {
+		return len(fp.postsWhere(func(p map[string]any) bool { m, _ := p["meta"].(map[string]any); return m["kind"] == kind })) == 1
+	})
+	deadline := time.Now().Add(10 * statusMinGap)
+	for time.Now().Before(deadline) {
+		if got := fp.shownStatus(); got != line {
+			t.Fatalf("after the %s post the phone shows %q, want %q", kind, got, line)
+		}
+		time.Sleep(statusMinGap / 4)
+	}
+}
+
+// What eagent types to the agent is posted as an agent message, which the
+// service takes as the end of the status line unless it carries one. The
+// line must stay while the agent works on.
+func TestWhatEagentTypesToTheAgentKeepsThePhonesStatusLine(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g, name := r5Working(t, fp)
+	g.rt.sync(func() {
+		ev := event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: name, ID: "s1", From: "eagent", Text: "Go on."})
+		ev.Seq = 9999
+		g.rt.phone.observe(g.rt, ev)
+	})
+	r5LineHolds(t, fp, "relay_send", "Codex: running go test ./...")
+}
+
+// The agent's screen posted to the thread keeps the status line too.
+func TestTheAgentsScreenOnThePhoneKeepsItsStatusLine(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g, name := r5Working(t, fp)
+	g.rt.phone.postRelayScreen(name, "$ go test ./...\nok")
+	r5LineHolds(t, fp, "relay_screen", "Codex: running go test ./...")
+}
+
+// A status write the service turns down (it holds a newer one) is not
+// taken for shown: the keeper writes it again soon, not at its next
+// refresh forty seconds on.
+func TestAStatusTheServiceTurnedDownIsWrittenAgain(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	fp.mu.Lock()
+	fp.rejectActivity = true
+	fp.mu.Unlock()
+	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
+	g.seat.mu.Lock()
+	g.seat.hang = true
+	g.seat.mu.Unlock()
+	waitFor(t, "the thread", func() bool { return fp.postCount() >= 1 })
+	if err := PostInbox(g.rt.sess.Path, InboxMessage{Type: "message", Text: "run it", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the message to reach the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
+	g.seat.emit(agentDoes("running go test ./..."))
+	const line = "Codex: running go test ./..."
+	tries := func() int {
+		n := 0
+		for _, a := range fp.statuses() {
+			if a["text"] == line {
+				n++
+			}
+		}
+		return n
+	}
+	waitFor(t, "a first write of the step", func() bool { return tries() >= 1 })
+	fp.mu.Lock()
+	fp.rejectActivity = false
+	fp.mu.Unlock()
+	waitFor(t, "the step on the phone", func() bool { return fp.shownStatus() == line })
+}
