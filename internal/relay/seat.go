@@ -135,10 +135,10 @@ type pending struct {
 	// restored: recorded before eagent stopped (see Seat.restore); sentAt
 	// is when. Such a send can be confirmed by transcript lines from before
 	// the reattach, and is never pressed again. dormant: the seat has not
-	// caught up on the transcript yet. lost: a held send no longer waiting
-	// where eagent put it (its spool file gone at the catch-up, or gone
-	// once the turn it waited for ended), watched on a timer as a typed send
-	// is, but never pressed.
+	// caught up on the transcript yet. lost: an after-turn send nothing
+	// holds (typed straight in, or its spool file gone at the catch-up, or
+	// gone once the turn it waited for ended), watched on a timer as a
+	// typed send is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
 }
@@ -181,10 +181,12 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 			return nil, Started{}, err
 		}
 	}
-	if !resume && spec.Spool != "" {
+	if spec.Spool != "" {
 		// The spool belongs to the relay's name, and a name is used again
 		// after its agent stopped. What waits there was held for that
-		// conversation; a fresh one must not run it. A resume keeps it.
+		// conversation; a fresh one must not run it. Nor does a resume: a
+		// restart reports what the old agent still waited on unconfirmed,
+		// and a copy left here would be handed over as well.
 		if err := clearSpool(spec.Spool); err != nil {
 			return nil, Started{}, err
 		}
@@ -477,14 +479,17 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		}
 	case "after_turn":
 		if state == "working" {
-			if err := s.agent.afterTurn(s, id, text); err == nil {
-				// An agent with a spool holds it there; one without has handed
-				// it to its own queue. Either way it is tracked for its arrival,
-				// and, as every after-turn send, never pressed again, nor
-				// reported lost on a timer before its turn is over (see
-				// pending.lost). Only Claude's and pi's hand-overs go through
-				// the spool.
-				s.trackHeld(id, text, mode, s.spec.Spool != "")
+			// An agent with a spool holds it there; one without hands it to
+			// its own queue. Either way it is tracked for its arrival before
+			// it is handed over (so an arrival or a sweep of the spool right
+			// after finds it), and, as every after-turn send, never pressed
+			// again, nor reported lost on a timer before its turn is over
+			// (see pending.lost). Only Claude's and pi's hand-overs go
+			// through the spool.
+			s.trackHeld(id, text, mode, s.spec.Spool != "")
+			err := s.agent.afterTurn(s, id, text)
+			if err == nil || !s.untrack(id) {
+				// Handed over, or already confirmed or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
 				// It was being typed when it failed: typing it again
@@ -497,17 +502,35 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown mode %q (queue, interrupt, after_turn)", mode)
 	}
-	if err := s.typeText(text); err != nil {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		// Stopped during the last look or the interrupt's pause: nothing typed.
+		return "", ErrClosed
+	}
+	command := isAgentCommand(text)
+	if !command {
+		// Tracked before it is typed, so an arrival read while Enter goes
+		// is found. An after-turn send typed here (the agent idle, or the
+		// hand-over failed) is held by nothing: it is timed from the
+		// start, never pressed.
+		s.mu.Lock()
+		s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
+		s.mu.Unlock()
+	}
+	if err := s.typeText(text); err != nil && (command || s.untrack(id)) {
+		// Not tracked any more: the caller reports it. (One the
+		// transcript already showed arriving is reported delivered.)
 		return "", &TypingError{err}
 	}
-	if isAgentCommand(text) {
+	if command {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
-	s.track(id, text, mode)
 	switch {
 	case mode == "interrupt" && state == "working":
 		return fmt.Sprintf("interrupted %s and typed the message", label), nil
@@ -612,6 +635,16 @@ func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Unlock()
 }
 
+// untrack stops watching send id, and says whether it was still watched
+// (not yet confirmed or reported).
+func (s *Seat) untrack(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.pending)
+	s.pending = slices.DeleteFunc(s.pending, func(p *pending) bool { return p.id == id })
+	return len(s.pending) < n
+}
+
 // heldGrace is how long after the transcript shows a turn over a message
 // still in the spool counts as left over (the Stop hook had its chance).
 // Tests shorten it.
@@ -711,8 +744,13 @@ func (s *Seat) matchSends(text string, at time.Time) []string {
 	var cands []int
 	for i, p := range s.pending {
 		// Antigravity stamps to the whole second, so its entry for a send
-		// can carry a time up to a second before the send's own.
-		if at.IsZero() || p.restored && !at.Before(p.sentAt.Truncate(time.Second)) {
+		// can carry a time up to a second before the send's own; an entry
+		// stamped finer than that gets no such grace.
+		sent := p.sentAt
+		if at.Nanosecond() == 0 {
+			sent = sent.Truncate(time.Second)
+		}
+		if at.IsZero() || p.restored && !at.Before(sent) {
 			cands = append(cands, i)
 		}
 	}
@@ -794,12 +832,13 @@ type sendView struct {
 // after text left in the input box arrives glued to it, a hook hands over
 // several held messages at once. What one entry may not do is confirm two
 // sends with one place in it. So each confirmed send claims the stretch of
-// the entry it matched, stretches may not overlap, and sends are tried
-// longest first, then oldest first (the longer claims its words before a
-// shorter send that is part of them can). A send the entry shows whole is
-// given its stretch before any send the entry shows only cut short or in
-// part, so a send that arrived word for word is never left for a longer
-// one that merely contains it:
+// the entry it matched, stretches may not overlap, and the longest stretch
+// is given first (a longer send claims its words before a shorter send that
+// is part of them can, and a long send shown cut short keeps its stretch
+// from a short send inside it). Between stretches of one length, a send the
+// entry shows whole comes before one it shows only cut short or in part,
+// then the longer send, then the older, so a send that arrived word for
+// word is never left for a longer one that merely contains it:
 //
 //	pending                         entry                      confirms
 //	"continue", "continue"          "continue"                 the older one
@@ -810,6 +849,7 @@ type sendView struct {
 //	five held messages              the hook's join of them    all five
 //	a, b (a's Enter was lost)       a then b, glued            both
 //	a long send                     its first 200 bytes + "…"  it
+//	"yes", a long "…yesterday…"     the long one cut short     the long one
 //	two long sends, same opening    one of them                that one
 //	anything                        words that are no send     nothing
 //
@@ -829,20 +869,25 @@ func arrivals(pending []sendView, entry string) []int {
 		}
 	}
 	slices.SortStableFunc(order, func(a, b int) int { return len(norms[b]) - len(norms[a]) })
-	var claimed [][2]int
-	var out []int
+	type match struct {
+		i  int
+		sp [2]int
+	}
+	var matches []match
 	for _, whole := range []bool{true, false} {
 		for _, i := range order {
-			if slices.Contains(out, i) {
-				continue
-			}
 			for _, sp := range shows(got, norms[i], whole) {
-				if !overlaps(claimed, sp) {
-					claimed = append(claimed, sp)
-					out = append(out, i)
-					break
-				}
+				matches = append(matches, match{i, sp})
 			}
+		}
+	}
+	slices.SortStableFunc(matches, func(a, b match) int { return (b.sp[1] - b.sp[0]) - (a.sp[1] - a.sp[0]) })
+	var claimed [][2]int
+	var out []int
+	for _, m := range matches {
+		if !slices.Contains(out, m.i) && !overlaps(claimed, m.sp) {
+			claimed = append(claimed, m.sp)
+			out = append(out, m.i)
 		}
 	}
 	slices.Sort(out)
