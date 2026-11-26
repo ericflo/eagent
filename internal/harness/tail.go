@@ -481,12 +481,24 @@ func (r *Runtime) owedTail(who string, alone bool) string {
 		lead = "The"
 	}
 	const tailEnd = "kept for you, so nobody else will answer. Answer now with send_message, or pass it on with relay_forward if it is for %s."
+	// An answer to eagent's question held on beside the message is part of
+	// the same debt (turnEnding.settle): it is named with it.
+	var answers []string
+	for _, ev := range r.st.Events {
+		if ev.Seq < r.turns.owed || ev.Type != event.UserAnswer {
+			continue
+		}
+		var d event.UserAnswerData
+		if ev.Decode(&d) == nil {
+			answers = append(answers, fmt.Sprintf(" They also answered your question at %s (%q), and nothing has been done with the answer: it has reached nobody but you. If %s is waiting on it, give it to %s with relay_send in words it can act on; if the question was only yours, do what the answer calls for.", clock(ev.Time), clipRunes(oneLine(d.Text, 300), 300), who, who))
+		}
+	}
 	if len(list) <= 1 {
 		var k kept
 		if len(list) == 1 {
 			k = list[0]
 		}
-		return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was "+tailEnd, lead, clock(k.at), clipRunes(oneLine(k.text, 300), 300), who)
+		return fmt.Sprintf("%s user wrote to you at %s and has had no answer and seen nothing done about it: %q. It was "+tailEnd, lead, clock(k.at), clipRunes(oneLine(k.text, 300), 300), who) + strings.Join(answers, "")
 	}
 	// Oldest first, as they were written. Past four, the rest are pointed at
 	// by their time rather than quoted: they are in the conversation above,
@@ -502,7 +514,7 @@ func (r *Runtime) owedTail(who string, alone bool) string {
 	if len(later) > 0 {
 		quoted = append(quoted, fmt.Sprintf("and %d more after those, above (at %s)", len(later), strings.Join(later, ", ")))
 	}
-	return fmt.Sprintf("%s user wrote to you more than once and has had no answer and seen nothing done about it: %s. These were "+tailEnd, lead, strings.Join(quoted, "; "), who)
+	return fmt.Sprintf("%s user wrote to you more than once and has had no answer and seen nothing done about it: %s. These were "+tailEnd, lead, strings.Join(quoted, "; "), who) + strings.Join(answers, "")
 }
 
 // threadTail asks about the thread's title and summary.
