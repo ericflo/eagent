@@ -103,6 +103,11 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
 	}
+	if job := r.relays.launch(name); job != nil {
+		// The start under way is another agent's, which this relay hands
+		// over to: it does not start again, so nothing is kept for it.
+		return "", fmt.Errorf("%s is being replaced by %s; change the model once that is up", rel.Who(), relay.AgentLabel(job.spec.Profile.Agent))
+	}
 	if pick == (relayPick{rel.Model, rel.Effort}) {
 		delete(r.relayRepick, name)
 		r.syncRelaySettings()
@@ -117,16 +122,6 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
-	}
-	if r.relays.launch(name) != nil {
-		// A start is under way; the change applies when it is up.
-		if r.relayRepick == nil {
-			r.relayRepick = map[string]relayPick{}
-		}
-		r.relayRepick[name] = pick
-		r.syncRelaySettings()
-		r.publishRelayMeta()
-		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		return "", err
