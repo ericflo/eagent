@@ -418,6 +418,10 @@ func (r *Runtime) attentionTail(fallback string) string {
 			}
 			return who + " is stuck on something on its screen. Read it with relay_screen and clear it with relay_control keys; ask the user only if the choice is really theirs."
 		case event.RelayDelivered:
+			var d event.RelayDeliveredData
+			if ev.Decode(&d) == nil && state.DeliveryOutcome(d) == state.SendNotSent {
+				return "A message to " + who + " did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong."
+			}
 			return "A message to " + who + " could not be confirmed. Look at relay_screen, then send it again or say what is wrong."
 		case event.RelayLimit:
 			return who + "'s usage budget changed. Tell the user if it stops the work or soon will; otherwise hold."

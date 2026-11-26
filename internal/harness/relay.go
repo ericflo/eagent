@@ -1796,6 +1796,15 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	handed := handedOver(r.st)
 	quoted := map[string]bool{}
+	// A user message sent more than once (forwarded again after a send
+	// that did not go) is one instruction: quoted once, and not at all
+	// when a send of it is typed after the brief.
+	quotedSeq := map[int64]bool{}
+	for id := range pending {
+		if d, ok := sendRecord(r.st, id); ok && d.From == "user" && d.Seq > 0 {
+			quotedSeq[d.Seq] = true
+		}
+	}
 	// One pass in record order over every relay in the handover, so the
 	// order is the order the user wrote them and a send moved from one to
 	// the next is quoted once.
@@ -1815,7 +1824,7 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		if d.From != "user" || quoted[d.ID] || pending[d.ID] {
+		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
 			continue
 		}
 		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
@@ -1829,6 +1838,9 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 			continue
 		}
 		quoted[d.ID] = true
+		if d.Seq > 0 {
+			quotedSeq[d.Seq] = true
+		}
 		texts = append(texts, d.Text)
 	}
 	if len(texts) > 12 {

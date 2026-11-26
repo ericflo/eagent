@@ -421,7 +421,10 @@ function chatNode(ev) {
       // A quiet receipt for a message of the user's that went to the agent.
       const sent = S.events.find(e => e.type === 'relay.send' && e.data && e.data.id === d.id && e.data.name === d.name);
       if (!sent || sent.data.from !== 'user') return null;
-      return h('div', {class: 'receipt' + (d.ok ? '' : ' bad')}, d.ok ? `delivered to ${agentWho(d.name)}` : `did not reach ${agentWho(d.name)}` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+      // Only a failure that says nothing was typed is "did not reach"; one
+      // that was typed (or an older record that does not say) may have.
+      const failed = d.outcome === 'not_sent' ? `did not reach ${agentWho(d.name)}` : `not confirmed by ${agentWho(d.name)}`;
+      return h('div', {class: 'receipt' + (d.ok ? '' : ' bad')}, d.ok ? `delivered to ${agentWho(d.name)}` : failed + (d.detail ? ': ' + clip(d.detail, 160) : ''));
     }
     case 'relay.state':
       // A stop on a dialog and an exit are notices; the rest is activity.

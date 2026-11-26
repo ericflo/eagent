@@ -445,8 +445,11 @@ func (t *Terminal) Trace(ev event.Event) {
 		}
 		if d.OK {
 			t.write(t.err, t.dim("  ✓ delivered to "+t.agentName(name))+"\n")
-		} else {
+		} else if d.Outcome == event.DeliveryNotSent {
 			t.write(t.err, t.red("  ✗ ")+t.dim("did not reach "+t.agentName(name)+": "+clip(d.Detail, 160))+"\n")
+		} else {
+			// Typed (or an older record that does not say): it may have.
+			t.write(t.err, t.red("  ✗ ")+t.dim("not confirmed by "+t.agentName(name)+": "+clip(d.Detail, 160))+"\n")
 		}
 		return
 	}
