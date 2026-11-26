@@ -7,38 +7,49 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// Finding 6 of the ninth review, first half: a stop and a message in the
-// inbox at one poll. The stop ends the session; the message is left for
-// the next run, which takes it (it used to be taken by the ending session,
-// whose send was never typed).
-func TestR9InboxWordsAfterAStopAreLeftForTheNextRun(t *testing.T) {
-	rt := r8cNew(t, &fakeUI{})
-	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "stop", From: "web"}); err != nil {
+// Finding 6 of the ninth review: a quit and a message for the running
+// agent in the inbox at one poll. The message is taken by the ending run,
+// in order (an answer still answers its question), but kept for eagent:
+// nothing more is typed once the session is ending, so no send is recorded
+// that the next run would report as perhaps arrived. (Two independent
+// reads proved that leaving it for the next run put it after that run's
+// own words.)
+func TestR9InboxWordsAfterAStopAreKeptNotPassedOn(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("ok")
+	useFakeRelays(t, seat)
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.sess.Close()
+	// A quit (from a script) leaves the agents running, unlike a stop.
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: "/quit"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: "r9 ship the fix", From: "web"}); err != nil {
 		t.Fatal(err)
 	}
 	rt.pollInbox()
-	if !rt.ending {
-		t.Fatalf("the stop was not carried out")
+	if !rt.ending || len(rt.st.ActiveRelays()) != 1 {
+		t.Fatalf("ending %v, %d agents running; want the quit carried out and the agent left running", rt.ending, len(rt.st.ActiveRelays()))
 	}
-	if got := r8cWords(rt, event.UserMessage, "r9 ship the fix"); len(got) != 0 {
-		t.Fatalf("the ending session took the message: %q", got)
+	var msgs []event.UserMessageData
+	for _, ev := range rt.st.Events {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.Text == "r9 ship the fix" {
+			msgs = append(msgs, d)
+		}
+		var sd event.RelaySendData
+		if ev.Type == event.RelaySend && ev.Decode(&sd) == nil && sd.Text == "r9 ship the fix" {
+			t.Fatalf("a send was recorded for the message while the session was ending")
+		}
 	}
-	path := rt.sess.Path
-	if entries, _ := os.ReadDir(InboxDir(path)); len(entries) != 1 {
-		t.Fatalf("inbox after the stop: %v, want the message's file", entries)
+	if len(msgs) != 1 || msgs[0].Held != "the session was ending" {
+		t.Fatalf("the message was recorded as %+v, want once, kept for eagent", msgs)
 	}
-	rt.sess.Close()
-	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt2.sess.Close()
-	rt2.pollInbox()
-	if got := r8cWords(rt2, event.UserMessage, "r9 ship the fix"); len(got) != 1 {
-		t.Fatalf("the next run took the message %d times, want once", len(got))
+	if entries, _ := os.ReadDir(InboxDir(rt.sess.Path)); len(entries) != 0 {
+		t.Fatalf("files left: %v", entries)
 	}
 }
 

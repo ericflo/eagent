@@ -1389,6 +1389,11 @@ func (r *Runtime) routeUserMessage(d event.UserMessageData) (rel *state.Relay, h
 	switch {
 	case d.Route == "eagent":
 		return nil, "the user addressed it to you"
+	case r.ending:
+		// Nothing more is typed once the session is ending: the send
+		// would be recorded and never typed, and the next run would
+		// report it as perhaps arrived. Kept, the next run takes it up.
+		return nil, "the session was ending"
 	case len(active) == 0:
 		return nil, "no agent is running"
 	case len(active) > 1:

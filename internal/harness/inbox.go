@@ -132,12 +132,6 @@ func (r *Runtime) pollInbox() {
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
-		case r.ending:
-			// Words that came after a stop or a quit in this poll: the
-			// ending session would pass them on and close before anything
-			// is typed. They stay for the next run, which takes them as it
-			// takes a file left by a cut.
-			continue
 		default:
 			r.handleInboxFile(msg, id)
 			_ = os.Remove(path)
