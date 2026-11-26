@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/config"
 )
@@ -83,34 +81,33 @@ type Seat struct {
 	done   chan struct{}
 	poll   time.Duration // how often the watcher looks; pollEvery when zero (tests shorten it)
 
-	mu            sync.Mutex
-	inner         string
-	transcript    string
-	launched      time.Time
-	since         time.Time // ignore transcript lines at or before this (reattach)
-	state         string
-	stateAt       time.Time
-	activity      string
-	activityAt    time.Time
-	lastLine      time.Time
-	pending       []*pending
-	turnStart     time.Time
-	turnTools     int
-	turnImages    []string
-	limitMark     float64
-	handled       map[string]time.Time // dialog -> when it was last answered
-	readySince    time.Time            // when the screen first looked ready while starting
-	refollow      bool                 // the agent moved to another transcript: find it again
-	followed      bool                 // ...and where its news begins is decided when it opens
-	sinceKept     time.Time            // since as it was before the move
-	onAt          time.Time            // when the agent was last seen on the session the seat follows
-	dialogUp      string               // the dialog the agent itself reports waiting on
-	dialogPrev    string               // the state to go back to when it ends
-	releasedAt    time.Time            // when the seat last typed a held message
-	heldWaitSince time.Time            // since when a held message waits for the prompt
-	hung          bool                 // blocked because a working agent went quiet, not by a dialog
-	attached      bool                 // reattached: the state is a guess until the transcript's history says
-	closed        bool
+	mu         sync.Mutex
+	inner      string
+	transcript string
+	launched   time.Time
+	since      time.Time // ignore transcript lines at or before this (reattach)
+	state      string
+	stateAt    time.Time
+	activity   string
+	activityAt time.Time
+	lastLine   time.Time
+	pending    []*pending
+	turnStart  time.Time
+	turnTools  int
+	turnImages []string
+	limitMark  float64
+	handled    map[string]time.Time // dialog -> when it was last answered
+	readySince time.Time            // when the screen first looked ready while starting
+	refollow   bool                 // the agent moved to another transcript: find it again
+	followed   bool                 // ...and where its news begins is decided when it opens
+	sinceKept  time.Time            // since as it was before the move
+	onAt       time.Time            // when the agent was last seen on the session the seat follows
+	dialogUp   string               // the dialog the agent itself reports waiting on
+	dialogPrev string               // the state to go back to when it ends
+	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
+	hung       bool                 // blocked because a working agent went quiet, not by a dialog
+	attached   bool                 // reattached: the state is a guess until the transcript's history says
+	closed     bool
 
 	typing sync.Mutex // one message is pasted and entered at a time
 }
@@ -119,7 +116,6 @@ type pending struct {
 	id, text, mode string
 	at             time.Time
 	nudges         int
-	held           bool // waits in the spool for the agent's turn to end; not typed yet
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -270,6 +266,9 @@ func (s *Seat) setState(state, detail string) {
 	if state != "blocked" {
 		s.hung = false
 	}
+	if state != "idle" {
+		s.turnEndAt = time.Time{}
+	}
 	s.mu.Unlock()
 	s.emit(Event{Kind: KindState, State: state, Detail: detail})
 }
@@ -376,7 +375,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
 				// An agent with a spool holds it there; one without has typed
 				// it into its own queue, and it is watched as typed.
-				s.trackHeld(id, text, mode, s.spec.Spool != "")
+				s.track(id, text, mode)
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -491,58 +490,47 @@ func (s *Seat) typeText(text string) error {
 	return s.host.Keys(s.target, "Enter")
 }
 
-func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
-
-func (s *Seat) trackHeld(id, text, mode string, held bool) {
+func (s *Seat) track(id, text, mode string) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
+	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now()})
 	s.mu.Unlock()
 }
 
-// atPrompt says whether the screen shows the agent waiting at its own
-// prompt: ready, not busy, and no dialog (one it reports, or one of its
-// own the seat knows).
-func (s *Seat) atPrompt(screen string) bool {
-	if !s.ready(screen) || s.busy(screen) || s.dialogShowing() {
-		return false
-	}
-	for _, d := range s.agent.dialogs() {
-		if containsAll(screen, d.match) {
-			return false
-		}
-	}
-	return true
-}
+// heldGrace is how long after the transcript shows a turn over a message
+// still in the spool counts as left over (the Stop hook had its chance).
+// Tests shorten it.
+var heldGrace = 5 * time.Second
 
-// spoolWaiting says whether a message waits in spool.
-func spoolWaiting(spool string) bool {
-	entries, _ := os.ReadDir(spool)
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".txt") && !strings.HasPrefix(e.Name(), ".") {
-			return true
-		}
+// reportLeftOvers reports undelivered every message still in the spool
+// heldGrace after the transcript showed the agent's turn over: the Stop
+// hook runs only at a turn's end, so nothing will hand them over now (an
+// interrupt, a message held just as the turn ended, a restart). Each is
+// claimed with the rename the Stop hook uses, so nothing goes twice, and
+// reported in order. Nothing here reads the screen: an idle seen only on
+// the screen (after going quiet) is no turn end, and leaves the spool to
+// the hook.
+func (s *Seat) reportLeftOvers(now time.Time) {
+	if s.spec.Spool == "" {
+		return
 	}
-	return false
-}
-
-// giveUpHeld reports every message still waiting in the spool undelivered
-// and takes it out, so it is neither kept for ever nor typed later into
-// whatever the agent shows by then.
-func (s *Seat) giveUpHeld(waited time.Duration, screen string) {
-	ids := map[string]bool{}
+	s.mu.Lock()
+	over := s.state == "idle" && !s.turnEndAt.IsZero() && now.Sub(s.turnEndAt) >= heldGrace
+	s.mu.Unlock()
+	if !over {
+		return
+	}
+	taken, _ := takeSpool(s.spec.Spool)
 	var order []string
-	for {
-		taken, _ := takeSpool(s.spec.Spool, 0)
-		if len(taken) == 0 {
-			break
+	ids := map[string]bool{}
+	for _, path := range taken {
+		_ = os.Remove(path)
+		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok && !ids[id] {
+			ids[id] = true
+			order = append(order, id)
 		}
-		for _, path := range taken {
-			_ = os.Remove(path)
-			if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok && !ids[id] {
-				ids[id] = true
-				order = append(order, id)
-			}
-		}
+	}
+	if len(order) == 0 {
+		return
 	}
 	s.mu.Lock()
 	keep := s.pending[:0]
@@ -551,17 +539,13 @@ func (s *Seat) giveUpHeld(waited time.Duration, screen string) {
 			keep = append(keep, p)
 		}
 	}
-	s.pending, s.heldWaitSince = keep, time.Time{}
+	s.pending = keep
 	s.mu.Unlock()
-	detail := fmt.Sprintf("held for the end of the turn, but %s stayed away from its prompt for %s, so it was not typed; the screen ends:\n%s", s.agent.Label(), waited.Round(time.Second), lastLines(screen, 8))
+	detail := s.agent.Label() + "'s turn ended before it took this message (for example after an interrupt), so it was not delivered; send it again if it is still wanted"
 	for _, id := range order {
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Detail: detail})
 	}
 }
-
-// heldGiveUp is how long a held message waits, with the agent idle, for its
-// prompt to show before it is reported undelivered. Tests shorten it.
-var heldGiveUp = 10 * time.Minute
 
 // isAgentCommand says whether text is the agent's own command: "/" and a
 // name (letters, digits, "_", "-", ":" for a plugin's namespace), then a
@@ -569,103 +553,6 @@ var heldGiveUp = 10 * time.Minute
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
 
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
-
-// heldGrace is how long an agent stays idle before the seat types what still
-// waits in its spool: long enough for the message an interrupt is followed
-// by to start the next turn first. Tests shorten it.
-var heldGrace = 5 * time.Second
-
-// releaseHeld types the messages still waiting in the spool once the agent
-// has stayed idle for heldGrace: the turn they waited for is over and
-// nothing handed them over. They are then watched as typed messages.
-func (s *Seat) releaseHeld(now time.Time) {
-	if s.spec.Spool == "" {
-		return
-	}
-	s.mu.Lock()
-	// After one it typed, the next waits as long again: the agent has begun
-	// on the first (the seat then sees it working), or a command it typed
-	// has run or opened something the next look sees.
-	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace && now.Sub(s.releasedAt) >= heldGrace
-	s.mu.Unlock()
-	if !idle || !spoolWaiting(s.spec.Spool) {
-		s.mu.Lock()
-		s.heldWaitSince = time.Time{}
-		s.mu.Unlock()
-		return
-	}
-	// The seat types this by its own decision, so it looks first: only at
-	// the agent's own prompt, with nothing busy and no dialog up (a command
-	// it typed may have opened one, as /model opens a picker). Otherwise the
-	// message waits, and is reported once it has waited heldGiveUp; an agent
-	// visibly busy (a long compaction) is working, and does not run that
-	// clock.
-	screen, err := s.host.Capture(s.target, 0)
-	if err == nil && s.busy(screen) {
-		s.mu.Lock()
-		s.heldWaitSince = time.Time{}
-		s.mu.Unlock()
-		return
-	}
-	if err != nil || !s.atPrompt(screen) {
-		s.mu.Lock()
-		if s.heldWaitSince.IsZero() {
-			s.heldWaitSince = now
-		}
-		waited := now.Sub(s.heldWaitSince)
-		s.mu.Unlock()
-		if waited >= heldGiveUp {
-			s.giveUpHeld(waited, screen)
-		}
-		return
-	}
-	s.mu.Lock()
-	s.heldWaitSince = time.Time{}
-	s.mu.Unlock()
-	// One message at a time, each after its own look, in order.
-	taken, texts := takeSpool(s.spec.Spool, 1)
-	if len(taken) == 0 {
-		return
-	}
-	text := strings.Join(texts, "\n\n")
-	if text != "" {
-		if err := s.typeText(text); err != nil {
-			for _, path := range taken {
-				_ = os.Rename(path, strings.TrimSuffix(path, ".taken"))
-			}
-			return
-		}
-	}
-	ids := map[string]bool{}
-	for _, path := range taken {
-		_ = os.Remove(path)
-		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok {
-			ids[id] = true
-		}
-	}
-	// The agent's own command ("/compact") runs rather than being recorded
-	// as a message, so there is no arrival to wait for: typed is delivered.
-	command := isAgentCommand(text)
-	var done []string
-	s.mu.Lock()
-	s.releasedAt = now
-	keep := s.pending[:0]
-	for _, p := range s.pending {
-		if p.held && ids[p.id] {
-			if command {
-				done = append(done, p.id)
-				continue
-			}
-			p.held, p.at = false, time.Now()
-		}
-		keep = append(keep, p)
-	}
-	s.pending = keep
-	s.mu.Unlock()
-	for _, id := range done {
-		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
-	}
-}
 
 // Interrupt stops what the agent is doing (Escape, unless the agent says
 // otherwise).
@@ -861,12 +748,11 @@ func (s *Seat) watch() {
 			}
 		}
 		_, starter := s.agent.(sessionStarter)
-		if pl, ok := s.agent.(poller); ok && (tail != nil || starter || s.spec.Spool != "") {
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
 			// An agent that moves between sessions of its own (pi) is
 			// polled before any transcript is found too: a sighting on the
 			// session it was started on dates a move made before its first
-			// message. So is one with a spool: a message held from before a
-			// restart waits there before the new session has a transcript.
+			// message.
 			pl.poll(s, now)
 		}
 		if dr, ok := s.agent.(dialogReporter); ok {
@@ -954,6 +840,9 @@ func (s *Seat) fold(o obs) {
 		s.mu.Unlock()
 		if !held {
 			s.setState("idle", "")
+			s.mu.Lock()
+			s.turnEndAt = time.Now() // the transcript says the turn is over
+			s.mu.Unlock()
 		}
 	case "limit":
 		if o.exhausted {
@@ -989,7 +878,12 @@ func (s *Seat) foldHistory(o obs) {
 	}
 	state := ""
 	switch o.kind {
-	case "user", "working", "progress", "activity", "image":
+	case "working", "progress", "activity", "image":
+		// A "user" line alone is no turn: Claude records a message queued
+		// while it worked ("enqueue") that way, and the live watcher does
+		// not take it for working either. A real message comes with a
+		// working observation of its own.
+		s.turnEndAt = time.Time{}
 		if s.state == "idle" {
 			state, s.turnStart, s.turnTools, s.turnImages = "working", o.at, 0, nil
 		}
@@ -997,6 +891,7 @@ func (s *Seat) foldHistory(o obs) {
 		if s.state == "working" {
 			state = "idle"
 		}
+		s.turnEndAt = time.Now() // the history says the agent's turn is over
 	}
 	s.mu.Unlock()
 	if state != "" {
@@ -1027,7 +922,7 @@ func (s *Seat) wantsDialogCheck(now time.Time) bool {
 	}
 	if s.state != "working" {
 		for _, p := range s.pending {
-			if !p.held && now.Sub(p.at) > 6*time.Second {
+			if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
 				return true
 			}
 		}
@@ -1063,7 +958,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Lock()
 	var stuck *pending
 	for _, p := range s.pending {
-		if !p.held && now.Sub(p.at) > 6*time.Second {
+		if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
 			stuck = p
 			break
 		}
@@ -1073,11 +968,9 @@ func (s *Seat) checkScreen(now time.Time) {
 		// A message meant for after the turn is pressed only once the agent
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
-		// A message for after the turn is never pressed again (it may sit in
-		// the box because an interrupt put it back), and no Enter goes while
-		// a dialog is up: known ones were answered above, and one the agent
-		// reports holds the seat.
-		if stuck.mode != "after_turn" && stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
+		// No Enter goes while a dialog is up: known ones were answered
+		// above, and one the agent reports holds the seat.
+		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
@@ -1214,21 +1107,16 @@ func (s *Seat) ready(screen string) bool {
 	return s.agent.ready(screen)
 }
 
-// busyLineNearBottom finds the spinner line Claude and Codex draw by their
-// input box while they work ("✻ Thinking… (12s · esc to interrupt)",
-// "• Working (3s • esc to interrupt)"): among the last n lines that are not
-// blank, one that starts with a glyph and says how to interrupt. The same
-// words in the output above, or in a sentence, are not it.
-func busyLineNearBottom(screen string, n int) bool {
-	for _, l := range strings.Split(lastLines(screen, n), "\n") {
-		l = strings.TrimSpace(l)
-		r, _ := utf8.DecodeRuneInString(l)
-		if l != "" && !unicode.IsLetter(r) && !unicode.IsDigit(r) && strings.Contains(strings.ToLower(l), "esc to interrupt") {
-			return true
-		}
-	}
-	return false
-}
+// spinnerLine is the line Claude and Codex draw while they work: a glyph,
+// a few words, and at the end of the line a parenthesis that says how to
+// interrupt ("✻ Thinking… (12s · esc to interrupt)", "• Working (3s • esc
+// to interrupt)"). A sentence or a bullet that quotes the words has more
+// after the parenthesis, or no parenthesis around them.
+var spinnerLine = regexp.MustCompile(`(?im)^\s*[^\w\s"']\s+[^()\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+
+// spinnerShown says whether the screen shows that line, anywhere: the agent
+// redraws it while it works and takes it away when it stops.
+func spinnerShown(screen string) bool { return spinnerLine.MatchString(screen) }
 
 // busyScreen is an agent whose prompt or status line stays on screen while
 // it works (Claude's footer, Antigravity's relay line), and that shows

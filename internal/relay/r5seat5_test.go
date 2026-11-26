@@ -1,47 +1,10 @@
 package relay
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-// Claude is idle at its prompt; its last answer, still on screen, quotes
-// the words of its own busy line (it was working on this very code). The
-// held message left in the spool is typed: the busy line counts only where
-// Claude draws it, by its input box.
-func TestClaudeHeldMessageIsTypedAtAPromptWhoseOutputQuotesTheBusyLine(t *testing.T) {
-	saved, savedGive, savedSettle := heldGrace, heldGiveUp, typeSettle
-	heldGrace, heldGiveUp, typeSettle = 0, 100*time.Millisecond, time.Millisecond
-	t.Cleanup(func() { heldGrace, heldGiveUp, typeSettle = saved, savedGive, savedSettle })
-	spool := filepath.Join(t.TempDir(), "after_turn")
-	screen := "● Done. busy() now reports Claude working while its spinner line\n" +
-		"  says \"esc to interrupt\", so the seat leaves a quiet agent blocked.\n\n" +
-		"> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
-	h := &fakeHost{alive: true, screen: screen}
-	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	s.state = "working"
-	if _, err := s.Send("m1", "then run the tests", "after_turn"); err != nil {
-		t.Fatal(err)
-	}
-	s.state, s.stateAt = "idle", time.Now().Add(-time.Second)
-	t0 := time.Now()
-	s.releaseHeld(t0)
-	s.releaseHeld(t0.Add(heldGiveUp))
-	var lost []string
-	for _, ev := range drain(s.events) {
-		if ev.Kind == KindDelivered && !ev.OK {
-			lost = append(lost, ev.SendID)
-		}
-	}
-	h.mu.Lock()
-	typed := append([]string(nil), h.typed...)
-	h.mu.Unlock()
-	if len(typed) == 0 {
-		t.Fatalf("Claude sat at its prompt and the held message was never typed; reported lost: %v", lost)
-	}
-}
 
 // An Antigravity relay line whose state name is not "idle" (here empty, as
 // before agy reports an agent_state; antigravity.go says the names are not
@@ -72,47 +35,5 @@ func TestAHeldMessageStartingWithADirectoryIsHandedOver(t *testing.T) {
 	RunStopHook(spool, strings.NewReader("{}"), &out)
 	if !strings.Contains(out.String(), "clear the old build outputs") {
 		t.Errorf("the Stop hook did not hand the held message over (said %q); isAgentCommand=%v", out.String(), isAgentCommand(msg))
-	}
-}
-
-// While Claude's busy line shows by its input box (a long compaction), a
-// held message waits without running the ten-minute clock; the clock
-// starts when the screen is neither busy nor at the prompt.
-func TestABusyScreenDoesNotRunTheHeldMessageClock(t *testing.T) {
-	saved, savedGive := heldGrace, heldGiveUp
-	heldGrace, heldGiveUp = 0, 100*time.Millisecond
-	t.Cleanup(func() { heldGrace, heldGiveUp = saved, savedGive })
-	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true, screen: "✻ Compacting conversation… (esc to interrupt)\n\n> \n  ⏵⏵ bypass permissions on"}
-	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	if err := spoolMessage(spool, "m1", "then run the tests"); err != nil {
-		t.Fatal(err)
-	}
-	s.state = "idle"
-	t0 := time.Now()
-	for i := 0; i <= 3; i++ {
-		s.releaseHeld(t0.Add(time.Duration(i) * heldGiveUp))
-	}
-	if evs := drain(s.events); len(evs) != 0 || len(h.typed) != 0 {
-		t.Fatalf("while busy: events %+v, typed %q", evs, h.typed)
-	}
-	h.mu.Lock()
-	h.screen = " Select model\n ❯ 1. Default\n\n Enter to confirm · Esc to exit"
-	h.mu.Unlock()
-	t1 := t0.Add(4 * heldGiveUp)
-	s.releaseHeld(t1)
-	s.releaseHeld(t1.Add(heldGiveUp / 2))
-	if evs := drain(s.events); len(evs) != 0 {
-		t.Fatalf("reported before heldGiveUp away from the prompt: %+v", evs)
-	}
-	s.releaseHeld(t1.Add(heldGiveUp))
-	var lost int
-	for _, ev := range drain(s.events) {
-		if ev.Kind == KindDelivered && !ev.OK {
-			lost++
-		}
-	}
-	if lost != 1 {
-		t.Fatalf("lost %d", lost)
 	}
 }

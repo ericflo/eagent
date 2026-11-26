@@ -10,8 +10,8 @@ import (
 )
 
 // Two held messages that share a long start are handed over together, in
-// one transcript record (the Stop hook, pi's extension and releaseHeld all
-// join them with a blank line). Both arrived, so both are confirmed.
+// one transcript record (the Stop hook and pi's extension both join them
+// with a blank line). Both arrived, so both are confirmed.
 func TestJoinedHeldMessagesWithACommonStartAreBothConfirmed(t *testing.T) {
 	t.Parallel()
 	intro := strings.Repeat("CI failed on main. Read the log below, find the cause and fix it. ", 3)
@@ -68,13 +68,13 @@ func TestAQuietPiInALongToolCallStillTakesMessages(t *testing.T) {
 	}
 }
 
-// A held "/compact" and a held message: the command is typed on its own, so
-// Claude runs it, and the message after it is typed as a message, never as
-// the command's arguments, and is not reported delivered before it arrives.
-func TestAHeldCommandDoesNotSwallowAHeldMessage(t *testing.T) {
-	saved, savedSettle := heldGrace, typeSettle
-	heldGrace, typeSettle = 0, 10*time.Millisecond
-	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
+// A held "/compact" and a held message left over after an interrupt are
+// both reported undelivered; neither is typed, so the message is never
+// taken for the command's arguments.
+func TestLeftOverHeldCommandAndMessageAreReportedNotTyped(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
 	spool := filepath.Join(t.TempDir(), "after_turn")
 	h := &fakeHost{alive: true, screen: "> \n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
@@ -87,63 +87,44 @@ func TestAHeldCommandDoesNotSwallowAHeldMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.fold(obs{kind: "aborted"})
-	s.releaseHeld(time.Now().Add(time.Second))
-	h.mu.Lock()
-	typed := append([]string(nil), h.typed...)
-	h.mu.Unlock()
-	var okIDs []string
+	s.reportLeftOvers(time.Now().Add(time.Second))
+	var lost []string
 	for _, ev := range drain(s.events) {
-		if ev.Kind == KindDelivered && ev.OK {
-			okIDs = append(okIDs, ev.SendID)
+		if ev.Kind == KindDelivered && !ev.OK {
+			lost = append(lost, ev.SendID)
 		}
 	}
-	for _, id := range okIDs {
-		if id == "m1" {
-			for _, p := range typed {
-				if strings.HasPrefix(p, "/compact") && strings.Contains(p, "then run the tests") {
-					t.Fatalf("the message was typed as the command's arguments (%q) and reported delivered (%v)", typed, okIDs)
-				}
-			}
-		}
+	if strings.Join(lost, ",") != "c1,m1" || len(h.typed) != 0 {
+		t.Fatalf("lost %v, typed %q", lost, h.typed)
 	}
 }
 
-// Held messages left in the spool are typed one at a time, in order, each
-// as its own paste after its own look and heldGrace after the one before;
-// a command among them is typed on its own like any other.
-func TestHeldMessagesLeftInTheSpoolAreTypedOneAtATimeInOrder(t *testing.T) {
-	saved, savedSettle := heldGrace, typeSettle
-	heldGrace, typeSettle = 50*time.Millisecond, time.Millisecond
-	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
+// Every left-over is reported, in the order it was held.
+func TestLeftOverHeldMessagesAreReportedInOrder(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
 	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true, screen: claudePromptScreen}
+	h := &fakeHost{alive: true}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	texts := []string{"first", "/compact", "then run the tests", "and report"}
-	for _, text := range texts {
-		if err := spoolMessage(spool, "m", text); err != nil {
+	for _, id := range []string{"a1", "a2", "a3", "a4"} {
+		if err := spoolMessage(spool, id, "text of "+id); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(time.Millisecond)
 	}
-	s.state, s.stateAt = "idle", time.Now().Add(-time.Second)
-	t0 := time.Now()
-	typed := func() string {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return strings.Join(h.typed, "|")
+	s.state = "working"
+	s.fold(obs{kind: "turn"})
+	drain(s.events)
+	s.reportLeftOvers(time.Now().Add(time.Second))
+	var lost []string
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindDelivered && !ev.OK {
+			lost = append(lost, ev.SendID)
+		}
 	}
-	for i := range texts {
-		want := strings.Join(texts[:i+1], "|")
-		at := t0.Add(time.Duration(i) * heldGrace)
-		s.releaseHeld(at)
-		if got := typed(); got != want {
-			t.Fatalf("after release %d typed %q, want %q", i, got, want)
-		}
-		// Within heldGrace of a release nothing more is typed.
-		s.releaseHeld(at.Add(heldGrace / 2))
-		if got := typed(); got != want {
-			t.Fatalf("typed %q within heldGrace of the last release", got)
-		}
+	if strings.Join(lost, ",") != "a1,a2,a3,a4" || len(h.typed) != 0 {
+		t.Fatalf("lost %v, typed %q", lost, h.typed)
 	}
 }
 
