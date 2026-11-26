@@ -133,6 +133,17 @@ func r6Reachable(t *testing.T, s *session, sent []event.Event) {
 	if end := strings.Index(block, "\n\n"); end > 0 {
 		block = block[:end]
 	}
+	// The model reads it as the first thing of the conversation it is
+	// given, not only in the record.
+	opening := ""
+	s.rt.sync(func() {
+		if v := s.rt.st.View(nil); len(v) > 0 {
+			opening = v[0].Text
+		}
+	})
+	if !strings.Contains(opening, unseenHeading) {
+		t.Fatalf("the conversation's opening does not say what was not seen:\n%.2000s", opening)
+	}
 	if !strings.Contains(block, fmt.Sprintf("%d messages", len(sent))) {
 		t.Fatalf("the dossier's note does not say how many messages were not seen:\n%s", block)
 	}

@@ -387,13 +387,11 @@ func (r *Runtime) needsDossier() bool {
 }
 
 // restartFull reports, once the first call after a restart was already too
-// long, that the restart itself is what fills it. On an ordinary route the
-// first call tells: what arrives in the moment after a restart is small
-// beside the limit. On a small route one message can be a good part of the
-// limit, so there the conversation's own opening is measured instead (the
-// system prompt, the tools and the briefing): when that fits, another
-// restart takes in what came after it and does make room. Loop goroutine
-// only.
+// long, that the restart itself is what fills it: no restart can make room
+// (restartHelps). On a route of any size: what arrives in the moment after
+// a restart, or while it is written, can be more than any window holds (a
+// burst of pasted logs, pictures), and another restart sets that aside by
+// place. Loop goroutine only.
 func (r *Runtime) restartFull(limit int) bool {
 	return !restartHelps(r.restartFactsNow(limit))
 }
