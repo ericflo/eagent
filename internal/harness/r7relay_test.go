@@ -269,3 +269,105 @@ func TestARestartWaitsForTheKillOfAnAgentStoppedWhileItStarted(t *testing.T) {
 		t.Fatal("the restart launched while the kill of the agent before it still ran")
 	}
 }
+
+// heldSendSeat is a fake agent whose sends block once they begin until the
+// test gives each its result.
+type heldSendSeat struct {
+	*fakeSeat
+	entered chan string
+	result  chan error
+}
+
+func (s *heldSendSeat) Send(id, text, mode string) (string, error) {
+	s.entered <- id
+	if err := <-s.result; err != nil {
+		return "", err
+	}
+	return "Typed", nil
+}
+
+// typingQueue is the one seat queue running (typing id), read under
+// relays.mu.
+func typingQueue(t *testing.T, rt *Runtime, id string) *sendQueue {
+	t.Helper()
+	rt.relays.mu.Lock()
+	defer rt.relays.mu.Unlock()
+	for _, q := range rt.relays.queues {
+		if q.running {
+			return q
+		}
+	}
+	t.Fatalf("no queue is typing %s", id)
+	return nil
+}
+
+func waitIdle(t *testing.T, q *sendQueue) {
+	t.Helper()
+	select {
+	case <-q.idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send queue never finished")
+	}
+}
+
+func postExit(rt *Runtime) {
+	rt.post(func() {
+		rt.onRelayEvent("codex", relay.Event{Kind: relay.KindState, State: "exited", Detail: "pane gone"})
+	})
+}
+
+// Finding 8, the double report. The agent exits just as typing a send
+// fails: the exit is on the loop's queue before the failure's outcome, and
+// runs after the queue stopped naming the send as typing. The send gets
+// one outcome, not the exit's unconfirmed and then the failure's not_sent.
+func TestASendFailingAsItsAgentExitsHasOneOutcome(t *testing.T) {
+	seat := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
+	useGatedLaunches(t, []relaySeat{seat}, nil)
+	rt := newLaunchRuntime(t)
+	userSays(t, rt, "check the version")
+	var id string
+	select {
+	case id = <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send was never typed")
+	}
+	q := typingQueue(t, rt, id)
+	hold, holding := make(chan struct{}), make(chan struct{})
+	rt.post(func() { close(holding); <-hold })
+	<-holding
+	postExit(rt)
+	seat.result <- relay.ErrClosed
+	waitIdle(t, q) // its outcome is posted, behind the exit
+	close(hold)
+	got := deliveredFor(rt, id)
+	if len(got) != 1 {
+		t.Fatalf("the send has %d outcomes: %+v", len(got), got)
+	}
+}
+
+// Finding 8, the loss. The agent exits while a send is being typed, and
+// the typing then succeeds: the process it went into is gone and nothing
+// will confirm it. It is reported unconfirmed, not left waiting for ever.
+func TestASendTypedAsItsAgentExitsIsNotLeftWaiting(t *testing.T) {
+	seat := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
+	useGatedLaunches(t, []relaySeat{seat}, nil)
+	rt := newLaunchRuntime(t)
+	userSays(t, rt, "check the version")
+	var id string
+	select {
+	case id = <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send was never typed")
+	}
+	q := typingQueue(t, rt, id)
+	postExit(rt)
+	rt.sync(func() {})
+	seat.result <- nil
+	waitIdle(t, q)
+	var outcome state.SendOutcome
+	rt.sync(func() { outcome = rt.st.SendOutcome(id) })
+	got := deliveredFor(rt, id)
+	if len(got) != 1 || outcome != state.SendUnconfirmed {
+		t.Fatalf("outcome %q, %d on the record (%+v); want one unconfirmed", outcome, len(got), got)
+	}
+}

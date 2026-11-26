@@ -342,9 +342,6 @@ type sendQueue struct {
 	movedTo *relayLaunch
 	// idle is closed when the goroutine typing this queue ends.
 	idle chan struct{}
-	// typing is the send being typed now (its failure is reported where
-	// it fails, see settleExited).
-	typing string
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -387,7 +384,6 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		h := q.items[0]
 		q.items = q.items[1:]
-		q.typing = h.id
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
@@ -403,9 +399,6 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 				res.how, res.err = seat.Send(h.id, h.text, h.mode)
 			}
 		}
-		r.relays.mu.Lock()
-		q.typing = ""
-		r.relays.mu.Unlock()
 		// A send typing failed part way may be in the old agent already:
 		// it is reported (unconfirmed), never typed into the new one.
 		var half *relay.TypingError
@@ -464,10 +457,19 @@ func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
 	case h.done != nil:
 		h.done <- res
 	case res.err != nil && !h.barrier:
-		r.post(func() {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: h.id, OK: false, Outcome: sendErrOutcome(res.err), Detail: clipRunes(res.err.Error(), 2000)}))
-		})
+		r.post(func() { r.typingFailed(name, h.id, res.err) })
 	}
+}
+
+// typingFailed records how typing a send failed, unless the record has its
+// outcome already: its agent exited or was restarted while it was typed,
+// and settleExited reported it then. One send, one outcome. Loop goroutine.
+func (r *Runtime) typingFailed(name, id string, err error) {
+	switch r.st.SendOutcome(id) {
+	case state.SendArrived, state.SendUnconfirmed, state.SendNotSent:
+		return
+	}
+	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
 }
 
 // prepareLaunch settles what a start launches. Loop goroutine (or before
@@ -989,7 +991,8 @@ func (r *Runtime) reattachRelays() []string {
 // restarted), and nothing watches for its arrival any more. A send still
 // waiting in the seat's queue to be typed is left out: typing it fails,
 // and that is reported where it fails; so is one the caller names in
-// except. Called where an agent's process ends and its conversation does
+// except. One being typed now is reported here, and its typing's failure
+// is then not recorded (typingFailed). Called where an agent's process ends and its conversation does
 // not: an exit seen live or found at a resume, a restart that cannot
 // start, and a restart that does (before the new start is recorded; also
 // of a relay stopped before). A stop is not one of them (the agent and its
@@ -1008,9 +1011,6 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 		for _, h := range q.items {
 			queued[h.id] = true
-		}
-		if q.typing != "" {
-			queued[q.typing] = true
 		}
 	}
 	r.relays.mu.Unlock()
@@ -1578,7 +1578,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			r.sync(func() {
 				// Under the relay the send is on the record for now: a
 				// switch meanwhile passed it on to the new agent.
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, rel.Name), ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: err.Error()}))
+				r.typingFailed(sendHolder(r.st, id, rel.Name), id, err)
 			})
 			return fmt.Sprintf("Could not send to %s: %v", rel.Who(), err), true
 		}
@@ -1726,7 +1726,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				// On the record like any send that failed: it wakes eagent,
 				// and the new relay stops waiting for its arrival.
 				r.sync(func() {
-					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Outcome: sendErrOutcome(berr), Detail: clipRunes(berr.Error(), 2000)}))
+					r.typingFailed(started, sw.briefID, berr)
 					// It was never told the work: a switch away from it says so.
 					if b, ok := r.relays.briefed[started]; ok && b.ho == sw.handover {
 						b.failed = true
