@@ -65,6 +65,16 @@ func looks(n int) time.Duration { return time.Duration(n) * piLook }
 // quietLooks is how many looks a test waits for something not to happen.
 const quietLooks = 12
 
+// stampAhead is how far ahead a test stamps a turn it writes to a session
+// before the status file names that session. pi stamps a turn after it has
+// left the old session, so the watcher can never have seen it still on the
+// old one after the turn's stamp. A test writes the turn first, and a look
+// between the two writes, should writing take more than the millisecond of
+// grace the seat gives, would date the move after the turn: an order pi
+// never produces. With looks every 25 ms it happened in one run of a few
+// dozen under the race detector on a loaded machine.
+const stampAhead = 100 * time.Millisecond
+
 // piSwitchSeat watches a pi seat whose status file names first (session
 // id "first") and waits until it follows it.
 type piSwitchSeat struct {
@@ -179,7 +189,7 @@ func TestPiSwitchReportsAFastFirstTurn(t *testing.T) {
 			w.until(5*time.Second, innerIs(w.first))
 			second := filepath.Join(w.dir, "second.jsonl")
 			// pi writes the new file and its whole first turn...
-			lines := append([]string{piHeaderLine("second", time.Now()), piModelLine(time.Now())}, piTurnLines("k", "Continue in the replacement session", "Kickoff done.", time.Now())...)
+			lines := append([]string{piHeaderLine("second", time.Now()), piModelLine(time.Now())}, piTurnLines("k", "Continue in the replacement session", "Kickoff done.", time.Now().Add(stampAhead))...)
 			writeLines(t, second, lines...)
 			// ...and the status file names it, before any poll looks.
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: second, SessionID: "second", Settled: 1, SessionEntries: tc.entries})

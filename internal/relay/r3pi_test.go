@@ -107,7 +107,7 @@ func TestFreshPiResumedReportsATurnWrittenBeforeTheFirstLook(t *testing.T) {
 			w := newFreshPiSeat(t)
 			time.Sleep(looks(8))
 			older := olderSession(t, w.dir, time.Now().Add(-3*time.Hour))
-			appendLines(t, older, piTurnLines("n1", "right away", "Fast answer.", time.Now())...)
+			appendLines(t, older, piTurnLines("n1", "right away", "Fast answer.", time.Now().Add(stampAhead))...)
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: older, SessionID: "older", SessionEntries: tc.entries, Settled: 1})
 			got := w.until(5*time.Second, isTurn)
 			if turns := turnsIn(got); len(turns) != 1 || turns[0] != "Fast answer." {
