@@ -103,6 +103,7 @@ type Seat struct {
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
+	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	closed     bool
 }
 
@@ -237,6 +238,9 @@ func (s *Seat) setState(state, detail string) {
 		return
 	}
 	s.state, s.stateAt = state, time.Now()
+	if state != "blocked" {
+		s.hung = false
+	}
 	s.mu.Unlock()
 	s.emit(Event{Kind: KindState, State: state, Detail: detail})
 }
@@ -366,7 +370,7 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		s.mu.Lock()
-		state, closed := s.state, s.closed
+		state, closed, hung := s.state, s.closed, s.hung
 		s.mu.Unlock()
 		if closed {
 			// Nothing watches this seat any more, so its state is stale and
@@ -384,6 +388,11 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 			}
 			continue
 		case "blocked":
+			if hung {
+				// Only quiet for a long time: nothing on screen waits for an
+				// answer, so a message is typed as into a working agent.
+				return "working", nil
+			}
 			return state, errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
 		case "exited":
 			return state, errors.New("the agent has exited")
@@ -781,7 +790,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
-	} else if state == "blocked" && ready && !s.dialogShowing() {
+		s.mu.Lock()
+		s.hung = s.state == "blocked"
+		s.mu.Unlock()
+	} else if state == "blocked" && ready && !s.busy(screen) && !s.dialogShowing() {
 		s.setState("idle", "")
 	}
 }
@@ -815,6 +827,7 @@ func (s *Seat) reportDialog(title string) {
 	}
 	s.dialogUp = title
 	if title != "" {
+		s.hung = false // a dialog holds it now: nothing is typed into it
 		if prev == "" {
 			s.dialogPrev = state
 		}
@@ -875,6 +888,20 @@ func (s *Seat) ready(screen string) bool {
 		}
 	}
 	return s.agent.ready(screen)
+}
+
+// busyScreen is an agent whose prompt or status line stays on screen while
+// it works (Claude's footer, Antigravity's relay line), and that shows
+// something else only while it works.
+type busyScreen interface {
+	busy(screen string) bool
+}
+
+// busy says whether the screen shows the agent working, whatever prompt or
+// status line it also shows.
+func (s *Seat) busy(screen string) bool {
+	b, ok := s.agent.(busyScreen)
+	return ok && b.busy(screen)
 }
 
 // sessionStarter is an agent that can say how many entries a transcript

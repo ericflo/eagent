@@ -33,6 +33,11 @@ func (codexAgent) ready(screen string) bool {
 	return strings.Contains(screen, "Ask Codex to do anything")
 }
 
+// busy: Codex's working line says how to stop it.
+func (codexAgent) busy(screen string) bool {
+	return strings.Contains(strings.ToLower(screen), "esc to interrupt")
+}
+
 func (codexAgent) dialogs() []dialog {
 	return []dialog{
 		// Codex: the default choice is "Trust and continue".

@@ -32,6 +32,10 @@ func (claudeAgent) ready(screen string) bool {
 	return strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "for shortcuts")
 }
 
+// busy: Claude's footer stays while it works; its spinner line says how
+// to stop it.
+func (claudeAgent) busy(screen string) bool { return strings.Contains(screen, "esc to interrupt") }
+
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
 		// Claude Code: the default choice is "No, exit".
