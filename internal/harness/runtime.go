@@ -716,10 +716,14 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 func (r *Runtime) takeRoute(who string, m *modelRoute, at int, client *llm.Client, why string, err error) {
 	next := m.routes[at]
 	r.ui.Log("%s: %s %s (%s); switching to %s", who, m.client.Endpoint, why, shortErr(err), next)
+	moved := !sameRoute(m.client.Endpoint, next)
 	m.at, m.client = at, client
 	// Nothing is known of the new route yet.
 	m.out = outage{}
 	r.flushSilent() // the looks so far were made on the old route
+	if who == event.ActorEagent && moved {
+		r.newModel() // as for a model picked in settings (swapRoute)
+	}
 	r.recordRoute(event.RouteData{
 		Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
 		Reason: "the configured route " + why + ": " + shortErr(err),

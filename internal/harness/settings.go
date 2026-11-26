@@ -262,23 +262,28 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 		r.models[sw.who].out = old.out // the same model at the same address: an outage goes on
 	}
 	if sw.who == event.ActorEagent && moved {
-		// What the old model did belongs to it: its failures and the wait
-		// before the next try (up to an hour), a refusal of the prompt as
-		// too long (which would write the next dossier from the files), the
-		// restarts in a row it needed, and how its provider counts tokens
-		// (recordRoute forgets the first call's size). The new one starts clean and is
-		// tried at the loop's next tick (the poll that applied the change
-		// is followed by one); if it fails too, it backs off on its own
-		// count.
-		t := &r.turns
-		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
-		t.overflowed, t.futileLogged = false, false
-		r.tokenScale = 0
-		r.restartRetried, r.restartRescues = false, 0
+		// The new one starts clean (newModel) and is tried at the loop's
+		// next tick (the poll that applied the change is followed by one).
+		r.newModel()
 	}
 	r.recordRoute(event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),
 	})
 	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.who, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
+}
+
+// newModel forgets, when eagent's calls move to another model or address
+// (a pick in settings, swapRoute; a fallback, takeRoute), what the old model
+// did, which belongs to it: its failures and the wait before the next try
+// (up to an hour), a refusal of the prompt as too long (which would write
+// the next dossier from the files), the restarts in a row it needed, and how
+// its provider counts tokens (recordRoute forgets the first call's size).
+// If the new one fails too, it backs off on its own count. Loop goroutine.
+func (r *Runtime) newModel() {
+	t := &r.turns
+	t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+	t.overflowed, t.futileLogged = false, false
+	r.tokenScale = 0
+	r.restartRetried, r.restartRescues = false, 0
 }
