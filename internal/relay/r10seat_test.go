@@ -162,3 +162,77 @@ func TestR10ARestoredHeldSendTheHookLostAfterTheReattachIsReported(t *testing.T)
 		t.Fatalf("typed %q, pressed %q", h.typed, h.keys)
 	}
 }
+
+// Finding 4: a reattached seat re-reads the transcript's history to learn
+// whether the agent is still in its turn. The turns it re-reads are not
+// news: it says its state once, at the end of the catch-up, and only if it
+// is not the idle it started with. Nothing drains the seat's events here,
+// as nothing does while a resume reattaches, so a state for every turn
+// filled the channel and the watcher never got past the history. A turn
+// after the catch-up is news as before.
+func TestR10AReattachReplaysHistoryQuietlyAndSaysItsStateOnce(t *testing.T) {
+	t.Parallel()
+	since := time.Now().Add(-time.Minute)
+	for i, c := range []struct {
+		turns int
+		open  bool // the history ends inside a turn
+		want  []string
+		live  bool
+	}{
+		{5, false, nil, false},
+		{140, false, nil, true},
+		{140, true, []string{"working"}, false},
+	} {
+		var lines []string
+		for k := 0; k < c.turns; k++ {
+			lines = append(lines, claudeTurnLines(fmt.Sprintf("sort shelf %d", k), "Sorted.", since.Add(-time.Hour+time.Duration(k)*time.Second))...)
+		}
+		if c.open {
+			lines = append(lines, claudeUser(since.Add(-time.Second), "now the last shelf"))
+		}
+		path := filepath.Join(t.TempDir(), "t.jsonl")
+		writeLines(t, path, lines...)
+		// A restored send, so the catch-up can be waited on as it always could.
+		r := Restored{ID: "r1", Text: "count the chairs", Mode: "queue", At: since.Add(-time.Second)}
+		s := attachSeat(Spec{Restore: []Restored{r}}, claudeAgent{}, &fakeHost{alive: true}, fmt.Sprintf("r10-%d", i), "", path, since)
+		s.poll = piLook
+		go s.watch()
+		caught := eventually(func() bool { s.mu.Lock(); defer s.mu.Unlock(); return !s.catchingUp })
+		var states []string
+		for _, ev := range drain(s.events) {
+			if ev.Kind == KindState {
+				states = append(states, ev.State)
+			}
+		}
+		if !caught {
+			s.Close()
+			t.Errorf("%d turns: the watcher never got past the history (%d states said)", c.turns, len(states))
+			continue
+		}
+		if !slices.Equal(states, c.want) {
+			s.Close()
+			t.Errorf("%d turns (open %v): states said %v, want %v", c.turns, c.open, states, c.want)
+			continue
+		}
+		if c.live {
+			appendLines(t, path, claudeTurnLines("one more shelf", "Sorted.", time.Now())...)
+			var turns int
+			states = nil
+			if !eventually(func() bool {
+				for _, ev := range drain(s.events) {
+					switch ev.Kind {
+					case KindState:
+						states = append(states, ev.State)
+					case KindTurn:
+						turns++
+					}
+				}
+				return turns == 1 && len(states) == 2
+			}) || !slices.Equal(states, []string{"working", "idle"}) {
+				s.Close()
+				t.Fatalf("the live turn said states %v, %d turns", states, turns)
+			}
+		}
+		s.Close()
+	}
+}

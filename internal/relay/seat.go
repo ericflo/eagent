@@ -120,7 +120,7 @@ type Seat struct {
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
-	catchingUp bool                 // restored sends wait for the first read to the transcript's end
+	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
 	closed     bool
 
 	typing sync.Mutex // one message is pasted and entered at a time
@@ -269,7 +269,6 @@ func (s *Seat) restore(list []Restored) {
 		}
 		held := mode == "after_turn" && s.spec.Spool != "" && s.spec.Hook != ""
 		s.pending = append(s.pending, &pending{id: r.ID, text: r.Text, mode: mode, at: r.At, held: held, restored: true, dormant: true, sentAt: r.At})
-		s.catchingUp = true
 	}
 }
 
@@ -281,10 +280,13 @@ func (s *Seat) restore(list []Restored) {
 // history or the watcher has seen a turn end after it). Any other, a held
 // one whose file is gone among them, is reported unconfirmed after the
 // wait a live send gets, and is never pressed or typed again.
+//
+// The state the history left the seat in (foldHistory) is said here, once,
+// if it is not the idle the reattached seat started with.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.catchingUp {
+		s.mu.Unlock()
 		return
 	}
 	s.catchingUp = false
@@ -303,6 +305,11 @@ func (s *Seat) caughtUp(now time.Time) {
 			}
 		}
 		p.at, p.lost = now, p.mode == "after_turn"
+	}
+	state := s.state
+	s.mu.Unlock()
+	if state != "idle" {
+		s.emit(Event{Kind: KindState, State: state})
 	}
 }
 
@@ -331,10 +338,10 @@ func (p *pending) timed() bool {
 
 // markAttached starts a reattached seat. The agent may be in the middle of
 // a turn: idle is only what the seat says until the history it re-reads
-// shows whether the last turn ended.
+// shows whether the last turn ended (caughtUp).
 func (s *Seat) markAttached(since time.Time) {
 	s.launched, s.since = since, since
-	s.state, s.attached = "idle", true
+	s.state, s.attached, s.catchingUp = "idle", true, true
 }
 
 func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
@@ -1254,7 +1261,8 @@ func (s *Seat) fold(o obs) {
 
 // foldHistory follows the turns in history a reattached seat re-reads, so
 // it says working when the agent is still in the turn it was in when eagent
-// stopped watching. Nothing is reported but the state.
+// stopped watching. Nothing is reported but the state, and that only once
+// the catch-up is over (caughtUp): a turn in history is no news.
 func (s *Seat) foldHistory(o obs) {
 	s.mu.Lock()
 	if !s.attached {
@@ -1277,6 +1285,12 @@ func (s *Seat) foldHistory(o obs) {
 			state = "idle"
 		}
 		s.turnEndAt = time.Now() // the history says the agent's turn is over
+	}
+	if state != "" && s.catchingUp {
+		// What setState does, but said at the catch-up's end. Between
+		// idle and working there is no hung to clear, and turnEndAt is
+		// set above.
+		s.state, s.stateAt, state = state, time.Now(), ""
 	}
 	s.mu.Unlock()
 	if state != "" {
