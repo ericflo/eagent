@@ -16,12 +16,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/store"
 )
 
-// r9Host resumes as the harness does: the message it is resumed with is
-// recorded in the session's ledger as taken in, files or not.
+// r9Host resumes as the serve does: the message it is resumed with is
+// recorded in the session's ledger as taken in, files or not, and the
+// session is hosted from then on (it runs).
 type r9Host struct {
 	fakeResumeHost
 	t       *testing.T
@@ -30,7 +32,11 @@ type r9Host struct {
 
 func (h *r9Host) Resume(id string, msg PhoneMessage) error {
 	r6Record(h.t, h.project, id, r6Read(msg.ID))
-	return h.fakeResumeHost.Resume(id, msg)
+	_ = h.fakeResumeHost.Resume(id, msg)
+	h.mu.Lock()
+	h.hosted[id] = true
+	h.mu.Unlock()
+	return nil
 }
 
 // r9Front stands in front of an r6Thread fixture: it can fail the file
@@ -185,5 +191,135 @@ func TestAFileTooLargeIsLeftOutOnlyOnceTheSenderIsTold(t *testing.T) {
 	}
 	if !told {
 		t.Fatalf("the sender was not told: %q", fr.posted())
+	}
+}
+
+// r9Running is a running session (its lock held) whose thread has the
+// mirror's first post; keeps says its run keeps the ledger.
+func r9Running(t *testing.T, keeps bool) (project, sid string, sess *store.Session, f *r6Thread, host *r9Host, w *resumeWatcher) {
+	t.Helper()
+	project = t.TempDir()
+	sid = finishedSession(t, project, time.Now().Add(-time.Hour))
+	if keeps {
+		r6Record(t, project, sid, r6Run(), r6Read("start"))
+	}
+	f = newR6Thread(t)
+	f.say(sid, "start", "", time.Now().Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	sess, _, err := store.Open(r6Info(t, project, sid).Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	host = &r9Host{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, t: t, project: project}
+	return project, sid, sess, f, host, f.watcher(project, host, t)
+}
+
+// r9Says is a message the person writes from the app: it lands in the
+// thread and comes on the event stream.
+func r9Says(w *resumeWatcher, f *r6Thread, sid, id, body string) {
+	at := time.Now()
+	f.say(sid, id, body, at, nil)
+	w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: id, Sender: "user", Origin: "session", Body: body, CreatedAt: at})
+}
+
+// r9Ends ends the running session with its last writes, releases its lock,
+// and posts its closing note, the thread's last message from then on.
+func r9Ends(t *testing.T, sess *store.Session, f *r6Thread, sid string, evs ...event.Event) {
+	t.Helper()
+	for _, ev := range append(evs, event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: "done"})) {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = sess.Close()
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "bye", "sender": "system", "origin": "session", "body": "eagent stopped", "created_at": time.Now().Add(time.Second)})
+	f.mu.Unlock()
+}
+
+// Finding 7: a message that reaches a session as it shuts down, which the
+// session does not take in, resumes it once it has stopped, although the
+// thread's last message is then the session's closing note.
+func TestAReplyToAStoppingSessionResumesItOnceItHasStopped(t *testing.T) {
+	_, sid, sess, f, host, w := r9Running(t, true)
+	r9Says(w, f, sid, "m1", "one more thing")
+	if host.calls() != 0 {
+		t.Fatalf("resumed a running session: %#v", host.resumed)
+	}
+	r9Ends(t, sess, f, sid)
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "one more thing" {
+		t.Fatalf("resumed with %#v", host.resumed)
+	}
+}
+
+// Finding 7: the same, but the session took the message in before it
+// stopped: it is not taken again, and nothing is kept for it after.
+func TestAReplyAStoppingSessionTookInIsNotTakenAgain(t *testing.T) {
+	_, sid, sess, f, host, w := r9Running(t, true)
+	r9Says(w, f, sid, "m1", "one more thing")
+	r9Ends(t, sess, f, sid, r6Took("m1", "one more thing"))
+	w.sweep(context.Background())
+	if host.calls() != 0 {
+		t.Fatalf("took the message in twice: %#v", host.resumed)
+	}
+	if len(w.retries.replies) != 0 {
+		t.Fatalf("still kept: %#v", w.retries.replies)
+	}
+}
+
+// Finding 7: several messages to one running session keep one of them;
+// once it has stopped without taking them, it is resumed once, with the
+// first (its poll reads on after it), and nothing is kept after.
+func TestRepliesToARunningSessionKeepOneEntry(t *testing.T) {
+	_, sid, sess, f, host, w := r9Running(t, true)
+	for _, id := range []string{"m1", "m2", "m3"} {
+		r9Says(w, f, sid, id, "message "+id)
+	}
+	w.sweep(context.Background()) // while it runs
+	if len(w.retries.replies) != 1 || w.retries.replies["m3"].msg.ID != "m3" || w.retries.replies["m3"].told {
+		t.Fatalf("kept %#v", w.retries.replies)
+	}
+	if host.calls() != 0 {
+		t.Fatalf("resumed a running session: %#v", host.resumed)
+	}
+	r9Ends(t, sess, f, sid)
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("resumed with %#v", host.resumed)
+	}
+	if len(w.retries.replies) != 0 {
+		t.Fatalf("still kept: %#v", w.retries.replies)
+	}
+}
+
+// A reply kept after a failed resume, the thread told, is left as it is
+// when a message reaches its session while it runs.
+func TestAReplyToARunningSessionLeavesAToldReplyAlone(t *testing.T) {
+	_, sid, _, f, _, w := r9Running(t, true)
+	told := pendingReply{thread: finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, msg: finalechat.Message{ID: "m0", Sender: "user"}, since: time.Now(), told: true}
+	w.retries.replies["m0"] = told
+	r9Says(w, f, sid, "m1", "one more thing")
+	w.sweep(context.Background())
+	if p := w.retries.replies["m0"]; len(w.retries.replies) != 2 || !p.told || p.msg.ID != "m0" || !p.since.Equal(told.since) || w.retries.replies["m1"].told {
+		t.Fatalf("kept %#v", w.retries.replies)
+	}
+}
+
+// A running session whose run does not keep the ledger (an eagent from
+// before it) cannot say afterwards whether it took a message in: nothing is
+// kept for it, as before.
+func TestARunWithoutTheLedgerKeepsNoReply(t *testing.T) {
+	_, sid, sess, f, host, w := r9Running(t, false)
+	r9Says(w, f, sid, "m1", "one more thing")
+	r9Ends(t, sess, f, sid) // it took m1 in without a record of it
+	w.sweep(context.Background())
+	if host.calls() != 0 || len(w.retries.replies) != 0 {
+		t.Fatalf("resumed %#v, kept %#v", host.resumed, w.retries.replies)
 	}
 }
