@@ -347,3 +347,39 @@ func fmtUserTexts(s *session) string {
 	}
 	return b.String()
 }
+
+// Finding 1, the second trigger: a reminder about a message for eagent is
+// cut off by the provider refusing the conversation as too long. The debt
+// is kept, and the next reminder waits for the owed backoff: it is not
+// made again at once after the restart.
+func TestR7ACutReminderWaitsForTheOwedBackoff(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+	defer func() { owedRetryDelays = old }()
+	var sp atomic.Pointer[session]
+	var reminders atomic.Int32
+	brain := func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing(nil)}
+		}
+		if strings.Contains(lastUserText(msgs), owedPhrase) && msgs[len(msgs)-1]["role"] != "tool" {
+			if reminders.Add(1) == 1 {
+				// From here on a reminder waits an hour.
+				sp.Load().rt.sync(func() { owedRetryDelays = []time.Duration{time.Hour, time.Hour, time.Hour} })
+				return reply{status: 400, body: `{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum","type":"invalid_request_error"}}`}
+			}
+		}
+		return hold()
+	}
+	s := startSession(t, "", brain, nil)
+	sp.Store(s)
+	s.settled()
+	s.type_("@e what is Codex up to?")
+	s.waitFor("the reminder", func() bool { return reminders.Load() >= 1 })
+	s.waitFor("the restart", func() bool { return len(s.dossiers()) >= 1 })
+	s.settled()
+	if n := reminders.Load(); n != 1 {
+		t.Fatalf("%d reminders: the one cut off was made again with no wait", n)
+	}
+	s.stop()
+}

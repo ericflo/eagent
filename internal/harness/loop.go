@@ -1122,6 +1122,12 @@ func (r *Runtime) turn(w wake) {
 				r.clearOwed()
 			}
 			r.oweReminder(answerSeq)
+		case keepDebt:
+			if t := &r.turns; t.owed > 0 && t.owedTimer == nil {
+				// The reminder that was cut off is tried again after its
+				// own delay, not at the next tick.
+				r.armOwed(owedRetryDelays[min(max(t.owedTries-1, 0), len(owedRetryDelays)-1)])
+			}
 		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
