@@ -1417,18 +1417,29 @@ func (r *Runtime) turnFailed(err error) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
-		who := "the agent"
-		if active := r.st.ActiveRelays(); len(active) > 0 {
-			who = active[0].Who()
-		}
 		if errors.As(err, &ae) && ae.ContextOverflow() {
+			who := "the agent"
+			if active := r.st.ActiveRelays(); len(active) > 0 {
+				who = active[0].Who()
+			}
 			// Not an outage: the provider refuses the prompt as too long,
 			// and restarting from a dossier did not make it fit.
 			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
 			return
 		}
-		r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", shortErr(err), who, who)})
+		r.recordMessage(r.unreachableNotice(err))
 	}
+}
+
+// unreachableNotice is what the user is told when eagent's model has not
+// answered for a while: automatic, so it is no answer to them. Loop
+// goroutine.
+func (r *Runtime) unreachableNotice(err error) event.MessageData {
+	who := "the agent"
+	if active := r.st.ActiveRelays(); len(active) > 0 {
+		who = active[0].Who()
+	}
+	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", shortErr(err), who, who)}
 }
 
 // stopTimers stops the loop's timers at the end of a run.
