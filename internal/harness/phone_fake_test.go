@@ -44,13 +44,6 @@ type phoneFake struct {
 	features         []string                 // what /me advertises
 	activity         []map[string]any         // bodies of POST …/activity
 	cleared          int                      // DELETE …/activity calls
-	// The status line as the service holds it: what shows, until when,
-	// the seq it was set with, and the watermark of the latest clear.
-	live                *phoneFakeStatus
-	liveSeq, clearedSeq float64
-	// rejectActivity makes every POST …/activity answer applied=false,
-	// as the service does when a newer status is live.
-	rejectActivity bool
 	keys             map[string]string        // client_key -> message id
 	qkeys            map[string]string        // client_key -> question id, whatever its status (as the service keeps it)
 	dupes            int                      // posts answered from a known key
@@ -64,6 +57,13 @@ type phoneFake struct {
 	// service's pin rule: what the user wrote stays, whatever a token sends.
 	title, desc             string
 	titlePinned, descPinned bool
+	// The status line as the service holds it: what shows, until when,
+	// the seq it was set with, and the watermark of the latest clear.
+	live                *phoneFakeStatus
+	liveSeq, clearedSeq float64
+	// rejectActivity makes every POST …/activity answer applied=false,
+	// as the service does when a newer status is live.
+	rejectActivity bool
 }
 
 // threadJSON is the thread as the service returns it. Call with f.mu held.
