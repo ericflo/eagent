@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 
@@ -55,5 +56,45 @@ func TestR11SummarizerRouteWrittenNull(t *testing.T) {
 	}
 	if got.Summarizer.Model != nil || want.Summarizer.Model != nil {
 		t.Fatalf("summarizer route after undo %+v, want %+v\nundo wrote:\n%s", got.Summarizer.Model, want.Summarizer.Model, raw)
+	}
+}
+
+// Finding 19: a fallback the file turned off with null (over a preset that
+// has one) stays off after the undo of a remote edit that gave the route a
+// fallback: the undo loads as the file before it did. (No layer below the
+// file gives a summarizer route a fallback, so there the null and its
+// absence load alike.)
+func TestR11UndoKeepsANullFallbackOff(t *testing.T) {
+	clearRouteEnv(t)
+	for _, c := range []struct{ name, before, route, skip string }{
+		{"main", `{"preset":"openai-high","model":{"fallback":null}}`, "/model", "known, not fixed: the null is an edit of /model/fallback, which is no field of the descriptor, so validation refuses it"},
+		{"summarizer", `{"preset":"openai-high","summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3-flash","api_key_env":"OPENROUTER_API_KEY","fallback":null}}}`, "/summarizer/model", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.skip != "" {
+				t.Skip(c.skip)
+			}
+			project := t.TempDir()
+			writeProjectFile(t, project, c.before)
+			want, err := config.Load(project, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			edits := []control.Edit{
+				{Op: "set", Key: c.route + "/fallback/base_url", Value: "https://openrouter.ai/api/v1"},
+				{Op: "set", Key: c.route + "/fallback/model", Value: "z-ai/glm-5.3"},
+			}
+			raw := r11Undo(t, project, c.before, edits)
+			writeProjectFile(t, project, raw)
+			got, err := config.Load(project, "")
+			if err != nil {
+				t.Fatalf("load after undo: %v\n%s", err, raw)
+			}
+			g, _ := json.Marshal([]any{got.Model, got.Summarizer})
+			w, _ := json.Marshal([]any{want.Model, want.Summarizer})
+			if string(g) != string(w) {
+				t.Fatalf("routes after undo %s\nwant %s\nundo wrote:\n%s", g, w, raw)
+			}
+		})
 	}
 }
