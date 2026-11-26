@@ -127,6 +127,12 @@ func (r *Runtime) startPhone() {
 		}
 	}
 	ledger := integration.ReadPhoneLedger(r.st.Events[:before])
+	// The ledger as this run's first write starts it: with no cursor, what
+	// waited is judged by time, as the reply watcher judges it.
+	started := ledger
+	if before < len(r.st.Events) {
+		started = integration.ReadPhoneLedger(r.st.Events[:before+1])
+	}
 	for card := range integration.ReadPhoneLedger(r.st.Events).Cards {
 		p.taken[card] = true
 	}
@@ -264,6 +270,16 @@ func (r *Runtime) startPhone() {
 			p.cancel()
 			return
 		}
+		// Resumed with no app message and no cursor to read on after (a
+		// record by an eagent without the ledger, or a ledger run cut before
+		// it read the thread): the messages that waited are found by time,
+		// and the poll reads on from just before the earliest of them.
+		waited, waitedPrev := false, ""
+		if resumed && r.opts.PromptPhoneID == "" && !(ledger.Keeps && ledger.Cursor != "") {
+			if _, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); err == nil && found {
+				waited, waitedPrev = true, prev
+			}
+		}
 		p.mu.Lock()
 		p.posted[msg.ID] = true
 		p.lastID = msg.ID
@@ -280,6 +296,11 @@ func (r *Runtime) startPhone() {
 			// while it was stopped are taken now, in order.
 			p.lastID, p.resumedBy, p.fallback = ledger.Cursor, ledger.Cursor, msg.ID
 			p.posted[ledger.Cursor] = true
+		} else if waited {
+			// From the user message listed before the earliest that waited
+			// (from the thread's start when there is none); from the
+			// session's own post if the server does not know that one.
+			p.lastID, p.resumedBy, p.fallback = waitedPrev, waitedPrev, msg.ID
 		}
 		anchor := p.lastID
 		p.threadID = thread.ID
@@ -303,7 +324,7 @@ func (r *Runtime) startPhone() {
 			if err == nil {
 				p.mu.Lock()
 				p.posted[m2.ID] = true
-				if p.resumedBy == "" {
+				if p.resumedBy == "" && !waited {
 					p.lastID = m2.ID
 				}
 				if promptSeq > 0 {
