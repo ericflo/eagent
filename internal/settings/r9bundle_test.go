@@ -87,6 +87,9 @@ func r9Plain(cfg config.Config) config.Config {
 }
 
 func TestR9BundleConfigTakesBundleSavedUnderMain(t *testing.T) {
+	// LoadBundle, the reference, also reads the environment; BundleConfig
+	// does not. CI switches the phone off with EAGENT_FINALECHAT=off.
+	t.Setenv("EAGENT_FINALECHAT", "")
 	s := &Service{Project: t.TempDir()}
 	want := r9OnDisk(t, t.TempDir(), "mine", r9MainBundle)
 	got, err := s.BundleConfig(BundleRequest{Name: "mine", Config: json.RawMessage(r9MainBundle)})
@@ -129,6 +132,9 @@ func TestR9UndoRestoresBundleSavedUnderMain(t *testing.T) {
 }
 
 func TestR9BundleConfigNullsClearAsOnDisk(t *testing.T) {
+	// LoadBundle, the reference, also reads the environment; BundleConfig
+	// does not. CI switches the phone off with EAGENT_FINALECHAT=off.
+	t.Setenv("EAGENT_FINALECHAT", "")
 	cfg := config.Defaults()
 	cfg.Model.ReasoningEffort, cfg.Model.MaxTokens, cfg.Model.ContextTokens = "", 0, 0
 	raw, err := config.BundleBytes("cleared", "", cfg)
@@ -157,6 +163,9 @@ func TestR9BundleConfigNullsClearAsOnDisk(t *testing.T) {
 // A bundle as eagent saves it today gives what it gave before: today's
 // keys decoded over the defaults.
 func TestR9BundleConfigTodaysShapeUnchanged(t *testing.T) {
+	// LoadBundle, the reference, also reads the environment; BundleConfig
+	// does not. CI switches the phone off with EAGENT_FINALECHAT=off.
+	t.Setenv("EAGENT_FINALECHAT", "")
 	cfg := config.Defaults()
 	config.Presets["openai-high"](&cfg)
 	cfg.Preset, cfg.MaxCallsPerTurn, cfg.Model.ReasoningEffort = "openai-high", 50, "high"
