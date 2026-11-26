@@ -1,12 +1,20 @@
 package harness
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // r5AskBrain asks one question, stops the agent, and says "Done." once the
@@ -116,5 +124,108 @@ func TestResumedQuestionWhoseCardWasDismissedIsNotAskedAgain(t *testing.T) {
 		if ev.Type == event.UserAnswer {
 			t.Fatalf("a dismissal recorded an answer: %s", ev.Data)
 		}
+	}
+}
+
+// r5FileServer serves each path's bytes, with no length up front, as a
+// server streaming a file does.
+func r5FileServer(t *testing.T, files map[string][]byte) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ok := files[r.URL.Path]
+		if !ok {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		for len(data) > 0 {
+			n := min(len(data), 1<<20)
+			_, _ = w.Write(data[:n])
+			w.(http.Flusher).Flush()
+			data = data[n:]
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func r5Runtime(t *testing.T) *Runtime {
+	t.Helper()
+	sess, err := store.Create(store.Root(t.TempDir()), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return &Runtime{sess: sess, ctx: context.Background()}
+}
+
+// The service's ids are UUIDv7: their first eight characters are a clock
+// that moves once a minute or so. Two files of one name sent within that
+// minute are two files on disk, each with its own bytes.
+func TestTwoPhoneFilesOfOneNameSentTogetherAreBothKept(t *testing.T) {
+	srv := r5FileServer(t, map[string][]byte{"/f/1": []byte("first"), "/f/2": []byte("second")})
+	client := &finalechat.Client{BaseURL: srv.URL, Token: "fc_test"}
+	r := r5Runtime(t)
+	a, err := r.downloadAttachment(client, finalechat.Attachment{ID: "019abc12-0000-7000-8000-000000000001", Filename: "image.png", URL: "/f/1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.downloadAttachment(client, finalechat.Attachment{ID: "019abc12-0000-7000-8000-000000000002", Filename: "image.png", URL: "/f/2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Path == b.Path {
+		t.Fatalf("both saved at %s", a.Path)
+	}
+	for path, want := range map[string]string{a.Path: "first", b.Path: "second"} {
+		if raw, err := os.ReadFile(path); err != nil || string(raw) != want {
+			t.Fatalf("%s holds %q (%v), want %q", path, raw, err, want)
+		}
+	}
+}
+
+// A file over the limit is refused, never saved cut short.
+func TestPhoneFileOverTheLimitIsRefusedNotSavedCutShort(t *testing.T) {
+	big := bytes.Repeat([]byte("x"), finalechat.MaxAttachmentSize+5)
+	srv := r5FileServer(t, map[string][]byte{"/f/big": big})
+	client := &finalechat.Client{BaseURL: srv.URL, Token: "fc_test"}
+	r := r5Runtime(t)
+	// Size 0: the message did not say, so only the download can tell.
+	_, err := r.downloadAttachment(client, finalechat.Attachment{ID: "019abc12-0000-7000-8000-00000000000b", Filename: "big.bin", URL: "/f/big"})
+	if !errors.Is(err, finalechat.ErrTooLarge) {
+		t.Fatalf("err = %v, want too large", err)
+	}
+	if entries, _ := os.ReadDir(attachmentsDir(r.sess.Path)); len(entries) != 0 {
+		t.Fatalf("left behind %v", entries)
+	}
+}
+
+// The person who sent a file too large to take is told so on the phone,
+// and the words they sent with it still reach the session.
+func TestPhoneIsToldWhenAFileItSentIsTooLarge(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	size := finalechat.MaxAttachmentSize + 5
+	fp.files["big-1"] = phoneFakeFile{name: "clip.mov", contentType: "video/quicktime", data: bytes.Repeat([]byte("x"), size)}
+	g := phoneStart(t, fp, "", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the thread", func() bool { return fp.postCount() >= 1 })
+	fp.userReplyWith("here is the clip", []map[string]any{{"id": "big-1", "kind": "file", "content_type": "video/quicktime", "filename": "clip.mov", "size": size, "url": "/api/v1/attachments/big-1"}})
+	waitFor(t, "the note about the file", func() bool {
+		return len(fp.postsWhere(func(p map[string]any) bool {
+			b, _ := p["body"].(string)
+			return strings.Contains(b, "clip.mov") && strings.Contains(b, "10 MB")
+		})) == 1
+	})
+	waitFor(t, "the words to reach the session", func() bool {
+		for _, ev := range g.events(event.UserMessage) {
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && d.Text == "here is the clip" {
+				return len(d.Attachments) == 0
+			}
+		}
+		return false
+	})
+	if entries, _ := os.ReadDir(attachmentsDir(g.rt.sess.Path)); len(entries) != 0 {
+		t.Fatalf("left behind %v", entries)
 	}
 }

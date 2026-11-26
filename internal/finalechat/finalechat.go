@@ -168,11 +168,16 @@ type File struct {
 	Data        []byte
 }
 
-// Limits mirror the server's.
+// Limits on what eagent sends and takes. The service holds up to 8 files a
+// message, each up to 25 MB; eagent keeps files to 10 MB either way.
 const (
 	MaxAttachments    = 8
 	MaxAttachmentSize = 10 << 20
 )
+
+// ErrTooLarge is a file over MaxAttachmentSize: it is refused whole, never
+// kept cut short.
+var ErrTooLarge = fmt.Errorf("finalechat: the file is over the %d MB limit", MaxAttachmentSize>>20)
 
 // IsAnswer reports whether the message records the answer to a question,
 // and returns that question's id.

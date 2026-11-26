@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -353,5 +354,38 @@ func TestGoneOnlyForFinaleChatsOwnNotFound(t *testing.T) {
 	}
 	if Gone(&Error{Status: 404, Message: "404 page not found"}) || Gone(&Error{Status: 503}) {
 		t.Fatal("a proxy's 404 or an outage is not a deletion")
+	}
+}
+
+// A download over the limit is an error, whether the server says its
+// length up front or not, and never a file cut short without one.
+func TestDownloadOverTheLimitIsRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := bytes.Repeat([]byte("x"), MaxAttachmentSize+1)
+		if r.URL.Path == "/sized" {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			_, _ = w.Write(data)
+			return
+		}
+		_, _ = w.Write(data[:1<<20])
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(data[1<<20:])
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "fc_x"}
+	for _, path := range []string{"/sized", "/streamed"} {
+		var buf bytes.Buffer
+		if _, _, err := c.Download(context.Background(), path, &buf); !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("%s: err = %v after %d bytes, want too large", path, err, buf.Len())
+		}
+	}
+	var buf bytes.Buffer
+	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("y"), MaxAttachmentSize))
+	}))
+	defer exact.Close()
+	c.BaseURL = exact.URL
+	if _, _, err := c.Download(context.Background(), "/f", &buf); err != nil || buf.Len() != MaxAttachmentSize {
+		t.Fatalf("a file of exactly the limit: %d bytes, %v", buf.Len(), err)
 	}
 }
