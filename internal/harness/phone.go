@@ -2,7 +2,9 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -336,11 +338,11 @@ func (r *Runtime) startPhone() {
 			// The message the session was resumed with, as the user wrote it.
 			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
 			if err == nil {
+				// The poll still reads on after the anchor above: a reply
+				// written between that post and this one comes before this
+				// one, which the poll skips as its own.
 				p.mu.Lock()
 				p.posted[m2.ID] = true
-				if p.resumedBy == "" && !waited {
-					p.lastID = m2.ID
-				}
 				if promptSeq > 0 {
 					p.mirror1(promptSeq, m2.ID)
 				}
@@ -802,6 +804,22 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			}
 			p.mu.Unlock()
 		}
+		var refused *finalechat.Error
+		if errors.As(err, &refused) && refused.Status == http.StatusUnprocessableEntity {
+			// The service does not take the card as asked (more choices than
+			// a card holds, say). The question still goes to the phone, as a
+			// message with its choices, and the session waits for the
+			// user's reply in the thread, which is the answer. (A message
+			// does not expire as a card does.)
+			body := text + "\n"
+			for i, o := range options {
+				body += fmt.Sprintf("\n%d. %s", i+1, o)
+			}
+			if m, _, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text")}); perr == nil {
+				p.remember(m.ID)
+				return
+			}
+		}
 		if err != nil {
 			p.mu.Lock()
 			p.gone[qid] = true
@@ -990,7 +1008,17 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 		after := p.lastID
 		p.mu.Unlock()
 		start := time.Now()
-		msgs, _, anchorUnknown, err := p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		var msgs []finalechat.Message
+		var anchorUnknown bool
+		var err error
+		if after == "" {
+			// No message to read on from: the thread from its start, oldest
+			// first. (Asked with no cursor the service lists its newest
+			// page, which passes over what is older.)
+			msgs, err = p.client.MessagesSince(p.ctx, p.ref, time.Time{}, "user", 100)
+		} else {
+			msgs, _, anchorUnknown, err = p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		}
 		p.mu.Lock()
 		resumedBy, fallback := p.resumedBy, p.fallback
 		p.mu.Unlock()

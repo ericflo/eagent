@@ -719,6 +719,43 @@ func (c *Client) MessagesPage(ctx context.Context, ref, after, sender string, wa
 	return out.Messages, out.TimedOut, out.AnchorUnknown, err
 }
 
+// MessagesSince lists the messages written after since, oldest first: the
+// read for a caller that has no message to read on from. (Asked with no
+// cursor at all the service lists the thread's newest page, which is no
+// place to start reading forward from.) The zero time reads from the
+// thread's start.
+func (c *Client) MessagesSince(ctx context.Context, ref string, since time.Time, sender string, limit int) ([]Message, error) {
+	if since.IsZero() {
+		since = time.Unix(0, 0)
+	}
+	return c.window(ctx, ref, url.Values{"after_time": {since.UTC().Format(time.RFC3339Nano)}}, sender, limit)
+}
+
+// MessageBefore is the id of the message listed just before m, "" when m
+// is the first (or the service's answer is not a message older than m, as
+// from one that does not know the request).
+func (c *Client) MessageBefore(ctx context.Context, ref string, m Message, sender string) (string, error) {
+	msgs, err := c.window(ctx, ref, url.Values{"before": {m.ID}}, sender, 1)
+	if err != nil || len(msgs) != 1 || msgs[0].ID == m.ID || msgs[0].CreatedAt.After(m.CreatedAt) {
+		return "", err
+	}
+	return msgs[0].ID, nil
+}
+
+func (c *Client) window(ctx context.Context, ref string, q url.Values, sender string, limit int) ([]Message, error) {
+	var out struct {
+		Messages []Message `json:"messages"`
+	}
+	if sender != "" {
+		q.Set("sender", sender)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	err := c.do(ctx, http.MethodGet, "/api/v1/threads/"+refPath(ref)+"/messages", q, nil, &out, 0)
+	return out.Messages, err
+}
+
 // Patch updates a thread's title, description/summary, agent, archived, or
 // muted state. Description and Summary are aliases: sending either sets
 // both (send both with the same value for older servers that know one name).

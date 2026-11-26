@@ -324,6 +324,9 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 					out = append(out, m)
 				}
 			}
+			if after == "" {
+				out = fakeWindow(out, r.URL.Query())
+			}
 			if len(out) > 0 || wait == 0 || time.Now().After(deadline) {
 				break
 			}
@@ -358,6 +361,14 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}, "created": false})
 				return
 			}
+		}
+		if opts, _ := body["options"].([]any); len(opts) > 20 {
+			// As the service: it takes at most twenty choices.
+			f.asks = append(f.asks, body)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "validation_failed", "message": "At most 20 options are allowed."}})
+			return
 		}
 		q := map[string]any{"id": f.nextID(), "thread_id": "t1", "prompt": body["prompt"], "options": body["options"], "allow_freeform": true, "multi_select": false, "status": "pending", "answer": nil, "meta": body["meta"], "created_at": time.Now().UTC().Format(time.RFC3339Nano), "expires_at": nil}
 		f.questions[q["id"].(string)] = q
