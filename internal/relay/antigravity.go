@@ -91,8 +91,14 @@ func (antigravityAgent) command(p config.RelayProfile, id string, resume bool, h
 	return append(argv, p.Args...)
 }
 
+// afterTurn types the text: agy's native queue delivers it after the
+// running turn. A failure here may come after the paste went in, so the
+// seat must not type it again.
 func (antigravityAgent) afterTurn(s *Seat, _, text string) error {
-	return s.typeText(text) // agy's native queue delivers it after the running turn
+	if err := s.typeText(text); err != nil {
+		return &TypingError{err}
+	}
+	return nil
 }
 
 func antigravityHome() string {

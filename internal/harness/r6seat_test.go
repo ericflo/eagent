@@ -1,0 +1,138 @@
+package harness
+
+import (
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
+)
+
+// stoppedWithSends runs a session whose Claude takes one turn, records two
+// sends it has not confirmed (one typed, one held for the end of a turn)
+// and one it has, and stops eagent with the agent still running. It
+// returns the session's record and the two unconfirmed ids.
+func stoppedWithSends(t *testing.T) (path, project string, model *scripted, open []string) {
+	t.Helper()
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	project = t.TempDir()
+	useFakeRelays(t, newFakeSeat("Working on it."))
+	model = newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	rt, err := New(testConfig(model.srv.URL), Options{Project: project, Prompt: "keep it running", Relay: "claude"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := contextWithCancel()
+	done := make(chan int, 1)
+	go func() { done <- rt.Run(ctx) }()
+	waitFor(t, "the agent's turn", func() bool {
+		n := 0
+		rt.sync(func() { n = rt.st.Relays["claude"].Turns })
+		return n == 1
+	})
+	rt.sync(func() {
+		for _, s := range []struct{ text, mode string }{{"check the version", "queue"}, {"then run the tests", "after_turn"}, {"and push", "queue"}} {
+			id := rt.st.NextRelaySendID()
+			rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: id, From: "eagent", Mode: s.mode, Text: s.text}))
+			if s.text == "and push" {
+				rt.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "claude", ID: id, OK: true}))
+				continue
+			}
+			open = append(open, id)
+		}
+	})
+	cancel()
+	<-done
+	return rt.sess.Path, project, model, open
+}
+
+// captureAttach makes reattaching hand back a fake seat (or fail with err)
+// and keeps the spec each reattach was given.
+func captureAttach(t *testing.T, fail error) func() []relay.Spec {
+	t.Helper()
+	var mu sync.Mutex
+	var specs []relay.Spec
+	old := attachRelay
+	attachRelay = func(spec relay.Spec, host, target, innerID, transcript string, since time.Time) (relaySeat, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		specs = append(specs, spec)
+		if fail != nil {
+			return nil, fail
+		}
+		return newFakeSeat("again"), nil
+	}
+	t.Cleanup(func() { attachRelay = old })
+	return func() []relay.Spec { mu.Lock(); defer mu.Unlock(); return slices.Clone(specs) }
+}
+
+// A resumed session hands the reattached seat the sends its record still
+// waits on, with their words, mode and time, oldest first, so the seat can
+// confirm them from the transcript. A second resume in a row, with nothing
+// confirmed between, hands it the same ones.
+func TestAReattachedAgentIsHandedTheSendsTheRecordStillWaitsOn(t *testing.T) {
+	path, project, model, open := stoppedWithSends(t)
+	specs := captureAttach(t, nil)
+	for round := 1; round <= 2; round++ {
+		rt, err := Resume(testConfig(model.srv.URL), Options{Project: project}, &fakeUI{}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt.sess.Close()
+		got := specs()
+		if len(got) != round {
+			t.Fatalf("round %d: %d reattaches", round, len(got))
+		}
+		r := got[round-1].Restore
+		var ids []string
+		for _, s := range r {
+			ids = append(ids, s.ID)
+		}
+		if !slices.Equal(ids, open) {
+			t.Fatalf("round %d: restored %v, want %v", round, ids, open)
+		}
+		if r[0].Text != "check the version" || r[0].Mode != "queue" || r[1].Text != "then run the tests" || r[1].Mode != "after_turn" || r[0].At.IsZero() || r[1].At.Before(r[0].At) {
+			t.Fatalf("round %d: restored %+v", round, r)
+		}
+	}
+}
+
+// An agent that exited while eagent was down can confirm nothing: what the
+// record still waited on is reported not confirmed, once, and no longer
+// counts as on its way (which held a session with no terminal from its
+// idle check for ever).
+func TestSendsToAnAgentThatExitedWhileEagentWasDownAreSettled(t *testing.T) {
+	path, project, model, open := stoppedWithSends(t)
+	captureAttach(t, errNotRunning)
+	rt, err := Resume(testConfig(model.srv.URL), Options{Project: project}, &fakeUI{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.sess.Close()
+	if n := len(rt.st.Relays["claude"].Undelivered); n != 0 {
+		t.Fatalf("%d sends still wait on an agent that is gone", n)
+	}
+	var failed []string
+	for _, ev := range rt.st.Events {
+		var d event.RelayDeliveredData
+		if ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && !d.OK {
+			failed = append(failed, d.ID)
+			if !strings.Contains(d.Detail, "no longer running") {
+				t.Errorf("detail %q", d.Detail)
+			}
+		}
+	}
+	if !slices.Equal(failed, open) {
+		t.Fatalf("reported %v not confirmed, want %v", failed, open)
+	}
+}
+
+var errNotRunning = errString("not running")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
