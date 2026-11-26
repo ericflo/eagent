@@ -491,6 +491,13 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		}
 	case "after_turn":
 		if state == "working" {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				// Stopped during the last look: nothing held or typed.
+				return "", ErrClosed
+			}
 			// An agent with a spool holds it there; one without hands it to
 			// its own queue. Either way it is tracked for its arrival before
 			// it is handed over (so an arrival or a sweep of the spool right
