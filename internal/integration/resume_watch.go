@@ -145,14 +145,42 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 	})
 }
 
-// consider resumes the message's session when it is one of this project's,
-// nobody is running it, and the message is the user's own from the app.
-func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, m finalechat.Message) {
-	if m.Sender != "user" || m.Origin == "token" || m.Deleted || m.ID == "" {
+// consider resumes the thread's session when it is one of this project's,
+// nobody is running it, and the user wrote to it from the app since it
+// last took a message in. trigger is the message that brought the thread
+// up (from the event stream, or a retry); a sweep passes none. The session
+// is resumed with the earliest message it has not taken in, whatever
+// triggered it (nextPhoneMessage); its poll then takes the rest in order.
+func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message) {
+	if trigger.ID != "" && (trigger.Sender != "user" || trigger.Origin == "token" || trigger.Deleted) {
 		return
 	}
 	sid, ok := strings.CutPrefix(thread.ExternalID, "eagent:")
 	if !ok {
+		return
+	}
+	info, ok := w.session(sid)
+	if !ok {
+		return // not a session of this project
+	}
+	if store.Alive(info.Path) || w.host.Hosted(sid) {
+		w.logf("finalechat: reply to session %s left to its running mirror", sid)
+		return
+	}
+	var held *finalechat.Message
+	if trigger.ID != "" {
+		held = &trigger
+	}
+	m, found, err := nextPhoneMessage(ctx, w.client, info, held)
+	if err != nil {
+		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
+	}
+	if !found {
+		if trigger.ID != "" {
+			w.retries.mu.Lock()
+			delete(w.retries.replies, trigger.ID)
+			w.retries.mu.Unlock()
+		}
 		return
 	}
 	w.mu.Lock()
@@ -178,14 +206,11 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			w.mu.Unlock()
 		}
 	}()
-	info, ok := w.session(sid)
-	if !ok {
-		settled = true
-		return // not a session of this project
-	}
-	if store.Alive(info.Path) || w.host.Hosted(sid) {
-		w.logf("finalechat: reply to session %s left to its running mirror", sid)
-		return
+	if trigger.ID != "" && trigger.ID != m.ID {
+		// The trigger is read by the session's poll, after m.
+		w.retries.mu.Lock()
+		delete(w.retries.replies, trigger.ID)
+		w.retries.mu.Unlock()
 	}
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
@@ -197,10 +222,9 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
-	if msg.Text == "" && len(msg.Attachments) == 0 {
-		settled = true
-		return
-	}
+	// A message whose files were all refused (the person was told) still
+	// resumes the session: it takes the message in, so the ones after it
+	// are read in order instead of waiting behind it for ever.
 	if err := w.host.Resume(sid, msg); err != nil {
 		w.logf("finalechat: could not resume session %s for your reply: %v (will retry)", sid, err)
 		w.retryLater(ctx, thread, m, "eagent could not resume this session for your reply yet: "+err.Error()+". It keeps trying every minute.")
@@ -267,7 +291,9 @@ func (w *resumeWatcher) session(id string) (store.Info, bool) {
 }
 
 // sweep finds threads whose latest message is the user's and newer than the
-// session's last log write: a reply nothing was watching for.
+// session's last log write (less sweepSlack when the record keeps the
+// ledger, which can tell a message it never took in from one it took):
+// a reply nothing was watching for.
 func (w *resumeWatcher) sweep(ctx context.Context) {
 	var page struct {
 		Threads []struct {
@@ -293,51 +319,26 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 			continue
 		}
 		info, ok := w.session(sid)
-		if !ok || !t.LastActivityAt.After(info.Modified) || store.Alive(info.Path) || w.host.Hosted(sid) {
+		if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
 			continue
 		}
-		last, ok, _ := w.lastUserMessage(sweepCtx, t.ExternalID)
-		if !ok || !last.CreatedAt.After(info.Modified) {
+		since := info.Modified
+		if evs, err := store.Read(info.Path); err == nil && ReadPhoneLedger(evs).Keeps {
+			since = since.Add(-sweepSlack)
+		}
+		if !t.LastActivityAt.After(since) {
 			continue
 		}
-		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, last)
+		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
 	}
 }
 
-// lastUserMessage pages through the user's messages in a thread and returns
-// the newest one the user wrote from the app. err says the thread could not
-// be read to the end.
-func (w *resumeWatcher) lastUserMessage(ctx context.Context, external string) (finalechat.Message, bool, error) {
-	var last finalechat.Message
-	found := false
-	after := ""
-	for i := 0; i < 50; i++ {
-		msgs, _, _, err := w.client.MessagesPage(ctx, finalechat.Ref(external), after, "user", 0, 100)
-		if err != nil {
-			return last, found, err
-		}
-		if len(msgs) == 0 {
-			break
-		}
-		for _, m := range msgs {
-			after = m.ID
-			if m.Sender == "user" && m.Origin != "token" && !m.Deleted {
-				last, found = m, true
-			}
-		}
-		if len(msgs) < 100 {
-			break
-		}
-	}
-	return last, found, nil
-}
-
-// PendingReply is the user's newest message in a session's thread when it
-// came after the session last wrote its log: a reply sent while nothing ran
-// the session. A session brought back without it would never see it (its
-// mirror reads on from its own first post), so whoever resumes the session
-// passes it as the prompt, as the reply watcher does. ok is false when
-// there is none, or no phone; err when the thread could not be read.
+// PendingReply is the earliest message in a session's thread that the user
+// sent from the app and the session has not taken in (nextPhoneMessage, as
+// the reply watcher picks it): a reply sent while nothing ran the session.
+// Whoever resumes the session passes it as the prompt; the session's poll
+// reads on after it and takes the rest in order. ok is false when there is
+// none, or no phone; err when the thread could not be read.
 func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMessage, bool, error) {
 	if finalechat.Disabled() {
 		return PhoneMessage{}, false, nil
@@ -346,12 +347,11 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	if err != nil {
 		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
 	}
-	w := &resumeWatcher{project: project, client: client}
-	last, ok, err := w.lastUserMessage(ctx, "eagent:"+info.ID)
+	last, ok, err := nextPhoneMessage(ctx, client, info, nil)
 	if err != nil {
 		return PhoneMessage{}, false, err
 	}
-	if !ok || !last.CreatedAt.After(info.Modified) {
+	if !ok {
 		return PhoneMessage{}, false, nil
 	}
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
@@ -368,7 +368,9 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
-	return msg, msg.Text != "" || len(msg.Attachments) > 0, nil
+	// Also a message whose files were all refused: the session takes it
+	// in, so the ones after it are read in order.
+	return msg, true, nil
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not

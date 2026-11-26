@@ -83,6 +83,13 @@ func TestReplyWatcherTellsThePhoneAFileWasTooLarge(t *testing.T) {
 			_, _ = w.Write([]byte(`{"message":{"id":"n1"},"thread":{"id":"t1"}}`))
 			return
 		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") {
+			// The watcher reads the thread for the earliest message the
+			// session has not taken in; this one lists none besides the
+			// reply that brought it up.
+			_, _ = w.Write([]byte(`{"messages":[]}`))
+			return
+		}
 		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()

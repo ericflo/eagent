@@ -352,6 +352,19 @@ type PhoneAnswerTakenData struct {
 	CardID string `json:"card_id"`
 }
 
+// PhoneRead records that the session took in a message the user sent from
+// the app whose effect carries no phone id of its own (an answer, a
+// command, a reply whose files were all refused), and, when the mirror
+// starts keeping this ledger, the message it reads on from. With the
+// phone_id on user.message it says, after any stop, which app messages
+// the session has taken in: a resume goes on after the newest of them.
+const PhoneRead = "phone.read"
+
+// PhoneReadData names the app message taken in.
+type PhoneReadData struct {
+	MessageID string `json:"message_id"`
+}
+
 // PhoneMirrorData records which thread message shows a user message the
 // user wrote at the terminal or in the web UI, so a later run can keep the
 // receipt under it (a message from the phone carries its own id).
