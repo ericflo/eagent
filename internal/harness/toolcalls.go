@@ -256,7 +256,10 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			r.armSchedule(id, next)
 		})
 		tc.handle()
-		return fmt.Sprintf("timer %s set (%s); it first comes due at %s", id, s.Kind, next.In(r.st.Location()).Format("15:04:05")), false, false
+		// The timer's id and the time it comes due are in the result, and
+		// nothing else would wake eagent to tell the user (as for
+		// relay_start below).
+		return fmt.Sprintf("timer %s set (%s); it first comes due at %s", id, s.Kind, next.In(r.st.Location()).Format("15:04:05")), false, true
 
 	case tools.CancelSchedule:
 		id := str("schedule")
@@ -278,7 +281,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		if !bad {
 			tc.handle()
 		}
-		return msg, bad, bad
+		return msg, bad, true
 	}
 	// The rest drive the agent.
 	var before int64
