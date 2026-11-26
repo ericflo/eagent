@@ -162,7 +162,7 @@ func takeSpool(spool string, command bool) (taken, texts []string) {
 			continue // another taker got it
 		}
 		text := strings.TrimSpace(string(raw))
-		isCommand := strings.HasPrefix(text, "/")
+		isCommand := isAgentCommand(text)
 		if isCommand && (len(taken) > 0 || !command) {
 			break
 		}

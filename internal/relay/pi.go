@@ -372,7 +372,7 @@ func (piAgent) ready(screen string) bool {
 // reports its dialogs there too, so a working pi shows none.
 func (piAgent) reportedWorking(s *Seat) bool {
 	st, ok := readPiStatus(s.spec.StatusFile)
-	return ok && st.State == "working"
+	return ok && st.State == "working" && strings.TrimSpace(st.Prompt) == ""
 }
 
 // reportedReady is what the extension's status file says: idle with no
