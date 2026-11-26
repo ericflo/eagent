@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -194,13 +195,16 @@ func (s *State) applyRelay(ev event.Event) {
 			if h := s.relayHolders[d.Name]; len(h) > 0 {
 				h[len(h)-1] = r
 			}
+			s.keepHeld(r, prev)
 		case prev != nil:
 			// A new agent under the name of one that was stopped (a switch
 			// back, a new start) is a new conversation. Only the usage
-			// budget, which is the agent account's, carries over.
+			// budget, which is the agent account's, carries over, and the
+			// sends held for this start.
 			r.Limit = prev.Limit
 			r.PrevEnded = prev.StateSince
 			s.relayHolders[d.Name] = append(s.relayHolders[d.Name], r)
+			s.keepHeld(r, prev)
 		default:
 			s.RelayOrder = append(s.RelayOrder, d.Name)
 			s.relayHolders[d.Name] = append(s.relayHolders[d.Name], r)
@@ -290,6 +294,33 @@ func (s *State) applyRelay(ev event.Event) {
 	case event.RelayState:
 		if r.State == "blocked" || r.State == "exited" {
 			s.lastMoveSeq = ev.Seq
+		}
+	}
+}
+
+// keepHeld keeps r, a new start of prev's name, waiting on the sends held
+// for it. A restart of a relay not stopped keeps all prev waits on (the
+// harness settles the rest before the start); after a stop, only what was
+// sent to the name since, in this run.
+func (s *State) keepHeld(r, prev *Relay) {
+	if !prev.Ended {
+		maps.Copy(r.Undelivered, prev.Undelivered)
+		return
+	}
+	for i := len(s.Events) - 1; i >= 0 && len(prev.Undelivered) > 0; i-- {
+		ev := s.Events[i]
+		if ev.Type == event.SessionResume {
+			return
+		}
+		var d event.RelaySendData
+		if ev.Type != event.RelaySend && ev.Type != event.RelayEnd || ev.Decode(&d) != nil || d.Name != r.Name {
+			continue
+		}
+		if ev.Type == event.RelayEnd {
+			return
+		}
+		if text, ok := prev.Undelivered[d.ID]; ok {
+			r.Undelivered[d.ID] = text
 		}
 	}
 }
