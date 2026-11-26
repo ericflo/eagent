@@ -675,11 +675,12 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
-	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil && rel.Active() {
-		// A restart: what was typed into the process that was just
-		// stopped and not yet confirmed has nobody to confirm it, and the
-		// new start begins with nothing waited on. What is held for this
-		// start is typed below, by the new seat.
+	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil {
+		// A restart (of a running relay or of a stopped one): what was
+		// typed into the process that was stopped and not yet confirmed
+		// has nobody to confirm it, and the new start begins with nothing
+		// waited on. What is held for this start is typed below, by the
+		// new seat.
 		var waiting []string
 		for _, h := range held {
 			waiting = append(waiting, h.id)
@@ -975,8 +976,9 @@ func (r *Runtime) reattachRelays() []string {
 // and that is reported where it fails; so is one the caller names in
 // except. Called where an agent's process ends and its conversation does
 // not: an exit seen live or found at a resume, a restart that cannot
-// start, and a restart that does (before the new start is recorded). A
-// stop is not one of them (the agent and its work are ended on purpose),
+// start, and a restart that does (before the new start is recorded; also
+// of a relay stopped before). A stop is not one of them (the agent and its
+// work are ended on purpose),
 // nor is a switch to another agent: its hand-over brief carries what the
 // old agent was sent. Loop goroutine (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
@@ -998,7 +1000,10 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	}
 	r.relays.mu.Unlock()
 	how := "exited"
-	if rel.State != "exited" {
+	switch {
+	case rel.Ended:
+		how = "was stopped"
+	case rel.State != "exited":
 		how = "was restarted"
 	}
 	for _, s := range unresolvedSends(r.st, rel) {
@@ -2379,6 +2384,9 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 		return false
 	}
 	for _, id := range ids {
+		if st.SendOutcome(id) == state.SendNotSent {
+			continue // it certainly did not go: it says nothing of where the message went
+		}
 		if _, moved := movedOn[id]; moved || st.SendOutcome(id) != state.SendArrived {
 			return false
 		}
