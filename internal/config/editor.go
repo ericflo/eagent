@@ -124,6 +124,16 @@ func Resolve(project, preset, bundle string) Resolution {
 			}
 		}
 	}
+	// Then the saved configuration a session would load with no name
+	// given, in LoadBundle's order, so what is shown is what runs.
+	if bundle == "" {
+		bundle = os.Getenv("EAGENT_CONFIG")
+	}
+	if bundle == "" && fileMap != nil {
+		if raw, ok := fileMap["default_config"]; ok {
+			_ = json.Unmarshal(raw, &bundle)
+		}
+	}
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
 		if canon, isPreset := ResolvePreset(bundle); isPreset {
@@ -531,6 +541,15 @@ func spelled(cfg Config) map[string]json.RawMessage {
 	if _, ok := m["persona"]; !ok {
 		m["persona"] = json.RawMessage(`""`)
 	}
+	// No default agent is spelled too, or the layer below names one.
+	relay := object(m["relay"])
+	if relay == nil {
+		relay = map[string]json.RawMessage{}
+	}
+	if _, ok := relay["default"]; !ok {
+		relay["default"] = json.RawMessage(`""`)
+	}
+	m["relay"], _ = json.Marshal(relay)
 	return m
 }
 
@@ -576,9 +595,28 @@ func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
 	_ = json.Unmarshal(want, &w)
 	out := map[string]json.RawMessage{}
 	for k, v := range w {
-		if hv, ok := h[k]; !ok || !bytes.Equal(canon(hv), canon(v)) {
-			out[k] = v
+		hv, ok := h[k]
+		if ok && bytes.Equal(canon(hv), canon(v)) {
+			continue
 		}
+		// A route inside (a fallback, the summarizer's model) loads field
+		// by field over the one below, so it is written as its own diff:
+		// a field it no longer has becomes null instead of being refilled
+		// from below.
+		if ok && object(hv) != nil && object(v) != nil {
+			sub := diffObjects(hv, v)
+			if _, changed := sub["model"]; changed {
+				// As for the main route: a new model takes the window shown.
+				if _, named := sub["context_tokens"]; !named {
+					if cw := object(v)["context_tokens"]; cw != nil {
+						sub["context_tokens"] = cw
+					}
+				}
+			}
+			out[k], _ = json.Marshal(sub)
+			continue
+		}
+		out[k] = v
 	}
 	for k := range h {
 		if _, ok := w[k]; !ok {
@@ -645,6 +683,10 @@ func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 		return res, &ErrConflict{Current: res.Previous, ETag: res.PrevETag}
 	}
 	existing, _ = MigrateLegacy(existing)
+	if existing == nil {
+		// A file holding null loads as no file; a save starts it afresh.
+		existing = map[string]json.RawMessage{}
+	}
 	for k, v := range edits {
 		if k == "relay" {
 			v = mergeRelay(existing[k], v)
@@ -694,6 +736,10 @@ func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) 
 	m := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return res, fmt.Errorf("not valid JSON: %v", err)
+	}
+	if m == nil {
+		// null decodes into a map without an error, as no map at all.
+		return res, fmt.Errorf("the configuration must be a JSON object, not null")
 	}
 	out := []byte(raw)
 	if !strings.HasSuffix(raw, "\n") {

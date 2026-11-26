@@ -21,6 +21,8 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // The configuration API behind the web editor. Every mutating route is
@@ -204,11 +206,24 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	v.Files["config"] = config.File(s.Project)
 	v.Files["bundles"] = config.BundlesDir(s.Project)
 	v.Files["prompts"] = prompts.Dir(s.Project)
+	// The models come from each session's record, not its live state: that
+	// state belongs to the session's loop, which changes it without a lock,
+	// and reading its maps from here can crash the whole server.
 	s.mu.Lock()
-	for id, h := range s.running {
-		v.Running = append(v.Running, runningView{ID: id, Models: h.rt.State().Models})
+	ids := make([]string, 0, len(s.running))
+	for id := range s.running {
+		ids = append(ids, id)
 	}
 	s.mu.Unlock()
+	for _, id := range ids {
+		models := map[string]string{}
+		if info, err := s.resolve(id); err == nil && info.ID == id {
+			if evs, err := store.Read(info.Path); err == nil {
+				models = state.Replay(evs).Models
+			}
+		}
+		v.Running = append(v.Running, runningView{ID: id, Models: models})
+	}
 	sort.Slice(v.Running, func(i, j int) bool { return v.Running[i].ID < v.Running[j].ID })
 	if v.Bundles == nil {
 		v.Bundles = []bundleView{}
@@ -340,6 +355,10 @@ func (s *Server) loadChecks() map[string]checkRecord {
 	raw, err := os.ReadFile(s.checksPath())
 	if err == nil {
 		_ = json.Unmarshal(raw, &out)
+	}
+	if out == nil {
+		// A file holding null; recordCheck writes into what this returns.
+		out = map[string]checkRecord{}
 	}
 	return out
 }

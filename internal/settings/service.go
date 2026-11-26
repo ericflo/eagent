@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/config"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -204,10 +205,14 @@ type EnvField struct {
 }
 
 type Result struct {
-	Saved      config.SaveResult `json:"saved"`
-	Shadowed   []EnvField        `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
-	Skipped    []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
-	Kept       []EnvField        `json:"kept_from_file,omitempty"`  // pinned fields whose saved value was carried over unchanged
+	Saved    config.SaveResult `json:"saved"`
+	Shadowed []EnvField        `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
+	Skipped  []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
+	Kept     []EnvField        `json:"kept_from_file,omitempty"`  // pinned fields whose saved value was carried over unchanged
+	// Bundled are fields not written because the saved configuration in
+	// force (named, or the file's default_config) sets them over the file;
+	// Env holds "bundle:NAME".
+	Bundled    []EnvField        `json:"skipped_by_bundle,omitempty"`
 	Resolution config.Resolution `json:"resolution"`
 }
 
@@ -273,7 +278,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// the editor's value for them is not written. Whatever the file already
 	// says for such a field is carried over unchanged: it is what will apply
 	// once the variable is unset, and a save of something else must not lose it.
-	var shadowed, skipped, kept []EnvField
+	var shadowed, skipped, kept, bundled []EnvField
 	env := config.EnvOverrides()
 	// A route's window follows the model a variable names, so it is that
 	// variable's too: the window of the environment's model is not written.
@@ -284,7 +289,24 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 			}
 		}
 	}
-	if len(env) > 0 && !b.AllowShadow {
+	// The saved configuration in force is laid over the file, so what it
+	// sets reaches the editor as the effective value; written back, it
+	// would end up in config.json too. Those fields keep what the file
+	// says, as the environment's do.
+	fromBundle := map[string]string{}
+	for ptr, src := range config.Resolve(s.Project, s.Preset, s.Bundle).Sources {
+		if strings.HasPrefix(src, "bundle:") && !slices.Contains([]string{"/name", "/description", "/preset", "/default_config"}, ptr) {
+			fromBundle[ptr] = src
+		}
+	}
+	if len(env) > 0 && b.AllowShadow {
+		for ptr, v := range env {
+			shadowed = append(shadowed, EnvField{ptr, v})
+		}
+		sort.Slice(shadowed, func(i, j int) bool { return shadowed[i].Pointer < shadowed[j].Pointer })
+		env = map[string]string{}
+	}
+	if len(env) > 0 || len(fromBundle) > 0 {
 		onDisk := map[string]json.RawMessage{}
 		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
 			_ = json.Unmarshal(raw, &onDisk)
@@ -307,8 +329,10 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 				env["/summarizer/model"] = name
 			}
 		}
+		over := maps.Clone(fromBundle)
+		maps.Copy(over, env)
 		var ptrs []string
-		for ptr := range env {
+		for ptr := range over {
 			ptrs = append(ptrs, ptr)
 		}
 		sort.Strings(ptrs)
@@ -342,18 +366,18 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 					edits[segs[0]], _ = json.Marshal(obj)
 				}
 			}
+			_, isEnv := env[ptr]
 			switch {
+			case !isEnv:
+				if touched && !fileHas {
+					bundled = append(bundled, EnvField{ptr, over[ptr]})
+				}
 			case fileHas:
 				kept = append(kept, EnvField{ptr, env[ptr]})
 			case touched:
 				skipped = append(skipped, EnvField{ptr, env[ptr]})
 			}
 		}
-	} else if len(env) > 0 {
-		for ptr, v := range env {
-			shadowed = append(shadowed, EnvField{ptr, v})
-		}
-		sort.Slice(shadowed, func(i, j int) bool { return shadowed[i].Pointer < shadowed[j].Pointer })
 	}
 	ifMatch := ""
 	if b.IfMatch != nil {
@@ -364,7 +388,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)}, nil
+	return Result{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Bundled: bundled, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)}, nil
 }
 
 // pointerIn reads a pointer, split into its segments, out of a raw JSON
@@ -428,6 +452,9 @@ func (s *Service) SaveRaw(ctx context.Context, b RawRequest) (Result, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(b.Raw), &probe); err != nil {
 		return Result{}, &Error{Status: 422, Message: "not valid JSON: " + err.Error()}
+	}
+	if probe == nil {
+		return Result{}, &Error{Status: 422, Message: "the configuration must be a JSON object, not null"}
 	}
 	// Check the routes as they will load: keys of eagent's earlier design
 	// are carried over first.
