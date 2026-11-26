@@ -1659,7 +1659,7 @@ func (r *Runtime) dossierFactsWith(covers int64, opens string, lim factLimits) s
 			if !ap.Decide {
 				decide = "its questions go to the user"
 			}
-			fmt.Fprintf(&b, "  Autopilot is on %s (%s). The standing order: %s\n", autopilotUntil(*ap), decide, clipRunes(ap.Instruction, 600))
+			fmt.Fprintf(&b, "  Autopilot is on %s (%s). The standing order: %s\n", r.autopilotUntil(*ap), decide, clipRunes(ap.Instruction, 600))
 		}
 		if rel.Limit != nil {
 			fmt.Fprintf(&b, "  Usage: %s\n", limitLine(rel.Who(), *rel.Limit))

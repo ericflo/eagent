@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/clientcaps"
+	"github.com/ericflo/eagent/internal/event"
 )
 
 // "Until 10:00" is the next 10:00 on the user's clock. When today's 10:00
@@ -99,5 +102,50 @@ func TestASwitchBackKeepsWhatTheUserToldTheAgentInBetween(t *testing.T) {
 	i, j := strings.Index(brief, r4Task), strings.Index(brief, between)
 	if i < 0 || j < 0 || j < i {
 		t.Errorf("pi's brief does not quote the task and then what the user told Claude:\n%s", brief)
+	}
+}
+
+// A deadline read in the user's zone is said on their clock, with the zone
+// named, wherever it is written from then on: the tool's reply, the agent's
+// status and the notice when the autopilot ends.
+func TestAnAutopilotDeadlineIsSaidOnTheUsersClock(t *testing.T) {
+	zone := "Asia/Manila"
+	if time.Local.String() == zone {
+		zone = "America/Los_Angeles"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Skip(err)
+	}
+	setFor(t, &autopilotEndFloor, 10*time.Millisecond)
+	useFakeRelays(t, newFakeSeat("one"))
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "keep it going a bit", Source: "finalechat", Held: "eagent", Client: &clientcaps.Caps{Source: "finalechat", Timezone: zone}}))
+	})
+	out := relayToolNamed(t, rt, "relay_autopilot", map[string]any{"until": "1s"})
+	var until time.Time
+	rt.sync(func() { until, _ = time.Parse(time.RFC3339, rt.st.Relays["codex"].Autopilot.Until) })
+	want := until.In(loc).Format("Mon 15:04") + " " + zone + " time"
+	if !strings.Contains(out, want) {
+		t.Errorf("the tool's reply does not say %q: %s", want, out)
+	}
+	if status := relayToolNamed(t, rt, "relay_status", nil); !strings.Contains(status, want) {
+		t.Errorf("the status does not say %q: %s", want, status)
+	}
+	var notice string
+	waitFor(t, "the autopilot's end", func() bool {
+		rt.sync(func() {
+			for _, ev := range rt.st.Events {
+				var d event.HarnessMessageData
+				if ev.Type == event.HarnessMessage && ev.Decode(&d) == nil && strings.Contains(d.Text, "ended: it was set to run until") {
+					notice = d.Text
+				}
+			}
+		})
+		return notice != ""
+	})
+	if !strings.Contains(notice, want) {
+		t.Errorf("the end notice does not say %q: %s", want, notice)
 	}
 }

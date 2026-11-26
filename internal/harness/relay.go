@@ -1686,26 +1686,19 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					d.Instruction = "Keep going: pick the next most valuable thing toward what the user asked, do it, commit, and continue."
 				}
 				d.Decide = str("decide") != "false"
-				until := autopilotUntil
 				if u := strings.TrimSpace(str("until")); u != "" {
-					// The deadline is the user's: read where they are.
-					loc := r.userZone()
-					t, perr := parseUntil(u, time.Now().In(loc))
+					// The deadline is the user's: read where they are. It is
+					// kept with that zone's offset, so it is said on their clock.
+					t, perr := parseUntil(u, time.Now().In(r.userZone()))
 					if perr != nil {
 						err = perr
 						return
 					}
 					d.Until = t.Format(time.RFC3339)
-					if t.In(loc).Format("Mon 15:04") != t.Local().Format("Mon 15:04") {
-						// Said as the user gave it, with where that is.
-						until = func(event.RelayAutopilotData) string {
-							return "until " + t.In(loc).Format("Mon 15:04") + " " + loc.String() + " time"
-						}
-					}
 				}
-				out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
+				out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
 				if !d.Decide {
-					out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
+					out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
 				}
 				out += "."
 			}
@@ -1950,11 +1943,30 @@ func (r *Runtime) userZone() *time.Location {
 	return r.st.Location()
 }
 
-func autopilotUntil(d event.RelayAutopilotData) string {
+// autopilotUntil says an autopilot's deadline for what is written from now
+// on (tool replies, notices, status, a new dossier). How a relay.autopilot
+// already on the record renders in the conversation is state's, unchanged.
+func (r *Runtime) autopilotUntil(d event.RelayAutopilotData) string {
 	if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
-		return "until " + t.Local().Format("Mon 15:04")
+		return "until " + r.clockAt(t)
 	}
 	return "until the user says stop"
+}
+
+// clockAt says a deadline on the clock of the zone it was given in (its
+// offset: the user's, for one read where they are), naming that zone when
+// the machine's clock reads otherwise: the model passes it on to a user who
+// may be elsewhere.
+func (r *Runtime) clockAt(t time.Time) string {
+	given, local := t.Format("Mon 15:04"), t.Local().Format("Mon 15:04")
+	if given == local {
+		return local
+	}
+	name := "UTC" + t.Format("-07:00")
+	if loc := r.userZone(); t.In(loc).Format("Mon 15:04") == given {
+		name = loc.String()
+	}
+	return given + " " + name + " time"
 }
 
 // autopilotCheckAfter is how long an agent on autopilot may sit idle, with
@@ -2038,7 +2050,7 @@ func (r *Runtime) armAutopilots() {
 					return
 				}
 				r.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: name, Off: true}))
-				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), until.Local().Format("Mon 15:04"))}))
+				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), r.clockAt(until))}))
 			})
 		})
 	}
@@ -2201,7 +2213,7 @@ func (r *Runtime) relayStatusText(name, lead string) string {
 			b.WriteString("\nUsage: " + limitLine(rel.Who(), *rel.Limit))
 		}
 		if ap := rel.Autopilot; ap != nil {
-			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
+			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", r.autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
 		}
 		if sent := userSends(r.st, rel.Name, 8); len(sent) > 0 {
 			b.WriteString("\nWhat the user sent it, newest last:")
