@@ -46,7 +46,7 @@ func TestAPresetFromASessionOnASavedLocalPresetCanBeSaved(t *testing.T) {
 		t.Fatalf("the local server has a provider: %+v", values.Routes[RouteEagent])
 	}
 	values.TickSeconds = 45
-	saved, err := ConfigFromValues(project, values)
+	saved, err := ConfigFromRoutes(project, values, map[string]config.ModelRoute{RouteEagent: cfg.Model})
 	if err != nil {
 		t.Fatalf("the preset of a session on the saved preset %q was refused: %v", "local", err)
 	}
@@ -84,7 +84,7 @@ func TestAPresetFromASessionOnASavedCatalogPresetKeepsItsLimits(t *testing.T) {
 	}
 	values := FromConfigFor(project, cfg)
 	values.TickSeconds = 45
-	saved, err := ConfigFromValues(project, values)
+	saved, err := ConfigFromRoutes(project, values, map[string]config.ModelRoute{RouteEagent: cfg.Model})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +95,8 @@ func TestAPresetFromASessionOnASavedCatalogPresetKeepsItsLimits(t *testing.T) {
 }
 
 // Through the app: a session started on a saved preset changes its tick
-// and saves itself as a new preset in one change. The change renames the
-// session's configuration to the new preset's, so the routes are looked up
-// in the one it was started on; the new preset has that preset's local
+// and saves itself as a new preset in one change. The session hands the
+// controller the routes it runs, so the new preset has that preset's local
 // model, and the tick change is applied with it.
 func TestSavingAPresetFromTheAppKeepsTheRoutesOfThePresetTheSessionRuns(t *testing.T) {
 	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_SUMMARIZER_MODE", "EAGENT_SUMMARIZER_MODEL", "EAGENT_MODEL"} {
@@ -123,6 +122,10 @@ func TestSavingAPresetFromTheAppKeepsTheRoutesOfThePresetTheSessionRuns(t *testi
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// As the session hands them over: the routes it runs.
+	c.Routes = func(map[string]Route) (map[string]config.ModelRoute, error) {
+		return map[string]config.ModelRoute{RouteEagent: cfg.Model}, nil
 	}
 	defer c.Close()
 	defer runLoop(t, c)()
@@ -177,7 +180,7 @@ func TestAPresetFromASessionOnABuiltInPresetKeepsItsRoutes(t *testing.T) {
 	if values.Config != "openai-high" {
 		t.Fatalf("the session runs %q", values.Config)
 	}
-	saved, err := ConfigFromValues(project, values)
+	saved, err := ConfigFromRoutes(project, values, map[string]config.ModelRoute{RouteEagent: cfg.Model})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +188,7 @@ func TestAPresetFromASessionOnABuiltInPresetKeepsItsRoutes(t *testing.T) {
 		t.Fatalf("on the first route it saved %s @ %s window %d fallback %v", m.Model, m.BaseURL, m.ContextTokens, m.Fallback)
 	}
 	values.Routes[RouteEagent] = routeFor(project, fallback)
-	saved, err = ConfigFromValues(project, values)
+	saved, err = ConfigFromRoutes(project, values, map[string]config.ModelRoute{RouteEagent: fallback})
 	if err != nil {
 		t.Fatal(err)
 	}
