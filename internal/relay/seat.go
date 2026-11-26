@@ -1009,6 +1009,7 @@ func (s *Seat) watch() {
 		}
 		now := time.Now()
 		s.mu.Lock()
+		moved, movedTo := s.refollow, s.inner
 		if s.refollow {
 			// The agent moved to another transcript of its own (pi's /new):
 			// let the old one go and find the new one.
@@ -1018,6 +1019,12 @@ func (s *Seat) watch() {
 			s.refollow, s.transcript, tail = false, "", nil
 		}
 		s.mu.Unlock()
+		if moved {
+			// Recorded now: pi writes no file for a new session until its
+			// first prompt, and a restart meanwhile must open this session,
+			// not the one left. The path follows when the file is found.
+			s.emit(Event{Kind: KindInner, InnerID: movedTo})
+		}
 		if tail == nil {
 			s.mu.Lock()
 			path, inner := s.transcript, s.inner
