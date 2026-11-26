@@ -103,6 +103,8 @@ type Seat struct {
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
+	hung       bool                 // blocked because a working agent went quiet, not by a dialog
+	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	closed     bool
 }
 
@@ -110,6 +112,7 @@ type pending struct {
 	id, text, mode string
 	at             time.Time
 	nudges         int
+	held           bool // waits in the spool for the agent's turn to end; not typed yet
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -129,7 +132,7 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 	if innerID == "" {
 		innerID = a.chooseID()
 	}
-	argv := a.command(spec.Profile, innerID, resume, spec.Hook)
+	argv, _ := launchCommand(a, spec, innerID, resume)
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return nil, Started{}, fmt.Errorf("%s is not installed (not on PATH)", argv[0])
 	}
@@ -181,6 +184,20 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 	return s, Started{Host: host.Name(), Target: target, InnerID: innerID, Command: argv}, nil
 }
 
+// resumer is an agent that can resume only a session it has saved.
+type resumer interface {
+	canResume(spec Spec, innerID string) bool
+}
+
+// launchCommand is the agent's command line, and whether it resumes: a
+// session the agent never saved is started afresh on the same id.
+func launchCommand(a Agent, spec Spec, innerID string, resume bool) ([]string, bool) {
+	if r, ok := a.(resumer); ok && resume && !r.canResume(spec, innerID) {
+		resume = false
+	}
+	return a.command(spec.Profile, innerID, resume, spec.Hook), resume
+}
+
 // Attach watches an agent a previous eagent run started. since is the time
 // of the last thing already on the record; earlier transcript lines are
 // skipped.
@@ -195,11 +212,17 @@ func Attach(spec Spec, hostName, target, innerID, transcript string, since time.
 	}
 	s := newSeat(spec, a, host, target, innerID)
 	s.transcript = transcript
-	s.launched = since
-	s.since = since
-	s.state = "idle"
+	s.markAttached(since)
 	go s.watch()
 	return s, nil
+}
+
+// markAttached starts a reattached seat. The agent may be in the middle of
+// a turn: idle is only what the seat says until the history it re-reads
+// shows whether the last turn ended.
+func (s *Seat) markAttached(since time.Time) {
+	s.launched, s.since = since, since
+	s.state, s.attached = "idle", true
 }
 
 func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
@@ -237,6 +260,9 @@ func (s *Seat) setState(state, detail string) {
 		return
 	}
 	s.state, s.stateAt = state, time.Now()
+	if state != "blocked" {
+		s.hung = false
+	}
 	s.mu.Unlock()
 	s.emit(Event{Kind: KindState, State: state, Detail: detail})
 }
@@ -329,7 +355,9 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	case "after_turn":
 		if state == "working" {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
-				s.track(id, text, mode)
+				// An agent with a spool holds it there; one without has typed
+				// it into its own queue, and it is watched as typed.
+				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -366,7 +394,7 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		s.mu.Lock()
-		state, closed := s.state, s.closed
+		state, closed, hung := s.state, s.closed, s.hung
 		s.mu.Unlock()
 		if closed {
 			// Nothing watches this seat any more, so its state is stale and
@@ -384,6 +412,11 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 			}
 			continue
 		case "blocked":
+			if hung {
+				// Only quiet for a long time: nothing on screen waits for an
+				// answer, so a message is typed as into a working agent.
+				return "working", nil
+			}
 			return state, errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
 		case "exited":
 			return state, errors.New("the agent has exited")
@@ -400,9 +433,57 @@ func (s *Seat) typeText(text string) error {
 	return s.host.Keys(s.target, "Enter")
 }
 
-func (s *Seat) track(id, text, mode string) {
+func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
+
+func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now()})
+	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
+	s.mu.Unlock()
+}
+
+// heldGrace is how long an agent stays idle before the seat types what still
+// waits in its spool: long enough for the message an interrupt is followed
+// by to start the next turn first. Tests shorten it.
+var heldGrace = 5 * time.Second
+
+// releaseHeld types the messages still waiting in the spool once the agent
+// has stayed idle for heldGrace: the turn they waited for is over and
+// nothing handed them over. They are then watched as typed messages.
+func (s *Seat) releaseHeld(now time.Time) {
+	if s.spec.Spool == "" {
+		return
+	}
+	s.mu.Lock()
+	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace
+	s.mu.Unlock()
+	if !idle {
+		return
+	}
+	taken, texts := takeSpool(s.spec.Spool)
+	if len(taken) == 0 {
+		return
+	}
+	if len(texts) > 0 {
+		if err := s.typeText(strings.Join(texts, "\n\n")); err != nil {
+			for _, path := range taken {
+				_ = os.Rename(path, strings.TrimSuffix(path, ".taken"))
+			}
+			return
+		}
+	}
+	ids := map[string]bool{}
+	for _, path := range taken {
+		_ = os.Remove(path)
+		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok {
+			ids[id] = true
+		}
+	}
+	s.mu.Lock()
+	for _, p := range s.pending {
+		if p.held && ids[p.id] {
+			p.held, p.at = false, time.Now()
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -429,7 +510,7 @@ func (s *Seat) matchPending(text string) []string {
 	keep := s.pending[:0]
 	for _, p := range s.pending {
 		want := normalize(p.text)
-		if want != "" && (strings.Contains(got, clipText(want, 160)) || strings.Contains(want, clipText(got, 160)) && len(got) > 20) {
+		if want != "" && (strings.Contains(got, head(want, 160)) || strings.Contains(want, head(got, 160)) && len(got) > 20) {
 			ids = append(ids, p.id)
 			continue
 		}
@@ -438,6 +519,10 @@ func (s *Seat) matchPending(text string) []string {
 	s.pending = keep
 	return ids
 }
+
+// head is the start of s, at most n bytes, cut at a character and without
+// the ellipsis clipText adds: it is looked for in other text.
+func head(s string, n int) string { return strings.TrimSuffix(clipText(s, n), "…") }
 
 // ---- watching ---------------------------------------------------------------
 
@@ -595,8 +680,14 @@ func (s *Seat) fold(o obs) {
 	since := s.since
 	s.mu.Unlock()
 	if !since.IsZero() && !o.at.IsZero() && !o.at.After(since) && o.kind != "meta" {
-		return // already on the record before this eagent attached
+		// Already on the record before this eagent attached; it only says
+		// whether the agent is still in a turn.
+		s.foldHistory(o)
+		return
 	}
+	s.mu.Lock()
+	s.attached = false
+	s.mu.Unlock()
 	switch o.kind {
 	case "meta":
 		s.mu.Lock()
@@ -677,6 +768,32 @@ func (s *Seat) fold(o obs) {
 	}
 }
 
+// foldHistory follows the turns in history a reattached seat re-reads, so
+// it says working when the agent is still in the turn it was in when eagent
+// stopped watching. Nothing is reported but the state.
+func (s *Seat) foldHistory(o obs) {
+	s.mu.Lock()
+	if !s.attached {
+		s.mu.Unlock()
+		return
+	}
+	state := ""
+	switch o.kind {
+	case "user", "working", "progress", "activity", "image":
+		if s.state == "idle" {
+			state, s.turnStart, s.turnTools, s.turnImages = "working", o.at, 0, nil
+		}
+	case "turn", "aborted":
+		if s.state == "working" {
+			state = "idle"
+		}
+	}
+	s.mu.Unlock()
+	if state != "" {
+		s.setState(state, "")
+	}
+}
+
 func (s *Seat) ensureWorking(at time.Time) {
 	s.mu.Lock()
 	working := s.state == "working" || s.heldByDialog("working")
@@ -700,7 +817,7 @@ func (s *Seat) wantsDialogCheck(now time.Time) bool {
 	}
 	if s.state != "working" {
 		for _, p := range s.pending {
-			if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+			if !p.held && now.Sub(p.at) > 6*time.Second {
 				return true
 			}
 		}
@@ -736,15 +853,14 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Lock()
 	var stuck *pending
 	for _, p := range s.pending {
-		if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+		if !p.held && now.Sub(p.at) > 6*time.Second {
 			stuck = p
 			break
 		}
 	}
 	if stuck != nil {
-		head := clipText(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
-		head = strings.TrimSuffix(head, "…")
-		if stuck.nudges < 2 && head != "" && strings.Contains(screen, head) && state != "working" {
+		start := head(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
+		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
@@ -778,7 +894,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
-	} else if state == "blocked" && ready && !s.dialogShowing() {
+		s.mu.Lock()
+		s.hung = s.state == "blocked"
+		s.mu.Unlock()
+	} else if state == "blocked" && ready && !s.busy(screen) && !s.dialogShowing() {
 		s.setState("idle", "")
 	}
 }
@@ -812,6 +931,7 @@ func (s *Seat) reportDialog(title string) {
 	}
 	s.dialogUp = title
 	if title != "" {
+		s.hung = false // a dialog holds it now: nothing is typed into it
 		if prev == "" {
 			s.dialogPrev = state
 		}
@@ -831,10 +951,12 @@ func (s *Seat) reportDialog(title string) {
 	s.setState(back, "")
 }
 
-// answerDialog presses the answer to a known dialog on screen, at most once
-// per dialog every few seconds, and reports whether one was showing.
+// answerDialog presses the answer to one of the agent's own dialogs on
+// screen, at most once per dialog every few seconds, and reports whether
+// one was showing. Another agent's dialog text on this screen is output
+// (a file, a log), never a dialog this agent shows.
 func (s *Seat) answerDialog(screen string, now time.Time) bool {
-	for _, d := range allDialogs() {
+	for _, d := range s.agent.dialogs() {
 		if !containsAll(screen, d.match) {
 			continue
 		}
@@ -853,17 +975,6 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 	return false
 }
 
-// looksReady recognises an agent at its input prompt. Any agent's prompt
-// counts, whichever agent the seat runs.
-func looksReady(screen string) bool {
-	for _, a := range Agents() {
-		if a.ready(screen) {
-			return true
-		}
-	}
-	return false
-}
-
 // readyReporter is an agent whose own hook says whether it waits at its
 // prompt (pi's status file); known is false when it says nothing usable.
 type readyReporter interface {
@@ -871,15 +982,30 @@ type readyReporter interface {
 }
 
 // ready says whether the agent waits at its prompt: what its hook reports,
-// when it reports anything, and otherwise what the screen looks like. A
-// screen can look ready while the agent works (pi always draws its footer).
+// when it reports anything, and otherwise whether the screen shows this
+// agent's own prompt. A screen can look ready while the agent works (pi
+// always draws its footer).
 func (s *Seat) ready(screen string) bool {
 	if rr, ok := s.agent.(readyReporter); ok {
 		if ready, known := rr.reportedReady(s); known {
 			return ready
 		}
 	}
-	return looksReady(screen)
+	return s.agent.ready(screen)
+}
+
+// busyScreen is an agent whose prompt or status line stays on screen while
+// it works (Claude's footer, Antigravity's relay line), and that shows
+// something else only while it works.
+type busyScreen interface {
+	busy(screen string) bool
+}
+
+// busy says whether the screen shows the agent working, whatever prompt or
+// status line it also shows.
+func (s *Seat) busy(screen string) bool {
+	b, ok := s.agent.(busyScreen)
+	return ok && b.busy(screen)
 }
 
 // sessionStarter is an agent that can say how many entries a transcript

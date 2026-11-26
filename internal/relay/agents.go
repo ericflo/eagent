@@ -268,16 +268,6 @@ func UpgradeCommand(agent string) ([]string, error) {
 	return []string{a.Binary(), "update"}, nil
 }
 
-// allDialogs are every agent's dialogs, in agent order. A seat answers any
-// of them, whichever agent it runs.
-func allDialogs() []dialog {
-	var out []dialog
-	for _, a := range Agents() {
-		out = append(out, a.dialogs()...)
-	}
-	return out
-}
-
 // ---- shared helpers -------------------------------------------------------------
 
 // claimed holds transcripts already followed by a relay in this process, so

@@ -38,6 +38,12 @@ func (antigravityAgent) ready(screen string) bool {
 	return strings.Contains(screen, "Antigravity relay ·")
 }
 
+// busy: the relay line is drawn whatever agy does, and names its state;
+// only "idle" is waiting at the prompt.
+func (antigravityAgent) busy(screen string) bool {
+	return strings.Contains(screen, "Antigravity relay ·") && !strings.Contains(screen, "Antigravity relay · idle ·")
+}
+
 func (antigravityAgent) dialogs() []dialog {
 	return []dialog{
 		{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
