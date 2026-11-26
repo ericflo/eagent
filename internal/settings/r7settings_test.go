@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
 // Finding 25: a JSON null in config.json is a deliberate "cleared"
@@ -54,5 +55,51 @@ func TestSaveUnderEnvKeepsNullOverrides(t *testing.T) {
 	}
 	if !strings.Contains(string(disk), `"terse"`) {
 		t.Fatalf("persona not saved:\n%s", disk)
+	}
+}
+
+// Finding 28: an undo of a pick of a fallback's model puts back the
+// fields the pick gave the fallback route, as for a primary route.
+func TestRemoteUndoOfFallbackModelPick(t *testing.T) {
+	clearRouteEnv(t)
+	for _, c := range []struct {
+		name, before string
+		edits        []control.Edit
+	}{
+		{"change a fallback", `{"preset":"openai-high"}`, []control.Edit{{Op: "set", Key: "/model/fallback/model", Value: "z-ai/glm-5.3"}}},
+		{"add a fallback", `{"preset":"glm"}`, []control.Edit{{Op: "set", Key: "/model/fallback/base_url", Value: "https://openrouter.ai/api/v1"}, {Op: "set", Key: "/model/fallback/model", Value: "z-ai/glm-5.3"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			project := t.TempDir()
+			writeProjectFile(t, project, c.before)
+			s := &Service{Project: project}
+			view := apply(t, s, c.edits...)
+			desired, _ := os.ReadFile(config.File(project))
+			after, err := s.RemoteSnapshot(s.Grant())
+			if err != nil {
+				t.Fatal(err)
+			}
+			inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: c.edits}, c.before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, after.Snapshot.Version
+			raw, _, _, err := s.PrepareUndo(inverse, string(desired), s.Grant())
+			if err != nil {
+				t.Fatalf("undo: %v\nafter the edit:\n%s", err, desired)
+			}
+			writeProjectFile(t, project, raw)
+			got, err := config.Load(project, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProjectFile(t, project, c.before)
+			want, _ := config.Load(project, "")
+			g, _ := json.Marshal(got.Model.Fallback)
+			w, _ := json.Marshal(want.Model.Fallback)
+			if string(g) != string(w) {
+				t.Fatalf("fallback after undo %s, want %s\nedit wrote:\n%s\nundo wrote:\n%s", g, w, desired, raw)
+			}
+		})
 	}
 }
