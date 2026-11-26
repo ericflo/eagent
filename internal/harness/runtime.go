@@ -483,9 +483,11 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 	// onRoute is the client of the route in use when this call last
 	// looked. During an outage probe is the route of the chain asked in
 	// its place (-1: none), through probeClient, which is installed only
-	// if it answers.
+	// if it answers while the outage it was asked for (askedFor, that
+	// outage's out.since) is still the one open.
 	var onRoute, probeClient *llm.Client
 	probe := -1
+	var askedFor time.Time
 	for {
 		var client *llm.Client
 		var known []string
@@ -540,7 +542,9 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		}
 		if probe < 0 && len(refused) > 0 {
 			r.sync(func() {
-				if m := r.models[who]; m != nil && m.client == onRoute {
+				// The route the call went to, whatever client now serves it
+				// (an effort-only change makes a new one).
+				if m := r.models[who]; m != nil && m.client != nil && sameRoute(m.client.Endpoint, onRoute.Endpoint) {
 					writeRefused()
 				}
 			})
@@ -557,11 +561,13 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 				}
 				// A route of the chain answered while the one in use could
 				// not be reached: the session goes on with it, as after a
-				// route that cannot serve the model. Not when the one in use
-				// has answered another call meanwhile: it is back.
-				if m.out.down() {
+				// route that cannot serve the model. Only while the outage it
+				// was asked for is the one open and past the bound: not when
+				// the one in use has answered another call meanwhile (it is
+				// back), even if it has failed once since.
+				if now := time.Now(); m.out.since.Equal(askedFor) && m.out.past(now) {
 					writeRefused()
-					probeClient.MaxAttempts, probeClient.StartTimeout = onRoute.MaxAttempts, 0
+					probeClient.MaxAttempts = onRoute.MaxAttempts
 					r.takeRoute(who, m, probe, probeClient, "cannot be reached", m.out.err)
 					m.out.answer(time.Now())
 				}
@@ -639,7 +645,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 				// once: the last one failing ends the call.
 				r.takeRoute(who, m, m.at+1, r.newClient(m.routes[m.at+1], who), "is unavailable", err)
 			case step == stepNext:
-				ep = m.routes[next]
+				ep, askedFor = m.routes[next], m.out.since
 			}
 		})
 		if moved {
@@ -652,11 +658,9 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			if probe < 0 {
 				r.ui.Log("%s: %s has not been reachable for %s; asking %s in its place", who, onRoute.Endpoint.BaseURL, roundDur(down), ep)
 			}
-			// One attempt: it is asked whether it answers, and the round goes
-			// on to the next route at once if it does not, or has not begun
-			// to answer within probeStart. A reply it has begun is not cut.
-			probe, probeClient = next, r.newClient(ep, who)
-			probeClient.MaxAttempts, probeClient.StartTimeout = 1, probeStart
+			// It is asked whether it answers, and the round goes on to the
+			// next route at once if it does not.
+			probe, probeClient = next, r.probeClient(ep, who)
 			continue
 		case step == stepAgain:
 			probe, probeClient = -1, nil
@@ -701,6 +705,22 @@ func (r *Runtime) takeRoute(who string, m *modelRoute, at int, client *llm.Clien
 	r.followRoute(who)
 }
 
+// sameRoute says two endpoints are the same model at the same address: a
+// change of anything else (the effort) keeps what is known of the route.
+func sameRoute(a, b llm.Endpoint) bool {
+	return llm.SameBaseURL(a.BaseURL, b.BaseURL) && a.Model == b.Model
+}
+
+// probeClient is the client a route is asked through in place of the one
+// in use: an ordinary one, with the limits any call to that route has
+// (the idle limit among them), but for one attempt, so that the round goes
+// on to the next route at once if it does not answer.
+func (r *Runtime) probeClient(ep llm.Endpoint, who string) *llm.Client {
+	c := r.newClient(ep, who)
+	c.MaxAttempts = 1
+	return c
+}
+
 // How a model call failed, as netStep weighs it.
 type failKind int
 
@@ -724,10 +744,16 @@ const (
 
 // routeFacts: what complete keeps about a route, who may change it, and
 // when it is cleared. "In use" is the route a call was sent to while it was
-// the one in use; a call that comes back after the route moved (another
-// call switched, or the settings) changes nothing at all.
+// the one in use; a call that comes back after the route moved to another
+// model or address (another call switched, or the settings) changes
+// nothing at all. "The same route" is the same model at the same address
+// (sameRoute), whatever client serves it.
 //
 //	fact                      changed by                                      cleared
+//	the route in use          an unroutable answer (the next route); a route  a settings change
+//	(m.client, m.at)          asked in its place that answers while the
+//	                          outage it was asked for (that out.since) is
+//	                          still the one open and past the bound
 //	out.answered              any reply of the route in use (an answer, or    a new route
 //	                          a failure that is not a network failure)
 //	out.since                 the first network failure of the route in use   a reply of it; a new route
@@ -735,8 +761,10 @@ const (
 //	out.again                 such a failure of a call sent after out.since   as out.since
 //	out.told                  the notice, once per outage                     as out.since
 //	out.err                   each failure counted in out.since/out.again     as out.since
-//	refused pictures (record) a reply or failure of the route in use, or a    never (the record)
-//	                          route asked in its place that takes over
+//	refused pictures (record) a reply or failure of a call to the route in    never (the record)
+//	                          use that comes back while it is the same
+//	                          route, or of a route asked in its place that
+//	                          takes over
 //	token ratio (calibrate)   any call, filed under the endpoint that served  a reply on another route
 //	                          it and learned only while that endpoint is in
 //	                          use, so a probe or a late reply teaches nothing
@@ -875,14 +903,6 @@ var offlineWait = 15 * time.Second
 // second after another 15 s wait and ~31 s, 46 s later, past this, and the
 // first fallback is asked some 77 seconds after the first refusal.
 var offlineSwitch = 45 * time.Second
-
-// probeStart is how long a route asked in place of an unreachable one has
-// to begin answering (its response headers): it is only being asked
-// whether it is there, and one that accepted the call and went silent
-// would hold the round, and so the route in use coming back or a change in
-// the settings, for the whole idle limit (two minutes). A reply that has
-// begun is not cut by it.
-var probeStart = 30 * time.Second
 
 // loopPoll is how often the loop reads its inbox and live settings and
 // looks at the time-based parts of its state; a variable so tests can

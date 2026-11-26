@@ -52,9 +52,6 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 	if idle <= 0 {
 		idle = 120 * time.Second
 	}
-	if c.StartTimeout > 0 {
-		idle = c.StartTimeout
-	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	timer := idleAfterFunc(idle, cancel)
 	resp, err := c.HTTP.Do(req.WithContext(reqCtx))

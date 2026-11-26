@@ -255,7 +255,7 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	moved := true
 	old := r.models[sw.who]
 	if old != nil && old.client != nil {
-		moved = !llm.SameBaseURL(old.client.Endpoint.BaseURL, sw.eps[0].BaseURL) || old.client.Endpoint.Model != sw.eps[0].Model
+		moved = !sameRoute(old.client.Endpoint, sw.eps[0])
 	}
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
 	if !moved {

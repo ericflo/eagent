@@ -9,8 +9,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -90,23 +94,55 @@ func TestAnOutageIsTimedFromWhatTheRouteDidLast(t *testing.T) {
 	}
 }
 
+// downSockets holds, by address, the sockets downAddr bound.
+var downSockets sync.Map
+
 // downAddr is a loopback address nothing listens on: a call to it is
-// refused, as when a local model server is stopped.
+// refused, as when a local model server is stopped. The port is held by a
+// socket bound and not listening (which refuses connections), so no other
+// process can take it while the test runs; serveAt turns that same socket
+// into the listener.
 func downAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	ln.Close()
+	syscall.CloseOnExec(fd)
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		syscall.Close(fd)
+		t.Fatal(err)
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		syscall.Close(fd)
+		t.Fatal(err)
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", sa.(*syscall.SockaddrInet4).Port)
+	downSockets.Store(addr, fd)
+	t.Cleanup(func() {
+		if _, ok := downSockets.LoadAndDelete(addr); ok {
+			syscall.Close(fd)
+		}
+	})
 	return addr
 }
 
 // serveAt starts h on addr (one downAddr gave) until the test ends.
 func serveAt(t *testing.T, addr string, h http.Handler) {
 	t.Helper()
-	l, err := net.Listen("tcp", addr)
+	v, ok := downSockets.LoadAndDelete(addr)
+	if !ok {
+		t.Fatalf("%s is not an address downAddr gave", addr)
+	}
+	fd := v.(int)
+	if err := syscall.Listen(fd, 128); err != nil {
+		syscall.Close(fd)
+		t.Fatal(err)
+	}
+	f := os.NewFile(uintptr(fd), addr)
+	l, err := net.FileListener(f) // a copy of the socket; the file is closed
+	f.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +426,6 @@ func waitingCallReturns(t *testing.T, probing, deadline bool) {
 	}))
 	t.Cleanup(func() { close(stop); hung.Close() })
 	rt, _ := netRuntime(t, "http://"+downAddr(t), hung.URL)
-	setFor(t, &probeStart, time.Hour)
 	if !probing {
 		setFor(t, &offlineWait, time.Hour) // held in the wait between rounds
 	}
@@ -421,32 +456,19 @@ func waitingCallReturns(t *testing.T, probing, deadline bool) {
 	}
 }
 
-// A fallback that takes the call and does not begin to answer is given up
-// on after probeStart, and the round goes on: the primary, back meanwhile,
-// answers. One that has begun to answer is not cut, however slow.
-func TestARouteAskedInPlaceOfAnotherHasLittleTimeToBegin(t *testing.T) {
-	t.Run("silent", func(t *testing.T) {
-		model := netModel(t)
-		var asked atomic.Int32
-		stop := make(chan struct{})
-		hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			asked.Add(1)
-			select {
-			case <-r.Context().Done():
-			case <-stop:
-			}
-		}))
-		t.Cleanup(func() { close(stop); hung.Close() })
-		addr := downAddr(t)
-		rt, _ := netRuntime(t, "http://"+addr, hung.URL)
-		setFor(t, &probeStart, 30*time.Millisecond)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		ch := netCallAsync(rt, ctx)
-		waitFor(t, "the fallback to be asked", func() bool { return asked.Load() > 0 })
-		serveAt(t, addr, model.srv.Config.Handler)
-		if o := netWait(t, ch); o.err != nil || o.resp.Text != "from "+testModel || len(netRoutes(rt)) != 0 {
-			t.Fatalf("call: %v %+v; routes %+v", o.err, o.resp, netRoutes(rt))
+// A route asked in place of another has the limits any call to it has, the
+// idle limit among them (which also bounds the wait for a reply to begin:
+// llm's TestIdleTimeoutCoversTheWaitForAResponse), but one attempt. A
+// reply it has begun is not cut, however slow.
+func TestARouteAskedInPlaceOfAnotherHasTheOrdinaryLimits(t *testing.T) {
+	t.Run("limits", func(t *testing.T) {
+		rt, _ := netRuntime(t, "http://"+downAddr(t), "http://"+downAddr(t))
+		var ep llm.Endpoint
+		rt.sync(func() { ep = rt.models[event.ActorEagent].routes[1] })
+		probe, plain := rt.probeClient(ep, event.ActorEagent), rt.newClient(ep, event.ActorEagent)
+		if probe.MaxAttempts != 1 || probe.IdleTimeout != plain.IdleTimeout || probe.CallTimeout != plain.CallTimeout || probe.IdleTimeout <= 0 {
+			t.Fatalf("asked in place of another: attempts %d, idle %s, call %s; an ordinary call: idle %s, call %s",
+				probe.MaxAttempts, probe.IdleTimeout, probe.CallTimeout, plain.IdleTimeout, plain.CallTimeout)
 		}
 	})
 	t.Run("slow", func(t *testing.T) {
@@ -458,21 +480,18 @@ func TestARouteAskedInPlaceOfAnotherHasLittleTimeToBegin(t *testing.T) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
 			w.(http.Flusher).Flush()
-			time.Sleep(80 * time.Millisecond) // begun, then slow
+			time.Sleep(50 * time.Millisecond) // begun, then slow
 			model.srv.Config.Handler.ServeHTTP(w, r)
 		}))
 		t.Cleanup(slow.Close)
 		rt, _ := netRuntime(t, "http://"+downAddr(t), slow.URL)
-		setFor(t, &probeStart, 20*time.Millisecond)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if o := netWait(t, netCallAsync(rt, ctx)); o.err != nil || o.resp.Text != "from eagent-fallback" {
 			t.Fatalf("call: %v %+v", o.err, o.resp)
 		}
-		var start time.Duration
-		rt.sync(func() { start = rt.models[event.ActorEagent].client.StartTimeout })
-		if r := netRoutes(rt); len(r) != 1 || start != 0 {
-			t.Fatalf("routes %+v; the fallback in use keeps a start limit of %s", r, start)
+		if r := netRoutes(rt); len(r) != 1 {
+			t.Fatalf("routes %+v", r)
 		}
 	})
 }
@@ -532,5 +551,150 @@ func TestPickingThePrimaryAgainLeavesTheFallback(t *testing.T) {
 	switchTo(rt, "http://"+pAddr, testModel)
 	if o := netWait(t, ch); o.err != nil || o.resp.Text != "from "+testModel {
 		t.Fatalf("picking the primary during an outage: %v %+v", o.err, o.resp)
+	}
+}
+
+// From the second reader of the outage handling (S/r6w-net), renamed.
+
+// A fallback asked during an outage past the bound is slow to answer.
+// Meanwhile the primary answers another call (it is back), then fails one
+// call once (a blip, under the bound). The fallback's late answer does not
+// move the session: the outage it was asked for is over, and the one now
+// open is not past the bound.
+func TestAFallbackAskedForAnOutageThatEndedDoesNotTakeOverOnANewBlip(t *testing.T) {
+	model := netModel(t)
+	var answer atomic.Bool // the primary: false drops the connection, true answers
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answer.Load() {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(primary.Close)
+	var asked atomic.Int32
+	release := make(chan struct{})
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(fb.Close)
+	rt, _ := netRuntime(t, primary.URL, fb.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a := netCallAsync(rt, ctx)
+	waitFor(t, "the fallback to be asked", func() bool { return asked.Load() > 0 })
+
+	// The primary is back and answers a call.
+	answer.Store(true)
+	if o := netWait(t, netCallAsync(rt, ctx)); o.err != nil || o.resp.Text != "from "+testModel {
+		t.Fatalf("the primary's answer: %v %+v", o.err, o.resp)
+	}
+	// Then one call of it fails once; it is not tried again here.
+	setFor(t, &offlineWait, time.Hour)
+	answer.Store(false)
+	cctx, ccancel := context.WithCancel(ctx)
+	c := netCallAsync(rt, cctx)
+	waitFor(t, "the blip to be counted", func() bool {
+		var down bool
+		rt.sync(func() { down = rt.models[event.ActorEagent].out.down() })
+		return down
+	})
+	var past bool
+	rt.sync(func() { past = rt.models[event.ActorEagent].out.past(time.Now()) })
+	if past {
+		t.Fatal("setup: one failure is past the bound")
+	}
+	ccancel()
+	netWait(t, c)
+	answer.Store(true)
+
+	close(release)
+	if o := netWait(t, a); o.err != nil {
+		t.Fatal(o.err)
+	}
+	if r := netRoutes(rt); len(r) != 0 {
+		t.Fatalf("the primary answered after the outage the fallback was asked for, and has failed once since, yet the session moved: %+v", r)
+	}
+}
+
+// A call on the route in use has a picture refused and goes through
+// without it; while it is out the user changes the effort only (the same
+// model at the same address). The refusal is the route's own and is
+// written down, so the next call does not upload the picture again.
+func TestARefusalOfTheRouteInUseSurvivesAnEffortChange(t *testing.T) {
+	model := netModel(t)
+	var imageCalls atomic.Int32
+	held := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hold atomic.Bool
+	hold.Store(true)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		if strings.Contains(string(raw), "image_url") {
+			imageCalls.Add(1)
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":{"message":"image too large","code":"image_too_large"}}`))
+			return
+		}
+		if hold.CompareAndSwap(true, false) {
+			held <- struct{}{}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(primary.Close)
+	rt, _ := netRuntime(t, primary.URL, "")
+	shot := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(shot, audit2PNG(t, 8, 6), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := llm.Request{Messages: []llm.Message{{Role: "user", Text: "look at this", Images: []llm.Image{{Path: shot, MediaType: "image/png"}}}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := make(chan netOutcome, 1)
+	go func() {
+		resp, err := rt.complete(ctx, event.ActorEagent, req, nil)
+		ch <- netOutcome{resp, err}
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call without the picture never came")
+	}
+	rt.sync(func() {
+		ep := rt.models[event.ActorEagent].client.Endpoint
+		ep.ReasoningEffort = "low"
+		rt.swapRoute(routeSwap{who: event.ActorEagent, eps: []llm.Endpoint{ep}, conf: config.ModelRoute{BaseURL: ep.BaseURL, Model: ep.Model}})
+	})
+	close(release)
+	if o := netWait(t, ch); o.err != nil || o.resp.Text != "from "+testModel {
+		t.Fatalf("call: %v %+v", o.err, o.resp)
+	}
+	var refused bool
+	rt.sync(func() { refused = rt.st.RefusedImages[shot] })
+	// The next call, as the record renders it.
+	go func() {
+		resp, err := rt.complete(ctx, event.ActorEagent, req.WithRefused(nil), nil)
+		ch <- netOutcome{resp, err}
+	}()
+	if o := netWait(t, ch); o.err != nil {
+		t.Fatal(o.err)
+	}
+	if !refused || imageCalls.Load() != 1 {
+		t.Fatalf("the route in use refused the picture, but the record says refused=%v and it was uploaded %d times", refused, imageCalls.Load())
 	}
 }
