@@ -214,12 +214,6 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			w.mu.Unlock()
 		}
 	}()
-	if trigger.ID != "" && trigger.ID != m.ID {
-		// The trigger is read by the session's poll, after m.
-		w.retries.mu.Lock()
-		delete(w.retries.replies, trigger.ID)
-		w.retries.mu.Unlock()
-	}
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
@@ -229,8 +223,15 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			// session comes back with the rest of the message. The note
 			// gets its own time, as the fetch may have used up the
 			// sweep's. When it cannot be posted nobody would know: the
-			// reply is not taken in, and a sweep looks again.
+			// reply is not taken in, and is kept, quietly, for the sweeps
+			// to read the thread for (an earlier notice may have made
+			// eagent's the thread's latest message).
 			if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, a, err) != nil {
+				w.retries.mu.Lock()
+				if _, kept := w.retries.replies[m.ID]; !kept {
+					w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+				}
+				w.retries.mu.Unlock()
 				return
 			}
 			continue
@@ -240,7 +241,15 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	// A message whose files were all refused (the person was told) still
 	// resumes the session: it takes the message in, so the ones after it
 	// are read in order instead of waiting behind it for ever.
-	if err := w.host.Resume(sid, msg); err != nil {
+	err = w.host.Resume(sid, msg)
+	if trigger.ID != "" && trigger.ID != m.ID {
+		// The trigger is read by the session's poll, after m; when the
+		// resume failed, m is kept in its stead (retryLater).
+		w.retries.mu.Lock()
+		delete(w.retries.replies, trigger.ID)
+		w.retries.mu.Unlock()
+	}
+	if err != nil {
 		w.logf("finalechat: could not resume session %s for your reply: %v (will retry)", sid, err)
 		w.retryLater(ctx, thread, m, "eagent could not resume this session for your reply yet: "+err.Error()+". It keeps trying every minute.")
 		return
