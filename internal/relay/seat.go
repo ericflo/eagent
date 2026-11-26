@@ -794,12 +794,13 @@ type sendView struct {
 // after text left in the input box arrives glued to it, a hook hands over
 // several held messages at once. What one entry may not do is confirm two
 // sends with one place in it. So each confirmed send claims the stretch of
-// the entry it matched, stretches may not overlap, and sends are tried
-// longest first, then oldest first (the longer claims its words before a
-// shorter send that is part of them can). A send the entry shows whole is
-// given its stretch before any send the entry shows only cut short or in
-// part, so a send that arrived word for word is never left for a longer
-// one that merely contains it:
+// the entry it matched, stretches may not overlap, and the longest stretch
+// is given first (a longer send claims its words before a shorter send that
+// is part of them can, and a long send shown cut short keeps its stretch
+// from a short send inside it). Between stretches of one length, a send the
+// entry shows whole comes before one it shows only cut short or in part,
+// then the longer send, then the older, so a send that arrived word for
+// word is never left for a longer one that merely contains it:
 //
 //	pending                         entry                      confirms
 //	"continue", "continue"          "continue"                 the older one
@@ -810,6 +811,7 @@ type sendView struct {
 //	five held messages              the hook's join of them    all five
 //	a, b (a's Enter was lost)       a then b, glued            both
 //	a long send                     its first 200 bytes + "…"  it
+//	"yes", a long "…yesterday…"     the long one cut short     the long one
 //	two long sends, same opening    one of them                that one
 //	anything                        words that are no send     nothing
 //
@@ -829,20 +831,25 @@ func arrivals(pending []sendView, entry string) []int {
 		}
 	}
 	slices.SortStableFunc(order, func(a, b int) int { return len(norms[b]) - len(norms[a]) })
-	var claimed [][2]int
-	var out []int
+	type match struct {
+		i  int
+		sp [2]int
+	}
+	var matches []match
 	for _, whole := range []bool{true, false} {
 		for _, i := range order {
-			if slices.Contains(out, i) {
-				continue
-			}
 			for _, sp := range shows(got, norms[i], whole) {
-				if !overlaps(claimed, sp) {
-					claimed = append(claimed, sp)
-					out = append(out, i)
-					break
-				}
+				matches = append(matches, match{i, sp})
 			}
+		}
+	}
+	slices.SortStableFunc(matches, func(a, b match) int { return (b.sp[1] - b.sp[0]) - (a.sp[1] - a.sp[0]) })
+	var claimed [][2]int
+	var out []int
+	for _, m := range matches {
+		if !slices.Contains(out, m.i) && !overlaps(claimed, m.sp) {
+			claimed = append(claimed, m.sp)
+			out = append(out, m.i)
 		}
 	}
 	slices.Sort(out)
