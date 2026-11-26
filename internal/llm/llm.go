@@ -547,6 +547,10 @@ type Client struct {
 	// anthropicBudgeted remembers whether this model wants the older
 	// budget-style thinking parameter instead of adaptive thinking.
 	anthropicBudgeted atomic.Bool
+	// anthropicTurnRuled remembers that this provider refused budgeted
+	// thinking because the last assistant turn of a tool loop did not
+	// start with a thinking block (anthropicThinkingTurnRequired).
+	anthropicTurnRuled atomic.Bool
 	// anthropicCached remembers where the last requests Anthropic took
 	// from this client left cache entries (anthropicBridge).
 	anthropicCached anthropicEntries
