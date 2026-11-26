@@ -74,3 +74,45 @@ func TestAHeldMessageStartingWithADirectoryIsHandedOver(t *testing.T) {
 		t.Errorf("the Stop hook did not hand the held message over (said %q); isAgentCommand=%v", out.String(), isAgentCommand(msg))
 	}
 }
+
+// While Claude's busy line shows by its input box (a long compaction), a
+// held message waits without running the ten-minute clock; the clock
+// starts when the screen is neither busy nor at the prompt.
+func TestABusyScreenDoesNotRunTheHeldMessageClock(t *testing.T) {
+	saved, savedGive := heldGrace, heldGiveUp
+	heldGrace, heldGiveUp = 0, 100*time.Millisecond
+	t.Cleanup(func() { heldGrace, heldGiveUp = saved, savedGive })
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	h := &fakeHost{alive: true, screen: "✻ Compacting conversation… (esc to interrupt)\n\n> \n  ⏵⏵ bypass permissions on"}
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
+	if err := spoolMessage(spool, "m1", "then run the tests"); err != nil {
+		t.Fatal(err)
+	}
+	s.state = "idle"
+	t0 := time.Now()
+	for i := 0; i <= 3; i++ {
+		s.releaseHeld(t0.Add(time.Duration(i) * heldGiveUp))
+	}
+	if evs := drain(s.events); len(evs) != 0 || len(h.typed) != 0 {
+		t.Fatalf("while busy: events %+v, typed %q", evs, h.typed)
+	}
+	h.mu.Lock()
+	h.screen = " Select model\n ❯ 1. Default\n\n Enter to confirm · Esc to exit"
+	h.mu.Unlock()
+	t1 := t0.Add(4 * heldGiveUp)
+	s.releaseHeld(t1)
+	s.releaseHeld(t1.Add(heldGiveUp / 2))
+	if evs := drain(s.events); len(evs) != 0 {
+		t.Fatalf("reported before heldGiveUp away from the prompt: %+v", evs)
+	}
+	s.releaseHeld(t1.Add(heldGiveUp))
+	var lost int
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindDelivered && !ev.OK {
+			lost++
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("lost %d", lost)
+	}
+}
