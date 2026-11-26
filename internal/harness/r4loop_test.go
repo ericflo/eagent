@@ -74,11 +74,11 @@ func TestAQuestionHeldOnIsAskedAboutAgainAfterAResume(t *testing.T) {
 	path, project := s.rt.sess.Path, s.rt.opts.Project
 	s.stop()
 
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 	s2 := resumeOneCall(t, path, project, s.model)
 	s2.waitFor("the question to be asked about again", func() bool { return reminders.Load() >= 1 })
 	s2.waitFor("eagent to give up", func() bool { return gaveUp(s2) })
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s2.settled()
 	if n := reminders.Load(); n != int32(len(owedRetryDelays)) {
 		t.Fatalf("the resumed session reminded the model %d times, want %d", n, len(owedRetryDelays))
@@ -87,7 +87,7 @@ func TestAQuestionHeldOnIsAskedAboutAgainAfterAResume(t *testing.T) {
 
 	s3 := resumeOneCall(t, path, project, s.model)
 	s3.settled()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s3.settled()
 	s3.stop()
 	if n := reminders.Load(); n != int32(len(owedRetryDelays)) {
@@ -258,10 +258,10 @@ func TestAnAnswerHeldOnIsBroughtUpOnceAfterAResume(t *testing.T) {
 	path, project := s.rt.sess.Path, s.rt.opts.Project
 	s.stop()
 
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 	s2 := resumeOneCall(t, path, project, s.model)
 	s2.waitFor("the answer to be brought up", func() bool { return reminded.Load() >= 1 })
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s2.settled()
 	var owed int64
 	s2.rt.sync(func() { owed = s2.rt.turns.owed })
@@ -271,7 +271,7 @@ func TestAnAnswerHeldOnIsBroughtUpOnceAfterAResume(t *testing.T) {
 	s2.stop()
 	s3 := resumeOneCall(t, path, project, s.model)
 	s3.settled()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s3.settled()
 	s3.stop()
 	if n := reminded.Load(); n != 1 {

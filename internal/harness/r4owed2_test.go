@@ -67,10 +67,10 @@ func TestAnAnswerSentInATurnCutOffByAStopIsNotOwedAfterResume(t *testing.T) {
 	s.stop()
 
 	phase.Store(2)
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 	s2 := resumeOneCall(t, path, project, s.model)
 	s2.settled()
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(15 * owedRetryDelays[0]) // a false reminder comes one delay after the resume
 	s2.settled()
 	var owed int64
 	s2.rt.sync(func() { owed = s2.rt.turns.owed })
