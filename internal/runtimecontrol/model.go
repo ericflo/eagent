@@ -40,33 +40,6 @@ var routeOrder = []string{RouteEagent, RouteSummarizer}
 // effort"), so eagent's card is named for eagent, not "Model".
 var routeLabels = map[string]string{RouteEagent: "eagent", RouteSummarizer: "Summarizer"}
 
-// sessionChains are the configurations a session's routes are looked up in
-// when its preset is saved, in order: the saved preset it was started on,
-// the project's own configuration, then the built-in preset it was started
-// on. The project's own comes before a built-in name because a session on
-// the project's config.json reports the built-in "glm" (FromConfigFor).
-// names are the configuration the session runs and the one a change in
-// the same proposal chose; one that cannot be loaded (the preset being
-// saved does not exist yet) is left out.
-func sessionChains(project string, own config.Config, names ...string) []config.Config {
-	var bundles, presets []config.Config
-	seen := map[string]bool{}
-	for _, name := range names {
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		if b, ok := strings.CutPrefix(name, "bundle:"); ok {
-			if c, err := config.LoadBundle(project, "", b); err == nil {
-				bundles = append(bundles, c)
-			}
-		} else if c, err := config.ChosenPreset(project, name); err == nil {
-			presets = append(presets, c)
-		}
-	}
-	return append(append(bundles, own), presets...)
-}
-
 // routeNames name each route in a sentence.
 var routeNames = map[string]string{RouteEagent: "eagent's model", RouteSummarizer: "the summarizer"}
 
@@ -566,24 +539,23 @@ func SavePresetName(p control.Proposal) string {
 
 // ConfigFromValues constructs a standalone Config representing a running
 // session's current models and runtime settings so it can be saved as a
-// reusable project preset. The session runs the configuration values.Config
-// names; see ConfigFromValuesOn.
+// reusable project preset, for a caller with no session at hand: each
+// route is looked up in the project's own configuration; see
+// ConfigFromRoutes.
 func ConfigFromValues(project string, values Values) (config.Config, error) {
-	return ConfigFromValuesOn(project, values.Config, values)
+	return ConfigFromRoutes(project, values, nil)
 }
 
-// ConfigFromValuesOn is ConfigFromValues for a session started on the
-// configuration running names (a saved preset as "bundle:<name>", a
-// built-in preset, or "" for the project's own). Its routes are saved as
-// that configuration has them (address, key variable, window, reply
-// ceiling, fallbacks), or as the project's own does when it has them; a
-// model neither has is picked from the catalog as before.
-func ConfigFromValuesOn(project, running string, values Values) (config.Config, error) {
+// ConfigFromRoutes is ConfigFromValues with the routes the session runs,
+// as configured, by route key (Controller.Routes): those are saved as they
+// are, whatever the session was started on and wherever the preset is
+// saved. A route the session did not hand over is looked up in the
+// project's own configuration, else picked from the catalog.
+func ConfigFromRoutes(project string, values Values, running map[string]config.ModelRoute) (config.Config, error) {
 	cfg, err := config.LoadBundle(project, "", "")
 	if err != nil {
 		cfg = config.Defaults()
 	}
-	chains := sessionChains(project, cfg, running, values.Config)
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
 	if values.TickSeconds > 0 {
 		cfg.TickSeconds = values.TickSeconds
@@ -596,29 +568,24 @@ func ConfigFromValuesOn(project, running string, values Values) (config.Config, 
 		if !ok || rt.Model == "" {
 			return base, false, nil
 		}
-		// A model a configured chain has (the fallback a session moved
-		// to, say) is saved as that entry is configured.
-		for _, c := range chains {
-			chain := c.Model
-			if key == RouteSummarizer {
-				chain = c.Summarizer.Route(c.Model)
-			}
-			if entry, ok := ChainEntry(project, chain, rt); ok {
-				base = entry
-				if rt.Provider == "" {
-					// At an address no provider knows there is no catalog
-					// to pick from: the entry as it is, at the effort shown.
-					base.ReasoningEffort = rt.Effort
-					return base, true, nil
-				}
-				break
+		if r, ok := running[key]; ok {
+			return r, true, nil
+		}
+		// A model the project's chain has (its fallback, say) is saved as
+		// that entry is configured.
+		if entry, ok := ChainEntry(project, base, rt); ok {
+			base = entry
+			if rt.Provider == "" {
+				// At an address no provider knows there is no catalog to
+				// pick from: the entry as it is, at the effort shown.
+				base.ReasoningEffort = rt.Effort
+				return base, true, nil
 			}
 		}
 		if rt.Provider == "" {
-			// Neither a catalog nor a configuration the session could be
-			// running has it: saving another model under the new name
-			// would not be what runs.
-			return base, false, fmt.Errorf("%s: %s is at an address no provider is known for, and neither this session's configuration nor the project's has it, so a preset cannot be built from it here; register its server (eagent servers add <url>) or save the preset in %s", routeNames[key], rt.Model, config.BundlesDir(project))
+			// Neither a catalog nor the project's chain has it: saving the
+			// project's own model under the new name would not be what runs.
+			return base, false, fmt.Errorf("%s: %s is at an address no provider is known for and is not in this project's configuration, so a preset cannot be built from it here; register its server (eagent servers add <url>) or save the preset in %s", routeNames[key], rt.Model, config.BundlesDir(project))
 		}
 		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, rt.Effort)
 		if err != nil {

@@ -37,7 +37,13 @@ type Controller struct {
 	// Stop records an accepted session.stop and arranges for the session to
 	// end once Poll returns (Poll's files must stay open until then). Nil
 	// refuses the stop.
-	Stop                               func(Request) error
+	Stop func(Request) error
+	// Routes, when set, gives for each route key in routes (eagent's, the
+	// summarizer's) the chain the session runs or, for a pick that changes
+	// it, will run once the change is applied, as configured (address, key
+	// variable, window, reply ceiling, fallbacks). A preset saved from the
+	// session is built from it. Called on the goroutine that polls.
+	Routes                             func(routes map[string]Route) (map[string]config.ModelRoute, error)
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
@@ -211,9 +217,13 @@ func (c *Controller) process(q Request) error {
 	presetName := SavePresetName(q.Proposal)
 	var presetCfg config.Config
 	if presetName != "" {
-		// The configuration the session runs is the one its settings named
-		// before this change: saving a preset renames it to the new one.
-		presetCfg, err = ConfigFromValuesOn(c.Project, c.Values.Config, values)
+		var running map[string]config.ModelRoute
+		if c.Routes != nil {
+			if running, err = c.Routes(values.Routes); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
+			}
+		}
+		presetCfg, err = ConfigFromRoutes(c.Project, values, running)
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
