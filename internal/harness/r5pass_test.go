@@ -37,6 +37,13 @@ func r5StartPass(t *testing.T) *r5PassSession {
 			<-p.release
 			return reply{text: briefing(places(ask)[:3])}
 		}
+		if phoneLastIsTool(msgs) {
+			// The timer's result: nothing more to do, and the conversation
+			// is as large as it was.
+			r := hold()
+			r.prompt = 25000
+			return r
+		}
 		if looks.Add(1) == 1 {
 			r := reply{calls: []event.ToolCall{
 				tc("schedule", `{"spec":"in 100ms","note":"Tell Codex to deploy to staging."}`),
