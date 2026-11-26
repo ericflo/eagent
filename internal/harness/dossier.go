@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -93,18 +94,19 @@ const (
 
 // dossierBudget is how many characters of the record one pass may read
 // back: what the model's window has left after the prompt it already
-// holds and the room it needs to write, up to a fixed bound. It is small
-// or negative when the prompt nearly fills the window (rollover_tokens
-// fixed close to it, or one turn that took the conversation far past the
-// limit); such a pass is not written inside the conversation
-// (startDossier). Loop goroutine only.
+// holds and the room it needs to write (the reply ceiling, or the 16,384
+// tokens a call asks for when the route sets none), up to a fixed bound.
+// It is small or negative when the prompt nearly fills the window
+// (rollover_tokens fixed close to it, or one turn that took the
+// conversation far past the limit); such a pass is not written inside the
+// conversation (startDossier). Loop goroutine only.
 func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
-	window, reply := r.window()
+	input, _ := r.inputRoom()
 	limit := dossierReadMax
 	if fresh {
 		limit, promptTokens = dossierFreshMax, 8000
 	}
-	free := window - promptTokens - reply - 8000
+	free := input - promptTokens - 8000
 	// About three characters of the record to a token, with a fifth held back.
 	return min(limit, free*3*4/5)
 }
@@ -164,9 +166,24 @@ const (
 	scaleMax  = 4 * scaleUnit
 )
 
-// scale is the ratio learned so far, in thousandths. Loop goroutine only.
+// scale is the ratio learned so far on the route in use, in thousandths.
+// One learned on another route (before a fallback took over, or before a
+// model was picked in the thread's settings) says nothing about this one,
+// which starts at 1 again. Loop goroutine only.
 func (r *Runtime) scale() int {
+	if r.tokenScaleOn != r.routeKey() {
+		return scaleUnit
+	}
 	return max(r.tokenScale, scaleUnit)
+}
+
+// routeKey names the route eagent's calls go to right now. Loop goroutine
+// only.
+func (r *Runtime) routeKey() string {
+	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
+		return m.client.Endpoint.BaseURL + " " + m.client.Endpoint.Model
+	}
+	return ""
 }
 
 // provider is an estimate in the provider's count; estimate is the
@@ -176,16 +193,29 @@ func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale
 
 // calibrate learns from one of eagent's calls how its provider counts
 // against the estimate (see scale). Any goroutine: what it learns is
-// applied on the loop. A request with pictures teaches nothing (the
-// estimate does not see them), nor one too small to measure by.
+// applied on the loop, to the route in use then (a call that moves to a
+// fallback route posts this before the move).
+//
+// A picture that goes out with the request teaches nothing: a provider
+// counts one as anything from a few hundred tokens to many thousands, and
+// the estimate does not see it. One that does not go out (refused before,
+// so a note stands in its place, or too large to be sent) is no reason to
+// learn nothing. Reasoning replayed verbatim (Native) is counted by some
+// providers and dropped by others; its estimate is the most it can be, so
+// a request that carries it only teaches a ratio at least this high, and
+// never lowers one learned before. Nor does a request too small to measure
+// by teach anything.
 func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err error) {
 	if who != event.ActorEagent {
 		return
 	}
 	est := llm.EstimateTokens(req.System) + toolTokens()
+	unknown := 0
 	for _, m := range req.Messages {
-		if len(m.Images) > 0 {
-			return
+		for _, im := range m.Images {
+			if sentPicture(im) {
+				return
+			}
 		}
 		est += llm.EstimateTokens(m.Text)
 		for _, c := range m.ToolCalls {
@@ -194,26 +224,49 @@ func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err
 		for _, res := range m.Results {
 			est += llm.EstimateTokens(res.Output)
 		}
+		if len(m.Native) > 0 {
+			unknown += llm.EstimateTokens(string(m.Native))
+		}
 	}
 	if est < 1000 {
 		return
 	}
+	// learn sets the ratio to k, or (raise) only raises it. On the loop.
+	learn := func(k int, raise bool) {
+		k = min(k, scaleMax)
+		if key := r.routeKey(); r.tokenScaleOn != key {
+			r.tokenScale, r.tokenScaleOn = 0, key
+		}
+		if raise && k <= r.scale() {
+			return
+		}
+		r.tokenScale = k
+	}
 	var ae *llm.APIError
 	switch {
 	case err == nil && resp != nil && resp.Usage.Input > 0:
-		k := min(resp.Usage.Input*scaleUnit/est, scaleMax)
-		r.post(func() { r.tokenScale = k })
+		k := max(resp.Usage.Input-unknown, 0) * scaleUnit / est
+		r.post(func() { learn(k, unknown > 0) })
 	case errors.As(err, &ae) && ae.ContextOverflow():
 		// Refused as too long: the provider counts at least the room it
 		// has for input in this request. A tenth more is held back, as
 		// the refusal says only that it was over.
 		r.post(func() {
 			input, _ := r.inputRoom()
-			if k := min(input*scaleUnit*11/10/est, scaleMax); k > r.scale() {
-				r.tokenScale = k
-			}
+			learn(max(input-unknown, 0)*11/10*scaleUnit/est, true)
 		})
 	}
+}
+
+// sentPicture reports that a picture in a request goes out as a picture:
+// it is not marked refused, and the file is there and small enough to be
+// inlined (llm.Image).
+func sentPicture(im llm.Image) bool {
+	if im.Refused {
+		return false
+	}
+	st, err := os.Stat(im.Path)
+	return err == nil && st.Size() > 0 && st.Size() <= 10<<20
 }
 
 // smallBudget is how a small route's room is shared out, in the
@@ -313,6 +366,17 @@ func (r *Runtime) restartFull(limit int) bool {
 	if _, small := r.room(); !small {
 		return true
 	}
+	if r.refusedFirst() {
+		// Refused before any call of this conversation went through. When
+		// it holds more than its opening (what the restart carried whole,
+		// what came while the dossier was written), the next restart takes
+		// that in by place and carries nothing (startDossier), so it can
+		// make room. When it holds its opening alone, no restart can. Once
+		// that is decided it stands until a call goes through: what is
+		// added after the refusal (the notice that says so, a message)
+		// cannot make the opening fit.
+		return r.turns.futileLogged || len(r.st.View(&r.view)) <= 1
+	}
 	_, fixed := r.inputRoom()
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
 		fixed += llm.EstimateTokens(v[0].Text)
@@ -321,6 +385,15 @@ func (r *Runtime) restartFull(limit int) bool {
 	// without it another restart could only open on the same full prompt.
 	span, _, carry := r.smallBudget()
 	return span <= 0 || r.provider(fixed)+carry >= limit
+}
+
+// refusedFirst reports that the conversation was begun by a restart and
+// the provider refused it as too long before any of its calls went
+// through. Loop goroutine only.
+func (r *Runtime) refusedFirst() bool {
+	t := &r.turns
+	cur := r.st.Current()
+	return t.overflowed && t.subCalls == 0 && cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade")
 }
 
 // fullNotice opens the message that tells the user the conversation cannot
@@ -350,7 +423,7 @@ func (r *Runtime) toldFull() bool {
 // dossierJob is what one dossier pass works from, gathered on the loop.
 type dossierJob struct {
 	msgs   []llm.Message  // the conversation, ending with the request
-	lines  map[string]int // lines in each record file, to check citations
+	lines  map[string]int // lines in each record file, to check citations (brought up to date before each check)
 	budget int            // characters of lookups the pass may read back
 	covers int64
 	tokens int
@@ -374,7 +447,7 @@ type dossierResult struct {
 // until it lands. Loop goroutine only.
 func (r *Runtime) startDossier() {
 	t := &r.turns
-	t.busy, t.compacting, t.callAt = true, true, time.Now()
+	t.busy, t.compacting, t.callAt, t.rereadTold = true, true, time.Now(), false
 	r.flushSilent()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
 	if r.st.Unfinished() {
@@ -382,14 +455,17 @@ func (r *Runtime) startDossier() {
 		// conversation being replaced is as long as when it was closed.
 		job.tokens = max(job.tokens, r.closedTokens())
 	}
-	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= r.carryBytes() {
+	if _, due := r.dueWake(); due && t.seen < job.covers && r.unseenBytes() <= r.carryBytes() && !r.refusedFirst() {
 		// Something arrived that no look has taken in yet: the message
 		// or the turn end that set this restart off. The briefing does
 		// not stand in for it. The new conversation shows it whole, with
 		// its pictures, because it starts after the last thing seen.
 		// (Unless a great deal piled up unseen, as when the model was
 		// unreachable for hours: carrying all of that over would undo
-		// the restart, and the facts list it with its places.)
+		// the restart, and the facts list it with its places. Nor when
+		// the conversation being replaced was itself begun by a restart
+		// and refused on its first call: what that restart carried did
+		// not fit, and carrying it again would only be refused again.)
 		job.covers = t.seen
 	}
 	switch {
@@ -422,12 +498,68 @@ func (r *Runtime) startDossier() {
 		job.msgs = state.WithTail(r.st.View(&r.view), r.prompts.Render("DOSSIER.md", data))
 		r.ui.Log("the conversation reached %dk tokens; restarting it from a dossier", job.tokens/1000)
 	}
+	r.tellRereading()
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		res := r.writeDossier(job)
 		r.post(func() { r.finishDossier(job, res) })
 	}()
+}
+
+// rereadNotice is what the user is told, in the harness's own words, when
+// what they wrote to eagent waits on a dossier pass: the pass takes
+// minutes, and eagent makes no other model call until it is over.
+const rereadNotice = "I'm rereading the session so far, to carry on with a clear head. I'll answer you as soon as that's done."
+
+// tellRereading tells the user once per pass, as soon as it is so, that a
+// message or an answer of theirs for eagent waits on the pass: one written
+// during it, or one no look had taken in when it began. A message typed
+// straight into the agent's terminal is not waiting on eagent and says
+// nothing. It is recorded as eagent's words and shown in the next
+// conversation, so the model knows what the user was told; it is not
+// taken for an answer (saidAt and saidSeq stay as they were). Loop
+// goroutine only.
+func (r *Runtime) tellRereading() {
+	t := &r.turns
+	if !t.compacting || t.rereadTold || r.ending {
+		return
+	}
+	// Newest first, back to the last look: a message or an answer for
+	// eagent since the last time they were told (by an earlier pass that
+	// ended without a look, as when the next restart follows at once).
+	waiting := false
+scan:
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > t.seen; i-- {
+		ev := r.st.Events[i]
+		switch ev.Type {
+		case event.UserAnswer:
+			waiting = true
+			break scan
+		case event.UserMessage:
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && d.Held != "" {
+				waiting = true
+				break scan
+			}
+		case event.Message:
+			var d event.MessageData
+			if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && d.Auto && d.Text == rereadNotice {
+				break scan
+			}
+		}
+	}
+	if !waiting {
+		return
+	}
+	t.rereadTold = true
+	if r.phone != nil {
+		// The post carries the status line; it is the pass's from the
+		// first moment, not the one from before it.
+		r.phone.noteState(r)
+	}
+	r.append(event.New(event.Message, event.ActorEagent, event.MessageData{Auto: true, Text: rereadNotice}))
+	r.ui.Say(rereadNotice)
 }
 
 // dossierRefused is why a pass is written from the files after the
@@ -505,15 +637,35 @@ func (r *Runtime) smallRoute() bool {
 	return small
 }
 
-// unseenBytes sizes what the record holds after the last look. Loop
-// goroutine only.
+// unseenBytes sizes what the record holds after the last look, with each
+// picture a message carries (and that is not refused) as pictureTokens:
+// the record holds only its path, and the new conversation would carry the
+// picture itself. Loop goroutine only.
 func (r *Runtime) unseenBytes() int {
 	n := 0
 	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > r.turns.seen; i-- {
-		n += len(r.st.Events[i].Data)
+		ev := r.st.Events[i]
+		n += len(ev.Data)
+		var d struct {
+			Attachments []event.Attachment `json:"attachments"`
+		}
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil {
+			for _, a := range d.Attachments {
+				if a.IsImage() && !r.st.RefusedImages[a.Path] {
+					n += pictureTokens * 7 / 2
+				}
+			}
+		}
 	}
 	return n
 }
+
+// pictureTokens is about what a provider counts for one picture: Anthropic
+// counts about 1,600 tokens for one at the size it scales pictures down
+// to, and OpenAI's high-detail tiles come to less. Some count more; a
+// carried picture that turns out not to fit is taken care of by the next
+// restart (startDossier).
+const pictureTokens = 1600
 
 // citation matches a place in the record: file:line or file:line-line.
 var citation = regexp.MustCompile(`(\d{10,}\.jsonl):(\d+)(?:-(\d+))?`)
@@ -718,6 +870,10 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			continue
 		}
 		text := strings.TrimSpace(resp.Text)
+		// The record went on growing while the pass ran, and its lookups
+		// read it as it is now: a place written since the pass began is
+		// one the briefing may cite.
+		r.sync(func() { job.lines = r.recordLines() })
 		_, bad := checkCitations(text, job.lines)
 		why := mapProblem(text, job.lines)
 		if len(text) < dossierMinChars {
@@ -850,7 +1006,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	// A new conversation: if this one turns out too long from its first
 	// call as well, the user is told again.
 	t.futileLogged = false
-	cites, _ := checkCitations(res.text, job.lines)
+	cites, _ := checkCitations(res.text, r.recordLines())
 	r.ui.Log("subsession %d begins with a dossier written by %s (%d characters, %d places cited, %d lookups)", len(r.st.Subsessions), by, len(body), cites, len(res.consulted))
 }
 

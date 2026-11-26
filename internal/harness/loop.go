@@ -148,6 +148,7 @@ type turnState struct {
 	firstPrompt     int
 	overflowed      bool
 	futileLogged    bool
+	rereadTold      bool // the user was told what they wrote waits on this dossier pass
 	dossierFailedAt time.Time
 	// adopt: the log was written by the three-actor design, and the first
 	// thing this loop does is write a dossier from its files (resume.go).
@@ -400,6 +401,7 @@ func (r *Runtime) dueWake() (wakeKind, bool) {
 // look, then a look at the thread's title and summary. Loop goroutine.
 func (r *Runtime) maybeTurn() {
 	t := &r.turns
+	r.tellRereading()
 	if t.busy || r.ending {
 		return
 	}
