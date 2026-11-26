@@ -834,10 +834,12 @@ func (s *Seat) reportDialog(title string) {
 	s.setState(back, "")
 }
 
-// answerDialog presses the answer to a known dialog on screen, at most once
-// per dialog every few seconds, and reports whether one was showing.
+// answerDialog presses the answer to one of the agent's own dialogs on
+// screen, at most once per dialog every few seconds, and reports whether
+// one was showing. Another agent's dialog text on this screen is output
+// (a file, a log), never a dialog this agent shows.
 func (s *Seat) answerDialog(screen string, now time.Time) bool {
-	for _, d := range allDialogs() {
+	for _, d := range s.agent.dialogs() {
 		if !containsAll(screen, d.match) {
 			continue
 		}
@@ -856,17 +858,6 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 	return false
 }
 
-// looksReady recognises an agent at its input prompt. Any agent's prompt
-// counts, whichever agent the seat runs.
-func looksReady(screen string) bool {
-	for _, a := range Agents() {
-		if a.ready(screen) {
-			return true
-		}
-	}
-	return false
-}
-
 // readyReporter is an agent whose own hook says whether it waits at its
 // prompt (pi's status file); known is false when it says nothing usable.
 type readyReporter interface {
@@ -874,15 +865,16 @@ type readyReporter interface {
 }
 
 // ready says whether the agent waits at its prompt: what its hook reports,
-// when it reports anything, and otherwise what the screen looks like. A
-// screen can look ready while the agent works (pi always draws its footer).
+// when it reports anything, and otherwise whether the screen shows this
+// agent's own prompt. A screen can look ready while the agent works (pi
+// always draws its footer).
 func (s *Seat) ready(screen string) bool {
 	if rr, ok := s.agent.(readyReporter); ok {
 		if ready, known := rr.reportedReady(s); known {
 			return ready
 		}
 	}
-	return looksReady(screen)
+	return s.agent.ready(screen)
 }
 
 // sessionStarter is an agent that can say how many entries a transcript

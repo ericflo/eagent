@@ -232,7 +232,7 @@ func TestPiCommandAndPrepare(t *testing.T) {
 	if err := CheckPick(spec.Profile, "", "ultra"); err == nil || !strings.Contains(err.Error(), "Pi takes reasoning effort off, minimal") {
 		t.Fatalf("effort check: %v", err)
 	}
-	if !looksReady("x\n0.4%/1.0M (auto)            (anthropic) claude-haiku-5-5 • low\n") || looksReady("Working...") {
+	if !a.ready("x\n0.4%/1.0M (auto)            (anthropic) claude-haiku-5-5 • low\n") || a.ready("Working...") {
 		t.Fatal("pi footer not recognised")
 	}
 	if !containsAll(" Trust project folder?\n → Trust\n   Trust (this session only)\n", piAgent{}.dialogs()[0].match) {
@@ -332,10 +332,13 @@ func TestRegistry(t *testing.T) {
 	if _, err := agentFor("nope"); err == nil || !strings.Contains(err.Error(), "antigravity, claude, codex, pi") {
 		t.Fatalf("unknown agent error %v", err)
 	}
-	// The dialogs every seat answers, in the order they always were.
+	// Each agent's dialogs, in the order they always were; a seat answers
+	// only its own agent's.
 	var names []string
-	for _, d := range allDialogs() {
-		names = append(names, d.name)
+	for _, a := range Agents() {
+		for _, d := range a.dialogs() {
+			names = append(names, d.name)
+		}
 	}
 	if strings.Join(names, ",") != "antigravity-trust,claude-trust,claude-bypass,codex-trust,codex-update,pi-trust" {
 		t.Fatalf("dialogs %v", names)
