@@ -1,12 +1,15 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -71,5 +74,56 @@ func TestConfigPageReadsARunningSessionsModelsWithoutRacingItsLoop(t *testing.T)
 	}
 	if w := do(s, "GET", "/api/config", nil, nil); json.Unmarshal(w.Body.Bytes(), &v) != nil || len(v.Running) != 1 || v.Running[0].Models["eagent"] == "" {
 		t.Fatalf("running = %+v", v.Running)
+	}
+}
+
+// A session the server was hosting that has no phone thread (FinaleChat
+// says the thread does not exist) cannot have a reply waiting in it, so it
+// comes back like any other, instead of being left stopped with the list
+// that named it already gone.
+func TestRestartBringsBackASessionWhoseThreadDoesNotExist(t *testing.T) {
+	s, project := newTestServer(t)
+	sess := newSession(t, project)
+	_ = sess.Close()
+	s.running[sess.ID] = fakeHosted()
+	s.rememberHosted()
+	var got []string
+	oldRestore, oldReply := restoreSession, pendingReply
+	t.Cleanup(func() { restoreSession, pendingReply = oldRestore, oldReply })
+	restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error {
+		got = append(got, id+"|"+reply.Text)
+		return nil
+	}
+	pendingReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
+		return integration.PhoneMessage{}, false, &finalechat.Error{Status: 404, Code: "not_found", Message: "Not found."}
+	}
+	New(project, nil).restoreHosted(context.Background())
+	if len(got) != 1 || got[0] != sess.ID+"|" {
+		t.Fatalf("brought back %v, want %s with no reply", got, sess.ID)
+	}
+}
+
+// A 404 that is not FinaleChat's own (a proxy in front of it during a
+// deploy) says nothing about the thread: that session is left to the reply
+// watcher, as when the service cannot be reached.
+func TestRestartLeavesASessionWhenA404IsNotFinaleChats(t *testing.T) {
+	s, project := newTestServer(t)
+	sess := newSession(t, project)
+	_ = sess.Close()
+	s.running[sess.ID] = fakeHosted()
+	s.rememberHosted()
+	var got []string
+	oldRestore, oldReply := restoreSession, pendingReply
+	t.Cleanup(func() { restoreSession, pendingReply = oldRestore, oldReply })
+	restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error {
+		got = append(got, id)
+		return nil
+	}
+	pendingReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
+		return integration.PhoneMessage{}, false, &finalechat.Error{Status: 404, Message: "404 page not found"}
+	}
+	New(project, nil).restoreHosted(context.Background())
+	if len(got) != 0 {
+		t.Fatalf("brought back %v without reading its thread", got)
 	}
 }
