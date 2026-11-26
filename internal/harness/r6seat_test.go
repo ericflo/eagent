@@ -121,13 +121,99 @@ func TestSendsToAnAgentThatExitedWhileEagentWasDownAreSettled(t *testing.T) {
 		var d event.RelayDeliveredData
 		if ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && !d.OK {
 			failed = append(failed, d.ID)
-			if !strings.Contains(d.Detail, "no longer running") {
+			if !strings.Contains(d.Detail, "exited") || d.Outcome != event.DeliveryUnconfirmed {
 				t.Errorf("detail %q", d.Detail)
 			}
 		}
 	}
 	if !slices.Equal(failed, open) {
 		t.Fatalf("reported %v not confirmed, want %v", failed, open)
+	}
+}
+
+// unconfirmedIDs lists, in order, the sends the record reports not
+// confirmed, and fails on one reported twice.
+func unconfirmedIDs(t *testing.T, evs []event.Event) []string {
+	t.Helper()
+	var ids []string
+	for _, ev := range evs {
+		var d event.RelayDeliveredData
+		if ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && !d.OK {
+			if slices.Contains(ids, d.ID) {
+				t.Fatalf("%s reported not confirmed twice", d.ID)
+			}
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids
+}
+
+// The agent exited while eagent ran (the record says exited) with sends
+// still unconfirmed, and eagent was then stopped. The resume settles them,
+// once; a second resume says nothing more.
+func TestSendsToAnAgentRecordedExitedAreSettledAtTheResume(t *testing.T) {
+	path, project, model, open := stoppedWithSends(t)
+	captureAttach(t, nil)
+	rt, err := Resume(testConfig(model.srv.URL), Options{Project: project}, &fakeUI{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recorded as the harness records a seat's exit, but with nothing to
+	// settle it (as a record written before this rule): the next resume
+	// must.
+	rt.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "exited", Detail: "the pane is gone"}))
+	rt.sess.Close()
+	for round := 1; round <= 2; round++ {
+		rt2, err := Resume(testConfig(model.srv.URL), Options{Project: project}, &fakeUI{}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := len(rt2.st.Relays["claude"].Undelivered)
+		got := unconfirmedIDs(t, rt2.st.Events)
+		rt2.sess.Close()
+		if n != 0 || !slices.Equal(got, open) {
+			t.Fatalf("round %d: %d still wait; reported %v, want %v", round, n, got, open)
+		}
+	}
+}
+
+// The agent exits while eagent runs: the sends it still waited on are
+// reported not confirmed when the exit is recorded, once, so a session
+// with no terminal can reach its idle check.
+func TestSendsToAnAgentThatExitsLiveAreSettledWhenTheExitIsRecorded(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("Working on it.")
+	useFakeRelays(t, seat)
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	rt, err := New(testConfig(model.srv.URL), Options{Project: t.TempDir(), Prompt: "keep it running", Relay: "claude"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := contextWithCancel()
+	done := make(chan int, 1)
+	go func() { done <- rt.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, "the agent's turn", func() bool {
+		n := 0
+		rt.sync(func() { n = rt.st.Relays["claude"].Turns })
+		return n == 1
+	})
+	var id string
+	rt.sync(func() {
+		id = rt.st.NextRelaySendID()
+		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: id, From: "eagent", Mode: "queue", Text: "sort the mail"}))
+	})
+	seat.emit(relay.Event{Kind: relay.KindState, State: "exited", Detail: "the pane is gone"})
+	waitFor(t, "the send settled", func() bool {
+		n := 1
+		rt.sync(func() { n = len(rt.st.Relays["claude"].Undelivered) })
+		return n == 0
+	})
+	var got []string
+	rt.sync(func() { got = unconfirmedIDs(t, rt.st.Events) })
+	if !slices.Equal(got, []string{id}) {
+		t.Fatalf("reported %v, want %s once", got, id)
 	}
 }
 

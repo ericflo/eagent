@@ -342,6 +342,9 @@ type sendQueue struct {
 	movedTo *relayLaunch
 	// idle is closed when the goroutine typing this queue ends.
 	idle chan struct{}
+	// typing is the send being typed now (its failure is reported where
+	// it fails, see settleExited).
+	typing string
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -384,6 +387,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		h := q.items[0]
 		q.items = q.items[1:]
+		q.typing = h.id
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
@@ -399,6 +403,9 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 				res.how, res.err = seat.Send(h.id, h.text, h.mode)
 			}
 		}
+		r.relays.mu.Lock()
+		q.typing = ""
+		r.relays.mu.Unlock()
 		if res.err != nil && r.passOn(q, h) {
 			continue
 		}
@@ -873,6 +880,9 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if ev.State == "idle" {
 			r.applyWaitingRepick(name)
 		}
+		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
+			r.settleExited(rel)
+		}
 	case relay.KindDelivered:
 		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
 	case relay.KindProgress:
@@ -916,14 +926,16 @@ func (r *Runtime) reattachRelays() []string {
 	var lost []string
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "exited" {
+			// Exited before eagent stopped: what it still waited on was
+			// settled then, unless eagent stopped first.
+			r.settleExited(rel)
 			continue
 		}
 		spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort})
-		restore := unresolvedSends(r.st, rel)
 		if err == nil {
 			// The new seat confirms what the record still waits on from the
 			// transcript, as the old one would have; nothing is typed again.
-			spec.Restore = restore
+			spec.Restore = unresolvedSends(r.st, rel)
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)
@@ -931,14 +943,39 @@ func (r *Runtime) reattachRelays() []string {
 			}
 		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: rel.Name, State: "exited", Detail: "it was not running when eagent resumed (" + err.Error() + ")"}))
-		// Nothing watches its transcript any more: what it was still to
-		// confirm stays unconfirmed, and is said so once.
-		for _, s := range restore {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent was no longer running when eagent resumed, so whether it arrived cannot be confirmed"}))
-		}
+		r.settleExited(rel)
 		lost = append(lost, fmt.Sprintf("relay %s (%s) was no longer running", rel.Name, rel.Who()))
 	}
 	return lost
+}
+
+// settleExited reports, once, each send rel still waited on as not
+// confirmed: its agent has exited, and nothing watches its transcript any
+// more. A send still waiting in the seat's queue to be typed is left out:
+// typing it fails, and that is reported where it fails. Called where an
+// exit is recorded, live or at a resume. Loop goroutine (or before the
+// loop starts).
+func (r *Runtime) settleExited(rel *state.Relay) {
+	queued := map[string]bool{}
+	r.relays.mu.Lock()
+	for _, q := range r.relays.queues {
+		if q.name != rel.Name {
+			continue
+		}
+		for _, h := range q.items {
+			queued[h.id] = true
+		}
+		if q.typing != "" {
+			queued[q.typing] = true
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, s := range unresolvedSends(r.st, rel) {
+		if queued[s.ID] {
+			continue
+		}
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent exited before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
+	}
 }
 
 // unresolvedSends are the sends the record still waits on for rel, oldest
