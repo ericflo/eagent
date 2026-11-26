@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -118,5 +119,29 @@ func TestFirstPublicationKeepsTheThreadsSummaryTitle(t *testing.T) {
 	}
 	if f.patchAgent != "eagent" {
 		t.Fatalf("agent = %q", f.patchAgent)
+	}
+}
+
+// The service keeps a file's name up to 255 characters. Saved under the
+// whole id, a name that long must still make a file that opens as what it
+// is, as the running session's copy does.
+func TestALongPhoneFileNameStillSaves(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("png bytes"))
+	}))
+	t.Cleanup(srv.Close)
+	client := &finalechat.Client{BaseURL: srv.URL, Token: "fc_test"}
+	for _, name := range []string{strings.Repeat("a", 216) + ".png", strings.Repeat("a", 251) + ".png"} {
+		a := finalechat.Attachment{ID: "019abc12-0000-7000-8000-000000000001", Filename: name, URL: "/f/1", Size: 9}
+		saved, err := saveAttachment(context.Background(), client, t.TempDir(), a)
+		if err != nil {
+			t.Fatalf("a %d-byte name (the service allows 255) was refused: %v", len(name), err)
+		}
+		if raw, err := os.ReadFile(saved.Path); err != nil || string(raw) != "png bytes" {
+			t.Fatalf("saved %q, %v", raw, err)
+		}
+		if !strings.HasSuffix(saved.Path, ".png") || len(filepath.Base(saved.Path)) > 255 {
+			t.Fatalf("saved as %q (%q)", saved.Path, saved.Name)
+		}
 	}
 }

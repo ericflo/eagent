@@ -234,6 +234,10 @@ type Question struct {
 	Meta          map[string]any `json:"meta"`
 	CreatedAt     time.Time      `json:"created_at"`
 	ExpiresAt     *time.Time     `json:"expires_at"`
+	// Created is set by Ask: false when the client key matched a question
+	// the service already had, which it returns as it is, leaving the
+	// thread's status line alone.
+	Created bool `json:"-"`
 }
 
 // Thread is one conversation.
@@ -611,12 +615,14 @@ func (c *Client) Ask(ctx context.Context, ref string, req AskRequest) (Question,
 	var out struct {
 		Question Question `json:"question"`
 		Thread   Thread   `json:"thread"`
+		Created  bool     `json:"created"`
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return Question{}, Thread{}, err
 	}
 	err = c.send(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/questions", "application/json", raw, &out, 0, req.ClientKey != "")
+	out.Question.Created = out.Created
 	return out.Question, out.Thread, err
 }
 

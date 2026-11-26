@@ -64,6 +64,9 @@ type phoneFake struct {
 	// rejectActivity makes every POST …/activity answer applied=false,
 	// as the service does when a newer status is live.
 	rejectActivity bool
+	// questionsDown makes every GET …/questions/<id> fail as a service
+	// that cannot be reached does.
+	questionsDown bool
 }
 
 // threadJSON is the thread as the service returns it. Call with f.mu held.
@@ -344,7 +347,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		q = phoneCopy(q)
 		f.mu.Unlock()
 		w.WriteHeader(201)
-		_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}, "created": true})
 	case strings.HasPrefix(path, "/api/v1/questions/") && strings.HasSuffix(path, "/dismiss"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/questions/"), "/dismiss")
 		f.mu.Lock()
@@ -374,6 +377,14 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"question": q})
 	case strings.HasPrefix(path, "/api/v1/questions/"):
 		id := strings.TrimPrefix(path, "/api/v1/questions/")
+		f.mu.Lock()
+		down := f.questionsDown
+		f.mu.Unlock()
+		if down {
+			w.WriteHeader(503)
+			_, _ = w.Write([]byte(`{"error":{"code":"unavailable","message":"down"}}`))
+			return
+		}
 		wait := 0
 		fmt.Sscanf(r.URL.Query().Get("wait"), "%d", &wait)
 		deadline := time.Now().Add(time.Duration(wait) * time.Second)

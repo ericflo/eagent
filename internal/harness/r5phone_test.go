@@ -383,3 +383,108 @@ func TestSendMessageAttachesAPictureThatViewImageTakes(t *testing.T) {
 		t.Fatalf("the session keeps %d copies, want the look and the send", len(entries))
 	}
 }
+
+// A deleted thread takes its cards and their keys with it, so the card a
+// resume then makes in the new thread has the plain key again. On the
+// resume after that, the question still has that one open card: a second
+// must not go up beside it.
+func TestAQuestionAskedAgainAfterTheThreadWasDeletedKeepsOneCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	// The user deletes the thread on the phone: its questions and their
+	// keys go with it.
+	fp.mu.Lock()
+	clear(fp.questions)
+	clear(fp.qkeys)
+	fp.mu.Unlock()
+	g.resume(Options{})
+	waitFor(t, "a card in the new thread", func() bool { return fp.pendingQuestions() == 1 })
+	waitFor(t, "the new card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	g.interrupt()
+	g.resume(Options{})
+	waitFor(t, "the question to be asked again", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.asks) >= 3 })
+	waitFor(t, "the card to be watched", func() bool {
+		var p *phone
+		g.rt.sync(func() { p = g.rt.phone })
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.open) == 1
+	})
+	if n := fp.pendingQuestions(); n != 1 {
+		t.Fatalf("%d open cards for one question after the second resume, want 1", n)
+	}
+}
+
+// The message that resumes a session is taken as the answer to its open
+// question only when the question's card is known not to be dismissed. If
+// the service cannot say, the person may have closed the card while the
+// session was stopped: their words are a message, and the question stays.
+func TestAResumeMessageIsNotTakenAsTheAnswerWhenTheCardCannotBeChecked(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	fp.mu.Lock()
+	fp.questionsDown = true
+	fp.mu.Unlock()
+	g.resume(Options{Prompt: "use the blue one", PromptSource: "finalechat"})
+	waitFor(t, "the words to be recorded", func() bool {
+		for _, ev := range g.log() {
+			switch ev.Type {
+			case event.UserAnswer:
+				t.Fatalf("taken as the answer: %s", ev.Data)
+			case event.UserMessage:
+				var d event.UserMessageData
+				if ev.Decode(&d) == nil && d.Text == "use the blue one" {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	var open bool
+	g.rt.sync(func() { open = g.rt.st.Question != nil })
+	if !open {
+		t.Fatal("the question was closed")
+	}
+}
+
+// A card the person dismissed while the session was stopped is found
+// whichever of the question's recorded cards it is.
+func TestADismissalWhileAwayIsFoundOnAnOlderCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	// A later card the record knows of, gone with a deleted thread.
+	qid := r5OpenQuestion(t, g)
+	sess, _, err := store.Open(g.rt.sess.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: "gone-card"})); err != nil {
+		t.Fatal(err)
+	}
+	sess.Close()
+	if !fp.dismiss() {
+		t.Fatal("nothing to dismiss")
+	}
+	g.resume(Options{Prompt: "use the blue one", PromptSource: "finalechat"})
+	waitFor(t, "the dismissal to be recorded", func() bool { return len(g.events(event.UserDismiss)) == 1 })
+	for _, ev := range g.log() {
+		if ev.Type == event.UserAnswer {
+			t.Fatalf("taken as the answer: %s", ev.Data)
+		}
+	}
+}
+
+func r5OpenQuestion(t *testing.T, g *phoneRig) string {
+	t.Helper()
+	st := state.Replay(g.log())
+	if st.Question == nil {
+		t.Fatal("no open question")
+	}
+	return st.Question.ID
+}

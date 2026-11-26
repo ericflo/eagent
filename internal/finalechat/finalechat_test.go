@@ -389,3 +389,18 @@ func TestDownloadOverTheLimitIsRefused(t *testing.T) {
 		t.Fatalf("a file of exactly the limit: %d bytes, %v", buf.Len(), err)
 	}
 }
+
+// A long name is cut to 120 bytes on a character boundary and keeps its
+// extension; the saved name stays well inside 255 bytes.
+func TestInboundFileNameFitsAndKeepsItsExtension(t *testing.T) {
+	file, name := InboundFileName("019abc12-0000-7000-8000-000000000001", strings.Repeat("a", 251)+".png")
+	if len(name) != 120 || !strings.HasSuffix(name, ".png") || len(file) > 255 || !strings.HasPrefix(file, "in-019abc12-0000-7000-8000-000000000001-") {
+		t.Fatalf("file %q (%d), name %q (%d)", file, len(file), name, len(name))
+	}
+	if got := clipBytes("ab"+"é", 3); got != "ab" {
+		t.Fatalf("clipBytes cut inside a character: %q", got)
+	}
+	if _, name := InboundFileName("x", "../../etc/passwd"); name != "passwd" {
+		t.Fatalf("name = %q", name)
+	}
+}
