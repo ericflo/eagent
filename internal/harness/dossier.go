@@ -343,9 +343,8 @@ func (r *Runtime) needsDossier() bool {
 		return false
 	}
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) && r.restartFull(limit) {
-		// burst: what was refused held what arrived during the pass, and
-		// the restart that set it aside was refused the same way.
-		burst := r.restartFactsNow(limit).sinceOpening
+		// What was too large, for the words below (causeOf).
+		cause := causeOf(r.restartFactsNow(limit))
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
 		// Restarting again would only rebuild the same prompt. A session
@@ -363,8 +362,10 @@ func (r *Runtime) needsDossier() bool {
 				} else {
 					r.ui.Log("this model's window leaves %d tokens for a request, and its provider counts eagent's system prompt and tools alone as about %d of them, so no restart can make room; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md", input, r.provider(fixed))
 				}
-			} else if burst {
+			} else if cause == fullBurst {
 				r.ui.Log("what arrived while the session was being reread is more than this model's window holds, also after restarting once more to set it aside; stopping the restarts")
+			} else if cause == fullAgain {
+				r.ui.Log("the conversation was past the restart size on its first call after %d restarts in a row; stopping the restarts", restartRescueMax+1)
 			} else {
 				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			}
@@ -374,8 +375,11 @@ func (r *Runtime) needsDossier() bool {
 			// arriving while the session was reread.
 			if !r.toldFull() {
 				text := fullNotice + " from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."
-				if burst {
+				switch cause {
+				case fullBurst:
 					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
+				case fullAgain:
+					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting. I carry on with a conversation longer than it should be, which makes each answer slower and dearer. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
 				}
 				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
 			}
@@ -403,24 +407,28 @@ func (r *Runtime) restartFull(limit int) bool {
 // ordinary route the most a restart carries whole (dossierUnseenBytes).
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit int) restartFacts {
-	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, decided: r.turns.futileLogged || r.toldFull()}
-	if f.refused {
-		f.sinceOpening = r.recordedSinceOpening()
-		return f
-	}
-	_, fixed := r.inputRoom()
+	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || r.toldFull()}
+	// The opening: the system prompt, the tools and the briefing. Every
+	// size below is in the provider's count (the estimate times the ratio
+	// learned from the provider's own sizes, scale), as the first call's
+	// size and the refusal are: one ruler for both sides of the question.
+	input, fixed := r.inputRoom()
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
 		fixed += llm.EstimateTokens(v[0].Text)
 	}
-	// Room for one message beside the opening, in the provider's count:
-	// without it another restart could only open on the same full prompt.
+	opening := r.provider(fixed)
+	if f.refused {
+		f.sinceOpening = r.recordedSinceOpening()
+		f.openingAloneFits = opening < input
+		return f
+	}
+	// Room for one message beside the opening: without it another restart
+	// could only open on the same full prompt.
 	if _, small := r.room(); small {
 		span, _, carry := r.smallBudget()
-		f.openingFits = span > 0 && r.provider(fixed)+carry < limit
+		f.openingFits = span > 0 && opening+carry < limit
 	} else {
-		// Ordinary routes are sized by the estimate, never by the
-		// provider's ratio (scale), as their restart size is.
-		f.openingFits = fixed+r.carryBytes()*2/7 < limit
+		f.openingFits = opening+r.provider(r.carryBytes()*2/7) < limit
 	}
 	return f
 }
@@ -451,6 +459,16 @@ type restartFacts struct {
 	// retried: the restart that began it was itself the one more try a
 	// restart that carried nothing is allowed (restartHelps).
 	retried bool
+	// rescues: how many restarts in a row, up to the one that began it,
+	// were made because the conversation before was too long from its
+	// start (refused, or past the restart size on its first call). A
+	// conversation whose first call fits ends the run: the next restart
+	// starts it again at 0.
+	rescues int
+	// openingAloneFits (refused): the opening by itself, with nothing
+	// after the briefing, fits the window. When it does not, what arrived
+	// is not what was too large, and no restart can help.
+	openingAloneFits bool
 	// decided: no restart can make room was already found for this
 	// conversation and said (futileLogged in this run, toldFull from the
 	// record), and no call has gone through since.
@@ -470,6 +488,16 @@ type restartFacts struct {
 // written. The next restart carries nothing (startDossier) and lists all
 // of that by place in its facts.
 //
+// Every size is in the provider's count (restartFactsNow).
+//
+//   - Two rescues in a row already (rescues): the restart that began this
+//     conversation and the one before it were each made because the
+//     conversation before was too long from its start, and this one is
+//     too. No: with the restart that started the run, that is three, and
+//     the session stops and says so. A conversation whose first call
+//     fits ends the run.
+//   - Refused, and the opening alone does not fit the window: no restart
+//     can make it smaller. No.
 //   - Refused, and the restart carried something whole: the next request
 //     is smaller. Yes.
 //   - Refused, carried nothing, and nothing after the opening: the opening
@@ -490,21 +518,55 @@ type restartFacts struct {
 //     (tellStillFull).
 //   - Not refused (the first call went through, past the restart size):
 //     what came after the opening is now seen and is not carried again,
-//     so a restart helps when the opening itself leaves room.
+//     so a restart helps when the opening itself leaves room for a
+//     message under the restart size.
 //
-// So the most a session does is a restart that carried something, one
-// that carried nothing, and one more; then it stops and says so.
+// So the most a session does is three restarts in a row whose
+// conversations are each too long from their start; then it stops and
+// says so.
 func restartHelps(f restartFacts) bool {
 	switch {
+	case f.rescues >= restartRescueMax:
+		return false
 	case !f.refused:
 		return f.openingFits
-	case f.decided:
+	case f.decided, !f.openingAloneFits:
 		return false
 	case f.carried == carriedNothing:
 		return f.sinceOpening && !f.retried
 	default:
 		return true
 	}
+}
+
+// restartRescueMax is how many restarts in a row may be made for
+// conversations too long from their start, after the restart that began
+// the run (restartHelps).
+const restartRescueMax = 2
+
+// fullCause is which of the full notice's wordings is true for these
+// facts, once restartHelps said no: what was too large.
+type fullCause int
+
+const (
+	fullOpening fullCause = iota // the notes and the standing instructions
+	fullBurst                    // what arrived while the session was reread
+	fullAgain                    // each restart was past the restart size again
+)
+
+// causeOf says what was too large. What arrived during the pass is the
+// cause only when the opening alone fits and the refused request held
+// it. A run of restarts each past the restart size whose openings leave
+// room is the third case: the restarts are what keeps being too long, not
+// one thing anyone can point at.
+func causeOf(f restartFacts) fullCause {
+	switch {
+	case f.refused && f.openingAloneFits && (f.sinceOpening || f.carried == carriedSome):
+		return fullBurst
+	case !f.refused && f.openingFits:
+		return fullAgain
+	}
+	return fullOpening
 }
 
 // recordedSinceOpening reports that the conversation holds events after
@@ -603,6 +665,9 @@ type dossierJob struct {
 	fresh  bool // written from the files, without the conversation
 	carry  bool // the new conversation carries whole what no look took in
 	retry  bool // the one more try after a refused restart that carried nothing
+	// rescues: restarts in a row, this one included, made for
+	// conversations too long from their start (restartFacts).
+	rescues int
 }
 
 // dossierResult is what a pass came back with.
@@ -628,6 +693,11 @@ func (r *Runtime) startDossier() {
 	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
 	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
+	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (r.refusedFirst() || t.firstPrompt >= r.rolloverTokens()) {
+		// A rescue: the conversation being replaced was too long from
+		// its start (restartHelps counts them).
+		job.rescues = r.restartRescues + 1
+	}
 	if r.st.Unfinished() {
 		// The new file's start set the prompt's size back to nothing; the
 		// conversation being replaced is as long as when it was closed.
@@ -1292,7 +1362,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
-	r.restartCarried, r.restartRetried, r.decidedWindow = carriedNothing, job.retry, 0
+	r.restartCarried, r.restartRetried, r.decidedWindow, r.restartRescues = carriedNothing, job.retry, 0, job.rescues
 	if job.carry {
 		r.restartCarried = carriedSome
 	}

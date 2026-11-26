@@ -31,14 +31,22 @@ var r6LogLines = sync.OnceValue(func() string {
 	return b.String()
 })
 
-// r6Count is the fake provider's count of a request: eagent's estimate of
-// each message's text, the tool list, each picture as picture tokens and
-// each r6Weight as a whole 82 KiB excerpt. It reads each text once and
-// marshals nothing, so a request of half a megabyte costs one pass over it.
-func r6Count(m []map[string]any, picture int) int {
+// r6PictureTokens is what the fake provider counts for one picture: what a
+// local vision model can count for a large one. eagent cannot see it (its
+// estimate counts a picture by its path) and does not learn its ratio from
+// a request that sends one (calibrate).
+const r6PictureTokens = 16_000
+
+// r6Count is the fake provider's count of a request: ratio (in hundredths)
+// times eagent's estimate of everything it sends, the system prompt and
+// the tools included, and each picture as r6PictureTokens. It counts what
+// is sent and nothing else, evenly. It reads each text once and marshals
+// nothing, so a request of half a megabyte costs one pass over it.
+func r6Count(m []map[string]any, ratio int) int {
 	n := toolTokens()
+	pictures := 0
 	text := func(s string) {
-		n += len(s)*2/7 + 1 + strings.Count(s, r6Weight)*r6ExcerptTokens
+		n += len(s)*2/7 + 1
 	}
 	for _, msg := range m {
 		n += 4
@@ -49,7 +57,7 @@ func r6Count(m []map[string]any, picture int) int {
 			for _, p := range c {
 				pm, _ := p.(map[string]any)
 				if pm["type"] == "image_url" {
-					n += picture
+					pictures++
 				} else if s, ok := pm["text"].(string); ok {
 					text(s)
 				}
@@ -59,17 +67,17 @@ func r6Count(m []map[string]any, picture int) int {
 			n += 50 * len(calls)
 		}
 	}
-	return n
+	return n*ratio/100 + pictures*r6PictureTokens
 }
 
 // r6Brain answers as a route of this window whose provider counts with
-// r6Count and refuses what is past the window: a dossier pass gets a
-// briefing, a look at a message kept for eagent gets "Noted.", any other
-// look holds.
-func r6Brain(window, ceiling, picture int) func(string, []map[string]any) reply {
+// r6Count at ratio and refuses what is past the window: a dossier pass
+// gets a briefing, a look at a message kept for eagent gets "Noted.", any
+// other look holds.
+func r6Brain(window, ceiling, ratio int) func(string, []map[string]any) reply {
 	tooLong := reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
 	return func(_ string, m []map[string]any) reply {
-		n := r6Count(m, picture)
+		n := r6Count(m, ratio)
 		if n > window-ceiling {
 			return tooLong
 		}
@@ -95,30 +103,19 @@ func r6Burst(window int) int {
 // r6ExcerptTokens is what eagent's estimate makes of one 82 KiB excerpt.
 const r6ExcerptTokens = 82 * 1024 * 2 / 7
 
-// r6Weight marks a short excerpt that the fake provider counts as a whole
-// 82 KiB one (r6ExcerptTokens): bursts on the larger routes and in the
-// cases beside the first are sent this way, so the tests do not push
-// megabytes through the race detector. It sits past the first 1,500
-// characters, which is as much of a message as a dossier's facts quote,
-// so it is counted only where the message is whole.
-const r6Weight = "[[r6-weighs-82KiB]]"
-
-// r6ShortExcerpt is the i-th excerpt of a burst, short, carrying r6Weight.
-func r6ShortExcerpt(i int) string {
-	return r6ShortPaste(i, 1)
-}
-
-// r6ShortPaste is the i-th paste of a burst, short, weighing as much as k
-// whole excerpts.
-func r6ShortPaste(i, k int) string {
-	return fmt.Sprintf("@e excerpt %d of the build log:\n%s %s END-OF-EXCERPT-%d", i, strings.Repeat("compiled internal/harness in 1.9s; ", 48), strings.Repeat(r6Weight, k), i)
+// r6Pictures is how many pictures are more than a route of this window
+// can take in one request.
+func r6Pictures(window int) int {
+	return window/r6PictureTokens + 1
 }
 
 // r6QuietRestart runs a session on a route of the given window, whose
 // provider counts as eagent estimates and refuses what is past the window.
-// The first answer is past the restart size, so the conversation is
-// restarted at the next quiet moment with nothing unseen: that restart
-// carries nothing. While its pass is held open, during(s) runs; then the
+// The user's first message carries pictures enough to put its look past
+// the restart size, so the conversation is restarted at the next quiet
+// moment with nothing unseen: that restart carries nothing. (Pictures,
+// because a request that sends one teaches no token ratio: the fake never
+// reports a size the estimate could be compared with and found wrong.) While its pass is held open, during(s) runs; then the
 // pass is let go. passes > 1 are held too when hold says so. It returns
 // once the user's last message is answered, the user is told the
 // conversation is full, or there are more restarts than any rule allows.
@@ -130,8 +127,8 @@ func r6QuietRestart(t *testing.T, window int, during func(s *session, pass int))
 // out: what it records is unseen when the restart begins, right after.
 func r6Restart(t *testing.T, window int, first func(s *session), during func(s *session, pass int)) (*session, *r5PictureRoute) {
 	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
-	route := &r5PictureRoute{window: window, ceiling: 16384, picture: 30000}
-	inner := r6Brain(route.window, route.ceiling, route.picture)
+	route := &r5PictureRoute{window: window, ceiling: 16384, picture: r6PictureTokens}
+	inner := r6Brain(route.window, route.ceiling, 100)
 	var passes, answers atomic.Int32
 	held := make(chan int, 8)
 	release := make(chan struct{}, 8)
@@ -144,11 +141,8 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 			return inner(model, m)
 		}
 		r := inner(model, m)
-		if r.status == 0 && answers.Add(1) == 1 {
-			if first != nil {
-				first(s)
-			}
-			r.prompt = window * 3 / 5 // past the restart size: the next look restarts
+		if r.status == 0 && answers.Add(1) == 1 && first != nil {
+			first(s)
 		}
 		return r
 	}
@@ -163,7 +157,11 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 	})
 	r5LogOnFailure(s)
 	r4Settled(s)
-	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e hello", Route: "eagent"}) })
+	limit := 0
+	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	r6SendEach(s, 1, func(int) event.UserMessageData {
+		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
+	})
 	go func() {
 		for n := range held {
 			during(s, n)
@@ -212,27 +210,33 @@ func r6SendBurst(s *session, n int) []event.Event {
 	return r6Send(s, n, r6Excerpt)
 }
 
-// r6SendShort sends n short excerpts that weigh as whole ones.
-func r6SendShort(s *session, n int) []event.Event {
-	return r6Send(s, n, r6ShortExcerpt)
-}
-
 func r6Send(s *session, n int, excerpt func(int) string) []event.Event {
 	return r6SendEach(s, n, func(i int) event.UserMessageData {
 		return event.UserMessageData{Text: excerpt(i), Route: "eagent"}
 	})
 }
 
-// r6SendPictures sends n messages to eagent, each with a picture.
-func r6SendPictures(s *session, n int) []event.Event {
+// r6SendPictures sends a burst of pictures to eagent, more than the
+// window takes in one request: six messages, the pictures shared out
+// among them.
+func r6SendPictures(s *session, window int) []event.Event {
+	per := (r6Pictures(window) + 5) / 6
+	return r6SendEach(s, 6, func(i int) event.UserMessageData {
+		return r6WithPictures(fmt.Sprintf("@e screenshots, set %d", i), per, s)
+	})
+}
+
+// r6WithPictures is a message to eagent with k pictures attached.
+func r6WithPictures(text string, k int, s *session) event.UserMessageData {
 	shot := filepath.Join(s.rt.opts.Project, "shot.png")
 	if err := os.WriteFile(shot, tinyPNG, 0o644); err != nil {
 		s.t.Fatal(err)
 	}
-	return r6SendEach(s, n, func(i int) event.UserMessageData {
-		return event.UserMessageData{Text: fmt.Sprintf("@e screenshot %d", i), Route: "eagent",
-			Attachments: []event.Attachment{{Name: "shot.png", Path: shot, ContentType: "image/png", Kind: "image", Size: int64(len(tinyPNG))}}}
-	})
+	d := event.UserMessageData{Text: text, Route: "eagent"}
+	for j := 0; j < k; j++ {
+		d.Attachments = append(d.Attachments, event.Attachment{Name: "shot.png", Path: shot, ContentType: "image/png", Kind: "image", Size: int64(len(tinyPNG))})
+	}
+	return d
 }
 
 // r6SendEach records the n messages and returns their events.
@@ -357,12 +361,10 @@ func TestABurstDuringAPassGetsOneMoreRestartOnEveryRouteSize(t *testing.T) {
 					// The reviewer's case as it was: six excerpts of
 					// 82 KiB, whole in the record and in the request.
 					sent = r6SendBurst(s, r6Burst(window))
-				case 200_000:
-					sent = r6SendPictures(s, 7)
 				default:
-					// Six short pastes, each counted as several whole
-					// excerpts: more than a million tokens in all.
-					sent = r6Send(s, 6, func(i int) string { return r6ShortPaste(i, (r6Burst(window)+5)/6) })
+					// Pictures, which cost the record a path and the
+					// provider many tokens.
+					sent = r6SendPictures(s, window)
 				}
 			})
 			if n := r6ToldFull(s); n != 0 {
@@ -384,7 +386,7 @@ func TestABurstDuringAPassGetsOneMoreRestartOnEveryRouteSize(t *testing.T) {
 func TestOneExcerptDuringAPassFitsWithoutAnotherRestart(t *testing.T) {
 	s, _ := r6QuietRestart(t, 128_000, func(s *session, pass int) {
 		if pass == 1 {
-			r6SendShort(s, 1)
+			r6SendBurst(s, 1)
 		}
 	})
 	if n := len(s.events(event.Dossier)); n != 1 {
@@ -417,11 +419,7 @@ func TestABurstJustBeforeAPassIsGivenByPlaceAtOnce(t *testing.T) {
 // carries them whole, and the provider counts them as more than the window.
 // The restart after it carries nothing and gives them by place.
 func TestPicturesJustBeforeAPassAreCarriedThenGivenByPlace(t *testing.T) {
-	s, _ := r6Restart(t, 128_000, func(s *session) {
-		for i := 0; i < 6; i++ {
-			r5SendPicture(s, fmt.Sprintf("@e screenshot %d", i))
-		}
-	}, func(*session, int) {})
+	s, _ := r6Restart(t, 128_000, func(s *session) { r6SendPictures(s, 128_000) }, func(*session, int) {})
 	if n := len(s.events(event.Dossier)); n != 2 {
 		t.Fatalf("%d restarts, want 2: one that carried the pictures, one that gave them by place", n)
 	}
@@ -441,7 +439,7 @@ func TestABurstDuringBothPassesStopsAtTheBoundAndSaysWhatHappened(t *testing.T) 
 	var last []event.Event
 	s, _ := r6QuietRestart(t, 128_000, func(s *session, pass int) {
 		if pass <= 2 {
-			last = r6SendShort(s, r6Burst(128_000))
+			last = r6SendPictures(s, 128_000)
 		}
 	})
 	// A few more refused calls (retried every millisecond here), and no
@@ -470,9 +468,9 @@ func TestABurstDuringBothPassesStopsAtTheBoundAndSaysWhatHappened(t *testing.T) 
 // more, which lists the burst by place, and the user is answered.
 func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	setFor(t, &errorRetryDelays, []time.Duration{time.Hour})
-	route := &r5PictureRoute{window: 128_000, ceiling: 16384, picture: 30000}
-	inner := r6Brain(route.window, route.ceiling, route.picture)
-	var answers, passes, refused atomic.Int32
+	route := &r5PictureRoute{window: 128_000, ceiling: 16384, picture: r6PictureTokens}
+	inner := r6Brain(route.window, route.ceiling, 100)
+	var passes, refused atomic.Int32
 	release := make(chan struct{})
 	t.Cleanup(func() {
 		select {
@@ -493,10 +491,6 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 		r := inner(model, m)
 		if r.status != 0 {
 			refused.Add(1)
-			return r
-		}
-		if answers.Add(1) == 1 {
-			r.prompt = 128_000 * 3 / 5
 		}
 		return r
 	}
@@ -507,9 +501,15 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	s := startSession(t, "", brain, tune)
 	r5LogOnFailure(s)
 	r4Settled(s)
-	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e hello", Route: "eagent"}) })
+	// Pictures enough to put the first look past the restart size: the
+	// next quiet moment restarts.
+	limit := 0
+	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	r6SendEach(s, 1, func(int) event.UserMessageData {
+		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
+	})
 	<-inPass
-	sent := r6SendShort(s, r6Burst(128_000))
+	sent := r6SendPictures(s, 128_000)
 	close(release)
 	r4Until(t, "the refused first call after the restart", func() bool { return refused.Load() >= 1 })
 	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
@@ -540,7 +540,7 @@ func TestABurstPastTheRestartSizeButInsideTheWindowIsRestartedNormally(t *testin
 	const window = 200_000
 	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 		if pass == 1 {
-			r6SendShort(s, 5) // about 120k tokens: past half the window, inside it
+			r6SendBurst(s, 5) // five whole excerpts, about 120k tokens: past half the window, inside it
 		}
 	})
 	if n := r5Told(s, "Noted."); n < 2 {

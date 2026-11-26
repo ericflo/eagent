@@ -63,40 +63,66 @@ func TestAgentProgressDuringEachPassDoesNotBuyAnotherRestart(t *testing.T) {
 // window is not a row: the next call goes to the new route as it is (a
 // larger window takes what the old one refused, with no restart), and a
 // restart sized for it would open on a briefing at least as long.
+//
+// alone is whether the opening by itself fits the window (refused rows);
+// fits whether it leaves a message's room under the restart size (rows
+// whose first call went through). rescues is how many restarts in a row
+// before this conversation were made for conversations too long from
+// their start; a conversation whose first call fits sets it back to 0.
+// For each row that stops, cause is what the user is told was too large.
 func TestWhenAnotherRestartIsWorthTrying(t *testing.T) {
 	const (
 		some, nothing, unknown = carriedSome, carriedNothing, carriedUnknown
+		opening, burst, again  = fullOpening, fullBurst, fullAgain
 	)
 	for _, c := range []struct {
 		carried carried
 		refused bool
 		since   bool
 		retried bool
+		rescues int
+		alone   bool
 		decided bool
 		fits    bool
 		restart bool
+		cause   fullCause
 	}{
 		// Refused on its first call.
-		{some, true, false, false, false, false, true},
-		{some, true, true, false, false, false, true},
-		{nothing, true, false, false, false, false, false}, // the opening alone was refused
-		{nothing, true, true, false, false, false, true},   // the one more try
-		{nothing, true, true, true, false, false, false},   // after it, stop
-		{nothing, true, false, true, false, false, false},
-		{unknown, true, false, false, false, false, true},
-		{unknown, true, true, false, false, false, true},
-		{some, true, true, false, true, false, false}, // decided stands
-		{nothing, true, true, false, true, false, false},
-		{unknown, true, true, false, true, false, false},
+		{some, true, false, false, 0, true, false, false, true, 0},
+		{some, true, true, false, 0, true, false, false, true, 0},
+		{nothing, true, false, false, 0, true, false, false, false, opening}, // the opening alone was refused
+		{nothing, true, true, false, 0, true, false, false, true, 0},         // the one more try
+		{nothing, true, true, true, 1, true, false, false, false, burst},     // after it, stop
+		{nothing, true, false, true, 1, true, false, false, false, opening},
+		{unknown, true, false, false, 0, true, false, false, true, 0},
+		{unknown, true, true, false, 0, true, false, false, true, 0},
+		{some, true, true, false, 0, true, true, false, false, burst}, // decided stands
+		{nothing, true, true, false, 0, true, true, false, false, burst},
+		{unknown, true, true, false, 0, true, true, false, false, burst},
+		// The opening by itself does not fit the window: nothing a
+		// restart does can help, whatever arrived or was carried.
+		{some, true, true, false, 0, false, false, false, false, opening},
+		{nothing, true, true, false, 0, false, false, false, false, opening},
+		{unknown, true, false, false, 0, false, false, false, false, opening},
+		// Two rescues in a row already: the third restart was the last.
+		{some, true, true, false, 2, true, false, false, false, burst},
+		{unknown, true, false, false, 2, true, false, false, false, opening},
 		// The first call went through, past the restart size.
-		{some, false, false, false, false, true, true},
-		{nothing, false, true, true, false, true, true},
-		{some, false, true, false, false, false, false},
-		{nothing, false, false, false, true, true, true},
+		{some, false, false, false, 0, false, false, true, true, 0},
+		{nothing, false, true, true, 0, false, false, true, true, 0},
+		{nothing, false, false, false, 1, false, false, true, true, 0},
+		{some, false, true, false, 0, false, false, false, false, opening}, // the opening leaves no room
+		{nothing, false, false, false, 0, false, true, true, true, 0},
+		{nothing, false, false, false, 2, false, false, true, false, again}, // three in a row, each past the size
+		{nothing, false, false, false, 2, false, false, false, false, opening},
 	} {
-		f := restartFacts{carried: c.carried, refused: c.refused, sinceOpening: c.since, retried: c.retried, decided: c.decided, openingFits: c.fits}
-		if got := restartHelps(f); got != c.restart {
+		f := restartFacts{carried: c.carried, refused: c.refused, sinceOpening: c.since, retried: c.retried, rescues: c.rescues, openingAloneFits: c.alone, decided: c.decided, openingFits: c.fits}
+		got := restartHelps(f)
+		if got != c.restart {
 			t.Errorf("%+v: restart %v, want %v", f, got, c.restart)
+		}
+		if !got && causeOf(f) != c.cause {
+			t.Errorf("%+v: the user would be told cause %d, want %d", f, causeOf(f), c.cause)
 		}
 	}
 }
