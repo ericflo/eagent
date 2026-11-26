@@ -29,21 +29,18 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var cfg config.Config
 	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
-		// Read as a bundle file is (a saved bundle comes back here on an
-		// undo); a key no version of eagent had is still refused.
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(b.Config, &m); err != nil {
-			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
-		}
-		today, _ := config.MigrateLegacy(m)
-		raw, _ := json.Marshal(today)
 		cfg = config.Defaults()
-		dec := json.NewDecoder(strings.NewReader(string(raw)))
+		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
 		}
-		config.ClearNulls(&cfg, today)
+		// A field the editor left empty is written as null, which the
+		// decode above leaves at the default's value.
+		var m map[string]json.RawMessage
+		if json.Unmarshal(b.Config, &m) == nil {
+			config.ClearNulls(&cfg, m)
+		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
 		cfg, err = config.LoadBundle(s.Project, "", b.From)

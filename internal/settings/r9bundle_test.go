@@ -87,20 +87,11 @@ func r9Plain(cfg config.Config) config.Config {
 }
 
 func TestR9BundleConfigTakesBundleSavedUnderMain(t *testing.T) {
-	// LoadBundle, the reference, also reads the environment; BundleConfig
-	// does not. CI switches the phone off with EAGENT_FINALECHAT=off.
-	t.Setenv("EAGENT_FINALECHAT", "")
+	// A save is held to today's keys, as at 12aec43; only an undo, of
+	// eagent's own bytes, carries main's over (TestR9UndoRestoresBundleSavedUnderMain).
 	s := &Service{Project: t.TempDir()}
-	want := r9OnDisk(t, t.TempDir(), "mine", r9MainBundle)
-	got, err := s.BundleConfig(BundleRequest{Name: "mine", Config: json.RawMessage(r9MainBundle)})
-	if err != nil {
-		t.Fatalf("BundleConfig refused a bundle main saved: %v", err)
-	}
-	if got = r9Plain(got); !reflect.DeepEqual(got, want) {
-		t.Fatalf("BundleConfig = %+v\nLoadBundle  = %+v", got, want)
-	}
-	if got.Model.ReasoningEffort != "medium" || got.MaxCallsPerTurn != 40 {
-		t.Fatalf("orchestrator not carried over: effort %q calls %d", got.Model.ReasoningEffort, got.MaxCallsPerTurn)
+	if _, err := s.BundleConfig(BundleRequest{Name: "mine", Config: json.RawMessage(r9MainBundle)}); err == nil || !strings.Contains(err.Error(), "orchestrator") {
+		t.Fatalf("a save in main's keys: %v, want it refused as at 12aec43", err)
 	}
 }
 

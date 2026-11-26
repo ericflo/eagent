@@ -114,6 +114,16 @@ func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, gra
 			if raw, ok := p.Parameters["config_json"].(string); ok && raw != "" {
 				request.Config = json.RawMessage(raw)
 			}
+			if len(restored) > 0 {
+				// An undo puts back eagent's own bytes, which may be a
+				// bundle main saved: they are checked in today's keys (the
+				// undo writes the bytes themselves back).
+				var m map[string]json.RawMessage
+				if json.Unmarshal(restored, &m) == nil {
+					today, _ := config.MigrateLegacy(m)
+					request.Config, _ = json.Marshal(today)
+				}
+			}
 			cfg, err := s.BundleConfig(request)
 			if err != nil {
 				return change, err
@@ -129,6 +139,9 @@ func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, gra
 			change.After, err = config.BundleBytes(name, request.Description, cfg)
 			if err != nil {
 				return change, err
+			}
+			if len(restored) > 0 {
+				change.After = restored // as it was, byte for byte
 			}
 			change.AfterExists = true
 		} else {
