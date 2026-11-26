@@ -425,11 +425,15 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	}
 }
 
+// typeSettle is the pause between pasting a message and pressing Enter.
+// Tests shorten it.
+var typeSettle = 350 * time.Millisecond
+
 func (s *Seat) typeText(text string) error {
 	if err := s.host.Paste(s.target, text); err != nil {
 		return err
 	}
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(typeSettle)
 	return s.host.Keys(s.target, "Enter")
 }
 
