@@ -618,3 +618,104 @@ func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *t
 		t.Fatalf("the user was told %d times that no restart can make room, want once", told)
 	}
 }
+
+// Restarts by how the provider counts. Each case is a route, a provider
+// that counts ratio times eagent's estimate of everything sent (evenly,
+// the opening included), and standing instructions of a given size. The
+// user sends four short messages; with a small opening the first comes
+// with pictures enough to put its look past the restart size. With a
+// small opening every provider gets one restart and every message an
+// answer. With an opening near the restart size, a provider whose count
+// puts the opening itself past the size gets one restart and the user is
+// told once that no restart can make room; one whose count leaves it
+// under the size needs no restart.
+func TestRestartsByHowTheProviderCounts(t *testing.T) {
+	r4ParallelSessions(t)
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	for _, c := range []struct {
+		window, rollover, ratio, instructions int
+		restarts, told                        int
+	}{
+		{60_000, 0, 100, 0, 1, 0},
+		{60_000, 0, 145, 0, 1, 0},
+		{200_000, 0, 100, 0, 1, 0},
+		{200_000, 0, 130, 0, 1, 0},
+		{200_000, 0, 145, 0, 1, 0},
+		{200_000, 0, 200, 0, 1, 0},
+		// Near the restart size: under it at 1.0 and 1.3 (no restart
+		// is due), past it at 1.45 and 2 (one restart, then told).
+		{200_000, 0, 100, 62_000, 0, 0},
+		{200_000, 0, 130, 62_000, 0, 0},
+		{200_000, 0, 145, 62_000, 1, 1},
+		{200_000, 0, 200, 62_000, 1, 1},
+		// On 128k the same opening leaves under 64k of room, so the
+		// route counts as small, its restart size follows the
+		// provider's count, and the opening is under it.
+		{128_000, 0, 145, 62_000, 0, 0},
+		{1_000_000, 100_000, 145, 62_000, 1, 1},
+	} {
+		name := fmt.Sprintf("%dk-rollover%d-x%.2f-instructions%dk", c.window/1000, c.rollover, float64(c.ratio)/100, c.instructions/1000)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := r4StartSession(t, "", r6Brain(c.window, 16384, c.ratio), func(cfg *config.Config) {
+				cfg.RolloverTokens = c.rollover
+				cfg.Model.ContextTokens, cfg.Model.MaxTokens = c.window, 16384
+				if c.instructions > 0 {
+					cfg.Instructions = r6Instructions(c.instructions)
+				}
+			})
+			r5LogOnFailure(s)
+			limit := 0
+			s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+			progress := func() int {
+				return r5Told(s, "Noted.") + r5Told(s, stillFullNotice) + r6ToldFull(s)
+			}
+			send := func(d event.UserMessageData) {
+				before := progress()
+				s.rt.sync(func() { s.rt.userMessage(d) })
+				r6Until(t, "an answer or a notice", func() bool { return progress() > before })
+			}
+			if c.instructions == 0 {
+				// A small opening is past the restart size only with
+				// something large: pictures, which teach no ratio.
+				send(r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s))
+			}
+			for i := 0; i < 4; i++ {
+				send(event.UserMessageData{Text: fmt.Sprintf("@e status %d?", i), Route: "eagent"})
+			}
+			restarts, told := r6Dossiers(s), r6ToldFull(s)
+			t.Logf("%s: %d restarts, told full %d times", name, restarts, told)
+			if restarts != c.restarts || told != c.told {
+				t.Fatalf("%d restarts and told %d times, want %d and %d", restarts, told, c.restarts, c.told)
+			}
+		})
+	}
+}
+
+// Pictures arrive during every pass, each time inside the window but
+// enough to put the new conversation's first call past the restart size.
+// Each opening leaves room, so each time another restart is worth trying,
+// but not for ever: after three restarts in a row whose conversations
+// were too long from their start, the restarts stop, and the user is
+// told once, in words that say so.
+func TestRestartsPastTheSizeEveryTimeStopAfterThreeInARow(t *testing.T) {
+	const window = 200_000
+	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
+		r6SendEach(s, 1, func(int) event.UserMessageData {
+			return r6WithPictures(fmt.Sprintf("@e more screenshots, set %d", pass), 7, s)
+		})
+	})
+	r6Until(t, "the user told the restarts stop", func() bool { return r6ToldFull(s) > 0 || r6Dossiers(s) > 5 })
+	if n := r6Dossiers(s); n != 3 {
+		t.Fatalf("%d restarts, want 3: the quiet one and two more, each too long on its first call", n)
+	}
+	var notice string
+	for _, m := range s.ui.said() {
+		if strings.HasPrefix(m, fullNotice) {
+			notice = m
+		}
+	}
+	if !strings.Contains(notice, "three times in a row") {
+		t.Fatalf("the user was told the wrong cause: %q", notice)
+	}
+}
