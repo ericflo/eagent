@@ -446,6 +446,4 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 }
 
 // sameHost compares two base URLs ignoring a trailing slash.
-func sameHost(a, b string) bool {
-	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
-}
+func sameHost(a, b string) bool { return SameBaseURL(a, b) }

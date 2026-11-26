@@ -12,6 +12,14 @@ import (
 // fallback as configured: its key variable, window and reply ceiling, not
 // the catalog's defaults for the model.
 func TestAPresetSavedOnAFallbackIsTheFallbackAsConfigured(t *testing.T) {
+	for _, url := range []string{"https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/"} {
+		t.Run(url, func(t *testing.T) { presetOnFallback(t, url) })
+	}
+}
+
+// presetOnFallback saves a preset on a fallback at fallbackURL (written
+// with or without a trailing slash).
+func presetOnFallback(t *testing.T, fallbackURL string) {
 	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_SUMMARIZER_MODE", "EAGENT_SUMMARIZER_MODEL", "EAGENT_MODEL", "OPENROUTER_API_KEY"} {
 		t.Setenv(n, "")
 	}
@@ -22,7 +30,7 @@ func TestAPresetSavedOnAFallbackIsTheFallbackAsConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := `{"model":{"protocol":"openai-chat","base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3","api_key_env":"EAGENT_TEST_KEY","context_tokens":200000,"max_tokens":32000,"reasoning_effort":"high",
-		"fallback":{"protocol":"openai-chat","base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3-flash","api_key_env":"EAGENT_TEST_KEY2","context_tokens":50000,"max_tokens":4000,"reasoning_effort":"low"}}}`
+		"fallback":{"protocol":"openai-chat","base_url":"` + fallbackURL + `","model":"z-ai/glm-5.3-flash","api_key_env":"EAGENT_TEST_KEY2","context_tokens":50000,"max_tokens":4000,"reasoning_effort":"low"}}}`
 	if err := os.WriteFile(config.File(project), []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}

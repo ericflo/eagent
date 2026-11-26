@@ -92,9 +92,6 @@ type modelRoute struct {
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
-	// picked: conf is a route a settings pick resolved, not the configured
-	// chain (pickBase).
-	picked bool
 }
 
 // confAt is the configured route the client is on: the at-th of the chain
@@ -106,7 +103,9 @@ func (m *modelRoute) confAt() *config.ModelRoute {
 		return nil
 	}
 	ep := m.client.Endpoint
-	same := func(cur *config.ModelRoute) bool { return cur.BaseURL == ep.BaseURL && cur.Model == ep.Model }
+	same := func(cur *config.ModelRoute) bool {
+		return llm.SameBaseURL(cur.BaseURL, ep.BaseURL) && cur.Model == ep.Model
+	}
 	i := 0
 	for cur := &m.conf; cur != nil; cur = cur.Fallback {
 		if _, err := cur.Endpoint(); err != nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/relay"
@@ -574,7 +575,7 @@ func ConfigFromValues(project string, values Values) (config.Config, error) {
 		if err != nil {
 			return base, false, fmt.Errorf("%s: %w", routeNames[key], err)
 		}
-		if strings.TrimRight(picked.BaseURL, "/") != strings.TrimRight(base.BaseURL, "/") || picked.Model != base.Model {
+		if !llm.SameBaseURL(picked.BaseURL, base.BaseURL) || picked.Model != base.Model {
 			picked.Fallback = nil
 		}
 		return picked, true, nil
