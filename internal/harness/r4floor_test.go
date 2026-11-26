@@ -58,46 +58,68 @@ func r4Restarts(t *testing.T, rt *Runtime, stretches int, at *time.Time) {
 // r4First is the first thing the user said, in the session's first file.
 const r4First = "the first instruction: keep every reading in kelvin"
 
-// r4CheckFloor checks the newest dossier against its share of a small
-// route, and that it leaves room for the conversation.
-func r4CheckFloor(t *testing.T, rt *Runtime) string {
-	t.Helper()
+// r4Newest is the text of the newest dossier in rt's record.
+func r4Newest(rt *Runtime) string {
 	var d event.DossierData
 	for _, ev := range rt.st.Events {
 		if ev.Type == event.Dossier {
 			_ = ev.Decode(&d)
 		}
 	}
-	_, share, _ := rt.smallBudget()
-	n := llm.EstimateTokens(d.Text)
-	t.Logf("after %d files, the dossier is %d tokens (by the estimate) of the %d it may take", len(rt.st.Subsessions), n, rt.estimate(share))
-	if n > rt.estimate(share) {
-		t.Fatalf("the dossier takes %d tokens of the %d it may:\n%s", n, rt.estimate(share), d.Text)
-	}
 	return d.Text
 }
+
+// r4CheckFloor checks the newest dossier against its share of a small
+// route, and that it leaves room for the conversation.
+func r4CheckFloor(t *testing.T, rt *Runtime) string {
+	t.Helper()
+	text := r4Newest(rt)
+	_, share, _ := rt.smallBudget()
+	n := llm.EstimateTokens(text)
+	t.Logf("after %d files, the dossier is %d tokens (by the estimate) of the %d it may take", len(rt.st.Subsessions), n, rt.estimate(share))
+	if n > rt.estimate(share) {
+		t.Fatalf("the dossier takes %d tokens of the %d it may:\n%s", n, rt.estimate(share), text)
+	}
+	return text
+}
+
+// r4Grows is how much the newest dossier grew over was, a dossier written
+// earlier in the same record, by the estimate. Each stretch r4Restarts
+// writes adds about 70 tokens to a dossier that lists every file and
+// message again; one held to a conversation's worth of places grows by a
+// digit or two.
+func r4Grows(rt *Runtime, was string) int {
+	return llm.EstimateTokens(r4Newest(rt)) - llm.EstimateTokens(was)
+}
+
+// r4GrowthSlack is how much a narrowest dossier may grow between two
+// lengths of record: its counts gain digits, nothing more.
+const r4GrowthSlack = 20
 
 // On a small route the narrowest dossier does not grow with the record: it
 // leaves what came before the conversation's own briefing to that
 // briefing, which maps it, and holds one conversation's worth of places.
-// After 40 restarts and 400 messages, and after 150 and 1,500, it is
-// within its share (a third of what the conversation may fill past the
-// system prompt and tools).
+// After 8 restarts (80 messages), when the chain has begun, and after 22
+// (220 messages) it is within its share (a third of what the conversation
+// may fill past the system prompt and tools), and it is no longer at 22
+// than at 8. A dossier that listed every file and message again would
+// grow by about 70 tokens a restart and pass its share by the 22nd.
 func TestSmallRouteDossierFitsALongRecord(t *testing.T) {
-	for _, stretches := range []int{40, 150} {
-		t.Run(fmt.Sprint(stretches), func(t *testing.T) {
-			rt := r4SmallRuntime(t)
-			defer rt.sess.Close()
-			at := time.Now().Add(-1000 * time.Hour)
-			r4Restarts(t, rt, stretches, &at)
-			r4CheckFloor(t, rt)
-			if r4LoggedRT(rt, "to the briefing there") == 0 {
-				t.Fatal("the session log does not say a dossier left the earlier record to the briefing before it")
-			}
-			if r4LoggedRT(rt, "and still") != 0 {
-				t.Fatal("a dossier at its narrowest did not fit")
-			}
-		})
+	rt := r4SmallRuntime(t)
+	defer rt.sess.Close()
+	at := time.Now().Add(-1000 * time.Hour)
+	r4Restarts(t, rt, 8, &at)
+	was := r4CheckFloor(t, rt)
+	r4Restarts(t, rt, 14, &at)
+	r4CheckFloor(t, rt)
+	if g := r4Grows(rt, was); g > r4GrowthSlack {
+		t.Fatalf("the dossier grew by %d tokens from 8 restarts to 22: it grows with the record", g)
+	}
+	if r4LoggedRT(rt, "to the briefing there") == 0 {
+		t.Fatal("the session log does not say a dossier left the earlier record to the briefing before it")
+	}
+	if r4LoggedRT(rt, "and still") != 0 {
+		t.Fatal("a dossier at its narrowest did not fit")
 	}
 }
 
@@ -114,11 +136,13 @@ func r4LoggedRT(rt *Runtime, what string) int {
 
 // The same with the session stopped and resumed half-way: the chain of
 // briefings is read from the record, so the run that picks it up writes
-// dossiers as narrow as the one before.
+// dossiers as narrow as the one before (8 restarts, then 8 more after the
+// resume; a run that lost the chain would list all 16 files again).
 func TestSmallRouteDossierStaysNarrowAcrossAResume(t *testing.T) {
 	rt := r4SmallRuntime(t)
 	at := time.Now().Add(-1000 * time.Hour)
-	r4Restarts(t, rt, 75, &at)
+	r4Restarts(t, rt, 8, &at)
+	was := r4CheckFloor(t, rt)
 	path, project := rt.sess.Path, rt.opts.Project
 	rt.sess.Close()
 	cfg := rt.cfg
@@ -127,8 +151,11 @@ func TestSmallRouteDossierStaysNarrowAcrossAResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt2.sess.Close()
-	r4Restarts(t, rt2, 75, &at)
+	r4Restarts(t, rt2, 8, &at)
 	text := r4CheckFloor(t, rt2)
+	if g := r4Grows(rt2, was); g > r4GrowthSlack {
+		t.Fatalf("the dossier grew by %d tokens across the resume: the run that picked the session up lost the chain", g)
+	}
 	r4Reach(t, rt2, text, r4First)
 }
 
@@ -199,19 +226,14 @@ func r4Follow(t *testing.T, rt *Runtime, text, file string, line int) (int, bool
 
 // From the newest dossier alone, by following file:line places with the
 // session tools, the first thing the user said in the first conversation
-// of a long record on a small route is reached.
+// of a long record on a small route is reached. The chain begins at the
+// fifth restart; after 14 the way back runs through ten briefings.
 func TestNewestDossierReachesTheFirstConversation(t *testing.T) {
 	rt := r4SmallRuntime(t)
 	defer rt.sess.Close()
 	at := time.Now().Add(-1000 * time.Hour)
-	r4Restarts(t, rt, 60, &at)
-	var d event.DossierData
-	for _, ev := range rt.st.Events {
-		if ev.Type == event.Dossier {
-			_ = ev.Decode(&d)
-		}
-	}
-	r4Reach(t, rt, d.Text, r4First)
+	r4Restarts(t, rt, 14, &at)
+	r4Reach(t, rt, r4Newest(rt), r4First)
 }
 
 // The chain also runs through a briefing the harness had to write (the
@@ -237,7 +259,7 @@ func TestChainOfBriefingsRunsThroughHarnessAndUpgradeDossiers(t *testing.T) {
 	r4Restarts(t, rt, 1, &at)
 	// One by the harness in the middle.
 	rt.finishDossier(dossierJob{covers: rt.st.LastSeq(), lines: rt.recordLines()}, dossierResult{})
-	r4Restarts(t, rt, 40, &at)
+	r4Restarts(t, rt, 10, &at)
 	text := r4CheckFloor(t, rt)
 	r4Reach(t, rt, text, "write the release notes for v2")
 }

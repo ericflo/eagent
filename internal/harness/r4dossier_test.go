@@ -38,12 +38,12 @@ func r4RolledSession(t *testing.T) (dir string, files []string) {
 		}
 		return r
 	}, nil)
-	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
-	s.settled()
+	r4Until(t, "the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	r4Settled(s)
 	big.Store(true)
 	s.type_("@e " + r4Instruction)
-	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
-	s.settled()
+	r4Until(t, "the dossier", func() bool { return len(s.dossiers()) == 1 })
+	r4Settled(s)
 	dir = s.rt.sess.Path
 	s.stop()
 	files, err := s.rt.sess.Files()
@@ -129,7 +129,7 @@ func r4Resume(t *testing.T, dir string) (*session, func() [][]map[string]any) {
 func r4CheckResumed(t *testing.T, dir string, wantDossiers int) {
 	t.Helper()
 	s, requests := r4Resume(t, dir)
-	s.waitFor("a conversation that opens with its briefing", func() bool {
+	r4Until(t, "a conversation that opens with its briefing", func() bool {
 		ok := false
 		s.read(func(st *state.State) {
 			cur := st.Current()
@@ -137,10 +137,10 @@ func r4CheckResumed(t *testing.T, dir string, wantDossiers int) {
 		})
 		return ok && len(s.dossiers()) >= wantDossiers
 	})
-	s.settled()
+	r4Settled(s)
 	s.type_("@e what next?")
-	s.waitFor("the answer", func() bool { return s.ui.messageCount() >= 1 })
-	s.settled()
+	r4Until(t, "the answer", func() bool { return s.ui.messageCount() >= 1 })
+	r4Settled(s)
 	reqs := requests()
 	if len(reqs) == 0 {
 		t.Fatal("the model was never called")
@@ -207,8 +207,8 @@ func TestASecondStopAtTheSameWriteIsHandledTheSameWay(t *testing.T) {
 	dir, files := r4RolledSession(t)
 	r4Keep(t, filepath.Join(dir, files[1]), 1)
 	s, _ := r4Resume(t, dir)
-	s.waitFor("the briefing", func() bool { return len(s.dossiers()) == 1 })
-	s.settled()
+	r4Until(t, "the briefing", func() bool { return len(s.dossiers()) == 1 })
+	r4Settled(s)
 	s.stop()
 	all, _ := s.rt.sess.Files()
 	newest := filepath.Join(dir, all[len(all)-1])
@@ -230,8 +230,8 @@ func TestResumeAfterTheDossierIsUnchanged(t *testing.T) {
 	view, _ := json.Marshal(st.View(nil))
 	s, requests := r4Resume(t, dir)
 	s.type_("@e what next?")
-	s.waitFor("the answer", func() bool { return s.ui.messageCount() >= 1 })
-	s.settled()
+	r4Until(t, "the answer", func() bool { return s.ui.messageCount() >= 1 })
+	r4Settled(s)
 	if n := len(s.dossiers()); n != 1 {
 		t.Fatalf("a whole record was restarted again: %d dossiers", n)
 	}
@@ -310,8 +310,8 @@ func TestUpgradeStoppedBeforeItsDossierIsWrittenOnTheNextRun(t *testing.T) {
 		return hold()
 	}
 	s, _ := resumeOld(t, project, sess, brain)
-	s.waitFor("the upgrade's dossier", func() bool { return len(s.dossiers()) == 2 })
-	s.settled()
+	r4Until(t, "the upgrade's dossier", func() bool { return len(s.dossiers()) == 2 })
+	r4Settled(s)
 	s.stop()
 	all, _ := s.rt.sess.Files()
 	if len(all) != 3 {
@@ -319,8 +319,8 @@ func TestUpgradeStoppedBeforeItsDossierIsWrittenOnTheNextRun(t *testing.T) {
 	}
 	r4Keep(t, filepath.Join(sess.Path, all[2]), 1)
 	s, _ = resumeOld(t, project, sess, brain)
-	s.waitFor("the upgrade's dossier, written again", func() bool { return len(s.dossiers()) == 2 })
-	s.settled()
+	r4Until(t, "the upgrade's dossier, written again", func() bool { return len(s.dossiers()) == 2 })
+	r4Settled(s)
 	var upgraded bool
 	var subs []state.Subsession
 	s.read(func(st *state.State) { upgraded, subs = st.Upgraded(), append(subs, st.Subsessions...) })

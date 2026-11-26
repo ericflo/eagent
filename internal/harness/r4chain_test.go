@@ -43,7 +43,9 @@ func allReachableFromTheNewestDossier(t *testing.T, rt *Runtime) {
 // the new file's subsession.start; the next run wrote messages there, then
 // finished the restart), a briefing the harness wrote, and a briefing that
 // carried what had not been seen (covers before the end of the file).
-// Every message the user sent is reached from the newest dossier.
+// Every message the user sent is reached from the newest dossier. The chain
+// begins at the fifth restart, so each odd link sits inside it, and the
+// way back to the first messages runs through all three (eleven hops).
 func TestTheChainOfBriefingsReachesEveryMessageThroughOddLinks(t *testing.T) {
 	rt := r4SmallRuntime(t)
 	defer rt.sess.Close()
@@ -54,7 +56,7 @@ func TestTheChainOfBriefingsReachesEveryMessageThroughOddLinks(t *testing.T) {
 		ev.Time = at
 		rt.append(ev)
 	}
-	r4Restarts(t, rt, 12, &at)
+	r4Restarts(t, rt, 6, &at)
 	// An unfinished restart: end and start written, no dossier.
 	if _, err := rt.openSubsession("context full", "rollover", 12000); err != nil {
 		t.Fatal(err)
@@ -66,13 +68,13 @@ func TestTheChainOfBriefingsReachesEveryMessageThroughOddLinks(t *testing.T) {
 		add(fmt.Sprintf("said in the unfinished file %d", i))
 	}
 	rt.finishDossier(dossierJob{covers: rt.st.LastSeq(), lines: rt.recordLines()}, dossierResult{ok: true, text: briefing([]string{rt.sess.Current() + ":3", rt.sess.Current() + ":4", rt.sess.Current() + ":5"})})
-	r4Restarts(t, rt, 6, &at)
+	r4Restarts(t, rt, 2, &at)
 	// A harness-written one.
 	for i := 0; i < 5; i++ {
 		add(fmt.Sprintf("before the harness briefing %d", i))
 	}
 	rt.finishDossier(dossierJob{covers: rt.st.LastSeq(), lines: rt.recordLines()}, dossierResult{})
-	r4Restarts(t, rt, 6, &at)
+	r4Restarts(t, rt, 2, &at)
 	// One that covers only part of its file: the rest is carried over.
 	for i := 0; i < 6; i++ {
 		add(fmt.Sprintf("seen before the carried restart %d", i))
@@ -82,6 +84,6 @@ func TestTheChainOfBriefingsReachesEveryMessageThroughOddLinks(t *testing.T) {
 		add(fmt.Sprintf("unseen, carried over %d", i))
 	}
 	rt.finishDossier(dossierJob{covers: covers, lines: rt.recordLines()}, dossierResult{ok: true, text: briefing([]string{rt.sess.Current() + ":3", rt.sess.Current() + ":4", rt.sess.Current() + ":5"})})
-	r4Restarts(t, rt, 8, &at)
+	r4Restarts(t, rt, 2, &at)
 	allReachableFromTheNewestDossier(t, rt)
 }

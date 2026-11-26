@@ -269,14 +269,14 @@ func after(d time.Duration) <-chan struct{} {
 	return ch
 }
 
-// The reviewer's case, scaled: the pass's reading time is 1.5 s and every
-// call is a lookup that takes 3.5 s. One deadline bounds the whole pass, so
+// The reviewer's case, scaled: the pass's reading time is 600 ms and every
+// call is a lookup that takes 1.4 s. One deadline bounds the whole pass, so
 // the harness writes the briefing and the loop answers again by the time
-// the reading and the writing allowed (1.5 s + 1 s), not two calls later
-// (7 s). The times are long enough that a busy machine does not decide the
-// outcome.
+// the reading and the writing allowed (600 ms + 400 ms), not two calls
+// later (2.8 s). The times are long enough that a busy machine does not
+// decide the outcome.
 func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
-	r2DossierTime(t, 1500*time.Millisecond, time.Second)
+	r2DossierTime(t, 600*time.Millisecond, 400*time.Millisecond)
 	var mu sync.Mutex
 	var first time.Time
 	var told []string
@@ -287,7 +287,7 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 		}
 		told = append(told, lastText(msgs))
 		mu.Unlock()
-		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(3500 * time.Millisecond)}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"PR"}`)}, block: after(1400 * time.Millisecond)}
 	})
 	mu.Lock()
 	took := time.Since(first)
@@ -295,8 +295,8 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 	if d := s.dossiers()[0]; d.By != "harness" {
 		t.Fatalf("dossier by %q", d.By)
 	}
-	if took > 3300*time.Millisecond {
-		t.Fatalf("the pass took %s; it is bounded at 2.5s", took)
+	if took > 1320*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 1s", took)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -308,7 +308,7 @@ func TestR2DossierPassIsBoundedAsAWhole(t *testing.T) {
 // A lookup still running when the reading time is over is cut short so
 // the writing keeps its reserved time, and the model's briefing is kept.
 func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
-	r2DossierTime(t, 500*time.Millisecond, 2*time.Second)
+	r2DossierTime(t, 200*time.Millisecond, 800*time.Millisecond)
 	var mu sync.Mutex
 	var first time.Time
 	s, _ := audit2Dossier(t, func(n int, msgs []map[string]any) reply {
@@ -327,9 +327,9 @@ func TestR2DossierWritingKeepsItsReservedTime(t *testing.T) {
 	if d := s.dossiers()[0]; d.By != "eagent" || d.NoMap {
 		t.Fatalf("dossier by %q nomap=%v:\n%s", d.By, d.NoMap, d.Text)
 	}
-	// The lookup is cut at 1.5 s (the reading time and half the writing
-	// time), and the writing has a second left.
-	if took > 2500*time.Millisecond {
-		t.Fatalf("the pass took %s; it is bounded at 2.5s", took)
+	// The lookup is cut at 600 ms (the reading time and half the writing
+	// time), and the writing has 400 ms left.
+	if took > 1000*time.Millisecond {
+		t.Fatalf("the pass took %s; it is bounded at 1s", took)
 	}
 }

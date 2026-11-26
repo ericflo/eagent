@@ -15,6 +15,8 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
 )
 
@@ -78,31 +80,39 @@ func r4Text(i, n int) string {
 // A session on a small local route: a fake provider with a 16,384-token
 // window and a 2,048-token reply, which refuses as too long any request
 // that would not fit (counted with the estimator eagent uses). The user
-// writes 178 messages in rounds. Every restart is written by the model
-// (its request fits), the first request after each restart fits, every
-// message gets its answer, and the latest briefing still points at every
-// message the user sent before it, by file and line.
+// writes 50 messages (r4WindowMessages) in rounds. Every restart is
+// written by the model (its request fits), the first request after each
+// restart fits, every message gets its answer, and the latest briefing
+// still points at every message the user sent before it, by file and
+// line, through the chain of briefings.
 //
 // A round can still carry a conversation from under the threshold past the
 // window; that request is refused, and the restart that follows is the one
 // after a refusal (the test below).
 func TestSessionOnASmallWindowRestartsIntoRequestsThatFit(t *testing.T) {
-	r4SmallWindow(t, 5)
+	r4SmallWindow(t, 5, r4WindowMessages)
 }
 
-// The same with all 178 messages arriving at once: the provider refuses
+// The same with all the messages arriving at once: the provider refuses
 // the conversation as too long, and the restart that follows (written
 // from the files) still leads to requests that fit.
 func TestRefusedConversationOnASmallWindowRestartsIntoRequestsThatFit(t *testing.T) {
-	if refused := r4SmallWindow(t, 178); refused == 0 {
+	if refused := r4SmallWindow(t, r4WindowMessages, r4WindowMessages); refused == 0 {
 		t.Fatal("the conversation was never refused as too long")
 	}
 }
 
-// r4SmallWindow runs the session above, with the user's messages arriving
-// perRound at a time, and returns how many requests were refused as too
-// long.
-func r4SmallWindow(t *testing.T, perRound int) int {
+// r4WindowMessages is how many messages the user writes in the sessions
+// above: four restarts with five a round, the briefings chained from the
+// second, the largest first request after a restart as large as after
+// fifteen, and one round refused as too long; all at once, far past the
+// window.
+const r4WindowMessages = 50
+
+// r4SmallWindow runs the session above, with total messages from the user
+// arriving perRound at a time, and returns how many requests were refused
+// as too long.
+func r4SmallWindow(t *testing.T, perRound, total int) int {
 	t.Helper()
 	const window, ceiling = 16384, 2048
 	b, _ := json.Marshal(tools.All())
@@ -162,20 +172,20 @@ func r4SmallWindow(t *testing.T, perRound int) int {
 			}
 		}
 	})
-	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
-	s.settled()
+	r4Until(t, "the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+	r4Settled(s)
 	sent := 0
-	for sent < 178 {
+	for sent < total {
 		s.rt.sync(func() {
-			for i := 0; i < perRound && sent < 178; i++ {
+			for i := 0; i < perRound && sent < total; i++ {
 				s.rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: r4Text(sent, 400+sent%7*300)}))
 				sent++
 			}
 		})
 		before := s.ui.messageCount()
 		s.type_(fmt.Sprintf("@e round %d", sent))
-		s.waitFor("the answer to round "+fmt.Sprint(sent), func() bool { return s.ui.messageCount() > before })
-		s.settled()
+		r4Until(t, "the answer to round "+fmt.Sprint(sent), func() bool { return s.ui.messageCount() > before })
+		r4Settled(s)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -206,6 +216,9 @@ func r4SmallWindow(t *testing.T, perRound int) int {
 		if ev.Seq <= d.CoversSeq {
 			users = append(users, ev)
 		}
+	}
+	if perRound < total && r4Pointer.FindStringSubmatch(d.Text) == nil {
+		t.Fatal("the latest briefing points at no earlier briefing: the chain is not exercised")
 	}
 	for _, ev := range users {
 		if _, ok := r4Follow(t, s.rt, d.Text, ev.Source.File, ev.Source.Line); !ok {
@@ -239,10 +252,14 @@ func r4Points(text, file string, line int) bool {
 	return false
 }
 
-// r4OrdinaryDossier writes a dossier for a long session on an ordinary
+// r4OrdinaryRecord builds the record of a long session on an ordinary
 // route (200k window, 32k reply): 210 user messages, some long, and 35
-// turn ends. It returns the body with file names and times made stable.
-func r4OrdinaryDossier(t *testing.T, ok bool) string {
+// turn ends. It returns the runtime, which has written no dossier yet,
+// and a second one on a copy of the same record (each writes one dossier,
+// which changes its record). The copy is read back as Resume reads a
+// session, without what Resume writes on taking it up, so both records
+// are the same to the line; the goldens below hold the two to that.
+func r4OrdinaryRecord(t *testing.T) (*Runtime, *Runtime) {
 	t.Helper()
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	useFakeRelays(t, newFakeSeat("ok"))
@@ -253,7 +270,7 @@ func r4OrdinaryDossier(t *testing.T, ok bool) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rt.sess.Close()
+	t.Cleanup(func() { rt.sess.Close() })
 	at := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
 	add := func(ev event.Event) {
 		at = at.Add(time.Minute)
@@ -269,6 +286,32 @@ func r4OrdinaryDossier(t *testing.T, ok bool) string {
 			add(event.New(event.Message, event.ActorEagent, event.MessageData{Text: fmt.Sprintf("Progress at %d.", i)}))
 		}
 	}
+	copied := filepath.Join(t.TempDir(), filepath.Base(rt.sess.Path))
+	if err := os.CopyFS(copied, os.DirFS(rt.sess.Path)); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.Read(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.Replay(events)
+	sess, err := store.Open(copied, st.LastSeq(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt2, err := build(cfg, rt.opts, &fakeUI{input: make(chan string)}, sess, st)
+	if err != nil {
+		sess.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt2.sess.Close() })
+	return rt, rt2
+}
+
+// r4OrdinaryDossier writes rt's dossier, by the model (ok) or by the
+// harness, and returns its body with file names and times made stable.
+func r4OrdinaryDossier(t *testing.T, rt *Runtime, ok bool) string {
+	t.Helper()
 	job := dossierJob{covers: rt.st.LastSeq(), lines: rt.recordLines()}
 	res := dossierResult{ok: ok, text: briefing([]string{rt.sess.Current() + ":3", rt.sess.Current() + ":4", rt.sess.Current() + ":5"})}
 	rt.finishDossier(job, res)
@@ -292,13 +335,16 @@ func r4OrdinaryDossier(t *testing.T, ok bool) string {
 
 // On an ordinary route the dossier is byte for byte what it was before
 // dossiers were sized to the window: the model's text and the facts, for
-// a briefing by the model and for one the harness had to write.
+// a briefing by the model and for one the harness had to write (on two
+// copies of one record).
 func TestOrdinaryWindowDossierIsUnchanged(t *testing.T) {
+	rt, copied := r4OrdinaryRecord(t)
 	for _, c := range []struct {
+		rt   *Runtime
 		ok   bool
 		file string
-	}{{true, "r4dossier-ordinary.golden"}, {false, "r4dossier-ordinary-harness.golden"}} {
-		got := r4OrdinaryDossier(t, c.ok)
+	}{{rt, true, "r4dossier-ordinary.golden"}, {copied, false, "r4dossier-ordinary-harness.golden"}} {
+		got := r4OrdinaryDossier(t, c.rt, c.ok)
 		path := filepath.Join("testdata", c.file)
 		if os.Getenv("EAGENT_R4_WRITE_GOLDEN") != "" {
 			_ = os.MkdirAll("testdata", 0o755)
