@@ -1030,7 +1030,7 @@ func (r *Runtime) checkIdleAgents() {
 		}
 		who = append(who, rel.Who())
 	}
-	r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf(idleCheckPrefix+"this session has no terminal, and %s has been between turns with nobody writing for %s.] If its work is finished, tell the user how it ended (unless you already have) and stop it with relay_control stop: the session then ends, a reply from the phone brings it back, and relay_control restart then continues the agent's own conversation. If it is waiting on something of its own that is still running (a build, a run, a task it said it would report on), leave it alone and hold; you are asked again in %s if nothing changes.", strings.Join(who, " and "), roundDur(r.idleFor()), roundDur(idleCheckWait(window, asked+1)))}))
+	r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf(idleCheckPrefix+"this session has no terminal, and %s has been between turns with nobody writing for %s.] Nobody writing for that long means the user is finished with it for now, unless it is waiting on work of its own that is still running (a build, a run, a task it said it would report on): then leave it alone and hold; you are asked again in %s if nothing changes. Otherwise tell the user how it ended (unless you already have) and stop it with relay_control stop. The session then ends; a reply from the phone brings it back, and relay_control restart continues the agent's own conversation.", strings.Join(who, " and "), roundDur(r.idleFor()), roundDur(idleCheckWait(window, asked+1)))}))
 }
 
 // idleFor is how long since an agent's turn or start, or the user's last
@@ -1686,26 +1686,19 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					d.Instruction = "Keep going: pick the next most valuable thing toward what the user asked, do it, commit, and continue."
 				}
 				d.Decide = str("decide") != "false"
-				until := autopilotUntil
 				if u := strings.TrimSpace(str("until")); u != "" {
-					// The deadline is the user's: read where they are.
-					loc := r.userZone()
-					t, perr := parseUntil(u, time.Now().In(loc))
+					// The deadline is the user's: read where they are. It is
+					// kept with that zone's offset, so it is said on their clock.
+					t, perr := parseUntil(u, time.Now().In(r.userZone()))
 					if perr != nil {
 						err = perr
 						return
 					}
 					d.Until = t.Format(time.RFC3339)
-					if t.In(loc).Format("Mon 15:04") != t.Local().Format("Mon 15:04") {
-						// Said as the user gave it, with where that is.
-						until = func(event.RelayAutopilotData) string {
-							return "until " + t.In(loc).Format("Mon 15:04") + " " + loc.String() + " time"
-						}
-					}
 				}
-				out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
+				out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
 				if !d.Decide {
-					out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
+					out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
 				}
 				out += "."
 			}
@@ -1790,11 +1783,14 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	// A name can be in the chain more than once (a quick switch back), each
-	// time with the agent that held it then.
-	seen := map[string][]int64{}
+	// The agents the brief hands over from, each the holder of its name
+	// from its start (a name can be in the chain twice, a quick switch
+	// back, each time with the agent that held it then).
+	targets := map[holder]bool{}
+	names := map[string]bool{}
 	for _, n := range ho.names {
-		seen[n.name] = append(seen[n.name], n.start)
+		targets[holder{n.name, n.start}] = true
+		names[n.name] = true
 	}
 	handed := handedOver(r.st)
 	quoted := map[string]bool{}
@@ -1817,13 +1813,17 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		starts, ok := seen[d.Name]
-		if !ok || d.From != "user" || quoted[d.ID] || pending[d.ID] {
+		if d.From != "user" || quoted[d.ID] || pending[d.ID] {
 			continue
 		}
-		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && !inChain(handed, holder{d.Name, at.StartSeq}, d.Name, starts) {
-			// Said to another agent that held the name: a later one, or an
-			// earlier one that was stopped rather than handed over.
+		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
+			if !names[d.Name] {
+				continue
+			}
+		} else if !inChain(handed, holder{d.Name, at.StartSeq}, targets) {
+			// Said to an agent whose work did not come to this one: a
+			// later holder of a name, one that was stopped rather than
+			// handed over, or another agent altogether.
 			continue
 		}
 		quoted[d.ID] = true
@@ -1862,7 +1862,7 @@ func handedOver(st *state.State) map[holder]holder {
 		}
 		var end event.RelayEndData
 		var start event.RelayStartData
-		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") {
+		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") || strings.Contains(end.Reason, ", which could not start") {
 			continue
 		}
 		from, to := st.RelayAt(end.Name, ev.Seq), st.RelayAt(start.Name, next.Seq)
@@ -1874,13 +1874,15 @@ func handedOver(st *state.State) map[holder]holder {
 	return out
 }
 
-// inChain reports whether the agent h is one of the agents under name that
-// a brief quotes (starts), or an earlier one whose work reached one of them
-// through switches: Codex, Claude, Codex again is one piece of work. An
-// earlier agent that was stopped, not handed over, did other work.
-func inChain(handed map[holder]holder, h holder, name string, starts []int64) bool {
+// inChain reports whether the agent h is one of the agents a brief hands
+// over from (targets), or one whose work reached one of them through
+// switches, whatever their names: Codex, Claude, pi is one piece of work,
+// and so is Codex, Claude, Codex again. An agent that was stopped, not
+// handed over, did other work. Bounded by the number of switches, so a
+// cycle cannot hang it.
+func inChain(handed map[holder]holder, h holder, targets map[holder]bool) bool {
 	for steps := 0; steps <= len(handed); steps++ {
-		if h.name == name && slices.Contains(starts, h.start) {
+		if targets[h] {
 			return true
 		}
 		next, ok := handed[h]
@@ -1903,7 +1905,10 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 		if t, err := time.ParseInLocation(layout, strings.ToLower(strings.ReplaceAll(s, " ", "")), now.Location()); err == nil {
 			at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 			if !at.After(now) {
-				at = at.Add(24 * time.Hour)
+				// Tomorrow's, built on the calendar: across a daylight-saving
+				// change a day is 23 or 25 hours, and adding 24 would land
+				// an hour off the clock time asked for.
+				at = time.Date(now.Year(), now.Month(), now.Day()+1, t.Hour(), t.Minute(), 0, 0, now.Location())
 			}
 			return at, nil
 		}
@@ -1938,11 +1943,30 @@ func (r *Runtime) userZone() *time.Location {
 	return r.st.Location()
 }
 
-func autopilotUntil(d event.RelayAutopilotData) string {
+// autopilotUntil says an autopilot's deadline for what is written from now
+// on (tool replies, notices, status, a new dossier). How a relay.autopilot
+// already on the record renders in the conversation is state's, unchanged.
+func (r *Runtime) autopilotUntil(d event.RelayAutopilotData) string {
 	if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
-		return "until " + t.Local().Format("Mon 15:04")
+		return "until " + r.clockAt(t)
 	}
 	return "until the user says stop"
+}
+
+// clockAt says a deadline on the clock of the zone it was given in (its
+// offset: the user's, for one read where they are), naming that zone when
+// the machine's clock reads otherwise: the model passes it on to a user who
+// may be elsewhere.
+func (r *Runtime) clockAt(t time.Time) string {
+	given, local := t.Format("Mon 15:04"), t.Local().Format("Mon 15:04")
+	if given == local {
+		return local
+	}
+	name := "UTC" + t.Format("-07:00")
+	if loc := r.userZone(); t.In(loc).Format("Mon 15:04") == given {
+		name = loc.String()
+	}
+	return given + " " + name + " time"
 }
 
 // autopilotCheckAfter is how long an agent on autopilot may sit idle, with
@@ -2026,7 +2050,7 @@ func (r *Runtime) armAutopilots() {
 					return
 				}
 				r.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: name, Off: true}))
-				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), until.Local().Format("Mon 15:04"))}))
+				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), r.clockAt(until))}))
 			})
 		})
 	}
@@ -2189,7 +2213,7 @@ func (r *Runtime) relayStatusText(name, lead string) string {
 			b.WriteString("\nUsage: " + limitLine(rel.Who(), *rel.Limit))
 		}
 		if ap := rel.Autopilot; ap != nil {
-			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
+			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", r.autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
 		}
 		if sent := userSends(r.st, rel.Name, 8); len(sent) > 0 {
 			b.WriteString("\nWhat the user sent it, newest last:")
