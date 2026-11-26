@@ -78,6 +78,7 @@ type Seat struct {
 	events chan Event
 	stop   chan struct{}
 	done   chan struct{}
+	poll   time.Duration // how often the watcher looks; pollEvery when zero (tests shorten it)
 
 	mu         sync.Mutex
 	inner      string
@@ -463,7 +464,11 @@ func (s *Seat) watch() {
 	}()
 	var tail *tailer
 	var p parser
-	tick := time.NewTicker(pollEvery)
+	every := pollEvery
+	if s.poll > 0 {
+		every = s.poll
+	}
+	tick := time.NewTicker(every)
 	defer tick.Stop()
 	lastAlive := time.Now()
 	lastDialog := time.Time{}

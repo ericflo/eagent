@@ -97,6 +97,7 @@ func TestPiDialogSeenByTheWatcher(t *testing.T) {
 	h := &fakeHost{alive: true}
 	s := newSeat(Spec{StatusFile: status, Dir: t.TempDir()}, piAgent{label: "Pi"}, h, "x", "")
 	s.state = "idle"
+	s.poll = piLook
 	go s.watch()
 	defer s.Close()
 	writePiStatus(t, status, piStatus{State: "idle", Prompt: "Pick a goal"})
