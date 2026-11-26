@@ -153,12 +153,19 @@ type SessionStartData struct {
 	// same event always renders the same text, wherever the session is
 	// resumed. Empty in older logs, which render in the reader's zone.
 	TZ string `json:"tz,omitempty"`
+	// PhoneLedger says this run records every message from the app it
+	// takes in (phone.read and the phone ids on user.message and
+	// user.answer). A run by an eagent without that leaves it out, and its
+	// record is read by time.
+	PhoneLedger bool `json:"phone_ledger,omitempty"`
 }
 
 // SessionResumeData records a restart and what the replay had to close.
 type SessionResumeData struct {
 	Interactive bool     `json:"interactive"`
 	Closed      []string `json:"closed,omitempty"` // human-readable list of things marked interrupted
+	// PhoneLedger: as on SessionStartData, for this run.
+	PhoneLedger bool `json:"phone_ledger,omitempty"`
 }
 
 // SessionEndData records why the runner stopped.

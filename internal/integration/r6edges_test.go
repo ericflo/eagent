@@ -38,7 +38,7 @@ func r6Flaky(t *testing.T, f *r6Thread) (string, *atomic.Bool) {
 func r6Ledgered(t *testing.T, f *r6Thread, project string, evs ...event.Event) string {
 	t.Helper()
 	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
-	r6Record(t, project, sid, append([]event.Event{r6Read("start")}, evs...)...)
+	r6Record(t, project, sid, append([]event.Event{r6Run(), r6Read("start")}, evs...)...)
 	f.say(sid, "start", "", r6Info(t, project, sid).Modified.Add(-time.Hour), nil)
 	f.mu.Lock()
 	f.threads[sid][0]["origin"] = "token"
@@ -113,30 +113,49 @@ func TestAStreamTriggerAheadOfTheListingIsTaken(t *testing.T) {
 // its card on itself, in that one write: no later sweep or message takes
 // it again, whether the thread's newest message is the answer or a later
 // one.
+//
+// Each half of the answer's naming is enough on its own: its phone_id
+// names the message, its card_id names the card the message was written
+// on. Without either, the message is the next one, which is what the
+// "neither" case shows the check can see. Asked of nextPhoneMessage
+// directly (the reply watcher's choice, with no time filter), and through
+// the sweep with a later message waiting.
 func TestAnAnswerRecordedJustBeforeAHardStopIsNotTakenAgain(t *testing.T) {
-	for _, later := range []bool{false, true} {
-		project := t.TempDir()
-		f := newR6Thread(t)
-		sid := r6Ledgered(t, f, project,
-			event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "which colour?"}),
-			event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: "q1", CardID: "card-1"}),
-			event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "blue", Source: "finalechat", PhoneID: "a1", CardID: "card-1"}),
-		)
-		stop := r6Info(t, project, sid).Modified
-		f.say(sid, "a1", "blue", stop.Add(-time.Second), map[string]any{"kind": "answer", "question_id": "card-1"})
-		want := ""
-		if later {
+	for _, c := range []struct {
+		name            string
+		phoneID, cardID string
+		taken           bool
+	}{
+		{"both", "a1", "card-1", true},
+		{"phone_id only", "a1", "", true},
+		{"card_id only", "", "card-1", true},
+		{"neither", "", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			project := t.TempDir()
+			f := newR6Thread(t)
+			sid := r6Ledgered(t, f, project,
+				event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "which colour?"}),
+				event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: "q1", CardID: "card-1"}),
+				event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "blue", Source: "finalechat", PhoneID: c.phoneID, CardID: c.cardID}),
+			)
+			stop := r6Info(t, project, sid).Modified
+			f.say(sid, "a1", "blue", stop.Add(-time.Second), map[string]any{"kind": "answer", "question_id": "card-1"})
+			w := f.watcher(project, &fakeResumeHost{hosted: map[string]bool{}}, t)
+			m, found, err := nextPhoneMessage(context.Background(), w.client, r6Info(t, project, sid), nil)
+			if err != nil || found == c.taken || (found && m.ID != "a1") {
+				t.Fatalf("next message %q found=%v err=%v; want found=%v", m.ID, found, err, !c.taken)
+			}
 			f.say(sid, "m2", "thanks", stop.Add(time.Minute), nil)
-			want = "m2"
-		}
-		host := &fakeResumeHost{hosted: map[string]bool{}}
-		f.watcher(project, host, t).sweep(context.Background())
-		got := ""
-		if host.calls() > 0 {
-			got = host.resumed[0].ID
-		}
-		if got != want || host.calls() > 1 {
-			t.Fatalf("later=%v: resumed with %q (%d resumes), want %q", later, got, host.calls(), want)
-		}
+			host := &fakeResumeHost{hosted: map[string]bool{}}
+			f.watcher(project, host, t).sweep(context.Background())
+			want := "m2"
+			if !c.taken {
+				want = "a1"
+			}
+			if host.calls() != 1 || host.resumed[0].ID != want {
+				t.Fatalf("resumes %#v, want one with %q", host.resumed, want)
+			}
+		})
 	}
 }
