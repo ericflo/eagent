@@ -112,6 +112,23 @@ func cutCheck(t *testing.T, sid string, evs []event.Event, model *scripted) {
 				t.Errorf("%s: seq %d follows %d (%s after %s)", at, after[i].Seq, after[i-1].Seq, after[i].Type, after[i-1].Type)
 			}
 		}
+		// Every message typed into the agent has exactly one send of it.
+		for _, u := range after {
+			var ud event.UserMessageData
+			if u.Type != event.UserMessage || u.Decode(&ud) != nil || ud.Held != "" {
+				continue
+			}
+			sends := 0
+			for _, ev := range after {
+				var d event.RelaySendData
+				if ev.Type == event.RelaySend && ev.Decode(&d) == nil && d.Auto && d.From == "user" && d.Seq == u.Seq {
+					sends++
+				}
+			}
+			if sends != 1 {
+				t.Errorf("%s: user message seq %d, typed into the agent, has %d sends", at, u.Seq, sends)
+			}
+		}
 		var users []event.Event
 		for _, ev := range prefix {
 			if ev.Type == event.UserMessage {
@@ -192,6 +209,18 @@ func TestCutEveryWriteTwoPlainReplies(t *testing.T) {
 	s.settled()
 	s.type_("@e cutq two")
 	s.waitFor("the second reply", func() bool { return cutSentCount(s) >= 2 })
+	sid, evs := cutRecord(t, s)
+	cutCheck(t, sid, evs, s.model)
+}
+
+// (c) a user message typed into the running agent, and acknowledged.
+func TestCutEveryWriteMessageToTheAgent(t *testing.T) {
+	s := startSession(t, brief, cutBrain, nil)
+	s.waitFor("the brief to reach the agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	s.type_("cutq one")
+	s.waitFor("the message to reach the agent", func() bool { return len(s.seat.sentTexts()) == 2 })
+	s.waitFor("the acknowledgement", func() bool { return cutSentCount(s) >= 1 })
 	sid, evs := cutRecord(t, s)
 	cutCheck(t, sid, evs, s.model)
 }
