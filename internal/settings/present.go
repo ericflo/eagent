@@ -251,7 +251,11 @@ func SessionConfigSuggestions(project string) []control.Suggestion {
 		var cfg config.Config
 		var err error
 		if bundle != "" {
-			cfg, err = config.LoadBundleWithFile(project, "", bundle, file)
+			// As for a preset (ChosenPresetWithFile): an effort the
+			// bundle's model lacks is the nearest it offers.
+			if cfg, err = config.LoadBundleWithFile(project, "", bundle, file); err == nil {
+				config.OfferedEffort(&cfg.Model)
+			}
 		} else {
 			cfg, err = config.ChosenPresetWithFile(project, preset, file)
 		}
