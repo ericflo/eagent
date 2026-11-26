@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,8 @@ type pending struct {
 	id, text, mode string
 	at             time.Time
 	nudges         int
+	// held: the message waits in the spool for a hook to hand it over.
+	held bool
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -376,8 +379,9 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// An agent with a spool holds it there; one without has handed
 				// it to its own queue. Either way it is tracked for its arrival,
 				// and, as every after-turn send, never pressed again or reported
-				// lost on a timer.
-				s.track(id, text, mode)
+				// lost on a timer. Only Claude's and pi's hand-overs go
+				// through the spool.
+				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -492,9 +496,11 @@ func (s *Seat) typeText(text string) error {
 	return s.host.Keys(s.target, "Enter")
 }
 
-func (s *Seat) track(id, text, mode string) {
+func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
+
+func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now()})
+	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
 	s.mu.Unlock()
 }
 
@@ -570,16 +576,31 @@ func (s *Seat) Screen(lines int) (string, error) { return s.host.Capture(s.targe
 
 func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// matchPending confirms the sends whose text the transcript shows arriving.
+// matchPending confirms the sends one user entry of the transcript shows
+// arriving (see arrivals) and returns their ids, oldest first.
 func (s *Seat) matchPending(text string) []string {
-	got := normalize(text)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	views := make([]sendView, len(s.pending))
+	var spool []string
+	for i, p := range s.pending {
+		views[i].text = p.text
+		if p.held {
+			if spool == nil {
+				spool = spoolNames(s.spec.Spool)
+			}
+			views[i].waiting = spoolWaits(spool, p.id)
+			views[i].handed = !views[i].waiting
+		}
+	}
+	got := arrivals(views, text)
+	if len(got) == 0 {
+		return nil
+	}
 	var ids []string
 	keep := s.pending[:0]
-	for _, p := range s.pending {
-		want := normalize(p.text)
-		if want != "" && arrived(got, want) {
+	for i, p := range s.pending {
+		if slices.Contains(got, i) {
 			ids = append(ids, p.id)
 			continue
 		}
@@ -589,28 +610,193 @@ func (s *Seat) matchPending(text string) []string {
 	return ids
 }
 
-// arrived says whether transcript text got (normalized) shows the send want
-// (normalized). Where got holds want's first 160 bytes, what follows them
-// must agree with want too, as far as either goes (a transcript may cut a
-// long message short), so two long messages with a common start are told
-// apart. A transcript that shows only a shortened start of the message
-// counts as well.
-func arrived(got, want string) bool {
-	h := head(want, 160)
-	for from := 0; ; {
-		i := strings.Index(got[from:], h)
-		if i < 0 {
-			break
-		}
-		// Every place it starts counts: held messages with a common start
-		// arrive joined in one record.
-		rest := got[from+i:]
-		if strings.HasPrefix(rest, want) || strings.HasPrefix(want, strings.TrimSuffix(rest, "…")) {
+// spoolNames lists a spool's file names; [] (not nil) when it has none.
+func spoolNames(spool string) []string {
+	names := []string{}
+	if spool == "" {
+		return names
+	}
+	entries, _ := os.ReadDir(spool)
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// spoolWaits says whether the held message id still waits in the spool,
+// unclaimed (a hook renames what it takes to .taken), or is still being
+// written (a hidden temporary name).
+func spoolWaits(names []string, id string) bool {
+	for _, n := range names {
+		if strings.HasSuffix(n, "-"+id+".txt") {
 			return true
 		}
-		from += i + 1
 	}
-	return len(got) > 20 && strings.Contains(want, strings.TrimSuffix(got, "…"))
+	return false
+}
+
+// sendView is what arrivals needs to know of one pending send.
+type sendView struct {
+	text string
+	// waiting: a message held in the spool whose file is still there.
+	// Nothing has handed it over, so no entry is its arrival.
+	waiting bool
+	// handed: a message held in the spool that a hook has taken. Only
+	// such a message arrives inside a hook's hand-over beside other text.
+	handed bool
+}
+
+// arrivals decides which pending sends (oldest first) one user entry of the
+// agent's transcript shows arriving, and returns their positions. An entry
+// is one message as the agent took it, or one hand-over by eagent's hook
+// (Claude's Stop hook, pi's extension), which trims each held message and
+// joins them with a blank line. So one entry confirms each send at most
+// once, and a send's words inside other text (a person's own message, an
+// echo, a pasted conversation) are not its arrival. Whitespace is compared
+// loosely throughout: transcripts reflow and trim it. The first rule that
+// applies decides:
+//
+//	the entry is                                        confirms
+//	one send's text                                     the oldest such send
+//	sends' texts joined at line breaks, nothing else    each of them
+//	  (a hook's join; messages pi gives back to its
+//	  editor after an interrupt go with the next one)
+//	held messages a hook took, each between blank       those held messages
+//	  lines, beside other text (a held message the
+//	  seat does not know, from before a restart)
+//	the start of one send, over 20 bytes, with or       the oldest such send
+//	  without "…" (a transcript that cuts it short)
+//	anything else                                       nothing
+//
+// A held message whose file still waits in the spool takes part in no rule.
+// Two long sends that share their first 160 bytes are told apart: the entry
+// must match all of one, or be a cut start of it.
+func arrivals(pending []sendView, entry string) []int {
+	norms := make([]string, len(pending))
+	usable := make([]bool, len(pending))
+	for i, p := range pending {
+		norms[i] = normalize(p.text)
+		usable[i] = !p.waiting && norms[i] != ""
+	}
+	got := normalize(entry)
+	if got == "" {
+		return nil
+	}
+	for i := range pending {
+		if usable[i] && norms[i] == got {
+			return []int{i}
+		}
+	}
+	segs, blank := entryLines(entry)
+	if parts := coverLines(segs, norms, usable); len(parts) > 1 {
+		slices.Sort(parts)
+		return parts
+	}
+	var handed []int
+	used := make([]bool, len(segs))
+	for i, p := range pending {
+		if !usable[i] || !p.handed {
+			continue
+		}
+		if from, to, ok := findBlock(segs, blank, used, norms[i]); ok {
+			for k := from; k < to; k++ {
+				used[k] = true
+			}
+			handed = append(handed, i)
+		}
+	}
+	if len(handed) > 0 {
+		return handed
+	}
+	if stem := strings.TrimSpace(strings.TrimSuffix(got, "…")); len(stem) > 20 {
+		for i := range pending {
+			if usable[i] && strings.HasPrefix(norms[i], stem) {
+				return []int{i}
+			}
+		}
+	}
+	return nil
+}
+
+// entryLines splits an entry into its non-blank lines, normalized, and says
+// for each whether a blank line (or the entry's start) comes before it.
+func entryLines(entry string) (segs []string, blank []bool) {
+	entry = strings.ReplaceAll(strings.ReplaceAll(entry, "\r\n", "\n"), "\r", "\n")
+	gap := true
+	for _, l := range strings.Split(entry, "\n") {
+		n := normalize(l)
+		if n == "" {
+			gap = true
+			continue
+		}
+		segs, blank = append(segs, n), append(blank, gap)
+		gap = false
+	}
+	return segs, blank
+}
+
+// coverLines finds distinct usable sends whose texts, in any order, make up
+// all of segs, each a run of whole lines; nil when none do. The search is
+// bounded: the lists are short, and a pathological one finds no cover.
+func coverLines(segs, norms []string, usable []bool) []int {
+	used := make([]bool, len(norms))
+	var parts []int
+	budget := 10000
+	var walk func(pos int) bool
+	walk = func(pos int) bool {
+		if pos == len(segs) {
+			return true
+		}
+		if budget--; budget < 0 {
+			return false
+		}
+		for k := range norms {
+			if !usable[k] || used[k] {
+				continue
+			}
+			for end := pos + 1; end <= len(segs); end++ {
+				run := strings.Join(segs[pos:end], " ")
+				if len(run) > len(norms[k]) {
+					break
+				}
+				if run != norms[k] {
+					continue
+				}
+				used[k] = true
+				parts = append(parts, k)
+				if walk(end) {
+					return true
+				}
+				used[k] = false
+				parts = parts[:len(parts)-1]
+			}
+		}
+		return false
+	}
+	if len(segs) == 0 || !walk(0) {
+		return nil
+	}
+	return parts
+}
+
+// findBlock finds the first run of lines, not yet used, that is want and
+// stands between blank lines (or the entry's ends).
+func findBlock(segs []string, blank, used []bool, want string) (int, int, bool) {
+	for from := range segs {
+		if !blank[from] || used[from] {
+			continue
+		}
+		for to := from + 1; to <= len(segs) && !used[to-1]; to++ {
+			run := strings.Join(segs[from:to], " ")
+			if len(run) > len(want) {
+				break
+			}
+			if run == want && (to == len(segs) || blank[to]) {
+				return from, to, true
+			}
+		}
+	}
+	return 0, 0, false
 }
 
 // head is the start of s, at most n bytes, cut at a character and without

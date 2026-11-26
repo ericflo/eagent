@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -215,6 +216,12 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
+	// queued are the messages Claude queued while it worked ("enqueue"), in
+	// order, and dequeued the ones it has since taken off the queue to run
+	// as a prompt of their own. Such a prompt is recorded again as a user
+	// line; its arrival was the enqueue line, so the user line is not a
+	// second arrival.
+	queued, dequeued []string
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -240,10 +247,24 @@ func (p *claudeParser) line(raw []byte) []obs {
 	at := parseTime(ev.Timestamp)
 	switch ev.Type {
 	case "queue-operation":
-		if ev.Operation == "enqueue" {
-			var s string
-			if json.Unmarshal(ev.Content, &s) == nil && s != "" {
+		var s string
+		_ = json.Unmarshal(ev.Content, &s)
+		switch ev.Operation {
+		case "enqueue":
+			if s != "" {
+				p.queued = append(p.queued, s)
 				return []obs{{kind: "user", text: s, at: at}}
+			}
+		case "dequeue":
+			// Taken off the front of the queue, to run as the next prompt.
+			if len(p.queued) > 0 {
+				p.dequeued = append(p.dequeued, p.queued[0])
+				p.queued = p.queued[1:]
+			}
+		case "remove":
+			// Taken into the running turn (or dropped): no user line follows.
+			if i := slices.Index(p.queued, s); i >= 0 {
+				p.queued = slices.Delete(p.queued, i, i+1)
 			}
 		}
 		return nil
@@ -354,7 +375,33 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		return nil // the TUI's own bookkeeping
 	}
 	p.held, p.inTurn = "", true
+	if n := p.takeDequeued(s); n > 0 {
+		// The queued message(s) running now arrived at their enqueue line.
+		return []obs{{kind: "working", at: at}}
+	}
 	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
+}
+
+// takeDequeued says how many of the messages Claude took off its queue the
+// prompt s is (one, or several joined), and forgets them. Any it took and
+// did not run as this prompt are forgotten too: the user line follows the
+// dequeue at once.
+func (p *claudeParser) takeDequeued(s string) int {
+	if len(p.dequeued) == 0 {
+		return 0
+	}
+	got := normalize(s)
+	var joined []string
+	n := 0
+	for i, q := range p.dequeued {
+		joined = append(joined, normalize(q))
+		if strings.Join(joined, " ") == got {
+			n = i + 1
+			break
+		}
+	}
+	p.dequeued = nil
+	return n
 }
 
 func claudeTool(name string, in map[string]any, at time.Time) []obs {
