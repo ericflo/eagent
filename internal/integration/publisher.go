@@ -307,7 +307,13 @@ func publish(ctx context.Context, project, session, version string, force, recre
 		// mirror has not yet, leaving it untitled (later posts never
 		// backfill). Re-assert title/agent so a raced registration cannot
 		// strand an orphan. Best effort: never fail publication over it.
-		_, _ = client.Patch(ctx, "ext:eagent:"+info.ID, finalechat.PatchRequest{Title: filepath.Base(project), Agent: cfg.Finalechat.AgentName()})
+		// A thread that has a title keeps it: by now it is usually the
+		// session's summary, which the service would let this replace.
+		patch := finalechat.PatchRequest{Title: filepath.Base(project), Agent: cfg.Finalechat.AgentName()}
+		if t, err := client.Thread(ctx, "ext:eagent:"+info.ID); err == nil && strings.TrimSpace(t.Title) != "" {
+			patch.Title = ""
+		}
+		_, _ = client.Patch(ctx, "ext:eagent:"+info.ID, patch)
 		if a.ID == "" {
 			return "", fmt.Errorf("artifact registration returned no identity")
 		}
