@@ -586,9 +586,28 @@ func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
 	_ = json.Unmarshal(want, &w)
 	out := map[string]json.RawMessage{}
 	for k, v := range w {
-		if hv, ok := h[k]; !ok || !bytes.Equal(canon(hv), canon(v)) {
-			out[k] = v
+		hv, ok := h[k]
+		if ok && bytes.Equal(canon(hv), canon(v)) {
+			continue
 		}
+		// A route inside (a fallback, the summarizer's model) loads field
+		// by field over the one below, so it is written as its own diff:
+		// a field it no longer has becomes null instead of being refilled
+		// from below.
+		if ok && object(hv) != nil && object(v) != nil {
+			sub := diffObjects(hv, v)
+			if _, changed := sub["model"]; changed {
+				// As for the main route: a new model takes the window shown.
+				if _, named := sub["context_tokens"]; !named {
+					if cw := object(v)["context_tokens"]; cw != nil {
+						sub["context_tokens"] = cw
+					}
+				}
+			}
+			out[k], _ = json.Marshal(sub)
+			continue
+		}
+		out[k] = v
 	}
 	for k := range h {
 		if _, ok := w[k]; !ok {
