@@ -1507,7 +1507,10 @@ func (r *Runtime) turnFailed(err error) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
-		if errors.As(err, &ae) && ae.ContextOverflow() {
+		// Unless the restart could not be made (its file could not be
+		// created, finishDossier): then nothing was restarted, and the user
+		// hears what any failed call tells them.
+		if errors.As(err, &ae) && ae.ContextOverflow() && time.Since(t.dossierFailedAt) >= dossierRetry {
 			who := "the agent"
 			if active := r.st.ActiveRelays(); len(active) > 0 {
 				who = active[0].Who()
