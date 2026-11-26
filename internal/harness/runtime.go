@@ -195,6 +195,8 @@ type Runtime struct {
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
 	// startFailed: the last attempt to start an agent failed (startRelay).
 	startFailed bool
+	// inboxTaken: the inbox files this run handled (pollInbox). Loop goroutine.
+	inboxTaken  map[string]bool
 	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
 	ending       bool
@@ -1291,12 +1293,13 @@ func (r *Runtime) appendDirect(ev event.Event) {
 
 // ---- user input -----------------------------------------------------------
 
-func (r *Runtime) onInput(line string) { r.onInputFrom(line, "", "", nil) }
+func (r *Runtime) onInput(line string) { r.onInputFrom(line, "", "", "", nil) }
 
 // onInputFrom records a line from the user; source is "" for the terminal,
 // otherwise "web" or "finalechat". phoneID is the app message it came in,
-// which an answer carries so the record names the message in one write.
-func (r *Runtime) onInputFrom(line, source, phoneID string, client *clientcaps.Caps, atts ...event.Attachment) {
+// which an answer carries so the record names the message in one write;
+// inbox is the inbox file it came in, "" when none.
+func (r *Runtime) onInputFrom(line, source, phoneID, inbox string, client *clientcaps.Caps, atts ...event.Attachment) {
 	line = strings.TrimSpace(line)
 	if line == "" && len(atts) == 0 {
 		return
@@ -1311,10 +1314,10 @@ func (r *Runtime) onInputFrom(line, source, phoneID string, client *clientcaps.C
 		if n := optionIndex(line, q.Options); n >= 0 {
 			text = q.Options[n]
 		}
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts, PhoneID: phoneID}))
+		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts, PhoneID: phoneID, Inbox: inbox}))
 		return
 	}
-	r.userMessage(event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts, PhoneID: phoneID})
+	r.userMessage(event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts, PhoneID: phoneID, Inbox: inbox})
 }
 
 // userMessage records something the user wrote and, unless it is held back

@@ -217,6 +217,9 @@ type UserMessageData struct {
 	// CardID is the phone card whose answer these words are, when a card's
 	// answer was kept as a message (its question was settled another way).
 	CardID string `json:"card_id,omitempty"`
+	// Inbox is the name of the inbox file the words came in, which lets a
+	// later run tell that a file still lying there was already taken.
+	Inbox string `json:"inbox,omitempty"`
 }
 
 // Attachment is a file carried by a message: a screenshot the user sent
@@ -255,6 +258,9 @@ type UserAnswerData struct {
 	// (phone.read) learns both.
 	PhoneID string `json:"phone_id,omitempty"`
 	CardID  string `json:"card_id,omitempty"`
+	// Inbox is the name of the inbox file the answer came in, which lets a
+	// later run tell that a file still lying there was already taken.
+	Inbox string `json:"inbox,omitempty"`
 }
 
 // ImagesRefusedData lists pictures (by the path of the session's own copy)

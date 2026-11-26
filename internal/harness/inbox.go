@@ -15,7 +15,7 @@ import (
 // The inbox lets other processes (the web UI, a script) talk to a running
 // session without owning it: they drop small JSON files into
 // <session>/inbox/ and the runtime folds them into the log. Files are
-// processed in name order and deleted once recorded.
+// processed in name order and deleted once recorded (see pollInbox).
 
 // InboxDir is where messages for a session are dropped.
 func InboxDir(sessionPath string) string { return filepath.Join(sessionPath, "inbox") }
@@ -78,23 +78,52 @@ func (r *Runtime) pollInbox() {
 		if err != nil {
 			continue
 		}
-		_ = os.Remove(path)
 		var msg InboxMessage
 		if json.Unmarshal(raw, &msg) != nil {
+			_ = os.Remove(path)
 			continue
 		}
-		if msg.Type == "stop" && r.sess.Stale[name] {
+		// The file is removed only after what it became is on the record,
+		// which names it: a file still here that this run handled, or
+		// that an earlier run left and the record names, is not taken
+		// again (its removal failed, or the process was cut before it).
+		switch {
+		case r.inboxTaken[name] || r.sess.Stale[name] && r.inboxRecorded(name):
+		case msg.Type == "stop" && r.sess.Stale[name]:
 			// A stop that was already in the inbox when this run took the
 			// session lock was meant for an earlier run; it must not quit
 			// this one before its first tick. Messages and answers are kept.
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
-			continue
+		default:
+			r.handleInboxFile(msg, name)
 		}
-		r.handleInbox(msg)
+		if r.inboxTaken == nil {
+			r.inboxTaken = map[string]bool{}
+		}
+		r.inboxTaken[name] = true
+		_ = os.Remove(path)
 	}
 }
 
-func (r *Runtime) handleInbox(msg InboxMessage) {
+// inboxRecorded reports whether the record holds the user.message or
+// user.answer that inbox file name became. Loop goroutine only.
+func (r *Runtime) inboxRecorded(name string) bool {
+	for _, ev := range r.st.Events {
+		var d struct {
+			Inbox string `json:"inbox"`
+		}
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil && d.Inbox == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runtime) handleInbox(msg InboxMessage) { r.handleInboxFile(msg, "") }
+
+// handleInboxFile takes msg; file is the inbox file it came in ("" when it
+// did not come in one), named on the user.message or user.answer it becomes.
+func (r *Runtime) handleInboxFile(msg InboxMessage, file string) {
 	text := strings.TrimSpace(msg.Text)
 	switch msg.Type {
 	case "stop":
@@ -102,12 +131,12 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID, Inbox: file}))
 			return
 		}
 		if text != "" || len(msg.Attachments) > 0 { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID})
+			r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID, Inbox: file})
 		}
 	case "dismiss":
 		r.dismissQuestion(msg.QuestionID, msg.From)
@@ -122,11 +151,11 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 		if msg.Route != "" || msg.Delivery != "" || msg.PhoneID != "" {
 			if q := r.st.Question; q == nil {
 				r.ui.Idle(false)
-				r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery, PhoneID: msg.PhoneID})
+				r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, Route: msg.Route, Delivery: msg.Delivery, PhoneID: msg.PhoneID, Inbox: file})
 				return
 			}
 		}
-		r.onInputFrom(text, msg.From, msg.PhoneID, msg.Client, msg.Attachments...)
+		r.onInputFrom(text, msg.From, msg.PhoneID, file, msg.Client, msg.Attachments...)
 	}
 }
 
