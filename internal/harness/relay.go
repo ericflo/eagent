@@ -1030,7 +1030,7 @@ func (r *Runtime) checkIdleAgents() {
 		}
 		who = append(who, rel.Who())
 	}
-	r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf(idleCheckPrefix+"this session has no terminal, and %s has been between turns with nobody writing for %s.] If its work is finished, tell the user how it ended (unless you already have) and stop it with relay_control stop: the session then ends, a reply from the phone brings it back, and relay_control restart then continues the agent's own conversation. If it is waiting on something of its own that is still running (a build, a run, a task it said it would report on), leave it alone and hold; you are asked again in %s if nothing changes.", strings.Join(who, " and "), roundDur(r.idleFor()), roundDur(idleCheckWait(window, asked+1)))}))
+	r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf(idleCheckPrefix+"this session has no terminal, and %s has been between turns with nobody writing for %s.] Nobody writing for that long means the user is finished with it for now, unless it is waiting on work of its own that is still running (a build, a run, a task it said it would report on): then leave it alone and hold; you are asked again in %s if nothing changes. Otherwise tell the user how it ended (unless you already have) and stop it with relay_control stop. The session then ends; a reply from the phone brings it back, and relay_control restart continues the agent's own conversation.", strings.Join(who, " and "), roundDur(r.idleFor()), roundDur(idleCheckWait(window, asked+1)))}))
 }
 
 // idleFor is how long since an agent's turn or start, or the user's last

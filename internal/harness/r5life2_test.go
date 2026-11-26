@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/clientcaps"
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 )
 
@@ -147,5 +148,25 @@ func TestAnAutopilotDeadlineIsSaidOnTheUsersClock(t *testing.T) {
 	})
 	if !strings.Contains(notice, want) {
 		t.Errorf("the end notice does not say %q: %s", want, notice)
+	}
+}
+
+// The prompt says to stop an agent only when the user is finished with it.
+// The idle check says that nobody writing for so long is that, unless the
+// agent waits on its own work, so a model that keeps to the prompt can act.
+func TestTheIdleCheckSaysTheUserIsFinishedWithTheAgentForNow(t *testing.T) {
+	setFor(t, &questionSecond, 50*time.Millisecond)
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "merge the open PRs", false, idleBrain(true), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
+	g.exit(10 * time.Second)
+	n := idleNotices(g.log())
+	if len(n) != 1 {
+		t.Fatalf("%d idle checks", len(n))
+	}
+	var d event.HarnessMessageData
+	_ = n[0].Decode(&d)
+	if !strings.Contains(d.Text, "the user is finished with it for now, unless it is waiting on work of its own") {
+		t.Errorf("the idle check does not say the user is finished with the agent: %s", d.Text)
 	}
 }
