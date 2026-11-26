@@ -1250,7 +1250,9 @@ drain:
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			r.ui.Log("a model call did not stop in time")
+			// r.wg holds the turn in flight and, in a session with no
+			// terminal, a command's work (relayCommand).
+			r.ui.Log("a model call or a command did not finish in time")
 			break drain
 		}
 	}

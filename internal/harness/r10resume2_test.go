@@ -87,8 +87,8 @@ func TestRV10UpgradeOnResumedFinishedSession(t *testing.T) {
 	}
 	end := time.Now()
 	t.Logf("Run took %v; from ending to Run's return %v; said %q; logs %q", end.Sub(start), end.Sub(endingAt), ui2.said(), ui2.logged())
-	if rv10Logged(ui2, "a model call did not stop in time") {
-		t.Errorf("finish logged %q though no model call was in flight (a command's goroutine held r.wg); finish waited %v", "a model call did not stop in time", end.Sub(endingAt))
+	if rv10Logged(ui2, "did not finish in time") {
+		t.Errorf("finish logged %q, waiting for an upgrade it does not wait for; finish waited %v", "did not finish in time", end.Sub(endingAt))
 	}
 	// Nothing is told about the upgrade in a session that ends under it,
 	// as at 59a2069 (listed as a known limit).
