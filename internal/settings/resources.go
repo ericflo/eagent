@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"text/template"
@@ -47,6 +48,38 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		return cfg, &Error{Status: 422, Message: err.Error()}
 	}
 	return cfg, nil
+}
+
+// CheckRemoteProfiles refuses agent profiles in a configuration a connector
+// would save, unless this machine already defines each one exactly, under
+// the same name: in config.json, a saved bundle, the configuration in force
+// or the built-in ones. A profile names a program and its arguments, so a
+// connector may not write one; the remote settings editor never offers
+// them for the same reason. Copying a saved bundle (from) or restoring its
+// bytes keeps working, since its profiles are already on this machine.
+func (s *Service) CheckRemoteProfiles(cfg config.Config) error {
+	if len(cfg.Relay.Profiles) == 0 {
+		return nil
+	}
+	known := []map[string]config.RelayProfile{config.BuiltinRelayProfiles(), config.Resolve(s.Project, s.Preset, s.Bundle).Effective.Relay.Profiles}
+	if c, err := config.LoadBundle(s.Project, "", ""); err == nil {
+		known = append(known, c.Relay.Profiles)
+	}
+	names, _ := config.ListBundles(s.Project)
+	for _, n := range names {
+		if c, err := config.LoadBundle(s.Project, "", n); err == nil {
+			known = append(known, c.Relay.Profiles)
+		}
+	}
+	for name, p := range cfg.Relay.Profiles {
+		if !slices.ContainsFunc(known, func(m map[string]config.RelayProfile) bool {
+			have, ok := m[name]
+			return ok && reflect.DeepEqual(have, p)
+		}) {
+			return &Error{Status: 422, Message: fmt.Sprintf("relay.profiles.%s: an agent profile names a program to run, so it is added or changed on this machine (eagent's web UI or %s), not from a connector", name, config.File(s.Project))}
+		}
+	}
+	return nil
 }
 
 func (s *Service) SaveBundle(ctx context.Context, b BundleRequest) (string, error) {

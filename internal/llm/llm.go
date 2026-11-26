@@ -568,7 +568,7 @@ type Client struct {
 func NewClient(ep Endpoint) *Client {
 	return &Client{
 		Endpoint:    ep,
-		HTTP:        &http.Client{Transport: netx.Transport()}, // per-request deadlines are set via context
+		HTTP:        &http.Client{Transport: netx.Transport(), CheckRedirect: netx.SameOriginRedirects}, // per-request deadlines are set via context
 		IdleTimeout: 120 * time.Second,
 		CallTimeout: 15 * time.Minute,
 		MaxAttempts: 6,

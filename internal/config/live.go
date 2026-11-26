@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/netx"
 )
 
 // Live model discovery: each provider's /models endpoint is queried on demand —
@@ -60,7 +61,7 @@ type LiveResult struct {
 
 var (
 	liveMu       sync.Mutex
-	liveHTTP     = &http.Client{Timeout: 10 * time.Second}
+	liveHTTP     = &http.Client{Timeout: 10 * time.Second, CheckRedirect: netx.SameOriginRedirects}
 	liveProbe    = probeProviderHTTP // replaced in tests
 	liveMaxBytes = 8 << 20
 )

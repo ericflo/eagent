@@ -130,30 +130,52 @@ func tmux(stdin []byte, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// tmuxArg keeps one argument an argument. tmux splits its own command line
+// at any argument that ends in ";" (a lone ";" included) and runs what
+// follows as another tmux command, such as run-shell, so a program's
+// arguments, a folder or a key could otherwise run a shell command. tmux
+// reads a trailing "\;" as a literal ";" and leaves every other character
+// alone.
+func tmuxArg(s string) string {
+	if strings.HasSuffix(s, ";") {
+		return s[:len(s)-1] + `\;`
+	}
+	return s
+}
+
+// tmuxSession and tmuxPane name exactly one session: without "=", tmux
+// takes a name no session has as the start of another's name, so a relay
+// that has ended would be read, typed into or killed through a sibling
+// whose name starts with its own ("…-pi" and "…-pi-2").
+func tmuxSession(name string) string { return "=" + name }
+func tmuxPane(name string) string    { return "=" + name + ":" }
+
 func (Tmux) Start(name, dir string, argv, env []string) error {
 	// The scrollback limit only applies to panes created after it is set, so
 	// it goes first, on eagent's private server.
 	args := []string{"start-server", ";", "set-option", "-g", "history-limit", "50000", ";",
-		"new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", dir}
+		"new-session", "-d", "-s", tmuxArg(name), "-x", "200", "-y", "50", "-c", tmuxArg(dir)}
 	for _, kv := range env {
-		args = append(args, "-e", kv)
+		args = append(args, "-e", tmuxArg(kv))
 	}
 	args = append(args, "--")
-	args = append(args, argv...)
+	for _, a := range argv {
+		args = append(args, tmuxArg(a))
+	}
 	// Keep the pane when the program exits, so its last words can be read
 	// and the exit noticed rather than the session silently vanishing.
-	args = append(args, ";", "set-option", "-t", name, "remain-on-exit", "on")
+	args = append(args, ";", "set-option", "-t", tmuxPane(name), "remain-on-exit", "on")
 	_, err := tmux(nil, args...)
 	return err
 }
 
 func (Tmux) Alive(name string) bool {
-	out, err := tmux(nil, "display-message", "-p", "-t", name+":", "#{pane_dead}")
+	out, err := tmux(nil, "display-message", "-p", "-t", tmuxPane(name), "#{pane_dead}")
 	return err == nil && strings.TrimSpace(out) == "0"
 }
 
 func (Tmux) PID(name string) int {
-	out, err := tmux(nil, "display-message", "-p", "-t", name+":", "#{pane_pid}")
+	out, err := tmux(nil, "display-message", "-p", "-t", tmuxPane(name), "#{pane_pid}")
 	if err != nil {
 		return 0
 	}
@@ -166,13 +188,14 @@ func (Tmux) Paste(name, text string) error {
 	if _, err := tmux([]byte(text), "load-buffer", "-b", buf, "-"); err != nil {
 		return err
 	}
-	_, err := tmux(nil, "paste-buffer", "-p", "-d", "-b", buf, "-t", name+":")
+	_, err := tmux(nil, "paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxPane(name))
 	return err
 }
 
 func (Tmux) Keys(name string, keys ...string) error {
 	for _, k := range keys {
-		if _, err := tmux(nil, "send-keys", "-t", name+":", k); err != nil {
+		// "--" so a key that starts with "-" is typed, not read as a flag.
+		if _, err := tmux(nil, "send-keys", "-t", tmuxPane(name), "--", tmuxArg(k)); err != nil {
 			return err
 		}
 	}
@@ -181,13 +204,13 @@ func (Tmux) Keys(name string, keys ...string) error {
 
 func (Tmux) Capture(name string, lines int) (string, error) {
 	if lines <= 0 {
-		return tmux(nil, "capture-pane", "-p", "-J", "-t", name+":")
+		return tmux(nil, "capture-pane", "-p", "-J", "-t", tmuxPane(name))
 	}
-	return tmux(nil, "capture-pane", "-p", "-J", "-t", name+":", "-S", "-"+strconv.Itoa(lines))
+	return tmux(nil, "capture-pane", "-p", "-J", "-t", tmuxPane(name), "-S", "-"+strconv.Itoa(lines))
 }
 
 func (Tmux) Kill(name string) error {
-	_, err := tmux(nil, "kill-session", "-t", name)
+	_, err := tmux(nil, "kill-session", "-t", tmuxSession(name))
 	return err
 }
 
@@ -223,8 +246,15 @@ type Screen struct{}
 
 func (Screen) Name() string { return "screen" }
 
+// screen sends a command to the named session only. screen -S takes a name
+// as the start of any session's, so it is given the live session's
+// "pid.name", which no other session can start with.
 func screen(name string, args ...string) (string, error) {
-	cmd, cancel := bounded(helperTimeout, "screen", append([]string{"-S", name, "-p", "0", "-X"}, args...)...)
+	pid := Screen{}.PID(name)
+	if pid <= 0 {
+		return "", fmt.Errorf("screen %s: no session named %s", args[0], name)
+	}
+	cmd, cancel := bounded(helperTimeout, "screen", append([]string{"-S", strconv.Itoa(pid) + "." + name, "-p", "0", "-X"}, args...)...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -247,7 +277,8 @@ func (Screen) Start(name, dir string, argv, env []string) error {
 func (s Screen) Alive(name string) bool { return s.PID(name) > 0 }
 
 // PID finds the screen session's pid from `screen -ls` (the session's own
-// pid; its child is the agent).
+// pid; its child is the agent). A session screen lists as dead (its process
+// gone, its socket left behind) has none.
 func (Screen) PID(name string) int {
 	cmd, cancel := bounded(helperTimeout, "screen", "-ls", name)
 	defer cancel()
@@ -262,7 +293,7 @@ func (Screen) PID(name string) int {
 		if tab := strings.IndexAny(rest, " \t"); tab >= 0 {
 			rest = rest[:tab]
 		}
-		if rest != name {
+		if rest != name || strings.Contains(strings.ToLower(line[dot+1+len(rest):]), "dead") {
 			continue
 		}
 		n, _ := strconv.Atoi(line[:dot])
