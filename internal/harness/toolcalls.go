@@ -9,12 +9,18 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/sched"
+	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/tools"
 )
 
 // turnCalls is what one turn's tool calls share.
 type turnCalls struct {
-	wake  wake
+	wake wake
+	// view is the newest event the call whose reply is being run was
+	// shown. An argument that names something on the record by default
+	// (relay_forward's message) is resolved against it, not against what
+	// came in while the call was out.
+	view  int64
 	spoke bool // a message or a question went out in this turn
 	// said: a message or a question went out in the reply whose calls are
 	// being run. One reply sends one message; a later reply of the same
@@ -54,6 +60,21 @@ func (r *Runtime) endsOf(name string, after int64) []int64 {
 		}
 	}
 	return out
+}
+
+// userSeqAsOf is the newest message or answer from the user at or before
+// view (0: the newest of all). Loop goroutine only.
+func userSeqAsOf(st *state.State, view int64) int64 {
+	if view <= 0 {
+		return st.LastUserSeq
+	}
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		if ev.Seq <= view && (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) {
+			return ev.Seq
+		}
+	}
+	return 0
 }
 
 // handle notes a call that answered the user or did something with the
@@ -138,7 +159,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 				id = r.st.NextQuestionID()
 				r.append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: id, Text: text, Options: opts}))
 				asked := r.st.Events[len(r.st.Events)-1]
-				r.turns.saidAt, r.turns.saidSeq = asked.Time, asked.Seq
+				r.turns.saidAt, r.turns.saidSeq, r.turns.spokeSeen = asked.Time, asked.Seq, r.turns.seen
 				tc.own = append(tc.own, asked.Seq)
 				onPhone = r.phone != nil
 			}
@@ -270,7 +291,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			}
 		})
 	}
-	out, isErr = r.relayTool(c.Name, str, num, list, false)
+	out, isErr = r.relayToolAt(c.Name, str, num, list, false, tc.view)
 	if c.Name == tools.RelayControl && !isErr && controlled != "" {
 		// The agent this call stopped (or replaced) ending is the reply's
 		// own news; another agent ending meanwhile is not.

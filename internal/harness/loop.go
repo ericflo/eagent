@@ -114,6 +114,10 @@ type turnState struct {
 	saidSeq  int64
 	saidSeen int64
 	lastSaid string
+	// spokeSeen is the newest event the call that made eagent's last
+	// word (a message of its own or a question, saidSeq) had been shown:
+	// what that word can have answered (closingWordOwed).
+	spokeSeen int64
 
 	// Progress looks while the agent works: when the last one ran, how many
 	// steps the agents had taken by then, and when one last failed.
@@ -212,10 +216,12 @@ func (t *turnState) init(st *state.State) {
 				}
 				if !d.Auto {
 					t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
+					t.spokeSeen = spokeSeenOnReplay(t.seen, ev.Seq)
 				}
 			}
 		case ev.Type == event.Question:
 			t.saidAt, t.saidSeq = ev.Time, ev.Seq
+			t.spokeSeen = spokeSeenOnReplay(t.seen, ev.Seq)
 		}
 		if shows(ev) {
 			t.worthy = ev.Seq
@@ -882,9 +888,10 @@ func (r *Runtime) turn(w wake) {
 					answered, answerSeq, answerMark = true, seq, tc.dealt
 					remindedAnswer = remindedAnswer && first
 				}
-				// The closing word is owed whenever the user has not heard
-				// from eagent since they last wrote (or ever).
-				mustSpeak = w.final && r.turns.saidSeq <= r.st.LastUserSeq
+				// The closing word is owed whenever eagent's last word was
+				// made without seeing what the user last wrote (or there
+				// has been none).
+				mustSpeak = w.final && closingWordOwed(r.st.LastUserSeq, r.turns.saidSeq, r.turns.spokeSeen)
 				if active := r.st.ActiveRelays(); len(active) > 0 {
 					who = active[0].Who()
 				}
@@ -1030,7 +1037,7 @@ func (r *Runtime) turn(w wake) {
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
-		tc.said, tc.stamped, tc.own = false, false, nil
+		tc.said, tc.stamped, tc.own, tc.view = false, false, nil, covered
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
 			if ctx.Err() == nil {
@@ -1216,6 +1223,42 @@ func (e turnEnding) settle() turnSettle {
 		return clearDebt
 	}
 	return keepDebt
+}
+
+// closingWordOwed says whether a session that is ending owes the user a
+// closing word. lastUser is the newest message or answer from the user,
+// spoke the record's eagent last spoke at (a message of its own or a
+// question; 0 for never), and spokeSeen the newest event the call that
+// made that word had been shown. A word answers what its call saw, not
+// what happens to be recorded before it:
+//
+//	the user's message was recorded      then              closing word owed
+//	before the reply's call was made     nothing           no (the reply saw it)
+//	while the reply's call was out       nothing           yes (the reply never saw it)
+//	after the reply                      nothing           yes
+//	any of the three                     a later reply     no (that reply saw it)
+//	                                     that saw it
+//	any of the three                     only an automatic as with nothing: a notice
+//	                                     notice            is not eagent speaking
+//	any of the three                     a stop and resume as before the stop: the record
+//	                                                       rebuilds the same marks
+//	                                                       (spokeSeenOnReplay)
+//	(eagent has not spoken at all)                         yes
+func closingWordOwed(lastUser, spoke, spokeSeen int64) bool {
+	return spoke == 0 || lastUser > spokeSeen
+}
+
+// spokeSeenOnReplay rebuilds spokeSeen for a word at seq from a replayed
+// record, where seen is the newest event the record says eagent's calls
+// had seen by then: the word's own call is recorded (its reply, with the
+// newest event it was shown) before the word, so seen is that call's. A
+// record with no such marks before the word (written by the eagent of
+// three models) falls back to record order, which is all it holds.
+func spokeSeenOnReplay(seen, seq int64) int64 {
+	if seen == 0 {
+		return seq
+	}
+	return seen
 }
 
 // stopReason names why a turn whose context is done ended: its own time
@@ -1548,7 +1591,7 @@ func (r *Runtime) recordMessage(d event.MessageData) {
 	ev := r.append(event.New(event.Message, event.ActorEagent, d))
 	t.saidAt = time.Now()
 	if !d.Auto {
-		t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
+		t.saidSeq, t.lastSaid, t.saidSeen, t.spokeSeen = ev.Seq, d.Text, t.seen, t.seen
 	}
 	text := d.Text
 	if s := attachmentSummary(d.Attachments); s != "" {

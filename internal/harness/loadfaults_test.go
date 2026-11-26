@@ -8,10 +8,7 @@ import (
 	"time"
 )
 
-// Faults in the program that only load showed. A test here that still
-// fails on the code as it is says so in its skip message, so the suite
-// stays green; set runKnownFaults to see it fail.
-var runKnownFaults = false
+// Faults in the program that only load showed.
 
 // A post carries the status line as it was when the post went out. When
 // that post is slow and a newer line is written while it is on its way,
@@ -70,10 +67,9 @@ func TestAStatusAPostCarriedIsNotLeftUpWhenANewerOneOvertookIt(t *testing.T) {
 // session ends and the question is never answered. Written after the
 // reply is shown (TestAudit2ClosingWord) the same message is owed one.
 // Seen under load as that test failing: its message then landed mid-call.
+// The closing look now asks what the reply's call had seen
+// (closingWordOwed).
 func TestAMessageWrittenWhileTheLastReplyWasOutIsStillOwedAWord(t *testing.T) {
-	if !runKnownFaults {
-		t.Skip("known fault, not fixed: a message the user writes while eagent's last reply is being written counts as answered by it (the closing look compares record order, tail.go saidSeq <= LastUserSeq), so a batch session can end with the question unanswered and no closing word")
-	}
 	s, seen, code := audit2ClosingAt(t, true, func(msgs []map[string]any) reply {
 		if strings.Contains(lastText(msgs), "Holding is not allowed here") {
 			return say("Final: #42 and #44 are merged; #45 is not.")
