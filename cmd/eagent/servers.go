@@ -237,12 +237,6 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		if name, ok := pinned["/model/"+field]; ok {
 			return fail(fmt.Errorf("%s sets eagent's %s here, so the model cannot be changed in the file; unset it first", name, field))
 		}
-		// Likewise a saved configuration in force (default_config or
-		// EAGENT_CONFIG): it is laid over the file, and the save leaves
-		// what it sets out of the file.
-		if src := res.Sources["/model/"+field]; strings.HasPrefix(src, "bundle:") {
-			return fail(fmt.Errorf("the saved configuration %s sets eagent's %s here, so the model cannot be changed in the file; edit that configuration or pick another default", strings.TrimPrefix(src, "bundle:"), field))
-		}
 	}
 	cfg := res.Effective
 	a := &cfg.Model
