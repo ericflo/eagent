@@ -1912,7 +1912,10 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 		if t, err := time.ParseInLocation(layout, strings.ToLower(strings.ReplaceAll(s, " ", "")), now.Location()); err == nil {
 			at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 			if !at.After(now) {
-				at = at.Add(24 * time.Hour)
+				// Tomorrow's, built on the calendar: across a daylight-saving
+				// change a day is 23 or 25 hours, and adding 24 would land
+				// an hour off the clock time asked for.
+				at = time.Date(now.Year(), now.Month(), now.Day()+1, t.Hour(), t.Minute(), 0, 0, now.Location())
 			}
 			return at, nil
 		}
