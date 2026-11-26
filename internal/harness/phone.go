@@ -113,6 +113,13 @@ func (r *Runtime) startPhone() {
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
 		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{}, taken: map[string]bool{},
 	}
+	// Answers already taken from cards, in this run or an earlier one.
+	for _, ev := range r.st.Events {
+		var d event.PhoneAnswerTakenData
+		if ev.Type == event.PhoneAnswerTaken && ev.Decode(&d) == nil {
+			p.taken[d.CardID] = true
+		}
+	}
 	r.phone = p
 	p.wg.Add(1)
 	go p.worker()
@@ -765,7 +772,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			p.mu.Lock()
 			delete(p.open, q.ID)
 			p.mu.Unlock()
-			if !p.takeCard(q.ID) {
+			if !p.takeCard(r, q.ID) {
 				return
 			}
 			answer := cardAnswer(q.Answer)
@@ -1019,7 +1026,7 @@ func (p *phone) poll(r *Runtime) {
 				p.mu.Lock()
 				qid, known := p.fromPhone[fid]
 				p.mu.Unlock()
-				if !p.takeCard(fid) {
+				if !p.takeCard(r, fid) {
 					continue // its answer was taken from the card itself
 				}
 				if !known {
@@ -1298,8 +1305,21 @@ func liveCards(st *state.State, qid string) []string {
 // takeCard claims a card's answer for whoever takes it: the message poll
 // meeting the card's answer message, or a re-ask finding the card already
 // answered. Only the first claim succeeds, so one answer is never taken
-// twice (once as the answer, once more as a message).
-func (p *phone) takeCard(fid string) bool {
+// twice (once as the answer, once more as a message). A claim is recorded
+// (phone.answer_taken), and the phone starts with every claim the record
+// holds, so it holds across a stop. Any goroutine.
+func (p *phone) takeCard(r *Runtime, fid string) bool {
+	if !p.claim(fid) {
+		return false
+	}
+	r.post(func() {
+		r.append(event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: fid}))
+	})
+	return true
+}
+
+// claim marks a card's answer taken in memory; false if it already was.
+func (p *phone) claim(fid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.taken[fid] {

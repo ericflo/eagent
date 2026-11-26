@@ -342,6 +342,16 @@ type PhoneQuestionData struct {
 	Key      int    `json:"key,omitempty"`
 }
 
+// PhoneAnswerTaken records that a card's answer reached the session (as
+// the answer, or as a message), so no later poll or re-ask takes it a
+// second time.
+const PhoneAnswerTaken = "phone.answer_taken"
+
+// PhoneAnswerTakenData names the card whose answer was taken.
+type PhoneAnswerTakenData struct {
+	CardID string `json:"card_id"`
+}
+
 // PhoneMirrorData records which thread message shows a user message the
 // user wrote at the terminal or in the web UI, so a later run can keep the
 // receipt under it (a message from the phone carries its own id).

@@ -233,6 +233,7 @@ type Question struct {
 	Answer        *Answer        `json:"answer"`
 	Meta          map[string]any `json:"meta"`
 	CreatedAt     time.Time      `json:"created_at"`
+	AnsweredAt    *time.Time     `json:"answered_at"` // when it was answered, dismissed, withdrawn or expired
 	ExpiresAt     *time.Time     `json:"expires_at"`
 	// Created is set by Ask: false when the client key matched a question
 	// the service already had, which it returns as it is, leaving the
