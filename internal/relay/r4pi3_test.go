@@ -14,15 +14,28 @@ import (
 // and is not handed over again.
 func TestPiHandOverWithTabsPutBackInTheEditorIsNotSentAgain(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, text string }{
-		{"plain", held},
-		{"tabs", "run this:\n\tgo test ./...\n\tgo vet ./..."},
-		{"carriage returns", "first line\r\nsecond line\rthird"},
+	// The hooks see the hand-over at the extension's first look (1 s); the
+	// typed run must start before the login check after them ends, and
+	// last past it. Sped up, the stand-in's times give a second between
+	// each. The extension as shipped runs the plain case on times close
+	// together, so it takes three seconds rather than six: this is the
+	// one hand-over test that runs the extension's real timers.
+	const fast, real = `[[2000, "type", "a typed message"]]`, `[[1200, "type", "a typed message"]]`
+	for _, tc := range []struct {
+		name, text string
+		speed      int
+		run        time.Duration
+		steps      string
+		env        []string
+	}{
+		{"plain, as shipped", held, piReal, 3 * time.Second, real, []string{"PREFLIGHT_MS=600", "RUN_EACH_MS=800"}},
+		{"plain", held, piFast, 6 * time.Second, fast, []string{"PREFLIGHT_MS=2000", "RUN_EACH_MS=2500"}},
+		{"tabs", "run this:\n\tgo test ./...\n\tgo vet ./...", piFast, 6 * time.Second, fast, []string{"PREFLIGHT_MS=2000", "RUN_EACH_MS=2500"}},
+		{"carriage returns", "first line\r\nsecond line\rthird", piFast, 6 * time.Second, fast, []string{"PREFLIGHT_MS=2000", "RUN_EACH_MS=2500"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			list, wait := runPiPromptPathWith(t, tc.text, 3500*time.Millisecond, `[[1100, "type", "a typed message"]]`,
-				"PREFLIGHT_MS=400", "RUN_EACH_MS=800", "ABORT_QUEUED=1")
+			list, wait, _ := runPiPromptPathWith(t, tc.speed, tc.text, tc.run, tc.steps, append(tc.env, "ABORT_QUEUED=1")...)
 			r := wait()
 			if !strings.Contains(r.out, `"editor":`) || r.count("ran", "a typed message") != 1 {
 				t.Fatalf("the scenario did not run as meant (the hand-over queued into the typed run, then put in the editor):\n%s", r.out)

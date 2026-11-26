@@ -62,6 +62,14 @@ const piExtension = `// eagent's relay extension for pi. eagent writes this file
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+// The extension's timers, in milliseconds. eagent's tests run a copy with
+// exactly these lines scaled down.
+const TICK_MS = 1000; // how often an idle pi is checked for a held message
+const GIVE_BACK_MS = 5000; // a hand-over pi refused before its input hook waits again after this
+const GIVE_BACK_SEEN_MS = 120000; // one that went through the hook, after this
+const RETRY_MS = 5000; // the pause after a second refusal, doubling while pi refuses
+const RETRY_MAX_MS = 60000; // the longest pause
+
 export default function (pi: any) {
 	const statusFile = process.env.EAGENT_PI_STATUS || "";
 	const spool = process.env.EAGENT_PI_SPOOL || "";
@@ -161,7 +169,7 @@ export default function (pi: any) {
 		}
 		handing = null;
 		tries++;
-		retryAt = tries < 2 ? 0 : Date.now() + Math.min(60000, 5000 * 2 ** (tries - 2));
+		retryAt = tries < 2 ? 0 : Date.now() + Math.min(RETRY_MAX_MS, RETRY_MS * 2 ** (tries - 2));
 	}
 
 	function deliver() {
@@ -202,11 +210,11 @@ export default function (pi: any) {
 				// then would run it twice, so it is given much longer:
 				// pi either starts the run or gives up on it (no model,
 				// no key).
-				const wait = handing && handing.seen ? 120000 : 5000;
+				const wait = handing && handing.seen ? GIVE_BACK_SEEN_MS : GIVE_BACK_MS;
 				if (idle && handing && Date.now() - handing.at > wait) giveBack();
 				if (idle) deliver();
 			} catch {}
-		}, 1000);
+		}, TICK_MS);
 		if (timer && timer.unref) timer.unref();
 	});
 	pi.on("session_shutdown", () => {

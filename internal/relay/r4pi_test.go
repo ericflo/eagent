@@ -2,9 +2,6 @@ package relay
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,64 +157,42 @@ func (r piPathRun) count(key, text string) int {
 	return n
 }
 
-// runPiPromptPath runs the embedded extension against piPromptPath with a
-// spool holding "the held message". It returns a spool lister and a wait
-// for the end of the run.
-func runPiPromptPath(t *testing.T, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun) {
+// runPiPromptPath runs the embedded extension (timers divided by speed)
+// against piPromptPath with a spool holding "the held message". It returns a
+// spool lister, a wait for the end of the run, and the run. The run's
+// length, steps, PREFLIGHT_MS and RUN_EACH_MS are given in the extension's
+// real units and divided by speed too.
+func runPiPromptPath(t *testing.T, speed int, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun, *piDriverRun) {
 	t.Helper()
-	return runPiPromptPathWith(t, held, run, steps, env...)
+	return runPiPromptPathWith(t, speed, held, run, steps, env...)
 }
 
 // runPiPromptPathWith is runPiPromptPath with another held message.
-func runPiPromptPathWith(t *testing.T, text string, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun) {
+func runPiPromptPathWith(t *testing.T, speed int, text string, run time.Duration, steps string, env ...string) (func() []string, func() piPathRun, *piDriverRun) {
 	t.Helper()
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node not installed")
-	}
-	dir := t.TempDir()
-	ext, driver, spool := filepath.Join(dir, "eagent-relay.ts"), filepath.Join(dir, "driver.mjs"), filepath.Join(dir, "after_turn")
-	if err := os.WriteFile(ext, []byte(piExtension), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(driver, []byte(piPromptPath), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := spoolMessage(spool, "a1", text); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(node, driver, ext)
-	cmd.Env = append(os.Environ(), "EAGENT_PI_STATUS="+filepath.Join(dir, "pi-status.json"), "EAGENT_PI_SPOOL="+spool,
-		fmt.Sprintf("RUN_MS=%d", run.Milliseconds()), "STEPS="+steps)
-	cmd.Env = append(cmd.Env, env...)
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	env = append(env, "STEPS="+piScaleSteps(t, steps, speed))
+	// A run lasts 300 ms unless a test says otherwise, divided as a test's
+	// own would be. The default 10 ms preflight is left as it is: it only
+	// orders a hand-over's run after a typed message's (5 ms) when both go
+	// through the hooks together.
+	r := startPiDriver(t, speed, piPromptPath, text, run, map[string]int{"RUN_EACH_MS": 300}, env...)
 	list := func() []string {
-		names, _ := filepath.Glob(filepath.Join(spool, "*"))
+		names, _ := filepath.Glob(filepath.Join(r.spool, "*"))
 		return names
 	}
 	wait := func() piPathRun {
-		if err := cmd.Wait(); err != nil {
-			t.Fatalf("stand-in: %v\n%s", err, out.String())
-		}
-		r := piPathRun{out: out.String()}
-		for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-			if line == "" {
-				continue
-			}
+		lines := r.lines()
+		out := piPathRun{out: r.out.String()}
+		for _, line := range lines {
 			var m map[string]any
 			if json.Unmarshal([]byte(line), &m) != nil {
 				t.Fatalf("stand-in printed %q", line)
 			}
-			r.lines = append(r.lines, m)
+			out.lines = append(out.lines, m)
 		}
-		return r
+		return out
 	}
-	return list, wait
+	return list, wait, r
 }
 
 const held = "the held message"
@@ -228,8 +203,12 @@ const held = "the held message"
 // spool, goes again, and arrives once.
 func TestPiHandOverRefusedThenAnUnrelatedRunStaysRetryable(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 10*time.Second, `[[1500, "type", "a typed message"]]`, "REFUSE_BEFORE=1")
-	time.Sleep(2800 * time.Millisecond) // the typed run has started and settled
+	// The extension hands it over at its first look (1 s) and pi refuses
+	// it; the typed run goes at 2 s, a second clear of both that look and
+	// the retry (5 s after the refusal).
+	list, wait, run := runPiPromptPath(t, piFast, 10*time.Second, `[[2000, "type", "a typed message"]]`, "REFUSE_BEFORE=1")
+	run.waitFor(`"ran":"a typed message"`)
+	time.Sleep(800 * time.Millisecond / piFast) // the typed run (300 ms) has settled
 	if got := list(); len(got) != 1 {
 		t.Fatalf("after an unrelated run the spool holds %v", got)
 	}
@@ -242,7 +221,7 @@ func TestPiHandOverRefusedThenAnUnrelatedRunStaysRetryable(t *testing.T) {
 // (a) Idle: one hand-over, one run, the spool empties.
 func TestPiHandOverWhileIdleGoesOnce(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 8*time.Second, `[]`)
+	list, wait, _ := runPiPromptPath(t, piFast, 8*time.Second, `[]`)
 	r := wait()
 	if r.count("sent", held) != 1 || r.count("ran", held) != 1 || len(list()) != 0 {
 		t.Fatalf("spool %v:\n%s", list(), r.out)
@@ -253,7 +232,8 @@ func TestPiHandOverWhileIdleGoesOnce(t *testing.T) {
 // hand-over is made in agent_settled and deferred, then starts a run.
 func TestPiHandOverDeferredInTheSettleGoesOnce(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 9*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=1500")
+	// The typed run covers the extension's first look (1 s) by a second.
+	list, wait, _ := runPiPromptPath(t, piFast, 9*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=2000")
 	r := wait()
 	if r.count("deferred", held) != 1 || r.count("sent", held) != 1 || r.count("ran", held) != 1 || len(list()) != 0 {
 		t.Fatalf("spool %v:\n%s", list(), r.out)
@@ -265,7 +245,10 @@ func TestPiHandOverDeferredInTheSettleGoesOnce(t *testing.T) {
 // hand-over into that run. It goes once, without a run of its own.
 func TestPiHandOverQueuedBehindATypedRunGoesOnce(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 9*time.Second, `[[1500, "type", "a typed message"]]`, "PREFLIGHT_MS=2000", "RUN_EACH_MS=1500")
+	// The hooks see it at the first look (1 s), its login check ends at 3 s;
+	// the typed run starts at 2 s and lasts to 4.5 s: a second or more
+	// between each.
+	list, wait, _ := runPiPromptPath(t, piFast, 9*time.Second, `[[2000, "type", "a typed message"]]`, "PREFLIGHT_MS=2000", "RUN_EACH_MS=2500")
 	r := wait()
 	if r.count("queued", held) != 1 || r.count("sent", held) != 1 || r.count("ran", held) != 1 || len(list()) != 0 {
 		t.Fatalf("spool %v:\n%s", list(), r.out)
@@ -278,7 +261,10 @@ func TestPiHandOverQueuedBehindATypedRunGoesOnce(t *testing.T) {
 // and it goes once.
 func TestPiHandOverDeferredBehindATypedRunGoesOnce(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 12*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=1500", "TYPED_BEFORE_DEFERRED=typed first")
+	// The first run covers the extension's first look (1 s) by a second;
+	// all is settled by about 6 s, and the run lasts past a second hand-over
+	// 5 s after the first.
+	list, wait, _ := runPiPromptPath(t, piFast, 10*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=2000", "TYPED_BEFORE_DEFERRED=typed first")
 	r := wait()
 	if r.count("deferred", held) != 1 || r.count("queued", held) != 1 || r.count("sent", held) != 1 || r.count("ran", held) != 1 || len(list()) != 0 {
 		t.Fatalf("spool %v:\n%s", list(), r.out)
@@ -290,7 +276,9 @@ func TestPiHandOverDeferredBehindATypedRunGoesOnce(t *testing.T) {
 // the long retry and is not sent again meanwhile.
 func TestPiHandOverRefusedAfterTheHooksSurvivesAnUnrelatedRun(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 8*time.Second, `[[1500, "type", "a typed message"]]`, "REFUSE_AFTER=1")
+	// The hooks see it at the first look (1 s); the typed run goes a second
+	// later; a short give-back (5 s) would hand it over again before the end.
+	list, wait, _ := runPiPromptPath(t, piFast, 8*time.Second, `[[2000, "type", "a typed message"]]`, "REFUSE_AFTER=1")
 	r := wait()
 	if r.count("sent", held) != 1 || r.count("ran", held) != 0 || r.count("ran", "a typed message") != 1 || len(list()) != 1 {
 		t.Fatalf("spool %v:\n%s", list(), r.out)
@@ -301,7 +289,7 @@ func TestPiHandOverRefusedAfterTheHooksSurvivesAnUnrelatedRun(t *testing.T) {
 // it does with every queued message. It is not handed over a second time.
 func TestPiHandOverPutBackInTheEditorIsNotSentAgain(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 12*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=1500", "TYPED_BEFORE_DEFERRED=typed first", "ABORT_QUEUED=1")
+	list, wait, _ := runPiPromptPath(t, piFast, 10*time.Second, `[[100, "type", "a long run"]]`, "RUN_EACH_MS=2000", "TYPED_BEFORE_DEFERRED=typed first", "ABORT_QUEUED=1")
 	r := wait()
 	if r.count("sent", held) != 1 || r.count("ran", held) != 0 || len(list()) != 0 || !strings.Contains(r.out, `"editor":["`+held+`"]`) {
 		t.Fatalf("spool %v:\n%s", list(), r.out)

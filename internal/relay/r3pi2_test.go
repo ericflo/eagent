@@ -11,7 +11,9 @@ import (
 // taken back and handed over again: pi would run it twice.
 func TestPiExtensionWaitsForARunPiIsSlowToStart(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiExtension(t, true, 9*time.Second, "PREFLIGHT_MS=6500")
+	// Handed over at the first look (1 s), run at 8 s: 7 s later, past the
+	// short give-back (5 s) by a second, and settled 2 s before the end.
+	list, wait, _ := runPiExtension(t, piFast, true, 10*time.Second, "PREFLIGHT_MS=7000")
 	sent := wait()
 	if len(sent) != 1 || sent[0].Text != "the held message" {
 		t.Fatalf("pi was handed the message %d times, want once: %+v", len(sent), sent)
