@@ -112,6 +112,7 @@ type pending struct {
 	id, text, mode string
 	at             time.Time
 	nudges         int
+	held           bool // waits in the spool for the agent's turn to end; not typed yet
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -131,7 +132,7 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 	if innerID == "" {
 		innerID = a.chooseID()
 	}
-	argv := a.command(spec.Profile, innerID, resume, spec.Hook)
+	argv, _ := launchCommand(a, spec, innerID, resume)
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return nil, Started{}, fmt.Errorf("%s is not installed (not on PATH)", argv[0])
 	}
@@ -181,6 +182,20 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 	}
 	go s.watch()
 	return s, Started{Host: host.Name(), Target: target, InnerID: innerID, Command: argv}, nil
+}
+
+// resumer is an agent that can resume only a session it has saved.
+type resumer interface {
+	canResume(spec Spec, innerID string) bool
+}
+
+// launchCommand is the agent's command line, and whether it resumes: a
+// session the agent never saved is started afresh on the same id.
+func launchCommand(a Agent, spec Spec, innerID string, resume bool) ([]string, bool) {
+	if r, ok := a.(resumer); ok && resume && !r.canResume(spec, innerID) {
+		resume = false
+	}
+	return a.command(spec.Profile, innerID, resume, spec.Hook), resume
 }
 
 // Attach watches an agent a previous eagent run started. since is the time
@@ -340,7 +355,9 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	case "after_turn":
 		if state == "working" {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
-				s.track(id, text, mode)
+				// An agent with a spool holds it there; one without has typed
+				// it into its own queue, and it is watched as typed.
+				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -416,9 +433,57 @@ func (s *Seat) typeText(text string) error {
 	return s.host.Keys(s.target, "Enter")
 }
 
-func (s *Seat) track(id, text, mode string) {
+func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
+
+func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now()})
+	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
+	s.mu.Unlock()
+}
+
+// heldGrace is how long an agent stays idle before the seat types what still
+// waits in its spool: long enough for the message an interrupt is followed
+// by to start the next turn first. Tests shorten it.
+var heldGrace = 5 * time.Second
+
+// releaseHeld types the messages still waiting in the spool once the agent
+// has stayed idle for heldGrace: the turn they waited for is over and
+// nothing handed them over. They are then watched as typed messages.
+func (s *Seat) releaseHeld(now time.Time) {
+	if s.spec.Spool == "" {
+		return
+	}
+	s.mu.Lock()
+	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace
+	s.mu.Unlock()
+	if !idle {
+		return
+	}
+	taken, texts := takeSpool(s.spec.Spool)
+	if len(taken) == 0 {
+		return
+	}
+	if len(texts) > 0 {
+		if err := s.typeText(strings.Join(texts, "\n\n")); err != nil {
+			for _, path := range taken {
+				_ = os.Rename(path, strings.TrimSuffix(path, ".taken"))
+			}
+			return
+		}
+	}
+	ids := map[string]bool{}
+	for _, path := range taken {
+		_ = os.Remove(path)
+		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok {
+			ids[id] = true
+		}
+	}
+	s.mu.Lock()
+	for _, p := range s.pending {
+		if p.held && ids[p.id] {
+			p.held, p.at = false, time.Now()
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -752,7 +817,7 @@ func (s *Seat) wantsDialogCheck(now time.Time) bool {
 	}
 	if s.state != "working" {
 		for _, p := range s.pending {
-			if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+			if !p.held && now.Sub(p.at) > 6*time.Second {
 				return true
 			}
 		}
@@ -788,7 +853,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Lock()
 	var stuck *pending
 	for _, p := range s.pending {
-		if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+		if !p.held && now.Sub(p.at) > 6*time.Second {
 			stuck = p
 			break
 		}
