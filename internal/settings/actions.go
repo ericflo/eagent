@@ -118,6 +118,9 @@ func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, gra
 			if err := s.CheckRemoteRoutes(cfg, config.Resolve(s.Project, s.Preset, s.Bundle).Effective); err != nil {
 				return change, err
 			}
+			if err := s.CheckRemoteProfiles(cfg); err != nil {
+				return change, err
+			}
 			change.After, err = config.BundleBytes(name, request.Description, cfg)
 			if err != nil {
 				return change, err
