@@ -672,6 +672,17 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
+	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil && rel.Active() {
+		// A restart: what was typed into the process that was just
+		// stopped and not yet confirmed has nobody to confirm it, and the
+		// new start begins with nothing waited on. What is held for this
+		// start is typed below, by the new seat.
+		var waiting []string
+		for _, h := range held {
+			waiting = append(waiting, h.id)
+		}
+		r.settleExited(rel, waiting...)
+	}
 	// A session with an agent started is not ending: its closing word is
 	// asked again once this agent's work is done.
 	r.summary.final, r.turns.finalAsked = false, false
@@ -955,12 +966,15 @@ func (r *Runtime) reattachRelays() []string {
 }
 
 // settleExited reports, once, each send rel still waited on as not
-// confirmed: its agent has exited, and nothing watches its transcript any
+// confirmed: the process it was typed into is gone (it exited, was
+// stopped, or was restarted), and nothing watches for its arrival any
 // more. A send still waiting in the seat's queue to be typed is left out:
 // typing it fails, and that is reported where it fails; so is one the
-// caller names in except. Called where an exit is recorded: live, at a
-// resume, and when a restart cannot start. Loop goroutine (or before the
-// loop starts).
+// caller names in except. Called wherever an agent's process ends: an exit
+// seen live or found at a resume, a restart that cannot start, a restart
+// that does (before the new start is recorded), and a stop. A switch to
+// another agent is not one of them: its hand-over brief carries what the
+// old agent was sent. Loop goroutine (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
 	for _, id := range except {
@@ -979,11 +993,18 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 	}
 	r.relays.mu.Unlock()
+	how := "exited"
+	switch {
+	case rel.Ended:
+		how = "was stopped"
+	case rel.State != "exited":
+		how = "was restarted"
+	}
 	for _, s := range unresolvedSends(r.st, rel) {
 		if queued[s.ID] {
 			continue
 		}
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent exited before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
 	}
 }
 
@@ -1755,6 +1776,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				}
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
+				r.settleExited(rel)
 				r.armAutopilots()
 			}) {
 				return errEnding.Error(), true
