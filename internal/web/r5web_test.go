@@ -1,10 +1,18 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -125,5 +133,105 @@ func TestRestartLeavesASessionWhenA404IsNotFinaleChats(t *testing.T) {
 	New(project, nil).restoreHosted(context.Background())
 	if len(got) != 0 {
 		t.Fatalf("brought back %v without reading its thread", got)
+	}
+}
+
+// TestBrowserClosedQuestionsAndTheToolbarFollowTheStream: a question card
+// answered or dismissed while the page is open stops offering its options,
+// and the toolbar (Stop or Resume, the model) follows the session's status
+// as it streams in. Runs by hand, like TestBrowserOldSession.
+func TestBrowserClosedQuestionsAndTheToolbarFollowTheStream(t *testing.T) {
+	module := os.Getenv("EAGENT_PLAYWRIGHT_MODULE")
+	if module == "" {
+		t.Skip("set EAGENT_PLAYWRIGHT_MODULE to run the browser test")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not installed")
+	}
+	old := streamStatusEvery
+	streamStatusEvery = 100 * time.Millisecond
+	t.Cleanup(func() { streamStatusEvery = old })
+	s, project := newTestServer(t)
+	sess := newSession(t, project)
+	for _, ev := range []event.Event{
+		event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project, Models: map[string]string{"eagent": "o/first"}}),
+		event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{Index: 0, Reason: "new"}),
+		event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "ship it?"}),
+		event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Push now?", Options: []string{"yes", "no"}}),
+		event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q2", Text: "Tag it too?", Options: []string{"yes", "no"}}),
+	} {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = sess.Close()
+	info, err := store.Resolve(store.Root(project), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := fakeHosted()
+	h.ui = newWebUI(func(string, ...any) {})
+	s.mu.Lock()
+	s.running[sess.ID] = h
+	s.mu.Unlock()
+	srv := httptest.NewServer(s.loopbackOnly(s.Handler()))
+	defer srv.Close()
+	cmd := exec.Command("node", filepath.Join("testdata", "live-session-browser.mjs"), srv.URL, sess.ID)
+	cmd.Env = append(os.Environ(), "EAGENT_PLAYWRIGHT_MODULE="+module)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	out := bufio.NewScanner(stdout)
+	var said []string
+	for out.Scan() {
+		said = append(said, out.Text())
+		if out.Text() == "ready" {
+			break
+		}
+	}
+	if len(said) == 0 || said[len(said)-1] != "ready" {
+		_ = cmd.Wait()
+		t.Fatalf("the page never showed the session: %s\n%s", strings.Join(said, "\n"), stderr.String())
+	}
+	// The session answers one question, dismisses the other, changes model
+	// and stops being hosted here.
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.Open(info.Path, evs[len(evs)-1].Seq, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []event.Event{
+		event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "yes", Source: "web"}),
+		event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: "q2", Source: "web"}),
+		event.New(event.Route, event.ActorHarness, event.RouteData{Actor: "eagent", Model: "o/second"}),
+	} {
+		if _, err := again.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = again.Close()
+	s.mu.Lock()
+	delete(s.running, sess.ID)
+	s.mu.Unlock()
+	_, _ = io.WriteString(stdin, "go\n")
+	for out.Scan() {
+		said = append(said, out.Text())
+	}
+	err = cmd.Wait()
+	if err != nil || said[len(said)-1] != "ok" {
+		t.Fatalf("browser test failed: %v\n%s\n%s", err, strings.Join(said, "\n"), stderr.String())
 	}
 }

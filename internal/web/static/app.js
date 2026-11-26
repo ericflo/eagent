@@ -172,6 +172,7 @@ function openStream(id, after) {
     const before = S.detail;
     S.detail = JSON.parse(e.data);
     renderLive();
+    renderTools();
     // Rebuild the Usage tab only when something it shows changed; open
     // panels survive either way.
     if (S.tab === 'usage' && usageDigest(S.detail) !== usageDigest(before)) renderTab();
@@ -184,9 +185,19 @@ function openStream(id, after) {
   es.onerror = () => { /* the browser reconnects */ };
 }
 function onEvent(ev) {
+  if (S.tab === 'chat' && (ev.type === 'user.answer' || ev.type === 'user.dismiss')) closeQuestionCard(ev.data && ev.data.question_id);
   if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const col = $('.chat .col'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; const w = $('#working'); if (w) col.insertBefore(node, w); else col.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
   else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb) { if (passesFilter(ev)) tb.append(tlRow(ev)); tlUpdateCount(); } }
   if (ev.type === 'narrator.message' && document.hidden) notify('eagent: ' + clip(ev.data.text, 80));
+}
+// closeQuestionCard redraws a question's card once it is answered or
+// dismissed, so its options can no longer be picked.
+function closeQuestionCard(qid) {
+  if (!qid) return;
+  const q = S.events.find(e => e.type === 'narrator.question' && e.data && e.data.id === qid);
+  const old = q && [...document.querySelectorAll('#pane [data-qid]')].find(n => n.dataset.qid === qid);
+  const node = old && chatNode(q);
+  if (node) old.replaceWith(node);
 }
 function notify(text) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -201,27 +212,41 @@ const TABS = ['chat', 'usage', 'timeline'];
 function renderSessionShell() {
   const d = S.detail;
   const tabs = TABS.map((t, i) => h('a', {href: `#/s/${S.sid}/${t}`, class: S.tab === t ? 'active' : '', title: `shortcut: ${i+1}`}, t[0].toUpperCase() + t.slice(1)));
-  const stopBtn = h('button', {onclick: async () => { if (confirm('Stop this session and its agent? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); }}, 'Stop');
-  const resumeBtn = h('button', {onclick: async () => { try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); } }}, 'Resume');
-  const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
   const titleText = d.title ? d.title : (d.first_message ? clip(d.first_message, 120) : 'New session');
-  const model = eagentModel(d);
   $('#main').replaceChildren(
     h('div', {class: 'session-head'},
       h('div', {class: 'session-title', id: 'session-title'}, titleText),
       h('div', {class: 'session-desc', id: 'session-desc', style: d.description ? '' : 'display:none'}, d.description || ''),
       h('div', {class: 'agents', id: 'agents'})),
-    h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), h('div', {class: 'tools'},
-      d.legacy ? h('span', {class: 'badge', title: 'Written before eagent was one loop: its tasks, processes and schedules are shown as history only.'}, 'older session') : null,
-      model ? h('span', {class: 'badge model', title: `eagent runs on ${model}`}, shortModel(model)) : null,
-      d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
-      cost,
-      d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
-      h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
-      h('span', {class: 'badge mono', title: 'session id'}, S.sid),
-      ARCHIVE ? null : d.alive ? stopBtn : resumeBtn)),
+    h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), sessionTools(d)),
     h('div', {class: 'pane', id: 'pane'}));
   renderAgents();
+}
+// sessionTools is the toolbar beside the tabs: what the session runs on,
+// what it has cost, and Stop or Resume.
+function sessionTools(d) {
+  const stopBtn = h('button', {onclick: async () => { if (confirm('Stop this session and its agent? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); }}, 'Stop');
+  const resumeBtn = h('button', {onclick: async () => { try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); } }}, 'Resume');
+  const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
+  const model = eagentModel(d);
+  const el = h('div', {class: 'tools', id: 'session-tools'},
+    d.legacy ? h('span', {class: 'badge', title: 'Written before eagent was one loop: its tasks, processes and schedules are shown as history only.'}, 'older session') : null,
+    model ? h('span', {class: 'badge model', title: `eagent runs on ${model}`}, shortModel(model)) : null,
+    d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
+    cost,
+    d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
+    h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
+    h('span', {class: 'badge mono', title: 'session id'}, S.sid),
+    ARCHIVE ? null : d.alive ? stopBtn : resumeBtn);
+  el.dataset.digest = el.textContent + '|' + (el.querySelector('.badge.model')?.title || '') + '|' + (el.querySelector('.badge.phone')?.title || '');
+  return el;
+}
+// renderTools brings the toolbar up to date with the latest status, and
+// leaves it alone when nothing it shows changed.
+function renderTools() {
+  const old = $('#session-tools'); if (!old || !S.detail) return;
+  const next = sessionTools(S.detail);
+  if (next.dataset.digest !== old.dataset.digest) old.replaceWith(next);
 }
 
 // renderAgents shows the session's agents under its title: who, what it
@@ -364,7 +389,7 @@ function chatNode(ev) {
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
       const dismissed = S.events.find(e => e.type === 'user.dismiss' && e.data && e.data.question_id === d.id);
-      return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
+      return h('div', {class: 'msg', 'data-qid': d.id}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
         h('div', {class: 'qcard'}, h('div', {class: 'text', html: md(d.text)}),
           answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : dismissed ? h('div', {class: 'answered'}, 'dismissed without an answer') : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o))))));
     }
