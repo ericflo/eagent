@@ -32,7 +32,7 @@ func TestOpenLetsGoOfAnEmptyNextFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(s.Path, next)); err != nil {
 		t.Fatalf("the next file is not on disk: %v", err)
 	}
-	o, err := Open(s.Path, 1, time.Now())
+	o, _, err := Open(s.Path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestOpenKeepsAnEmptyOnlyFile(t *testing.T) {
 	}
 	name := s.Current()
 	s.Close()
-	o, err := Open(s.Path, 0, time.Now())
+	o, _, err := Open(s.Path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

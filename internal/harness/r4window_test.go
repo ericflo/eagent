@@ -290,15 +290,11 @@ func r4OrdinaryRecord(t *testing.T) (*Runtime, *Runtime) {
 	if err := os.CopyFS(copied, os.DirFS(rt.sess.Path)); err != nil {
 		t.Fatal(err)
 	}
-	events, err := store.Read(copied)
+	sess, events, err := store.Open(copied, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := state.Replay(events)
-	sess, err := store.Open(copied, st.LastSeq(), time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
 	rt2, err := build(cfg, rt.opts, &fakeUI{input: make(chan string)}, sess, st)
 	if err != nil {
 		sess.Close()

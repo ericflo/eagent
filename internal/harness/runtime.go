@@ -270,18 +270,17 @@ func localZone() string {
 
 // Resume reopens an existing session directory.
 func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtime, error) {
-	events, err := store.Read(sessionPath)
+	// The lock first, then the record: what a run still finishing writes
+	// before it lets go is read too (store.Open).
+	sess, events, err := store.Open(sessionPath, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	if len(events) == 0 {
+		sess.Close()
 		return nil, fmt.Errorf("%s has no events", sessionPath)
 	}
 	st := state.Replay(events)
-	sess, err := store.Open(sessionPath, st.LastSeq(), time.Now())
-	if err != nil {
-		return nil, err
-	}
 	if opts.Project == "" {
 		opts.Project = st.Cwd
 	}
