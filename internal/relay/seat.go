@@ -832,14 +832,14 @@ type sendView struct {
 // after text left in the input box arrives glued to it, a hook hands over
 // several held messages at once. What one entry may not do is confirm two
 // sends with one place in it. So each confirmed send claims the stretch of
-// the entry it matched, stretches may not overlap, and the stretch that
-// explains most of the entry is given first (a longer send claims its words
-// before a shorter send that is part of them can, and a long send shown cut
-// short keeps its stretch from a short send inside it). A send the entry
-// shows only cut short or in part counts for what it explains beyond the
-// sends the entry shows whole inside that stretch, so sends that arrived
-// word for word are never left for a longer one that merely contains them.
-// Between equals, whole comes first, then the longer send, then the older:
+// the entry it matched, stretches may not overlap, and the longest stretch
+// is given first (a longer send claims its words before a shorter send that
+// is part of them can, and a long send shown cut short keeps its stretch
+// from a send inside it). A send the entry shows only cut short or in part
+// comes last when the sends it shows whole inside that stretch account for
+// all of it: sends that arrived word for word are never left for a longer
+// one that merely begins with them. Between stretches of one length, whole
+// comes first, then the longer send, then the older:
 //
 //	pending                         entry                      confirms
 //	"continue", "continue"          "continue"                 the older one
@@ -852,6 +852,7 @@ type sendView struct {
 //	a long send                     its first 200 bytes + "…"  it
 //	"yes", a long "…yesterday…"     the long one cut short     the long one
 //	a, b, a third that opens a + b  a and b, joined            a and b
+//	a long a, a + more              a + more, cut short        a + more
 //	two long sends, same opening    one of them                that one
 //	anything                        words that are no send     nothing
 //
@@ -874,7 +875,7 @@ func arrivals(pending []sendView, entry string) []int {
 	type match struct {
 		i    int
 		sp   [2]int
-		rank int // the bytes of the entry it explains
+		rank int // the length of its stretch; 0 for one shown in part that explains nothing more
 	}
 	var matches []match
 	for _, i := range order {
@@ -886,10 +887,17 @@ func arrivals(pending []sendView, entry string) []int {
 	for _, i := range order {
 		for _, sp := range shows(got, norms[i], false) {
 			m := match{i, sp, sp[1] - sp[0]}
+			// What the other sends shown whole inside the stretch leave of it.
+			left := []byte(got[sp[0]:sp[1]])
 			for _, w := range whole {
 				if w.i != i && sp[0] <= w.sp[0] && w.sp[1] <= sp[1] {
-					m.rank -= w.sp[1] - w.sp[0]
+					for k := w.sp[0]; k < w.sp[1]; k++ {
+						left[k-sp[0]] = ' '
+					}
 				}
+			}
+			if strings.Trim(string(left), " …") == "" {
+				m.rank = 0
 			}
 			matches = append(matches, m)
 		}

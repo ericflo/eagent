@@ -252,3 +252,23 @@ func TestSendsShownWholeAreNotLeftForALongerOneShownInPart(t *testing.T) {
 		t.Errorf("the joined entry confirmed %v, want [a b]", got)
 	}
 }
+
+// A waiting send that a longer waiting send begins with or quotes, when the
+// entry shows the longer one cut short: the entry holds words only the
+// longer one explains, so the longer one arrived (a second read's cases).
+func TestALongSendShownCutShortKeepsItsEntryFromASendInsideIt(t *testing.T) {
+	x := "Please read the migration plan in docs/migrate.md and check that every step still matches the schema in db/schema.sql before we run it on staging tonight."
+	more := " Then write down each mismatch you find with the file and line, propose a fix for each one, and wait for my go-ahead before you change any code at all."
+	quote := "Did this arrive? \"" + x + "\" Please do that now, and also" + more
+	short := "check the migration plan against the schema"
+	longer := short + ", then list every mismatch with file and line, and propose a fix for each one; wait for me before you change anything at all please"
+	for _, c := range []struct{ name, in, long, entry string }{
+		{"sent again with more, cut at 200", x, x + more, (x + more)[:200] + "…"},
+		{"quoted by a longer send, cut at 200", x, quote, quote[:200] + "…"},
+		{"sent again with more, a piece of 100", short, longer, longer[:100]},
+	} {
+		if got := arrivals([]sendView{{text: c.in}, {text: c.long}}, c.entry); !slices.Equal(got, []int{1}) {
+			t.Errorf("%s: confirmed %v, want [1]", c.name, got)
+		}
+	}
+}
