@@ -34,14 +34,20 @@ func TestAPackageThatFailsWithATestStillRunningShowsWhatThatTestWrote(t *testing
 		t.Fatal(err)
 	}
 	got := shown.String()
-	want := []string{"waiting for the server", "inner started", "panic: test timed out after 1s", "TestStuck(0x22e4cf7e6488?)", "FAIL\texample.com/hang"}
-	at := 0
-	for _, w := range want {
-		i := strings.Index(got[at:], w)
-		if i < 0 {
-			t.Fatalf("the output lacks %q after what came before it:\n%s", w, got)
+	// Each test's lines together, in the order they were written, and the
+	// package's own line after them.
+	for _, w := range [][]string{
+		{"waiting for the server", "panic: test timed out after 1s", "TestStuck(0x22e4cf7e6488?)", "FAIL\texample.com/hang"},
+		{"inner started", "FAIL\texample.com/hang"},
+	} {
+		at := 0
+		for _, line := range w {
+			i := strings.Index(got[at:], line)
+			if i < 0 {
+				t.Fatalf("the output lacks %q after what came before it:\n%s", line, got)
+			}
+			at += i
 		}
-		at += i
 	}
 	if strings.Contains(got, "fine says hi") || strings.Contains(got, "another package's words") {
 		t.Errorf("a passing test's output, or another package's, was shown:\n%s", got)
