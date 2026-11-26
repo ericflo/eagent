@@ -45,43 +45,58 @@ func TestAgentProgressDuringEachPassDoesNotBuyAnotherRestart(t *testing.T) {
 	r4Until(t, "the user to be told no restart can make room, or a restart loop", func() bool {
 		return r5Told(s, fullNotice) > 0 || len(s.events(event.Dossier)) > 6
 	})
-	if n := len(s.events(event.Dossier)); n > 2 {
-		t.Fatalf("%d restarts, want at most 2: each refused restart carried nothing, and a progress line that came while the pass was written bought another", n)
+	// The first restart carries the picture; the second carries nothing,
+	// and the progress recorded during its pass buys the one more try; the
+	// third is the last.
+	n := len(s.events(event.Dossier))
+	t.Logf("%d restarts", n)
+	if n > 3 {
+		t.Fatalf("%d restarts, want at most 3: each refused restart carried nothing, and a progress line that came while the pass was written bought another", n)
 	}
 }
 
 // Whether another restart is worth trying, for a conversation a restart
-// began and that was too long from its start. What was recorded since the
-// restart never changes the answer: it goes into the next restart's facts
-// by place, so it cannot make that restart's opening smaller. A route
-// changed to another window does not either: the next call goes to the new
-// route as it is (a larger window takes the opening the old one refused),
-// and a restart sized for it would open on a briefing at least as long.
+// began and that was too long from its start. since is whether the refused
+// request held events after the briefing (a message written during the
+// pass, the agent's progress); what kind they were does not matter, only
+// that the next restart would leave them out. A route changed to another
+// window is not a row: the next call goes to the new route as it is (a
+// larger window takes what the old one refused, with no restart), and a
+// restart sized for it would open on a briefing at least as long.
 func TestWhenAnotherRestartIsWorthTrying(t *testing.T) {
-	since := []string{"nothing", "harness notices", "agent events", "a user message", "a route change to a larger window", "a route change to a smaller window"}
+	const (
+		some, nothing, unknown = carriedSome, carriedNothing, carriedUnknown
+	)
 	for _, c := range []struct {
 		carried carried
 		refused bool
+		since   bool
+		retried bool
 		decided bool
 		fits    bool
 		restart bool
 	}{
-		{carriedSome, true, false, false, true},
-		{carriedNothing, true, false, false, false},
-		{carriedUnknown, true, false, false, true},
-		{carriedSome, true, true, false, false},
-		{carriedNothing, true, true, false, false},
-		{carriedSome, false, false, true, true},
-		{carriedNothing, false, false, true, true},
-		{carriedSome, false, false, false, false},
-		{carriedNothing, false, false, false, false},
-		{carriedNothing, false, true, true, true},
+		// Refused on its first call.
+		{some, true, false, false, false, false, true},
+		{some, true, true, false, false, false, true},
+		{nothing, true, false, false, false, false, false}, // the opening alone was refused
+		{nothing, true, true, false, false, false, true},   // the one more try
+		{nothing, true, true, true, false, false, false},   // after it, stop
+		{nothing, true, false, true, false, false, false},
+		{unknown, true, false, false, false, false, true},
+		{unknown, true, true, false, false, false, true},
+		{some, true, true, false, true, false, false}, // decided stands
+		{nothing, true, true, false, true, false, false},
+		{unknown, true, true, false, true, false, false},
+		// The first call went through, past the restart size.
+		{some, false, false, false, false, true, true},
+		{nothing, false, true, true, false, true, true},
+		{some, false, true, false, false, false, false},
+		{nothing, false, false, false, true, true, true},
 	} {
-		for _, what := range since {
-			got := restartHelps(restartFacts{carried: c.carried, refused: c.refused, decided: c.decided, openingFits: c.fits})
-			if got != c.restart {
-				t.Errorf("carried %d, refused %v, decided %v, opening fits %v, since: %s: restart %v, want %v", c.carried, c.refused, c.decided, c.fits, what, got, c.restart)
-			}
+		f := restartFacts{carried: c.carried, refused: c.refused, sinceOpening: c.since, retried: c.retried, decided: c.decided, openingFits: c.fits}
+		if got := restartHelps(f); got != c.restart {
+			t.Errorf("%+v: restart %v, want %v", f, got, c.restart)
 		}
 	}
 }

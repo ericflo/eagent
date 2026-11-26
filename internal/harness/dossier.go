@@ -378,8 +378,10 @@ func (r *Runtime) restartFull(limit int) bool {
 	if _, small := r.room(); !small {
 		return true
 	}
-	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, decided: r.turns.futileLogged || r.toldFull()}
-	if !f.refused {
+	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, decided: r.turns.futileLogged || r.toldFull()}
+	if f.refused {
+		f.sinceOpening = r.recordedSinceOpening()
+	} else {
 		_, fixed := r.inputRoom()
 		if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
 			fixed += llm.EstimateTokens(v[0].Text)
@@ -412,6 +414,13 @@ type restartFacts struct {
 	refused bool
 	// carried: what the restart that began it carried whole.
 	carried carried
+	// sinceOpening (refused): the conversation held events after its
+	// briefing, which were in the refused request whole: what arrived
+	// while the dossier was written (a message, an agent's progress).
+	sinceOpening bool
+	// retried: the restart that began it was itself the one more try a
+	// restart that carried nothing is allowed (restartHelps).
+	retried bool
 	// decided: no restart can make room was already found for this
 	// conversation and said (futileLogged in this run, toldFull from the
 	// record), and no call has gone through since.
@@ -422,36 +431,79 @@ type restartFacts struct {
 }
 
 // restartHelps answers the one question every rule here comes from:
-// would another restart send the provider a smaller opening than the one
+// would another restart send the provider a smaller request than the one
 // it just refused?
 //
-//   - Refused, and the restart carried something whole: the next restart
-//     carries nothing (startDossier), so its opening is smaller. Yes.
-//   - Refused, and the restart carried nothing: the next one carries
-//     nothing too, and opens on a briefing sized the same way for the same
-//     route. Whatever was recorded since (the harness's notices, the
-//     agent's progress and turns, a timer, a message from the user, the
-//     phone) goes into its facts by place and adds nothing to the opening
-//     the provider refused. No. The user's message still gets its
-//     answer path: it is owed a look, the look is made on every wake and
-//     goes out the moment the conversation fits (a model with a larger
-//     window, picked in the thread's settings, takes the same opening
-//     without a restart), and the user is told it waits (tellStillFull).
+// What the provider refused is the opening (the system prompt, the tools,
+// the briefing) and, whole, everything after the briefing's covers_seq:
+// what the restart carried, and what was recorded while its dossier was
+// written. The next restart carries nothing (startDossier) and lists all
+// of that by place in its facts.
+//
+//   - Refused, and the restart carried something whole: the next request
+//     is smaller. Yes.
+//   - Refused, carried nothing, and nothing after the opening: the opening
+//     alone was refused, and the next restart opens on a briefing sized
+//     the same way for the same route. No.
+//   - Refused, carried nothing, something after the opening (a message
+//     the user wrote during the pass, a picture, the agent's progress):
+//     the next request leaves that out, so it can be smaller. Yes, once.
+//     A working agent records something during every pass, so that is
+//     true every time: the try after it (retried) is the last. No.
 //   - Refused, and not known what it carried (the restart was made by an
 //     earlier run): one more restart, whose carrying this run then knows.
-//   - Once decided, it stands until a call goes through.
+//   - Once decided, it stands until a call goes through. The user's
+//     message still gets its answer path: it is owed a look, the look is
+//     made on every wake and goes out the moment the conversation fits (a
+//     model with a larger window, picked in the thread's settings, takes
+//     it without a restart), and the user is told it waits
+//     (tellStillFull).
 //   - Not refused (the first call went through, past the restart size):
 //     what came after the opening is now seen and is not carried again,
 //     so a restart helps when the opening itself leaves room.
+//
+// So the most a session does is a restart that carried something, one
+// that carried nothing, and one more; then it stops and says so.
 func restartHelps(f restartFacts) bool {
 	switch {
 	case !f.refused:
 		return f.openingFits
 	case f.decided:
 		return false
+	case f.carried == carriedNothing:
+		return f.sinceOpening && !f.retried
 	default:
-		return f.carried != carriedNothing
+		return true
 	}
+}
+
+// recordedSinceOpening reports that the conversation holds events after
+// its briefing that show in it and are not eagent's or the harness's own
+// words (shows): what the dossier's covers_seq left to the conversation.
+// Loop goroutine only.
+func (r *Runtime) recordedSinceOpening() bool {
+	cur := r.st.Current()
+	if cur == nil {
+		return false
+	}
+	covers := int64(-1)
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
+		if ev := r.st.Events[i]; ev.Type == event.Dossier {
+			var d event.DossierData
+			if ev.Decode(&d) == nil {
+				covers = d.CoversSeq
+			}
+		}
+	}
+	if covers < 0 {
+		return false
+	}
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > covers; i-- {
+		if shows(r.st.Events[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
@@ -497,6 +549,7 @@ type dossierJob struct {
 	adopt  bool // the record is the three-actor design's (resume.go)
 	fresh  bool // written from the files, without the conversation
 	carry  bool // the new conversation carries whole what no look took in
+	retry  bool // the one more try after a refused restart that carried nothing
 }
 
 // dossierResult is what a pass came back with.
@@ -521,6 +574,7 @@ func (r *Runtime) startDossier() {
 	// carries nothing then carries the notice neither.
 	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
+	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
 	if r.st.Unfinished() {
 		// The new file's start set the prompt's size back to nothing; the
 		// conversation being replaced is as long as when it was closed.
@@ -1121,7 +1175,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
-	r.restartCarried = carriedNothing
+	r.restartCarried, r.restartRetried = carriedNothing, job.retry
 	if job.carry {
 		r.restartCarried = carriedSome
 	}
