@@ -181,10 +181,12 @@ func Launch(spec Spec, innerID string, resume bool) (*Seat, Started, error) {
 			return nil, Started{}, err
 		}
 	}
-	if !resume && spec.Spool != "" {
+	if spec.Spool != "" {
 		// The spool belongs to the relay's name, and a name is used again
 		// after its agent stopped. What waits there was held for that
-		// conversation; a fresh one must not run it. A resume keeps it.
+		// conversation; a fresh one must not run it. Nor does a resume: a
+		// restart reports what the old agent still waited on unconfirmed,
+		// and a copy left here would be handed over as well.
 		if err := clearSpool(spec.Spool); err != nil {
 			return nil, Started{}, err
 		}

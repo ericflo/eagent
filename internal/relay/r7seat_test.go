@@ -2,11 +2,17 @@ package relay
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/config"
 )
 
 // Finding 13: on a reattach, an entry Claude stamped to the millisecond
@@ -61,6 +67,51 @@ func TestR7AnAfterTurnSendTypedStraightInIsTimed(t *testing.T) {
 		if !timed {
 			t.Errorf("%s: the typed after-turn send is not on the timer", state)
 		}
+	}
+}
+
+// Finding 5: a restart (Launch with resume) starts with an empty spool. The
+// harness reports every send the old agent still waited on as unconfirmed
+// at the restart, and eagent may send it again; a file left in the spool
+// would be handed to the new agent as well (pi's extension does so on
+// startup, Claude's Stop hook at its next turn end): the message twice.
+func TestR7ARestartDropsTheSpool(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	old := Socket
+	Socket = fmt.Sprintf("eagent-r7spool-%d", os.Getpid())
+	defer func() {
+		KillSocket(Socket)
+		Socket = old
+	}()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "pi"), []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
+	work, state := t.TempDir(), t.TempDir()
+	profile := config.BuiltinRelayProfiles()["pi"]
+	profile.Host = "tmux"
+	spec := Spec{Session: fmt.Sprintf("r7spool%d", os.Getpid()), Name: "pi", Profile: profile, Dir: work}
+	if err := Prepare(&spec, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := spoolMessage(spec.Spool, "r1", "deploy to prod"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spec.Spool, "1-r0.txt.taken"), []byte("claimed, never finished"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seat, _, err := Launch(spec, "inner-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seat.Kill()
+	names, _ := filepath.Glob(filepath.Join(spec.Spool, "*"))
+	if len(names) != 0 {
+		t.Fatalf("the restarted agent inherits %v", names)
 	}
 }
 

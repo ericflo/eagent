@@ -242,7 +242,7 @@ func TestPiStartupWithADialogIsNotReady(t *testing.T) {
 // ---- the spool --------------------------------------------------------------------
 
 // A fresh start under a name used before does not hand the new agent what
-// waited for the old one; a restart of the same conversation does.
+// waited for the old one.
 func TestFreshLaunchDropsAnEarlierAgentsSpool(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
@@ -286,24 +286,11 @@ func TestFreshLaunchDropsAnEarlierAgentsSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer seat.Kill()
 	if got := left(); len(got) != 0 {
-		seat.Kill()
 		t.Fatalf("a fresh agent inherits %v", got)
 	}
-	inner := seat.Snapshot().InnerID
-	if err := seat.Kill(); err != nil {
-		t.Fatal(err)
-	}
-	seed()
-	before := left()
-	seat, _, err = Launch(spec, inner, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer seat.Kill()
-	if got := left(); strings.Join(got, ",") != strings.Join(before, ",") {
-		t.Fatalf("a resume lost what waited for it: %v, had %v", got, before)
-	}
+	// A restart drops it too: TestR7ARestartDropsTheSpool.
 }
 
 // ---- the extension's hand-over ------------------------------------------------------
