@@ -101,7 +101,9 @@ func TestTwoRoutesToTheSameModelAreEachTriedOnce(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	t.Setenv("EAGENT_TEST_KEY2", "y")
 	useFakeRelays(t, newFakeSeat("ok"))
-	model := newScripted(func(string, []map[string]any) reply { return reply{status: 401, body: `{"error":{"message":"bad key"}}`} })
+	model := newScripted(func(string, []map[string]any) reply {
+		return reply{status: 401, body: `{"error":{"message":"bad key"}}`}
+	})
 	t.Cleanup(model.srv.Close)
 	cfg := testConfig(model.srv.URL)
 	cfg.Model.ContextTokens = 100_000
