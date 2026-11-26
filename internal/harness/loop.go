@@ -194,8 +194,17 @@ type owedRecord struct {
 // in memory. Called once, before the loop starts.
 func (t *turnState) init(st *state.State) {
 	var owed *event.Event
+	// A log from the three-actor design: its events were weighed by actors
+	// that no longer exist, so nothing in it is owed a look. The one loop
+	// takes over from the end of it, where its first run here began.
+	legacy, tookOver := st.Legacy(), false
 	for i, ev := range st.Events {
 		switch {
+		case legacy && !tookOver && ev.Type == event.SessionResume:
+			var d event.SessionResumeData
+			if ev.Decode(&d) == nil && d.PhoneLedger {
+				tookOver, t.seen = true, max(t.seen, d.After)
+			}
 		case ev.Type == event.Owed:
 			owed = &st.Events[i]
 		case ev.Type == event.Assistant && ev.Actor == event.ActorEagent:
@@ -273,10 +282,12 @@ func (t *turnState) init(st *state.State) {
 			}
 		}
 	}
-	if st.Legacy() && !st.Upgraded() {
-		// A log from the three-actor design: its events were weighed by
-		// actors that no longer exist. Nothing in it is owed a look; the
-		// session picks up from a briefing (resume.go).
+	// Until its upgrade dossier is written, the first thing it does is
+	// write one (resume.go).
+	t.adopt = legacy && !st.Upgraded()
+	if legacy && !tookOver {
+		// Not yet run by the one loop: it picks up from a briefing
+		// (resume.go).
 		t.seen = st.LastSeq()
 		return
 	}

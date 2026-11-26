@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // Finding 21: a reply with no tool call and no words (a provider's error or
@@ -187,5 +189,107 @@ func TestR7AFallbackThatAnswersAfterAnEffortChangeTakesOver(t *testing.T) {
 	}
 	if len(routes) != 1 {
 		t.Fatalf("takeovers on the record: %+v", routes)
+	}
+}
+
+// r7ResumeOld is resumeOld with the prompt given (none when "").
+func r7ResumeOld(t *testing.T, project string, sess *store.Session, prompt string, brain func(model string, msgs []map[string]any) reply) *session {
+	t.Helper()
+	seat := newFakeSeat("Filled in the changelog.")
+	useFakeRelays(t, seat)
+	model := newScripted(brain)
+	t.Cleanup(model.srv.Close)
+	ui := &fakeUI{input: make(chan string, 4)}
+	rt, err := Resume(testConfig(model.srv.URL), Options{Project: project, Interactive: true, Prompt: prompt}, ui, sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session{t: t, rt: rt, ui: ui, seat: seat, model: model, done: make(chan int, 1)}
+	ctx, cancel := contextWithCancel()
+	s.cancel = cancel
+	go func() { s.done <- rt.Run(ctx) }()
+	t.Cleanup(s.stop)
+	return s
+}
+
+// r7Looks counts the calls of a session's model that were not the dossier
+// pass's.
+func r7Looks(s *session) int {
+	n := 0
+	for _, q := range s.model.requests(testModel) {
+		var msgs []map[string]any
+		for _, raw := range q.Messages {
+			var m map[string]any
+			_ = json.Unmarshal(raw, &m)
+			msgs = append(msgs, m)
+		}
+		if dossierRequest(msgs) == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// Finding 2, an interrupted upgrade: a session of the earlier design is
+// resumed with a message and stopped while its upgrade dossier is being
+// written. The next run, with no message, finishes the upgrade and the
+// message is still answered: it reaches an agent.
+func TestR7AMessageOfAnInterruptedUpgradeIsAnsweredOnTheNextRun(t *testing.T) {
+	project, sess, files := oldSession(t)
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	asked := make(chan struct{}, 1)
+	s := r7ResumeOld(t, project, sess, "fill in the changelog too", func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+			return reply{block: gate}
+		}
+		return hold()
+	})
+	select {
+	case <-asked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade's dossier was never asked for")
+	}
+	s.stop()
+	s = r7ResumeOld(t, project, sess, "", func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing([]string{files[0] + ":3", files[1] + ":3"})}
+		}
+		if r, ok := startsAnAgent(msgs); ok {
+			return r
+		}
+		return hold()
+	})
+	s.waitFor("the message to reach a new agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	if got := s.seat.sentTexts(); len(got) != 1 || got[0] != "fill in the changelog too" {
+		t.Fatalf("the agent was sent %q", got)
+	}
+}
+
+// Finding 2, a clean upgrade: the upgrade is written and nothing is owed.
+// The next run has nothing to look at: the old design's messages were
+// dealt with before the upgrade.
+func TestR7ACleanUpgradeLeavesNothingOwedOnTheNextRun(t *testing.T) {
+	project, sess, files := oldSession(t)
+	brain := func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing([]string{files[0] + ":3", files[1] + ":3"})}
+		}
+		return hold()
+	}
+	s := r7ResumeOld(t, project, sess, "", brain)
+	r4Until(t, "the upgrade's dossier", func() bool { return len(s.dossiers()) == 2 })
+	s.settled()
+	s.stop()
+	s = r7ResumeOld(t, project, sess, "", brain)
+	s.settled()
+	s.stop()
+	if n := r7Looks(s); n != 0 {
+		t.Fatalf("the run after a clean upgrade made %d looks at the old design's events", n)
 	}
 }
