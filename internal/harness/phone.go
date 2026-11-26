@@ -666,6 +666,21 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		opts = append(opts, finalechat.Option{Label: clipLabel(o, 200)})
 	}
 	timeout := p.timeout
+	// The service answers a known client key with the question it made for
+	// it, whatever became of that question. A card of an earlier run that
+	// expired or was withdrawn would come back dead and the question would
+	// never be shown again, so each later card has a key of its own: the
+	// first keeps the plain key (a card still open is found by it and
+	// reused, not doubled), the nth adds n. Start at the newest card the
+	// record knows; the walk below steps past dead ones.
+	cards := map[string]bool{}
+	for _, ev := range r.st.Events {
+		var c event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&c) == nil && c.QuestionID == qid && c.CardID != "" {
+			cards[c.CardID] = true
+		}
+	}
+	attempt := max(1, len(cards))
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -675,7 +690,22 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		if p.has("activity") {
 			act = &finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL, Seq: time.Now().UnixNano()}
 		}
-		q, thread, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid), Activity: act})
+		var q finalechat.Question
+		var thread finalechat.Thread
+		var err error
+		for n := attempt; ; n++ {
+			key := p.key("q", qid)
+			if n > 1 && key != "" {
+				key = p.key("q", qid, strconv.Itoa(n))
+			}
+			q, thread, err = p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: key, Activity: act})
+			// A dismissed card stays the answer: the user closed it, and
+			// asking again would undo that. Only a card that timed out or
+			// was withdrawn is passed over.
+			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") || n >= attempt+50 {
+				break
+			}
+		}
 		if err == nil {
 			p.mu.Lock()
 			if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
