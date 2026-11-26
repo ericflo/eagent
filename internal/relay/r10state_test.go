@@ -39,9 +39,10 @@ func TestRV10AReattachWhoseHistoryEndsIdleCorrectsTheRecordedState(t *testing.T)
 			s.Close()
 			t.Fatalf("record %s: never caught up", recorded)
 		}
-		// A few more looks, so anything said at the catch-up is in.
+		// The catch-up has said its state by now (catchingUp is false);
+		// two more looks catch anything a look after it says.
 		var said []string
-		within(10*piLook, func() bool {
+		within(2*piLook, func() bool {
 			for _, ev := range drain(s.events) {
 				if ev.Kind == KindState {
 					said = append(said, ev.State)
