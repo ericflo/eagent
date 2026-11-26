@@ -204,6 +204,7 @@ func newScripted(brain func(model string, msgs []map[string]any) reply) *scripte
 		}
 		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", usage)
 	}))
+	invRegister(s)
 	return s
 }
 
@@ -289,6 +290,9 @@ func TestMain(m *testing.M) {
 	// a test that posts to the inbox, or waits on a time the loop notices
 	// only then, would wait up to that much each time.
 	loopPoll = 25 * time.Millisecond
+	// Every session a test runs is checked when it ends, and every request
+	// to a fake model when the run ends (invariants_test.go).
+	afterRun = invAfterRun
 	// A minute for the closing word and 75 seconds of grace at shutdown
 	// are real waits when a test's model is already gone.
 	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
@@ -326,6 +330,16 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("FINALECHAT_URL")
 	http.DefaultTransport = loopbackOnlyTransport{base: http.DefaultTransport}
 	code := m.Run()
+	found, sessions, requests := invReport()
+	for _, f := range found {
+		fmt.Fprintln(os.Stderr, "invariant:", f)
+	}
+	if len(found) > 0 {
+		fmt.Fprintf(os.Stderr, "FAIL: %d things found over %d sessions and %d model requests (invariants_test.go)\n", len(found), sessions, requests)
+		if code == 0 {
+			code = 1
+		}
+	}
 	if memTmp != "" {
 		os.RemoveAll(memTmp)
 	}

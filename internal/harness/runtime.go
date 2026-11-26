@@ -909,6 +909,10 @@ var offlineSwitch = 45 * time.Second
 // shorten it.
 var loopPoll = 500 * time.Millisecond
 
+// afterRun is nil outside tests. The harness tests set it to compare the
+// loop's state with the record once a session has finished.
+var afterRun func(*Runtime)
+
 // networkDown reports a failure to reach the provider at all, which waiting
 // fixes. A whole call running past its limit is not one: the provider was
 // reached and is slow, and the turn's own error handling decides.
@@ -1045,6 +1049,9 @@ func (r *Runtime) Run(ctx context.Context) int {
 			r.tick()
 		case <-r.ctx.Done():
 			r.finish()
+			if afterRun != nil {
+				afterRun(r)
+			}
 			return r.exitCode
 		}
 	}
