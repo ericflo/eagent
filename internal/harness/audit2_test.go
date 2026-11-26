@@ -549,11 +549,18 @@ func TestAudit2UpdateThread(t *testing.T) {
 
 // audit2ThreadAsks starts a session with inline summaries on a quick
 // schedule, whose model never answers about the thread, and returns when
-// the silence has been taken as "they still fit". firstCall, when set,
-// delays the reply to the first call that asks.
-func audit2ThreadAsks(t *testing.T, firstCall time.Duration) (*session, func() []time.Time) {
+// the silence has been taken as "they still fit". slowFirst delays the
+// reply to the first call that asks well past the quick schedule's first
+// timers, so they come due while it runs.
+func audit2ThreadAsks(t *testing.T, slowFirst bool) (*session, func() []time.Time) {
 	t.Helper()
 	coreSummariesOn(t, true)
+	var firstCall time.Duration
+	if slowFirst {
+		// Read after the quick schedule is in: ten of its first delays, and
+		// five of the delay a user's message arms.
+		firstCall = 10 * summaryFirstDelay
+	}
 	var mu sync.Mutex
 	var asks, ends []time.Time
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
@@ -597,7 +604,7 @@ func audit2ThreadAsks(t *testing.T, firstCall time.Duration) (*session, func() [
 // and after threadAskAgain more tries its silence is taken as "they still
 // fit" and recorded so; then it is not asked again until there is news.
 func TestAudit2ThreadAskedAgainThenTakenAsKept(t *testing.T) {
-	_, times := audit2ThreadAsks(t, 0)
+	_, times := audit2ThreadAsks(t, false)
 	got := times()
 	if n := len(got) - 1; n != 1+threadAskAgain {
 		t.Fatalf("asked %d times before it was taken as kept, want %d", n, 1+threadAskAgain)
@@ -614,7 +621,7 @@ func TestAudit2ThreadAskedAgainThenTakenAsKept(t *testing.T) {
 func TestAudit2ThreadReaskWaitsItsGap(t *testing.T) {
 	// The first ask takes longer than summaryFirstDelay, so the timer the
 	// user's message armed comes due while it runs.
-	_, times := audit2ThreadAsks(t, 4*summaryFirstDelay)
+	_, times := audit2ThreadAsks(t, true)
 	got := times()
 	end1 := got[len(got)-1]
 	if gap := got[1].Sub(end1); gap < summaryRetry*9/10 {
