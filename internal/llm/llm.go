@@ -429,7 +429,13 @@ func (e *APIError) badImage() bool {
 	if strings.Contains(b, "expected tags") || strings.Contains(b, "union_tag_invalid") {
 		return false
 	}
-	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match",
+	// OpenAI names the picture's fault in a code of its own.
+	switch e.Code {
+	case "invalid_image", "image_too_large", "image_parse_error", "invalid_image_url", "invalid_image_format":
+		return true
+	}
+	for _, k := range []string{"invalid_image", "image_too_large", "image_parse_error", "does not represent a valid image",
+		"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match",
 		"unsupported image", "invalid_image_format", "image format", "media_type", "could not decode", "unable to decode", "not a valid image"} {
 		if strings.Contains(b, k) {
 			return true
@@ -541,6 +547,10 @@ type Client struct {
 	// anthropicBudgeted remembers whether this model wants the older
 	// budget-style thinking parameter instead of adaptive thinking.
 	anthropicBudgeted atomic.Bool
+	// anthropicTurnRuled remembers that this provider refused budgeted
+	// thinking because the last assistant turn of a tool loop did not
+	// start with a thinking block (anthropicThinkingTurnRequired).
+	anthropicTurnRuled atomic.Bool
 	// anthropicCached remembers where the last requests Anthropic took
 	// from this client left cache entries (anthropicBridge).
 	anthropicCached anthropicEntries
@@ -562,7 +572,7 @@ type Client struct {
 func NewClient(ep Endpoint) *Client {
 	return &Client{
 		Endpoint:    ep,
-		HTTP:        &http.Client{Transport: netx.Transport()}, // per-request deadlines are set via context
+		HTTP:        &http.Client{Transport: netx.Transport(), CheckRedirect: netx.SameOriginRedirects}, // per-request deadlines are set via context
 		IdleTimeout: 120 * time.Second,
 		CallTimeout: 15 * time.Minute,
 		MaxAttempts: 6,
@@ -650,7 +660,10 @@ func (e *APIError) ContextOverflow() bool {
 		strings.Contains(b, "prompt is too long") || strings.Contains(b, "exceeds the limit") ||
 		strings.Contains(b, "input tokens exceed") ||
 		// Anthropic: "input length and `max_tokens` exceed context limit".
-		strings.Contains(b, "exceed context limit")
+		strings.Contains(b, "exceed context limit") ||
+		// llama-server: "request (N tokens) exceeds the available context
+		// size (M tokens)", type exceed_context_size_error.
+		strings.Contains(b, "exceeds the available context size") || strings.Contains(b, "exceed_context_size_error")
 }
 
 // streamError builds the error for a failure reported inside a stream,

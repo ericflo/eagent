@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,10 @@ type Options struct {
 	// "to eagent / to the agent" and "queue / interrupt / after this turn"
 	// choices, as a running session reads them off the message.
 	PromptPhoneID, PromptRoute, PromptDelivery string
+	// PromptAnswers is, for a Prompt the user wrote on a question's card on
+	// the phone, the card's id (the message's meta says so): the Prompt is
+	// that question's answer.
+	PromptAnswers string
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string
@@ -84,9 +89,43 @@ type Options struct {
 type modelRoute struct {
 	routes []llm.Endpoint
 	client *llm.Client
+	// at is the position in routes of the one the client is on. Two routes
+	// can name the same model at the same address (another key, say), so
+	// the position is kept rather than found again by name.
+	at int
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
+}
+
+// confAt is the configured route the client is on: the at-th of the chain
+// among those Routes keeps (the ones whose key is set). When that does not
+// name the client's model (a key set or unset since the routes were made),
+// it is the first route of the chain that does, or nil.
+func (m *modelRoute) confAt() *config.ModelRoute {
+	if m.client == nil {
+		return nil
+	}
+	ep := m.client.Endpoint
+	same := func(cur *config.ModelRoute) bool {
+		return llm.SameBaseURL(cur.BaseURL, ep.BaseURL) && cur.Model == ep.Model
+	}
+	i := 0
+	for cur := &m.conf; cur != nil; cur = cur.Fallback {
+		if _, err := cur.Endpoint(); err != nil {
+			continue
+		}
+		if i == m.at && same(cur) {
+			return cur
+		}
+		i++
+	}
+	for cur := &m.conf; cur != nil; cur = cur.Fallback {
+		if same(cur) {
+			return cur
+		}
+	}
+	return nil
 }
 
 // Runtime is one live session.
@@ -131,6 +170,7 @@ type Runtime struct {
 
 	turns          turnState             // the model loop (loop.go); loop-owned
 	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
+	tokenScaleOn   string                // the route tokenScale was learned on (dossier.go); loop-owned
 	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl *runtimecontrol.Controller
@@ -270,18 +310,17 @@ func localZone() string {
 
 // Resume reopens an existing session directory.
 func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtime, error) {
-	events, err := store.Read(sessionPath)
+	// The lock first, then the record: what a run still finishing writes
+	// before it lets go is read too (store.Open).
+	sess, events, err := store.Open(sessionPath, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	if len(events) == 0 {
+		sess.Close()
 		return nil, fmt.Errorf("%s has no events", sessionPath)
 	}
 	st := state.Replay(events)
-	sess, err := store.Open(sessionPath, st.LastSeq(), time.Now())
-	if err != nil {
-		return nil, err
-	}
 	if opts.Project == "" {
 		opts.Project = st.Cwd
 	}
@@ -291,9 +330,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
-	r.settleDismissedWhileAway()
+	// What the cards of an open question say, and so what the resuming
+	// words become, is decided in one place (resumecards.go).
+	holdBack := r.planResume(opts).Words == wordsMessage
 	if a := strings.TrimSpace(opts.Answer); a != "" {
-		if st.Question != nil {
+		if st.Question != nil && !holdBack {
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		} else {
 			// Answered elsewhere first (the phone, another resume): the words
@@ -319,11 +360,16 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			// was woken for these words and nobody is at a terminal, so
 			// they are what they were before: a message, or the answer.
 			r.ui.Idle(false)
-			if q := r.st.Question; q != nil {
+			if q := r.st.Question; q != nil && !holdBack {
 				r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments}))
 			} else {
 				r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
 			}
+		} else if text := strings.TrimSpace(opts.Prompt); holdBack && r.st.Question != nil && !r.ownCommand(text, in.From) {
+			// Words that are not the open question's answer (planResume):
+			// a message, and the question stays open.
+			r.ui.Idle(false)
+			r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
 		} else {
 			r.handleInbox(in)
 		}
@@ -375,7 +421,12 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 			cancel()
 			return nil, fmt.Errorf("summarizer: %w", err)
 		}
-		r.models[event.ActorSummarizer] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorSummarizer)}
+		r.models[event.ActorSummarizer] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorSummarizer), conf: cfg.Summarizer.Route(cfg.Model)}
+	}
+	// A route whose key is not set was left out, so the first one in use
+	// may be a fallback: the live settings show the one that runs.
+	for who := range r.models {
+		r.followRoute(who)
 	}
 	r.turns.init(st)
 	return r, nil
@@ -429,7 +480,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		// so no client is sent a picture the record says was refused.
 		req = req.WithRefused(known)
 		resp, err := client.Complete(ctx, req, obs)
-		r.calibrate(who, req, resp, err)
+		r.calibrate(who, client.Endpoint, req, resp, err)
 		// Pictures the provider would not take, whether the call then
 		// went through without them or failed for another reason.
 		// Written down, so the conversation is rendered without them by
@@ -477,23 +528,54 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 				switched = true // another call already moved on; use its route
 				return
 			}
-			for i, ep := range m.routes {
-				if ep.BaseURL == client.Endpoint.BaseURL && ep.Model == client.Endpoint.Model && i+1 < len(m.routes) {
-					next := m.routes[i+1]
-					r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
-					m.client = r.newClient(next, who)
-					r.flushSilent() // the looks so far were made on the old route
-					r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-						Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
-						Reason: "the configured route is unavailable: " + shortErr(err),
-					}))
-					switched = true
-					return
-				}
+			// The next route after the one that failed, each tried once:
+			// the last one failing ends the call.
+			if m.at+1 < len(m.routes) {
+				m.at++
+				next := m.routes[m.at]
+				r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
+				m.client = r.newClient(next, who)
+				r.flushSilent() // the looks so far were made on the old route
+				r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+					Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
+					Reason: "the configured route is unavailable: " + shortErr(err),
+				}))
+				r.followRoute(who)
+				switched = true
 			}
 		})
 		if !switched {
 			return nil, err
+		}
+	}
+}
+
+// followRoute brings the live settings' pick for who up to date with the
+// route its calls go to, after a fallback took over: the app's settings
+// sheet shows the model that answers, a preset saved from it is that
+// model, and a change to something else keeps the session on it (a pick
+// that did not change keeps its route, see routeChanges). Loop goroutine.
+func (r *Runtime) followRoute(who string) {
+	m := r.models[who]
+	shown, ok := r.activeSettings.Routes[who]
+	if m == nil || m.client == nil || !ok {
+		return
+	}
+	ep := m.client.Endpoint
+	now := runtimecontrol.Route{Model: ep.Model, Effort: ep.ReasoningEffort}
+	if pr, ok := config.ProviderForURLFor(r.opts.Project, ep.BaseURL); ok {
+		now.Provider = pr.ID
+	}
+	if now == shown {
+		return
+	}
+	// A new map: the controller's copy of the values may share this one.
+	routes := maps.Clone(r.activeSettings.Routes)
+	routes[who] = now
+	r.activeSettings.Routes = routes
+	if r.runtimeControl != nil {
+		if err := r.runtimeControl.Update(r.activeSettings); err != nil {
+			r.ui.Log("live settings: %v", err)
 		}
 	}
 }
@@ -720,6 +802,7 @@ func (r *Runtime) maybeEnd() {
 	// resumed session picks it up.
 	unanswerable := r.st.Question != nil && r.phone == nil
 	if len(r.st.ActiveRelays()) > 0 && !unanswerable {
+		r.checkIdleAgents()
 		return
 	}
 	if len(r.st.ActiveSchedules()) > 0 {
@@ -913,44 +996,6 @@ func (r *Runtime) dismissQuestion(qid, source string) {
 	r.listenUntil = asked.Add(time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond)
 	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: source}))
 	r.ui.Log("question %s dismissed without an answer; nothing was sent to the agent", q.ID)
-}
-
-// settleDismissedWhileAway records a dismissal the session was not running
-// to hear: the user closed the open question's card on the phone while the
-// session was down. Without this, what they wrote next (the message that
-// resumes the session) would be taken for the answer. It is one short call,
-// made only when a question is open and has a card; if the service cannot
-// be reached the question stays open. Called before the loop starts.
-func (r *Runtime) settleDismissedWhileAway() {
-	q := r.st.Question
-	if q == nil {
-		return
-	}
-	card := ""
-	for _, ev := range r.st.Events {
-		if ev.Type == event.PhoneQuestion {
-			var d event.PhoneQuestionData
-			_ = ev.Decode(&d)
-			if d.QuestionID == q.ID {
-				card = d.CardID
-			}
-		}
-	}
-	fc := r.cfg.Finalechat
-	if card == "" || !fc.Wanted() || finalechat.Disabled() {
-		return
-	}
-	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
-	if !ok {
-		return
-	}
-	client.UserAgent = "eagent/" + Version
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if got, err := client.Question(ctx, card, 0); err != nil || got.Status != "dismissed" {
-		return
-	}
-	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: "finalechat"}))
 }
 
 // questionSecond is one second of a question's time as a batch session

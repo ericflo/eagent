@@ -80,6 +80,11 @@ func (s *Service) ValidateAction(p control.Proposal, grant control.Grant) (Remot
 }
 
 func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, grant control.Grant) (ResourceChange, error) {
+	return s.prepareResource(editor, p, grant, nil)
+}
+
+// restored, for an undo, is the bundle bytes eagent's own record kept.
+func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, grant control.Grant, restored []byte) (ResourceChange, error) {
 	var change ResourceChange
 	if _, err := s.ValidateAction(p, grant); err != nil {
 		return change, err
@@ -116,6 +121,9 @@ func (s *Service) PrepareResource(editor *config.Editor, p control.Proposal, gra
 			// A bundle can become the default from here, so its routes pair
 			// keys with addresses only as a remote edit may.
 			if err := s.CheckRemoteRoutes(cfg, config.Resolve(s.Project, s.Preset, s.Bundle).Effective); err != nil {
+				return change, err
+			}
+			if err := s.checkRemoteProfiles(cfg, restored); err != nil {
 				return change, err
 			}
 			change.After, err = config.BundleBytes(name, request.Description, cfg)

@@ -362,7 +362,7 @@ const (
 )
 
 // piTimers are the extension's timer constants, as shipped.
-var piTimers = map[string]int{"TICK_MS": 1000, "GIVE_BACK_MS": 5000, "GIVE_BACK_SEEN_MS": 120000, "RETRY_MS": 5000, "RETRY_MAX_MS": 60000}
+var piTimers = map[string]int{"TICK_MS": 1000, "GIVE_BACK_MS": 5000, "GIVE_BACK_SEEN_MS": 120000, "RETRY_MS": 5000, "RETRY_MAX_MS": 60000, "AFTER_ABORT_MS": 5000}
 
 var piTimerLine = regexp.MustCompile(`(?m)^const ([A-Z_]+_MS) = (\d+);`)
 

@@ -609,6 +609,12 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if pick, ok := r.relayRepick[job.name]; ok && (err != nil || pick == job.pick) {
 		delete(r.relayRepick, job.name)
 	}
+	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended {
+		// A change still waiting under this name was for the agent that
+		// was stopped (no change can be asked of a stopped relay), not
+		// for the one starting now.
+		delete(r.relayRepick, job.name)
+	}
 	if err != nil {
 		switch rel := r.st.Relays[job.replaces]; {
 		case job.endOld != "" && rel != nil && rel.Active():
@@ -654,7 +660,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
-	r.summary.final = false // a session with an agent started is not ending
+	// A session with an agent started is not ending: its closing word is
+	// asked again once this agent's work is done.
+	r.summary.final, r.turns.finalAsked = false, false
 	spec, started := job.spec, job.started
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
 		Name: job.name, Profile: job.profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: job.dir,
@@ -922,6 +930,119 @@ func (r *Runtime) reattachRelays() []string {
 		lost = append(lost, fmt.Sprintf("relay %s (%s) was no longer running", rel.Name, rel.Who()))
 	}
 	return lost
+}
+
+// A session with no terminal and a phone keeps its agent after the work,
+// so the user can steer it from there; nothing would ever end it once they
+// stop writing. eagent cannot tell an agent whose work is done from one
+// that ended its turn while work of its own still runs (a build, a training
+// run): both sit idle between turns. So the harness stops nothing itself.
+// When the agents have been between turns and nobody has written for a
+// question's time (an open question waits that long for the phone too),
+// it asks the model, which stops the agent if the work is done (the
+// session then ends through its closing look) or leaves it. Each time it
+// is left with nothing new, the next ask waits twice as long, up to
+// idleCheckCap; a turn of the agent or a word from the user starts over.
+
+// idleCheckCap is the longest wait between two asks.
+var idleCheckCap = 24 * time.Hour
+
+// idleCheckPrefix opens the notice, which is how the record says when the
+// model was last asked (idleCheckDue).
+const idleCheckPrefix = "[Idle check: "
+
+// idleCheckDue is when the model is next asked, from the record alone (so
+// a resumed session keeps the schedule): the newest turn of an agent,
+// start of one, or message or answer from the user is where the quiet
+// began; each ask since doubles the wait from the last ask. asked is how
+// many asks there were since then.
+func idleCheckDue(st *state.State, window time.Duration) (due time.Time, asked int) {
+	var from time.Time
+scan:
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		switch ev.Type {
+		case event.UserMessage, event.UserAnswer, event.RelayTurn, event.RelayStart:
+			from = ev.Time
+		case event.HarnessMessage:
+			var d event.HarnessMessageData
+			if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && strings.HasPrefix(d.Text, idleCheckPrefix) {
+				if asked == 0 {
+					due = ev.Time
+				}
+				asked++
+			}
+			continue
+		default:
+			continue
+		}
+		break scan
+	}
+	if asked == 0 {
+		due = from
+	}
+	return due.Add(idleCheckWait(window, asked)), asked
+}
+
+// idleCheckWait is the wait after asks asks: the window, doubled each time.
+func idleCheckWait(window time.Duration, asks int) time.Duration {
+	w := window
+	for range asks {
+		if w >= idleCheckCap/2 {
+			return idleCheckCap
+		}
+		w *= 2
+	}
+	return min(w, idleCheckCap)
+}
+
+// checkIdleAgents asks the model whether the agents of a session with no
+// terminal are done, when they have been between turns and nobody has
+// written for the wait. Loop goroutine (maybeEnd).
+func (r *Runtime) checkIdleAgents() {
+	if r.phone == nil || r.opts.Interactive || len(r.st.Events) == 0 {
+		return
+	}
+	// Anything still open keeps the agent and asks nothing: a question,
+	// even a dismissed one (a dismissal decides nothing), a timer, a
+	// message owed an answer.
+	if r.st.Question != nil || r.st.DismissalStands() || len(r.st.ActiveSchedules()) > 0 || r.turns.owed > 0 {
+		return
+	}
+	window := time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond
+	due, asked := idleCheckDue(r.st, window)
+	if time.Now().Before(due) {
+		return
+	}
+	r.relays.mu.Lock()
+	busy := len(r.relays.launching) > 0 || len(r.relays.stopping) > 0
+	r.relays.mu.Unlock()
+	if busy {
+		return
+	}
+	active := r.st.ActiveRelays()
+	var who []string
+	for _, rel := range active {
+		// Between turns (or gone), with nothing on its way to it and no
+		// standing order (autopilot has its own check).
+		if rel.State != "idle" && rel.State != "exited" || rel.Autopilot != nil || len(rel.Undelivered) > 0 {
+			return
+		}
+		who = append(who, rel.Who())
+	}
+	r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf(idleCheckPrefix+"this session has no terminal, and %s has been between turns with nobody writing for %s.] Nobody writing for that long means the user is finished with it for now, unless it is waiting on work of its own that is still running (a build, a run, a task it said it would report on): then leave it alone and hold; you are asked again in %s if nothing changes. Otherwise tell the user how it ended (unless you already have) and stop it with relay_control stop. The session then ends; a reply from the phone brings it back, and relay_control restart continues the agent's own conversation.", strings.Join(who, " and "), roundDur(r.idleFor()), roundDur(idleCheckWait(window, asked+1)))}))
+}
+
+// idleFor is how long since an agent's turn or start, or the user's last
+// message or answer.
+func (r *Runtime) idleFor() time.Duration {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		switch ev := r.st.Events[i]; ev.Type {
+		case event.UserMessage, event.UserAnswer, event.RelayTurn, event.RelayStart:
+			return time.Since(ev.Time)
+		}
+	}
+	return 0
 }
 
 // closeRelays stops watching every relay; the agents keep running so a
@@ -1308,7 +1429,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		how, err := res.how, res.err
 		if err != nil {
 			r.sync(func() {
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: err.Error()}))
+				// Under the relay the send is on the record for now: a
+				// switch meanwhile passed it on to the new agent.
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, rel.Name), ID: id, OK: false, Detail: err.Error()}))
 			})
 			return fmt.Sprintf("Could not send to %s: %v", rel.Who(), err), true
 		}
@@ -1564,16 +1687,18 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				}
 				d.Decide = str("decide") != "false"
 				if u := strings.TrimSpace(str("until")); u != "" {
-					t, perr := parseUntil(u, time.Now())
+					// The deadline is the user's: read where they are. It is
+					// kept with that zone's offset, so it is said on their clock.
+					t, perr := parseUntil(u, time.Now().In(r.userZone()))
 					if perr != nil {
 						err = perr
 						return
 					}
 					d.Until = t.Format(time.RFC3339)
 				}
-				out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
+				out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
 				if !d.Decide {
-					out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
+					out = "Autopilot on for " + rel.Who() + " " + r.autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
 				}
 				out += "."
 			}
@@ -1658,10 +1783,16 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	seen := map[string]int64{}
+	// The agents the brief hands over from, each the holder of its name
+	// from its start (a name can be in the chain twice, a quick switch
+	// back, each time with the agent that held it then).
+	targets := map[holder]bool{}
+	names := map[string]bool{}
 	for _, n := range ho.names {
-		seen[n.name] = n.start
+		targets[holder{n.name, n.start}] = true
+		names[n.name] = true
 	}
+	handed := handedOver(r.st)
 	quoted := map[string]bool{}
 	// One pass in record order over every relay in the handover, so the
 	// order is the order the user wrote them and a send moved from one to
@@ -1682,12 +1813,18 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		start, ok := seen[d.Name]
-		if !ok || d.From != "user" || quoted[d.ID] || pending[d.ID] {
+		if d.From != "user" || quoted[d.ID] || pending[d.ID] {
 			continue
 		}
-		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && at.StartSeq > start {
-			continue // said to a later agent that took the name
+		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
+			if !names[d.Name] {
+				continue
+			}
+		} else if !inChain(handed, holder{d.Name, at.StartSeq}, targets) {
+			// Said to an agent whose work did not come to this one: a
+			// later holder of a name, one that was stopped rather than
+			// handed over, or another agent altogether.
+			continue
 		}
 		quoted[d.ID] = true
 		texts = append(texts, d.Text)
@@ -1706,6 +1843,57 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	return b.String()
 }
 
+// holder is one agent under a relay name: the name and the sequence at
+// which that agent first started under it.
+type holder struct {
+	name  string
+	start int64
+}
+
+// handedOver maps each agent that a switch replaced to the agent that took
+// over from it. A switch records the old relay's end ("handed over to …")
+// and the new relay's start as neighbouring events (finishLaunch).
+func handedOver(st *state.State) map[holder]holder {
+	out := map[holder]holder{}
+	for i := 0; i+1 < len(st.Events); i++ {
+		ev, next := st.Events[i], st.Events[i+1]
+		if ev.Type != event.RelayEnd || next.Type != event.RelayStart {
+			continue
+		}
+		var end event.RelayEndData
+		var start event.RelayStartData
+		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") || strings.Contains(end.Reason, ", which could not start") {
+			continue
+		}
+		from, to := st.RelayAt(end.Name, ev.Seq), st.RelayAt(start.Name, next.Seq)
+		if from == nil || to == nil {
+			continue
+		}
+		out[holder{end.Name, from.StartSeq}] = holder{start.Name, to.StartSeq}
+	}
+	return out
+}
+
+// inChain reports whether the agent h is one of the agents a brief hands
+// over from (targets), or one whose work reached one of them through
+// switches, whatever their names: Codex, Claude, pi is one piece of work,
+// and so is Codex, Claude, Codex again. An agent that was stopped, not
+// handed over, did other work. Bounded by the number of switches, so a
+// cycle cannot hang it.
+func inChain(handed map[holder]holder, h holder, targets map[holder]bool) bool {
+	for steps := 0; steps <= len(handed); steps++ {
+		if targets[h] {
+			return true
+		}
+		next, ok := handed[h]
+		if !ok {
+			return false
+		}
+		h = next
+	}
+	return false
+}
+
 // parseUntil reads an autopilot deadline: "10:00" (the next such local
 // time), "8h" or "90m" from now, or a date and time.
 func parseUntil(s string, now time.Time) (time.Time, error) {
@@ -1717,7 +1905,10 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 		if t, err := time.ParseInLocation(layout, strings.ToLower(strings.ReplaceAll(s, " ", "")), now.Location()); err == nil {
 			at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 			if !at.After(now) {
-				at = at.Add(24 * time.Hour)
+				// Tomorrow's, built on the calendar: across a daylight-saving
+				// change a day is 23 or 25 hours, and adding 24 would land
+				// an hour off the clock time asked for.
+				at = time.Date(now.Year(), now.Month(), now.Day()+1, t.Hour(), t.Minute(), 0, 0, now.Location())
 			}
 			return at, nil
 		}
@@ -1730,11 +1921,52 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("could not read %q as a time: use 10:00, 8h, or 2026-10-28T10:00", s)
 }
 
-func autopilotUntil(d event.RelayAutopilotData) string {
+// userZone is where the user is: the time zone their newest message or
+// answer from the phone or the web declared, else the session's own.
+// Loop goroutine.
+func (r *Runtime) userZone() *time.Location {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer {
+			continue
+		}
+		var d struct {
+			Client *clientcaps.Caps `json:"client"`
+		}
+		if ev.Decode(&d) != nil || d.Client == nil || d.Client.Timezone == "" {
+			continue
+		}
+		if loc, err := time.LoadLocation(d.Client.Timezone); err == nil {
+			return loc
+		}
+	}
+	return r.st.Location()
+}
+
+// autopilotUntil says an autopilot's deadline for what is written from now
+// on (tool replies, notices, status, a new dossier). How a relay.autopilot
+// already on the record renders in the conversation is state's, unchanged.
+func (r *Runtime) autopilotUntil(d event.RelayAutopilotData) string {
 	if t, err := time.Parse(time.RFC3339, d.Until); err == nil {
-		return "until " + t.Local().Format("Mon 15:04")
+		return "until " + r.clockAt(t)
 	}
 	return "until the user says stop"
+}
+
+// clockAt says a deadline on the clock of the zone it was given in (its
+// offset: the user's, for one read where they are), naming that zone when
+// the machine's clock reads otherwise: the model passes it on to a user who
+// may be elsewhere.
+func (r *Runtime) clockAt(t time.Time) string {
+	given, local := t.Format("Mon 15:04"), t.Local().Format("Mon 15:04")
+	if given == local {
+		return local
+	}
+	name := "UTC" + t.Format("-07:00")
+	if loc := r.userZone(); t.In(loc).Format("Mon 15:04") == given {
+		name = loc.String()
+	}
+	return given + " " + name + " time"
 }
 
 // autopilotCheckAfter is how long an agent on autopilot may sit idle, with
@@ -1818,7 +2050,7 @@ func (r *Runtime) armAutopilots() {
 					return
 				}
 				r.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: name, Off: true}))
-				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), until.Local().Format("Mon 15:04"))}))
+				r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: fmt.Sprintf("[Autopilot for %s ended: it was set to run until %s.] Stop sending it on. Let it finish what it is doing, then tell the user what was done while they were away and where things stand.", cur.Who(), r.clockAt(until))}))
 			})
 		})
 	}
@@ -1833,6 +2065,23 @@ func sendRecord(st *state.State, id string) (event.RelaySendData, bool) {
 		}
 	}
 	return event.RelaySendData{}, false
+}
+
+// sendHolder is the relay a send is on the record for now: the one it was
+// sent to, or the last a switch passed it on to (relay.moved); name when the
+// record has neither.
+func sendHolder(st *state.State, id, name string) string {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		if ev.Type != event.RelaySend && ev.Type != event.RelayMoved {
+			continue
+		}
+		var d event.RelaySendData
+		if ev.Decode(&d) == nil && d.ID == id {
+			return d.Name
+		}
+	}
+	return name
 }
 
 // relaySendsTo calls fn for each send on the record for a relay, oldest
@@ -1964,7 +2213,7 @@ func (r *Runtime) relayStatusText(name, lead string) string {
 			b.WriteString("\nUsage: " + limitLine(rel.Who(), *rel.Limit))
 		}
 		if ap := rel.Autopilot; ap != nil {
-			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
+			fmt.Fprintf(&b, "\nAutopilot: on %s; standing order: %s", r.autopilotUntil(*ap), clipRunes(ap.Instruction, 400))
 		}
 		if sent := userSends(r.st, rel.Name, 8); len(sent) > 0 {
 			b.WriteString("\nWhat the user sent it, newest last:")

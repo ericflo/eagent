@@ -180,7 +180,7 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 func (s *Server) phoneResumeOptions(msg integration.PhoneMessage) harness.Options {
 	route, delivery, client := harness.FromPhone(msg.Meta)
 	return harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments,
-		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery}
+		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery, PromptAnswers: harness.AnsweredCard(msg.Meta)}
 }
 
 // ---- sessions ---------------------------------------------------------------

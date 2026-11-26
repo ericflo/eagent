@@ -235,7 +235,7 @@ func TestStopHook(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("empty spool should let the turn end, got %q", out.String())
 	}
-	s := &Seat{spec: Spec{Spool: spool}}
+	s := &Seat{spec: Spec{Spool: spool, Hook: "eagent relay-hook"}}
 	_ = claudeAgent{}.afterTurn(s, "r1", "first")
 	time.Sleep(2 * time.Millisecond)
 	_ = claudeAgent{}.afterTurn(s, "r2", "second")

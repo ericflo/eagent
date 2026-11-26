@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -193,6 +192,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err)
 			continue
 		}
 		msg.Attachments = append(msg.Attachments, saved)
@@ -357,6 +357,12 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			// It will never fit: the session comes back with the rest of
+			// the message, and the sender is told about the file.
+			tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, err)
+			continue
+		}
 		if err != nil {
 			return PhoneMessage{}, false, err
 		}
@@ -365,30 +371,26 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	return msg, msg.Text != "" || len(msg.Attachments) > 0, nil
 }
 
-var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-// unsafeAttachmentID is what may not stay of a server's attachment id in a
-// file name: anything but letters, digits and dashes (an id is a uuid).
-var unsafeAttachmentID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
+// tellRefused posts, in the thread, why a file the user sent was not
+// taken. The key makes it once per file whoever notices first.
+func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) {
+	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+	defer stop()
+	_, _, _ = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+}
 
 // saveAttachment downloads a phone attachment under the session directory,
-// named the way the running mirror names them.
+// named the way the running mirror names them (finalechat.InboundFileName).
 func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath string, a finalechat.Attachment) (event.Attachment, error) {
 	dir := filepath.Join(sessionPath, "attachments")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
-	// Both come from the server: neither may bring a "/" or ".." into the
-	// path.
-	short := unsafeAttachmentID.ReplaceAllString(a.ID, "_")
-	if len(short) > 8 {
-		short = short[:8]
+	if a.Size > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, finalechat.ErrTooLarge
 	}
-	name := strings.Trim(unsafeAttachmentName.ReplaceAllString(filepath.Base(strings.TrimSpace(a.Filename)), "_"), "._")
-	if name == "" {
-		name = "file"
-	}
-	dst := filepath.Join(dir, "in-"+short+"-"+name)
+	file, name := finalechat.InboundFileName(a.ID, a.Filename)
+	dst := filepath.Join(dir, file)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

@@ -339,7 +339,11 @@ func AutoRollover(window, maxTokens int) int {
 // asks for when the route sets none), of which fixed tokens are the system
 // prompt and the tool list that open every request. A conversation may
 // fill three quarters of what is left beside them, which leaves the rest
-// for the turn that carries it past the line. On a window where
+// for the turn that carries it past the line, and is given at least a
+// quarter: AutoRollover's 20,000 floor knows nothing of the fixed part,
+// and on a window whose reply ceiling eats its reserve (64k to 96k with a
+// large ceiling) it can sit at or below what a long INSTRUCTIONS.md and
+// the tools take, where no restart could make room. On a window where
 // AutoRollover's number already fits (every ordinary cloud model) the
 // number is AutoRollover's. A window too small to hold the fixed part at
 // all is left at AutoRollover's: no restart can make room there.
@@ -361,7 +365,8 @@ func AutoRolloverWithin(window, maxTokens, fixed int) int {
 	if limit/100*100 > max(fixed, 0) {
 		limit = limit / 100 * 100
 	}
-	return min(n, limit)
+	least := max(fixed, 0) + room/4
+	return min(max(n, least), limit)
 }
 
 // rolloverReserve is what a restart needs beside the conversation and the

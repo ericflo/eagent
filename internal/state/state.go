@@ -94,6 +94,12 @@ type State struct {
 	// reader of the log can tell who is mid-turn right now.
 	Turns     map[string]int
 	TurnSince map[string]time.Time
+	// OpenAtEnd is what Turns held when the session last ended, until a
+	// resume or the turn's own end settles it: a run whose shutdown did
+	// not wait out a turn ends with it open, and the resume has to close
+	// it and take it up (harness/resume.go). An ended session is not
+	// mid-turn, so Turns itself is cleared.
+	OpenAtEnd map[string]int
 
 	// LastUsage is the newest provider-reported usage per actor; its Input
 	// is the size of that actor's last recorded prompt.
@@ -387,11 +393,21 @@ func (s *State) Apply(ev event.Event) {
 		s.Ended = false
 		s.EndReason = ""
 		s.Resumes++
+		s.OpenAtEnd = nil
 	case event.SessionEnd:
 		var d event.SessionEndData
 		_ = ev.Decode(&d)
 		s.Ended = true
 		s.EndReason = d.Reason
+		s.OpenAtEnd = nil
+		for who, n := range s.Turns {
+			if n > 0 {
+				if s.OpenAtEnd == nil {
+					s.OpenAtEnd = map[string]int{}
+				}
+				s.OpenAtEnd[who] = n
+			}
+		}
 		s.Turns = map[string]int{}
 	case event.TurnStart:
 		s.Turns[ev.Actor]++
@@ -399,6 +415,8 @@ func (s *State) Apply(ev event.Event) {
 	case event.TurnEnd:
 		if s.Turns[ev.Actor] > 0 {
 			s.Turns[ev.Actor]--
+		} else if s.OpenAtEnd[ev.Actor] > 0 {
+			s.OpenAtEnd[ev.Actor]--
 		}
 	case event.SubsessionStart:
 		var d event.SubsessionStartData

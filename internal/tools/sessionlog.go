@@ -358,14 +358,8 @@ func (m matcher) place(ev event.Event, shown string, shortened bool) string {
 		}
 		at := -1
 		for _, re := range []*regexp.Regexp{m.readable, m.escaped} {
-			for _, loc := range re.FindAllStringIndex(text, -1) {
-				if loc[0] >= skipFrom && loc[0] < skipTo {
-					continue // inside the provider's replay payload
-				}
-				if at < 0 || loc[0] < at {
-					at = loc[0]
-				}
-				break
+			if loc := firstOutside(re, text, skipFrom, skipTo); loc >= 0 && (at < 0 || loc < at) {
+				at = loc
 			}
 		}
 		if at < 0 {
@@ -386,6 +380,25 @@ func (m matcher) place(ev event.Event, shown string, shortened bool) string {
 		return fmt.Sprintf(" [shortened; from=%d offset=0 reads it whole]", line)
 	}
 	return ""
+}
+
+// firstOutside is where re first matches in text outside [from, to) (the
+// provider's replay payload), or -1. Only the first match is looked for:
+// a line can be a megabyte with the query in it thousands of times. No
+// pattern of a query is anchored, so looking on from the end of the
+// payload finds what a search of the whole line would.
+func firstOutside(re *regexp.Regexp, text string, from, to int) int {
+	loc := re.FindStringIndex(text)
+	if loc == nil {
+		return -1
+	}
+	if loc[0] < from || loc[0] >= to {
+		return loc[0]
+	}
+	if loc = re.FindStringIndex(text[to:]); loc == nil {
+		return -1
+	}
+	return to + loc[0]
 }
 
 // searchText is the text a query is matched against: the event's type,

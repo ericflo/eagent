@@ -166,9 +166,9 @@ func r4SmallRoute(t *testing.T, route *r4Route, msgs int, tune func(*config.Conf
 	r4Settled(s)
 	last, since := 0, 0
 	for i := 0; i < msgs; i++ {
-		before := s.ui.messageCount()
+		before := s.ui.answerCount()
 		s.type_(fmt.Sprintf("@e %s", r4Text(i, 1500)))
-		r4Until(t, fmt.Sprint("the answer to message ", i), func() bool { return s.ui.messageCount() > before })
+		r4Until(t, fmt.Sprint("the answer to message ", i), func() bool { return s.ui.answerCount() > before })
 		r4Settled(s)
 		since++
 		if n := len(s.events(event.Dossier)); n > last {

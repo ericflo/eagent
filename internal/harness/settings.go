@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -130,12 +131,29 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 	var out []routeSwap
 	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
 		pick, ok := after[who]
-		if !ok || pick == before[who] || pick.Provider == "" || pick.Model == "" || r.models[who] == nil {
+		if !ok || pick == before[who] || pick.Model == "" || r.models[who] == nil {
 			continue
 		}
-		a, err := config.PickRoute(r.opts.Project, r.configRoute(who), pick.Provider, pick.Model, pick.Effort)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", who, err)
+		var a config.ModelRoute
+		base, known := r.pickBase(who, pick)
+		switch {
+		case known && pick.Provider == "":
+			// An address no provider knows has no catalog to pick from:
+			// the entry as configured, at the effort asked for.
+			if pick.Effort != "" && config.EffortIndex(pick.Effort) == len(config.EffortOrder) {
+				return nil, fmt.Errorf("%s: effort %q is not a known level (%s)", who, pick.Effort, strings.Join(config.EffortOrder, ", "))
+			}
+			a = base
+		case pick.Provider == "":
+			return nil, fmt.Errorf("%s: model %q is not at an address eagent knows a provider for, and this session's routes do not have it; pick a provider", who, pick.Model)
+		default:
+			if !known {
+				base = r.configRoute(who)
+			}
+			var err error
+			if a, err = config.PickRoute(r.opts.Project, base, pick.Provider, pick.Model, pick.Effort); err != nil {
+				return nil, fmt.Errorf("%s: %w", who, err)
+			}
 		}
 		// The pick names the effort the session reports (ApplyValues
 		// resolves it), "" (send none) included, so it is the one sent,
@@ -155,6 +173,27 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 	return out, nil
 }
 
+// pickBase is the configured route a pick of a model the session already
+// has starts from: the entry the session is on when the pick names that
+// one (an effort change on a fallback keeps the fallback's limits and key,
+// even when two entries name one model), else the entry of the configured
+// chain the pick names (the first route picked again is that route, with
+// its fallbacks), else the one of the routes a settings pick put in place.
+// A pick of another model has none: it starts from the configured route.
+func (r *Runtime) pickBase(who string, pick runtimecontrol.Route) (config.ModelRoute, bool) {
+	project := r.opts.Project
+	m := r.models[who]
+	if cur := m.confAt(); cur != nil && runtimecontrol.Names(project, *cur, pick) {
+		return *cur, true
+	}
+	for _, chain := range []config.ModelRoute{r.configRoute(who), m.conf} {
+		if entry, ok := runtimecontrol.ChainEntry(project, chain, pick); ok {
+			return entry, true
+		}
+	}
+	return config.ModelRoute{}, false
+}
+
 // configRoute is the configured route of one of the session's models.
 func (r *Runtime) configRoute(who string) config.ModelRoute {
 	if who == runtimecontrol.RouteSummarizer {
@@ -170,7 +209,24 @@ func (r *Runtime) configRoute(who string) config.ModelRoute {
 // pays for the whole prompt once.
 func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
+	moved := true
+	if old := r.models[sw.who]; old != nil && old.client != nil {
+		moved = !llm.SameBaseURL(old.client.Endpoint.BaseURL, sw.eps[0].BaseURL) || old.client.Endpoint.Model != sw.eps[0].Model
+	}
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
+	if sw.who == event.ActorEagent && moved {
+		// What the old model did belongs to it: its failures and the wait
+		// before the next try (up to an hour), a refusal of the prompt as
+		// too long (which would write the next dossier from the files), and
+		// how its provider counts tokens. The new one starts clean and is
+		// tried at the loop's next tick (the poll that applied the change
+		// is followed by one); if it fails too, it backs off on its own
+		// count.
+		t := &r.turns
+		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+		t.overflowed, t.futileLogged = false, false
+		r.tokenScale = 0
+	}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),

@@ -30,7 +30,7 @@ func TestAntigravityUsesSessionSpecificStatus(t *testing.T) {
 	}
 	var out bytes.Buffer
 	input := strings.NewReader(`{"conversation_id":"` + id + `","email":"private@example.org","agent_state":"idle"}`)
-	if WriteAntigravityStatus(spec.StatusFile, input, &out) != 0 || !looksReady(out.String()) {
+	if WriteAntigravityStatus(spec.StatusFile, input, &out) != 0 || !a.ready(out.String()) {
 		t.Fatal(out.String())
 	}
 	saved, err := os.ReadFile(spec.StatusFile)

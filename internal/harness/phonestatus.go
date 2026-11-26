@@ -24,6 +24,10 @@ import (
 // shorten it.
 var statusMinGap = 2500 * time.Millisecond
 
+// statusFirstLook is when the status keeper first looks after it starts;
+// a variable so tests can shorten it.
+var statusFirstLook = time.Second
+
 const (
 	statusRefresh     = 40 * time.Second // re-send an unchanged busy status
 	statusWaitRefresh = 4 * time.Minute  // re-send an unchanged waiting status
@@ -173,7 +177,7 @@ func (r *Runtime) phoneStats() phoneStats {
 // server's seq ordering settles any race between the two.
 func (p *phone) keeper(r *Runtime) {
 	defer p.wg.Done()
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(statusFirstLook)
 	defer timer.Stop()
 	lastMe := time.Now()
 	var lastMeta phoneStats
@@ -243,18 +247,36 @@ func (p *phone) pushStatus() time.Duration {
 	ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
 	defer cancel()
 	var err error
+	shown := want
+	turnedDown := false
 	if want.Text == "" {
 		err = p.client.ClearActivity(ctx, p.ref, now.UnixNano())
 	} else {
 		want.Seq = now.UnixNano()
-		_, err = p.client.SetActivity(ctx, p.ref, want)
+		var applied bool
+		var line *finalechat.Status
+		applied, line, err = p.client.SetActivityShown(ctx, p.ref, want)
+		if err == nil && !applied && (line == nil || line.Text != want.Text || line.Kind != want.Kind) {
+			// The service kept something else (a newer line, or a clear
+			// that outranks this write). What it shows is what was sent,
+			// so the next look sees the difference and writes again. A
+			// repeat it skipped because the same line is still fresh is
+			// shown, and counts as sent.
+			shown, turnedDown = finalechat.Activity{}, true
+			if line != nil {
+				shown = finalechat.Activity{Text: line.Text, Kind: line.Kind}
+			}
+		}
 	}
 	p.mu.Lock()
 	p.sentAt = now
 	if err == nil {
-		p.sent = want
+		p.sent = shown
 	}
 	p.mu.Unlock()
+	if turnedDown {
+		return 2 * statusMinGap
+	}
 	if err != nil {
 		// Best effort: a 404 means the thread is not there yet, anything
 		// else is retried after a full gap. Nothing is logged; the status is

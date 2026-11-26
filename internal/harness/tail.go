@@ -316,7 +316,7 @@ func (r *Runtime) agentLine(rel *state.Relay, now time.Time) string {
 		fmt.Fprintf(&b, " Usage: %s.", limitLine(rel.Who(), *rel.Limit))
 	}
 	if ap := rel.Autopilot; ap != nil {
-		fmt.Fprintf(&b, " Autopilot is on %s", autopilotUntil(*ap))
+		fmt.Fprintf(&b, " Autopilot is on %s", r.autopilotUntil(*ap))
 		if !ap.Decide {
 			b.WriteString(" (its questions go to the user)")
 		}

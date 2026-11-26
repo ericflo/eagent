@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -29,24 +28,8 @@ import (
 // attachmentsDir is where a session keeps message files.
 func attachmentsDir(sessionPath string) string { return filepath.Join(sessionPath, "attachments") }
 
-var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
-// unsafeID is what may not stay of a server's attachment id in a file name.
-var unsafeID = regexp.MustCompile(`[^A-Za-z0-9-]+`)
-
 // safeName reduces a filename to something a shell and a browser both like.
-func safeName(name string) string {
-	name = filepath.Base(strings.TrimSpace(name))
-	name = unsafeName.ReplaceAllString(name, "_")
-	name = strings.Trim(name, "._")
-	if name == "" {
-		name = "file"
-	}
-	if len(name) > 120 {
-		name = name[len(name)-120:]
-	}
-	return name
-}
+func safeName(name string) string { return finalechat.SafeFileName(name) }
 
 // contentTypeFor guesses a file's type from its extension, then its bytes.
 func contentTypeFor(name string, head []byte) string {
@@ -101,8 +84,15 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		if real, err := filepath.EvalSymlinks(abs); err == nil {
 			abs = real
 		}
+		// A picture the user or an agent named is one eagent may look at
+		// (view_image); it may go to the user too, under the same rule.
+		// Only a picture: a named file of any other kind stays.
+		byName := false
 		if !r.sendable(abs) {
-			return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
+			if !r.named(abs) {
+				return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
+			}
+			byName = true
 		}
 		st, err := os.Stat(abs)
 		if err != nil {
@@ -120,6 +110,10 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		att, err := r.copyAttachment(abs, "out")
 		if err != nil {
 			return nil, err
+		}
+		if byName && att.Kind != "image" {
+			_ = os.Remove(att.Path)
+			return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder; a file named in the conversation can be sent from there only if it is a picture (png, jpeg, gif, webp)", p)
 		}
 		out = append(out, att)
 	}
@@ -168,14 +162,11 @@ func (r *Runtime) downloadAttachment(client *finalechat.Client, a finalechat.Att
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
-	// Both come from the server: neither may bring a "/" or ".." into the
-	// path. An id is a uuid; anything but letters, digits and dashes goes.
-	short := unsafeID.ReplaceAllString(a.ID, "_")
-	if len(short) > 8 {
-		short = short[:8]
+	if a.Size > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, finalechat.ErrTooLarge
 	}
-	name := safeName(a.Filename)
-	dst := filepath.Join(dir, "in-"+short+"-"+name)
+	file, name := finalechat.InboundFileName(a.ID, a.Filename)
+	dst := filepath.Join(dir, file)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

@@ -69,6 +69,7 @@ const GIVE_BACK_MS = 5000; // a hand-over pi refused before its input hook waits
 const GIVE_BACK_SEEN_MS = 120000; // one that went through the hook, after this
 const RETRY_MS = 5000; // the pause after a second refusal, doubling while pi refuses
 const RETRY_MAX_MS = 60000; // the longest pause
+const AFTER_ABORT_MS = 5000; // after an interrupted run, held messages wait this long
 
 export default function (pi: any) {
 	const statusFile = process.env.EAGENT_PI_STATUS || "";
@@ -101,6 +102,11 @@ export default function (pi: any) {
 	let handing: any = null;
 	let tries = 0;
 	let retryAt = 0;
+	// abortedAt: when a run last settled interrupted. Escape (or pi quitting
+	// or changing sessions) means stop: a held message waits a while, and a
+	// message typed after the interrupt goes first, the held one at the end
+	// of its run.
+	let abortedAt = 0;
 
 	// Files claimed by a pi that exited before taking them wait again.
 	if (spool) {
@@ -212,7 +218,7 @@ export default function (pi: any) {
 				// no key).
 				const wait = handing && handing.seen ? GIVE_BACK_SEEN_MS : GIVE_BACK_MS;
 				if (idle && handing && Date.now() - handing.at > wait) giveBack();
-				if (idle) deliver();
+				if (idle && Date.now() - abortedAt >= AFTER_ABORT_MS) deliver();
 			} catch {}
 		}, TICK_MS);
 		if (timer && timer.unref) timer.unref();
@@ -287,7 +293,8 @@ export default function (pi: any) {
 			pi.appendEntry("` + piSettledEntry + `", { aborted });
 		} catch {}
 		save({ state: "idle", aborted, settled: status.settled + 1 });
-		deliver();
+		abortedAt = aborted ? Date.now() : 0;
+		if (!aborted) deliver();
 	});
 	pi.on("ui_prompt_start", (event: any) => {
 		prompting = true;
@@ -359,6 +366,13 @@ var piFooter = regexp.MustCompile(`(?m)(?:^|\s)(?:\d+(?:\.\d+)?%|\?)/\d+(?:\.\d+
 // (reportedReady).
 func (piAgent) ready(screen string) bool {
 	return piFooter.MatchString(screen) || strings.Contains(screen, "escape interrupt · ctrl+c/ctrl+d clear/exit")
+}
+
+// reportedWorking: the extension's status file says pi is in a turn. pi
+// reports its dialogs there too, so a working pi shows none.
+func (piAgent) reportedWorking(s *Seat) bool {
+	st, ok := readPiStatus(s.spec.StatusFile)
+	return ok && st.State == "working" && strings.TrimSpace(st.Prompt) == ""
 }
 
 // reportedReady is what the extension's status file says: idle with no

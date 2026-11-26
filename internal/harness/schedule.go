@@ -83,7 +83,15 @@ func (r *Runtime) fireSchedule(id string) {
 		if err != nil {
 			return
 		}
-		next = s.Next(now)
+		// Counted from when it was due when the wall clock reads earlier:
+		// the timer runs on the steady clock, and a clock set back or
+		// slewed would otherwise give this same time again, and a second
+		// firing.
+		from := now
+		if sc.Next.After(from) {
+			from = sc.Next
+		}
+		next = s.Next(from)
 	}
 	r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: id, Note: sc.Note, Next: next}))
 	if !next.IsZero() {

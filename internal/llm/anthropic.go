@@ -18,13 +18,14 @@ import (
 // anthropic implements the Anthropic Messages API with streaming and prompt
 // caching. Thinking blocks are kept in Native and replayed verbatim.
 func (c *Client) anthropic(ctx context.Context, req Request, obs *Observer) (*Response, error) {
-	return c.anthropicTry(ctx, req, obs, true)
+	return c.anthropicTry(ctx, req, obs, true, false)
 }
 
 // anthropicTry makes one call; when mayProbe is set and the model rejects
 // the thinking flavour, it flips the flavour and tries once more (so every
-// call, not just one per client, gets its retry).
-func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe bool) (*Response, error) {
+// call, not just one per client, gets its retry). With noThinking set the
+// call asks for no thinking at all.
+func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, mayProbe, noThinking bool) (*Response, error) {
 	maxTokens := c.maxTokens(req)
 	messages := anthropicMessagesFor(req, c.Endpoint.BaseURL, c.Endpoint.Model)
 	head, _ := json.Marshal([]any{c.Endpoint.Model, req.System, req.Tools})
@@ -62,7 +63,12 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 	}
 	thinking := false
 	budgeted := c.anthropicBudgeted.Load() // the flavour this call sends
-	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" {
+	if budgeted && !noThinking && c.anthropicTurnRuled.Load() && anthropicToolLoopWithoutThinking(req, messages) {
+		// This provider has refused this shape once already: send at the
+		// first try what the retry below would send.
+		noThinking = true
+	}
+	if e := c.Endpoint.ReasoningEffort; e != "" && e != "none" && !noThinking {
 		thinking = true
 		if budgeted {
 			// Older models: explicit budget.
@@ -99,20 +105,42 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 			// The model may want the other thinking flavour: try it once, and
 			// keep the new flavour only when it actually worked.
 			c.anthropicBudgeted.CompareAndSwap(budgeted, !budgeted)
-			out, rerr := c.anthropicTry(ctx, req, obs, false)
-			if rerr != nil {
+			out, rerr := c.anthropicTry(ctx, req, obs, false, false)
+			var again *APIError
+			if rerr != nil && errors.As(rerr, &again) && again.Status == 400 && (again.Body == ae.Body || anthropicFlavourRejected(again.Body, !budgeted)) {
 				c.anthropicBudgeted.CompareAndSwap(!budgeted, budgeted)
 				return nil, err // the flavour was not the problem
 			}
-			return out, nil
+			// The other flavour got past the flavour check. When something
+			// else then stopped the call (a conversation too long, an
+			// overload, no credits), that is what the caller acts on, and
+			// the flavour stays: the first one was refused outright.
+			return out, rerr
+		}
+		if thinking && budgeted && errors.As(err, &ae) && ae.Status == 400 && anthropicThinkingTurnRequired(ae.Body) {
+			// Budgeted thinking wants the last assistant turn of a tool
+			// loop to start with a thinking block, and that turn has none
+			// (another model wrote it, so it was rebuilt from its text and
+			// calls). Adaptive thinking has no such rule. The call goes
+			// without thinking. Its reply has no thinking block either, so
+			// the rest of this tool loop goes without thinking too, decided
+			// up front from here on (anthropicToolLoopWithoutThinking); the
+			// first request after the person's next message thinks again.
+			c.anthropicTurnRuled.Store(true)
+			return c.anthropicTry(ctx, req, obs, false, true)
 		}
 		return nil, err
 	}
-	// The request was taken: its breakpoints are where the next call's
-	// cache entries are.
-	c.anthropicCached.add(cached)
+	// Once the provider has read the prompt, this request's breakpoints are
+	// where the next call's cache entries are. Not before: a stream that
+	// fails before it starts wrote nothing, and taking its breakpoints for
+	// entries would cost the retry its bridge to the entry that is there.
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
-		return c.anthropicNonStreaming(resp)
+		out, err := c.anthropicNonStreaming(resp)
+		if err == nil {
+			c.anthropicCached.add(cached)
+		}
+		return out, err
 	}
 
 	type block struct {
@@ -171,6 +199,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		}
 		switch frame.Type {
 		case "message_start":
+			c.anthropicCached.add(cached)
 			if frame.Message != nil {
 				out.Model = frame.Message.Model
 				out.Usage.Input = frame.Message.Usage.Input + frame.Message.Usage.CacheRead + frame.Message.Usage.CacheWrite
@@ -643,6 +672,36 @@ func (c *Client) anthropicNonStreaming(resp *http.Response) (*Response, error) {
 		}
 	}
 	return out, nil
+}
+
+// anthropicToolLoopWithoutThinking reports a request of the shape budgeted
+// thinking refuses: its last message is tool results, and the last
+// assistant turn, as rendered, does not start with a thinking block.
+func anthropicToolLoopWithoutThinking(req Request, msgs []map[string]any) bool {
+	if len(req.Messages) == 0 || req.Messages[len(req.Messages)-1].Role != "tool" {
+		return false
+	}
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i]["role"] != "assistant" {
+			continue
+		}
+		content, _ := msgs[i]["content"].([]map[string]any)
+		if len(content) == 0 {
+			return true
+		}
+		t, _ := content[0]["type"].(string)
+		return t != "thinking" && t != "redacted_thinking"
+	}
+	return false
+}
+
+// anthropicThinkingTurnRequired reports Anthropic's refusal of thinking
+// when the last assistant turn of a tool loop does not start with a
+// thinking block ("When `thinking` is enabled, a final `assistant` message
+// must start with a thinking block ...").
+func anthropicThinkingTurnRequired(body string) bool {
+	b := strings.ReplaceAll(strings.ToLower(body), "`", "")
+	return strings.Contains(b, "final assistant message must start with a thinking block")
 }
 
 // anthropicFlavourRejected reports a 400 that is about the thinking

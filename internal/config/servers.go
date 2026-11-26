@@ -20,6 +20,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/boundedfile"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/netx"
 )
 
 // RegisteredServer is a user-registered local or custom model server stored
@@ -365,7 +366,7 @@ func NormalizeServerURL(raw string) (candidates []string, hintProtocol string, e
 	return candidates, hintProtocol, nil
 }
 
-var probeHTTPClient = &http.Client{Timeout: 6 * time.Second}
+var probeHTTPClient = &http.Client{Timeout: 6 * time.Second, CheckRedirect: netx.SameOriginRedirects}
 
 // ProbeServer connects to any user-supplied model server URL, queries its
 // /models endpoint (plus optional server metadata such as LM Studio's

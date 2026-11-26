@@ -22,14 +22,45 @@ type turnCalls struct {
 	// speak again.
 	said bool
 	// handled: the turn answered the user or did something with the agent,
-	// so a message kept for eagent has not been left lying.
+	// so a message kept for eagent has not been left lying. dealt counts
+	// the calls that did so, so that something that arrives in the middle
+	// of a turn is dealt with only by a call made after it (handle).
 	handled bool
+	dealt   int
 	// images are the pictures view_image brought back in the call being
 	// run, recorded with its result.
 	images []event.Attachment
 	// threaded: the turn dealt with the thread's title and summary (set
 	// them, or said they still fit).
 	threaded bool
+	// stamped: the reply whose calls are being run recorded how far the
+	// title and summary are right. own lists what that reply itself put on
+	// the record for the thread list (a message, a question, the agent
+	// stopped): the model wrote the title and summary knowing it, so it is
+	// covered by them too (coverOwnWords).
+	stamped bool
+	own     []int64
+}
+
+// endsOf lists the ends of the relay called name recorded after seq.
+// Loop goroutine only.
+func (r *Runtime) endsOf(name string, after int64) []int64 {
+	var out []int64
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > after; i-- {
+		ev := r.st.Events[i]
+		var d event.RelayEndData
+		if ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Name == name {
+			out = append(out, ev.Seq)
+		}
+	}
+	return out
+}
+
+// handle notes a call that answered the user or did something with the
+// agent.
+func (tc *turnCalls) handle() {
+	tc.handled = true
+	tc.dealt++
 }
 
 // loopReadChars bounds one session_read in eagent's own conversation,
@@ -70,8 +101,14 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		important, _ := args["important"].(bool)
 		// The closing word of a session always buzzes.
 		important = important || tc.wake.final
-		r.sync(func() { r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts}) })
-		tc.spoke, tc.said, tc.handled = true, true, true
+		r.sync(func() {
+			r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts})
+			if n := len(r.st.Events); n > 0 && r.st.Events[n-1].Type == event.Message {
+				tc.own = append(tc.own, r.st.Events[n-1].Seq)
+			}
+		})
+		tc.spoke, tc.said = true, true
+		tc.handle()
 		if len(atts) > 0 {
 			return fmt.Sprintf("delivered with %d attachment(s)", len(atts)), false, false
 		}
@@ -102,6 +139,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 				r.append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: id, Text: text, Options: opts}))
 				asked := r.st.Events[len(r.st.Events)-1]
 				r.turns.saidAt, r.turns.saidSeq = asked.Time, asked.Seq
+				tc.own = append(tc.own, asked.Seq)
 				onPhone = r.phone != nil
 			}
 		})
@@ -109,18 +147,21 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return refused, true, false
 		}
 		r.ui.Ask(id, text, opts)
-		tc.spoke, tc.said, tc.handled = true, true, true
+		tc.spoke, tc.said = true, true
+		tc.handle()
 		switch {
 		case r.opts.Interactive:
 			return "asked; the answer will appear as a message from the user", false, false
 		case onPhone:
 			return "asked on the user's phone; the session waits for the answer, which will appear as a message from them", false, false
 		}
-		return "shown to the user; nobody is at a terminal and no phone is connected, so this session ends now and they can answer with `eagent resume --answer`", false, false
+		return "shown to the user; nobody is at a terminal and no phone is connected, so this session ends now and they can answer with `eagent resume " + r.sess.ID + " --answer \"...\"`", false, false
 
 	case tools.UpdateThread:
 		tc.threaded = true
-		return r.updateThread(str("title"), str("summary"), str("pin") == "true")
+		out, isErr, again = r.updateThread(str("title"), str("summary"), str("pin") == "true")
+		tc.stamped = tc.stamped || !isErr
+		return out, isErr, again
 
 	case tools.SessionRead:
 		raw, _ := args["raw"].(bool)
@@ -193,7 +234,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: id, Kind: s.Kind, Spec: spec, Note: note, Next: next}))
 			r.armSchedule(id, next)
 		})
-		tc.handled = true
+		tc.handle()
 		return fmt.Sprintf("timer %s set (%s); it first comes due at %s", id, s.Kind, next.In(r.st.Location()).Format("15:04:05")), false, false
 
 	case tools.CancelSchedule:
@@ -213,13 +254,30 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			r.append(event.New(event.ScheduleCancel, event.ActorEagent, event.ScheduleCancelData{ID: id}))
 			msg = "timer " + id + " cancelled"
 		})
-		tc.handled = tc.handled || !bad
+		if !bad {
+			tc.handle()
+		}
 		return msg, bad, bad
 	}
 	// The rest drive the agent.
+	var before int64
+	var controlled string
+	if c.Name == tools.RelayControl {
+		r.sync(func() {
+			before = r.st.LastSeq()
+			if rel, err := r.resolveRelay(str("relay")); err == nil {
+				controlled = rel.Name
+			}
+		})
+	}
 	out, isErr = r.relayTool(c.Name, str, num, list, false)
+	if c.Name == tools.RelayControl && !isErr && controlled != "" {
+		// The agent this call stopped (or replaced) ending is the reply's
+		// own news; another agent ending meanwhile is not.
+		r.sync(func() { tc.own = append(tc.own, r.endsOf(controlled, before)...) })
+	}
 	if !isErr && !tools.Looks(c.Name) {
-		tc.handled = true
+		tc.handle()
 	}
 	switch {
 	case tools.Looks(c.Name):

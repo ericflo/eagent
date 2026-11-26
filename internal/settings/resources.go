@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"text/template"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
 type BundleRequest struct {
@@ -47,6 +49,65 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		return cfg, &Error{Status: 422, Message: err.Error()}
 	}
 	return cfg, nil
+}
+
+// CheckRemoteProfiles refuses agent profiles in a configuration a connector
+// would save, unless this machine already defines each one exactly, under
+// the same name: in config.json, a saved bundle, the configuration in force
+// or the built-in ones. A profile names a program and its arguments, so a
+// connector may not write one; the remote settings editor never offers
+// them for the same reason. Copying a saved bundle (from) or restoring its
+// bytes keeps working, since its profiles are already on this machine.
+func (s *Service) CheckRemoteProfiles(cfg config.Config) error {
+	return s.checkRemoteProfiles(cfg, nil)
+}
+
+// checkRemoteProfiles also knows the profiles in restored: bundle bytes an
+// undo puts back, taken from the record eagent kept of what was on this
+// machine before, never from the caller.
+func (s *Service) checkRemoteProfiles(cfg config.Config, restored []byte) error {
+	if len(cfg.Relay.Profiles) == 0 {
+		return nil
+	}
+	known := []map[string]config.RelayProfile{config.BuiltinRelayProfiles(), config.Resolve(s.Project, s.Preset, s.Bundle).Effective.Relay.Profiles}
+	if len(restored) > 0 {
+		var prior struct {
+			Relay config.Relay `json:"relay"`
+		}
+		if json.Unmarshal(restored, &prior) == nil {
+			known = append(known, prior.Relay.Profiles)
+		}
+	}
+	if c, err := config.LoadBundle(s.Project, "", ""); err == nil {
+		known = append(known, c.Relay.Profiles)
+	}
+	names, _ := config.ListBundles(s.Project)
+	for _, n := range names {
+		if c, err := config.LoadBundle(s.Project, "", n); err == nil {
+			known = append(known, c.Relay.Profiles)
+		}
+	}
+	for name, p := range cfg.Relay.Profiles {
+		if !slices.ContainsFunc(known, func(m map[string]config.RelayProfile) bool {
+			have, ok := m[name]
+			return ok && reflect.DeepEqual(have, p)
+		}) {
+			return &Error{Status: 422, Message: fmt.Sprintf("relay.profiles.%s: an agent profile names a program to run, so it is added or changed on this machine (eagent's web UI or %s), not from a connector", name, config.File(s.Project))}
+		}
+	}
+	return nil
+}
+
+// PrepareRestore is PrepareResource for an undo that puts back a bundle's
+// bytes from eagent's own record of the command it reverses (restored).
+// Agent profiles those bytes carry were on this machine, so they are
+// allowed; everything else is held to today's policy as usual. The caller
+// passes the record's bytes, never anything the request carried.
+func (s *Service) PrepareRestore(editor *config.Editor, inverse control.Proposal, grant control.Grant, restored []byte) (ResourceChange, error) {
+	if raw, _ := inverse.Parameters["config_json"].(string); inverse.Operation != "bundle.save" || raw != string(restored) {
+		restored = nil
+	}
+	return s.prepareResource(editor, inverse, grant, restored)
 }
 
 func (s *Service) SaveBundle(ctx context.Context, b BundleRequest) (string, error) {

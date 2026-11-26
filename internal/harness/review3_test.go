@@ -131,13 +131,13 @@ func TestResumedConversationThatIsRefusedIsRestartedFromADossier(t *testing.T) {
 	prompt.Store(21_000)
 	s.type_("@e hello")
 	s.waitFor("the first dossier", func() bool { return len(s.dossiers()) == 1 })
-	s.waitFor("the first answer", func() bool { return s.ui.messageCount() >= 1 })
+	s.waitFor("the first answer", func() bool { return s.ui.answerCount() >= 1 })
 	s.settled()
 	// A call that works in the restarted conversation.
-	said := s.ui.messageCount()
+	said := s.ui.answerCount()
 	prompt.Store(3_000)
 	s.type_("@e and again")
-	s.waitFor("the answer in the new conversation", func() bool { return s.ui.messageCount() > said })
+	s.waitFor("the answer in the new conversation", func() bool { return s.ui.answerCount() > said })
 	s.settled()
 	var calls, first int
 	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, s.rt.turns.firstPrompt })
@@ -174,7 +174,7 @@ func TestResumedConversationThatIsRefusedIsRestartedFromADossier(t *testing.T) {
 	if m := gaveUp(); m != "" {
 		t.Fatalf("the user was told a restart cannot help, in a conversation that had worked:\n%s", m)
 	}
-	s2.waitFor("the answer after the resume", func() bool { return s2.ui.messageCount() >= 1 })
+	s2.waitFor("the answer after the resume", func() bool { return s2.ui.answerCount() >= 1 })
 	if gotCalls != calls || gotFirst != first {
 		t.Fatalf("resumed with %d calls and a first prompt of %d, want %d and %d", gotCalls, gotFirst, calls, first)
 	}
@@ -251,7 +251,8 @@ func TestRefusedFirstRequestKeepsTheMessageThatSetItOff(t *testing.T) {
 		})
 	})
 	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
-	s.waitFor("the answer", func() bool { return s.ui.messageCount() >= 1 })
+	// The user is first told the session is being reread (rereadNotice).
+	s.waitFor("the answer", func() bool { return r5Told(s, "Here.") == 1 })
 	if d := s.dossiers()[0]; d.CoversSeq != 0 || !d.CoversNone {
 		t.Fatalf("the dossier says it took in up to %d (none: %v), and no call had seen anything", d.CoversSeq, d.CoversNone)
 	}

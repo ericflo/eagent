@@ -419,8 +419,12 @@ func reportFences(text string, lineStart bool, fence, open string) (string, stri
 func (p *phone) postRelayScreen(name, screen string) {
 	body := "```\n" + strings.TrimRight(redactSecrets(screen), "\n") + "\n```"
 	p.enqueue(func(ctx context.Context) {
-		if msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}}); err == nil {
+		// Without a status the post would clear the thread's line, which
+		// may be saying the agent needs the user.
+		act := p.attach()
+		if msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}, Activity: act}); err == nil {
 			p.remember(msg.ID)
+			p.markSent(act)
 		}
 	})
 }

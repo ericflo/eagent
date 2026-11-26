@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,6 +32,10 @@ func (claudeAgent) chooseID() string      { return newUUID() }
 func (claudeAgent) ready(screen string) bool {
 	return strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "for shortcuts")
 }
+
+// busy: Claude's footer stays while it works; its spinner line says how
+// to stop it.
+func (claudeAgent) busy(screen string) bool { return strings.Contains(screen, "esc to interrupt") }
 
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
@@ -90,9 +95,25 @@ func (claudeAgent) locate(_ Spec, _ time.Time, innerID string) (string, string) 
 }
 
 // afterTurn leaves the text in the spool the Stop hook reads: when Claude's
-// turn ends, the hook hands it over as the next thing to do.
+// turn ends, the hook hands it over as the next thing to do. Without the
+// hook nothing would read it, so the seat types it now and Claude queues it.
 func (claudeAgent) afterTurn(s *Seat, id, text string) error {
+	if s.spec.Hook == "" {
+		return errors.New("no Stop hook to hand it over")
+	}
 	return spoolMessage(s.spec.Spool, id, text)
+}
+
+// poll types what still waits in the spool once Claude has stayed idle a
+// while: its Stop hook does not run on an interrupt, and a message held
+// just as a turn ended, or before a restart, finds no turn to end.
+func (claudeAgent) poll(s *Seat, now time.Time) { s.releaseHeld(now) }
+
+// canResume: Claude saves a session only when its first message is sent,
+// and exits at once on --resume of an id it never saved.
+func (a claudeAgent) canResume(spec Spec, innerID string) bool {
+	path, _ := a.locate(spec, time.Time{}, innerID)
+	return path != ""
 }
 
 // RunStopHook is Claude Code's Stop hook for a relay: it takes every message
@@ -101,9 +122,31 @@ func (claudeAgent) afterTurn(s *Seat, id, text string) error {
 // turn end.
 func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
+	// A held command is left for the seat to type at the prompt: handed
+	// over here it would be read as text, not run.
+	taken, texts := takeSpool(spool, false)
+	for _, path := range taken {
+		_ = os.Remove(path)
+	}
+	if len(texts) == 0 {
+		return 0
+	}
+	out, _ := json.Marshal(map[string]string{"decision": "block", "reason": strings.Join(texts, "\n\n")})
+	fmt.Fprintln(stdout, string(out))
+	return 0
+}
+
+// takeSpool claims the next messages waiting in spool, oldest first,
+// renaming each to .taken first so the Stop hook and the seat never both
+// hand one over. A message that is the agent's own command ("/compact")
+// only runs typed at its prompt on its own: the messages before it are
+// claimed without it, and with command set one that comes first is
+// claimed alone (without, it and what follows stay). It returns the
+// claimed files and their texts.
+func takeSpool(spool string, command bool) (taken, texts []string) {
 	entries, err := os.ReadDir(spool)
 	if err != nil {
-		return 0
+		return nil, nil
 	}
 	var names []string
 	for _, e := range entries {
@@ -112,25 +155,29 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 		}
 	}
 	sort.Strings(names)
-	var texts []string
 	for _, name := range names {
 		path := filepath.Join(spool, name)
-		taken := path + ".taken"
-		if os.Rename(path, taken) != nil {
-			continue // another hook got it
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue // another taker got it
 		}
-		raw, err := os.ReadFile(taken)
-		if err == nil && strings.TrimSpace(string(raw)) != "" {
-			texts = append(texts, strings.TrimSpace(string(raw)))
+		text := strings.TrimSpace(string(raw))
+		isCommand := isAgentCommand(text)
+		if isCommand && (len(taken) > 0 || !command) {
+			break
 		}
-		_ = os.Remove(taken)
+		if os.Rename(path, path+".taken") != nil {
+			continue // another taker got it
+		}
+		taken = append(taken, path+".taken")
+		if text != "" {
+			texts = append(texts, text)
+		}
+		if isCommand {
+			break
+		}
 	}
-	if len(texts) == 0 {
-		return 0
-	}
-	out, _ := json.Marshal(map[string]string{"decision": "block", "reason": strings.Join(texts, "\n\n")})
-	fmt.Fprintln(stdout, string(out))
-	return 0
+	return taken, texts
 }
 
 // ---- choices ------------------------------------------------------------------

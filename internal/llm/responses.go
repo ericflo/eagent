@@ -397,8 +397,11 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 						if reasoningUnreplayable(native) {
 							native = nil
 						}
-					} else {
-						native = dropReasoning(native)
+					} else if kept := dropReasoning(native); len(kept) != len(native) {
+						// The turn's other items were made with the
+						// reasoning dropped here, and OpenAI refuses them
+						// without it: rebuild the turn instead.
+						native = nil
 					}
 				}
 				if len(native) > 0 {
@@ -443,6 +446,4 @@ func responsesInputFor(req Request, replayReasoning bool, host, model string) []
 }
 
 // sameHost compares two base URLs ignoring a trailing slash.
-func sameHost(a, b string) bool {
-	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
-}
+func sameHost(a, b string) bool { return SameBaseURL(a, b) }

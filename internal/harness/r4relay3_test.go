@@ -115,7 +115,8 @@ func TestSwitchFromABriefedAgentQuotesWhatTheUserToldItOnce(t *testing.T) {
 }
 
 // Once Claude has finished a turn after its brief, its own report describes
-// the work: the switch to pi types today's direct brief from Claude.
+// the work: the switch to pi types a direct brief from Claude. It still
+// quotes the task the user gave Codex, whose work Claude took over.
 func TestSwitchFromABriefedAgentThatFinishedATurnIsADirectHandOver(t *testing.T) {
 	claude, pi := newFakeSeat("two"), newFakeSeat("done")
 	rt, g, _ := r43Start(t, claude, pi)
@@ -129,7 +130,7 @@ func TestSwitchFromABriefedAgentThatFinishedATurnIsADirectHandOver(t *testing.T)
 	var dir string
 	rt.sync(func() { dir = rt.st.Relays["claude"].Dir })
 	r43Step(t, rt, g, map[string]any{"action": "switch", "profile": "pi", "relay": "claude"})
-	want := fmt.Sprintf("You are taking over this work from Claude, which was working in %s. Its full session log is %s (JSONL) if you need detail.\n\nThe user's instructions so far, verbatim, oldest first:\n\nClaude's last report:\ntwo\n\nCheck the working tree and recent commits, then continue where it left off.", dir, r43ClaudeLog)
+	want := fmt.Sprintf("You are taking over this work from Claude, which was working in %s. Its full session log is %s (JSONL) if you need detail.\n\nThe user's instructions so far, verbatim, oldest first:\n- %s\n\nClaude's last report:\ntwo\n\nCheck the working tree and recent commits, then continue where it left off.", dir, r43ClaudeLog, r4Task)
 	r43Typed(t, pi, want)
 }
 
