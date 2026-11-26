@@ -722,6 +722,10 @@ scan:
 	r.ui.Say(rereadNotice)
 }
 
+// unseenHeading opens the part of a dossier that lists what the user sent
+// eagent that no look has taken in and the new conversation does not carry.
+const unseenHeading = "NOT SEEN YET"
+
 // stillFullNotice opens what the user is told when they write to eagent
 // after it found no restart can make room.
 const stillFullNotice = "I can't answer "
