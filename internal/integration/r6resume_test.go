@@ -181,7 +181,9 @@ func TestWhereAStoppedSessionGoesOnReadingItsThread(t *testing.T) {
 		{"three messages, by time: the first", nil, []said{{"m1", "a", time.Minute, nil, ""}, {"m2", "b", 2 * time.Minute, nil, ""}, {"m3", "c", 3 * time.Minute, nil, ""}}, "m1"},
 		{"messages from before the stop are not taken again, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}}, ""},
 		{"an older message, then a new one, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
-		{"an agent's own post and a taken-back message are passed over", nil, []said{{"x1", "mirror", time.Minute, nil, "token"}, {"m1", "go on", 2 * time.Minute, nil, ""}}, "m1"},
+		{"an agent's own post and a taken-back message are passed over", nil, []said{{"x1", "mirror", time.Minute, nil, "token"}, {"d1", "never mind", 90 * time.Second, nil, "deleted"}, {"m1", "go on", 2 * time.Minute, nil, ""}}, "m1"},
+		{"a run by an eagent without the ledger is read by time", []event.Event{r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}}, ""},
+		{"a run by an eagent without the ledger, then a new message", []event.Event{r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
 		{"ledger: after the last message taken in", []event.Event{r6Read("start"), r6Took("m1", "a")}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
 		{"ledger: a message received just before a hard stop is not lost", []event.Event{r6Read("m1")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Second, nil, ""}, {"m3", "c", time.Minute, nil, ""}}, "m2"},
 		{"ledger: everything taken in", []event.Event{r6Read("m1"), r6Took("m2", "b")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Minute, nil, ""}}, ""},
@@ -200,7 +202,12 @@ func TestWhereAStoppedSessionGoesOnReadingItsThread(t *testing.T) {
 				f.say(sid, m.id, m.body, stop.Add(m.at), m.meta)
 				if m.origin != "" {
 					f.mu.Lock()
-					f.threads[sid][len(f.threads[sid])-1]["origin"] = m.origin
+					last := f.threads[sid][len(f.threads[sid])-1]
+					if m.origin == "deleted" {
+						last["deleted"] = true // a tombstone: the person took it back
+					} else {
+						last["origin"] = m.origin
+					}
 					f.mu.Unlock()
 				}
 			}
