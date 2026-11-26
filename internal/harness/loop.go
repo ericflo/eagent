@@ -986,7 +986,7 @@ func (r *Runtime) turn(w wake) {
 			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
 				cut = true
 				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
-			case strings.TrimSpace(resp.Text) != "" && len(resp.ToolCalls) == 0 && !nudged:
+			case len(resp.ToolCalls) == 0 && !nudged:
 				nudged = true
 				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
 			default:
