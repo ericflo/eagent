@@ -537,20 +537,14 @@ func SavePresetName(p control.Proposal) string {
 	return ""
 }
 
-// ConfigFromValues constructs a standalone Config representing a running
+// ConfigFromRoutes constructs a standalone Config representing a running
 // session's current models and runtime settings so it can be saved as a
-// reusable project preset, for a caller with no session at hand: each
-// route is looked up in the project's own configuration; see
-// ConfigFromRoutes.
-func ConfigFromValues(project string, values Values) (config.Config, error) {
-	return ConfigFromRoutes(project, values, nil)
-}
-
-// ConfigFromRoutes is ConfigFromValues with the routes the session runs,
-// as configured, by route key (Controller.Routes): those are saved as they
+// reusable project preset. running holds the routes the session runs, as
+// configured, by route key (Controller.Routes): those are saved as they
 // are, whatever the session was started on and wherever the preset is
-// saved. A route the session did not hand over is looked up in the
-// project's own configuration, else picked from the catalog.
+// saved. A route the session did not hand over (a controller with no
+// Routes) is looked up in the project's own configuration, else picked
+// from the catalog.
 func ConfigFromRoutes(project string, values Values, running map[string]config.ModelRoute) (config.Config, error) {
 	cfg, err := config.LoadBundle(project, "", "")
 	if err != nil {

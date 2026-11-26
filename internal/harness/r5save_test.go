@@ -141,7 +141,9 @@ func savePreset(t *testing.T, rt *Runtime, target string) config.ModelRoute {
 // runs now and wherever the preset is saved:
 //   - on its first route, the chain it was started on;
 //   - on its fallback, that fallback and what follows it;
-//   - on a model picked from the sheet, the route that pick resolved to.
+//   - on a model picked from the sheet, the route that pick resolved to;
+//   - after an effort-only change, its chain at that effort, and after
+//     the fallback then takes over, that fallback and what follows it.
 //
 // Saving over the preset the session runs applies to a session started on
 // a saved preset only (the project's config.json is not a preset, and a
@@ -156,7 +158,7 @@ func TestAPresetSavedFromASessionHoldsTheRoutesItRuns(t *testing.T) {
 	}
 	useFakeRelays(t, newFakeSeat("ok"))
 	for _, start := range saveStarts(t) {
-		for _, now := range []string{"primary", "fallback", "picked"} {
+		for _, now := range []string{"primary", "fallback", "picked", "effort", "effort-then-fallback"} {
 			for _, target := range []string{"new", "other", "own"} {
 				if target == "own" && start.own == "" {
 					continue
@@ -177,6 +179,18 @@ func TestAPresetSavedFromASessionHoldsTheRoutesItRuns(t *testing.T) {
 							t.Fatal(err)
 						}
 						want.ReasoningEffort = start.pick.Effort
+					case "effort", "effort-then-fallback":
+						// Only the effort of the first route changes; its
+						// chain stays. Then, in the second case, that route
+						// fails and the fallback after it takes over.
+						if err := pickOnFallback(rt, func(p *runtimecontrol.Route) { p.Effort = "medium" }); err != nil {
+							t.Fatal(err)
+						}
+						want.ReasoningEffort = "medium"
+						if now == "effort-then-fallback" {
+							moveToFallback(rt)
+							want = *cfg.Model.Fallback
+						}
 					}
 					name := map[string]string{"new": "fresh", "other": "other", "own": start.own}[target]
 					got := savePreset(t, rt, name)
@@ -275,5 +289,58 @@ func TestARunningSessionHandsItsRoutesToAPresetSavedFromTheApp(t *testing.T) {
 	}
 	if chainText(saved.Model) != chainText(chain) || saved.TickSeconds != 45 {
 		t.Fatalf("saved (tick %d):\n%sthe session runs:\n%s", saved.TickSeconds, chainText(saved.Model), chainText(chain))
+	}
+}
+
+// A pick and a save in one change: the preset is what the session runs
+// once the change is applied (runningRoutes resolves the pick, as the
+// swap does), for a new model and for an effort-only change, on the first
+// route and on the fallback.
+func TestAPickAndASaveInOneChangeSaveWhatTheSessionThenRuns(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	t.Setenv("EAGENT_TEST_KEY2", "y")
+	t.Setenv("OPENROUTER_API_KEY", "z")
+	t.Setenv("OPENAI_API_KEY", "w")
+	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_SUMMARIZER_MODE", "EAGENT_SUMMARIZER_MODEL", "EAGENT_MODEL"} {
+		t.Setenv(n, "")
+	}
+	useFakeRelays(t, newFakeSeat("ok"))
+	for _, start := range saveStarts(t) {
+		for _, onFallback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fallback=%v", start.name, onFallback), func(t *testing.T) {
+				rt, _ := startSaveSession(t, start)
+				if onFallback {
+					moveToFallback(rt)
+				}
+				for _, pick := range []func(*runtimecontrol.Route){
+					func(p *runtimecontrol.Route) { *p = start.pick },
+					func(p *runtimecontrol.Route) { p.Effort = "medium" },
+				} {
+					values := rt.activeSettings
+					routes := map[string]runtimecontrol.Route{}
+					for k, v := range values.Routes {
+						routes[k] = v
+					}
+					p := routes[runtimecontrol.RouteEagent]
+					pick(&p)
+					if p == values.Routes[runtimecontrol.RouteEagent] {
+						continue
+					}
+					routes[runtimecontrol.RouteEagent] = p
+					values.Routes, values.Config = routes, "bundle:one"
+					running, err := rt.runningRoutes(values.Routes)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := pickOnFallback(rt, func(r *runtimecontrol.Route) { *r = p }); err != nil {
+						t.Fatal(err)
+					}
+					runs := rt.models[event.ActorEagent].conf
+					if chainText(running[runtimecontrol.RouteEagent]) != chainText(runs) {
+						t.Fatalf("saved:\n%sruns:\n%s", chainText(running[runtimecontrol.RouteEagent]), chainText(runs))
+					}
+				}
+			})
+		}
 	}
 }
