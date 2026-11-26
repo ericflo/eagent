@@ -30,7 +30,7 @@ func TestChoosingAnInlinePresetLiveKeepsADedicatedSummarizer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range settings.SessionConfigSuggestions(project) {
+	for _, s := range settings.SessionConfigSuggestions(project, true) {
 		if s.Value != "anthropic-high" {
 			continue
 		}

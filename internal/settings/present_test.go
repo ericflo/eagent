@@ -81,7 +81,7 @@ func TestSessionConfigSuggestionsShowWhatEachRuns(t *testing.T) {
 	if err := os.WriteFile(config.File(project), []byte(`{"preset":"openai-med","model":{"reasoning_effort":"medium"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configs := SessionConfigSuggestions(project)
+	configs := SessionConfigSuggestions(project, true)
 	if len(configs) != len(ConfigChoices(project)) {
 		t.Fatalf("%d configuration suggestions for %d choices", len(configs), len(ConfigChoices(project)))
 	}
@@ -107,7 +107,7 @@ func TestSessionConfigSuggestionsShowWhatEachRuns(t *testing.T) {
 	if err := os.WriteFile(config.File(project), []byte(`{"summarizer":{"mode":"dedicated"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	configs = SessionConfigSuggestions(project)
+	configs = SessionConfigSuggestions(project, true)
 	got = configs[slices.IndexFunc(configs, func(s control.Suggestion) bool { return s.Value == "glm" })]
 	if got.Implies["/routes/summarizer/model"] != "zai-org/GLM-5.3" || !strings.Contains(got.Detail, "summaries on") {
 		t.Errorf("dedicated glm = %+v", got)

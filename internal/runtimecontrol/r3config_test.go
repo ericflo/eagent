@@ -118,7 +118,7 @@ func TestChoosingAPresetLiveGivesItsModelOverTheFilesModel(t *testing.T) {
 		if got := out.Routes[RouteEagent]; got.Model != preset.Model.Model || got.Provider != "anthropic" {
 			t.Fatalf("%s: after choosing anthropic-high the route is %+v", name, got)
 		}
-		for _, s := range settings.SessionConfigSuggestions(project) {
+		for _, s := range settings.SessionConfigSuggestions(project, true) {
 			if s.Value == "anthropic-high" && s.Implies["/routes/eagent/model"] != preset.Model.Model {
 				t.Fatalf("%s: the suggestion implies %v", name, s.Implies)
 			}

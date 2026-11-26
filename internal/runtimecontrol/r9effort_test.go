@@ -28,7 +28,7 @@ func TestR9GLMSuggestionImpliesAnEffortTheSwitchTakes(t *testing.T) {
 				t.Fatal(err)
 			}
 			var glm *control.Suggestion
-			for _, s := range settings.SessionConfigSuggestions(project) {
+			for _, s := range settings.SessionConfigSuggestions(project, true) {
 				if s.Value == "glm" {
 					glm = &s
 				}

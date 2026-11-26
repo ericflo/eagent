@@ -22,7 +22,7 @@ func r10Write(t *testing.T, path, raw string) {
 
 func r10Suggestion(t *testing.T, project, value string) control.Suggestion {
 	t.Helper()
-	for _, s := range settings.SessionConfigSuggestions(project) {
+	for _, s := range settings.SessionConfigSuggestions(project, false) {
 		if s.Value == value {
 			return s
 		}

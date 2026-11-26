@@ -230,9 +230,11 @@ func ConfigChoices(project string) []string {
 // SessionConfigSuggestions describe each configuration a running session may
 // switch to as it would actually load in this project (its own settings on
 // top), and the provider, model and effort it gives the session's routes,
-// keyed /routes/eagent/... and, when its summarizer is dedicated,
-// /routes/summarizer/..., so a reader can show what a choice brings.
-func SessionConfigSuggestions(project string) []control.Suggestion {
+// keyed /routes/eagent/... and, when its summarizer is dedicated and the
+// session has a summarizer route, /routes/summarizer/..., so a reader can
+// show what a choice brings. A session without one (summaries inline)
+// keeps them inline whatever it chooses (runtimecontrol.ApplyValues).
+func SessionConfigSuggestions(project string, summarizer bool) []control.Suggestion {
 	file := map[string]json.RawMessage{}
 	if raw, err := readProjectFile(project); err == nil {
 		file = raw
@@ -260,6 +262,9 @@ func SessionConfigSuggestions(project string) []control.Suggestion {
 			cfg, err = config.ChosenPresetWithFile(project, preset, file)
 		}
 		if err == nil {
+			if !summarizer {
+				cfg.Summarizer.Mode = config.SummarizerInline
+			}
 			detail := lineup(project, cfg)
 			if bundle != "" && cfg.Description != "" {
 				detail += " — " + cfg.Description

@@ -81,7 +81,9 @@ func decorateSessionView(project string, view *settings.RemoteView, grant contro
 	// can still be typed in.
 	// The configuration field offers each configuration with what it would
 	// set the routes to.
-	configs := settings.SessionConfigSuggestions(project)
+	// A session without a summarizer route keeps its summaries inline.
+	_, summarizer := view.Snapshot.Saved["/routes/summarizer/model"]
+	configs := settings.SessionConfigSuggestions(project, summarizer)
 	// A relay's model list (from the view) stays beside them.
 	if view.Descriptor.Suggestions == nil {
 		view.Descriptor.Suggestions = map[string][]control.Suggestion{}

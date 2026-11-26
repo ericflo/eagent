@@ -67,7 +67,7 @@ func TestPresetSuggestionsIgnoreEnvConfig(t *testing.T) {
 	t.Setenv("EAGENT_CONFIG", "cheap")
 	want := config.Defaults()
 	config.Presets["anthropic-high"](&want)
-	lists := map[string][]control.Suggestion{"project": PresetSuggestions(project), "session": SessionConfigSuggestions(project)}
+	lists := map[string][]control.Suggestion{"project": PresetSuggestions(project), "session": SessionConfigSuggestions(project, true)}
 	for list, suggestions := range lists {
 		found := false
 		for _, s := range suggestions {
