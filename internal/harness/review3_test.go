@@ -45,7 +45,14 @@ func TestOneCallTurnsDoNotRetryTheSameWakeAtOnce(t *testing.T) {
 			before := s.model.count(testModel)
 			s.type_("@e what is Codex up to?")
 			s.waitFor("the call for the message", func() bool { return s.model.count(testModel) > before })
-			time.Sleep(300 * time.Millisecond)
+			// A retry at once starts on the tick that ends the turn; four
+			// more ticks for good measure.
+			s.waitFor("the turn to end", func() bool {
+				busy := true
+				s.rt.sync(func() { busy = s.rt.turns.busy })
+				return !busy
+			})
+			time.Sleep(4 * loopPoll)
 			if n := s.model.count(testModel) - before; n != 1 {
 				t.Fatalf("one message made %d calls at once with one call to a turn", n)
 			}
