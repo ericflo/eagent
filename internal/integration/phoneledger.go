@@ -95,7 +95,16 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 	l := ReadPhoneLedger(evs)
 	ext := "eagent:" + info.ID
 	fallback := func(err error) (finalechat.Message, bool, error) {
+		if err != nil && l.Keeps {
+			// An earlier message may wait in the thread we could not read;
+			// the trigger would jump it, and the cursor would then pass it
+			// for good. The next sweep, which reads the thread, resumes the
+			// session in order.
+			return finalechat.Message{}, false, err
+		}
 		if trigger != nil && l.Takeable(*trigger) {
+			// The thread lists nothing newer (its listing can lag the
+			// stream), or a record without the ledger, as before.
 			return *trigger, true, nil
 		}
 		return finalechat.Message{}, false, err
