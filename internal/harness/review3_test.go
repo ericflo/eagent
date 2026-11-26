@@ -140,7 +140,7 @@ func TestResumedConversationThatIsRefusedIsRestartedFromADossier(t *testing.T) {
 	s.waitFor("the answer in the new conversation", func() bool { return s.ui.answerCount() > said })
 	s.settled()
 	var calls, first int
-	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, s.rt.turns.firstPrompt })
+	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, int(s.rt.turns.firstPrompt) })
 	if calls == 0 || first != 3_000 {
 		t.Fatalf("before the stop: %d calls, first prompt %d", calls, first)
 	}
@@ -175,7 +175,7 @@ func TestResumedConversationThatIsRefusedIsRestartedFromADossier(t *testing.T) {
 		t.Fatalf("the user was told a restart cannot help, in a conversation that had worked:\n%s", m)
 	}
 	s2.waitFor("the answer after the resume", func() bool { return s2.ui.answerCount() >= 1 })
-	if gotCalls != calls || gotFirst != first {
+	if gotCalls != calls || int(gotFirst) != first {
 		t.Fatalf("resumed with %d calls and a first prompt of %d, want %d and %d", gotCalls, gotFirst, calls, first)
 	}
 }
@@ -196,7 +196,7 @@ func TestSilentLooksRecordTheirFirstPrompt(t *testing.T) {
 	s.waitFor("the second turn", func() bool { return len(s.events(event.RelayTurn)) == 2 })
 	s.settled()
 	var first, calls int
-	s.rt.sync(func() { first, calls = s.rt.turns.firstPrompt, s.rt.turns.subCalls })
+	s.rt.sync(func() { first, calls = int(s.rt.turns.firstPrompt), s.rt.turns.subCalls })
 	if calls < 2 || first != 1000 {
 		t.Fatalf("live: %d calls, first prompt %d", calls, first)
 	}
@@ -207,7 +207,7 @@ func TestSilentLooksRecordTheirFirstPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rt.turns.firstPrompt != first || rt.turns.subCalls != calls {
+	if int(rt.turns.firstPrompt) != first || rt.turns.subCalls != calls {
 		t.Fatalf("resumed with a first prompt of %d and %d calls, want %d and %d", rt.turns.firstPrompt, rt.turns.subCalls, first, calls)
 	}
 }

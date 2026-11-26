@@ -337,7 +337,7 @@ func TestASentBackFirstCallIsTheConversationsFirstCall(t *testing.T) {
 	// While the pass is held: what the running session counts for the
 	// conversation, and what a resumed one would read back.
 	var calls, first int
-	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, s.rt.turns.firstPrompt })
+	s.rt.sync(func() { calls, first = s.rt.turns.subCalls, int(s.rt.turns.firstPrompt) })
 	if first != 19_000 || calls < 2 {
 		t.Fatalf("the conversation counts %d calls and a first prompt of %d, want at least 2 and 19000", calls, first)
 	}
@@ -347,7 +347,7 @@ func TestASentBackFirstCallIsTheConversationsFirstCall(t *testing.T) {
 	}
 	var again turnState
 	again.init(state.Replay(evs))
-	if again.subCalls != calls || again.firstPrompt != first {
+	if again.subCalls != calls || int(again.firstPrompt) != first {
 		t.Fatalf("a resumed session would count %d calls and a first prompt of %d; the running one has %d and %d", again.subCalls, again.firstPrompt, calls, first)
 	}
 	release()

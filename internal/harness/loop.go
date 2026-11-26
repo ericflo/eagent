@@ -130,7 +130,7 @@ type turnState struct {
 	// one that did, written to the log in one line now and then.
 	silent event.ChecksData
 	// promptTokens is the size of the last prompt, recorded or not.
-	promptTokens int
+	promptTokens provTokens
 
 	// After a failed call: how many in a row, when the next try is due, and
 	// the newest event at the time (a message from the user after it does
@@ -149,7 +149,7 @@ type turnState struct {
 	// how long its first prompt was, whether the provider refused a prompt
 	// as too long, and when rotating the files last failed.
 	subCalls        int
-	firstPrompt     int
+	firstPrompt     provTokens
 	overflowed      bool
 	futileLogged    bool
 	rereadTold      bool // the user was told what they wrote waits on this dossier pass
@@ -227,7 +227,7 @@ func (t *turnState) init(st *state.State) {
 			t.worthy = ev.Seq
 		}
 	}
-	t.promptTokens = st.ContextTokens()
+	t.promptTokens = provTokens(st.ContextTokens())
 	// How many calls the conversation in the current file has made, and how
 	// long its first prompt was: the rollover guard (needsDossier) reads
 	// them to tell a conversation that was too long from its first call,
@@ -245,7 +245,7 @@ func (t *turnState) init(st *state.State) {
 				var d event.AssistantData
 				if ev.Decode(&d) == nil {
 					if t.subCalls == 0 {
-						t.firstPrompt = d.Usage.Input
+						t.firstPrompt = provTokens(d.Usage.Input)
 					}
 					t.subCalls++
 				}
@@ -263,9 +263,9 @@ func (t *turnState) init(st *state.State) {
 						// was too high would switch restarts off.
 						switch {
 						case d.FirstPrompt > 0:
-							t.firstPrompt = d.FirstPrompt
+							t.firstPrompt = provTokens(d.FirstPrompt)
 						case d.Count == 1:
-							t.firstPrompt = d.Usage.Input
+							t.firstPrompt = provTokens(d.Usage.Input)
 						}
 					}
 					t.subCalls += d.Count
@@ -717,11 +717,11 @@ func (r *Runtime) quietFor() time.Duration {
 }
 
 // contextTokens is the size of eagent's last prompt.
-func (r *Runtime) contextTokens() int {
+func (r *Runtime) contextTokens() provTokens {
 	if r.turns.promptTokens > 0 {
 		return r.turns.promptTokens
 	}
-	return r.st.ContextTokens()
+	return provTokens(r.st.ContextTokens())
 }
 
 // ---- a turn ---------------------------------------------------------------
@@ -1348,7 +1348,7 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	}
 	// The first prompt is the conversation's, whichever model counted it,
 	// as a resumed session reads it from the record (turnState.init).
-	r.called(resp.Usage.Input)
+	r.called(provTokens(resp.Usage.Input))
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
@@ -1364,7 +1364,7 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 // (needsDossier) reads both, and a resumed session rebuilds them from the
 // record (turnState.init), so every call that is recorded there, alone or
 // in a batch of silent ones, is counted here. Loop goroutine.
-func (r *Runtime) called(promptTokens int) {
+func (r *Runtime) called(promptTokens provTokens) {
 	t := &r.turns
 	if promptTokens > 0 && t.subCalls == 0 {
 		t.firstPrompt = promptTokens
@@ -1402,7 +1402,7 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 		t.silent.SeenSeq = seen
 		r.looked(seen, resp, w)
 	} else {
-		r.called(resp.Usage.Input)
+		r.called(provTokens(resp.Usage.Input))
 	}
 	if t.silent.Count >= 20 {
 		r.flushSilent()
@@ -1413,11 +1413,11 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 // served it. One still out when the model changed counts the old model's
 // tokens; the new model's size comes from its own first call. Loop
 // goroutine.
-func (r *Runtime) promptOf(resp *llm.Response) int {
+func (r *Runtime) promptOf(resp *llm.Response) provTokens {
 	if !r.st.OnRoute(event.ActorEagent, resp.BaseURL, resp.Asked) {
 		return 0
 	}
-	return resp.Usage.Input
+	return provTokens(resp.Usage.Input)
 }
 
 // flushSilent records the looks that left no trace since the last record,
