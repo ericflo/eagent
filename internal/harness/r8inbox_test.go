@@ -10,12 +10,12 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// An inbox file that carries an id (PostInbox gives each one) is taken
+// An inbox file that gives its own name as its id (PostInbox's do) is taken
 // exactly once: the user.message or user.answer it becomes is written
 // before the file is removed and carries the id, so a removal that fails
 // (or a process cut before it) leaves a file a later poll or run recognises
-// as already taken. A file without an id is removed and then taken, as
-// inbox files were before.
+// as already taken. Any other file is removed and then taken, as inbox
+// files were before.
 
 // r8cUI notes, at each user.message or user.answer written, whether the
 // inbox file it names was still in the inbox.
@@ -101,7 +101,7 @@ func r8cOne(t *testing.T, what string, got []string, name string) {
 	if len(got) != 1 {
 		t.Fatalf("%s: %d of them (%q), want 1", what, len(got), got)
 	}
-	// PostInbox names the file after the id it gives.
+	// The id is the file's name without ".json".
 	if want := strings.TrimSuffix(name, ".json"); got[0] != want {
 		t.Fatalf("%s carries %q, want %q", what, got[0], want)
 	}
@@ -196,17 +196,22 @@ func TestR8InboxNameOnlyOnInboxWords(t *testing.T) {
 	}
 }
 
-// r8cDrop writes an inbox file with no id under a name of the writer's
-// choosing, as a script does.
-func r8cDrop(t *testing.T, sessPath, name, text string) {
+// r8cDrop writes an inbox file by hand, as a script does: body is its JSON,
+// under a name of the writer's choosing.
+func r8cDrop(t *testing.T, sessPath, name, body string) {
 	t.Helper()
 	dir := InboxDir(sessPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"type":"message","text":"`+text+`","from":"script"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// r8cNote is a message with no id, as a script writes it.
+func r8cNote(text string) string {
+	return `{"type":"message","text":"` + text + `","from":"script"}`
 }
 
 // A script that writes each of its messages under the same name (found by
@@ -215,7 +220,7 @@ func r8cDrop(t *testing.T, sessPath, name, text string) {
 func TestR8InboxAFileWithNoIDUnderAReusedNameIsTaken(t *testing.T) {
 	rt := r8cNew(t, &fakeUI{})
 	for _, text := range []string{"r8c first", "r8c second"} {
-		r8cDrop(t, rt.sess.Path, "note.json", text)
+		r8cDrop(t, rt.sess.Path, "note.json", r8cNote(text))
 		rt.pollInbox()
 		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] != "" {
 			t.Fatalf("%s: %q, want one with no inbox id", text, got)
@@ -226,11 +231,11 @@ func TestR8InboxAFileWithNoIDUnderAReusedNameIsTaken(t *testing.T) {
 // The same when the second is written while the session is stopped.
 func TestR8InboxAFileWithNoIDUnderAReusedNameIsTakenByTheNextRun(t *testing.T) {
 	rt := r8cNew(t, &fakeUI{})
-	r8cDrop(t, rt.sess.Path, "note.json", "r8c one")
+	r8cDrop(t, rt.sess.Path, "note.json", r8cNote("r8c one"))
 	rt.pollInbox()
 	path := rt.sess.Path
 	rt.sess.Close()
-	r8cDrop(t, path, "note.json", "r8c two")
+	r8cDrop(t, path, "note.json", r8cNote("r8c two"))
 	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
 	if err != nil {
 		t.Fatal(err)
@@ -240,6 +245,58 @@ func TestR8InboxAFileWithNoIDUnderAReusedNameIsTakenByTheNextRun(t *testing.T) {
 	for _, text := range []string{"r8c one", "r8c two"} {
 		if got := r8cWords(rt2, event.UserMessage, text); len(got) != 1 {
 			t.Fatalf("%s: %d user.message, want 1", text, len(got))
+		}
+	}
+}
+
+// A file with no id is removed once, before it is handled, as before (found
+// by a fourth reader, when the poll removed every file again at its end):
+// one written under the same name while that one is being handled is left
+// for the next poll, which takes it.
+func TestR8InboxAFileWithNoIDWrittenWhileTheLastIsHandledIsTaken(t *testing.T) {
+	ui := &r8cHelpUI{}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	ui.during = func() { r8cDrop(t, rt.sess.Path, "note.json", r8cNote("r8c during")) }
+	r8cDrop(t, rt.sess.Path, "note.json", `{"type":"message","text":"/help"}`)
+	rt.pollInbox()
+	if len(ui.files) != 1 {
+		t.Fatalf("/help was carried out %d times, want once", len(ui.files))
+	}
+	rt.pollInbox()
+	if got := r8cWords(rt, event.UserMessage, "r8c during"); len(got) != 1 {
+		t.Fatalf("the message written under the reused name: %d user.message, want 1", len(got))
+	}
+}
+
+// Only a file that gives its own name as its id has one. Anything else
+// under "inbox_id" (the same fourth reader: a number there made the file
+// unreadable) is as if the key were not there, which it was not before.
+func TestR8InboxOnlyAFileThatGivesItsOwnNameHasAnID(t *testing.T) {
+	for _, tc := range []struct{ name, raw, want string }{
+		{"20261126T160003.904259023.json", `{"type":"message","text":"x","inbox_id":"20261126T160003.904259023"}`, "20261126T160003.904259023"},
+		{"note.json", `{"type":"message","text":"x"}`, ""},
+		{"note.json", `{"type":"message","text":"x","inbox_id":""}`, ""},
+		{"note.json", `{"type":"message","text":"x","inbox_id":"other"}`, ""},
+		{"note.json", `{"type":"message","text":"x","inbox_id":7}`, ""},
+		{"note.json", `{"type":"message","text":"x","inbox_id":null}`, ""},
+		{"note.json", `not json`, ""},
+	} {
+		if got := inboxFileID([]byte(tc.raw), tc.name); got != tc.want {
+			t.Errorf("%s %s: id %q, want %q", tc.name, tc.raw, got, tc.want)
+		}
+	}
+	rt := r8cNew(t, &fakeUI{})
+	for i, body := range []string{
+		`{"inbox_id":7,"type":"message","text":"r8c numbered","from":"script"}`,
+		`{"inbox_id":"other","type":"message","text":"r8c other","from":"script"}`,
+		`{"inbox_id":"other","type":"message","text":"r8c other again","from":"script"}`,
+	} {
+		r8cDrop(t, rt.sess.Path, "note.json", body)
+		rt.pollInbox()
+		text := []string{"r8c numbered", "r8c other", "r8c other again"}[i]
+		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] != "" {
+			t.Fatalf("%s: %q, want one with no inbox id", text, got)
 		}
 	}
 }
@@ -275,6 +332,7 @@ type r8cHelpUI struct {
 	dir    string
 	unlock bool
 	files  []int
+	during func() // runs once, while /help is carried out
 }
 
 func (u *r8cHelpUI) Log(format string, args ...any) {
@@ -284,6 +342,10 @@ func (u *r8cHelpUI) Log(format string, args ...any) {
 		u.files = append(u.files, len(entries))
 		if u.unlock {
 			os.Chmod(u.dir, 0o755)
+		}
+		if u.during != nil {
+			u.during()
+			u.during = nil
 		}
 	}
 }

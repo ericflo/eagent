@@ -15,21 +15,15 @@ import (
 // The inbox lets other processes (the web UI, a script) talk to a running
 // session without owning it: they drop small JSON files into
 // <session>/inbox/ and the runtime folds them into the log. Files are
-// processed in name order. One that carries an id (PostInbox gives each
-// one) is deleted once it is recorded and is never taken twice; one
-// without is deleted and then taken (see pollInbox).
+// processed in name order. One that gives its own name as its id, as
+// PostInbox's do, is deleted once it is recorded and is never taken twice;
+// any other is deleted and then taken (see pollInbox).
 
 // InboxDir is where messages for a session are dropped.
 func InboxDir(sessionPath string) string { return filepath.Join(sessionPath, "inbox") }
 
 // InboxMessage is one dropped file.
 type InboxMessage struct {
-	// ID names this submission and no other; PostInbox gives each one. The
-	// user.message or user.answer it becomes carries it, which is how a file
-	// still in the inbox is known to have been taken already. A file
-	// written without one is handled as inbox files always were: removed,
-	// then taken.
-	ID         string `json:"inbox_id,omitempty"`
 	Type       string `json:"type"` // message | answer | dismiss | stop
 	Text       string `json:"text,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
@@ -54,11 +48,13 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// The file says its own name ("inbox_id"), which marks that name as
+	// this submission's and no other's (see inboxFileID).
 	stamp := time.Now().UTC().Format("20060102T150405.000000000")
-	if msg.ID == "" {
-		msg.ID = stamp
-	}
-	raw, err := json.Marshal(msg)
+	raw, err := json.Marshal(struct {
+		InboxMessage
+		ID string `json:"inbox_id"`
+	}{msg, stamp})
 	if err != nil {
 		return err
 	}
@@ -90,32 +86,34 @@ func (r *Runtime) pollInbox() {
 		if err != nil {
 			continue
 		}
+		id := inboxFileID(raw, name)
 		var msg InboxMessage
-		if json.Unmarshal(raw, &msg) != nil {
-			_ = os.Remove(path)
-			continue
-		}
-		// Words that carry an id are recorded, with the id, before their
-		// file is removed: a file still here whose id this run handled, or
-		// that an earlier run left and the record names, is not taken
-		// again (its removal failed, or the process was cut before it).
-		// Everything else has its file removed first, as inbox files
-		// always had: a command, a stop or a dismissal leaves no event to
-		// name it, and a file with no id cannot be told from another
-		// written later under the same name.
-		id := msg.ID
+		bad := json.Unmarshal(raw, &msg) != nil
+		// A file with no id is handled as every inbox file was before
+		// files had ids: removed, then taken, and nothing is remembered of
+		// it. With an id, a command, a stop or a dismissal still has its
+		// file removed first (it leaves no event to know it by, so a cut in
+		// between loses it and never repeats it), and words are recorded,
+		// with the id, before their file is removed: a file still here
+		// whose id this run handled, or that an earlier run left and the
+		// record holds, is not taken again.
 		switch {
+		case bad:
+			_ = os.Remove(path)
 		case id != "" && (r.inboxTaken[id] || r.sess.Stale[name] && r.inboxRecorded(id)):
+			_ = os.Remove(path)
 		case msg.Type == "stop" && r.sess.Stale[name]:
 			// A stop that was already in the inbox when this run took the
 			// session lock was meant for an earlier run; it must not quit
 			// this one before its first tick. Messages and answers are kept.
+			_ = os.Remove(path)
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
 		default:
 			r.handleInboxFile(msg, id)
+			_ = os.Remove(path)
 		}
 		if id != "" {
 			if r.inboxTaken == nil {
@@ -123,8 +121,22 @@ func (r *Runtime) pollInbox() {
 			}
 			r.inboxTaken[id] = true
 		}
-		_ = os.Remove(path)
 	}
+}
+
+// inboxFileID is the id of the submission in an inbox file: the file's
+// name without ".json", when the file itself gives that as its "inbox_id"
+// (PostInbox's do). A name alone cannot serve, because a writer may use one
+// name again for its next message. Any other file has no id.
+func inboxFileID(raw []byte, name string) string {
+	var d struct {
+		ID string `json:"inbox_id"`
+	}
+	_ = json.Unmarshal(raw, &d)
+	if d.ID == "" || d.ID+".json" != name {
+		return ""
+	}
+	return d.ID
 }
 
 // inboxWords reports whether an inbox message is words of the user's (it
