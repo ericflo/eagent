@@ -38,10 +38,19 @@ func (antigravityAgent) ready(screen string) bool {
 	return strings.Contains(screen, "Antigravity relay ·")
 }
 
-// busy: the relay line is drawn whatever agy does, and names its state;
-// only "idle" is waiting at the prompt.
+// busy: the relay line is drawn whatever agy does, and names its state.
+// Only "idle" is known for certain (agy's own run statuses are idle,
+// running, busy and canceling, but how it names them here is not
+// documented), so any other name reads as busy. The seat asks only when an
+// agent that went quiet would otherwise be called idle, and such an agent
+// still takes messages and goes back to work on its next transcript line.
 func (antigravityAgent) busy(screen string) bool {
-	return strings.Contains(screen, "Antigravity relay ·") && !strings.Contains(screen, "Antigravity relay · idle ·")
+	_, rest, ok := strings.Cut(screen, "Antigravity relay · ")
+	if !ok {
+		return false
+	}
+	state, _, _ := strings.Cut(rest, " ·")
+	return !strings.EqualFold(strings.TrimSpace(state), "idle")
 }
 
 func (antigravityAgent) dialogs() []dialog {

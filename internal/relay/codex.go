@@ -181,13 +181,21 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	if id == "" {
 		return errors.New("Codex's session id is not known yet")
 	}
-	cmd, cancel := bounded(time.Minute, "codex", "queue", "--thread", id, "--message", text)
+	argv := codexQueueArgs(id, text)
+	cmd, cancel := bounded(time.Minute, argv[0], argv[1:]...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// codexQueueArgs is the codex queue command for a message. The values go
+// joined to their flags: codex's parser takes a separate "-x ..." for an
+// unknown flag and refuses the command, and "--" does not help there.
+func codexQueueArgs(id, text string) []string {
+	return []string{"codex", "queue", "--thread=" + id, "--message=" + text}
 }
 
 // ---- choices ------------------------------------------------------------------
