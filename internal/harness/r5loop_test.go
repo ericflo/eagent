@@ -376,3 +376,193 @@ func TestARepeatingTimerFiredBeforeItsWallClockTimeDoesNotFireTwice(t *testing.T
 		t.Fatalf("the timer due at %s was set to come due again at %s", due.Format(time.TimeOnly), next.Format(time.TimeOnly))
 	}
 }
+
+// A message kept for eagent is owed a reminder (eagent held on it). The
+// reminder's turn answers it with send_message, asks a question and looks
+// something up; the user answers while the look is out, and the next call
+// of that turn fails. The message was answered: nothing may bring it up
+// again as unanswered. The answer that came mid-turn still has its look
+// to come, from the retry.
+func TestAnAnsweredMessageIsNotOwedWhenItsTurnFailsAfterALaterAnswer(t *testing.T) {
+	setFor(t, &owedRetryDelays, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond})
+	setFor(t, &errorRetryDelays, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond})
+	const owedMark = "has had no answer and seen nothing done about it"
+	var mu sync.Mutex
+	phase := 0
+	var afterFail []string
+	gate := make(chan struct{})
+	called := make(chan struct{}, 1)
+	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+		mu.Lock()
+		defer mu.Unlock()
+		tail := lastUserText(msgs)
+		afterTool := msgs[len(msgs)-1]["role"] == "tool"
+		if phase >= 5 && !afterTool {
+			afterFail = append(afterFail, tail)
+		}
+		switch {
+		case phase == 0 && strings.Contains(tail, "kept for you"):
+			phase = 1
+			return hold()
+		case phase == 1:
+			// The hold sent back once; it holds again, and the message is owed.
+			phase = 2
+			return hold()
+		case phase == 2 && strings.Contains(tail, owedMark):
+			phase = 3
+			r := say("Codex is idle; nothing is running.")
+			r.calls = append(r.calls,
+				tc("ask_user", `{"text":"Merge #45 as well?","options":["yes","no"]}`),
+				tc("session_search", `{"query":"#45"}`),
+			)
+			return r
+		case phase == 3 && afterTool:
+			phase = 4
+			select {
+			case called <- struct{}{}:
+			default:
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"merge"}`)}, block: gate}
+		case phase == 4 && afterTool:
+			phase = 5
+			return reply{status: 400, body: `{"error":{"message":"bad request shape","type":"invalid_request_error"}}`}
+		}
+		return hold()
+	}, nil)
+	s.type_("@e what is Codex up to?")
+	<-called
+	s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+	s.type_("yes")
+	s.waitFor("the answer", func() bool { return len(s.events(event.UserAnswer)) == 1 })
+	close(gate)
+	s.waitFor("the failed call", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return phase == 5
+	})
+	s.settled()
+	// Give a reminder timer the chance to come due.
+	time.Sleep(50 * time.Millisecond)
+	s.settled()
+	var owed int64
+	s.rt.sync(func() {
+		if !s.rt.turns.owedAnswer {
+			owed = s.rt.turns.owed
+		}
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, tail := range afterFail {
+		if strings.Contains(tail, owedMark) {
+			t.Fatalf("the message already answered is brought up again as unanswered:\n%s", tail)
+		}
+	}
+	if owed != 0 {
+		t.Fatalf("the message already answered is still owed (seq %d)", owed)
+	}
+	looked := false
+	for _, tail := range afterFail {
+		looked = looked || strings.Contains(tail, "The user answered your question")
+	}
+	if !looked {
+		t.Fatalf("the answer that came mid-turn got no look after the failed call: %q", afterFail)
+	}
+}
+
+// The same turn stopped while its call about the answer is out: the
+// resumed session owes the answered message nothing, and the answer still
+// gets its look.
+func TestAnAnsweredMessageIsNotOwedAfterAResumeWhenItsTurnWasStoppedAfterALaterAnswer(t *testing.T) {
+	setFor(t, &owedRetryDelays, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond})
+	const owedMark = "has had no answer and seen nothing done about it"
+	var mu sync.Mutex
+	phase := 0
+	var resumed []string
+	gate := make(chan struct{})
+	never := make(chan struct{})
+	t.Cleanup(func() { close(never) })
+	called, stuck := make(chan struct{}, 1), make(chan struct{}, 1)
+	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+		mu.Lock()
+		defer mu.Unlock()
+		tail := lastUserText(msgs)
+		afterTool := msgs[len(msgs)-1]["role"] == "tool"
+		switch {
+		case phase == 6:
+			if !afterTool {
+				resumed = append(resumed, tail)
+			}
+		case phase == 0 && strings.Contains(tail, "kept for you"):
+			phase = 1
+		case phase == 1:
+			phase = 2
+		case phase == 2 && strings.Contains(tail, owedMark):
+			phase = 3
+			r := say("Codex is idle; nothing is running.")
+			r.calls = append(r.calls,
+				tc("ask_user", `{"text":"Merge #45 as well?","options":["yes","no"]}`),
+				tc("session_search", `{"query":"#45"}`),
+			)
+			return r
+		case phase == 3 && afterTool:
+			phase = 4
+			called <- struct{}{}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"merge"}`)}, block: gate}
+		case phase == 4 && afterTool:
+			phase = 5
+			stuck <- struct{}{}
+			return reply{calls: hold().calls, block: never}
+		}
+		return hold()
+	}, nil)
+	s.type_("@e what is Codex up to?")
+	<-called
+	s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+	s.type_("yes")
+	s.waitFor("the answer", func() bool { return len(s.events(event.UserAnswer)) == 1 })
+	close(gate)
+	<-stuck
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	mu.Lock()
+	phase = 6
+	mu.Unlock()
+	s2, _ := coreResume(t, path, project, s.model, newFakeSeat("ok"))
+	s2.settled()
+	time.Sleep(5 * owedRetryDelays[0])
+	s2.settled()
+	var owed int64
+	s2.rt.sync(func() { owed = s2.rt.turns.owed })
+	mu.Lock()
+	defer mu.Unlock()
+	looked := false
+	for _, tail := range resumed {
+		if strings.Contains(tail, owedMark) {
+			t.Fatalf("after the resume the answered message is brought up again:\n%s", tail)
+		}
+		looked = looked || strings.Contains(tail, "The user answered your question")
+	}
+	if owed != 0 || !looked {
+		t.Fatalf("after the resume: owed %d, the answer looked at %v (tails %q)", owed, looked, resumed)
+	}
+}
+
+// Only the ends of the agent a relay_control call stopped or replaced are
+// that reply's own news: another agent ending while the call runs (an
+// upgrade can take minutes) is still news for the thread list.
+func TestOnlyTheControlledAgentsEndIsTheReplysOwn(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.settled()
+	var before int64
+	var own []int64
+	var mine int64
+	s.rt.sync(func() {
+		before = s.rt.st.LastSeq()
+		s.rt.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: "review", Reason: "it exited"}))
+		mine = s.rt.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: "codex", Reason: "stopped"})).Seq
+		own = s.rt.endsOf("codex", before)
+	})
+	if len(own) != 1 || own[0] != mine {
+		t.Fatalf("own ends %v, want only %d", own, mine)
+	}
+}

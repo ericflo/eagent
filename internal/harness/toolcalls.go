@@ -42,6 +42,20 @@ type turnCalls struct {
 	own     []int64
 }
 
+// endsOf lists the ends of the relay called name recorded after seq.
+// Loop goroutine only.
+func (r *Runtime) endsOf(name string, after int64) []int64 {
+	var out []int64
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > after; i-- {
+		ev := r.st.Events[i]
+		var d event.RelayEndData
+		if ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Name == name {
+			out = append(out, ev.Seq)
+		}
+	}
+	return out
+}
+
 // handle notes a call that answered the user or did something with the
 // agent.
 func (tc *turnCalls) handle() {
@@ -247,19 +261,20 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 	}
 	// The rest drive the agent.
 	var before int64
+	var controlled string
 	if c.Name == tools.RelayControl {
-		r.sync(func() { before = r.st.LastSeq() })
-	}
-	out, isErr = r.relayTool(c.Name, str, num, list, false)
-	if c.Name == tools.RelayControl && !isErr {
-		// An agent this call stopped is the reply's own news.
 		r.sync(func() {
-			for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > before; i-- {
-				if ev := r.st.Events[i]; ev.Type == event.RelayEnd {
-					tc.own = append(tc.own, ev.Seq)
-				}
+			before = r.st.LastSeq()
+			if rel, err := r.resolveRelay(str("relay")); err == nil {
+				controlled = rel.Name
 			}
 		})
+	}
+	out, isErr = r.relayTool(c.Name, str, num, list, false)
+	if c.Name == tools.RelayControl && !isErr && controlled != "" {
+		// The agent this call stopped (or replaced) ending is the reply's
+		// own news; another agent ending meanwhile is not.
+		r.sync(func() { tc.own = append(tc.own, r.endsOf(controlled, before)...) })
 	}
 	if !isErr && !tools.Looks(c.Name) {
 		tc.handle()
