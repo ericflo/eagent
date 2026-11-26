@@ -1,8 +1,13 @@
 package relay
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,9 +126,11 @@ type Seat struct {
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	catchingUp bool                 // restored sends wait for the first read to the transcript's end
+	scanning   bool                 // scanEarlier is looking for restored sends before the tail
 	closed     bool
 
-	typing sync.Mutex // one message is pasted and entered at a time
+	typing sync.Mutex     // one message is pasted and entered at a time
+	scans  sync.WaitGroup // scanEarlier's goroutine
 }
 
 type pending struct {
@@ -278,8 +285,8 @@ func (s *Seat) restore(list []Restored) {
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.catchingUp {
-		return
+	if !s.catchingUp || s.scanning {
+		return // not started, or scanEarlier is still looking
 	}
 	s.catchingUp = false
 	var names []string
@@ -692,7 +699,9 @@ func (s *Seat) matchSends(text string, at time.Time) []string {
 	defer s.mu.Unlock()
 	var cands []int
 	for i, p := range s.pending {
-		if at.IsZero() || p.restored && !at.Before(p.sentAt.Truncate(time.Millisecond)) {
+		// Antigravity stamps to the whole second, so its entry for a send
+		// can carry a time up to a second before the send's own.
+		if at.IsZero() || p.restored && !at.Before(p.sentAt.Truncate(time.Second)) {
 			cands = append(cands, i)
 		}
 	}
@@ -872,12 +881,136 @@ func head(s string, n int) string { return strings.TrimSuffix(clipText(s, n), "â
 const pollEvery = 700 * time.Millisecond
 
 // tailBackfill is how much of a transcript is re-read on reattach, to catch
-// a turn that ended while no eagent was watching.
-const tailBackfill = 4 << 20
+// a turn that ended while no eagent was watching. Tests lower it.
+var tailBackfill int64 = 4 << 20
+
+// scanEarlier looks for the restored sends in the part of the transcript
+// before end, which the tail does not read: user entries only, matched and
+// confirmed, nothing else reported or applied. It starts near the oldest
+// restored send's time (the transcript's own stamps) and runs on its own,
+// so the live tail and its confirmations do not wait for it; the catch-up
+// ends only once it is done.
+func (s *Seat) scanEarlier(path string, end int64) {
+	s.mu.Lock()
+	var oldest time.Time
+	for _, p := range s.pending {
+		if p.restored && (oldest.IsZero() || p.sentAt.Before(oldest)) {
+			oldest = p.sentAt
+		}
+	}
+	if oldest.IsZero() || s.scanning {
+		s.mu.Unlock()
+		return
+	}
+	s.scanning = true
+	s.mu.Unlock()
+	s.scans.Add(1)
+	go func() {
+		defer s.scans.Done()
+		defer func() {
+			s.mu.Lock()
+			s.scanning = false
+			s.mu.Unlock()
+		}()
+		f, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		start := seekBefore(f, end, oldest.Truncate(time.Second))
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return
+		}
+		r := bufio.NewReaderSize(f, 1<<20)
+		pos := start
+		if start > 0 {
+			skipped, err := r.ReadBytes('\n') // inside a line
+			pos += int64(len(skipped))
+			if err != nil {
+				return
+			}
+		}
+		p := s.agent.newParser(s.spec)
+		for pos < end {
+			select {
+			case <-s.stop:
+				return
+			default:
+			}
+			line, err := r.ReadBytes('\n')
+			pos += int64(len(line))
+			for _, o := range p.line(bytes.TrimSpace(line)) {
+				if o.kind != "user" || o.again || o.at.IsZero() {
+					continue
+				}
+				for _, id := range s.matchSends(o.text, o.at) {
+					s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+				}
+			}
+			if err != nil || !s.hasRestored() {
+				return
+			}
+		}
+	}()
+}
+
+func (s *Seat) hasRestored() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.pending {
+		if p.restored {
+			return true
+		}
+	}
+	return false
+}
+
+// seekBefore finds an offset in f, before end, from which every line
+// stamped at or after t follows: a binary search on the lines' own stamps.
+// Where it cannot read a stamp it goes earlier, so it never skips a line it
+// should read.
+func seekBefore(f *os.File, end int64, t time.Time) int64 {
+	lo, hi := int64(0), end
+	buf := make([]byte, 1<<20)
+	for hi-lo > 1<<16 {
+		mid := lo + (hi-lo)/2
+		n, _ := f.ReadAt(buf, mid)
+		at, ok := firstStamp(buf[:n])
+		if ok && at.Before(t) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// firstStamp is the time of the first whole line in b that carries one
+// (Claude, Codex and pi write "timestamp", Antigravity "created_at").
+func firstStamp(b []byte) (time.Time, bool) {
+	i := bytes.IndexByte(b, '\n')
+	if i < 0 {
+		return time.Time{}, false
+	}
+	for _, line := range bytes.Split(b[i+1:], []byte("\n")) {
+		var v struct {
+			Timestamp string `json:"timestamp"`
+			Created   string `json:"created_at"`
+		}
+		if json.Unmarshal(line, &v) != nil {
+			continue // a whole line that is not JSON, or the cut last one
+		}
+		if at := parseTime(cmp.Or(v.Timestamp, v.Created)); !at.IsZero() {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
 
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer close(s.events)
+	defer s.scans.Wait() // nothing emits once events is closed
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
 	// agent can follow it. Held, it made a restarted Codex deaf until
@@ -959,18 +1092,18 @@ func (s *Seat) watch() {
 						}
 					}
 				}
-				since, restoring := s.since, s.catchingUp
+				since := s.since
 				s.mu.Unlock()
-				if !since.IsZero() && !exact && !restoring {
+				if !since.IsZero() && !exact {
 					// Reattached or resumed: the history is already on the
-					// record; read only the end of a long transcript. With
-					// sends to confirm, all of it is read: one may have
-					// arrived long before the record's last event (a send
-					// typed while the agent was busy), and history only
-					// confirms them, it reports nothing else again.
+					// record; read only the end of a long transcript.
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
 						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
 					}
+				}
+				if tail.offset > 0 {
+					// Restored sends may have arrived before that end.
+					s.scanEarlier(path, tail.offset)
 				}
 				if first {
 					s.emit(Event{Kind: KindInner, InnerID: inner, Transcript: path})
@@ -1229,31 +1362,40 @@ func (s *Seat) checkScreen(now time.Time) {
 	// A send that never arrived: if its text still sits in the input box,
 	// the Enter was lost; press it again, twice at most.
 	s.mu.Lock()
-	var stuck *pending
+	// The send pressed is the oldest one typed since eagent (re)started: a
+	// send from before it restarted is never pressed (its words on screen
+	// may be from long ago, and whatever the box holds now may be someone
+	// else's), and does not stand in front of one that may be. The one
+	// reported is the oldest whose wait is over.
+	var press, report *pending
 	for _, p := range s.pending {
-		if p.timed() && now.Sub(p.at) > 6*time.Second {
-			stuck = p
-			break
+		if !p.timed() || now.Sub(p.at) <= 6*time.Second {
+			continue
+		}
+		if press == nil && !p.restored {
+			press = p
+		}
+		if report == nil && now.Sub(p.at) > 45*time.Second {
+			report = p
 		}
 	}
-	if stuck != nil {
-		start := head(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
+	if press != nil {
+		start := head(strings.TrimSpace(strings.SplitN(press.text, "\n", 2)[0]), 40)
 		// A message meant for after the turn is pressed only once the agent
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
 		// No Enter goes while a dialog is up: known ones were answered
-		// above, and one the agent reports holds the seat. A send from
-		// before eagent restarted is never pressed: its words on screen may
-		// be from long ago, and whatever the box holds now may be someone
-		// else's.
-		if !stuck.restored && stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
-			stuck.nudges++
-			stuck.at = now
+		// above, and one the agent reports holds the seat.
+		if press.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
+			press.nudges++
+			press.at = now
 			s.mu.Unlock()
 			_ = s.host.Keys(s.target, "Enter")
 			return
 		}
-		if state != "working" && now.Sub(stuck.at) > 45*time.Second && now.Sub(s.stateAt) > 15*time.Second {
+	}
+	if stuck := report; stuck != nil {
+		if state != "working" && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
