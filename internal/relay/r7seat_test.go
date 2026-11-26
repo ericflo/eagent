@@ -115,6 +115,95 @@ func TestR7ARestartDropsTheSpool(t *testing.T) {
 	}
 }
 
+// arrivingHost makes the agent record the message the moment Enter goes,
+// and the watcher read it before Send returns.
+type arrivingHost struct {
+	*fakeHost
+	seat *Seat
+	text string
+}
+
+func (h *arrivingHost) Keys(target string, keys ...string) error {
+	err := h.fakeHost.Keys(target, keys...)
+	if slices.Contains(keys, "Enter") {
+		h.seat.fold(obs{kind: "user", text: h.text})
+	}
+	return err
+}
+
+// Finding 10, first half: a send whose arrival the transcript shows while
+// its Enter is still being pressed is confirmed, not left waiting.
+func TestR7AnArrivalReadBeforeSendReturnsIsConfirmed(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	h := &arrivingHost{fakeHost: &fakeHost{alive: true}, text: "count the chairs"}
+	s := newSeat(Spec{}, claudeAgent{}, h, "x", "")
+	h.seat = s
+	s.state = "idle"
+	if _, err := s.Send("r1", h.text, "queue"); err != nil {
+		t.Fatal(err)
+	}
+	var ok []string
+	for _, ev := range deliveries(drain(s.events)) {
+		ok = append(ok, fmt.Sprintf("%s:%v", ev.SendID, ev.OK))
+	}
+	if !slices.Equal(ok, []string{"r1:true"}) || len(s.Snapshot().Pending) != 0 {
+		t.Fatalf("reports %v, still pending %v", ok, s.Snapshot().Pending)
+	}
+}
+
+type failingPasteHost struct{ *fakeHost }
+
+func (failingPasteHost) Paste(string, string) error { return errors.New("no such pane") }
+
+// Finding 10: a send whose typing fails is not left tracked; the caller
+// reports it, and the seat reports nothing of it.
+func TestR7ASendWhoseTypingFailsIsNotLeftTracked(t *testing.T) {
+	t.Parallel()
+	s := newSeat(Spec{}, claudeAgent{}, failingPasteHost{&fakeHost{alive: true}}, "x", "")
+	s.state = "idle"
+	_, err := s.Send("r1", "count the chairs", "queue")
+	if !errors.As(err, new(*TypingError)) {
+		t.Fatalf("Send returned %v", err)
+	}
+	if p := s.Snapshot().Pending; len(p) != 0 || len(drain(s.events)) != 0 {
+		t.Fatalf("still pending %v", p)
+	}
+}
+
+// sweepingAgent is Claude whose turn ends, and whose left-overs are swept,
+// right after the held message is written to the spool.
+type sweepingAgent struct{ claudeAgent }
+
+func (a sweepingAgent) afterTurn(s *Seat, id, text string) error {
+	err := a.claudeAgent.afterTurn(s, id, text)
+	s.mu.Lock()
+	s.state, s.turnEndAt = "idle", time.Now().Add(-time.Hour)
+	s.mu.Unlock()
+	s.reportLeftOvers(time.Now())
+	return err
+}
+
+// Finding 10, second half: a held message swept from the spool as soon as
+// it is written is reported once (not sent), and not tracked after that.
+func TestR7AHeldMessageSweptAtOnceIsReportedOnce(t *testing.T) {
+	t.Parallel()
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, sweepingAgent{}, &fakeHost{alive: true}, "x", "")
+	s.state = "working"
+	if _, err := s.Send("r1", "then commit", "after_turn"); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ev := range deliveries(drain(s.events)) {
+		got = append(got, ev.SendID+":"+ev.Outcome)
+	}
+	if !slices.Equal(got, []string{"r1:" + OutcomeNotSent}) || len(s.Snapshot().Pending) != 0 {
+		t.Fatalf("reports %v, still pending %v", got, s.Snapshot().Pending)
+	}
+}
+
 // closingHost closes the seat the first time the send takes its last look
 // at the screen before typing: a stop that lands after the seat said it was
 // ready and before the text is pasted.

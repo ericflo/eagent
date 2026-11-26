@@ -479,14 +479,17 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		}
 	case "after_turn":
 		if state == "working" {
-			if err := s.agent.afterTurn(s, id, text); err == nil {
-				// An agent with a spool holds it there; one without has handed
-				// it to its own queue. Either way it is tracked for its arrival,
-				// and, as every after-turn send, never pressed again, nor
-				// reported lost on a timer before its turn is over (see
-				// pending.lost). Only Claude's and pi's hand-overs go through
-				// the spool.
-				s.trackHeld(id, text, mode, s.spec.Spool != "")
+			// An agent with a spool holds it there; one without hands it to
+			// its own queue. Either way it is tracked for its arrival before
+			// it is handed over (so an arrival or a sweep of the spool right
+			// after finds it), and, as every after-turn send, never pressed
+			// again, nor reported lost on a timer before its turn is over
+			// (see pending.lost). Only Claude's and pi's hand-overs go
+			// through the spool.
+			s.trackHeld(id, text, mode, s.spec.Spool != "")
+			err := s.agent.afterTurn(s, id, text)
+			if err == nil || !s.untrack(id) {
+				// Handed over, or already confirmed or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
 				// It was being typed when it failed: typing it again
@@ -506,21 +509,28 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// Stopped during the last look or the interrupt's pause: nothing typed.
 		return "", ErrClosed
 	}
-	if err := s.typeText(text); err != nil {
+	command := isAgentCommand(text)
+	if !command {
+		// Tracked before it is typed, so an arrival read while Enter goes
+		// is found. An after-turn send typed here (the agent idle, or the
+		// hand-over failed) is held by nothing: it is timed from the
+		// start, never pressed.
+		s.mu.Lock()
+		s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
+		s.mu.Unlock()
+	}
+	if err := s.typeText(text); err != nil && (command || s.untrack(id)) {
+		// Not tracked any more: the caller reports it. (One the
+		// transcript already showed arriving is reported delivered.)
 		return "", &TypingError{err}
 	}
-	if isAgentCommand(text) {
+	if command {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
-	// An after-turn send typed here (the agent idle, or the hand-over
-	// failed) is held by nothing: it is timed from the start, never pressed.
-	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
-	s.mu.Unlock()
 	switch {
 	case mode == "interrupt" && state == "working":
 		return fmt.Sprintf("interrupted %s and typed the message", label), nil
@@ -623,6 +633,16 @@ func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Lock()
 	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
 	s.mu.Unlock()
+}
+
+// untrack stops watching send id, and says whether it was still watched
+// (not yet confirmed or reported).
+func (s *Seat) untrack(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.pending)
+	s.pending = slices.DeleteFunc(s.pending, func(p *pending) bool { return p.id == id })
+	return len(s.pending) < n
 }
 
 // heldGrace is how long after the transcript shows a turn over a message
