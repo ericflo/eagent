@@ -1,0 +1,385 @@
+package harness
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/store"
+)
+
+// Finding 21: a reply with no tool call and no words (a provider's error or
+// refusal stop) is sent back once like any other reply that reaches no one,
+// so the agent's report still reaches the user.
+func TestR7AnEmptyReplyIsSentBackOnce(t *testing.T) {
+	var mu sync.Mutex
+	reminded := 0
+	s := startSession(t, brief, func(_ string, msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.Contains(tail, "had no tool call"):
+			reminded++
+			return say("Codex merged the PRs.")
+		case strings.Contains(tail, "finished a turn"):
+			return reply{}
+		}
+		return hold()
+	}, nil)
+	s.waitFor("the report", func() bool { return s.ui.messageCount() == 1 })
+	s.settled()
+	mu.Lock()
+	defer mu.Unlock()
+	if reminded != 1 {
+		t.Fatalf("reminded %d times, want 1", reminded)
+	}
+}
+
+// Finding 24: a closing word that is only a leaked control token says
+// nothing, so it is not taken as said: send_message is refused, plain text
+// is sent back as a reply with no tool call, and the session does not end
+// in silence.
+func TestR7AClosingWordOfOnlyControlTokensIsNotTakenAsSaid(t *testing.T) {
+	const report = "Final: #42 and #44 are merged; #45 is not."
+	t.Run("send_message", func(t *testing.T) {
+		s, _, code := audit2Closing(t, func(msgs []map[string]any) reply {
+			if strings.Contains(lastText(msgs), "text is required") {
+				return say(report)
+			}
+			return say("<|im_end|>")
+		})
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if said := s.ui.said(); len(said) == 0 || said[len(said)-1] != report {
+			t.Fatalf("said %q", said)
+		}
+	})
+	t.Run("plain text", func(t *testing.T) {
+		s, _, code := audit2Closing(t, func(msgs []map[string]any) reply { return reply{text: "<|im_end|>"} })
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if n := audit2CountLast(s.model, "That reply had no tool call"); n != 1 {
+			t.Fatalf("the empty report was sent back %d times, want 1", n)
+		}
+		// The earlier message was the last thing said before the closing
+		// look; something must come after it.
+		if said := s.ui.said(); len(said) < 2 {
+			t.Fatalf("said %q", said)
+		}
+	})
+}
+
+// r7EffortOnly changes the effort of eagent's model and nothing else, as a
+// live settings change does: the same chain, a new client.
+func r7EffortOnly(rt *Runtime) {
+	rt.sync(func() {
+		m := rt.models[event.ActorEagent]
+		eps := append([]llm.Endpoint(nil), m.routes...)
+		eps[0].ReasoningEffort = "low"
+		rt.swapRoute(routeSwap{who: event.ActorEagent, eps: eps, conf: config.ModelRoute{BaseURL: eps[0].BaseURL, Model: eps[0].Model}})
+		rt.models[event.ActorEagent].client.MaxAttempts = 1
+	})
+}
+
+// Finding 22, case 2: the primary was out (the user was told) and answers
+// a call during which only the effort changed. The outage is over: the
+// route answered, whatever client now serves it.
+func TestR7ThePrimaryBackUnderAnEffortChangeEndsTheOutage(t *testing.T) {
+	model := netModel(t)
+	var answer atomic.Bool
+	held, release := make(chan struct{}, 1), make(chan struct{})
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answer.Load() {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		select {
+		case held <- struct{}{}:
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		default:
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(primary.Close)
+	rt, _ := netRuntime(t, primary.URL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	waitFor(t, "the outage notice", func() bool { return len(outageNotices(rt)) > 0 })
+	answer.Store(true)
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the primary was not asked again")
+	}
+	r7EffortOnly(rt)
+	close(release)
+	if o := netWait(t, ch); o.err != nil {
+		t.Fatal(o.err)
+	}
+	var out outage
+	rt.sync(func() { out = rt.models[event.ActorEagent].out })
+	if out.down() || out.told {
+		t.Fatalf("the primary answered, yet the outage stands: %+v", out)
+	}
+}
+
+// Finding 22, case 3: the primary is dead and a fallback, asked in its
+// place past the bound, answers after an effort-only change. It takes over
+// as it would without the change, on the chain now configured.
+func TestR7AFallbackThatAnswersAfterAnEffortChangeTakesOver(t *testing.T) {
+	model := netModel(t)
+	held, release := make(chan struct{}, 1), make(chan struct{})
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case held <- struct{}{}:
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		default:
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(fb.Close)
+	rt, _ := netRuntime(t, "http://"+downAddr(t), fb.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fallback was not asked")
+	}
+	r7EffortOnly(rt)
+	close(release)
+	if o := netWait(t, ch); o.err != nil || o.resp.Text != "from eagent-fallback" {
+		t.Fatalf("call: %v %+v", o.err, o.resp)
+	}
+	var at int
+	var ep llm.Endpoint
+	rt.sync(func() { m := rt.models[event.ActorEagent]; at, ep = m.at, m.client.Endpoint })
+	if at != 1 || ep.Model != "eagent-fallback" {
+		t.Fatalf("the fallback answered past the bound, yet the session is on route %d (%s)", at, ep)
+	}
+	var routes []event.RouteData
+	for _, r := range netRoutes(rt) {
+		if strings.Contains(r.Reason, "cannot be reached") {
+			routes = append(routes, r)
+		}
+	}
+	if len(routes) != 1 {
+		t.Fatalf("takeovers on the record: %+v", routes)
+	}
+}
+
+// r7ResumeOld is resumeOld with the prompt given (none when "").
+func r7ResumeOld(t *testing.T, project string, sess *store.Session, prompt string, brain func(model string, msgs []map[string]any) reply) *session {
+	t.Helper()
+	seat := newFakeSeat("Filled in the changelog.")
+	useFakeRelays(t, seat)
+	model := newScripted(brain)
+	t.Cleanup(model.srv.Close)
+	ui := &fakeUI{input: make(chan string, 4)}
+	rt, err := Resume(testConfig(model.srv.URL), Options{Project: project, Interactive: true, Prompt: prompt}, ui, sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session{t: t, rt: rt, ui: ui, seat: seat, model: model, done: make(chan int, 1)}
+	ctx, cancel := contextWithCancel()
+	s.cancel = cancel
+	go func() { s.done <- rt.Run(ctx) }()
+	t.Cleanup(s.stop)
+	return s
+}
+
+// r7Looks counts the calls of a session's model that were not the dossier
+// pass's.
+func r7Looks(s *session) int {
+	n := 0
+	for _, q := range s.model.requests(testModel) {
+		var msgs []map[string]any
+		for _, raw := range q.Messages {
+			var m map[string]any
+			_ = json.Unmarshal(raw, &m)
+			msgs = append(msgs, m)
+		}
+		if dossierRequest(msgs) == "" {
+			n++
+		}
+	}
+	return n
+}
+
+// Finding 2, an interrupted upgrade: a session of the earlier design is
+// resumed with a message and stopped while its upgrade dossier is being
+// written. The next run, with no message, finishes the upgrade and the
+// message is still answered: it reaches an agent.
+func TestR7AMessageOfAnInterruptedUpgradeIsAnsweredOnTheNextRun(t *testing.T) {
+	project, sess, files := oldSession(t)
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	asked := make(chan struct{}, 1)
+	s := r7ResumeOld(t, project, sess, "fill in the changelog too", func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+			return reply{block: gate}
+		}
+		return hold()
+	})
+	select {
+	case <-asked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the upgrade's dossier was never asked for")
+	}
+	s.stop()
+	s = r7ResumeOld(t, project, sess, "", func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing([]string{files[0] + ":3", files[1] + ":3"})}
+		}
+		if r, ok := startsAnAgent(msgs); ok {
+			return r
+		}
+		return hold()
+	})
+	s.waitFor("the message to reach a new agent", func() bool { return len(s.seat.sentTexts()) == 1 })
+	s.settled()
+	if got := s.seat.sentTexts(); len(got) != 1 || got[0] != "fill in the changelog too" {
+		t.Fatalf("the agent was sent %q", got)
+	}
+}
+
+// Finding 2, a clean upgrade: the upgrade is written and nothing is owed.
+// The next run has nothing to look at: the old design's messages were
+// dealt with before the upgrade.
+func TestR7ACleanUpgradeLeavesNothingOwedOnTheNextRun(t *testing.T) {
+	project, sess, files := oldSession(t)
+	brain := func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing([]string{files[0] + ":3", files[1] + ":3"})}
+		}
+		return hold()
+	}
+	s := r7ResumeOld(t, project, sess, "", brain)
+	r4Until(t, "the upgrade's dossier", func() bool { return len(s.dossiers()) == 2 })
+	s.settled()
+	s.stop()
+	s = r7ResumeOld(t, project, sess, "", brain)
+	s.settled()
+	s.stop()
+	if n := r7Looks(s); n != 0 {
+		t.Fatalf("the run after a clean upgrade made %d looks at the old design's events", n)
+	}
+}
+
+// Finding 23: a message for eagent is at its last reminder when a second
+// one comes, while that reminder's turn is running. The model holds on
+// both. The second is owed reminders of its own: it is not dropped with
+// the first.
+func TestR7AMessageThatComesDuringTheLastReminderIsStillOwed(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+	defer func() { owedRetryDelays = old }()
+	const second = "@e and is the release branch cut?"
+	var sp atomic.Pointer[session]
+	var reminders, aboutSecond atomic.Int32
+	brain := func(_ string, msgs []map[string]any) reply {
+		last := lastUserText(msgs)
+		if !strings.Contains(last, owedPhrase) || msgs[len(msgs)-1]["role"] == "tool" {
+			return hold()
+		}
+		if strings.Contains(allText(msgs), "release branch") {
+			aboutSecond.Add(1)
+			return hold()
+		}
+		if reminders.Add(1) != int32(len(owedRetryDelays)) {
+			return hold()
+		}
+		// The last reminder: the second message comes while it is out,
+		// and the model looks at something before it holds.
+		s := sp.Load()
+		s.type_(second)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && !strings.Contains(fmtUserTexts(s), second) {
+			time.Sleep(time.Millisecond)
+		}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"Codex"}`)}}
+	}
+	s := startSession(t, "", brain, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 5 })
+	sp.Store(s)
+	s.settled()
+	s.type_("@e what is Codex up to?")
+	s.waitFor("eagent to give up", func() bool { return gaveUp(s) })
+	s.settled()
+	// One look in the last reminder's turn; the second message is owed
+	// reminders of its own after it.
+	if n := aboutSecond.Load(); n < 2 {
+		t.Fatalf("the second message was brought up %d times, only in the turn it came in", n)
+	}
+}
+
+func fmtUserTexts(s *session) string {
+	var b strings.Builder
+	for _, ev := range s.events(event.UserMessage) {
+		b.Write(ev.Data)
+	}
+	return b.String()
+}
+
+// Finding 1, the second trigger: a reminder about a message for eagent is
+// cut off by the provider refusing the conversation as too long. The debt
+// is kept, and the next reminder waits for the owed backoff: it is not
+// made again at once after the restart.
+func TestR7ACutReminderWaitsForTheOwedBackoff(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+	defer func() { owedRetryDelays = old }()
+	var sp atomic.Pointer[session]
+	var reminders atomic.Int32
+	brain := func(_ string, msgs []map[string]any) reply {
+		if dossierRequest(msgs) != "" {
+			return reply{text: briefing(nil)}
+		}
+		if strings.Contains(lastUserText(msgs), owedPhrase) && msgs[len(msgs)-1]["role"] != "tool" {
+			if reminders.Add(1) == 1 {
+				// From here on a reminder waits an hour.
+				sp.Load().rt.sync(func() { owedRetryDelays = []time.Duration{time.Hour, time.Hour, time.Hour} })
+				return reply{status: 400, body: `{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum","type":"invalid_request_error"}}`}
+			}
+		}
+		return hold()
+	}
+	s := startSession(t, "", brain, nil)
+	sp.Store(s)
+	s.settled()
+	s.type_("@e what is Codex up to?")
+	s.waitFor("the reminder", func() bool { return reminders.Load() >= 1 })
+	s.waitFor("the restart", func() bool { return len(s.dossiers()) >= 1 })
+	s.settled()
+	if n := reminders.Load(); n != 1 {
+		t.Fatalf("%d reminders: the one cut off was made again with no wait", n)
+	}
+	s.stop()
+}

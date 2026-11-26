@@ -194,8 +194,17 @@ type owedRecord struct {
 // in memory. Called once, before the loop starts.
 func (t *turnState) init(st *state.State) {
 	var owed *event.Event
+	// A log from the three-actor design: its events were weighed by actors
+	// that no longer exist, so nothing in it is owed a look. The one loop
+	// takes over from the end of it, where its first run here began.
+	legacy, tookOver := st.Legacy(), false
 	for i, ev := range st.Events {
 		switch {
+		case legacy && !tookOver && ev.Type == event.SessionResume:
+			var d event.SessionResumeData
+			if ev.Decode(&d) == nil && d.PhoneLedger {
+				tookOver, t.seen = true, max(t.seen, d.After)
+			}
 		case ev.Type == event.Owed:
 			owed = &st.Events[i]
 		case ev.Type == event.Assistant && ev.Actor == event.ActorEagent:
@@ -273,10 +282,12 @@ func (t *turnState) init(st *state.State) {
 			}
 		}
 	}
-	if st.Legacy() && !st.Upgraded() {
-		// A log from the three-actor design: its events were weighed by
-		// actors that no longer exist. Nothing in it is owed a look; the
-		// session picks up from a briefing (resume.go).
+	// Until its upgrade dossier is written, the first thing it does is
+	// write one (resume.go).
+	t.adopt = legacy && !st.Upgraded()
+	if legacy && !tookOver {
+		// Not yet run by the one loop: it picks up from a briefing
+		// (resume.go).
 		t.seen = st.LastSeq()
 		return
 	}
@@ -866,8 +877,11 @@ func (r *Runtime) turn(w wake) {
 				if h := r.heldSince(r.turns.seen); h > 0 {
 					// Not answered by what the turn did before it came. One
 					// kept earlier in this turn and not dealt with yet stays
-					// the mark: the newer one joins it.
-					if held == 0 || tc.handled || h < held {
+					// the mark: the newer one joins it. One that is already
+					// the debt does not: the newer one is what is owed now,
+					// and joining the debt starts its reminders over
+					// (oweAnswer), so it is not given up with the old one.
+					if held == 0 || tc.handled || h < held || held == r.turns.owed {
 						held = h
 					}
 					tc.handled = tc.handled && first
@@ -878,7 +892,7 @@ func (r *Runtime) turn(w wake) {
 					// one made for something else. That is the reminder:
 					// a hold is not sent back with it again.
 					answerDebt, remindedAnswer = true, true
-				} else if first && w.owed {
+				} else if first && w.owed && held == 0 {
 					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {
@@ -948,7 +962,7 @@ func (r *Runtime) turn(w wake) {
 				acts++
 			}
 		}
-		if acts == 0 && mustSpeak && len(resp.ToolCalls) == 0 && strings.TrimSpace(resp.Text) != "" {
+		if acts == 0 && mustSpeak && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != "" {
 			// The closing report came as plain text: the text is the report.
 			r.sync(func() {
 				r.flushSilent()
@@ -986,7 +1000,7 @@ func (r *Runtime) turn(w wake) {
 			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
 				cut = true
 				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
-			case strings.TrimSpace(resp.Text) != "" && len(resp.ToolCalls) == 0 && !nudged:
+			case len(resp.ToolCalls) == 0 && !nudged:
 				nudged = true
 				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
 			default:
@@ -1108,6 +1122,12 @@ func (r *Runtime) turn(w wake) {
 				r.clearOwed()
 			}
 			r.oweReminder(answerSeq)
+		case keepDebt:
+			if t := &r.turns; t.owed > 0 && t.owedTimer == nil {
+				// The reminder that was cut off is tried again after its
+				// own delay, not at the next tick.
+				r.armOwed(owedRetryDelays[min(max(t.owedTries-1, 0), len(owedRetryDelays)-1)])
+			}
 		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
