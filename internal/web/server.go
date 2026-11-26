@@ -367,6 +367,10 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// streamStatusEvery is how often a followed session's status line is sent
+// again. A variable so that tests need not wait it out.
+var streamStatusEvery = 2 * time.Second
+
 // stream tails the session: every new event as an SSE "append" and a status
 // snapshot every couple of seconds.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +407,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	tick := time.NewTicker(400 * time.Millisecond)
 	defer tick.Stop()
-	statusTick := time.NewTicker(2 * time.Second)
+	statusTick := time.NewTicker(streamStatusEvery)
 	defer statusTick.Stop()
 	// The session grows while it is followed: a rollover adds a subsession.
 	emitStatus := func() { info = store.Refresh(info); send("status", s.detailState(info, st)) }

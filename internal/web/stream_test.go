@@ -18,6 +18,10 @@ import (
 // A followed session's status counts the subsessions it has now: one a
 // rollover opens after the stream started is in the next status.
 func TestStreamStatusFollowsRollovers(t *testing.T) {
+	// Set before the server starts: each stream reads it once.
+	old := streamStatusEvery
+	streamStatusEvery = 50 * time.Millisecond
+	t.Cleanup(func() { streamStatusEvery = old })
 	s, project := newTestServer(t)
 	sess, err := store.Create(store.Root(project), time.Now())
 	if err != nil {
@@ -69,7 +73,11 @@ func TestStreamStatusFollowsRollovers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sess.Path, "zz-next.jsonl"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := status(); got != first+1 {
-		t.Fatalf("subsessions %d, then %d", first, got)
+	// A status sent just before the file appeared may still be on its way.
+	deadline := time.Now().Add(5 * time.Second)
+	for got := status(); got != first+1; got = status() {
+		if time.Now().After(deadline) {
+			t.Fatalf("subsessions %d, then %d", first, got)
+		}
 	}
 }
