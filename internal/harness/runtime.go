@@ -365,10 +365,16 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		// It comes after the mirror starts, so what it does reaches the phone
 		// (a screen, a receipt) as it would while running.
 		in := InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID}
-		if r.ownCommand(strings.TrimSpace(opts.Prompt), in.From) {
+		// Words written on the open question's card are its answer, verbatim,
+		// as the running poll takes a card's answer: never a command.
+		onCard := r.st.Question != nil && opts.PromptAnswers != "" && !holdBack
+		if !onCard && r.ownCommand(strings.TrimSpace(opts.Prompt), in.From) {
 			r.tookPhoneMessage(opts.PromptPhoneID, wordsFrom) // a command is recorded as taken before it runs, as the poll does
 		}
-		if text := strings.TrimSpace(opts.Prompt); strings.HasPrefix(text, "/") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(text) {
+		if onCard {
+			in.Type, in.QuestionID, in.CardID = "answer", r.st.Question.ID, plan.WordsCard
+			r.handleInbox(in)
+		} else if text := strings.TrimSpace(opts.Prompt); strings.HasPrefix(text, "/") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(text) {
 			// Words that only begin with a slash (a path, say) and no
 			// agent running to take them. A running session calls that an
 			// unknown command and says so at the terminal. This session
