@@ -2,8 +2,10 @@ package relay
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -117,5 +119,56 @@ func TestR11APiHeldSendPutBackInTheEditorIsReported(t *testing.T) {
 	}
 	if len(h.typed) != 0 || len(h.keys) != 0 {
 		t.Fatalf("typed %q, pressed %q", h.typed, h.keys)
+	}
+}
+
+// Finding 10: eagent stopped while the record said the agent was blocked
+// (here quiet in the middle of a turn, on a permission dialog). The
+// history the reattached seat re-reads ends inside that turn: the record's
+// blocked, and its detail, stand. The seat says nothing, holds the relay
+// blocked, and types nothing into the dialog. A record that said working
+// is told working as before, and so is a blocked one when the transcript
+// shows the agent at work after the record ends.
+func TestR11AReattachToABlockedAgentMidTurnKeepsItBlocked(t *testing.T) {
+	t.Parallel()
+	since := time.Now().Add(-time.Minute)
+	history := claudeTurnLines("sort the shelves", "Sorted.", since.Add(-10*time.Second))
+	history = append(history, claudeUser(since.Add(-5*time.Second), "now count the chairs"))
+	news := fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls chairs"}}]}}`, stamp(since.Add(time.Second)))
+	for _, c := range []struct {
+		recorded string
+		news     bool
+		said     []string
+		state    string
+	}{
+		{"blocked", false, nil, "blocked"},
+		{"working", false, []string{"working"}, "working"},
+		{"blocked", true, []string{"working"}, "working"},
+	} {
+		h := &fakeHost{alive: true, screen: "Do you want to proceed?\n❯ 1. Yes\n  2. No\n"}
+		s := attachSeat(Spec{State: c.recorded}, claudeAgent{}, h, "x", "", "", since)
+		claudeLines(s, history...)
+		if c.news {
+			claudeLines(s, news)
+		}
+		s.caughtUp(time.Now())
+		var said []string
+		for _, ev := range drain(s.events) {
+			if ev.Kind == KindState {
+				said = append(said, ev.State)
+			}
+		}
+		if !slices.Equal(said, c.said) || s.Snapshot().State != c.state {
+			t.Errorf("record %s (news %v): said %v and the seat is %s; want %v and %s", c.recorded, c.news, said, s.Snapshot().State, c.said, c.state)
+		}
+		if c.state != "blocked" {
+			continue
+		}
+		if msg, err := s.Send("q1", "and the tables", "queue"); err == nil {
+			t.Errorf("record blocked: a send went (%q)", msg)
+		}
+		if len(h.typed) != 0 || len(h.keys) != 0 {
+			t.Errorf("record blocked: typed %q, pressed %q", h.typed, h.keys)
+		}
 	}
 }

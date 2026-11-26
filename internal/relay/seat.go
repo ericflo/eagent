@@ -68,6 +68,8 @@ type Spec struct {
 	// first: the new seat confirms them from the transcript as the old one
 	// would have, and never types them again.
 	Restore []Restored
+	// State, on a reattach, is the relay's state on the record.
+	State string
 }
 
 // Restored is a send recorded before eagent stopped whose arrival the
@@ -282,7 +284,8 @@ func (s *Seat) restore(list []Restored) {
 // wait a live send gets, and is never pressed or typed again.
 //
 // The state the history left the seat in (foldHistory) is said here, once:
-// working, or idle when the history showed a turn end.
+// working, or idle when the history showed a turn end. A history that ends
+// inside a turn leaves a relay the record says is blocked blocked.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	if !s.catchingUp {
@@ -310,8 +313,15 @@ func (s *Seat) caughtUp(now time.Time) {
 	// may still say working, starting or blocked from before the stop, and
 	// the harness drops a state the record already has.
 	state, ended := s.state, !s.turnEndAt.IsZero()
+	// Inside a turn the record said was blocked (a dialog, or quiet for
+	// long), and nothing since: it still is, with the record's detail, as
+	// the seat that blocked it held it (hung).
+	kept := s.attached && state == "working" && s.spec.State == "blocked"
+	if kept {
+		s.state, s.hung = "blocked", true
+	}
 	s.mu.Unlock()
-	if state != "idle" || ended {
+	if !kept && (state != "idle" || ended) {
 		s.emit(Event{Kind: KindState, State: state})
 	}
 }
