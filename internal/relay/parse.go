@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 )
@@ -22,10 +21,6 @@ type obs struct {
 	resets     string
 	exhausted  bool
 	tool       bool // activity/image: counts as a tool call
-	// again: a user line that records once more a message that already
-	// arrived (Claude's prompt line for a message it had queued). It
-	// confirms nothing.
-	again bool
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -220,12 +215,6 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
-	// queued are the messages Claude queued while it worked ("enqueue"), in
-	// order, until one is taken into the running turn ("remove") or run as
-	// a prompt of its own. Such a prompt is recorded again as a user line;
-	// its arrival was the enqueue line, so the user line is not a second
-	// arrival.
-	queued []string
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -251,20 +240,10 @@ func (p *claudeParser) line(raw []byte) []obs {
 	at := parseTime(ev.Timestamp)
 	switch ev.Type {
 	case "queue-operation":
-		var s string
-		_ = json.Unmarshal(ev.Content, &s)
-		switch ev.Operation {
-		case "enqueue":
-			// Every enqueue holds a place in the queue, so a dequeue takes
-			// the right one; only text is an arrival.
-			p.queued = append(p.queued, s)
-			if s != "" {
+		if ev.Operation == "enqueue" {
+			var s string
+			if json.Unmarshal(ev.Content, &s) == nil && s != "" {
 				return []obs{{kind: "user", text: s, at: at}}
-			}
-		case "remove":
-			// Taken into the running turn (or dropped): no user line follows.
-			if i := slices.Index(p.queued, s); i >= 0 {
-				p.queued = slices.Delete(p.queued, i, i+1)
 			}
 		}
 		return nil
@@ -289,9 +268,6 @@ func (p *claudeParser) line(raw []byte) []obs {
 			// of a held message, which Claude records as meta.
 			if isText && strings.HasPrefix(s, stopHookPrefix) {
 				return p.userText(s, at)
-			}
-			if isText {
-				p.metaPrompt(s)
 			}
 			return nil
 		}
@@ -378,56 +354,7 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		return nil // the TUI's own bookkeeping
 	}
 	p.held, p.inTurn = "", true
-	// A queued message running now arrived at its enqueue line: this line
-	// is the same arrival recorded again, and confirms nothing.
-	again := p.takeDequeued(s)
-	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
-}
-
-// takeDequeued says whether the prompt s is a message (or a run of them,
-// joined) that Claude queued and has not run yet, and forgets those. Only
-// those: Claude may run several each as a line of its own. Which queued
-// message a dequeue takes cannot be told for certain (a remove does not
-// always name what it removes the way the enqueue did), so any message
-// still queued counts; a line that may be a second record of a queued
-// message confirms nothing.
-func (p *claudeParser) takeDequeued(s string) bool {
-	got := normalize(s)
-	if got == "" {
-		return false
-	}
-	for i, q := range p.queued {
-		if normalize(q) == got {
-			p.queued = slices.Delete(p.queued, i, i+1)
-			return true
-		}
-	}
-	for i := range p.queued {
-		var joined []string
-		for j := i; j < len(p.queued); j++ {
-			joined = append(joined, normalize(p.queued[j]))
-			if run := strings.Join(joined, " "); run == got {
-				p.queued = slices.Delete(p.queued, i, j+1)
-				return true
-			} else if len(run) > len(got) {
-				break
-			}
-		}
-	}
-	return false
-}
-
-// metaPrompt forgets a queued message that Claude ran as a meta line (a
-// message from another Claude session is recorded so, quoted inside it):
-// it is no longer waiting for a user line of its own.
-func (p *claudeParser) metaPrompt(s string) {
-	got := normalize(s)
-	for i, q := range p.queued {
-		if n := normalize(q); n != "" && strings.Contains(got, n) {
-			p.queued = slices.Delete(p.queued, i, i+1)
-			return
-		}
-	}
+	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
 }
 
 func claudeTool(name string, in map[string]any, at time.Time) []obs {

@@ -631,6 +631,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// on the record as exited, so eagent is told and can start it
 			// again or stop it.
 			r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: job.replaces, State: "exited", Detail: clipRunes("it was stopped to start again and could not start: "+err.Error(), 2000)}))
+			var waiting []string // held for the start: reported below
+			for _, h := range held {
+				waiting = append(waiting, h.id)
+			}
+			r.settleExited(rel, waiting...)
 		}
 		for _, h := range held {
 			if h.done != nil {
@@ -952,11 +957,15 @@ func (r *Runtime) reattachRelays() []string {
 // settleExited reports, once, each send rel still waited on as not
 // confirmed: its agent has exited, and nothing watches its transcript any
 // more. A send still waiting in the seat's queue to be typed is left out:
-// typing it fails, and that is reported where it fails. Called where an
-// exit is recorded, live or at a resume. Loop goroutine (or before the
+// typing it fails, and that is reported where it fails; so is one the
+// caller names in except. Called where an exit is recorded: live, at a
+// resume, and when a restart cannot start. Loop goroutine (or before the
 // loop starts).
-func (r *Runtime) settleExited(rel *state.Relay) {
+func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
+	for _, id := range except {
+		queued[id] = true
+	}
 	r.relays.mu.Lock()
 	for _, q := range r.relays.queues {
 		if q.name != rel.Name {

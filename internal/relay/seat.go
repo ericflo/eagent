@@ -778,13 +778,17 @@ type sendView struct {
 // sends with one place in it. So each confirmed send claims the stretch of
 // the entry it matched, stretches may not overlap, and sends are tried
 // longest first, then oldest first (the longer claims its words before a
-// shorter send that is part of them can):
+// shorter send that is part of them can). A send the entry shows whole is
+// given its stretch before any send the entry shows only cut short or in
+// part, so a send that arrived word for word is never left for a longer
+// one that merely contains it:
 //
 //	pending                         entry                      confirms
 //	"continue", "continue"          "continue"                 the older one
 //	"continue", "continue"          "continue\n\ncontinue"     both
 //	"deploy", "do not deploy"       "do not deploy"            "do not deploy" only
 //	"deploy", "do not deploy"       "deploy"                   "deploy"
+//	a, a + " and more" (both > 20)  a                          a only
 //	five held messages              the hook's join of them    all five
 //	a, b (a's Enter was lost)       a then b, glued            both
 //	a long send                     its first 200 bytes + "…"  it
@@ -809,12 +813,17 @@ func arrivals(pending []sendView, entry string) []int {
 	slices.SortStableFunc(order, func(a, b int) int { return len(norms[b]) - len(norms[a]) })
 	var claimed [][2]int
 	var out []int
-	for _, i := range order {
-		for _, sp := range shows(got, norms[i]) {
-			if !overlaps(claimed, sp) {
-				claimed = append(claimed, sp)
-				out = append(out, i)
-				break
+	for _, whole := range []bool{true, false} {
+		for _, i := range order {
+			if slices.Contains(out, i) {
+				continue
+			}
+			for _, sp := range shows(got, norms[i], whole) {
+				if !overlaps(claimed, sp) {
+					claimed = append(claimed, sp)
+					out = append(out, i)
+					break
+				}
 			}
 		}
 	}
@@ -828,8 +837,9 @@ func arrivals(pending []sendView, entry string) []int {
 // goes (a transcript may cut a long message short), so two long messages
 // with a common start are told apart; every place that start appears
 // counts. A transcript text that is a shortened piece of the message, over
-// 20 bytes, counts as well, as all of got.
-func shows(got, want string) [][2]int {
+// 20 bytes, counts as well, as all of got. whole asks for the places that
+// show all of want; otherwise only the cut-short and piece ones.
+func shows(got, want string, whole bool) [][2]int {
 	var out [][2]int
 	h := head(want, 160)
 	if h == "" {
@@ -844,13 +854,17 @@ func shows(got, want string) [][2]int {
 		rest := got[at:]
 		switch {
 		case strings.HasPrefix(rest, want):
-			out = append(out, [2]int{at, at + len(want)})
+			if whole {
+				out = append(out, [2]int{at, at + len(want)})
+			}
 		case strings.HasPrefix(want, strings.TrimSuffix(rest, "…")):
-			out = append(out, [2]int{at, len(got)})
+			if !whole {
+				out = append(out, [2]int{at, len(got)})
+			}
 		}
 		from = at + 1
 	}
-	if len(got) > 20 && strings.Contains(want, strings.TrimSuffix(got, "…")) {
+	if !whole && len(got) > 20 && strings.Contains(want, strings.TrimSuffix(got, "…")) {
 		out = append(out, [2]int{0, len(got)})
 	}
 	return out
@@ -1036,7 +1050,7 @@ func (s *Seat) fold(o obs) {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
-		if o.kind == "user" && !o.again {
+		if o.kind == "user" {
 			for _, id := range s.matchSends(o.text, o.at) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
@@ -1060,9 +1074,6 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		if o.again {
-			break
-		}
 		for _, id := range s.matchPending(o.text) {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		}
