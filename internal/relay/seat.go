@@ -1050,7 +1050,7 @@ func (s *Seat) fold(o obs) {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
-		if o.kind == "user" && !o.again {
+		if o.kind == "user" {
 			for _, id := range s.matchSends(o.text, o.at) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
@@ -1074,9 +1074,6 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		if o.again {
-			break
-		}
 		for _, id := range s.matchPending(o.text) {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		}

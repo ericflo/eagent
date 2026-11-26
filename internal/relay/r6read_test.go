@@ -34,67 +34,6 @@ func claudeUser(at time.Time, content string) string {
 	return fmt.Sprintf(`{"type":"user","timestamp":"%s","message":{"role":"user","content":%q}}`, stamp(at), content)
 }
 
-func claudeMeta(at time.Time, content string) string {
-	return fmt.Sprintf(`{"type":"user","isMeta":true,"timestamp":"%s","message":{"role":"user","content":%q}}`, stamp(at), content)
-}
-
-func claudeQueue(at time.Time, op, content string) string {
-	if content == "" {
-		return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":"%s"}`, op, stamp(at))
-	}
-	return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":"%s","content":%q}`, op, stamp(at), content)
-}
-
-// Two messages Claude queued while it worked, taken off the queue together
-// and run as two prompts, each a user line of its own. Each arrived at its
-// enqueue line; neither user line is a second arrival, so the same words
-// sent a third time, still unshown, stay unconfirmed.
-func TestTwoDequeuedPromptsOnLinesOfTheirOwnAreNotSecondArrivals(t *testing.T) {
-	t.Parallel()
-	at := time.Now()
-	a, b := "please water the ferns too", "and close the shed"
-	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
-	s.track("r1", a, "queue")
-	s.track("r2", b, "queue")
-	s.track("r3", b, "queue")
-	got := claudeLines(s,
-		claudeQueue(at, "enqueue", a),
-		claudeQueue(at.Add(time.Second), "enqueue", b),
-		claudeQueue(at.Add(2*time.Second), "dequeue", ""),
-		claudeQueue(at.Add(2*time.Second), "dequeue", ""),
-		claudeUser(at.Add(3*time.Second), a),
-		claudeUser(at.Add(3*time.Second), b),
-	)
-	if !slices.Equal(got, []string{"r1", "r2"}) {
-		t.Fatalf("confirmed %v, want r1 and r2", got)
-	}
-}
-
-// A message from another Claude session is queued and dequeued too, and
-// Claude records its prompt as a meta line, quoting it. That dequeue must
-// not stay behind: the next queued message's prompt line is still not a
-// second arrival.
-func TestADequeuedMessageClaudeRunsAsAMetaLineDoesNotStayBehind(t *testing.T) {
-	t.Parallel()
-	at := time.Now()
-	cross := "<cross-session-message from=\"uds:/tmp/a.sock\" from-name=\"other\">\nthanks, got it\n</cross-session-message>"
-	a := "Turn the lamp off now"
-	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
-	s.track("r1", a, "queue")
-	s.track("r2", a, "queue")
-	got := claudeLines(s,
-		claudeQueue(at, "enqueue", cross),
-		claudeQueue(at, "dequeue", ""),
-		claudeMeta(at, "Another Claude session sent a message:\n"+cross),
-		claudeQueue(at.Add(time.Minute), "enqueue", a),
-		claudeQueue(at.Add(time.Minute+time.Second), "dequeue", ""),
-		claudeUser(at.Add(time.Minute+time.Second), a),
-	)
-	if !slices.Equal(got, []string{"r1"}) {
-		t.Fatalf("confirmed %v, want r1 only", got)
-	}
-}
-
 // longHistory is a Claude transcript of many finished turns, well over the
 // (lowered) tail a reattach re-reads, whose first prompt is first: a send
 // that arrived long before the record's last event.

@@ -2,13 +2,19 @@ package relay
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // The matcher judged against real transcripts, off unless
@@ -28,7 +34,6 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 		text, mode   string
 		at, failAt   time.Time
 		oldBy, newBy int // the entry that confirmed it, -1 when none
-		oldByAgain   bool
 	}
 	type group struct {
 		agent, transcript string
@@ -91,13 +96,16 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 		}
 	}
 	type entry struct {
-		text  string
-		at    time.Time
-		again bool
+		text string
+		at   time.Time
+		// first: for a Claude prompt line that is a second record of a
+		// queued message (queueAnalysis), the entry of its enqueue line;
+		// -1 otherwise.
+		first int
 	}
-	type tally struct{ replayed, oldOK, newOK int }
+	type tally struct{ replayed, oldOK, newOK, twice, seconds, secondsHit int }
 	tallies := map[string]*tally{}
-	var oldOnly, newOnly []*send
+	var oldOnly, newOnly, twice []*send
 	for _, g := range groups {
 		a, err := agentFor(g.agent)
 		if err != nil {
@@ -108,13 +116,18 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 			continue
 		}
 		p := a.newParser(Spec{})
+		var q queueAnalysis
 		var entries []entry
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 1<<20), 256<<20)
 		for sc.Scan() {
+			first := -1
+			if g.agent == "claude" {
+				first = q.line(sc.Bytes(), len(entries))
+			}
 			for _, o := range p.line(sc.Bytes()) {
 				if o.kind == "user" {
-					entries = append(entries, entry{o.text, o.at, o.again})
+					entries = append(entries, entry{o.text, o.at, first})
 				}
 			}
 		}
@@ -142,15 +155,15 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 				pending = keep
 				hit := map[int]bool{}
 				if old {
-					// f2b210d: no second-arrival rule, each send tried on its own.
+					// f2b210d: each send tried on its own.
 					got := normalize(e.text)
 					for i, s := range pending {
 						if want := normalize(s.text); want != "" && oldArrived(got, want) {
 							hit[i] = true
-							s.oldBy, s.oldByAgain = ei, e.again
+							s.oldBy = ei
 						}
 					}
-				} else if !e.again {
+				} else {
 					views := make([]sendView, len(pending))
 					for i, s := range pending {
 						views[i].text = s.text
@@ -176,9 +189,31 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 			tl = &tally{}
 			tallies[g.agent] = tl
 		}
+		confirmedBy := map[int]int{} // entry -> sends today's rule confirmed with it
+		for _, s := range g.sends {
+			if s.key != "" && s.newBy >= 0 {
+				confirmedBy[s.newBy]++
+			}
+		}
+		for ei, e := range entries {
+			if e.first >= 0 {
+				tl.seconds++
+				if confirmedBy[ei] > 0 {
+					tl.secondsHit++
+				}
+			}
+		}
 		for _, s := range g.sends {
 			if s.key == "" {
 				continue
+			}
+			if s.newBy >= 0 {
+				// The known limit at work: confirmed by a queued message's
+				// second record, whose first record had confirmed another.
+				if fi := entries[s.newBy].first; fi >= 0 && confirmedBy[fi] > 0 {
+					tl.twice++
+					twice = append(twice, s)
+				}
 			}
 			tl.replayed++
 			if s.oldBy >= 0 {
@@ -213,15 +248,17 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 				nn++
 			}
 		}
-		t.Logf("%-12s replayed %5d  old rule %5d  today %5d  old and not today %4d  today and not old %4d", a, tl.replayed, tl.oldOK, tl.newOK, no, nn)
-	}
-	// Each difference, by id, with what kind it is (no text).
-	for _, s := range oldOnly {
-		why := "the entry's place was claimed by another send"
-		if s.oldByAgain {
-			why = "the old rule took Claude's second line of a queued message for an arrival"
+		t.Logf("%-12s replayed %5d  old rule %5d  today %5d  old and not today %4d  today and not old %4d  confirmed by a queued message's second record after its first confirmed another %3d", a, tl.replayed, tl.oldOK, tl.newOK, no, nn, tl.twice)
+		if tl.seconds > 0 {
+			t.Logf("%-12s second records of queued messages %d, of which confirmed a send %d", a, tl.seconds, tl.secondsHit)
 		}
-		t.Logf("old and not today: %s %s (%s)", s.agent, s.key, why)
+	}
+	// Each difference, by id (no text).
+	for _, s := range oldOnly {
+		t.Logf("old and not today: %s %s", s.agent, s.key)
+	}
+	for _, s := range twice {
+		t.Logf("second record confirmed it: %s %s", s.agent, s.key)
 	}
 	for _, s := range newOnly {
 		why := "a later entry, the old rule having spent an earlier one on it differently"
@@ -232,59 +269,168 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 	}
 }
 
-// Claude's queued messages judged against real transcripts, off unless
-// EAGENT_CORPUS_CLAUDE names a Claude projects directory: a message Claude
-// queued arrives at its enqueue line, and the parser marks its later prompt
-// line as the same arrival. Counts only.
-func TestCorpusClaudeQueuedMessagesArriveOnce(t *testing.T) {
-	root := os.Getenv("EAGENT_CORPUS_CLAUDE")
-	if root == "" {
-		t.Skip("set EAGENT_CORPUS_CLAUDE to read real Claude transcripts")
+// queueAnalysis is analysis for the corpus test only, not the seat's rule:
+// it tells which of Claude's prompt lines is the second record of a
+// message Claude queued while it worked (first recorded by an "enqueue"
+// line). It keeps the queued messages until a "remove" names one, a meta
+// line quotes one, or a prompt line is one (or a run of them, joined).
+type queueAnalysis struct {
+	queued []queuedEntry
+}
+
+type queuedEntry struct {
+	text  string
+	entry int // the entry of its enqueue line
+}
+
+// line reads one raw transcript line whose user entry, if any, will be
+// entry next; for a second record it returns the first record's entry,
+// otherwise -1.
+func (q *queueAnalysis) line(raw []byte, next int) int {
+	var ev struct {
+		Type      string          `json:"type"`
+		Operation string          `json:"operation"`
+		IsMeta    bool            `json:"isMeta"`
+		Sidechain bool            `json:"isSidechain"`
+		Content   json.RawMessage `json:"content"`
+		Message   *struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
 	}
-	files, queued, again, marked, typed := 0, 0, 0, 0, 0
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jsonl") || strings.Contains(path, "/subagents/") {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		files++
-		p := &claudeParser{}
-		enq, seen := map[string]int{}, map[string]int{}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 1<<20), 256<<20)
-		for sc.Scan() {
-			isEnq := strings.Contains(sc.Text(), `"operation":"enqueue"`)
-			for _, o := range p.line(sc.Bytes()) {
-				if o.kind != "user" {
-					continue
-				}
-				if o.again {
-					marked++
-					continue
-				}
-				n := normalize(o.text)
-				if isEnq {
-					enq[n]++
-					queued++
-				}
-				seen[n]++
-			}
-		}
-		for n, k := range enq {
-			if seen[n] > k {
-				again++
-				if !strings.HasPrefix(n, "<") {
-					typed++
+	if json.Unmarshal(raw, &ev) != nil || ev.Sidechain {
+		return -1
+	}
+	var s string
+	switch ev.Type {
+	case "queue-operation":
+		_ = json.Unmarshal(ev.Content, &s)
+		switch ev.Operation {
+		case "enqueue":
+			q.queued = append(q.queued, queuedEntry{s, next})
+		case "remove":
+			for i, e := range q.queued {
+				if e.text == s {
+					q.queued = slices.Delete(q.queued, i, i+1)
+					break
 				}
 			}
 		}
-		return nil
-	})
-	t.Logf("%d transcripts, %d queued arrivals, %d prompt lines marked as the same arrival, %d queued texts that still arrive again (%d not the agent's own <tag> notices)", files, queued, marked, again, typed)
+		return -1
+	case "user":
+		if ev.Message == nil || json.Unmarshal(ev.Message.Content, &s) != nil {
+			return -1
+		}
+	default:
+		return -1
+	}
+	got := normalize(s)
+	if ev.IsMeta {
+		for i, e := range q.queued {
+			if n := normalize(e.text); n != "" && strings.Contains(got, n) {
+				q.queued = slices.Delete(q.queued, i, i+1)
+				break
+			}
+		}
+		return -1
+	}
+	if got == "" {
+		return -1
+	}
+	for i := range q.queued {
+		var joined []string
+		for j := i; j < len(q.queued); j++ {
+			joined = append(joined, normalize(q.queued[j].text))
+			if run := strings.Join(joined, " "); run == got {
+				first := q.queued[i].entry
+				q.queued = slices.Delete(q.queued, i, j+1)
+				return first
+			} else if len(run) > len(got) {
+				break
+			}
+		}
+	}
+	return -1
+}
+
+// What existing records hold at the first resume after an upgrade, off
+// unless EAGENT_CORPUS_SESSIONS is set: the sends each session's record
+// still waits on, in the newest holder of each relay name, by mode and by
+// age at the end of the record. A resume restores them (an active relay)
+// or settles them (one recorded exited), and either way they end
+// unconfirmed unless the transcript shows them. Counts only.
+func TestCorpusUnresolvedSendsAtTheEndOfRecords(t *testing.T) {
+	roots := os.Getenv("EAGENT_CORPUS_SESSIONS")
+	if roots == "" {
+		t.Skip("set EAGENT_CORPUS_SESSIONS to read real records")
+	}
+	ages := []string{"under an hour", "under a day", "older"}
+	counts := map[string]map[string]int{} // mode -> age -> sends
+	var sessions, all, sessionsWith int
+	fate := map[string]int{}
+	for _, root := range strings.Split(roots, ":") {
+		dirs, _ := filepath.Glob(filepath.Join(root, "*"))
+		for _, dir := range dirs {
+			evs, err := store.Read(dir)
+			if err != nil || len(evs) == 0 {
+				continue
+			}
+			sessions++
+			st := state.Replay(evs)
+			end := evs[len(evs)-1].Time
+			sent := map[string]event.Event{} // id -> its latest send or move
+			for _, ev := range evs {
+				if ev.Type == event.RelaySend || ev.Type == event.RelayMoved {
+					var d event.RelaySendData
+					if ev.Decode(&d) == nil {
+						sent[d.Name+"/"+d.ID] = ev
+					}
+				}
+			}
+			with := false
+			for name, rel := range st.Relays {
+				for id := range rel.Undelivered {
+					ev, ok := sent[name+"/"+id]
+					if !ok {
+						continue
+					}
+					var d event.RelaySendData
+					_ = ev.Decode(&d)
+					mode := cmp.Or(d.Mode, "queue")
+					age := ages[2]
+					switch a := end.Sub(ev.Time); {
+					case a < time.Hour:
+						age = ages[0]
+					case a < 24*time.Hour:
+						age = ages[1]
+					}
+					if counts[mode] == nil {
+						counts[mode] = map[string]int{}
+					}
+					counts[mode][age]++
+					all++
+					with = true
+					switch {
+					case !rel.Active():
+						fate["stopped relay: left alone"]++
+					case rel.State == "exited":
+						fate["recorded exited: settled at the resume"]++
+					default:
+						fate["active: restored to the reattached seat"]++
+					}
+				}
+			}
+			if with {
+				sessionsWith++
+			}
+		}
+	}
+	t.Logf("%d session records; %d end with at least one unresolved send; %d such sends", sessions, sessionsWith, all)
+	for _, mode := range []string{"queue", "interrupt", "after_turn"} {
+		t.Logf("%-10s  %s %4d   %s %4d   %s %4d", mode, ages[0], counts[mode][ages[0]], ages[1], counts[mode][ages[1]], ages[2], counts[mode][ages[2]])
+	}
+	for k, n := range fate {
+		t.Logf("%s: %d", k, n)
+	}
 }
 
 // oldArrived is f2b210d's rule for whether transcript text got (normalized)
