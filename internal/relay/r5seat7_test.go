@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -96,9 +97,11 @@ func TestTheHookAndTheSeatNeverBothTakeOneMessage(t *testing.T) {
 	}
 }
 
-// Nothing after-turn is pressed or reported on a timer: a held message and
-// a held command in Claude's spool, and one typed into an idle Codex, all
-// old, their text on screen, the agent idle.
+// Nothing after-turn is pressed on a timer: a held message and a held
+// command in Claude's spool, and one typed into an idle Codex, all old,
+// their text on screen, the agent idle. The held ones are not reported
+// either; the one typed into the idle Codex, which nothing holds, is
+// reported unconfirmed when it never arrives (finding 6 of round 7).
 func TestAfterTurnSendsAreNeverNudgedOrReported(t *testing.T) {
 	saved, savedSettle := heldGrace, typeSettle
 	heldGrace, typeSettle = time.Hour, time.Millisecond
@@ -138,7 +141,7 @@ func TestAfterTurnSendsAreNeverNudgedOrReported(t *testing.T) {
 	hc.mu.Lock()
 	keysC := append([]string(nil), hc.keys...)
 	hc.mu.Unlock()
-	if len(lost)+len(lostC) != 0 || len(keys) != 0 || len(keysC) != 1 {
+	if len(lost) != 0 || !slices.Equal(lostC, []string{"m2"}) || len(keys) != 0 || len(keysC) != 1 {
 		t.Fatalf("lost %v %v, claude keys %q, codex keys %q (one Enter: the typing)", lost, lostC, keys, keysC)
 	}
 }

@@ -42,6 +42,28 @@ func TestR7ACutShortLongSendIsNotTakenByAShortSendInsideIt(t *testing.T) {
 	}
 }
 
+// Finding 6: an after-turn send typed straight into the prompt, because
+// the agent was idle or the hand-over to the end of its turn failed, is
+// held by nothing, so it is watched on the timer as any typed send is.
+func TestR7AnAfterTurnSendTypedStraightInIsTimed(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	for _, state := range []string{"idle", "working"} { // working: no Stop hook, so the hand-over fails
+		s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
+		s.state = state
+		if _, err := s.Send("r1", "count the chairs", "after_turn"); err != nil {
+			t.Fatalf("%s: Send: %v", state, err)
+		}
+		s.mu.Lock()
+		timed := len(s.pending) == 1 && s.pending[0].timed()
+		s.mu.Unlock()
+		if !timed {
+			t.Errorf("%s: the typed after-turn send is not on the timer", state)
+		}
+	}
+}
+
 // closingHost closes the seat the first time the send takes its last look
 // at the screen before typing: a stop that lands after the seat said it was
 // ready and before the text is pasted.

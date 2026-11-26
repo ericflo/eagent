@@ -135,10 +135,10 @@ type pending struct {
 	// restored: recorded before eagent stopped (see Seat.restore); sentAt
 	// is when. Such a send can be confirmed by transcript lines from before
 	// the reattach, and is never pressed again. dormant: the seat has not
-	// caught up on the transcript yet. lost: a held send no longer waiting
-	// where eagent put it (its spool file gone at the catch-up, or gone
-	// once the turn it waited for ended), watched on a timer as a typed send
-	// is, but never pressed.
+	// caught up on the transcript yet. lost: an after-turn send nothing
+	// holds (typed straight in, or its spool file gone at the catch-up, or
+	// gone once the turn it waited for ended), watched on a timer as a
+	// typed send is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
 }
@@ -514,7 +514,11 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
-	s.track(id, text, mode)
+	// An after-turn send typed here (the agent idle, or the hand-over
+	// failed) is held by nothing: it is timed from the start, never pressed.
+	s.mu.Lock()
+	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
+	s.mu.Unlock()
 	switch {
 	case mode == "interrupt" && state == "working":
 		return fmt.Sprintf("interrupted %s and typed the message", label), nil
