@@ -239,3 +239,16 @@ func TestR7ASeatClosedJustBeforeTypingTypesNothing(t *testing.T) {
 		t.Errorf("typed %q, pressed %q into a closed seat", fh.typed, fh.keys)
 	}
 }
+
+// Two sends the hook hands over together, while a third waiting send
+// begins with both of them: the entry shows the two whole and the third
+// only in part, so the two are confirmed (an independent read's case).
+func TestSendsShownWholeAreNotLeftForALongerOneShownInPart(t *testing.T) {
+	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
+	s.track("a", "check the logs", "queue")
+	s.track("b", "restart the server", "queue")
+	s.track("c", "check the logs\n\nrestart the server and then tell me what failed", "queue")
+	if got := s.matchPending("check the logs\n\nrestart the server"); !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("the joined entry confirmed %v, want [a b]", got)
+	}
+}

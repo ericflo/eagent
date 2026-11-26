@@ -832,13 +832,14 @@ type sendView struct {
 // after text left in the input box arrives glued to it, a hook hands over
 // several held messages at once. What one entry may not do is confirm two
 // sends with one place in it. So each confirmed send claims the stretch of
-// the entry it matched, stretches may not overlap, and the longest stretch
-// is given first (a longer send claims its words before a shorter send that
-// is part of them can, and a long send shown cut short keeps its stretch
-// from a short send inside it). Between stretches of one length, a send the
-// entry shows whole comes before one it shows only cut short or in part,
-// then the longer send, then the older, so a send that arrived word for
-// word is never left for a longer one that merely contains it:
+// the entry it matched, stretches may not overlap, and the stretch that
+// explains most of the entry is given first (a longer send claims its words
+// before a shorter send that is part of them can, and a long send shown cut
+// short keeps its stretch from a short send inside it). A send the entry
+// shows only cut short or in part counts for what it explains beyond the
+// sends the entry shows whole inside that stretch, so sends that arrived
+// word for word are never left for a longer one that merely contains them.
+// Between equals, whole comes first, then the longer send, then the older:
 //
 //	pending                         entry                      confirms
 //	"continue", "continue"          "continue"                 the older one
@@ -850,6 +851,7 @@ type sendView struct {
 //	a, b (a's Enter was lost)       a then b, glued            both
 //	a long send                     its first 200 bytes + "…"  it
 //	"yes", a long "…yesterday…"     the long one cut short     the long one
+//	a, b, a third that opens a + b  a and b, joined            a and b
 //	two long sends, same opening    one of them                that one
 //	anything                        words that are no send     nothing
 //
@@ -870,18 +872,29 @@ func arrivals(pending []sendView, entry string) []int {
 	}
 	slices.SortStableFunc(order, func(a, b int) int { return len(norms[b]) - len(norms[a]) })
 	type match struct {
-		i  int
-		sp [2]int
+		i    int
+		sp   [2]int
+		rank int // the bytes of the entry it explains
 	}
 	var matches []match
-	for _, whole := range []bool{true, false} {
-		for _, i := range order {
-			for _, sp := range shows(got, norms[i], whole) {
-				matches = append(matches, match{i, sp})
-			}
+	for _, i := range order {
+		for _, sp := range shows(got, norms[i], true) {
+			matches = append(matches, match{i, sp, sp[1] - sp[0]})
 		}
 	}
-	slices.SortStableFunc(matches, func(a, b match) int { return (b.sp[1] - b.sp[0]) - (a.sp[1] - a.sp[0]) })
+	whole := matches
+	for _, i := range order {
+		for _, sp := range shows(got, norms[i], false) {
+			m := match{i, sp, sp[1] - sp[0]}
+			for _, w := range whole {
+				if w.i != i && sp[0] <= w.sp[0] && w.sp[1] <= sp[1] {
+					m.rank -= w.sp[1] - w.sp[0]
+				}
+			}
+			matches = append(matches, m)
+		}
+	}
+	slices.SortStableFunc(matches, func(a, b match) int { return b.rank - a.rank })
 	var claimed [][2]int
 	var out []int
 	for _, m := range matches {
