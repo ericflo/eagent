@@ -92,6 +92,9 @@ type modelRoute struct {
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
+	// picked: conf is a route a settings pick resolved, not the configured
+	// chain (pickBase).
+	picked bool
 }
 
 // confAt is the configured route the client is on: the at-th of the chain
