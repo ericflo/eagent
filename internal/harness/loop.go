@@ -883,6 +883,17 @@ func (r *Runtime) turn(w wake) {
 				break
 			}
 			r.sync(func() {
+				if w.wait > 0 && !w.event && !w.final && r.summary.final {
+					// The last title and summary of a session that is
+					// ending is one attempt, like the dedicated call's
+					// (summary.go). Taken for an outage it would be tried
+					// again at once, tell the user after their closing
+					// report that the model cannot be reached, or restart
+					// the conversation, and end the session as one that
+					// waits on them.
+					r.ui.Log("thread summary: %s; the title and summary keep their last values", shortErr(err))
+					return
+				}
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				if w.final && mustSpeak && !tc.spoke {

@@ -154,3 +154,51 @@ func TestAnAnswerArrivingBetweenTheCallsOfATurnIsNotTakenAsDealtWith(t *testing.
 		t.Fatalf("the held answer was sent back %d times, want 1", reminded)
 	}
 }
+
+// The last title and summary of a batch session is one attempt. When that
+// call fails, the session ends as it would have without it: no second try
+// at once, no word to the user that the model cannot be reached after the
+// closing report went out, no restart of the conversation, and the exit
+// code of a session that finished its work.
+func TestAFailedLastSummaryLeavesTheBatchSessionsEndAsItWas(t *testing.T) {
+	for _, c := range []struct{ name, body string }{
+		{"refused", `{"error":{"message":"bad request shape","type":"invalid_request_error"}}`},
+		{"too long", tooLongBody},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			coreSummariesOn(t, false)
+			var threadCalls, after atomic.Int32
+			model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
+				tail := lastUserText(msgs)
+				if threadCalls.Load() > 0 {
+					after.Add(1)
+				}
+				switch {
+				case msgs[len(msgs)-1]["role"] == "tool":
+					return hold()
+				case strings.Contains(tail, threadOnly):
+					threadCalls.Add(1)
+					return reply{status: 400, body: c.body}
+				case strings.Contains(tail, "finished a turn"):
+					return stopsAndReports("Codex merged #42 and #44; stopping it.")
+				}
+				return hold()
+			})
+			s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief + " Stop when done."}, newFakeSeat("Merged #42 and #44."), model, nil)
+			code := coreExit(s)
+			said := s.ui.said()
+			if code != 0 {
+				t.Fatalf("exit %d after a failed last summary; said %q", code, said)
+			}
+			if n := threadCalls.Load(); n != 1 {
+				t.Fatalf("the last summary was asked for %d times, want once", n)
+			}
+			if n := after.Load(); n != 0 {
+				t.Fatalf("%d more model call(s) after the failed last summary", n)
+			}
+			if last := said[len(said)-1]; !strings.HasPrefix(last, "Codex merged") {
+				t.Fatalf("the user was told %q after the closing report", last)
+			}
+		})
+	}
+}
