@@ -426,7 +426,7 @@ func (r *Runtime) toldFull() bool {
 // dossierJob is what one dossier pass works from, gathered on the loop.
 type dossierJob struct {
 	msgs   []llm.Message  // the conversation, ending with the request
-	lines  map[string]int // lines in each record file, to check citations
+	lines  map[string]int // lines in each record file, to check citations (brought up to date before each check)
 	budget int            // characters of lookups the pass may read back
 	covers int64
 	tokens int
@@ -817,6 +817,10 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			continue
 		}
 		text := strings.TrimSpace(resp.Text)
+		// The record went on growing while the pass ran, and its lookups
+		// read it as it is now: a place written since the pass began is
+		// one the briefing may cite.
+		r.sync(func() { job.lines = r.recordLines() })
 		_, bad := checkCitations(text, job.lines)
 		why := mapProblem(text, job.lines)
 		if len(text) < dossierMinChars {
@@ -949,7 +953,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	// A new conversation: if this one turns out too long from its first
 	// call as well, the user is told again.
 	t.futileLogged = false
-	cites, _ := checkCitations(res.text, job.lines)
+	cites, _ := checkCitations(res.text, r.recordLines())
 	r.ui.Log("subsession %d begins with a dossier written by %s (%d characters, %d places cited, %d lookups)", len(r.st.Subsessions), by, len(body), cites, len(res.consulted))
 }
 

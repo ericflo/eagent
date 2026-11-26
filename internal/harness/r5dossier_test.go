@@ -278,3 +278,52 @@ func TestTheDossiersReadingLeavesRoomForTheDefaultReply(t *testing.T) {
 		s.stop()
 	}
 }
+
+// While the dossier is written the record goes on growing, and the pass's
+// lookups read it as it is. A briefing that cites a line written during
+// the pass cites a place that exists: it is not sent back for it, and the
+// dossier does not say it is wrong.
+func TestABriefingMayCiteWhatWasRecordedDuringThePass(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	defer open()
+	var mu sync.Mutex
+	cite := ""
+	asked := 0
+	s := dossierAfterALook(t, nil, func(ask string, msgs []map[string]any) reply {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		defer mu.Unlock()
+		return reply{text: briefing(append(places(ask)[:3], cite))}
+	})
+	s.waitFor("the pass", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return asked == 1
+	})
+	before := len(s.events(event.UserMessage))
+	s.type_("@e also bump the linter while you are at it")
+	s.waitFor("the message on the record", func() bool { return len(s.events(event.UserMessage)) > before })
+	ev := s.events(event.UserMessage)[before]
+	mu.Lock()
+	cite = fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line)
+	mu.Unlock()
+	open()
+	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
+	d := s.dossiers()[0]
+	if strings.Contains(d.Text, "do not exist") {
+		t.Fatalf("the dossier says a place recorded during the pass does not exist:\n%s", d.Text)
+	}
+	if n := r4Logged(s, "sent back once"); n != 0 {
+		t.Fatalf("the briefing was sent back %d times", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if asked != 1 {
+		t.Fatalf("the model was asked %d times for the briefing, want once", asked)
+	}
+}
