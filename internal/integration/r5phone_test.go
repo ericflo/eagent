@@ -2,12 +2,15 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/finalechat"
 )
@@ -59,5 +62,41 @@ func TestSavedFileOverTheLimitIsRefusedNotCutShort(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(session + "/attachments"); len(entries) != 0 {
 		t.Fatalf("left behind %v", entries)
+	}
+}
+
+// A reply that resumes a stopped session with a file too large to take
+// brings the session back with its words, and the sender is told in the
+// thread why the file is missing.
+func TestReplyWatcherTellsThePhoneAFileWasTooLarge(t *testing.T) {
+	var mu sync.Mutex
+	var notes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			notes = append(notes, body["body"].(string))
+			mu.Unlock()
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"message":{"id":"n1"},"thread":{"id":"t1"}}`))
+			return
+		}
+		t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Minute))
+	host := &fakeResumeHost{hosted: map[string]bool{}}
+	w := &resumeWatcher{project: project, host: host, client: &finalechat.Client{BaseURL: srv.URL, Token: "fc_fixture"}, logf: t.Logf, retries: &replyRetries{replies: map[string]pendingReply{}}, handled: map[string]time.Time{}}
+	big := finalechat.Attachment{ID: "019abc12-0000-7000-8000-00000000000b", Filename: "clip.mov", Size: finalechat.MaxAttachmentSize + 1, URL: "/api/v1/attachments/x"}
+	w.consider(context.Background(), finalechat.Thread{ID: "t1", ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "here it is", Attachments: []finalechat.Attachment{big}})
+	if host.calls() != 1 || host.resumed[0].Text != "here it is" || len(host.resumed[0].Attachments) != 0 {
+		t.Fatalf("resumed %#v", host.resumed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notes) != 1 || !strings.Contains(notes[0], "clip.mov") || !strings.Contains(notes[0], "10 MB") {
+		t.Fatalf("notes = %q", notes)
 	}
 }
