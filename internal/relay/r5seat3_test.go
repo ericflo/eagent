@@ -109,13 +109,14 @@ func TestAHeldCommandDoesNotSwallowAHeldMessage(t *testing.T) {
 }
 
 // The held messages after a command are typed once it has been, in order,
-// as their own message.
+// as their own message, each heldGrace after the one before: a command
+// runs before what was held after it is typed.
 func TestHeldMessagesAfterACommandAreTypedAfterIt(t *testing.T) {
 	saved, savedSettle := heldGrace, typeSettle
-	heldGrace, typeSettle = 0, 10*time.Millisecond
+	heldGrace, typeSettle = 50*time.Millisecond, time.Millisecond
 	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
 	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true}
+	h := &fakeHost{alive: true, screen: claudePromptScreen}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
 	for _, text := range []string{"first", "/compact", "then run the tests", "and report"} {
 		if err := spoolMessage(spool, "m", text); err != nil {
@@ -123,12 +124,24 @@ func TestHeldMessagesAfterACommandAreTypedAfterIt(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	s.state = "idle"
-	for i := 0; i < 4; i++ {
-		s.releaseHeld(time.Now().Add(time.Second))
+	s.state, s.stateAt = "idle", time.Now().Add(-time.Second)
+	t0 := time.Now()
+	typed := func() string {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return strings.Join(h.typed, "|")
 	}
-	if got := strings.Join(h.typed, "|"); got != "first|/compact|then run the tests\n\nand report" {
-		t.Fatalf("typed %q", h.typed)
+	for i, want := range []string{"first", "first|/compact", "first|/compact|then run the tests\n\nand report"} {
+		at := t0.Add(time.Duration(i) * heldGrace)
+		s.releaseHeld(at)
+		if got := typed(); got != want {
+			t.Fatalf("after release %d typed %q, want %q", i, got, want)
+		}
+		// Within heldGrace of a release nothing more is typed.
+		s.releaseHeld(at.Add(heldGrace / 2))
+		if got := typed(); got != want {
+			t.Fatalf("typed %q within heldGrace of the last release", got)
+		}
 	}
 }
 

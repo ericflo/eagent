@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -498,6 +499,17 @@ func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
 	s.mu.Unlock()
 }
+
+// heldGiveUp is how long a held message waits, with the agent idle, for its
+// prompt to show before it is reported undelivered. Tests shorten it.
+var heldGiveUp = 10 * time.Minute
+
+// isAgentCommand says whether text is the agent's own command: "/" and a
+// name (letters, digits, "_", "-", ":" for a plugin's namespace), then a
+// space or the end. "/home/eric/plan.md has it" is a message.
+func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
+
+var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
 
 // heldGrace is how long an agent stays idle before the seat types what still
 // waits in its spool: long enough for the message an interrupt is followed

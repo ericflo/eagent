@@ -231,7 +231,7 @@ func TestClaudeWithoutATranscriptStillReleasesAHeldMessage(t *testing.T) {
 	if err := spoolMessage(spool, "r1", "kept over the restart"); err != nil {
 		t.Fatal(err)
 	}
-	h := &fakeHost{alive: true}
+	h := &fakeHost{alive: true, screen: claudePromptScreen}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "0b8f6a52-6d1e-4c8e-9f55-3f2d8b8f1a11")
 	s.state, s.poll = "idle", 5*time.Millisecond
 	go s.watch()
