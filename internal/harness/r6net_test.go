@@ -1,11 +1,16 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,31 +22,70 @@ import (
 
 // The decision complete asks after every failed call, row by row.
 func TestAFailedCallIsDecidedByOneTable(t *testing.T) {
-	setFor(t, &offlineSwitch, time.Minute)
-	under, past := 30*time.Second, 2*time.Minute
 	for _, c := range []struct {
 		name   string
-		down   time.Duration
+		past   bool
 		others bool
 		last   failKind
 		told   bool
 		want   callStep
 	}{
-		{"another failure is the caller's", 0, true, failOther, false, stepGiveUp},
-		{"another failure after an outage", past, true, failOther, true, stepGiveUp},
-		{"unroutable with a route after it", 0, true, failUnroutable, false, stepNext},
-		{"unroutable at the end of the chain", 0, false, failUnroutable, false, stepGiveUp},
-		{"unreachable for the first time", 0, true, failNetwork, false, stepRetry},
-		{"unreachable under the bound, a fallback set", under, true, failNetwork, false, stepRetry},
-		{"unreachable under the bound, alone", under, false, failNetwork, false, stepRetry},
-		{"unreachable at the bound, a route not asked", time.Minute, true, failNetwork, false, stepNext},
-		{"past the bound, a route not asked", past, true, failNetwork, false, stepNext},
-		{"past the bound, told, a route not asked", past, true, failNetwork, true, stepNext},
-		{"past the bound, every route asked", past, false, failNetwork, false, stepTell},
-		{"past the bound, every route asked, told", past, false, failNetwork, true, stepRetry},
+		{"another failure is the caller's", false, true, failOther, false, stepGiveUp},
+		{"another failure after an outage", true, true, failOther, true, stepGiveUp},
+		{"unroutable with a route after it", false, true, failUnroutable, false, stepNext},
+		{"unroutable at the end of the chain", false, false, failUnroutable, false, stepGiveUp},
+		{"a failure older than the route's last answer", false, true, failStale, false, stepAgain},
+		{"a failure older than the last answer, past", true, false, failStale, false, stepAgain},
+		{"unreachable under the bound, a fallback set", false, true, failNetwork, false, stepRetry},
+		{"unreachable under the bound, alone", false, false, failNetwork, false, stepRetry},
+		{"past the bound, a route not asked", true, true, failNetwork, false, stepNext},
+		{"past the bound, told, a route not asked", true, true, failNetwork, true, stepNext},
+		{"past the bound, every route asked", true, false, failNetwork, false, stepTell},
+		{"past the bound, every route asked, told", true, false, failNetwork, true, stepRetry},
 	} {
-		if got := netStep(c.down, c.others, c.last, c.told); got != c.want {
+		if got := netStep(c.past, c.others, c.last, c.told); got != c.want {
 			t.Errorf("%s: step %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// What an outage is known to be, from the calls that came back, in order.
+func TestAnOutageIsTimedFromWhatTheRouteDidLast(t *testing.T) {
+	setFor(t, &offlineSwitch, time.Minute)
+	t0 := time.Unix(1_000_000, 0)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	err := errors.New("refused")
+	type call struct {
+		sent, back int
+		answered   bool // false: a network failure
+		counts     bool // for a failure: whether it counts
+	}
+	for _, c := range []struct {
+		name  string
+		calls []call
+		now   int
+		down  bool
+		past  bool
+	}{
+		{"nothing yet", nil, 0, false, false},
+		{"one long call that drops", []call{{0, 200, false, true}}, 200, true, false},
+		{"tried again soon after", []call{{0, 31, false, true}, {46, 77, false, true}}, 77, true, false},
+		{"tried again, out past the bound", []call{{0, 31, false, true}, {46, 92, false, true}}, 92, true, true},
+		{"a call sent before the first failure is no second try", []call{{0, 31, false, true}, {10, 200, false, true}}, 200, true, false},
+		{"answered since: the outage is over", []call{{0, 31, false, true}, {46, 92, false, true}, {100, 101, true, false}}, 101, false, false},
+		{"a failure sent before the last answer counts for nothing", []call{{0, 10, true, false}, {5, 200, false, false}}, 200, false, false},
+		{"a failure sent after the last answer counts", []call{{0, 10, true, false}, {11, 40, false, true}}, 40, true, false},
+	} {
+		var o outage
+		for _, k := range c.calls {
+			if k.answered {
+				o.answer(at(k.back))
+			} else if got := o.failed(at(k.sent), at(k.back), err); got != k.counts {
+				t.Errorf("%s: the failure sent at %d counts %v", c.name, k.sent, got)
+			}
+		}
+		if o.down() != c.down || o.past(at(c.now)) != c.past {
+			t.Errorf("%s: down %v past %v, want %v %v", c.name, o.down(), o.past(at(c.now)), c.down, c.past)
 		}
 	}
 }
@@ -270,7 +314,7 @@ func TestASingleRouteDownForLongIsToldOnceAndWaitedFor(t *testing.T) {
 	var m *modelRoute
 	rt.sync(func() { m = rt.models[event.ActorEagent] })
 	var told bool
-	rt.sync(func() { told = m.told || !m.downSince.IsZero() })
+	rt.sync(func() { told = m.out.told || m.out.down() })
 	if told {
 		t.Fatal("the outage is over, but its state stands")
 	}
@@ -323,26 +367,170 @@ func TestTwoCallsInOneOutageSwitchOnceAndTellOnce(t *testing.T) {
 // session stopping) or runs out of its time (the closing word), whether it
 // waits between rounds or is asking the other routes.
 func TestACallWaitingOnTheNetworkReturnsWhenItsContextEnds(t *testing.T) {
-	for _, deadline := range []bool{false, true} {
-		rt, _ := netRuntime(t, "http://"+downAddr(t), "http://"+downAddr(t))
-		setFor(t, &offlineWait, time.Hour)
-		var ctx context.Context
-		var cancel context.CancelFunc
-		if deadline {
-			ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
-		} else {
-			ctx, cancel = context.WithCancel(context.Background())
+	for _, probing := range []bool{false, true} {
+		for _, deadline := range []bool{false, true} {
+			t.Run(fmt.Sprintf("probing=%v,deadline=%v", probing, deadline), func(t *testing.T) {
+				waitingCallReturns(t, probing, deadline)
+			})
 		}
-		ch := netCallAsync(rt, ctx)
-		if !deadline {
-			time.Sleep(20 * time.Millisecond)
-			cancel()
+	}
+}
+
+func waitingCallReturns(t *testing.T, probing, deadline bool) {
+	// The fallback takes the call and never answers: a call that is
+	// asking it is held there until its context ends.
+	var asked atomic.Int32
+	stop := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		select {
+		case <-r.Context().Done():
+		case <-stop:
 		}
-		start := time.Now()
-		o := netWait(t, ch)
-		if o.err == nil || time.Since(start) > time.Second {
-			t.Fatalf("deadline %v: %v after %s", deadline, o.err, time.Since(start))
-		}
+	}))
+	t.Cleanup(func() { close(stop); hung.Close() })
+	rt, _ := netRuntime(t, "http://"+downAddr(t), hung.URL)
+	setFor(t, &probeStart, time.Hour)
+	if !probing {
+		setFor(t, &offlineWait, time.Hour) // held in the wait between rounds
+	}
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if deadline {
+		ctx, cancel = context.WithTimeout(context.Background(), 150*time.Millisecond)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	if probing {
+		waitFor(t, "the fallback to be asked", func() bool { return asked.Load() > 0 })
+	} else {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !deadline {
 		cancel()
+	}
+	start := time.Now()
+	o := netWait(t, ch)
+	if o.err == nil || time.Since(start) > time.Second {
+		t.Fatalf("%v after %s", o.err, time.Since(start))
+	}
+	if !probing && asked.Load() != 0 {
+		t.Fatalf("the fallback was asked during the first wait")
+	}
+}
+
+// A fallback that takes the call and does not begin to answer is given up
+// on after probeStart, and the round goes on: the primary, back meanwhile,
+// answers. One that has begun to answer is not cut, however slow.
+func TestARouteAskedInPlaceOfAnotherHasLittleTimeToBegin(t *testing.T) {
+	t.Run("silent", func(t *testing.T) {
+		model := netModel(t)
+		var asked atomic.Int32
+		stop := make(chan struct{})
+		hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			asked.Add(1)
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+		}))
+		t.Cleanup(func() { close(stop); hung.Close() })
+		addr := downAddr(t)
+		rt, _ := netRuntime(t, "http://"+addr, hung.URL)
+		setFor(t, &probeStart, 30*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ch := netCallAsync(rt, ctx)
+		waitFor(t, "the fallback to be asked", func() bool { return asked.Load() > 0 })
+		serveAt(t, addr, model.srv.Config.Handler)
+		if o := netWait(t, ch); o.err != nil || o.resp.Text != "from "+testModel || len(netRoutes(rt)) != 0 {
+			t.Fatalf("call: %v %+v; routes %+v", o.err, o.resp, netRoutes(rt))
+		}
+	})
+	t.Run("slow", func(t *testing.T) {
+		model := netModel(t)
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Read before the answer begins: the body cannot be read after.
+			raw, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			w.(http.Flusher).Flush()
+			time.Sleep(80 * time.Millisecond) // begun, then slow
+			model.srv.Config.Handler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(slow.Close)
+		rt, _ := netRuntime(t, "http://"+downAddr(t), slow.URL)
+		setFor(t, &probeStart, 20*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if o := netWait(t, netCallAsync(rt, ctx)); o.err != nil || o.resp.Text != "from eagent-fallback" {
+			t.Fatalf("call: %v %+v", o.err, o.resp)
+		}
+		var start time.Duration
+		rt.sync(func() { start = rt.models[event.ActorEagent].client.StartTimeout })
+		if r := netRoutes(rt); len(r) != 1 || start != 0 {
+			t.Fatalf("routes %+v; the fallback in use keeps a start limit of %s", r, start)
+		}
+	})
+}
+
+// A change of effort alone keeps an outage going: told once, not again.
+func TestAnEffortChangeDuringAnOutageDoesNotTellTheUserAgain(t *testing.T) {
+	model := netModel(t)
+	addr := downAddr(t)
+	rt, _ := netRuntime(t, "http://"+addr, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	waitFor(t, "the outage notice", func() bool { return len(outageNotices(rt)) > 0 })
+	rt.sync(func() {
+		ep := rt.models[event.ActorEagent].client.Endpoint
+		ep.ReasoningEffort = "low"
+		rt.swapRoute(routeSwap{who: event.ActorEagent, eps: []llm.Endpoint{ep}, conf: config.ModelRoute{BaseURL: ep.BaseURL, Model: ep.Model}})
+		rt.models[event.ActorEagent].client.MaxAttempts = 1
+	})
+	rounds(8)
+	serveAt(t, addr, model.srv.Config.Handler)
+	if o := netWait(t, ch); o.err != nil {
+		t.Fatal(o.err)
+	}
+	if n := outageNotices(rt); len(n) != 1 {
+		t.Fatalf("told %d times: %q", len(n), n)
+	}
+}
+
+// After a fallback took over, picking the primary again in the settings
+// brings the session back to it: once the outage is over, and during one of
+// the fallback.
+func TestPickingThePrimaryAgainLeavesTheFallback(t *testing.T) {
+	model := netModel(t)
+	pAddr, fAddr := downAddr(t), downAddr(t)
+	rt, _ := netRuntime(t, "http://"+pAddr, "http://"+fAddr)
+	serveAt(t, fAddr, model.srv.Config.Handler)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if o := netWait(t, netCallAsync(rt, ctx)); o.err != nil || o.resp.Text != "from eagent-fallback" {
+		t.Fatalf("call: %v %+v", o.err, o.resp)
+	}
+	serveAt(t, pAddr, model.srv.Config.Handler)
+	switchTo(rt, "http://"+pAddr, testModel)
+	if o := netWait(t, netCallAsync(rt, ctx)); o.err != nil || o.resp.Text != "from "+testModel {
+		t.Fatalf("after picking the primary: %v %+v", o.err, o.resp)
+	}
+	// On the fallback again, which goes away under a call: the pick moves
+	// the waiting call to the primary at once.
+	gone := downAddr(t)
+	switchTo(rt, "http://"+gone, "eagent-fallback")
+	// A try in flight finishes on its route (here one attempt, not the
+	// client's half minute of retries); the next goes to the pick.
+	rt.sync(func() { rt.models[event.ActorEagent].client.MaxAttempts = 1 })
+	ch := netCallAsync(rt, ctx)
+	time.Sleep(20 * time.Millisecond)
+	switchTo(rt, "http://"+pAddr, testModel)
+	if o := netWait(t, ch); o.err != nil || o.resp.Text != "from "+testModel {
+		t.Fatalf("picking the primary during an outage: %v %+v", o.err, o.resp)
 	}
 }

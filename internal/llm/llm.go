@@ -534,6 +534,10 @@ type Client struct {
 	HTTP     *http.Client
 	// IdleTimeout aborts a stream that produces no bytes for this long.
 	IdleTimeout time.Duration
+	// StartTimeout, when set, bounds the wait for the response to start
+	// (its headers) in place of IdleTimeout; the stream after that keeps
+	// IdleTimeout.
+	StartTimeout time.Duration
 	// CallTimeout bounds one attempt end to end (zero = none).
 	CallTimeout time.Duration
 	// MaxAttempts bounds retries of transient failures.
