@@ -105,8 +105,10 @@ func TestAPictureThatCannotFitDoesNotRestartTheConversationForever(t *testing.T)
 	if n := len(s.events(event.Dossier)); n > 2 {
 		t.Fatalf("%d restarts for one message with a picture, want at most 2", n)
 	}
-	if got := s.ui.said(); len(got) != 1 || got[0] != "Noted." {
-		t.Fatalf("the user heard %q, want the answer", got)
+	// Told once that the session is being reread, though two restarts
+	// came one after the other, and then answered.
+	if got := s.ui.said(); len(got) != 2 || got[0] != rereadNotice || got[1] != "Noted." {
+		t.Fatalf("the user heard %q, want to be told the session is being reread and then the answer", got)
 	}
 	// The message is still reachable from the newest briefing by its place.
 	ds := s.dossiers()

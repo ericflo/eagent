@@ -528,16 +528,27 @@ func (r *Runtime) tellRereading() {
 	if !t.compacting || t.rereadTold || r.ending {
 		return
 	}
+	// Newest first, back to the last look: a message or an answer for
+	// eagent since the last time they were told (by an earlier pass that
+	// ended without a look, as when the next restart follows at once).
 	waiting := false
+scan:
 	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > t.seen; i-- {
 		ev := r.st.Events[i]
 		switch ev.Type {
 		case event.UserAnswer:
 			waiting = true
+			break scan
 		case event.UserMessage:
 			var d event.UserMessageData
 			if ev.Decode(&d) == nil && d.Held != "" {
 				waiting = true
+				break scan
+			}
+		case event.Message:
+			var d event.MessageData
+			if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && d.Auto && d.Text == rereadNotice {
+				break scan
 			}
 		}
 	}
@@ -545,6 +556,11 @@ func (r *Runtime) tellRereading() {
 		return
 	}
 	t.rereadTold = true
+	if r.phone != nil {
+		// The post carries the status line; it is the pass's from the
+		// first moment, not the one from before it.
+		r.phone.noteState(r)
+	}
 	r.append(event.New(event.Message, event.ActorEagent, event.MessageData{Auto: true, Text: rereadNotice}))
 	r.ui.Say(rereadNotice)
 }

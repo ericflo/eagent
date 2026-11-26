@@ -141,10 +141,14 @@ func TestAMessageArrivingMidTurnIsAnsweredInThatTurn(t *testing.T) {
 	}
 }
 
-// phoneShows waits up to within for the phone's status line to read text.
+// phoneShows waits up to within for the phone's status line to read text,
+// written on its own or carried by a post.
 func phoneShows(fp *phoneFake, text string, within time.Duration) bool {
 	deadline := time.Now().Add(within)
 	for {
+		if fp.shownStatus() == text {
+			return true
+		}
 		for _, a := range fp.statuses() {
 			if a["text"] == text {
 				return true

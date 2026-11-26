@@ -251,7 +251,8 @@ func TestRefusedFirstRequestKeepsTheMessageThatSetItOff(t *testing.T) {
 		})
 	})
 	s.waitFor("the dossier", func() bool { return len(s.dossiers()) == 1 })
-	s.waitFor("the answer", func() bool { return s.ui.messageCount() >= 1 })
+	// The user is first told the session is being reread (rereadNotice).
+	s.waitFor("the answer", func() bool { return r5Told(s, "Here.") == 1 })
 	if d := s.dossiers()[0]; d.CoversSeq != 0 || !d.CoversNone {
 		t.Fatalf("the dossier says it took in up to %d (none: %v), and no call had seen anything", d.CoversSeq, d.CoversNone)
 	}
