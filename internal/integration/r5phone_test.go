@@ -100,3 +100,23 @@ func TestReplyWatcherTellsThePhoneAFileWasTooLarge(t *testing.T) {
 		t.Fatalf("notes = %q", notes)
 	}
 }
+
+// The session's summary names its thread a moment after it starts. The
+// first publication must not put the project's folder name back over it.
+func TestFirstPublicationKeepsTheThreadsSummaryTitle(t *testing.T) {
+	f, project, session := newPublicationFixture(t)
+	f.mu.Lock()
+	f.title = "Fixing the login redirect"
+	f.mu.Unlock()
+	if _, err := Publish(context.Background(), project, session.ID, "test", true); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.title != "Fixing the login redirect" {
+		t.Fatalf("title = %q", f.title)
+	}
+	if f.patchAgent != "eagent" {
+		t.Fatalf("agent = %q", f.patchAgent)
+	}
+}
