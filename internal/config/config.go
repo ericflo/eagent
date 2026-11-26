@@ -878,17 +878,27 @@ func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessag
 	// as it does everywhere; a choice that cannot hold under it is refused.
 	cfg, err := LoadBundleWithFile(project, preset, preset, rest)
 	if err == nil {
-		OfferedEffort(&cfg.Model)
+		OfferedEffort(project, &cfg)
 	}
 	return cfg, err
 }
 
-// OfferedEffort moves an effort kept that a route's catalog model does not
-// offer (xhigh from a file written for openai-high, on GLM-5.3) to the
-// nearest one it does, as a live switch to that model makes it.
-func OfferedEffort(a *ModelRoute) {
-	if m, ok := Lookup(a.BaseURL, a.Model); ok && a.ReasoningEffort != "" && !contains(m.Efforts, a.ReasoningEffort) {
-		a.ReasoningEffort = NearestEffort(m.Efforts, a.ReasoningEffort)
+// OfferedEffort moves an effort kept that a route's model does not offer
+// (xhigh from a file written for openai-high, on GLM-5.3) to the nearest
+// one it does, as a live switch to that model makes it (PickRoute, with
+// the project's servers and lists): on the main route, and on a dedicated
+// summarizer's own route.
+func OfferedEffort(project string, cfg *Config) {
+	routes := []*ModelRoute{&cfg.Model}
+	if cfg.Summarizer.Mode == SummarizerDedicated && cfg.Summarizer.Model != nil && cfg.Summarizer.Model.Model != "" {
+		routes = append(routes, cfg.Summarizer.Model)
+	}
+	for _, a := range routes {
+		if pr, ok := ProviderForURLFor(project, a.BaseURL); ok {
+			if picked, err := PickRoute(project, ModelRoute{ReasoningEffort: a.ReasoningEffort}, pr.ID, a.Model, ""); err == nil {
+				a.ReasoningEffort = picked.ReasoningEffort
+			}
+		}
 	}
 }
 
