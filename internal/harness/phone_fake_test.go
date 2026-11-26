@@ -810,7 +810,7 @@ func (g *phoneRig) phoneWeighed(id string) {
 }
 
 // statusIdle waits until the status keeper has nothing armed: its first
-// look (one second after it starts) is past, the line on the phone is what
+// look (statusFirstLook after it starts) is past, the line on the phone is what
 // the session wants, and more than its 200ms floor between looks has
 // passed since, so any wake it had set has come and gone. A change after
 // this reaches the phone only if it wakes the keeper.
@@ -827,7 +827,7 @@ func (g *phoneRig) statusIdle() {
 		return p.want.Text == p.sent.Text && p.want.Kind == p.sent.Kind
 	}
 	waitFor(g.t, "the status keeper to be idle", func() bool {
-		if time.Since(g.started) < 1300*time.Millisecond || !caughtUp() {
+		if time.Since(g.started) < statusFirstLook+300*time.Millisecond || !caughtUp() {
 			return false
 		}
 		time.Sleep(300 * time.Millisecond)

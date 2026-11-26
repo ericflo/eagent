@@ -234,6 +234,8 @@ func TestPhoneIsToldWhenAFileItSentIsTooLarge(t *testing.T) {
 // until the phone shows that step and the status keeper has nothing armed.
 func r5Working(t *testing.T, fp *phoneFake) (*phoneRig, string) {
 	t.Helper()
+	// The keeper's first look, a second in at most, comes at once.
+	setFor(t, &statusFirstLook, 50*time.Millisecond)
 	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
 	g.seat.mu.Lock()
 	g.seat.hang = true

@@ -526,11 +526,20 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 // server kept a newer status (by seq) or the same text still had most of
 // its life. A thread that does not exist yet is a 404: post a message first.
 func (c *Client) SetActivity(ctx context.Context, ref string, a Activity) (bool, error) {
+	applied, _, err := c.SetActivityShown(ctx, ref, a)
+	return applied, err
+}
+
+// SetActivityShown is SetActivity that also returns the line the thread
+// shows after the call (nil for none): when the write was not applied,
+// that is what the app shows instead.
+func (c *Client) SetActivityShown(ctx context.Context, ref string, a Activity) (bool, *Status, error) {
 	var out struct {
-		Applied bool `json:"applied"`
+		Applied bool   `json:"applied"`
+		Thread  Thread `json:"thread"`
 	}
 	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/activity", nil, a, &out, 0)
-	return out.Applied, err
+	return out.Applied, out.Thread.Activity, err
 }
 
 // ClearActivity drops the status line. seq (nanoseconds, like Activity.Seq)
