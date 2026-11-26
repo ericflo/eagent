@@ -7,51 +7,6 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// A message held for a restart is typed into the new agent; that agent is
-// then stopped before its arrival shows. It should be reported once.
-func TestASendHeldThroughARestartAndThenStoppedIsReportedOnce(t *testing.T) {
-	old, next := newFakeSeat("one"), newFakeSeat("two")
-	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
-	rt := newLaunchRuntime(t)
-	rt.sync(func() {
-		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
-			t.Errorf("repick: %v", err)
-		}
-	})
-	g.waitEntered(t)
-	userSays(t, rt, "also sweep the floor")
-	g.release <- struct{}{}
-	waitRelayStarts(t, rt)
-	waitFor(t, "the held message in the new agent", func() bool {
-		return slices.Contains(next.sentTexts(), "also sweep the floor")
-	})
-	var heldID string
-	rt.sync(func() {
-		for _, ev := range rt.st.Events {
-			var d event.RelaySendData
-			if ev.Type == event.RelaySend && ev.Decode(&d) == nil && d.Text == "also sweep the floor" {
-				heldID = d.ID
-			}
-		}
-	})
-	args := map[string]any{"action": "stop"}
-	if text, isErr := rt.relayTool("relay_control", argStr(args), argNum(args), argList(args), false); isErr {
-		t.Fatalf("stop: %s", text)
-	}
-	var evs []event.Event
-	rt.sync(func() { evs = slices.Clone(rt.st.Events) })
-	n := 0
-	for _, ev := range evs {
-		var d event.RelayDeliveredData
-		if ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && d.ID == heldID {
-			n++
-		}
-	}
-	if n != 1 {
-		t.Fatalf("held message %s typed into the new agent, then stopped unconfirmed: %d outcomes, want 1", heldID, n)
-	}
-}
-
 // A restart is under way and a user message waits for it (held, never
 // typed). The relay is stopped while the restart starts. The held message
 // was never typed: it should end once, not_sent, not first "unconfirmed".

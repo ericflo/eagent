@@ -75,33 +75,3 @@ func TestASendUnconfirmedWhenItsAgentIsRestartedIsReportedOnce(t *testing.T) {
 		t.Fatalf("typed into the stopped agent: %q", got)
 	}
 }
-
-// The same when the agent is stopped: a message it was typed and never
-// shown to have is reported unconfirmed once, with the reason.
-func TestASendUnconfirmedWhenItsAgentIsStoppedIsReportedOnce(t *testing.T) {
-	seat := newFakeSeat("one")
-	useGatedLaunches(t, []relaySeat{seat}, nil)
-	rt := newLaunchRuntime(t)
-	var typed string
-	rt.sync(func() {
-		typed = rt.st.NextRelaySendID()
-		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: typed, From: "user", Mode: "queue", Text: "tidy the shelves"}))
-	})
-	args := map[string]any{"action": "stop"}
-	if text, isErr := rt.relayTool("relay_control", argStr(args), argNum(args), argList(args), false); isErr {
-		t.Fatalf("stop: %s", text)
-	}
-	var evs []event.Event
-	var waiting bool
-	rt.sync(func() { evs, waiting = slices.Clone(rt.st.Events), rt.st.Waiting() })
-	d := outcomeOf(t, evs, typed)
-	if d == nil || d.OK || d.Outcome != event.DeliveryUnconfirmed || !strings.Contains(d.Detail, "was stopped") {
-		t.Fatalf("the send typed into the stopped agent: %+v, want one unconfirmed that says it was stopped", d)
-	}
-	if !waiting {
-		t.Errorf("the session still waits on a stopped agent")
-	}
-	if got := seat.sentTexts(); len(got) != 0 {
-		t.Fatalf("typed into the stopped agent: %q", got)
-	}
-}

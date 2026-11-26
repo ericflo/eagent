@@ -966,14 +966,15 @@ func (r *Runtime) reattachRelays() []string {
 }
 
 // settleExited reports, once, each send rel still waited on as not
-// confirmed: the process it was typed into is gone (it exited, was
-// stopped, or was restarted), and nothing watches for its arrival any
-// more. A send still waiting in the seat's queue to be typed is left out:
-// typing it fails, and that is reported where it fails; so is one held for
-// a start still in flight, and one the caller names in except. Called wherever an agent's process ends: an exit
-// seen live or found at a resume, a restart that cannot start, a restart
-// that does (before the new start is recorded), and a stop. A switch to
-// another agent is not one of them: its hand-over brief carries what the
+// confirmed: the process it was typed into is gone (it exited or was
+// restarted), and nothing watches for its arrival any more. A send still
+// waiting in the seat's queue to be typed is left out: typing it fails,
+// and that is reported where it fails; so is one the caller names in
+// except. Called where an agent's process ends and its conversation does
+// not: an exit seen live or found at a resume, a restart that cannot
+// start, and a restart that does (before the new start is recorded). A
+// stop is not one of them (the agent and its work are ended on purpose),
+// nor is a switch to another agent: its hand-over brief carries what the
 // old agent was sent. Loop goroutine (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
@@ -992,19 +993,9 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 			queued[q.typing] = true
 		}
 	}
-	if job := r.relays.launching[rel.Name]; job != nil {
-		// Held for a start still in flight: typed by the new agent, or
-		// reported where that start fails.
-		for _, h := range job.held {
-			queued[h.id] = true
-		}
-	}
 	r.relays.mu.Unlock()
 	how := "exited"
-	switch {
-	case rel.Ended:
-		how = "was stopped"
-	case rel.State != "exited":
+	if rel.State != "exited" {
 		how = "was restarted"
 	}
 	for _, s := range unresolvedSends(r.st, rel) {
@@ -1783,11 +1774,6 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				}
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
-				if now := r.st.Relays[rel.Name]; now != nil {
-					// The relay as the record has it now: a restart may
-					// have finished since rel was read above.
-					r.settleExited(now)
-				}
 				r.armAutopilots()
 			}) {
 				return errEnding.Error(), true
