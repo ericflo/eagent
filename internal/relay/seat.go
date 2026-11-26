@@ -104,6 +104,7 @@ type Seat struct {
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
+	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	closed     bool
 }
 
@@ -196,11 +197,17 @@ func Attach(spec Spec, hostName, target, innerID, transcript string, since time.
 	}
 	s := newSeat(spec, a, host, target, innerID)
 	s.transcript = transcript
-	s.launched = since
-	s.since = since
-	s.state = "idle"
+	s.markAttached(since)
 	go s.watch()
 	return s, nil
+}
+
+// markAttached starts a reattached seat. The agent may be in the middle of
+// a turn: idle is only what the seat says until the history it re-reads
+// shows whether the last turn ended.
+func (s *Seat) markAttached(since time.Time) {
+	s.launched, s.since = since, since
+	s.state, s.attached = "idle", true
 }
 
 func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
@@ -608,8 +615,14 @@ func (s *Seat) fold(o obs) {
 	since := s.since
 	s.mu.Unlock()
 	if !since.IsZero() && !o.at.IsZero() && !o.at.After(since) && o.kind != "meta" {
-		return // already on the record before this eagent attached
+		// Already on the record before this eagent attached; it only says
+		// whether the agent is still in a turn.
+		s.foldHistory(o)
+		return
 	}
+	s.mu.Lock()
+	s.attached = false
+	s.mu.Unlock()
 	switch o.kind {
 	case "meta":
 		s.mu.Lock()
@@ -687,6 +700,32 @@ func (s *Seat) fold(o obs) {
 		if next > mark {
 			s.emit(Event{Kind: KindLimit, UsedPercent: o.used, Window: o.window, ResetsAt: o.resets, Exhausted: o.used >= 100})
 		}
+	}
+}
+
+// foldHistory follows the turns in history a reattached seat re-reads, so
+// it says working when the agent is still in the turn it was in when eagent
+// stopped watching. Nothing is reported but the state.
+func (s *Seat) foldHistory(o obs) {
+	s.mu.Lock()
+	if !s.attached {
+		s.mu.Unlock()
+		return
+	}
+	state := ""
+	switch o.kind {
+	case "user", "working", "progress", "activity", "image":
+		if s.state == "idle" {
+			state, s.turnStart, s.turnTools, s.turnImages = "working", o.at, 0, nil
+		}
+	case "turn", "aborted":
+		if s.state == "working" {
+			state = "idle"
+		}
+	}
+	s.mu.Unlock()
+	if state != "" {
+		s.setState(state, "")
 	}
 }
 
