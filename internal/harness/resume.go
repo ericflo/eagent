@@ -18,6 +18,23 @@ func (r *Runtime) closeInterrupted() {
 	// The agents run in terminals of their own and survive eagent stopping;
 	// pick them up again, and say which are gone.
 	closed := r.reattachRelays()
+	legacy := r.st.Legacy() && !r.st.Upgraded()
+	// The run before stopped between recording a message of the user's that
+	// was not held and recording its send: nothing of it was typed (typing
+	// starts only once the send is recorded). It is routed again as things
+	// stand now and, unless that keeps it, sent; next to nothing else is
+	// written first, so a stop here leaves one of the two records again.
+	for i := len(r.st.Events) - 1; i >= 0 && !legacy; i-- {
+		if ev := r.st.Events[i]; ev.Seq == opened {
+			var d event.UserMessageData
+			if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.Held == "" {
+				if rel, held := r.routeUserMessage(d); held == "" {
+					r.forwardUserMessage(rel, opened, d)
+				}
+			}
+			break
+		}
+	}
 	dangling := r.st.DanglingCalls(event.ActorEagent)
 	for _, tc := range dangling {
 		r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{
@@ -31,7 +48,6 @@ func (r *Runtime) closeInterrupted() {
 	if open {
 		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
-	legacy := r.st.Legacy() && !r.st.Upgraded()
 	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed, PhoneLedger: true, After: opened}))
 	// The record names the model that speaks as eagent, and the phone and
 	// the views show it from there. A session last run with another model,

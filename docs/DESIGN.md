@@ -49,7 +49,7 @@ A message kept for the model is always answered. If the model holds, it is told 
 
 The model is woken by events, never on a bare timer:
 
-- **The user wrote** something that was kept for it, answered a question, or (after a passed message) is owed one short line saying it reached the agent.
+- **The user wrote** something that was kept for it, answered a question, or (after a passed message) is owed one short line saying where it got to, as its send's outcome on the record says: it reached the agent, it waits to be taken up, it did not go (send it again or say what is wrong), or its arrival could not be confirmed. A failed send of a passed message is told this way only, not again as a message that did not arrive.
 - **The agent needs attention**: a dialog it is stuck on, an exit, a message that could not be delivered, a usage limit.
 - **The agent finished a turn.** Its report is in the record; the model gives the user the short version, asks what the agent asks, or sends it on.
 - **A notice**: a timer the model set came due, or the harness has something to say (a resume, an autopilot deadline).
