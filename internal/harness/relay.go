@@ -607,10 +607,25 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				// everything" leaves none behind.
 				_ = seat.Kill()
 			} else {
+				// A start under this name waits for the kill, as for a
+				// stop's (beginLaunch).
 				r.relayOps.Add(1)
+				killed := make(chan struct{})
+				r.relays.mu.Lock()
+				if r.relays.stopping == nil {
+					r.relays.stopping = map[string]chan struct{}{}
+				}
+				r.relays.stopping[job.name] = killed
+				r.relays.mu.Unlock()
 				go func() {
 					defer r.relayOps.Done()
 					_ = seat.Kill()
+					r.relays.mu.Lock()
+					if r.relays.stopping[job.name] == killed {
+						delete(r.relays.stopping, job.name)
+					}
+					r.relays.mu.Unlock()
+					close(killed)
 				}()
 			}
 		}

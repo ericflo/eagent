@@ -166,3 +166,106 @@ func TestASendLeftByAStopIsSettledOnceWhenTheRelayIsRestarted(t *testing.T) {
 		t.Fatalf("typed into the restarted agent: %q", s)
 	}
 }
+
+// gatedKillSeat is a fake agent whose Kill waits for gate, as killing a
+// terminal can take seconds; dead is closed once it has.
+type gatedKillSeat struct {
+	*fakeSeat
+	entered chan struct{}
+	gate    chan struct{}
+	dead    chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedKillSeat) Kill() error {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.gate
+		_ = s.fakeSeat.Kill()
+		close(s.dead)
+	})
+	return nil
+}
+
+// Finding 14. An agent that came up for a restart the relay was stopped
+// during is killed in the background. A restart asked for right after
+// must wait for that kill, as it waits for a stop's (relays.stopping), and
+// not launch into the same terminal while the kill runs.
+func TestARestartWaitsForTheKillOfAnAgentStoppedWhileItStarted(t *testing.T) {
+	old := newFakeSeat("one")
+	mid := &gatedKillSeat{fakeSeat: newFakeSeat("mid"), entered: make(chan struct{}), gate: make(chan struct{}), dead: make(chan struct{})}
+	next := newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{old, mid, next}, nil)
+	gated := launchRelay
+	killedFirst := make(chan bool, 4)
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		select {
+		case <-mid.dead:
+			killedFirst <- true
+		default:
+			killedFirst <- false
+		}
+		return gated(spec, innerID, resume)
+	}
+	rt := newLaunchRuntime(t)
+	var gateOnce sync.Once
+	release := func() { gateOnce.Do(func() { close(mid.gate) }) }
+	t.Cleanup(release)
+	<-killedFirst // the session's own start
+	rt.sync(func() {
+		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("repick: %v", err)
+		}
+	})
+	g.waitEntered(t)
+	<-killedFirst
+	control := func(action string) (string, bool) {
+		args := map[string]any{"action": action}
+		return rt.relayTool("relay_control", argStr(args), argNum(args), argList(args), false)
+	}
+	if text, isErr := control("stop"); isErr {
+		t.Fatalf("stop: %s", text)
+	}
+	g.release <- struct{}{}
+	select {
+	case <-mid.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent that came up for the stopped restart was never killed")
+	}
+	waitRelayStarts(t, rt)
+	restarted := make(chan string, 1)
+	go func() {
+		text, isErr := control("restart")
+		if isErr {
+			text = "error: " + text
+		}
+		restarted <- text
+	}()
+	waitFor(t, "the restart under way", func() bool {
+		var job *relayLaunch
+		rt.sync(func() { job = rt.relays.launch("codex") })
+		return job != nil
+	})
+	var waits bool
+	rt.sync(func() {
+		rt.relays.mu.Lock()
+		waits = rt.relays.launching["codex"].afterStop != nil
+		rt.relays.mu.Unlock()
+	})
+	if !waits {
+		t.Fatal("the restart does not wait for the kill still running under the name")
+	}
+	release()
+	g.release <- struct{}{}
+	select {
+	case text := <-restarted:
+		if strings.HasPrefix(text, "error: ") {
+			t.Fatalf("restart: %s", text)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restart never finished")
+	}
+	if !<-killedFirst {
+		t.Fatal("the restart launched while the kill of the agent before it still ran")
+	}
+}
