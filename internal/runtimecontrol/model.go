@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/relay"
@@ -568,13 +569,15 @@ func ConfigFromValues(project string, values Values) (config.Config, error) {
 			}
 		}
 		if rt.Provider == "" {
-			return base, false, nil
+			// Neither a catalog nor the project's chain has it: saving the
+			// project's own model under the new name would not be what runs.
+			return base, false, fmt.Errorf("%s: %s is at an address no provider is known for and is not in this project's configuration, so it cannot be saved as a preset from here", routeNames[key], rt.Model)
 		}
 		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, rt.Effort)
 		if err != nil {
 			return base, false, fmt.Errorf("%s: %w", routeNames[key], err)
 		}
-		if strings.TrimRight(picked.BaseURL, "/") != strings.TrimRight(base.BaseURL, "/") || picked.Model != base.Model {
+		if !llm.SameBaseURL(picked.BaseURL, base.BaseURL) || picked.Model != base.Model {
 			picked.Fallback = nil
 		}
 		return picked, true, nil

@@ -174,17 +174,16 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 }
 
 // pickBase is the configured route a pick of a model the session already
-// has starts from. On the configured chain it is the entry the session is
-// on when the pick names that one (an effort change on a fallback keeps
-// the fallback's limits and key, even when two entries name one model).
-// Otherwise it is the entry of the configured chain the pick names (the
-// first route picked again is that route, with its fallbacks), else the
-// one of the routes a settings pick put in place. A pick of another model
-// has none: it starts from the configured route.
+// has starts from: the entry the session is on when the pick names that
+// one (an effort change on a fallback keeps the fallback's limits and key,
+// even when two entries name one model), else the entry of the configured
+// chain the pick names (the first route picked again is that route, with
+// its fallbacks), else the one of the routes a settings pick put in place.
+// A pick of another model has none: it starts from the configured route.
 func (r *Runtime) pickBase(who string, pick runtimecontrol.Route) (config.ModelRoute, bool) {
 	project := r.opts.Project
 	m := r.models[who]
-	if cur := m.confAt(); !m.picked && cur != nil && runtimecontrol.Names(project, *cur, pick) {
+	if cur := m.confAt(); cur != nil && runtimecontrol.Names(project, *cur, pick) {
 		return *cur, true
 	}
 	for _, chain := range []config.ModelRoute{r.configRoute(who), m.conf} {
@@ -212,9 +211,9 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
 	moved := true
 	if old := r.models[sw.who]; old != nil && old.client != nil {
-		moved = old.client.Endpoint.BaseURL != sw.eps[0].BaseURL || old.client.Endpoint.Model != sw.eps[0].Model
+		moved = !llm.SameBaseURL(old.client.Endpoint.BaseURL, sw.eps[0].BaseURL) || old.client.Endpoint.Model != sw.eps[0].Model
 	}
-	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf, picked: true}
+	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
 	if sw.who == event.ActorEagent && moved {
 		// What the old model did belongs to it: its failures and the wait
 		// before the next try (up to an hour), a refusal of the prompt as

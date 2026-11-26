@@ -164,18 +164,8 @@ func TestCoreRouteChangesSwapOnlyChangedPicksAndKeepFallbacks(t *testing.T) {
 	if routed != runtimecontrol.RouteEagent+" z-ai/glm-5.3" {
 		t.Fatalf("route event = %q", routed)
 	}
-	// Only the effort changes: same model, its fallback chain and limits stay.
-	rt.cfg.Model.BaseURL = "https://openrouter.ai/api/v1"
-	rt.cfg.Model.Model = "z-ai/glm-5.3"
-	swaps, err = rt.routeChanges(
-		map[string]runtimecontrol.Route{runtimecontrol.RouteEagent: {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "high"}},
-		map[string]runtimecontrol.Route{runtimecontrol.RouteEagent: {Provider: "openrouter", Model: "z-ai/glm-5.3", Effort: "low"}})
-	if err != nil || len(swaps) != 1 {
-		t.Fatalf("effort pick: %+v %v", swaps, err)
-	}
-	if eps := swaps[0].eps; len(eps) != 2 || eps[0].ReasoningEffort != "low" || eps[0].MaxTokens != 32768 || eps[1].Model != "eagent-fallback" {
-		t.Fatalf("an effort change lost the fallback or the limits: %+v", eps)
-	}
+	// An effort change keeping the fallback chain and limits:
+	// TestAnEffortChangeOnTheConfiguredModelKeepsItsFallbacks.
 	for _, bad := range []runtimecontrol.Route{
 		{Provider: "openrouter", Model: "nope/none", Effort: "low"},
 		{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}, // ANTHROPIC_API_KEY unset
