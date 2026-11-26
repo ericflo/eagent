@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,9 +85,41 @@ type Options struct {
 type modelRoute struct {
 	routes []llm.Endpoint
 	client *llm.Client
+	// at is the position in routes of the one the client is on. Two routes
+	// can name the same model at the same address (another key, say), so
+	// the position is kept rather than found again by name.
+	at int
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
+}
+
+// confAt is the configured route the client is on: the at-th of the chain
+// among those Routes keeps (the ones whose key is set). When that does not
+// name the client's model (a key set or unset since the routes were made),
+// it is the first route of the chain that does, or nil.
+func (m *modelRoute) confAt() *config.ModelRoute {
+	if m.client == nil {
+		return nil
+	}
+	ep := m.client.Endpoint
+	same := func(cur *config.ModelRoute) bool { return cur.BaseURL == ep.BaseURL && cur.Model == ep.Model }
+	i := 0
+	for cur := &m.conf; cur != nil; cur = cur.Fallback {
+		if _, err := cur.Endpoint(); err != nil {
+			continue
+		}
+		if i == m.at && same(cur) {
+			return cur
+		}
+		i++
+	}
+	for cur := &m.conf; cur != nil; cur = cur.Fallback {
+		if same(cur) {
+			return cur
+		}
+	}
+	return nil
 }
 
 // Runtime is one live session.
@@ -374,7 +407,12 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 			cancel()
 			return nil, fmt.Errorf("summarizer: %w", err)
 		}
-		r.models[event.ActorSummarizer] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorSummarizer)}
+		r.models[event.ActorSummarizer] = &modelRoute{routes: routes, client: r.newClient(routes[0], event.ActorSummarizer), conf: cfg.Summarizer.Route(cfg.Model)}
+	}
+	// A route whose key is not set was left out, so the first one in use
+	// may be a fallback: the live settings show the one that runs.
+	for who := range r.models {
+		r.followRoute(who)
 	}
 	r.turns.init(st)
 	return r, nil
@@ -476,23 +514,54 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 				switched = true // another call already moved on; use its route
 				return
 			}
-			for i, ep := range m.routes {
-				if ep.BaseURL == client.Endpoint.BaseURL && ep.Model == client.Endpoint.Model && i+1 < len(m.routes) {
-					next := m.routes[i+1]
-					r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
-					m.client = r.newClient(next, who)
-					r.flushSilent() // the looks so far were made on the old route
-					r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-						Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
-						Reason: "the configured route is unavailable: " + shortErr(err),
-					}))
-					switched = true
-					return
-				}
+			// The next route after the one that failed, each tried once:
+			// the last one failing ends the call.
+			if m.at+1 < len(m.routes) {
+				m.at++
+				next := m.routes[m.at]
+				r.ui.Log("%s: %s is unavailable (%s); switching to %s", who, client.Endpoint, shortErr(err), next)
+				m.client = r.newClient(next, who)
+				r.flushSilent() // the looks so far were made on the old route
+				r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+					Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
+					Reason: "the configured route is unavailable: " + shortErr(err),
+				}))
+				r.followRoute(who)
+				switched = true
 			}
 		})
 		if !switched {
 			return nil, err
+		}
+	}
+}
+
+// followRoute brings the live settings' pick for who up to date with the
+// route its calls go to, after a fallback took over: the app's settings
+// sheet shows the model that answers, a preset saved from it is that
+// model, and a change to something else keeps the session on it (a pick
+// that did not change keeps its route, see routeChanges). Loop goroutine.
+func (r *Runtime) followRoute(who string) {
+	m := r.models[who]
+	shown, ok := r.activeSettings.Routes[who]
+	if m == nil || m.client == nil || !ok {
+		return
+	}
+	ep := m.client.Endpoint
+	now := runtimecontrol.Route{Model: ep.Model, Effort: ep.ReasoningEffort}
+	if pr, ok := config.ProviderForURLFor(r.opts.Project, ep.BaseURL); ok {
+		now.Provider = pr.ID
+	}
+	if now == shown {
+		return
+	}
+	// A new map: the controller's copy of the values may share this one.
+	routes := maps.Clone(r.activeSettings.Routes)
+	routes[who] = now
+	r.activeSettings.Routes = routes
+	if r.runtimeControl != nil {
+		if err := r.runtimeControl.Update(r.activeSettings); err != nil {
+			r.ui.Log("live settings: %v", err)
 		}
 	}
 }
