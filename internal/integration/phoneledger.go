@@ -26,7 +26,7 @@ import (
 // their id. A run by an eagent without the ledger (an upgrade, a rollback)
 // may have taken messages it did not record: its record is read by time,
 // and a ledger run after it starts afresh, judging what came before it by
-// the time it started.
+// the time the run before it stopped (the resume says where that was).
 type PhoneLedger struct {
 	// Keeps: the last run in the record kept the ledger.
 	Keeps bool
@@ -61,17 +61,27 @@ func ReadPhoneLedger(evs []event.Event) PhoneLedger {
 		}
 	}
 	var last time.Time // the time of the event before this one
-	for _, ev := range evs {
+	for i, ev := range evs {
 		switch ev.Type {
 		case event.SessionStart, event.SessionResume:
 			var d struct {
-				PhoneLedger bool `json:"phone_ledger"`
+				PhoneLedger bool  `json:"phone_ledger"`
+				After       int64 `json:"after"`
 			}
 			_ = ev.Decode(&d)
 			if d.PhoneLedger && !l.Keeps {
 				// The ledger starts here: what came before was taken (or
-				// not) by runs that did not record it.
+				// not) by runs that did not record it. "Before" ends where
+				// that run stopped, which the resume names (after): the
+				// events between there and here are the resume's own
+				// repairs of a cut turn, written at the resume's time.
 				l.Cursor, l.Since = "", last
+				for j := i - 1; d.After > 0 && j >= 0; j-- {
+					if evs[j].Seq <= d.After {
+						l.Since = evs[j].Time
+						break
+					}
+				}
 			}
 			l.Keeps = d.PhoneLedger
 		case event.PhoneRead:

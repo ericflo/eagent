@@ -119,6 +119,36 @@ func TestAnOlderRecordResumedAtTheTerminalTakesTheMessagesThatWaited(t *testing.
 			t.Fatalf("after the second resume recorded %v", got)
 		}
 	})
+	t.Run("cut in the middle of a turn", func(t *testing.T) {
+		// The older run stopped with a turn open. This eagent's resume
+		// closes that turn before its session.resume, at the resume's
+		// time, which is after the message that waited: the message is
+		// still judged against where the older run stopped.
+		cfg, project, path, fp := stoppedRelaySession(t)
+		sess, _, err := store.Open(path, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sess.Append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{})); err != nil {
+			t.Fatal(err)
+		}
+		sess.Close()
+		bphoneOlder(t, path)
+		waited := fp.userSays("the checklist is A, B, C", nil)
+		_, stop := bphoneRun(t, func() *Runtime {
+			useFakeRelays(t, newFakeSeat("Done."))
+			rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rt
+		})
+		waitFor(t, "the message in the record", func() bool { return len(r6PhoneIDs(path)) >= 1 })
+		stop()
+		if got := r6PhoneIDs(path); len(got) != 1 || got[0] != waited {
+			t.Fatalf("recorded %v, want %v", got, waited)
+		}
+	})
 	t.Run("nothing waiting", func(t *testing.T) {
 		cfg, project, path, fp := stoppedRelaySession(t)
 		bphoneOlder(t, path)
