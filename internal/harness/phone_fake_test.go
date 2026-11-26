@@ -45,6 +45,7 @@ type phoneFake struct {
 	activity         []map[string]any         // bodies of POST …/activity
 	cleared          int                      // DELETE …/activity calls
 	keys             map[string]string        // client_key -> message id
+	qkeys            map[string]string        // client_key -> question id, whatever its status (as the service keeps it)
 	dupes            int                      // posts answered from a known key
 	metas            []map[string]any         // PATCH thread meta bodies
 	patches          []map[string]any         // PATCH thread bodies (retitles)
@@ -82,7 +83,7 @@ type phoneFakeFile struct {
 }
 
 func newPhoneFake(remote bool) *phoneFake {
-	f := &phoneFake{questions: map[string]map[string]any{}, remote: remote, files: map[string]phoneFakeFile{}, keys: map[string]string{}, features: []string{"activity", "idempotency", "dismiss", "attachments"}}
+	f := &phoneFake{questions: map[string]map[string]any{}, remote: remote, files: map[string]phoneFakeFile{}, keys: map[string]string{}, qkeys: map[string]string{}, features: []string{"activity", "idempotency", "dismiss", "attachments"}}
 	f.cond = sync.NewCond(&f.mu)
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
@@ -243,8 +244,23 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "has_more": false, "thread_id": "t1", "timed_out": len(out) == 0})
 	case strings.HasSuffix(path, "/questions") && r.Method == http.MethodPost:
 		f.mu.Lock()
+		// The service answers a known key with the question it made for it,
+		// whatever has become of that question since (expired, cancelled,
+		// dismissed): no new card, and the status line is left alone.
+		if key, _ := body["client_key"].(string); key != "" {
+			if id, ok := f.qkeys[key]; ok {
+				f.asks = append(f.asks, body)
+				q := phoneCopy(f.questions[id])
+				f.mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}, "created": false})
+				return
+			}
+		}
 		q := map[string]any{"id": f.nextID(), "thread_id": "t1", "prompt": body["prompt"], "options": body["options"], "allow_freeform": true, "multi_select": false, "status": "pending", "answer": nil, "meta": body["meta"], "created_at": time.Now().UTC().Format(time.RFC3339Nano), "expires_at": nil}
 		f.questions[q["id"].(string)] = q
+		if key, _ := body["client_key"].(string); key != "" {
+			f.qkeys[key] = q["id"].(string)
+		}
 		f.asks = append(f.asks, body)
 		f.cond.Broadcast()
 		q = phoneCopy(q)
@@ -549,6 +565,26 @@ func (f *phoneFake) metaPatches() []map[string]any {
 	defer f.mu.Unlock()
 	return append([]map[string]any(nil), f.metas...)
 }
+
+// expire is the service timing out every pending question, as its sweep
+// does once a question's timeout has passed.
+func (f *phoneFake) expire() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, q := range f.questions {
+		if q["status"] == "pending" {
+			q["status"] = "expired"
+			n++
+		}
+	}
+	f.cond.Broadcast()
+	return n
+}
+
+// cards is how many questions the service holds for the thread: one per
+// card the app has shown.
+func (f *phoneFake) cards() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.questions) }
 
 // injectQuestion plants a pending question the running mirror never asked
 // (from an earlier run, say), tagged with the eagent question id it was
