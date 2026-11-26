@@ -379,7 +379,7 @@ func (r *Runtime) needsDossier() bool {
 				case fullBurst:
 					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
 				case fullAgain:
-					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting. I carry on with a conversation longer than it should be, which makes each answer slower and dearer. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
+					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting for that. I carry on with a conversation longer than it should be, which makes each answer slower and dearer, and restart it from my notes when it reaches my model's window. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
 				}
 				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
 			}
@@ -408,6 +408,7 @@ func (r *Runtime) restartFull(limit int) bool {
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit int) restartFacts {
 	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || r.toldFull()}
+	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
 	// size below is in the provider's count (the estimate times the ratio
 	// learned from the provider's own sizes, scale), as the first call's
@@ -450,6 +451,9 @@ type restartFacts struct {
 	// any of its calls went through. When false, its first call went
 	// through and was already past the restart size.
 	refused bool
+	// refusedAfterCalls: the provider refused the conversation as too
+	// long after calls of it went through: it grew to the window.
+	refusedAfterCalls bool
 	// carried: what the restart that began it carried whole.
 	carried carried
 	// sinceOpening (refused): the conversation held events after its
@@ -490,32 +494,48 @@ type restartFacts struct {
 //
 // Every size is in the provider's count (restartFactsNow).
 //
+//   - Refused after calls of this conversation went through: yes, always,
+//     whatever was found before about restarts made for size. Those calls
+//     went through, so its opening fits the window, and a restart shrinks
+//     it back to an opening. What bounds it: each restart made this way
+//     follows a conversation in which calls went through, so it needs
+//     the conversation to grow to the window again. The verdicts below
+//     ("no restart can help") are about a restart wanted for size, or a
+//     refusal of a conversation's first call, and nothing else.
+//
 //   - Two rescues in a row already (rescues): the restart that began this
 //     conversation and the one before it were each made because the
 //     conversation before was too long from its start, and this one is
 //     too. No: with the restart that started the run, that is three, and
 //     the session stops and says so. A conversation whose first call
 //     fits ends the run.
+//
 //   - Refused, and the opening alone does not fit the window: no restart
 //     can make it smaller. No.
+//
 //   - Refused, and the restart carried something whole: the next request
 //     is smaller. Yes.
+//
 //   - Refused, carried nothing, and nothing after the opening: the opening
 //     alone was refused, and the next restart opens on a briefing sized
 //     the same way for the same route. No.
+//
 //   - Refused, carried nothing, something after the opening (a message
 //     the user wrote during the pass, a picture, the agent's progress):
 //     the next request leaves that out, so it can be smaller. Yes, once.
 //     A working agent records something during every pass, so that is
 //     true every time: the try after it (retried) is the last. No.
+//
 //   - Refused, and not known what it carried (the restart was made by an
 //     earlier run): one more restart, whose carrying this run then knows.
+//
 //   - Once decided, it stands until a call goes through. The user's
 //     message still gets its answer path: it is owed a look, the look is
 //     made on every wake and goes out the moment the conversation fits (a
 //     model with a larger window, picked in the thread's settings, takes
 //     it without a restart), and the user is told it waits
 //     (tellStillFull).
+//
 //   - Not refused (the first call went through, past the restart size):
 //     what came after the opening is now seen and is not carried again,
 //     so a restart helps when the opening itself leaves room for a
@@ -526,6 +546,8 @@ type restartFacts struct {
 // says so.
 func restartHelps(f restartFacts) bool {
 	switch {
+	case f.refusedAfterCalls:
+		return true
 	case f.rescues >= restartRescueMax:
 		return false
 	case !f.refused:
@@ -707,9 +729,13 @@ func (r *Runtime) startDossier() {
 	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
 	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
-	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (r.refusedFirst() || t.firstPrompt >= r.rolloverTokens()) {
+	grew := t.overflowed && t.subCalls > 0
+	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (r.refusedFirst() || t.firstPrompt >= r.rolloverTokens()) && !grew {
 		// A rescue: the conversation being replaced was too long from
-		// its start (restartHelps counts them).
+		// its start (restartHelps counts them). One that grew to the
+		// window, its calls going through, ends the run like one whose
+		// first call fits: the restart that follows it starts counting
+		// again.
 		job.rescues = r.restartRescues + 1
 	}
 	if r.st.Unfinished() {
