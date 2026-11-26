@@ -110,7 +110,15 @@ func (p *phone) markSent(a *finalechat.Activity) {
 	}
 	p.mu.Lock()
 	p.sent, p.sentAt = *a, time.Now()
+	// The post carried the line as it was when it went out. When the work
+	// has moved on since, the phone now shows an older line than the
+	// session wants, and only the keeper can put that right: wake it, or
+	// it sleeps until its refresh.
+	stale := a.Text != p.want.Text || a.Kind != p.want.Kind
 	p.mu.Unlock()
+	if stale {
+		p.kick()
+	}
 }
 
 // currentActivity describes the session's present work in one line. Loop

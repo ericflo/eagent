@@ -8,23 +8,21 @@ import (
 	"time"
 )
 
-// Faults in the program that only load showed. Each test here fails on
-// the code as it is and states the fault; they are skipped until it is
-// fixed, so the suite stays green. Set runKnownFaults to see them fail.
+// Faults in the program that only load showed. A test here that still
+// fails on the code as it is says so in its skip message, so the suite
+// stays green; set runKnownFaults to see it fail.
 var runKnownFaults = false
 
 // A post carries the status line as it was when the post went out. When
 // that post is slow and a newer line is written while it is on its way,
 // the service applies the post's older line on arrival (a post carrying a
-// line sets it). The keeper takes the post's line for what is sent, but
-// nothing wakes it, so it sleeps until its refresh (4 minutes for a
-// waiting line) while the phone shows the old one: here "Thinking about
-// the next step" long after the call is over. Seen under load as
-// TestPhoneSaysEagentIsThinkingWhileACallIsOut timing out.
+// line sets it). The keeper took the post's line for what is sent, and
+// nothing woke it, so it slept until its refresh (4 minutes for a waiting
+// line) while the phone showed the old one: here "Thinking about the next
+// step" long after the call was over. Seen under load as
+// TestPhoneSaysEagentIsThinkingWhileACallIsOut timing out. markSent now
+// wakes the keeper when the line a post carried is not the one wanted.
 func TestAStatusAPostCarriedIsNotLeftUpWhenANewerOneOvertookIt(t *testing.T) {
-	if !runKnownFaults {
-		t.Skip("known fault, not fixed yet: a slow post's older status line is left up (see the comment)")
-	}
 	quickKeeper(t)
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close)
@@ -74,7 +72,7 @@ func TestAStatusAPostCarriedIsNotLeftUpWhenANewerOneOvertookIt(t *testing.T) {
 // Seen under load as that test failing: its message then landed mid-call.
 func TestAMessageWrittenWhileTheLastReplyWasOutIsStillOwedAWord(t *testing.T) {
 	if !runKnownFaults {
-		t.Skip("known fault, not fixed yet: a message written during eagent's last call is taken as heard (see the comment)")
+		t.Skip("known fault, not fixed: a message the user writes while eagent's last reply is being written counts as answered by it (the closing look compares record order, tail.go saidSeq <= LastUserSeq), so a batch session can end with the question unanswered and no closing word")
 	}
 	s, seen, code := audit2ClosingAt(t, true, func(msgs []map[string]any) reply {
 		if strings.Contains(lastText(msgs), "Holding is not allowed here") {
