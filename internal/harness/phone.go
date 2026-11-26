@@ -336,11 +336,11 @@ func (r *Runtime) startPhone() {
 			// The message the session was resumed with, as the user wrote it.
 			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
 			if err == nil {
+				// The poll still reads on after the anchor above: a reply
+				// written between that post and this one comes before this
+				// one, which the poll skips as its own.
 				p.mu.Lock()
 				p.posted[m2.ID] = true
-				if p.resumedBy == "" && !waited {
-					p.lastID = m2.ID
-				}
 				if promptSeq > 0 {
 					p.mirror1(promptSeq, m2.ID)
 				}
