@@ -337,11 +337,52 @@ func TestASendFailingAsItsAgentExitsHasOneOutcome(t *testing.T) {
 	<-holding
 	postExit(rt)
 	seat.result <- relay.ErrClosed
-	waitIdle(t, q) // its outcome is posted, behind the exit
 	close(hold)
+	waitIdle(t, q) // its outcome reached the loop behind the exit
 	got := deliveredFor(rt, id)
-	if len(got) != 1 {
-		t.Fatalf("the send has %d outcomes: %+v", len(got), got)
+	if len(got) != 1 || got[0].Outcome != event.DeliveryNotSent {
+		t.Fatalf("the send has %d outcomes: %+v; want one, not_sent (nothing was typed)", len(got), got)
+	}
+}
+
+// The agent exits while a send still waits in the seat for it to be ready,
+// with no keystroke made: the send is certainly not sent, so it is on the
+// record as that, and the user's message can be forwarded again.
+func TestASendNotYetTypedWhenItsAgentExitsIsNotSent(t *testing.T) {
+	seat := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
+	useGatedLaunches(t, []relaySeat{seat}, nil)
+	rt := newLaunchRuntime(t)
+	var seq int64
+	rt.sync(func() {
+		d := event.UserMessageData{Text: "check the version"}
+		ev := rt.append(event.New(event.UserMessage, event.ActorUser, d))
+		seq = ev.Seq
+		rel, why := rt.routeUserMessage(d)
+		if rel == nil {
+			t.Errorf("not routed: %s", why)
+			return
+		}
+		rt.forwardUserMessage(rel, ev.Seq, d)
+	})
+	var id string
+	select {
+	case id = <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the send was never typed")
+	}
+	q := typingQueue(t, rt, id)
+	postExit(rt)
+	rt.sync(func() {})
+	seat.result <- errors.New("the agent has exited")
+	waitIdle(t, q)
+	var outcome state.SendOutcome
+	var refusal string
+	rt.sync(func() {
+		outcome = rt.st.SendOutcome(id)
+		_, refusal = forwardedAs(rt.st, "codex", seq, "")
+	})
+	if got := deliveredFor(rt, id); len(got) != 1 || outcome != state.SendNotSent || refusal != "" {
+		t.Fatalf("outcome %q (%+v), forward refusal %q; want one not_sent and a forward allowed", outcome, got, refusal)
 	}
 }
 

@@ -342,6 +342,10 @@ type sendQueue struct {
 	movedTo *relayLaunch
 	// idle is closed when the goroutine typing this queue ends.
 	idle chan struct{}
+	// typing is the send being typed, until the loop has its outcome
+	// (settleSend). gone is how settleExited found the agent's process
+	// gone meanwhile (it leaves that send to its typing's end).
+	typing, gone string
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -384,6 +388,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		h := q.items[0]
 		q.items = q.items[1:]
+		q.typing, q.gone = h.id, ""
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
@@ -410,7 +415,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 			// relay was stopped.
 			res.err = fmt.Errorf("the agent is not running")
 		}
-		r.settleSend(q.name, h, res)
+		r.settleSend(q, h, res)
 	}
 }
 
@@ -430,6 +435,7 @@ func (r *Runtime) passOn(q *sendQueue, h heldSend) bool {
 		h.on = q.name
 	}
 	job.held = append([]heldSend{h}, job.held...)
+	q.typing = ""
 	return true
 }
 
@@ -450,23 +456,52 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 	}
 }
 
-// settleSend tells a send's waiter how it went, or records a failure as
-// undelivered when nobody waits. Any goroutine.
-func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
-	switch {
-	case h.done != nil:
+// settleSend ends the typing of a send: on the loop goroutine, in the one
+// step that stops naming it as being typed, a failure is recorded, and so
+// is a send typed into a process that went meanwhile (nothing will confirm
+// it). No exit or restart seen in between can report it too. Then its
+// waiter, if any, is told. Not on the loop goroutine.
+func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult) {
+	r.sync(func() {
+		r.relays.mu.Lock()
+		gone := q.gone
+		q.typing, q.gone = "", ""
+		r.relays.mu.Unlock()
+		switch {
+		case h.barrier:
+		case res.err != nil:
+			// Under the relay the send is on the record for now: a switch
+			// meanwhile passed it on to the new agent.
+			r.typingFailed(sendHolder(r.st, h.id, q.name), h.id, res.err)
+		case gone != "" && !r.hasOutcome(h.id):
+			r.append(goneUnconfirmed(q.name, h.id, gone))
+		}
+	})
+	if h.done != nil {
 		h.done <- res
-	case res.err != nil && !h.barrier:
-		r.post(func() { r.typingFailed(name, h.id, res.err) })
 	}
 }
 
-// typingFailed records how typing a send failed, unless the record has its
-// outcome already: its agent exited or was restarted while it was typed,
-// and settleExited reported it then. One send, one outcome. Loop goroutine.
-func (r *Runtime) typingFailed(name, id string, err error) {
+// hasOutcome reports whether the record says how a send ended.
+func (r *Runtime) hasOutcome(id string) bool {
 	switch r.st.SendOutcome(id) {
 	case state.SendArrived, state.SendUnconfirmed, state.SendNotSent:
+		return true
+	}
+	return false
+}
+
+// goneUnconfirmed is the outcome of a send typed into a process that is
+// gone (how) before its arrival showed.
+func goneUnconfirmed(name, id, how string) event.Event {
+	return event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"})
+}
+
+// typingFailed records how typing a send failed, unless the record has its
+// outcome already (the seat reported it itself). One send, one outcome.
+// Loop goroutine.
+func (r *Runtime) typingFailed(name, id string, err error) {
+	if r.hasOutcome(id) {
 		return
 	}
 	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
@@ -991,9 +1026,10 @@ func (r *Runtime) reattachRelays() []string {
 // restarted), and nothing watches for its arrival any more. A send still
 // waiting in the seat's queue to be typed is left out: typing it fails,
 // and that is reported where it fails; so is one the caller names in
-// except. One being typed now is reported here, and its typing's failure
-// is then not recorded (typingFailed). Called where an agent's process ends and its conversation does
-// not: an exit seen live or found at a resume, a restart that cannot
+// except. One being typed now is left out too: how it ends is known only
+// when its typing ends, and settleSend reports it then (not sent, typed in
+// part, or typed into the process that is gone). Called where an agent's
+// process ends and its conversation does not: an exit seen live or found at a resume, a restart that cannot
 // start, and a restart that does (before the new start is recorded; also
 // of a relay stopped before). A stop is not one of them (the agent and its
 // work are ended on purpose),
@@ -1004,6 +1040,13 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	for _, id := range except {
 		queued[id] = true
 	}
+	how := "exited"
+	switch {
+	case rel.Ended:
+		how = "was stopped"
+	case rel.State != "exited":
+		how = "was restarted"
+	}
 	r.relays.mu.Lock()
 	for _, q := range r.relays.queues {
 		if q.name != rel.Name {
@@ -1012,20 +1055,16 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		for _, h := range q.items {
 			queued[h.id] = true
 		}
+		if q.typing != "" {
+			queued[q.typing], q.gone = true, how
+		}
 	}
 	r.relays.mu.Unlock()
-	how := "exited"
-	switch {
-	case rel.Ended:
-		how = "was stopped"
-	case rel.State != "exited":
-		how = "was restarted"
-	}
 	for _, s := range unresolvedSends(r.st, rel) {
 		if queued[s.ID] {
 			continue
 		}
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
+		r.append(goneUnconfirmed(rel.Name, s.ID, how))
 	}
 }
 
