@@ -374,7 +374,7 @@ func (r *Runtime) startPhone() {
 			})
 		}
 		p.wg.Add(2)
-		go p.poll(r)
+		go p.poll(r, started)
 		go p.keeper(r)
 	})
 	// The message the session was started or resumed with is passed to
@@ -979,7 +979,8 @@ var (
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
-func (p *phone) poll(r *Runtime) {
+// started is the ledger as this run's first write starts it (startPhone).
+func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
@@ -996,15 +997,24 @@ func (p *phone) poll(r *Runtime) {
 		if err == nil && anchorUnknown && after != "" && after == resumedBy {
 			// The message that resumed the session is not in the thread the
 			// server has (it was taken back, or the thread was recreated):
-			// read on from the session's own first post instead of from the
+			// read on from just before the earliest message that waited,
+			// judged by time as a resume with no cursor judges it, or from
+			// the session's own first post when none waited; never from the
 			// thread's start, which would take old messages again.
-			p.mu.Lock()
-			if p.lastID == after {
-				p.lastID = fallback
+			if _, prev, found, werr := started.Waiting(p.ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); werr != nil {
+				msgs, anchorUnknown, err = nil, false, werr // backs off, then asks again
+			} else {
+				if found && prev != after {
+					fallback = prev
+				}
+				p.mu.Lock()
+				if p.lastID == after {
+					p.lastID = fallback
+				}
+				p.resumedBy = ""
+				p.mu.Unlock()
+				continue
 			}
-			p.resumedBy = ""
-			p.mu.Unlock()
-			continue
 		}
 		if anchorUnknown && !saidRecreated {
 			// The thread was deleted from the app and recreated under the same

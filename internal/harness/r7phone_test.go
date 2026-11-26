@@ -36,7 +36,55 @@ func r7FailFirstRead(t *testing.T, target string) string {
 	return srv.URL
 }
 
-// Finding 19: a file sent from the phone while the session is shutting
+// r7GoneAnchor stands in front of the phone service and answers a read
+// after gone as the service does when the thread no longer has it.
+func r7GoneAnchor(t *testing.T, target, gone string) string {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && r.URL.Query().Get("after") == gone {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"messages":[],"has_more":false,"thread_id":"t1","timed_out":false,"anchor_unknown":true}`))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// Finding 18: a session resumed at the terminal whose cursor's message the
+// thread no longer has takes the messages that waited, each once.
+func TestMessagesThatWaitedAreTakenWhenTheCursorIsGone(t *testing.T) {
+	cfg, project, path, fp := stoppedRelaySession(t)
+	cursor, ok := bphoneAnchor(path)
+	if !ok || cursor == "" {
+		t.Fatalf("no cursor in the record (%q)", cursor)
+	}
+	first := fp.userSays("the checklist is A, B, C", nil)
+	second := fp.userSays("are you still there?", nil)
+	cfg.Finalechat.BaseURL = r7GoneAnchor(t, fp.srv.URL, cursor)
+	rt, stop := bphoneRun(t, func() *Runtime {
+		useFakeRelays(t, newFakeSeat("Done."))
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rt
+	})
+	waitFor(t, "both in the record", func() bool { return len(r6PhoneIDs(path)) >= 2 })
+	rt.sync(func() {})
+	stop()
+	if got := r6PhoneIDs(path); len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("recorded %v, want %v", got, []string{first, second})
+	}
+}
+
+// Finding 19:a file sent from the phone while the session is shutting
 // down (a turn still finishing) is neither refused in the thread nor taken
 // in: the next run takes it.
 func TestAFileSentDuringShutdownIsLeftForTheNextRun(t *testing.T) {
