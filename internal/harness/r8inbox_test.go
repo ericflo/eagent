@@ -192,38 +192,84 @@ func TestR8InboxNameOnlyOnInboxWords(t *testing.T) {
 	}
 }
 
+// r8cHelpUI notes, each time /help is carried out, how many files were in
+// the inbox, and can make the inbox writable again at that moment. (/help
+// from a script is eagent's own command; from the web, with an agent
+// running, it is typed into the agent.)
+type r8cHelpUI struct {
+	fakeUI
+	dir    string
+	unlock bool
+	files  []int
+}
+
+func (u *r8cHelpUI) Log(format string, args ...any) {
+	u.fakeUI.Log(format, args...)
+	if u.dir != "" && strings.HasPrefix(format, "eagent: /status") {
+		entries, _ := os.ReadDir(u.dir)
+		u.files = append(u.files, len(entries))
+		if u.unlock {
+			os.Chmod(u.dir, 0o755)
+		}
+	}
+}
+
 // A command sent through the inbox leaves no event that names its file, so
-// its file goes before it is carried out (found by an independent reader of
-// the change above: carried out first, a /quit left behind by a cut was
-// carried out again by the resumed run). When the file cannot be removed
-// the command is not carried out; the run that can remove it carries it
-// out, once.
-func TestR8InboxCommandIsCarriedOutOnlyOnceItsFileIsGone(t *testing.T) {
-	ui := &fakeUI{}
+// its file goes before it is carried out, as it did before the change above
+// (an independent reader showed that carried out first, a command left
+// behind by a cut was carried out again by the resumed run). It is carried
+// out whether or not the removal works, as before; within one run, once.
+func TestR8InboxCommandFileGoesBeforeItIsCarriedOut(t *testing.T) {
+	ui := &r8cHelpUI{}
 	rt := r8cNew(t, ui)
-	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/quit", From: "web"})
+	ui.dir = InboxDir(rt.sess.Path)
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
+	rt.pollInbox()
+	rt.pollInbox()
+	if len(ui.files) != 1 || ui.files[0] != 0 {
+		t.Fatalf("files in the inbox each time /help was carried out: %v, want once with none", ui.files)
+	}
+}
+
+func TestR8InboxCommandWhoseFileStaysIsCarriedOutOnceARun(t *testing.T) {
+	ui := &r8cHelpUI{}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
 	r8cLock(t, rt)
 	rt.pollInbox()
 	rt.pollInbox()
-	if rt.ending {
-		t.Fatalf("/quit was carried out although its file could not be removed: a later run would carry it out again")
+	rt.pollInbox()
+	if len(ui.files) != 1 {
+		t.Fatalf("/help was carried out %d times while its file could not be removed, want once", len(ui.files))
 	}
-	if n := strings.Count(strings.Join(ui.logged(), "\n"), "was not carried out"); n != 1 {
-		t.Fatalf("said %d times that it was not carried out, want once: %v", n, ui.logged())
+}
+
+// A removal that fails once (found by a second reader: the command was then
+// neither carried out nor left for later): it is carried out, and the file
+// goes when it can.
+func TestR8InboxCommandWhoseRemovalFailsOnceIsCarriedOut(t *testing.T) {
+	ui := &r8cHelpUI{unlock: true}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
+	r8cLock(t, rt)
+	rt.pollInbox()
+	rt.pollInbox()
+	if entries, _ := os.ReadDir(ui.dir); len(ui.files) != 1 || len(entries) != 0 {
+		t.Fatalf("/help carried out %d times, %d files left; want once and none", len(ui.files), len(entries))
 	}
-	path := rt.sess.Path
-	rt.sess.Close()
-	if err := os.Chmod(InboxDir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt2.sess.Close()
-	rt2.pollInbox()
-	if entries, _ := os.ReadDir(InboxDir(path)); !rt2.ending || len(entries) != 0 {
-		t.Fatalf("the run that could remove the file: ending %v, %d files left; want it carried out and gone", rt2.ending, len(entries))
+}
+
+// A stop whose file cannot be removed still stops the session (the next
+// run ignores a stop left behind, as before).
+func TestR8InboxStopWhoseFileStaysStillStops(t *testing.T) {
+	rt := r8cNew(t, &fakeUI{})
+	r8cPost(t, rt, InboxMessage{Type: "stop", From: "web"})
+	r8cLock(t, rt)
+	rt.pollInbox()
+	if !rt.ending {
+		t.Fatalf("the stop was not carried out")
 	}
 }
 

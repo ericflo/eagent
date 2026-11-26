@@ -97,14 +97,10 @@ func (r *Runtime) pollInbox() {
 		case !inboxWords(msg, r.ownCommand):
 			// A command, a stop or a dismissal leaves no event that names
 			// its file, so a later run could not tell that it was carried
-			// out. Its file goes first, as it always did, and it is carried
-			// out only once the file is gone: a cut in between loses the
-			// command and never repeats it.
-			if err := os.Remove(path); err != nil {
-				r.ui.Log("inbox: %s was not carried out: its file could not be removed (%v)", name, err)
-			} else {
-				r.handleInboxFile(msg, name)
-			}
+			// out. Its file goes first, as it always did: a cut in between
+			// loses the command and never repeats it.
+			_ = os.Remove(path)
+			r.handleInboxFile(msg, name)
 		default:
 			r.handleInboxFile(msg, name)
 		}
