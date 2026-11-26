@@ -631,9 +631,13 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		body := "→ " + who + ":\n" + d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq)})
+			// An agent's post without a status clears the thread's line;
+			// the agent is still at work, so the line rides along.
+			act := p.attach()
+			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
 			if err == nil {
 				p.remember(msg.ID)
+				p.markSent(act)
 			}
 		})
 	case event.UserMessage:
@@ -666,6 +670,21 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		opts = append(opts, finalechat.Option{Label: clipLabel(o, 200)})
 	}
 	timeout := p.timeout
+	// The service answers a known client key with the question it made for
+	// it, whatever became of that question. A card of an earlier run that
+	// expired or was withdrawn would come back dead and the question would
+	// never be shown again, so each later card has a key of its own: the
+	// first keeps the plain key (a card still open is found by it and
+	// reused, not doubled), the nth adds n. Start at the newest card the
+	// record knows; the walk below steps past dead ones.
+	cards := map[string]bool{}
+	for _, ev := range r.st.Events {
+		var c event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&c) == nil && c.QuestionID == qid && c.CardID != "" {
+			cards[c.CardID] = true
+		}
+	}
+	attempt := max(1, len(cards))
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -675,7 +694,22 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		if p.has("activity") {
 			act = &finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL, Seq: time.Now().UnixNano()}
 		}
-		q, thread, err := p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid), Activity: act})
+		var q finalechat.Question
+		var thread finalechat.Thread
+		var err error
+		for n := attempt; ; n++ {
+			key := p.key("q", qid)
+			if n > 1 && key != "" {
+				key = p.key("q", qid, strconv.Itoa(n))
+			}
+			q, thread, err = p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: key, Activity: act})
+			// A dismissed card stays the answer: the user closed it, and
+			// asking again would undo that. Only a card that timed out or
+			// was withdrawn is passed over.
+			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") || n >= attempt+50 {
+				break
+			}
+		}
 		if err == nil {
 			p.mu.Lock()
 			if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
@@ -920,6 +954,18 @@ func (p *phone) poll(r *Runtime) {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
+					// The person who sent it is on the phone, not at the
+					// terminal: tell them there, or the file is dropped
+					// without a word.
+					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
+					p.enqueue(func(ctx context.Context) {
+						act := p.attach()
+						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
+						if err == nil {
+							p.remember(msg.ID)
+							p.markSent(act)
+						}
+					})
 					continue
 				}
 				atts = append(atts, saved)

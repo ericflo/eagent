@@ -168,11 +168,33 @@ type File struct {
 	Data        []byte
 }
 
-// Limits mirror the server's.
+// Limits on what eagent sends and takes. The service holds up to 8 files a
+// message, each up to 25 MB; eagent keeps files to 10 MB either way.
 const (
 	MaxAttachments    = 8
 	MaxAttachmentSize = 10 << 20
 )
+
+// ErrTooLarge is a file over MaxAttachmentSize: it is refused whole, never
+// kept cut short.
+var ErrTooLarge = fmt.Errorf("finalechat: the file is over the %d MB limit", MaxAttachmentSize>>20)
+
+// RefusedNote is what the person who sent a file from the phone is told
+// when it could not be taken, so it is not dropped without a word.
+func RefusedNote(filename string, err error) string {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "a file you sent"
+	}
+	if errors.Is(err, ErrTooLarge) {
+		return fmt.Sprintf("eagent did not take %s: it is over %d MB, the largest file eagent takes from the phone, so none of it was saved. Send a smaller file.", name, MaxAttachmentSize>>20)
+	}
+	why := strings.ReplaceAll(err.Error(), "\n", " ")
+	if len(why) > 200 {
+		why = why[:200] + "..."
+	}
+	return fmt.Sprintf("eagent could not fetch %s from the phone (%s), so it was not passed on. Send it again.", name, why)
+}
 
 // IsAnswer reports whether the message records the answer to a question,
 // and returns that question's id.
@@ -504,11 +526,20 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 // server kept a newer status (by seq) or the same text still had most of
 // its life. A thread that does not exist yet is a 404: post a message first.
 func (c *Client) SetActivity(ctx context.Context, ref string, a Activity) (bool, error) {
+	applied, _, err := c.SetActivityShown(ctx, ref, a)
+	return applied, err
+}
+
+// SetActivityShown is SetActivity that also returns the line the thread
+// shows after the call (nil for none): when the write was not applied,
+// that is what the app shows instead.
+func (c *Client) SetActivityShown(ctx context.Context, ref string, a Activity) (bool, *Status, error) {
 	var out struct {
-		Applied bool `json:"applied"`
+		Applied bool   `json:"applied"`
+		Thread  Thread `json:"thread"`
 	}
 	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/activity", nil, a, &out, 0)
-	return out.Applied, err
+	return out.Applied, out.Thread.Activity, err
 }
 
 // ClearActivity drops the status line. seq (nanoseconds, like Activity.Seq)
@@ -554,8 +585,17 @@ func (c *Client) Download(ctx context.Context, urlOrID string, w io.Writer) (con
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", &Error{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
 	}
-	if _, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1)); err != nil {
+	if resp.ContentLength > MaxAttachmentSize {
+		return "", "", ErrTooLarge
+	}
+	n, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1))
+	if err != nil {
 		return "", "", fmt.Errorf("finalechat: %w", err)
+	}
+	if n > MaxAttachmentSize {
+		// What was written is only the start of the file: the caller must
+		// drop it, not keep it as if whole.
+		return "", "", ErrTooLarge
 	}
 	filename = ""
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {

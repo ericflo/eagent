@@ -34,6 +34,7 @@ type publicationFixture struct {
 	registrations, commits, calls int
 	patches                       int
 	patchTitle, patchAgent        string
+	title                         string // the thread's title as the service holds it (an agent's patch replaces it)
 	failBefore, failAfter         bool
 	resourceRegistrations         int
 }
@@ -80,7 +81,14 @@ func (f *publicationFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		f.patchTitle, f.patchAgent = in.Title, in.Agent
-		send(map[string]any{"thread": map[string]any{"id": "fixture-thread", "title": in.Title, "agent": in.Agent}})
+		if in.Title != "" {
+			f.title = in.Title
+		}
+		send(map[string]any{"thread": map[string]any{"id": "fixture-thread", "title": f.title, "agent": in.Agent}})
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/threads/") && r.Method == "GET" && strings.Count(r.URL.Path, "/") == 4 {
+		send(map[string]any{"thread": map[string]any{"id": "fixture-thread", "title": f.title}})
 		return
 	}
 	base := "/api/v1/artifacts/" + f.head.Artifact.ID
