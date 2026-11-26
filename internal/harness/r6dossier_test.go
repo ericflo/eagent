@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -717,5 +719,57 @@ func TestRestartsPastTheSizeEveryTimeStopAfterThreeInARow(t *testing.T) {
 	}
 	if !strings.Contains(notice, "three times in a row") {
 		t.Fatalf("the user was told the wrong cause: %q", notice)
+	}
+}
+
+// Hundreds of messages for eagent that no look took in (an outage of
+// hours): the note of what was not seen stays a few lines long, gives the
+// first and the last one by one, and every message between them lies in
+// a span of lines it names.
+func TestTheNoteOfWhatWasNotSeenStaysShortAndLosesNothing(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	var note string
+	var sent []event.Event
+	s.rt.sync(func() {
+		for i := 0; i < 300; i++ {
+			sent = append(sent, s.rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: fmt.Sprintf("@e still there? (%d)", i), Held: "the user addressed it to you"})))
+		}
+		note = s.rt.unseenNote(s.rt.st.LastSeq())
+	})
+	if !strings.Contains(note, "300 messages") {
+		t.Fatalf("the note does not say how many:\n%s", note)
+	}
+	if n := strings.Count(note, "\n"); n > 2*unseenListed+4 {
+		t.Fatalf("the note is %d lines long for 300 messages:\n%s", n, note)
+	}
+	place := func(ev event.Event) string { return fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line) }
+	for _, ev := range append(append([]event.Event{}, sent[:unseenListed]...), sent[len(sent)-unseenListed:]...) {
+		if !strings.Contains(note, place(ev)+" (") {
+			t.Fatalf("the note does not give %s one by one:\n%s", place(ev), note)
+		}
+	}
+	spans := regexp.MustCompile(`(\d{10,}\.jsonl):(\d+)-(\d+) \((\d+) messages`).FindAllStringSubmatch(note, -1)
+	covered := 0
+	for _, ev := range sent[unseenListed : len(sent)-unseenListed] {
+		in := false
+		for _, m := range spans {
+			from, _ := strconv.Atoi(m[2])
+			to, _ := strconv.Atoi(m[3])
+			if m[1] == ev.Source.File && ev.Source.Line >= from && ev.Source.Line <= to {
+				in = true
+			}
+		}
+		if !in {
+			t.Fatalf("%s is in no span of the note:\n%s", place(ev), note)
+		}
+		covered++
+	}
+	total := 0
+	for _, m := range spans {
+		n, _ := strconv.Atoi(m[4])
+		total += n
+	}
+	if total != covered {
+		t.Fatalf("the spans count %d messages, want %d", total, covered)
 	}
 }

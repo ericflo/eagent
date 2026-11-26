@@ -868,13 +868,56 @@ func (r *Runtime) unseenNote(covers int64) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\n%s: the user sent you %d %s that you have not seen in full; this conversation does not show them. Read each with session_read at its place before you answer (a long one in pieces, going on from the offset each piece gives), then answer them:", unseenHeading, len(items), noun)
-	for _, it := range items {
+	line := func(it item) {
 		fmt.Fprintf(&b, "\n- %s (%s, %d KB): %q", it.place, it.when, (it.size+1023)/1024, clipRunes(oneLine(it.text, 100), 100))
 		if len(it.files) > 0 {
 			b.WriteString(", attached: " + strings.Join(it.files, ", "))
 		}
 	}
+	if len(items) <= unseenListed*2+2 {
+		for _, it := range items {
+			line(it)
+		}
+		return b.String()
+	}
+	// Hundreds of them (an outage of hours): the first and the last few
+	// one by one, and those between as the span of lines they sit in, per
+	// file, which session_read walks in order. Nothing is left out; the
+	// note stays a few lines long, whatever the count.
+	for _, it := range items[:unseenListed] {
+		line(it)
+	}
+	mid := items[unseenListed : len(items)-unseenListed]
+	fmt.Fprintf(&b, "\n- %d more between them, read in order:", len(mid))
+	for i := 0; i < len(mid); {
+		file, from := placeOf(mid[i].place)
+		j, to := i, from
+		for j < len(mid) {
+			f, n := placeOf(mid[j].place)
+			if f != file {
+				break
+			}
+			to = n
+			j++
+		}
+		fmt.Fprintf(&b, " %s:%d-%d (%d messages, among other lines);", file, from, to, j-i)
+		i = j
+	}
+	for _, it := range items[len(items)-unseenListed:] {
+		line(it)
+	}
 	return b.String()
+}
+
+// unseenListed is how many unseen messages the note gives one by one at
+// each end when there are many (unseenNote).
+const unseenListed = 5
+
+// placeOf splits a file:line place.
+func placeOf(place string) (string, int) {
+	i := strings.LastIndexByte(place, ':')
+	n, _ := strconv.Atoi(place[i+1:])
+	return place[:i], n
 }
 
 // stillFullNotice opens what the user is told when they write to eagent
