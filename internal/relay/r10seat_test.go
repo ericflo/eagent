@@ -114,3 +114,51 @@ func TestR10AHeldCommandTheHookHandsOverIsConfirmedByItsArrival(t *testing.T) {
 		t.Fatalf("reported again: %+v", got)
 	}
 }
+
+// Finding 8: eagent stopped while a message waited in Claude's spool. On
+// the reattach the history shows the turn it waited for over, and the Stop
+// hook has claimed the file (.taken) but not yet removed it, so the message
+// stays held. The hook then removes the file without handing it over: the
+// message is lost from the next sweep, and reported unconfirmed after the
+// usual wait, once; never typed or pressed.
+func TestR10ARestoredHeldSendTheHookLostAfterTheReattachIsReported(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
+	since := time.Now().Add(-time.Minute)
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	if err := os.MkdirAll(spool, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	taken := filepath.Join(spool, fmt.Sprintf("%d-r1.txt.taken", since.Add(-10*time.Second).UnixNano()))
+	if err := os.WriteFile(taken, []byte("then run the tests"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := Restored{ID: "r1", Text: "then run the tests", Mode: "after_turn", At: since.Add(-10 * time.Second)}
+	h := &fakeHost{alive: true}
+	s := attachSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook", Restore: []Restored{r}}, claudeAgent{}, h, "x", "", "", since)
+	history := []string{
+		claudeUser(since.Add(-20*time.Second), "build the parser"),
+		fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"text","text":"Built."}]}}`, stamp(since.Add(-6*time.Second))),
+		fmt.Sprintf(`{"type":"system","subtype":"turn_duration","timestamp":"%s","durationMs":2}`, stamp(since.Add(-5*time.Second))),
+	}
+	if ok := claudeLines(s, history...); len(ok) != 0 {
+		t.Fatalf("the history confirmed %v", ok)
+	}
+	s.caughtUp(time.Now())
+	if err := os.Remove(taken); err != nil { // the hook removes it, never handing it over
+		t.Fatal(err)
+	}
+	seen := time.Now().Add(time.Second)
+	for _, after := range []time.Duration{0, 46, 120} {
+		s.reportLeftOvers(seen.Add(after * time.Second))
+		s.checkScreen(seen.Add(after * time.Second))
+	}
+	got := deliveries(drain(s.events))
+	if len(got) != 1 || got[0].SendID != "r1" || got[0].OK || got[0].Outcome != OutcomeUnconfirmed {
+		t.Fatalf("deliveries %+v, want r1 unconfirmed once (pending %v)", got, s.Snapshot().Pending)
+	}
+	if len(h.typed) != 0 || len(h.keys) != 0 {
+		t.Fatalf("typed %q, pressed %q", h.typed, h.keys)
+	}
+}

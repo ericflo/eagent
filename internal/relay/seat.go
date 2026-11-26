@@ -275,10 +275,12 @@ func (s *Seat) restore(list []Restored) {
 
 // caughtUp ends the catch-up: the restored sends the transcript did not
 // show are watched from now on as a live send is, from now. One held in
-// the spool (claimed or not) stays held: the hook hands it over at the end
-// of a turn, or the seat reports it left over. Any other, a held one whose
-// file is gone among them, is reported unconfirmed after the wait a live
-// send gets, and is never pressed or typed again.
+// the spool (claimed or not) stays held, at the time it was recorded: the
+// hook hands it over at the end of a turn, or the seat reports it left
+// over (lost, should the hook take its file and not hand it over, once the
+// history or the watcher has seen a turn end after it). Any other, a held
+// one whose file is gone among them, is reported unconfirmed after the
+// wait a live send gets, and is never pressed or typed again.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -291,7 +293,7 @@ func (s *Seat) caughtUp(now time.Time) {
 		if !p.dormant {
 			continue
 		}
-		p.dormant, p.at = false, now
+		p.dormant = false
 		if p.held {
 			if names == nil {
 				names = spoolNames(s.spec.Spool)
@@ -300,7 +302,7 @@ func (s *Seat) caughtUp(now time.Time) {
 				continue
 			}
 		}
-		p.lost = p.mode == "after_turn"
+		p.at, p.lost = now, p.mode == "after_turn"
 	}
 }
 
