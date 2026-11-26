@@ -126,7 +126,15 @@ func TestStoppingDuringEachReminderDoesNotStartThemOver(t *testing.T) {
 	for run := 0; run < 2*len(owedRetryDelays)+2; run++ {
 		before := reminders.Load()
 		sn := resumeOneCall(t, path, project, s.model)
-		deadline := time.Now().Add(600 * time.Millisecond)
+		// Once the loop runs, a reminder still to come is armed or on its
+		// way; with none, fifteen of its delays show that none comes.
+		var pending bool
+		sn.rt.sync(func() { pending = sn.rt.turns.owedTimer != nil || sn.rt.turns.busy || sn.rt.wakePending() })
+		wait := 600 * time.Millisecond
+		if !pending {
+			wait = 15 * owedRetryDelays[0]
+		}
+		deadline := time.Now().Add(wait)
 		for time.Now().Before(deadline) && reminders.Load() == before {
 			time.Sleep(5 * time.Millisecond)
 		}
