@@ -1076,10 +1076,13 @@ func (r *Runtime) turn(w wake) {
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
 		}
 		switch {
-		case tc.handled && answerDealt():
+		case tc.handled && (answerDealt() || end == "error" || end == "interrupted" || end == "timeout"):
 			// Dealt with, however the turn then ended: a turn cut off or
 			// failed after its answer went out owes that message nothing,
-			// in this run or in one resumed from the record.
+			// in this run or in one resumed from the record. An answer
+			// that arrived mid-turn and was not dealt with is not lost:
+			// the call that showed it left no record, so it is still newer
+			// than what was seen and its wake brings it up again.
 			r.clearOwed()
 		case end == "error" || end == "interrupted" || end == "timeout":
 			// What asked for the look is still owed one.
