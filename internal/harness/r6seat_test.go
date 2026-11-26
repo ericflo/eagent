@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // stoppedWithSends runs a session whose Claude takes one turn, records two
@@ -215,6 +217,35 @@ func TestSendsToAnAgentThatExitsLiveAreSettledWhenTheExitIsRecorded(t *testing.T
 	if !slices.Equal(got, []string{id}) {
 		t.Fatalf("reported %v, want %s once", got, id)
 	}
+}
+
+// A restart that cannot start records the relay exited; what the old agent
+// was still waited on for is settled there, as at every other exit.
+func TestAFailedRestartSettlesTheSendsTheOldAgentWasWaitedOnFor(t *testing.T) {
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), nil}, []error{nil, errors.New("codex is not installed (not on PATH)")})
+	rt := newLaunchRuntime(t)
+	var id string
+	rt.sync(func() {
+		id = rt.st.NextRelaySendID()
+		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: id, From: "eagent", Mode: "queue", Text: "tidy the shelves"}))
+	})
+	rt.sync(func() {
+		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("repick: %v", err)
+		}
+	})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		rel := rt.st.Relays["codex"]
+		if rel.State != "exited" {
+			t.Fatalf("relay after a failed restart: %s", rel.State)
+		}
+		if _, waiting := rel.Undelivered[id]; waiting || rt.st.SendOutcome(id) != state.SendUnconfirmed {
+			t.Errorf("still waited on %v, outcome %q, want settled unconfirmed", waiting, rt.st.SendOutcome(id))
+		}
+	})
 }
 
 var errNotRunning = errString("not running")
