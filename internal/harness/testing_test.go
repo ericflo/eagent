@@ -339,6 +339,9 @@ func TestMain(m *testing.M) {
 		if code == 0 {
 			code = 1
 		}
+	} else if testing.Verbose() {
+		// How much the two checks covered: a check that sees nothing passes too.
+		fmt.Fprintf(os.Stderr, "invariants: nothing found over %d sessions and %d model requests\n", sessions, requests)
 	}
 	if memTmp != "" {
 		os.RemoveAll(memTmp)
