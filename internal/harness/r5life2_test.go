@@ -118,13 +118,18 @@ func TestAnAutopilotDeadlineIsSaidOnTheUsersClock(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	setFor(t, &autopilotEndFloor, 10*time.Millisecond)
+	// "1ms" is read in the user's zone like any duration, and the record
+	// keeps the deadline to the second, so it has passed by the time it is
+	// armed and ends after the floor: long enough for the reply and the
+	// status below, many times what they take, and not the second a "1s"
+	// deadline waited.
+	setFor(t, &autopilotEndFloor, 300*time.Millisecond)
 	useFakeRelays(t, newFakeSeat("one"))
 	rt := newLaunchRuntime(t)
 	rt.sync(func() {
 		rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "keep it going a bit", Source: "finalechat", Held: "eagent", Client: &clientcaps.Caps{Source: "finalechat", Timezone: zone}}))
 	})
-	out := relayToolNamed(t, rt, "relay_autopilot", map[string]any{"until": "1s"})
+	out := relayToolNamed(t, rt, "relay_autopilot", map[string]any{"until": "1ms"})
 	var until time.Time
 	rt.sync(func() { until, _ = time.Parse(time.RFC3339, rt.st.Relays["codex"].Autopilot.Until) })
 	want := until.In(loc).Format("Mon 15:04") + " " + zone + " time"

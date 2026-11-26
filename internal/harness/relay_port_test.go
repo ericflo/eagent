@@ -364,7 +364,8 @@ func TestRelayAutopilotLeavesAWaitingAgentAlone(t *testing.T) {
 // deadline passes eagent is woken and told it ended.
 func TestRelayAutopilotDeadlineWakesEagent(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
-	// The deadline is kept to the second, so "1s" ends within the second.
+	// The deadline is kept to the second, so "1ms" has passed when it is
+	// armed, and the autopilot ends after this floor.
 	setFor(t, &autopilotEndFloor, 50*time.Millisecond)
 	useRelayFactory(t, "ok")
 	model := newScripted(func(_ string, msgs []map[string]any) reply {
@@ -375,7 +376,7 @@ func TestRelayAutopilotDeadlineWakesEagent(t *testing.T) {
 		case strings.Contains(tail, "The session is ending now"):
 			return say("Done.")
 		case !strings.Contains(all, "Autopilot on for Codex"):
-			return reply{calls: []event.ToolCall{tc("relay_autopilot", `{"until":"1s"}`)}}
+			return reply{calls: []event.ToolCall{tc("relay_autopilot", `{"until":"1ms"}`)}}
 		case strings.Contains(all, "[Autopilot for Codex ended") && !strings.Contains(all, "Stopped Codex"):
 			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop"}`)}}
 		}

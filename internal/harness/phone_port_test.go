@@ -527,6 +527,7 @@ func TestGitBranch(t *testing.T) {
 // and says so on the phone. What the user writes next is an ordinary
 // message, and the model reads it knowing nothing was decided.
 func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
+	quickKeeper(t) // statusIdle below waits out the keeper's first look and floor
 	var mu sync.Mutex
 	sawNotice := false
 	fp := newPhoneFake(false)

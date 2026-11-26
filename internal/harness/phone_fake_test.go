@@ -64,6 +64,10 @@ type phoneFake struct {
 	// rejectActivity makes every POST …/activity answer applied=false,
 	// as the service does when a newer status is live.
 	rejectActivity bool
+	// holdPost holds the next post of this body for holdFor before it is
+	// taken: a slow post, as on a loaded network.
+	holdPost string
+	holdFor  time.Duration
 	// questionsDown makes every GET …/questions/<id> fail as a service
 	// that cannot be reached does.
 	questionsDown bool
@@ -239,6 +243,15 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"auth": "token", "base_url": f.srv.URL, "push_enabled": true, "version": "test", "features": f.features, "user": map[string]any{"display_name": "Tester", "email": "t@x", "settings": map[string]any{"notify_all_messages": false, "remote_mode": f.remote}}})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodPost:
 		f.mu.Lock()
+		if f.holdPost != "" && body["body"] == f.holdPost {
+			f.holdPost = ""
+			f.mu.Unlock()
+			select {
+			case <-time.After(f.holdFor):
+			case <-r.Context().Done():
+			}
+			f.mu.Lock()
+		}
 		if key, _ := body["client_key"].(string); key != "" {
 			if id, ok := f.keys[key]; ok {
 				f.dupes++
@@ -314,7 +327,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 			if len(out) > 0 || wait == 0 || time.Now().After(deadline) {
 				break
 			}
-			// wake on new messages or every 200ms to re-check the deadline
+			// woken by a change, the request's end or its deadline (wakeAt)
 			f.cond.Wait()
 			if r.Context().Err() != nil {
 				f.mu.Unlock()
@@ -836,11 +849,21 @@ func (g *phoneRig) phoneWeighed(id string) {
 	g.rt.sync(func() {})
 }
 
+// quickKeeper runs the status keeper's first look and its floor between
+// looks in milliseconds for one test, so statusIdle costs a fraction of a
+// second instead of one and a half.
+func quickKeeper(t *testing.T) {
+	t.Helper()
+	setFor(t, &statusFirstLook, 50*time.Millisecond)
+	setFor(t, &statusLookFloor, 20*time.Millisecond)
+}
+
 // statusIdle waits until the status keeper has nothing armed: its first
-// look (statusFirstLook after it starts) is past, the line on the phone is what
-// the session wants, and more than its 200ms floor between looks has
-// passed since, so any wake it had set has come and gone. A change after
-// this reaches the phone only if it wakes the keeper.
+// look (statusFirstLook after it starts) is past, the line on the phone is
+// what the session wants, and five times the longest wake it can arm (its
+// floor between looks, or the minimum gap) has passed since, so any wake it
+// had set has come and gone. A change after this reaches the phone only if
+// it wakes the keeper.
 func (g *phoneRig) statusIdle() {
 	g.t.Helper()
 	caughtUp := func() bool {
@@ -853,11 +876,12 @@ func (g *phoneRig) statusIdle() {
 		defer p.mu.Unlock()
 		return p.want.Text == p.sent.Text && p.want.Kind == p.sent.Kind
 	}
+	armed := 5 * max(statusLookFloor, statusMinGap)
 	waitFor(g.t, "the status keeper to be idle", func() bool {
-		if time.Since(g.started) < statusFirstLook+300*time.Millisecond || !caughtUp() {
+		if time.Since(g.started) < statusFirstLook+armed || !caughtUp() {
 			return false
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(armed)
 		return caughtUp()
 	})
 }

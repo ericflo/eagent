@@ -147,6 +147,7 @@ func TestGapPhoneReasksPendingQuestionOnResume(t *testing.T) {
 // recorded. main's relay.go had the same code for relays; the old test's
 // path through bash, which did update it, is gone.
 func TestGapPhoneStatusFollowsTheAgentsStep(t *testing.T) {
+	quickKeeper(t) // statusIdle below waits out the keeper's first look and floor
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)

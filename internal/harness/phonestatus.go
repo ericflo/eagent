@@ -28,6 +28,10 @@ var statusMinGap = 2500 * time.Millisecond
 // a variable so tests can shorten it.
 var statusFirstLook = time.Second
 
+// statusLookFloor is the least time between two looks of the keeper; a
+// variable so tests can shorten it.
+var statusLookFloor = 200 * time.Millisecond
+
 const (
 	statusRefresh     = 40 * time.Second // re-send an unchanged busy status
 	statusWaitRefresh = 4 * time.Minute  // re-send an unchanged waiting status
@@ -106,7 +110,15 @@ func (p *phone) markSent(a *finalechat.Activity) {
 	}
 	p.mu.Lock()
 	p.sent, p.sentAt = *a, time.Now()
+	// The post carried the line as it was when it went out. When the work
+	// has moved on since, the phone now shows an older line than the
+	// session wants, and only the keeper can put that right: wake it, or
+	// it sleeps until its refresh.
+	stale := a.Text != p.want.Text || a.Kind != p.want.Kind
 	p.mu.Unlock()
+	if stale {
+		p.kick()
+	}
 }
 
 // currentActivity describes the session's present work in one line. Loop
@@ -212,8 +224,8 @@ func (p *phone) keeper(r *Runtime) {
 		if d := meRefresh - time.Since(lastMe); d < next {
 			next = d
 		}
-		if next < 200*time.Millisecond {
-			next = 200 * time.Millisecond
+		if next < statusLookFloor {
+			next = statusLookFloor
 		}
 		timer.Reset(next)
 	}
