@@ -223,7 +223,10 @@ func TestScreenAliveIsFalseForADeadSession(t *testing.T) {
 	_ = p.Kill()
 	_, _ = p.Wait()
 	// Its socket is left behind, which screen -ls lists as dead.
-	if !eventually(func() bool { out, _ := exec.Command("screen", "-ls").CombinedOutput(); return strings.Contains(string(out), "ead") }) {
+	if !eventually(func() bool {
+		out, _ := exec.Command("screen", "-ls").CombinedOutput()
+		return strings.Contains(string(out), "ead")
+	}) {
 		t.Skip("screen does not list the dead session")
 	}
 	if h.Alive(name) {
