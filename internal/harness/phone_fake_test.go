@@ -344,7 +344,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		q = phoneCopy(q)
 		f.mu.Unlock()
 		w.WriteHeader(201)
-		_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"question": q, "thread": map[string]any{"id": "t1"}, "created": true})
 	case strings.HasPrefix(path, "/api/v1/questions/") && strings.HasSuffix(path, "/dismiss"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/questions/"), "/dismiss")
 		f.mu.Lock()

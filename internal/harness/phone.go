@@ -674,17 +674,15 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// it, whatever became of that question. A card of an earlier run that
 	// expired or was withdrawn would come back dead and the question would
 	// never be shown again, so each later card has a key of its own: the
-	// first keeps the plain key (a card still open is found by it and
-	// reused, not doubled), the nth adds n. Start at the newest card the
-	// record knows; the walk below steps past dead ones.
-	cards := map[string]bool{}
-	for _, ev := range r.st.Events {
-		var c event.PhoneQuestionData
-		if ev.Type == event.PhoneQuestion && ev.Decode(&c) == nil && c.QuestionID == qid && c.CardID != "" {
-			cards[c.CardID] = true
-		}
-	}
-	attempt := max(1, len(cards))
+	// first keeps the plain key, the nth adds n. The walk always starts at
+	// the plain key. The service keeps keys per thread, never reopens a
+	// card that left "pending", and a key is tried only once every key
+	// before it in the thread came back dead, so stepping past the dead
+	// ones lands on the card still open (reused, not doubled) or on the
+	// first free key; a deleted thread takes all its keys at once. The
+	// record's count of cards cannot stand in for this: cards of a deleted
+	// thread are in it too. Each resume costs one call per dead card in
+	// the thread, plus one.
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -697,7 +695,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		var q finalechat.Question
 		var thread finalechat.Thread
 		var err error
-		for n := attempt; ; n++ {
+		for n := 1; ; n++ {
 			key := p.key("q", qid)
 			if n > 1 && key != "" {
 				key = p.key("q", qid, strconv.Itoa(n))
@@ -706,7 +704,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// A dismissed card stays the answer: the user closed it, and
 			// asking again would undo that. Only a card that timed out or
 			// was withdrawn is passed over.
-			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") || n >= attempt+50 {
+			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") || n >= 50 {
 				break
 			}
 		}
@@ -738,7 +736,11 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			}
 			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID}))
 		})
-		p.markSent(act)
+		if q.Created {
+			// A card found by its key was left as it was, status line
+			// included: only a new one carried the line.
+			p.markSent(act)
+		}
 		// A question is when remote mode matters most: re-read it now.
 		p.refreshMe(r)
 		p.wg.Add(1)
