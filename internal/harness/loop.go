@@ -877,8 +877,11 @@ func (r *Runtime) turn(w wake) {
 				if h := r.heldSince(r.turns.seen); h > 0 {
 					// Not answered by what the turn did before it came. One
 					// kept earlier in this turn and not dealt with yet stays
-					// the mark: the newer one joins it.
-					if held == 0 || tc.handled || h < held {
+					// the mark: the newer one joins it. One that is already
+					// the debt does not: the newer one is what is owed now,
+					// and joining the debt starts its reminders over
+					// (oweAnswer), so it is not given up with the old one.
+					if held == 0 || tc.handled || h < held || held == r.turns.owed {
 						held = h
 					}
 					tc.handled = tc.handled && first
@@ -889,7 +892,7 @@ func (r *Runtime) turn(w wake) {
 					// one made for something else. That is the reminder:
 					// a hold is not sent back with it again.
 					answerDebt, remindedAnswer = true, true
-				} else if first && w.owed {
+				} else if first && w.owed && held == 0 {
 					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {

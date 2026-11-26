@@ -293,3 +293,57 @@ func TestR7ACleanUpgradeLeavesNothingOwedOnTheNextRun(t *testing.T) {
 		t.Fatalf("the run after a clean upgrade made %d looks at the old design's events", n)
 	}
 }
+
+// Finding 23: a message for eagent is at its last reminder when a second
+// one comes, while that reminder's turn is running. The model holds on
+// both. The second is owed reminders of its own: it is not dropped with
+// the first.
+func TestR7AMessageThatComesDuringTheLastReminderIsStillOwed(t *testing.T) {
+	old := owedRetryDelays
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
+	defer func() { owedRetryDelays = old }()
+	const second = "@e and is the release branch cut?"
+	var sp atomic.Pointer[session]
+	var reminders, aboutSecond atomic.Int32
+	brain := func(_ string, msgs []map[string]any) reply {
+		last := lastUserText(msgs)
+		if !strings.Contains(last, owedPhrase) || msgs[len(msgs)-1]["role"] == "tool" {
+			return hold()
+		}
+		if strings.Contains(allText(msgs), "release branch") {
+			aboutSecond.Add(1)
+			return hold()
+		}
+		if reminders.Add(1) != int32(len(owedRetryDelays)) {
+			return hold()
+		}
+		// The last reminder: the second message comes while it is out,
+		// and the model looks at something before it holds.
+		s := sp.Load()
+		s.type_(second)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && !strings.Contains(fmtUserTexts(s), second) {
+			time.Sleep(time.Millisecond)
+		}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"Codex"}`)}}
+	}
+	s := startSession(t, "", brain, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 5 })
+	sp.Store(s)
+	s.settled()
+	s.type_("@e what is Codex up to?")
+	s.waitFor("eagent to give up", func() bool { return gaveUp(s) })
+	s.settled()
+	// One look in the last reminder's turn; the second message is owed
+	// reminders of its own after it.
+	if n := aboutSecond.Load(); n < 2 {
+		t.Fatalf("the second message was brought up %d times, only in the turn it came in", n)
+	}
+}
+
+func fmtUserTexts(s *session) string {
+	var b strings.Builder
+	for _, ev := range s.events(event.UserMessage) {
+		b.Write(ev.Data)
+	}
+	return b.String()
+}
