@@ -685,10 +685,11 @@ var heldGrace = 5 * time.Second
 // the screen (after going quiet) is no turn end, and leaves the spool to
 // the hook.
 //
-// A held message tracked before that turn ended whose file is gone (the
-// hook claimed it, and may have died before handing it over) is lost from
-// now: confirmed if the transcript shows it, reported unconfirmed after the
-// usual wait otherwise.
+// A held message tracked before that turn ended whose file is gone, or
+// still claimed (.taken) now, is lost from now: the hook claimed it and may
+// have died before handing it over. It is confirmed if the transcript shows
+// it, reported unconfirmed after the usual wait otherwise; a claimed file
+// left behind is removed.
 func (s *Seat) reportLeftOvers(now time.Time) {
 	if s.spec.Spool == "" {
 		return
@@ -711,6 +712,7 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		}
 	}
 	names := spoolNames(s.spec.Spool)
+	var stale []string
 	s.mu.Lock()
 	same := s.state == "idle" && s.turnEndAt.Equal(end)
 	keep := s.pending[:0]
@@ -718,13 +720,21 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolHolds(names, p.id) {
+		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolWaits(names, p.id) {
 			p.lost, p.at = true, now
+			for _, n := range names {
+				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {
+					stale = append(stale, filepath.Join(s.spec.Spool, n))
+				}
+			}
 		}
 		keep = append(keep, p)
 	}
 	s.pending = keep
 	s.mu.Unlock()
+	for _, path := range stale {
+		_ = os.Remove(path)
+	}
 	if len(order) == 0 {
 		return
 	}
