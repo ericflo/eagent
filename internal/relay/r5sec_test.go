@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,128 @@ func TestTmuxKeysTypesKeysThatLookLikeTmuxSyntaxLiterally(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(out); string(b) != "a;;-l-R\n" {
 		t.Fatalf("typed %q, want %q", b, "a;;-l-R\n")
+	}
+}
+
+func TestTmuxNeverActsOnASessionWhoseNameOnlyStartsWithTheTarget(t *testing.T) {
+	privateTmux(t, "exact")
+	dir := t.TempDir()
+	h := Tmux{}
+	sibling := Target("1", "pi-2")
+	if err := h.Start(sibling, dir, []string{"sleep", "30"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !eventually(func() bool { return h.Alive(sibling) }) {
+		t.Fatal("sibling not alive")
+	}
+	gone := Target("1", "pi")
+	if h.Alive(gone) {
+		t.Error("Alive reports a session that does not exist, because a sibling's name starts with it")
+	}
+	if h.PID(gone) != 0 {
+		t.Error("PID reads a sibling's pane")
+	}
+	if _, err := h.Capture(gone, 0); err == nil {
+		t.Error("Capture read a sibling's pane")
+	}
+	if err := h.Keys(gone, "x"); err == nil {
+		t.Error("Keys typed into a sibling's pane")
+	}
+	if err := h.Paste(gone, "x"); err == nil {
+		t.Error("Paste typed into a sibling's pane")
+	}
+	if err := h.Kill(gone); err == nil {
+		t.Error("Kill ended something")
+	}
+	if !h.Alive(sibling) {
+		t.Fatal("the sibling was killed")
+	}
+}
+
+// privateScreen gives screen a socket directory of the test's own. Unix
+// socket paths are short, so it is under /tmp rather than t.TempDir.
+func privateScreen(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("screen"); err != nil {
+		t.Skip("screen not installed")
+	}
+	dir, err := os.MkdirTemp("/tmp", "r5scr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCREENDIR", dir)
+	t.Cleanup(func() {
+		cmd := exec.Command("screen", "-ls")
+		out, _ := cmd.CombinedOutput()
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if dot := strings.IndexByte(line, '.'); dot > 0 {
+				if pid, err := strconv.Atoi(line[:dot]); err == nil {
+					_ = exec.Command("pkill", "-9", "-P", strconv.Itoa(pid)).Run()
+					if p, err := os.FindProcess(pid); err == nil {
+						_ = p.Kill()
+					}
+				}
+			}
+		}
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+		_ = os.Remove(dir)
+	})
+	return dir
+}
+
+func TestScreenNeverActsOnASessionWhoseNameOnlyStartsWithTheTarget(t *testing.T) {
+	privateScreen(t)
+	h := Screen{}
+	sibling := Target("1", "pi-2")
+	if err := h.Start(sibling, t.TempDir(), []string{"sleep", "30"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !eventually(func() bool { return h.Alive(sibling) }) {
+		t.Fatal("sibling not alive")
+	}
+	gone := Target("1", "pi")
+	if h.Alive(gone) {
+		t.Error("Alive reports a session that does not exist")
+	}
+	if err := h.Keys(gone, "x"); err == nil {
+		t.Error("Keys typed into a sibling")
+	}
+	if err := h.Kill(gone); err == nil {
+		t.Error("Kill ended something")
+	}
+	if !h.Alive(sibling) {
+		t.Fatal("the sibling was killed")
+	}
+}
+
+func TestScreenAliveIsFalseForADeadSession(t *testing.T) {
+	privateScreen(t)
+	h := Screen{}
+	name := Target("1", "dead")
+	if err := h.Start(name, t.TempDir(), []string{"sleep", "30"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pid := 0
+	if !eventually(func() bool { pid = h.PID(name); return pid > 0 }) {
+		t.Fatal("not alive")
+	}
+	_ = exec.Command("pkill", "-9", "-P", strconv.Itoa(pid)).Run()
+	p, _ := os.FindProcess(pid)
+	_ = p.Kill()
+	_, _ = p.Wait()
+	// Its socket is left behind, which screen -ls lists as dead.
+	if !eventually(func() bool { out, _ := exec.Command("screen", "-ls").CombinedOutput(); return strings.Contains(string(out), "ead") }) {
+		t.Skip("screen does not list the dead session")
+	}
+	if h.Alive(name) {
+		t.Fatal("a dead screen session reads as alive")
+	}
+	if h.PID(name) != 0 {
+		t.Fatal("a dead screen session has a pid")
 	}
 }
 
