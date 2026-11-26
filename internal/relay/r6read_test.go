@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,11 +148,12 @@ func (w *reattachedSeat) settle() {
 	})
 }
 
-// A restored send whose prompt is far back in a long transcript, before the
-// part a reattach re-reads, is still found and confirmed. Looking for it
-// reports nothing else: the reattach writes the same events as one with
-// nothing restored, apart from the confirmation.
-func TestARestoredSendFarBackIsFoundWithoutReportingTheHistoryAgain(t *testing.T) {
+// A reattach with restored sends records the same events as one with
+// nothing restored, apart from the confirmations: restored sends are only
+// matched against what the catch-up reads anyway. One whose prompt is in
+// the part re-read is confirmed; one whose prompt is older than that part,
+// and one never sent, are not.
+func TestAReattachWithRestoredSendsRecordsTheSameEventsAsOneWithout(t *testing.T) {
 	lowTail(t)
 	since := time.Now().Add(-time.Minute)
 	first := "label the jars on the top shelf"
@@ -162,7 +162,7 @@ func TestARestoredSendFarBackIsFoundWithoutReportingTheHistoryAgain(t *testing.T
 		text string
 		want []string
 		w    *reattachedSeat
-	}{{text: first, want: []string{"r1"}}, {text: "words it was never sent"}}
+	}{{text: "next shelf 99", want: []string{"r1"}}, {text: first}, {text: "words it was never sent"}}
 	// The seats watch copies, all at once: one transcript is followed by
 	// one seat at a time.
 	copyOf := func() string {
@@ -195,28 +195,49 @@ func TestARestoredSendFarBackIsFoundWithoutReportingTheHistoryAgain(t *testing.T
 	}
 }
 
-// The search for restored sends starts near the oldest one's time, never
-// after a line stamped at or after it, and skips most of a long history.
-func TestTheSearchForRestoredSendsStartsNearTheirTime(t *testing.T) {
-	t.Parallel()
+// A known limit: a restored send whose prompt lies before the part of the
+// transcript a reattach re-reads is not found. After the wait a live send
+// gets it is reported unconfirmed, once, and it is never typed or pressed.
+func TestARestoredSendOlderThanTheTailEndsUnconfirmedOnceAndIsNotTyped(t *testing.T) {
+	lowTail(t)
 	since := time.Now().Add(-time.Minute)
-	path := longHistory(t, since, "first")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	first := "label the jars on the top shelf"
+	path := longHistory(t, since, first)
+	w := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since, Restored{ID: "r1", Text: first, Mode: "queue", At: since.Add(-time.Hour - time.Second)})
+	w.caughtUp(t)
+	w.h.mu.Lock()
+	w.h.screen = "> label the jars on the top shelf\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	w.h.mu.Unlock()
+	start := time.Now()
+	w.s.mu.Lock()
+	w.s.stateAt = start.Add(-time.Minute)
+	w.s.mu.Unlock()
+	for _, after := range []time.Duration{10, 50, 100} {
+		w.s.checkScreen(start.Add(after * time.Second))
 	}
-	want := since.Add(-time.Hour + 70*time.Second)
-	mark := []byte(`"timestamp":"` + stamp(want) + `"`)
-	at := int64(bytes.Index(raw, mark))
-	at = int64(bytes.LastIndexByte(raw[:at], '\n') + 1) // the line's start
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
+	if !eventually(func() bool { _, failed := w.delivered(); return len(failed) > 0 }) {
+		t.Fatal("never reported")
 	}
-	defer f.Close()
-	got := seekBefore(f, int64(len(raw)), want)
-	if got > at || got <= at-1<<16 || got == 0 {
-		t.Fatalf("starts at %d; the first line at that time starts at %d", got, at)
+	w.settle()
+	ok, failed := w.delivered()
+	if len(ok) > 0 || len(failed) != 1 || !strings.HasPrefix(failed[0], "r1: ") {
+		t.Fatalf("confirmed %v, not confirmed %q", ok, failed)
+	}
+	w.mu.Lock()
+	var outcome string
+	for _, ev := range w.events {
+		if ev.Kind == KindDelivered {
+			outcome = ev.Outcome
+		}
+	}
+	w.mu.Unlock()
+	if outcome != OutcomeUnconfirmed {
+		t.Fatalf("outcome %q", outcome)
+	}
+	w.h.mu.Lock()
+	defer w.h.mu.Unlock()
+	if len(w.h.typed) > 0 || len(w.h.keys) > 0 {
+		t.Fatalf("typed %q, pressed %q for a restored send", w.h.typed, w.h.keys)
 	}
 }
 

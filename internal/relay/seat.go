@@ -1,13 +1,8 @@
 package relay
 
 import (
-	"bufio"
-	"bytes"
-	"cmp"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,11 +121,9 @@ type Seat struct {
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	catchingUp bool                 // restored sends wait for the first read to the transcript's end
-	scanning   bool                 // scanEarlier is looking for restored sends before the tail
 	closed     bool
 
-	typing sync.Mutex     // one message is pasted and entered at a time
-	scans  sync.WaitGroup // scanEarlier's goroutine
+	typing sync.Mutex // one message is pasted and entered at a time
 }
 
 type pending struct {
@@ -285,8 +278,8 @@ func (s *Seat) restore(list []Restored) {
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.catchingUp || s.scanning {
-		return // not started, or scanEarlier is still looking
+	if !s.catchingUp {
+		return
 	}
 	s.catchingUp = false
 	var names []string
@@ -884,133 +877,9 @@ const pollEvery = 700 * time.Millisecond
 // a turn that ended while no eagent was watching. Tests lower it.
 var tailBackfill int64 = 4 << 20
 
-// scanEarlier looks for the restored sends in the part of the transcript
-// before end, which the tail does not read: user entries only, matched and
-// confirmed, nothing else reported or applied. It starts near the oldest
-// restored send's time (the transcript's own stamps) and runs on its own,
-// so the live tail and its confirmations do not wait for it; the catch-up
-// ends only once it is done.
-func (s *Seat) scanEarlier(path string, end int64) {
-	s.mu.Lock()
-	var oldest time.Time
-	for _, p := range s.pending {
-		if p.restored && (oldest.IsZero() || p.sentAt.Before(oldest)) {
-			oldest = p.sentAt
-		}
-	}
-	if oldest.IsZero() || s.scanning {
-		s.mu.Unlock()
-		return
-	}
-	s.scanning = true
-	s.mu.Unlock()
-	s.scans.Add(1)
-	go func() {
-		defer s.scans.Done()
-		defer func() {
-			s.mu.Lock()
-			s.scanning = false
-			s.mu.Unlock()
-		}()
-		f, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		start := seekBefore(f, end, oldest.Truncate(time.Second))
-		if _, err := f.Seek(start, io.SeekStart); err != nil {
-			return
-		}
-		r := bufio.NewReaderSize(f, 1<<20)
-		pos := start
-		if start > 0 {
-			skipped, err := r.ReadBytes('\n') // inside a line
-			pos += int64(len(skipped))
-			if err != nil {
-				return
-			}
-		}
-		p := s.agent.newParser(s.spec)
-		for pos < end {
-			select {
-			case <-s.stop:
-				return
-			default:
-			}
-			line, err := r.ReadBytes('\n')
-			pos += int64(len(line))
-			for _, o := range p.line(bytes.TrimSpace(line)) {
-				if o.kind != "user" || o.again || o.at.IsZero() {
-					continue
-				}
-				for _, id := range s.matchSends(o.text, o.at) {
-					s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
-				}
-			}
-			if err != nil || !s.hasRestored() {
-				return
-			}
-		}
-	}()
-}
-
-func (s *Seat) hasRestored() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, p := range s.pending {
-		if p.restored {
-			return true
-		}
-	}
-	return false
-}
-
-// seekBefore finds an offset in f, before end, from which every line
-// stamped at or after t follows: a binary search on the lines' own stamps.
-// Where it cannot read a stamp it goes earlier, so it never skips a line it
-// should read.
-func seekBefore(f *os.File, end int64, t time.Time) int64 {
-	lo, hi := int64(0), end
-	buf := make([]byte, 1<<20)
-	for hi-lo > 1<<16 {
-		mid := lo + (hi-lo)/2
-		n, _ := f.ReadAt(buf, mid)
-		at, ok := firstStamp(buf[:n])
-		if ok && at.Before(t) {
-			lo = mid
-		} else {
-			hi = mid
-		}
-	}
-	return lo
-}
-
-// firstStamp is the time of the first whole line in b that carries one
-// (Claude, Codex and pi write "timestamp", Antigravity "created_at").
-func firstStamp(b []byte) (time.Time, bool) {
-	i := bytes.IndexByte(b, '\n')
-	if i < 0 {
-		return time.Time{}, false
-	}
-	for _, line := range bytes.Split(b[i+1:], []byte("\n")) {
-		var v struct {
-			Timestamp string `json:"timestamp"`
-			Created   string `json:"created_at"`
-		}
-		if json.Unmarshal(line, &v) != nil {
-			continue // a whole line that is not JSON, or the cut last one
-		}
-		if at := parseTime(cmp.Or(v.Timestamp, v.Created)); !at.IsZero() {
-			return at, true
-		}
-	}
-	return time.Time{}, false
-}
-
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer close(s.events)
-	defer s.scans.Wait() // nothing emits once events is closed
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
 	// agent can follow it. Held, it made a restarted Codex deaf until
@@ -1100,10 +969,6 @@ func (s *Seat) watch() {
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
 						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
 					}
-				}
-				if tail.offset > 0 {
-					// Restored sends may have arrived before that end.
-					s.scanEarlier(path, tail.offset)
 				}
 				if first {
 					s.emit(Event{Kind: KindInner, InnerID: inner, Transcript: path})
