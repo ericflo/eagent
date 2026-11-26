@@ -35,7 +35,7 @@ func (codexAgent) ready(screen string) bool {
 
 // busy: Codex's working line, drawn just above its composer, says how to
 // stop it.
-func (codexAgent) busy(screen string) bool { return busyLineNearBottom(screen, 6) }
+func (codexAgent) busy(screen string) bool { return spinnerShown(screen) }
 
 func (codexAgent) dialogs() []dialog {
 	return []dialog{

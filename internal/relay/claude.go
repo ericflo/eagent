@@ -35,7 +35,7 @@ func (claudeAgent) ready(screen string) bool {
 
 // busy: Claude's footer stays while it works; its spinner line, drawn just
 // above the input box, says how to stop it.
-func (claudeAgent) busy(screen string) bool { return busyLineNearBottom(screen, 6) }
+func (claudeAgent) busy(screen string) bool { return spinnerShown(screen) }
 
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
@@ -104,10 +104,10 @@ func (claudeAgent) afterTurn(s *Seat, id, text string) error {
 	return spoolMessage(s.spec.Spool, id, text)
 }
 
-// poll types what still waits in the spool once Claude has stayed idle a
-// while: its Stop hook does not run on an interrupt, and a message held
-// just as a turn ended, or before a restart, finds no turn to end.
-func (claudeAgent) poll(s *Seat, now time.Time) { s.releaseHeld(now) }
+// poll reports what is left in the spool after a turn the transcript shows
+// over: Claude's Stop hook does not run on an interrupt, and a message held
+// just as a turn ended finds no turn to end.
+func (claudeAgent) poll(s *Seat, now time.Time) { s.reportLeftOvers(now) }
 
 // canResume: Claude saves a session only when its first message is sent,
 // and exits at once on --resume of an id it never saved.
@@ -122,7 +122,7 @@ func (a claudeAgent) canResume(spec Spec, innerID string) bool {
 // turn end.
 func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
-	taken, texts := takeSpool(spool, 0)
+	taken, texts := takeSpool(spool)
 	for _, path := range taken {
 		_ = os.Remove(path)
 	}
@@ -134,11 +134,11 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
-// takeSpool claims up to max messages waiting in spool (every one when max
-// is 0), oldest first, renaming each to .taken first so the Stop hook and
-// the seat never both hand one over. It returns the claimed files and
-// their texts.
-func takeSpool(spool string, max int) (taken, texts []string) {
+// takeSpool claims every message waiting in spool, oldest first, renaming
+// each to .taken first so the Stop hook and the seat (reporting what is
+// left over) never both take one. It returns the claimed files and their
+// texts.
+func takeSpool(spool string) (taken, texts []string) {
 	entries, err := os.ReadDir(spool)
 	if err != nil {
 		return nil, nil
@@ -151,9 +151,6 @@ func takeSpool(spool string, max int) (taken, texts []string) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if max > 0 && len(taken) >= max {
-			break
-		}
 		path := filepath.Join(spool, name)
 		if os.Rename(path, path+".taken") != nil {
 			continue // another taker got it

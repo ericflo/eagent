@@ -209,10 +209,10 @@ func TestClaudeWithoutItsStopHookTypesAHeldMessage(t *testing.T) {
 }
 
 // A message still held when Claude's turn has ended without its Stop hook
-// taking it (an interrupt, a restart, a message held just as the turn
-// ended) is typed in once the agent has stayed idle a few seconds, and is
-// then watched like any typed message.
-func TestClaudeIdleWithAHeldMessageTypesIt(t *testing.T) {
+// taking it (an interrupt) is reported undelivered heldGrace after the
+// transcript showed the turn over, saying why; it is never typed, and it
+// leaves the spool.
+func TestClaudeLeftOverAfterAnInterruptIsReportedUndelivered(t *testing.T) {
 	saved := heldGrace
 	heldGrace = 200 * time.Millisecond
 	t.Cleanup(func() { heldGrace = saved })
@@ -223,42 +223,30 @@ func TestClaudeIdleWithAHeldMessageTypesIt(t *testing.T) {
 	if msg, err := s.Send("r1", "then run the tests", "after_turn"); err != nil || !strings.Contains(msg, "held for") {
 		t.Fatalf("send: %q %v", msg, err)
 	}
-	// The turn is interrupted: no Stop hook runs.
-	s.fold(obs{kind: "aborted"})
+	s.fold(obs{kind: "aborted"}) // no Stop hook runs on an interrupt
+	drain(s.events)
 	start := time.Now()
-	s.releaseHeld(start)
-	if len(h.typed) != 0 {
-		t.Fatalf("typed %q before the agent stayed idle", h.typed)
+	s.reportLeftOvers(start)
+	if evs := drain(s.events); len(evs) != 0 {
+		t.Fatalf("reported within heldGrace: %+v", evs)
 	}
-	s.mu.Lock()
-	s.stateAt = start.Add(-heldGrace)
-	s.mu.Unlock()
-	s.releaseHeld(start)
-	s.releaseHeld(start.Add(time.Second))
-	if len(h.typed) != 1 || h.typed[0] != "then run the tests" {
-		t.Fatalf("typed %q, want the held message once", h.typed)
-	}
-	if names, _ := filepath.Glob(filepath.Join(spool, "*")); len(names) != 0 {
-		t.Fatalf("the spool still holds %v", names)
-	}
-	s.mu.Lock()
-	watched := len(s.pending) == 1 && !s.pending[0].held
-	s.mu.Unlock()
-	if !watched {
-		t.Fatal("the typed message is not watched as a typed one")
-	}
-	s.fold(obs{kind: "user", text: "then run the tests"})
-	var ok bool
+	s.reportLeftOvers(start.Add(heldGrace))
+	var lost []Event
 	for _, ev := range drain(s.events) {
-		ok = ok || ev.Kind == KindDelivered && ev.OK && ev.SendID == "r1"
+		if ev.Kind == KindDelivered && !ev.OK {
+			lost = append(lost, ev)
+		}
 	}
-	if !ok {
-		t.Fatal("the held message was not confirmed")
+	if len(lost) != 1 || lost[0].SendID != "r1" || !strings.Contains(lost[0].Detail, "turn ended before it took this message") {
+		t.Fatalf("reports %+v", lost)
+	}
+	if names, _ := filepath.Glob(filepath.Join(spool, "*")); len(names) != 0 || len(h.typed) != 0 || len(s.Snapshot().Pending) != 0 {
+		t.Fatalf("spool %v, typed %q, pending %v", names, h.typed, s.Snapshot().Pending)
 	}
 }
 
-// A held message the Stop hook takes first is not typed as well.
-func TestClaudeHeldMessageTakenByTheHookIsNotTypedAgain(t *testing.T) {
+// A held message the Stop hook took is not reported after the turn.
+func TestClaudeHeldMessageTakenByTheHookIsNotReported(t *testing.T) {
 	saved := heldGrace
 	heldGrace = 0
 	t.Cleanup(func() { heldGrace = saved })
@@ -270,10 +258,12 @@ func TestClaudeHeldMessageTakenByTheHookIsNotTypedAgain(t *testing.T) {
 	}
 	var out strings.Builder
 	RunStopHook(spool, strings.NewReader("{}"), &out)
-	s.state = "idle"
-	s.releaseHeld(time.Now().Add(time.Second))
-	if len(h.typed) != 0 || !strings.Contains(out.String(), "held") {
-		t.Fatalf("typed %q, hook said %q", h.typed, out.String())
+	s.state = "working"
+	s.fold(obs{kind: "turn"})
+	drain(s.events)
+	s.reportLeftOvers(time.Now().Add(time.Second))
+	if evs := drain(s.events); len(evs) != 0 || !strings.Contains(out.String(), "held") {
+		t.Fatalf("events %+v, hook said %q", evs, out.String())
 	}
 }
 
