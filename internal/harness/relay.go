@@ -654,7 +654,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
-	r.summary.final = false // a session with an agent started is not ending
+	// A session with an agent started is not ending: its closing word is
+	// asked again once this agent's work is done.
+	r.summary.final, r.turns.finalAsked = false, false
 	spec, started := job.spec, job.started
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
 		Name: job.name, Profile: job.profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: job.dir,
