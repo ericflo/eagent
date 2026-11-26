@@ -861,7 +861,14 @@ func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessag
 	// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
 	// A route the environment pins (EAGENT_MODEL and the like) still wins,
 	// as it does everywhere; a choice that cannot hold under it is refused.
-	return LoadBundleWithFile(project, preset, preset, rest)
+	cfg, err := LoadBundleWithFile(project, preset, preset, rest)
+	// The effort kept may be one the preset's model does not offer (xhigh
+	// from a file written for openai-high, on GLM-5.3): it becomes the
+	// nearest one it does, as a live switch to that model makes it.
+	if m, ok := Lookup(cfg.Model.BaseURL, cfg.Model.Model); err == nil && ok && cfg.Model.ReasoningEffort != "" && !contains(m.Efforts, cfg.Model.ReasoningEffort) {
+		cfg.Model.ReasoningEffort = NearestEffort(m.Efforts, cfg.Model.ReasoningEffort)
+	}
+	return cfg, err
 }
 
 // modelChoiceFields are the fields of a route that say which model it is
