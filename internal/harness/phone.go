@@ -14,6 +14,7 @@ import (
 	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/state"
 )
 
@@ -120,6 +121,10 @@ func (r *Runtime) startPhone() {
 			p.taken[d.CardID] = true
 		}
 	}
+	// Which app messages the session has taken in (integration.PhoneLedger):
+	// a resumed session reads on after the newest of them, so what was sent
+	// while it was stopped is taken in order, once.
+	ledger := integration.ReadPhoneLedger(r.st.Events)
 	r.phone = p
 	p.wg.Add(1)
 	go p.worker()
@@ -264,7 +269,14 @@ func (r *Runtime) startPhone() {
 			// message that resumed it, which itself is not taken again.
 			p.lastID, p.resumedBy, p.fallback = by, by, msg.ID
 			p.posted[by] = true
+		} else if resumed && ledger.Keeps && ledger.Cursor != "" {
+			// Resumed with no app message (from the terminal or the web):
+			// read on after the last one the session took in, so those sent
+			// while it was stopped are taken now, in order.
+			p.lastID, p.resumedBy, p.fallback = ledger.Cursor, ledger.Cursor, msg.ID
+			p.posted[ledger.Cursor] = true
 		}
+		anchor := p.lastID
 		p.threadID = thread.ID
 		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
 			p.mirror1(promptSeq, msg.ID) // so that its receipt has a message to sit under
@@ -272,6 +284,13 @@ func (r *Runtime) startPhone() {
 		p.mu.Unlock()
 		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
 			p.recordMirror(r, promptSeq, msg.ID)
+		}
+		if !ledger.Keeps {
+			// The record starts keeping the ledger here: the poll reads on
+			// after anchor, and everything it takes in is recorded.
+			r.post(func() {
+				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
+			})
 		}
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
@@ -1015,7 +1034,14 @@ func (p *phone) poll(r *Runtime) {
 				}
 				atts = append(atts, saved)
 			}
+			// Every message the poll takes in is recorded in the loop step
+			// that takes it (tookPhoneMessage), so a resume after any stop
+			// goes on after the last one, neither taking one twice nor
+			// skipping one; a step dropped at shutdown leaves its message
+			// for the next run.
+			phoneID := m.ID
 			if body == "" && len(atts) == 0 {
+				r.post(func() { r.tookPhoneMessage(phoneID, len(r.st.Events)) })
 				continue
 			}
 			if fid, ok := m.IsAnswer(); ok {
@@ -1023,7 +1049,9 @@ func (p *phone) poll(r *Runtime) {
 				qid, known := p.fromPhone[fid]
 				p.mu.Unlock()
 				if p.isTaken(fid) {
-					continue // its answer was taken already (handOver claims it)
+					// Its answer was taken already (handOver claims it).
+					r.post(func() { r.tookPhoneMessage(phoneID, len(r.st.Events)) })
+					continue
 				}
 				if !known {
 					// A card from before this run (the thread outlives the
@@ -1040,16 +1068,19 @@ func (p *phone) poll(r *Runtime) {
 				}
 				caps := capsFromMeta(m.Meta)
 				r.post(func() {
+					from := len(r.st.Events)
 					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts})
+					r.tookPhoneMessage(phoneID, from)
 				})
 				continue
 			}
 			p.settleDismissals(r)
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
-			phoneID := m.ID
 			r.post(func() {
+				from := len(r.st.Events)
 				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery, PhoneID: phoneID})
+				r.tookPhoneMessage(phoneID, from)
 			})
 		}
 	}
@@ -1316,6 +1347,26 @@ func (r *Runtime) handOver(p *phone, fid string, msg InboxMessage) {
 	}
 	r.handleInbox(msg)
 	r.append(event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: fid}))
+}
+
+// tookPhoneMessage records that the session took in app message id, in
+// the same loop step that took it: unless what it became (recorded from
+// index from on) is a user.message naming it, a phone.read says so. The
+// newest of these is where a resume reads on (integration.PhoneLedger).
+// Loop goroutine.
+func (r *Runtime) tookPhoneMessage(id string, from int) {
+	if id == "" {
+		return
+	}
+	if from >= 0 && from <= len(r.st.Events) {
+		for _, ev := range r.st.Events[from:] {
+			var d event.UserMessageData
+			if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id {
+				return
+			}
+		}
+	}
+	r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: id}))
 }
 
 // isTaken reports whether a card's answer was claimed already.

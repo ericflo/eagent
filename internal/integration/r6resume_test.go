@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -61,6 +62,9 @@ func newR6Thread(t *testing.T) *r6Thread {
 				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "anchor_unknown": unknown})
+		case strings.HasPrefix(r.URL.Path, "/files/"):
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png"))
 		case r.Method == "POST":
 			_, _ = w.Write([]byte(`{"message":{"id":"note"},"thread":{"id":"t"}}`))
 		case r.URL.Path == "/api/v1/events":
@@ -129,5 +133,143 @@ func TestARestoredSessionPicksTheEarliestMessageSentWhileStopped(t *testing.T) {
 	msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
 	if err != nil || !ok || msg.ID != "m1" {
 		t.Fatalf("pending reply %#v ok=%v err=%v", msg, ok, err)
+	}
+}
+
+// r6Record appends events to a stopped session's record.
+func r6Record(t *testing.T, project, sid string, evs ...event.Event) {
+	t.Helper()
+	sess, _, err := store.Open(r6Info(t, project, sid).Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sess.Close()
+}
+
+func r6Read(id string) event.Event {
+	return event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: id})
+}
+
+func r6Took(id, text string) event.Event {
+	return event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text, Source: "finalechat", PhoneID: id})
+}
+
+// Where a session goes on, case by case. The record keeps the ledger
+// (phone.read) or does not (written before it); the thread holds what the
+// person wrote. The session is resumed with want, or not at all ("").
+func TestWhereAStoppedSessionGoesOnReadingItsThread(t *testing.T) {
+	type said struct {
+		id, body string
+		at       time.Duration // from the session's last log write
+		meta     map[string]any
+		origin   string
+	}
+	card := map[string]any{"kind": "answer", "question_id": "card-1"}
+	for _, c := range []struct {
+		name   string
+		record []event.Event
+		thread []said
+		want   string
+	}{
+		{"one message, by time", nil, []said{{"m1", "go on", time.Minute, nil, ""}}, "m1"},
+		{"three messages, by time: the first", nil, []said{{"m1", "a", time.Minute, nil, ""}, {"m2", "b", 2 * time.Minute, nil, ""}, {"m3", "c", 3 * time.Minute, nil, ""}}, "m1"},
+		{"messages from before the stop are not taken again, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}}, ""},
+		{"an older message, then a new one, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
+		{"an agent's own post and a taken-back message are passed over", nil, []said{{"x1", "mirror", time.Minute, nil, "token"}, {"m1", "go on", 2 * time.Minute, nil, ""}}, "m1"},
+		{"ledger: after the last message taken in", []event.Event{r6Read("start"), r6Took("m1", "a")}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
+		{"ledger: a message received just before a hard stop is not lost", []event.Event{r6Read("m1")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Second, nil, ""}, {"m3", "c", time.Minute, nil, ""}}, "m2"},
+		{"ledger: everything taken in", []event.Event{r6Read("m1"), r6Took("m2", "b")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Minute, nil, ""}}, ""},
+		{"ledger: an answer whose card was taken another way", []event.Event{r6Read("m1"), event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: "card-1"})}, []said{{"m1", "a", -time.Hour, nil, ""}, {"a1", "blue", time.Minute, card, ""}, {"m2", "b", 2 * time.Minute, nil, ""}}, "m2"},
+		{"ledger: the cursor's message is gone, by time", []event.Event{r6Read("gone")}, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			project := t.TempDir()
+			sid := finishedSession(t, project, time.Now().Add(-2*time.Hour))
+			if len(c.record) > 0 {
+				r6Record(t, project, sid, c.record...)
+			}
+			f := newR6Thread(t)
+			stop := r6Info(t, project, sid).Modified
+			for _, m := range c.thread {
+				f.say(sid, m.id, m.body, stop.Add(m.at), m.meta)
+				if m.origin != "" {
+					f.mu.Lock()
+					f.threads[sid][len(f.threads[sid])-1]["origin"] = m.origin
+					f.mu.Unlock()
+				}
+			}
+			host := &fakeResumeHost{hosted: map[string]bool{}}
+			f.watcher(project, host, t).sweep(context.Background())
+			got := ""
+			if host.calls() > 0 {
+				got = host.resumed[0].ID
+			}
+			if got != c.want || host.calls() > 1 {
+				t.Fatalf("resumed with %q (%d resumes), want %q", got, host.calls(), c.want)
+			}
+		})
+	}
+}
+
+// A message that brings the thread up on the event stream resumes the
+// session from the earliest one it has not taken in, not from itself.
+func TestAMessageOnTheStreamResumesFromTheEarliestNotTakenIn(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "m1", "the checklist is A, B, C", stop.Add(time.Minute), nil)
+	f.say(sid, "m2", "are you still there?", stop.Add(2*time.Minute), nil)
+	host := &fakeResumeHost{hosted: map[string]bool{}}
+	w := f.watcher(project, host, t)
+	w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m2", Sender: "user", Origin: "session", Body: "are you still there?"})
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("resumed with %#v", host.resumed)
+	}
+}
+
+// A file sent first and words second: the session is resumed with the
+// file's message, the file saved under the session.
+func TestAFileSentFirstResumesTheSessionWithTheFile(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "m1", "", stop.Add(time.Minute), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["attachments"] = []map[string]any{{"id": "att-1", "kind": "image", "content_type": "image/png", "filename": "shot.png", "size": 3, "url": "/files/att-1"}}
+	f.mu.Unlock()
+	f.say(sid, "m2", "see the screenshot", stop.Add(2*time.Minute), nil)
+	host := &fakeResumeHost{hosted: map[string]bool{}}
+	f.watcher(project, host, t).sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 1 {
+		t.Fatalf("resumed with %#v", host.resumed)
+	}
+}
+
+// Two sweeps at once (the serve retrying) resume the session once.
+func TestTwoSweepsAtOnceResumeTheSessionOnce(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "m1", "the checklist is A, B, C", stop.Add(time.Minute), nil)
+	f.say(sid, "m2", "are you still there?", stop.Add(2*time.Minute), nil)
+	host := &fakeResumeHost{hosted: map[string]bool{}}
+	w := f.watcher(project, host, t)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); w.sweep(context.Background()) }()
+	}
+	wg.Wait()
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("resumed %d times: %#v", host.calls(), host.resumed)
 	}
 }

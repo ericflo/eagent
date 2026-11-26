@@ -350,6 +350,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		}
 	}
 	r.startPhone()
+	wordsFrom := len(r.st.Events)
 	if strings.TrimSpace(opts.Prompt) != "" || len(opts.PromptAttachments) > 0 {
 		// The message the session is resumed with is taken exactly as a
 		// running session takes one from the same place: through the inbox's
@@ -380,6 +381,10 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			r.handleInbox(in)
 		}
 	}
+	// The app message the session was resumed with is taken in now, also
+	// when it held nothing (its files all refused): the ledger goes on
+	// after it, and the poll reads on from it.
+	r.tookPhoneMessage(opts.PromptPhoneID, wordsFrom)
 	if plan.WordsCard != "" {
 		r.markAnswerTaken(plan.WordsCard) // now that the words are recorded
 	}
