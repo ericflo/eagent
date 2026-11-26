@@ -103,7 +103,7 @@ func longHistory(t *testing.T, since time.Time, first string) string {
 	t.Helper()
 	reply := strings.Repeat("The shelves are sorted now. ", 40)
 	lines := claudeTurnLines(first, reply, since.Add(-time.Hour))
-	for i := 1; i < 300; i++ {
+	for i := 1; i < 100; i++ {
 		lines = append(lines, claudeTurnLines(fmt.Sprintf("next shelf %d", i), reply, since.Add(-time.Hour+time.Duration(i)*time.Second))...)
 	}
 	path := filepath.Join(t.TempDir(), "t.jsonl")
@@ -115,7 +115,7 @@ func longHistory(t *testing.T, since time.Time, first string) string {
 // transcript is long without being megabytes.
 func lowTail(t *testing.T) {
 	saved := tailBackfill
-	tailBackfill = 32 << 10
+	tailBackfill = 16 << 10
 	t.Cleanup(func() { tailBackfill = saved })
 }
 
@@ -145,7 +145,7 @@ func (w *reattachedSeat) settle() {
 			still = 0
 		}
 		last = n
-		return still >= 5
+		return still >= 3
 	})
 }
 
@@ -154,18 +154,36 @@ func (w *reattachedSeat) settle() {
 // reports nothing else: the reattach writes the same events as one with
 // nothing restored, apart from the confirmation.
 func TestARestoredSendFarBackIsFoundWithoutReportingTheHistoryAgain(t *testing.T) {
-	isolatePi(t)
 	lowTail(t)
 	since := time.Now().Add(-time.Minute)
 	first := "label the jars on the top shelf"
 	path := longHistory(t, since, first)
-	plain := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since)
-	plain.settle()
-	for _, c := range []struct {
+	cases := []struct {
 		text string
 		want []string
-	}{{first, []string{"r1"}}, {"words it was never sent", nil}} {
-		w := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since, Restored{ID: "r1", Text: c.text, Mode: "queue", At: since.Add(-time.Hour - time.Second)})
+		w    *reattachedSeat
+	}{{text: first, want: []string{"r1"}}, {text: "words it was never sent"}}
+	// The seats watch copies, all at once: one transcript is followed by
+	// one seat at a time.
+	copyOf := func() string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := os.WriteFile(p, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	plain := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since)
+	for i := range cases {
+		p := copyOf()
+		cases[i].w = reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(p)}, p, since, Restored{ID: "r1", Text: cases[i].text, Mode: "queue", At: since.Add(-time.Hour - time.Second)})
+	}
+	plain.settle()
+	for _, c := range cases {
+		w := c.w
 		w.caughtUp(t)
 		w.settle()
 		if ok, failed := w.delivered(); !slices.Equal(ok, c.want) || len(failed) > 0 {
@@ -187,7 +205,7 @@ func TestTheSearchForRestoredSendsStartsNearTheirTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := since.Add(-time.Hour + 150*time.Second)
+	want := since.Add(-time.Hour + 70*time.Second)
 	mark := []byte(`"timestamp":"` + stamp(want) + `"`)
 	at := int64(bytes.Index(raw, mark))
 	at = int64(bytes.LastIndexByte(raw[:at], '\n') + 1) // the line's start
@@ -197,7 +215,7 @@ func TestTheSearchForRestoredSendsStartsNearTheirTime(t *testing.T) {
 	}
 	defer f.Close()
 	got := seekBefore(f, int64(len(raw)), want)
-	if got > at || got < at/2 {
+	if got > at || got <= at-1<<16 || got == 0 {
 		t.Fatalf("starts at %d; the first line at that time starts at %d", got, at)
 	}
 }

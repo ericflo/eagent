@@ -141,7 +141,7 @@ func (w *reattachedSeat) turns() []string {
 // started finishing while nothing watched. The reattached seat reports
 // the turn and confirms the send, once.
 func TestAReattachedSeatConfirmsASendThatArrivedWhileEagentWasDown(t *testing.T) {
-	isolatePi(t)
+	t.Parallel()
 	since := time.Now().Add(-time.Minute)
 	sent := Restored{ID: "r1", Text: "run the tests and fix what fails", Mode: "queue", At: since.Add(-2 * time.Second)}
 	for _, c := range []struct {
@@ -175,7 +175,7 @@ func TestAReattachedSeatConfirmsASendThatArrivedWhileEagentWasDown(t *testing.T)
 // catch-up confirms it from the history, and reports nothing else of the
 // history again.
 func TestARestoredSendIsConfirmedByALineFromJustBeforeTheReattach(t *testing.T) {
-	isolatePi(t)
+	t.Parallel()
 	since := time.Now().Add(-time.Minute)
 	sent := Restored{ID: "r1", Text: "check the version", Mode: "queue", At: since.Add(-10 * time.Second)}
 	dir := t.TempDir()
@@ -196,7 +196,7 @@ func TestARestoredSendIsConfirmedByALineFromJustBeforeTheReattach(t *testing.T) 
 // was not. r1's line in the history is not r2's arrival; a line after r2
 // was sent is.
 func TestAConfirmedSendsLineDoesNotConfirmARestoredOneWithTheSameWords(t *testing.T) {
-	isolatePi(t)
+	t.Parallel()
 	since := time.Now().Add(-time.Minute)
 	r2 := Restored{ID: "r2", Text: "continue", Mode: "queue", At: since.Add(-10 * time.Second)}
 	head := []string{piHeaderLine("p1", since.Add(-time.Hour)), piModelLine(since.Add(-time.Hour))}
@@ -245,7 +245,7 @@ func TestAHistoryLineDoesNotConfirmASendMadeAfterTheReattach(t *testing.T) {
 // reported not confirmed, saying it was not typed again; no Enter is
 // pressed for it, though its words are on the screen.
 func TestARestoredSendTheTranscriptNeverShowsIsReportedAfterTheLiveWait(t *testing.T) {
-	isolatePi(t)
+	t.Parallel()
 	since := time.Now().Add(-time.Hour)
 	sent := Restored{ID: "r1", Text: "deploy the docs site", Mode: "queue", At: since.Add(-time.Hour)}
 	dir := t.TempDir()
@@ -286,7 +286,6 @@ func TestARestoredSendTheTranscriptNeverShowsIsReportedAfterTheLiveWait(t *testi
 // file gone, the transcript's hand-over confirms them; one it does not show
 // is reported after the wait a typed send gets.
 func TestRestoredHeldMessages(t *testing.T) {
-	isolatePi(t)
 	saved := heldGrace
 	heldGrace = 0
 	t.Cleanup(func() { heldGrace = saved })
@@ -303,6 +302,7 @@ func TestRestoredHeldMessages(t *testing.T) {
 		return Spec{Dir: dir, Spool: filepath.Join(dir, "after_turn"), Hook: filepath.Join(dir, "ext.ts")}, path
 	}
 	t.Run("in the spool, mid-turn: stays held", func(t *testing.T) {
+		t.Parallel()
 		spec, path := setup(t, append(header, working))
 		if err := spoolMessage(spec.Spool, "r1", "then run the tests"); err != nil {
 			t.Fatal(err)
@@ -337,6 +337,7 @@ func TestRestoredHeldMessages(t *testing.T) {
 		}
 	})
 	t.Run("handed over while eagent was down: confirmed", func(t *testing.T) {
+		t.Parallel()
 		spec, path := setup(t, append(header, piTurnLines("t1", "then run the tests\n\nand push", "Pushed.", since.Add(time.Second))...))
 		w := reattach(t, piAgent{label: "Pi"}, spec, path, since, held("r1", "then run the tests"), held("r2", "and push"))
 		w.caughtUp(t)
@@ -345,6 +346,7 @@ func TestRestoredHeldMessages(t *testing.T) {
 		}
 	})
 	t.Run("gone and not shown: reported after the wait", func(t *testing.T) {
+		t.Parallel()
 		spec, path := setup(t, append(header, piTurnLines("t1", "build it", "Built.", since.Add(-30*time.Second))...))
 		w := reattach(t, piAgent{label: "Pi"}, spec, path, since, held("r1", "then run the tests"))
 		w.caughtUp(t)
