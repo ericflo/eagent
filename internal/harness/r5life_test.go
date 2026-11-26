@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 )
@@ -302,4 +303,44 @@ func TestAQuickChainThroughTheSameNameTwiceKeepsTheTask(t *testing.T) {
 	typed, said := r4Chain(t, []string{"claude", "codex", "pi"})
 	r4CheckFinal(t, typed, "Claude")
 	r4CheckSaid(t, said)
+}
+
+// "Until 10:00" from the user is 10:00 where the user is. The phone and
+// the web say which zone that is with each message; the model's
+// relay_autopilot reads the time there, as the /autopilot command does,
+// and not in the zone of the machine eagent runs on.
+func TestAnAutopilotDeadlineIsReadInTheUsersTimeZone(t *testing.T) {
+	zone := "Asia/Manila"
+	if time.Local.String() == zone {
+		zone = "America/Los_Angeles"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Skip(err)
+	}
+	useFakeRelays(t, newFakeSeat("one"))
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "keep it going until 10am", Source: "finalechat", Held: "eagent", Client: &clientcaps.Caps{Source: "finalechat", Timezone: zone}}))
+	})
+	out := relayToolNamed(t, rt, "relay_autopilot", map[string]any{"until": "10:00"})
+	var until string
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			var d event.RelayAutopilotData
+			if ev.Type == event.RelayAutopilot && ev.Decode(&d) == nil {
+				until = d.Until
+			}
+		}
+	})
+	at, err := time.Parse(time.RFC3339, until)
+	if err != nil {
+		t.Fatalf("autopilot deadline %q (%s): %v", until, out, err)
+	}
+	if h, m := at.In(loc).Hour(), at.In(loc).Minute(); h != 10 || m != 0 {
+		t.Errorf("the deadline is %s, %02d:%02d in %s, want 10:00 there", at, h, m, zone)
+	}
+	if !strings.Contains(out, "10:00") {
+		t.Errorf("the tool does not say the deadline as the user gave it: %s", out)
+	}
 }

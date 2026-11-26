@@ -1573,17 +1573,26 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					d.Instruction = "Keep going: pick the next most valuable thing toward what the user asked, do it, commit, and continue."
 				}
 				d.Decide = str("decide") != "false"
+				until := autopilotUntil
 				if u := strings.TrimSpace(str("until")); u != "" {
-					t, perr := parseUntil(u, time.Now())
+					// The deadline is the user's: read where they are.
+					loc := r.userZone()
+					t, perr := parseUntil(u, time.Now().In(loc))
 					if perr != nil {
 						err = perr
 						return
 					}
 					d.Until = t.Format(time.RFC3339)
+					if t.In(loc).Format("Mon 15:04") != t.Local().Format("Mon 15:04") {
+						// Said as the user gave it, with where that is.
+						until = func(event.RelayAutopilotData) string {
+							return "until " + t.In(loc).Format("Mon 15:04") + " " + loc.String() + " time"
+						}
+					}
 				}
-				out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
+				out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, decide its questions yourself"
 				if !d.Decide {
-					out = "Autopilot on for " + rel.Who() + " " + autopilotUntil(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
+					out = "Autopilot on for " + rel.Who() + " " + until(d) + ". At every turn end: nudge it on if it stopped, leave it alone while it waits on work of its own, pass its questions to the user"
 				}
 				out += "."
 			}
@@ -1792,6 +1801,28 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("could not read %q as a time: use 10:00, 8h, or 2026-10-28T10:00", s)
+}
+
+// userZone is where the user is: the time zone their newest message or
+// answer from the phone or the web declared, else the session's own.
+// Loop goroutine.
+func (r *Runtime) userZone() *time.Location {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer {
+			continue
+		}
+		var d struct {
+			Client *clientcaps.Caps `json:"client"`
+		}
+		if ev.Decode(&d) != nil || d.Client == nil || d.Client.Timezone == "" {
+			continue
+		}
+		if loc, err := time.LoadLocation(d.Client.Timezone); err == nil {
+			return loc
+		}
+	}
+	return r.st.Location()
 }
 
 func autopilotUntil(d event.RelayAutopilotData) string {
