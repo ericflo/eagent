@@ -27,7 +27,7 @@ func TestJudgeSendRule(t *testing.T) {
 		{state.SendArrived, "arrived", false, "already went to Codex as written (r1)", "delivered"},
 		{"", "arrived", false, "already went to Codex as written (r1)", "delivered"},
 		{state.SendNotSent, "did not go", true, "", "failed"},
-		{state.SendUnconfirmed, "never confirmed", false, "Look at relay_screen first", "failed"},
+		{state.SendUnconfirmed, "never confirmed", false, "Look at relay_screen first", "sent"},
 		{sendMoved, "went to Claude", false, "went to Claude instead (r1)", ""},
 	} {
 		v := judgeSend(c.o, "Codex", "r1", "Claude", "\n\n[The user attached plan.pdf: /w/plan.pdf]")
@@ -215,8 +215,12 @@ func TestABriefQuotesAMessageSentTwiceOnce(t *testing.T) {
 	})
 }
 
-// The phone's receipt for a message that did not go says so; it is never
-// "delivered".
+// The phone's receipt for a message that certainly did not go says so
+// ("Not delivered", with Retry), never "delivered", and the receipts a
+// resumed session rebuilds from the record agree. The live receipt guards
+// behaviour older than send outcomes (any failure was "failed"); the
+// rebuilt one is checked against it since outcomes made the two paths read
+// the record through judgeSend.
 func TestThePhoneReceiptForAMessageThatDidNotGo(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	seat := newFakeSeat("done")
@@ -254,4 +258,27 @@ func TestThePhoneReceiptForAMessageThatDidNotGo(t *testing.T) {
 			t.Fatalf("a receipt said delivered: %v", rr)
 		}
 	}
+	if live, rebuilt := receiptsLiveAndRebuilt(rt); live != rebuilt || live != "failed" {
+		t.Errorf("live %q, rebuilt from the record %q", live, rebuilt)
+	}
+}
+
+// receiptsLiveAndRebuilt is the newest message's receipt as the running
+// phone holds it and as a resumed session would rebuild it from the record.
+func receiptsLiveAndRebuilt(rt *Runtime) (live, rebuilt string) {
+	rt.sync(func() {
+		last := func(p *phone) string {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if n := len(p.receipts); n > 0 {
+				return p.receipts[n-1].status
+			}
+			return ""
+		}
+		live = last(rt.phone)
+		fresh := &phone{}
+		fresh.loadReceipts(rt)
+		rebuilt = last(fresh)
+	})
+	return live, rebuilt
 }
