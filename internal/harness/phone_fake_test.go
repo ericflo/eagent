@@ -516,6 +516,32 @@ func (f *phoneFake) statuses() []map[string]any {
 	return append([]map[string]any(nil), f.activity...)
 }
 
+// shownStatus is the status line the app shows now: the newest by seq of
+// what was set through …/activity and what rode on a post, as the service
+// applies both. A post can carry the line's latest change, after which the
+// keeper has nothing left to write.
+func (f *phoneFake) shownStatus() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var best float64
+	text := ""
+	consider := func(a map[string]any) {
+		if seq, _ := a["seq"].(float64); seq >= best {
+			best = seq
+			text, _ = a["text"].(string)
+		}
+	}
+	for _, a := range f.activity {
+		consider(a)
+	}
+	for _, p := range f.posts {
+		if a, ok := p["activity"].(map[string]any); ok {
+			consider(a)
+		}
+	}
+	return text
+}
+
 func (f *phoneFake) clearedCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cleared }
 
 func (f *phoneFake) metaPatches() []map[string]any {
@@ -572,6 +598,7 @@ type phoneRig struct {
 	project string
 	cancel  context.CancelFunc
 	done    chan int
+	started time.Time // when the latest run began
 }
 
 // phoneStart starts a session (interactive or not) whose mirror talks to
@@ -607,7 +634,7 @@ func phoneStart(t *testing.T, fp *phoneFake, prompt string, interactive bool, br
 // run starts rt in the background.
 func (g *phoneRig) run(rt *Runtime) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	g.rt, g.cancel, g.done = rt, cancel, make(chan int, 1)
+	g.rt, g.cancel, g.done, g.started = rt, cancel, make(chan int, 1), time.Now()
 	done := g.done
 	go func() { done <- rt.Run(ctx) }()
 	g.t.Cleanup(func() {
@@ -675,6 +702,32 @@ func (g *phoneRig) phoneWeighed(id string) {
 		return g.fp.after == id
 	})
 	g.rt.sync(func() {})
+}
+
+// statusIdle waits until the status keeper has nothing armed: its first
+// look (one second after it starts) is past, the line on the phone is what
+// the session wants, and more than its 200ms floor between looks has
+// passed since, so any wake it had set has come and gone. A change after
+// this reaches the phone only if it wakes the keeper.
+func (g *phoneRig) statusIdle() {
+	g.t.Helper()
+	caughtUp := func() bool {
+		var p *phone
+		g.rt.sync(func() { p = g.rt.phone })
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.want.Text == p.sent.Text && p.want.Kind == p.sent.Kind
+	}
+	waitFor(g.t, "the status keeper to be idle", func() bool {
+		if time.Since(g.started) < 1300*time.Millisecond || !caughtUp() {
+			return false
+		}
+		time.Sleep(300 * time.Millisecond)
+		return caughtUp()
+	})
 }
 
 // interrupt cancels the run and waits for it.

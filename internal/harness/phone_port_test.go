@@ -553,6 +553,11 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 	g.phoneWeighed(fp.lastMessageID())
 	g.running(10*loopPoll, "on a token-origin message")
 	g.rt.sync(func() {}) // the token message has been weighed
+	// The waiting line below has to come from the dismissal itself: the
+	// keeper has looked once and has nothing armed, and only what is
+	// written after the dismissal counts.
+	g.statusIdle()
+	shownBefore := len(fp.statuses())
 	before := g.model.count(testModel)
 	if !fp.dismiss() {
 		t.Fatal("nothing to dismiss")
@@ -568,7 +573,7 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 		t.Fatalf("%d question(s) open after the dismissal", n)
 	}
 	waitFor(t, "the phone to say the session is waiting for a message", func() bool {
-		for _, a := range fp.statuses() {
+		for _, a := range fp.statuses()[shownBefore:] {
 			if a["text"] == "Waiting for your next message" {
 				return true
 			}

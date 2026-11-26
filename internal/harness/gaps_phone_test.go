@@ -158,7 +158,9 @@ func TestGapPhoneStatusFollowsTheAgentsStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the message to reach the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
-	time.Sleep(4 * statusMinGap) // past the status's minimum gap
+	// Past the status's minimum gap, with no look of the keeper's pending:
+	// the step alone must bring the line up.
+	g.statusIdle()
 	g.seat.emit(agentDoes("running go test ./..."))
 	waitFor(t, "the status to name the step", func() bool {
 		for _, a := range fp.statuses() {
