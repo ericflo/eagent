@@ -3,6 +3,7 @@ package harness
 import (
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -119,6 +120,63 @@ func TestR11ClosingTurnThatSetsATimerIsTriedAgain(t *testing.T) {
 	s.settled()
 	if said := s.ui.said(); len(said) != 1 {
 		t.Fatalf("said %q; want the answer of the call made again alone", said)
+	}
+}
+
+// r11WriteDuringClosing runs a batch session whose closing turn reads
+// something on its first call, and the user writes while that call is out.
+// next answers the calls after it, in order, until it returns false; then
+// the model holds. It returns the session's exit code.
+func r11WriteDuringClosing(t *testing.T, next ...reply) (*session, int) {
+	t.Helper()
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	var phase, after atomic.Int32
+	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case phase.Load() == 2:
+			if n := int(after.Add(1)); n <= len(next) {
+				return next[n-1]
+			}
+			return hold()
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			return reply{block: gate, calls: []event.ToolCall{tc("session_search", `{"query":"merged"}`)}}
+		case strings.Contains(tail, "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief}, newFakeSeat("Merged #42; the tests are green."), model, nil)
+	s.waitFor("the closing turn's first call", func() bool { return phase.Load() == 2 })
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "is #42 merged?"}) })
+	release()
+	return s, coreExit(s)
+}
+
+// The user writes while the first call of the closing turn is out, and the
+// call after it fails. The session is not ending any more (their message
+// is what the turn is for now): eagent does not close in its own words,
+// and the user gets one answer.
+func TestR11MessageDuringTheClosingTurnThenAFailedCall(t *testing.T) {
+	answer := say("Yes, #42 is merged and the tests are green.")
+	s, code := r11WriteDuringClosing(t, r10Bad, answer)
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
+
+// The same, with a read before the call that fails: the read takes the
+// user's message in, and the failure still does not close the session in
+// eagent's words, nor does a second closing turn follow with its own.
+func TestR11MessageDuringTheClosingTurnThenAReadThenAFailedCall(t *testing.T) {
+	answer := say("Yes, #42 is merged and the tests are green.")
+	read := reply{calls: []event.ToolCall{tc("session_search", `{"query":"tests"}`)}}
+	s, code := r11WriteDuringClosing(t, read, r10Bad, answer)
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
 	}
 }
 

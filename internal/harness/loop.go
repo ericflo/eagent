@@ -886,9 +886,11 @@ func (r *Runtime) turn(w wake) {
 				// Only something that asks for a look gets a tail of its
 				// own. Anything else that came (a remark from the agent,
 				// what this turn's own calls put on the record) is in the
-				// conversation the call is given, and counts as seen.
+				// conversation the call is given, and counts as seen. A
+				// session the user writes to is not ending (noteWake): from
+				// here on the turn is not its closing turn.
 				if k, ok := r.dueWake(); ok {
-					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
+					w = wake{kind: k, event: true, final: w.final && k != wakeUser, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
