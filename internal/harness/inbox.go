@@ -131,14 +131,17 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 // ownCommand reports whether a line the user wrote is a command for eagent
 // itself and not words for the agent or for eagent's model. With an agent
 // running, a slash word eagent does not own is the agent's. With none, it
-// is a command (an unknown one gets "try /help") unless a question is
-// open: then anything that is not one of eagent's commands is the answer,
-// which may well begin with a slash (a path). Loop goroutine.
+// is a command (an unknown one gets "try /help") when typed in eagent's
+// terminal and no question is open. Otherwise anything that is not one of
+// eagent's commands is words for eagent's model (or the answer), which may
+// well begin with a slash (a path): "try /help" would show only in a
+// terminal, and the phone or the web would see the message vanish. Loop
+// goroutine.
 func (r *Runtime) ownCommand(line, source string) bool {
 	if !strings.HasPrefix(line, "/") || r.relayPassthrough(line, source) {
 		return false
 	}
-	if r.st.Question != nil && len(r.st.ActiveRelays()) == 0 && !eagentCommand(line) {
+	if (r.st.Question != nil || source != "") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(line) {
 		return false
 	}
 	return true

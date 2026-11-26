@@ -2,6 +2,7 @@ package harness
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -186,6 +187,47 @@ func TestASendMovedByASwitchFailsUnderTheAgentItWasMovedTo(t *testing.T) {
 	rt.sync(func() {
 		if _, waits := rt.st.Relays["claude"].Undelivered[id]; waits {
 			t.Error("the new agent still waits for a send that failed")
+		}
+	})
+}
+
+// With no agent running, a message from the phone or the web that starts
+// with a slash and is not one of eagent's commands ("/tmp/out.log is
+// empty", an agent's own command) is the user's words for eagent: it is on
+// the record and owed an answer, where it used to be dropped with a note
+// only a terminal could show. In a terminal, it is still an unknown command.
+func TestASlashMessageFromThePhoneWithNoAgentRunningIsKept(t *testing.T) {
+	useFakeRelays(t, newFakeSeat("one"))
+	rt := newLaunchRuntime(t)
+	if out := relayToolNamed(t, rt, "relay_control", map[string]any{"action": "stop"}); !strings.Contains(out, "Stopped") {
+		t.Fatalf("stop: %s", out)
+	}
+	const words = "/tmp/out.log is empty, why?"
+	rt.sync(func() {
+		rt.handleInbox(InboxMessage{Type: "message", Text: words, From: "finalechat", PhoneID: "m1"})
+		rt.handleInbox(InboxMessage{Type: "message", Text: "/compact", From: "web"})
+		rt.onInput("/frobnicate")
+	})
+	var got []string
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			var d event.UserMessageData
+			if ev.Type == event.UserMessage && ev.Decode(&d) == nil {
+				got = append(got, d.Text)
+			}
+		}
+	})
+	if !slices.Equal(got, []string{words, "/compact"}) {
+		t.Fatalf("user messages on the record: %q", got)
+	}
+	// One of eagent's own commands is still carried out.
+	rt.sync(func() {
+		n := len(rt.st.Events)
+		rt.handleInbox(InboxMessage{Type: "message", Text: "/status", From: "web"})
+		for _, ev := range rt.st.Events[n:] {
+			if ev.Type == event.UserMessage {
+				t.Error("/status was recorded as words")
+			}
 		}
 	})
 }
