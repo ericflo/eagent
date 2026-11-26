@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +124,11 @@ func TestChaosCrashResumeLoop(t *testing.T) {
 	for seed := int64(1); seed <= 4; seed++ {
 		t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
 			t.Setenv("EAGENT_TEST_KEY", "x")
-			project := t.TempDir()
+			// On the disk, not in memory: each event is fsynced, which takes
+			// the milliseconds that let a kill land between a call's message
+			// and its result. In memory a turn crosses that in microseconds
+			// and the kills miss it.
+			project := diskDir(t)
 			rng := rand.New(rand.NewSource(seed))
 			c := newRelayChaos(seed+100, 0.2, relayChaosBrain)
 			defer c.srv.Close()
@@ -184,4 +189,20 @@ func TestChaosCrashResumeLoop(t *testing.T) {
 			t.Fatal("never finished")
 		})
 	}
+}
+
+// diskTmp is the temporary directory the run started with, before TestMain
+// moved temporary files to memory.
+var diskTmp string
+
+// diskDir is a temporary directory on diskTmp, for a test whose timing
+// rests on writes taking as long as they do on a disk.
+func diskDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp(diskTmp, "eagent-disk-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
 }

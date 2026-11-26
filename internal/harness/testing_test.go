@@ -276,6 +276,7 @@ func TestMain(m *testing.M) {
 	// event; on a memory filesystem that costs nothing. All of it is
 	// removed when the run ends.
 	var memTmp string
+	diskTmp = os.TempDir()
 	if dir := memoryDisk(); dir != "" {
 		// A run that was killed could not remove its directory, and here
 		// that is memory: clear out any that are over an hour old.
