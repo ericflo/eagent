@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+// A saved preset with no default agent loads with none, not with the one
+// the project file names below it.
+func TestSavedPresetWithoutADefaultAgentDoesNotTakeTheFiles(t *testing.T) {
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	project := t.TempDir()
+	writeProjectFile(t, File(project), `{"relay":{"default":"codex"}}`)
+	cfg := Defaults()
+	raw, err := BundleBytes("plain", "", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectFile(t, BundlePath(project, "plain"), string(raw))
+	loaded, err := LoadBundle(project, "", "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Relay.Default != "" {
+		t.Fatalf("relay.default = %q from %s", loaded.Relay.Default, raw)
+	}
+}
+
 // A field cleared in a preset's fallback route stays cleared once saved
 // over that preset: the file says null for it, as it does for the main
 // route, instead of a fallback object the preset's own values fill in.

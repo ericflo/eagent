@@ -541,6 +541,15 @@ func spelled(cfg Config) map[string]json.RawMessage {
 	if _, ok := m["persona"]; !ok {
 		m["persona"] = json.RawMessage(`""`)
 	}
+	// No default agent is spelled too, or the layer below names one.
+	relay := object(m["relay"])
+	if relay == nil {
+		relay = map[string]json.RawMessage{}
+	}
+	if _, ok := relay["default"]; !ok {
+		relay["default"] = json.RawMessage(`""`)
+	}
+	m["relay"], _ = json.Marshal(relay)
 	return m
 }
 
