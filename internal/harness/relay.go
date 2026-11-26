@@ -1790,11 +1790,14 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	// A name can be in the chain more than once (a quick switch back), each
-	// time with the agent that held it then.
-	seen := map[string][]int64{}
+	// The agents the brief hands over from, each the holder of its name
+	// from its start (a name can be in the chain twice, a quick switch
+	// back, each time with the agent that held it then).
+	targets := map[holder]bool{}
+	names := map[string]bool{}
 	for _, n := range ho.names {
-		seen[n.name] = append(seen[n.name], n.start)
+		targets[holder{n.name, n.start}] = true
+		names[n.name] = true
 	}
 	handed := handedOver(r.st)
 	quoted := map[string]bool{}
@@ -1817,13 +1820,17 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		starts, ok := seen[d.Name]
-		if !ok || d.From != "user" || quoted[d.ID] || pending[d.ID] {
+		if d.From != "user" || quoted[d.ID] || pending[d.ID] {
 			continue
 		}
-		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && !inChain(handed, holder{d.Name, at.StartSeq}, d.Name, starts) {
-			// Said to another agent that held the name: a later one, or an
-			// earlier one that was stopped rather than handed over.
+		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
+			if !names[d.Name] {
+				continue
+			}
+		} else if !inChain(handed, holder{d.Name, at.StartSeq}, targets) {
+			// Said to an agent whose work did not come to this one: a
+			// later holder of a name, one that was stopped rather than
+			// handed over, or another agent altogether.
 			continue
 		}
 		quoted[d.ID] = true
@@ -1862,7 +1869,7 @@ func handedOver(st *state.State) map[holder]holder {
 		}
 		var end event.RelayEndData
 		var start event.RelayStartData
-		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") {
+		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") || strings.Contains(end.Reason, ", which could not start") {
 			continue
 		}
 		from, to := st.RelayAt(end.Name, ev.Seq), st.RelayAt(start.Name, next.Seq)
@@ -1874,13 +1881,15 @@ func handedOver(st *state.State) map[holder]holder {
 	return out
 }
 
-// inChain reports whether the agent h is one of the agents under name that
-// a brief quotes (starts), or an earlier one whose work reached one of them
-// through switches: Codex, Claude, Codex again is one piece of work. An
-// earlier agent that was stopped, not handed over, did other work.
-func inChain(handed map[holder]holder, h holder, name string, starts []int64) bool {
+// inChain reports whether the agent h is one of the agents a brief hands
+// over from (targets), or one whose work reached one of them through
+// switches, whatever their names: Codex, Claude, pi is one piece of work,
+// and so is Codex, Claude, Codex again. An agent that was stopped, not
+// handed over, did other work. Bounded by the number of switches, so a
+// cycle cannot hang it.
+func inChain(handed map[holder]holder, h holder, targets map[holder]bool) bool {
 	for steps := 0; steps <= len(handed); steps++ {
-		if h.name == name && slices.Contains(starts, h.start) {
+		if targets[h] {
 			return true
 		}
 		next, ok := handed[h]
