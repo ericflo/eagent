@@ -186,7 +186,9 @@ func r5LogOnFailure(s *session) {
 // after it.
 func r5Scale(s *session, msgs []llm.Message, input int) int {
 	req := llm.Request{System: s.rt.system, Messages: msgs}
-	s.rt.calibrate(event.ActorEagent, req, &llm.Response{Usage: event.Usage{Input: input}}, nil)
+	var ep llm.Endpoint
+	s.rt.sync(func() { ep = s.rt.models[event.ActorEagent].client.Endpoint })
+	s.rt.calibrate(event.ActorEagent, ep, req, &llm.Response{Usage: event.Usage{Input: input}}, nil)
 	k := 0
 	s.rt.sync(func() { k = s.rt.scale() })
 	return k

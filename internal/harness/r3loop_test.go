@@ -315,9 +315,9 @@ func TestASentBackFirstCallIsTheConversationsFirstCall(t *testing.T) {
 	s.settled()
 
 	stage.Store(1)
-	said := s.ui.messageCount()
+	said := s.ui.answerCount()
 	s.type_("@e what is Codex doing?")
-	s.waitFor("the answer in the new conversation", func() bool { return s.ui.messageCount() > said })
+	s.waitFor("the answer in the new conversation", func() bool { return s.ui.answerCount() > said })
 	// The conversation grew past the limit, so the next thing to weigh
 	// restarts it again. The user is not told that a restart cannot help:
 	// it started under the limit.
