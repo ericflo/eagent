@@ -609,6 +609,12 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if pick, ok := r.relayRepick[job.name]; ok && (err != nil || pick == job.pick) {
 		delete(r.relayRepick, job.name)
 	}
+	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended {
+		// A change still waiting under this name was for the agent that
+		// was stopped (no change can be asked of a stopped relay), not
+		// for the one starting now.
+		delete(r.relayRepick, job.name)
+	}
 	if err != nil {
 		switch rel := r.st.Relays[job.replaces]; {
 		case job.endOld != "" && rel != nil && rel.Active():

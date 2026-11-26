@@ -85,3 +85,60 @@ func TestAgentStartedByTheClosingLookGetsAClosingLookOfItsOwn(t *testing.T) {
 		t.Fatalf("%d closing looks, want one for each agent's work", n)
 	}
 }
+
+// relayToolNamed runs one relay tool off the loop goroutine, as a model's
+// call does, and returns what it said.
+func relayToolNamed(t *testing.T, rt *Runtime, tool string, args map[string]any) string {
+	t.Helper()
+	out := make(chan string, 1)
+	go func() {
+		text, _ := rt.relayTool(tool, argStr(args), argNum(args), argList(args), false)
+		out <- text
+	}()
+	return recv(t, out, tool)
+}
+
+// A model change that waited for an agent's turn to end belongs to that
+// agent. Once it is stopped, a new agent that takes the name is not killed
+// and started again with the old agent's waiting change when it goes idle.
+func TestAWaitingModelChangeDiesWithTheAgentItWasFor(t *testing.T) {
+	first, fresh := newFakeSeat("one"), newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{first, fresh}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() { rt.st.Relays["codex"].State = "working" })
+	rt.sync(func() {
+		if msg, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil || !strings.Contains(msg, "when the turn ends") {
+			t.Errorf("repick: %q %v", msg, err)
+		}
+	})
+	if out := relayToolNamed(t, rt, "relay_control", map[string]any{"action": "stop"}); !strings.Contains(out, "Stopped") {
+		t.Fatalf("stop: %s", out)
+	}
+	start := make(chan string, 1)
+	go func() {
+		args := map[string]any{"profile": "codex"}
+		text, _ := rt.relayTool("relay_start", argStr(args), argNum(args), argList(args), false)
+		start <- text
+	}()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, start, "relay_start")
+	waitRelayStarts(t, rt)
+	fresh.emit(relay.Event{Kind: relay.KindState, State: "working"}, relay.Event{Kind: relay.KindState, State: "idle"})
+	waitFor(t, "the new agent idle on the record", func() bool {
+		idle := false
+		rt.sync(func() { idle = rt.st.Relays["codex"].State == "idle" })
+		return idle
+	})
+	rt.sync(func() {
+		if rt.relays.launch("codex") != nil {
+			t.Error("the new agent is being started again with the stopped agent's model change")
+		}
+		if len(rt.relayRepick) != 0 || rt.relayRoutes()["codex"].Waiting {
+			t.Errorf("the stopped agent's change still waits: %v", rt.relayRepick)
+		}
+	})
+	if fresh.wasKilled() {
+		t.Error("the new agent was killed")
+	}
+}
