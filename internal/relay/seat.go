@@ -711,8 +711,13 @@ func (s *Seat) matchSends(text string, at time.Time) []string {
 	var cands []int
 	for i, p := range s.pending {
 		// Antigravity stamps to the whole second, so its entry for a send
-		// can carry a time up to a second before the send's own.
-		if at.IsZero() || p.restored && !at.Before(p.sentAt.Truncate(time.Second)) {
+		// can carry a time up to a second before the send's own; an entry
+		// stamped finer than that gets no such grace.
+		sent := p.sentAt
+		if at.Nanosecond() == 0 {
+			sent = sent.Truncate(time.Second)
+		}
+		if at.IsZero() || p.restored && !at.Before(sent) {
 			cands = append(cands, i)
 		}
 	}
