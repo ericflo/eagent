@@ -260,6 +260,7 @@ func TestMain(m *testing.M) {
 		return nil, errors.New("tests attach to no real agent")
 	}
 	agentInstalled = func(string) bool { return true }
+	relay.OfflineCatalogs()
 	wakeSettle, keysSettle = 0, 0
 	// The phone's status line is written at most every 2.5 seconds; a test
 	// that waits for a status would wait that out after every change.
@@ -276,6 +277,14 @@ func TestMain(m *testing.M) {
 	// removed when the run ends.
 	var memTmp string
 	if dir := memoryDisk(); dir != "" {
+		// A run that was killed could not remove its directory, and here
+		// that is memory: clear out any that are over an hour old.
+		stale, _ := filepath.Glob(filepath.Join(dir, "eagent-harness-test*"))
+		for _, d := range stale {
+			if info, err := os.Stat(d); err == nil && time.Since(info.ModTime()) > time.Hour {
+				os.RemoveAll(d)
+			}
+		}
 		if d, err := os.MkdirTemp(dir, "eagent-harness-test"); err == nil {
 			memTmp = d
 			os.Setenv("TMPDIR", d)
@@ -370,6 +379,9 @@ type fakeSeat struct {
 	hang bool
 	// sendErr fails every send.
 	sendErr error
+	// lag is how long the agent takes over a turn: its answer comes that
+	// long after it took the message, not in the same instant.
+	lag time.Duration
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -384,7 +396,7 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 		f.sent = append(f.sent, text)
 		f.modes = append(f.modes, mode)
 	}
-	waiting, hang := f.waiting, f.hang
+	waiting, hang, lag, reply := f.waiting, f.hang, f.lag, f.reply
 	f.mu.Unlock()
 	if err != nil {
 		return "", err
@@ -392,17 +404,24 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 	f.events <- relay.Event{Kind: relay.KindState, State: "working"}
 	f.events <- relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}
 	if waiting {
-		f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 1000}
+		f.events <- relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 1000}
 		f.events <- relay.Event{Kind: relay.KindState, State: "idle"}
 		return "typed into Codex", nil
 	}
 	if hang {
 		return "typed into Codex", nil
 	}
-	f.events <- relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."}
-	f.events <- relay.Event{Kind: relay.KindActivity, Text: "running gh pr list"}
-	f.events <- relay.Event{Kind: relay.KindTurn, Text: f.reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}}
-	f.events <- relay.Event{Kind: relay.KindState, State: "idle"}
+	turn := func() {
+		f.events <- relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."}
+		f.events <- relay.Event{Kind: relay.KindActivity, Text: "running gh pr list"}
+		f.events <- relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}}
+		f.events <- relay.Event{Kind: relay.KindState, State: "idle"}
+	}
+	if lag > 0 {
+		time.AfterFunc(lag, turn)
+	} else {
+		turn()
+	}
 	return "typed into Codex", nil
 }
 func (f *fakeSeat) Interrupt() error {

@@ -414,8 +414,9 @@ func TestCoreStartDirIsWhereTheAgentStarts(t *testing.T) {
 // reads a message and a quick answer in one call.)
 func TestCoreAnswerFollowsTheAgentNotAheadOfIt(t *testing.T) {
 	old := wakeSettle
-	// The fake agent's turn lands a millisecond or two after the message.
-	wakeSettle = 100 * time.Millisecond
+	// The agent answers 20ms after it takes the message (below): a loop
+	// that did not wait would look before the answer and speak first.
+	wakeSettle = 150 * time.Millisecond
 	defer func() { wakeSettle = old }()
 	var seen tails
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
@@ -438,6 +439,7 @@ func TestCoreAnswerFollowsTheAgentNotAheadOfIt(t *testing.T) {
 	}, nil)
 	s.seat.mu.Lock()
 	s.seat.reply = "No, only the summary."
+	s.seat.lag = 20 * time.Millisecond
 	s.seat.mu.Unlock()
 
 	// Quick: the message and the answer are read in one call.
