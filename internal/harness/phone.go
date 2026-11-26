@@ -1390,6 +1390,11 @@ func (r *Runtime) waitingOnPhone() bool {
 	return asked
 }
 
+// Ending reports whether the session has begun to stop (beginShutdown): as
+// with a phone message read from then on, words put in its inbox now wait
+// for its next run. Safe from any goroutine.
+func (r *Runtime) Ending() bool { return r.ctx.Err() != nil }
+
 // latestKeys is, for each thread the record knows a card of question qid
 // in, the highest key number among those cards. Cards recorded without a
 // thread (by an older eagent) are left out; the walk then starts at the
