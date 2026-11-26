@@ -106,6 +106,8 @@ type Seat struct {
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	closed     bool
+
+	typing sync.Mutex // one message is pasted and entered at a time
 }
 
 type pending struct {
@@ -413,9 +415,13 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 			continue
 		case "blocked":
 			if hung {
-				// Only quiet for a long time: nothing on screen waits for an
-				// answer, so a message is typed as into a working agent.
-				return "working", nil
+				// Quiet for a long time: a message is typed as into a working
+				// agent only while the screen shows its own prompt or busy
+				// line. Anything else may be a dialog the seat does not know,
+				// and the Enter would answer it.
+				if screen, err := s.host.Capture(s.target, 0); err == nil && (s.ready(screen) || s.busy(screen)) {
+					return "working", nil
+				}
 			}
 			return state, errors.New("the agent is showing something that needs an answer first; check relay_screen and answer it with relay_control keys")
 		case "exited":
@@ -425,11 +431,17 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	}
 }
 
+// typeSettle is the pause between pasting a message and pressing Enter.
+// Tests shorten it.
+var typeSettle = 350 * time.Millisecond
+
 func (s *Seat) typeText(text string) error {
+	s.typing.Lock()
+	defer s.typing.Unlock()
 	if err := s.host.Paste(s.target, text); err != nil {
 		return err
 	}
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(typeSettle)
 	return s.host.Keys(s.target, "Enter")
 }
 
@@ -463,8 +475,9 @@ func (s *Seat) releaseHeld(now time.Time) {
 	if len(taken) == 0 {
 		return
 	}
-	if len(texts) > 0 {
-		if err := s.typeText(strings.Join(texts, "\n\n")); err != nil {
+	text := strings.Join(texts, "\n\n")
+	if text != "" {
+		if err := s.typeText(text); err != nil {
 			for _, path := range taken {
 				_ = os.Rename(path, strings.TrimSuffix(path, ".taken"))
 			}
@@ -478,13 +491,27 @@ func (s *Seat) releaseHeld(now time.Time) {
 			ids[id] = true
 		}
 	}
+	// The agent's own command ("/compact") runs rather than being recorded
+	// as a message, so there is no arrival to wait for: typed is delivered.
+	command := strings.HasPrefix(text, "/")
+	var done []string
 	s.mu.Lock()
+	keep := s.pending[:0]
 	for _, p := range s.pending {
 		if p.held && ids[p.id] {
+			if command {
+				done = append(done, p.id)
+				continue
+			}
 			p.held, p.at = false, time.Now()
 		}
+		keep = append(keep, p)
 	}
+	s.pending = keep
 	s.mu.Unlock()
+	for _, id := range done {
+		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+	}
 }
 
 // Interrupt stops what the agent is doing (Escape, unless the agent says
@@ -510,7 +537,7 @@ func (s *Seat) matchPending(text string) []string {
 	keep := s.pending[:0]
 	for _, p := range s.pending {
 		want := normalize(p.text)
-		if want != "" && (strings.Contains(got, head(want, 160)) || strings.Contains(want, head(got, 160)) && len(got) > 20) {
+		if want != "" && arrived(got, want) {
 			ids = append(ids, p.id)
 			continue
 		}
@@ -518,6 +545,20 @@ func (s *Seat) matchPending(text string) []string {
 	}
 	s.pending = keep
 	return ids
+}
+
+// arrived says whether transcript text got (normalized) shows the send want
+// (normalized). Where got holds want's first 160 bytes, what follows them
+// must agree with want too, as far as either goes (a transcript may cut a
+// long message short), so two long messages with a common start are told
+// apart. A transcript that shows only a shortened start of the message
+// counts as well.
+func arrived(got, want string) bool {
+	if i := strings.Index(got, head(want, 160)); i >= 0 {
+		rest := got[i:]
+		return strings.HasPrefix(rest, want) || strings.HasPrefix(want, strings.TrimSuffix(rest, "…"))
+	}
+	return len(got) > 20 && strings.Contains(want, strings.TrimSuffix(got, "…"))
 }
 
 // head is the start of s, at most n bytes, cut at a character and without
@@ -657,11 +698,12 @@ func (s *Seat) watch() {
 			}
 		}
 		_, starter := s.agent.(sessionStarter)
-		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter || s.spec.Spool != "") {
 			// An agent that moves between sessions of its own (pi) is
 			// polled before any transcript is found too: a sighting on the
 			// session it was started on dates a move made before its first
-			// message.
+			// message. So is one with a spool: a message held from before a
+			// restart waits there before the new session has a transcript.
 			pl.poll(s, now)
 		}
 		if dr, ok := s.agent.(dialogReporter); ok {
@@ -685,9 +727,14 @@ func (s *Seat) fold(o obs) {
 		s.foldHistory(o)
 		return
 	}
-	s.mu.Lock()
-	s.attached = false
-	s.mu.Unlock()
+	if o.kind != "meta" {
+		// A session header (Codex's session_meta, pi's session line) is
+		// the first line of every transcript, also one re-read from the
+		// top: only what follows it says where the turn is.
+		s.mu.Lock()
+		s.attached = false
+		s.mu.Unlock()
+	}
 	switch o.kind {
 	case "meta":
 		s.mu.Lock()
@@ -860,7 +907,11 @@ func (s *Seat) checkScreen(now time.Time) {
 	}
 	if stuck != nil {
 		start := head(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
-		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" {
+		// A message meant for after the turn is pressed only once the agent
+		// has stayed idle a while: after an interrupt, whatever it was for
+		// goes first (an agent may put the queued message back in its box).
+		settled := stuck.mode != "after_turn" || now.Sub(s.stateAt) >= heldGrace
+		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && settled {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
