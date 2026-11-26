@@ -298,6 +298,28 @@ func TestARestoredSendIsConfirmedByAnAntigravityStepStampedToTheSecond(t *testin
 	}
 }
 
+// A send that arrived word for word keeps its entry when a longer waiting
+// send contains its words (a follow-up that repeats and extends it): the
+// longer one, which has not arrived, is not given the entry through the
+// rule for a transcript that shows only a piece of a message.
+func TestAnExactArrivalIsNotGivenToALongerSendThatContainsIt(t *testing.T) {
+	t.Parallel()
+	short := "sort the photos by the date taken"
+	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
+	s.track("r1", short, "queue")
+	s.track("r2", short+" and then rename them by place", "queue")
+	if got := s.matchPending(short); !slices.Equal(got, []string{"r1"}) {
+		t.Errorf("the entry %q confirmed %v, want r1", short, got)
+	}
+	mid := "the photos by the date taken"
+	s2 := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
+	s2.track("r1", mid, "queue")
+	s2.track("r2", "sort "+mid+" first", "queue")
+	if got := s2.matchPending(mid); !slices.Equal(got, []string{"r1"}) {
+		t.Errorf("the entry %q confirmed %v, want r1", mid, got)
+	}
+}
+
 // Claude Code records a pasted message of several lines wrapped in a
 // <pasted_content> tag. The message arrived and is confirmed.
 func TestAMultiLinePasteClaudeWrapsInATagIsConfirmed(t *testing.T) {
