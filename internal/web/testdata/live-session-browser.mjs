@@ -27,6 +27,9 @@ try {
   const tools = page.locator('.tabs .tools');
   await tools.getByRole('button', { name: 'Stop', exact: true }).waitFor();
   assert.match(await tools.locator('.badge.model').innerText(), /^first$/);
+  // The button is the same element throughout: status updates relabel it
+  // rather than replace it, so a click is never lost to a rebuild.
+  await tools.locator('button').evaluate(el => { el.dataset.mark = 'kept'; });
   console.log('ready');
   await next();
   // One question answered, the other dismissed: neither card offers its
@@ -38,6 +41,7 @@ try {
   await tools.getByRole('button', { name: 'Resume', exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await tools.getByRole('button', { name: 'Stop', exact: true }).count(), 0, 'Stop is still offered for a stopped session');
   await tools.locator('.badge.model').getByText('second', { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await tools.locator('button').evaluate(el => el.dataset.mark), 'kept', 'the toolbar button was rebuilt');
   assert.deepEqual(errors, [], 'the page threw');
   console.log('ok');
 } finally {

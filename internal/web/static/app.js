@@ -223,13 +223,21 @@ function renderSessionShell() {
   renderAgents();
 }
 // sessionTools is the toolbar beside the tabs: what the session runs on,
-// what it has cost, and Stop or Resume.
+// what it has cost, and Stop or Resume. The button is made once and only
+// relabelled (renderTools), so a click never lands on a button that is
+// being swapped out; what it does is decided when it is clicked.
 function sessionTools(d) {
-  const stopBtn = h('button', {onclick: async () => { if (confirm('Stop this session and its agent? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); }}, 'Stop');
-  const resumeBtn = h('button', {onclick: async () => { try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); } }}, 'Resume');
+  const act = ARCHIVE ? null : h('button', {id: 'session-act', onclick: async () => {
+    if (S.detail && S.detail.alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); return; }
+    try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); }
+  }}, d.alive ? 'Stop' : 'Resume');
+  return h('div', {class: 'tools', id: 'session-tools'}, h('span', {id: 'session-badges', style: 'display:contents'}, ...toolBadges(d)), act);
+}
+// toolBadges are the toolbar's badges for a session's detail.
+function toolBadges(d) {
   const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
   const model = eagentModel(d);
-  const el = h('div', {class: 'tools', id: 'session-tools'},
+  return [
     d.legacy ? h('span', {class: 'badge', title: 'Written before eagent was one loop: its tasks, processes and schedules are shown as history only.'}, 'older session') : null,
     model ? h('span', {class: 'badge model', title: `eagent runs on ${model}`}, shortModel(model)) : null,
     d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
@@ -237,16 +245,19 @@ function sessionTools(d) {
     d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
     h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
     h('span', {class: 'badge mono', title: 'session id'}, S.sid),
-    ARCHIVE ? null : d.alive ? stopBtn : resumeBtn);
-  el.dataset.digest = el.textContent + '|' + (el.querySelector('.badge.model')?.title || '') + '|' + (el.querySelector('.badge.phone')?.title || '');
-  return el;
+  ].filter(Boolean);
 }
-// renderTools brings the toolbar up to date with the latest status, and
-// leaves it alone when nothing it shows changed.
+// renderTools brings the toolbar up to date with the latest status in
+// place: the badges only when what they show changed, the button only by
+// its label.
 function renderTools() {
-  const old = $('#session-tools'); if (!old || !S.detail) return;
-  const next = sessionTools(S.detail);
-  if (next.dataset.digest !== old.dataset.digest) old.replaceWith(next);
+  const badges = $('#session-badges'); if (!badges || !S.detail) return;
+  const next = toolBadges(S.detail);
+  const key = nodes => nodes.map(n => n.className + '\u0000' + (n.title || '') + '\u0000' + n.textContent).join('\u0001');
+  if (key(next) !== key([...badges.children])) badges.replaceChildren(...next);
+  const act = $('#session-act');
+  const label = S.detail.alive ? 'Stop' : 'Resume';
+  if (act && act.textContent !== label) act.textContent = label;
 }
 
 // renderAgents shows the session's agents under its title: who, what it
