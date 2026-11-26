@@ -161,7 +161,9 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 			case wakeUser:
 				reasons = append(reasons, r.userTail(who))
 			case wakeAttention:
-				reasons = append(reasons, r.attentionTail(who))
+				if s := r.attentionTail(who); s != "" {
+					reasons = append(reasons, s)
+				}
 			case wakeTurnEnd:
 				s := fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who))
 				if r.phone != nil {
@@ -347,7 +349,7 @@ func (r *Runtime) turnEndWho(fallback string) string {
 // userTail says what became of what the user wrote since the last look,
 // and what that leaves for eagent.
 func (r *Runtime) userTail(who string) string {
-	var passed, held, answered int
+	var held, answered int
 	heldWhy := ""
 	for _, ev := range r.st.Events {
 		if ev.Seq <= r.turns.seen {
@@ -357,14 +359,27 @@ func (r *Runtime) userTail(who string) string {
 		case event.UserMessage:
 			var d event.UserMessageData
 			_ = ev.Decode(&d)
-			if d.Held == "" {
-				passed++
-			} else {
+			if d.Held != "" {
 				held++
 				heldWhy = d.Held
 			}
 		case event.UserAnswer:
 			answered++
+		}
+	}
+	// What a message typed into the agent's terminal is said to have done
+	// follows its send's outcome on the record.
+	var passed, waiting, failed, unsure int
+	for _, id := range r.passedSends() {
+		switch r.st.SendOutcome(id) {
+		case state.SendArrived:
+			passed++
+		case state.SendWaiting, state.SendHeld:
+			waiting++
+		case state.SendUnconfirmed:
+			unsure++
+		default: // not_sent, or no send recorded
+			failed++
 		}
 	}
 	var parts []string
@@ -384,10 +399,41 @@ func (r *Runtime) userTail(who string) string {
 	if passed > 0 {
 		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written the moment it arrived. Say in one short line that it reached %s (and, if %s was in the middle of a turn, that it reads it at its next step); do not repeat the message back or answer it. Hold instead if %s has already answered it. Beyond that it needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs (add that with relay_send).", who, who, who, who, who, who))
 	}
+	if waiting > 0 {
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message was passed to %s as written; it waits to be taken up. Say in one short line that it was passed on and waits to be taken up; do not repeat the message back or answer it. Hold instead if %s has already answered it.", who, who))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message to %s did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong.", who))
+	}
+	if unsure > 0 {
+		parts = append(parts, fmt.Sprintf("The user wrote, and whether the message reached %s could not be confirmed. Look at relay_screen, then send it again or say what is wrong.", who))
+	}
 	if len(parts) == 0 {
 		return "The user wrote."
 	}
 	return strings.Join(parts, " ")
+}
+
+// passedSends maps each message of the user's since the last look that was
+// not held to the id of its automatic send, "" when none is recorded.
+func (r *Runtime) passedSends() map[int64]string {
+	out := map[int64]string{}
+	for _, ev := range r.st.Events {
+		if ev.Seq <= r.turns.seen {
+			continue
+		}
+		var m event.UserMessageData
+		var s event.RelaySendData
+		switch {
+		case ev.Type == event.UserMessage && ev.Decode(&m) == nil && m.Held == "":
+			out[ev.Seq] = ""
+		case ev.Type == event.RelaySend && ev.Decode(&s) == nil && s.Auto && s.From == "user":
+			if id, ok := out[s.Seq]; ok && id == "" {
+				out[s.Seq] = s.ID
+			}
+		}
+	}
+	return out
 }
 
 // attentionTail says what an agent needs, from the newest event that is
@@ -419,7 +465,13 @@ func (r *Runtime) attentionTail(fallback string) string {
 			return who + " is stuck on something on its screen. Read it with relay_screen and clear it with relay_control keys; ask the user only if the choice is really theirs."
 		case event.RelayDelivered:
 			var d event.RelayDeliveredData
-			if ev.Decode(&d) == nil && state.DeliveryOutcome(d) == state.SendNotSent {
+			ok := ev.Decode(&d) == nil
+			for _, id := range r.passedSends() {
+				if ok && id == d.ID {
+					return "" // the user's message it carried: userTail says how it went
+				}
+			}
+			if ok && state.DeliveryOutcome(d) == state.SendNotSent {
 				return "A message to " + who + " did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong."
 			}
 			return "A message to " + who + " could not be confirmed. Look at relay_screen, then send it again or say what is wrong."

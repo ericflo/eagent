@@ -250,6 +250,9 @@ func TestAudit2UnansweredMessageStaysOwedAcrossNewerMessages(t *testing.T) {
 		t.Fatalf("an ordinary message changed owed to %d, want %d", got, first)
 	}
 	tail := seen.find("typed into Codex's terminal as written")
+	if tail == "" { // the look came before the agent's transcript showed it
+		tail = seen.find("passed to Codex as written")
+	}
 	for _, want := range []string{"Also: the user wrote to you more than once", "what is Codex up to?", "and which branch is it on?"} {
 		if !strings.Contains(tail, want) {
 			t.Fatalf("the tail after an ordinary message lacks %q:\n%s", want, tail)
@@ -748,6 +751,9 @@ func TestAudit2AgentLineCarriesItsUsage(t *testing.T) {
 	s.waitFor("the message to reach the agent", func() bool { return len(s.seat.sentTexts()) == 1 })
 	s.settled()
 	tail := seen.find("typed into Codex's terminal")
+	if tail == "" { // the look came before the agent's transcript showed it
+		tail = seen.find("passed to Codex as written")
+	}
 	if !strings.Contains(tail, "Usage: 73% of its 5h budget used.") {
 		t.Fatalf("the agent's line has no usage:\n%s", tail)
 	}

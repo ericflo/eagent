@@ -703,7 +703,7 @@ func phoneColourBrain(stop bool) func(string, []map[string]any) reply {
 		case phoneLastIsTool(msgs), phoneEnding(msgs):
 			return hold()
 		case strings.Contains(all, "make it green") && !strings.Contains(all, "Painted it green"):
-			if strings.Contains(lastUserText(msgs), "typed into") && !strings.Contains(lastUserText(msgs), "finished a turn") {
+			if last := lastUserText(msgs); (strings.Contains(last, "typed into") || strings.Contains(last, "waits to be taken up")) && !strings.Contains(last, "finished a turn") {
 				return hold() // the agent has it; its turn's end is the moment to report
 			}
 			return say("Painted it green.")
