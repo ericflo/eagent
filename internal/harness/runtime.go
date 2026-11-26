@@ -1315,6 +1315,9 @@ drain:
 		}
 		r.st.Apply(out)
 		r.noteWake(out) // the look it is owed, as a resume reads it from the record
+		if r.phone != nil {
+			r.phone.observe(r, out) // its receipt turns to failed, before the closing note
+		}
 		r.ui.Trace(out)
 	}
 	if r.turns.silent.Count > 0 {
