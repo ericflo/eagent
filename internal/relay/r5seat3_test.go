@@ -40,9 +40,9 @@ func TestAQuietPiInALongToolCallStillTakesMessages(t *testing.T) {
 	if err := os.WriteFile(status, []byte(`{"state":"working"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	saved := interruptPause
-	interruptPause = 10 * time.Millisecond
-	t.Cleanup(func() { interruptPause = saved })
+	saved, savedSettle := interruptPause, typeSettle
+	interruptPause, typeSettle = 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { interruptPause, typeSettle = saved, savedSettle })
 	for _, mode := range []string{"queue", "interrupt", "after_turn"} {
 		h := &fakeHost{alive: true, screen: piFooterScreen}
 		s := newSeat(Spec{Name: "pi", StatusFile: status}, piAgent{label: "Pi"}, h, "x", "")
@@ -182,9 +182,9 @@ func (h *escHost) Keys(target string, keys ...string) error {
 // through: Escape is pressed. Its text is typed only if the agent's prompt
 // shows afterwards, never into the dialog.
 func TestAnInterruptReachesAQuietSeatButTypesOnlyAtThePrompt(t *testing.T) {
-	saved := interruptPause
-	interruptPause = 10 * time.Millisecond
-	t.Cleanup(func() { interruptPause = saved })
+	saved, savedSettle := interruptPause, typeSettle
+	interruptPause, typeSettle = 10*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { interruptPause, typeSettle = saved, savedSettle })
 	dialog := " Which approach should I take?\n\n ❯ 1. Rewrite the parser\n   2. Patch the caller\n\n Enter to select · Esc to cancel"
 	for _, c := range []struct {
 		name, clears string
