@@ -372,14 +372,21 @@ func (r *Runtime) enqueueSend(name string, seat relaySeat, items ...heldSend) {
 // drainSends types a seat's queued sends in order and ends when the queue
 // is empty. Sends for a seat that is no longer the relay's (stopped, or
 // replaced) are not typed: they are recorded undelivered, as a send to a
-// stopped relay is. Once the session has ended they are dropped. Never on
-// the loop goroutine.
+// stopped relay is. Once the session has ended nothing more is taken from
+// the queue: what is left in it is recorded not sent by finish, which
+// reads it under the same lock. Never on the loop goroutine.
 func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 	for {
 		r.relays.mu.Lock()
-		if len(q.items) == 0 {
+		ended := false
+		select {
+		case <-r.closed:
+			ended = true
+		default:
+		}
+		if len(q.items) == 0 || ended {
 			q.running = false
-			if r.relays.queues[seat] == q {
+			if r.relays.queues[seat] == q && len(q.items) == 0 {
 				delete(r.relays.queues, seat)
 			}
 			close(q.idle)
@@ -392,17 +399,12 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
-		select {
-		case <-r.closed:
-			res.err = fmt.Errorf("the session is ending")
+		switch {
+		case h.barrier:
+		case !current:
+			res.err = fmt.Errorf("the agent is not running")
 		default:
-			switch {
-			case h.barrier:
-			case !current:
-				res.err = fmt.Errorf("the agent is not running")
-			default:
-				res.how, res.err = seat.Send(h.id, h.text, h.mode)
-			}
+			res.how, res.err = seat.Send(h.id, h.text, h.mode)
 		}
 		// A send typing failed part way may be in the old agent already:
 		// it is reported (unconfirmed), never typed into the new one.
@@ -799,7 +801,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 
 // abandonLaunch is a start whose result could not be recorded because the
 // session ended: the new agent is stopped, as nothing would watch it, and
-// whoever waits on a send held for it is told. Not on the loop goroutine.
+// whoever waits on a send held for it is told. The held sends stay on the
+// job, which stays among the launches, for finish to record as not sent.
+// Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
 	defer r.relayOps.Done()
 	if job.err == nil {
@@ -807,7 +811,6 @@ func (r *Runtime) abandonLaunch(job *relayLaunch) {
 	}
 	r.relays.mu.Lock()
 	held := job.held
-	job.held = nil
 	r.relays.mu.Unlock()
 	for _, h := range held {
 		if h.done != nil {
@@ -2308,16 +2311,19 @@ func sendHolder(st *state.State, id, name string) string {
 }
 
 // relaySendsTo calls fn for each send on the record for a relay, oldest
-// first: its own, and those a switch to it passed on from the relay it took
-// over from (relay.moved). movedOn names, by send id, the sends of this
-// relay that went to another relay that way.
+// first, once each: its own, and those a switch to it passed on from the
+// relay it took over from (relay.moved). movedOn names, by send id, the
+// sends of this relay that went to another relay that way and were not
+// passed back to it since.
 func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.RelaySendData)) (movedOn map[string]string) {
 	movedOn = map[string]string{}
+	listed := map[string]bool{}
 	for _, ev := range st.Events {
 		switch ev.Type {
 		case event.RelaySend:
 			var d event.RelaySendData
 			if ev.Decode(&d) == nil && d.Name == name {
+				listed[d.ID] = true
 				fn(ev, d)
 			}
 		case event.RelayMoved:
@@ -2326,7 +2332,11 @@ func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.
 				continue
 			}
 			if d.Name == name {
-				fn(ev, d.RelaySendData)
+				delete(movedOn, d.ID)
+				if !listed[d.ID] {
+					listed[d.ID] = true
+					fn(ev, d.RelaySendData)
+				}
 			}
 			if d.Prev == name {
 				movedOn[d.ID] = d.Name
@@ -2403,11 +2413,14 @@ func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id,
 	return "", ""
 }
 
-// wentToEarlierHolder says whether every send in ids (all under name) was
-// recorded and confirmed arrived before the relay.end that stopped the
-// agent which held name before, and the agent holding name now started
-// after that end and runs. Only the words of a refusal hang on it: which
-// sends count stays as forwardedAs counts them.
+// wentToEarlierHolder says whether every send in ids (all under name) that
+// may have gone, and there is at least one, was put to name last before
+// the relay.end that stopped the agent which held name before (and, if it
+// arrived, arrived before then), and the agent holding name now started
+// after that end and runs. Such a send was that agent's, whether it
+// arrived, waits or was never confirmed: the agent now was never sent it.
+// Only the words of a refusal hang on it: which sends count stays as
+// forwardedAs counts them.
 func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map[string]string) bool {
 	rel := st.Relays[name]
 	if rel == nil || !rel.Active() {
@@ -2416,23 +2429,22 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	var endSeq int64
 	sentAt, arrivedAt := map[string]int64{}, map[string]int64{}
 	for _, ev := range st.Events {
-		if ev.Seq >= rel.StartSeq {
-			break
-		}
 		switch ev.Type {
 		case event.RelayEnd:
 			var d event.RelayEndData
-			if ev.Decode(&d) == nil && d.Name == name {
+			if ev.Seq < rel.StartSeq && ev.Decode(&d) == nil && d.Name == name {
 				endSeq = ev.Seq
 			}
 		case event.RelaySend, event.RelayMoved:
+			// The whole record: a send passed back to name since is not
+			// the earlier agent's.
 			var d event.RelaySendData
 			if ev.Decode(&d) == nil && d.Name == name {
 				sentAt[d.ID] = ev.Seq
 			}
 		case event.RelayDelivered:
 			var d event.RelayDeliveredData
-			if ev.Decode(&d) == nil && d.OK {
+			if ev.Seq < rel.StartSeq && ev.Decode(&d) == nil && d.OK {
 				if _, seen := arrivedAt[d.ID]; !seen {
 					arrivedAt[d.ID] = ev.Seq
 				}
@@ -2442,20 +2454,24 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	if endSeq == 0 {
 		return false
 	}
+	matched := false
 	for _, id := range ids {
-		if st.SendOutcome(id) == state.SendNotSent {
+		o := st.SendOutcome(id)
+		if o == state.SendNotSent {
 			continue // it certainly did not go: it says nothing of where the message went
 		}
-		if _, moved := movedOn[id]; moved || st.SendOutcome(id) != state.SendArrived {
+		if _, moved := movedOn[id]; moved {
 			return false
 		}
 		s, sent := sentAt[id]
 		a, arrived := arrivedAt[id]
-		if !sent || !arrived || s > endSeq || a > endSeq {
+		if !sent || s > endSeq || o == state.SendArrived && (!arrived || a > endSeq) {
 			return false
 		}
+		matched = true
 	}
-	return true
+	// Sends that all certainly did not go say nothing of the earlier holder.
+	return matched
 }
 
 // relayStatusText describes an agent in full: for the user who asks with

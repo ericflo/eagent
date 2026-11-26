@@ -216,8 +216,9 @@ func TestAMovedSendCountsForTheReceiptByItsOutcomeWhereItWent(t *testing.T) {
 // agent holding the name now let a message be typed twice (after a switch
 // back, whose brief quotes it, and for a send held while a fresh start
 // launched). The refusal's words say so when the record proves it: every
-// send arrived before the stop of the agent that held the name then, and
-// the agent holding it now started after that stop.
+// send was put to the agent that held the name then before its stop
+// (arrived, or never confirmed), and the agent holding it now started
+// after that stop.
 func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
 	const old = "that message already went to Codex as written (r1); to add to it, use relay_send"
 	const stopped = "that message went as written (r1) to the agent that held the name codex before, which was stopped; Codex, running now, was not sent it as its own message (its hand-over brief may quote it); to give it to this one, send the words with relay_send"
@@ -257,7 +258,8 @@ func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
 		{"restarted, continuing its conversation", false, []step{continues}, true, old},
 		{"stopped, then started again on its own conversation", false, []step{stop, continues}, true, old},
 		{"a switch away and back", false, []step{switchAway, switchBack}, true, stopped},
-		{"still unconfirmed, then stopped and started fresh", true, []step{stop, fresh}, true, waiting},
+		{"still unconfirmed, then stopped and started fresh", true, []step{stop, fresh}, true, stopped},
+		{"still unconfirmed, the same agent", true, nil, true, waiting},
 		{"stopped, then a send held while a fresh agent started", false, []step{stop, heldForStart}, true, heldOld},
 	} {
 		rec := &relayRecord{t: time.Now()}

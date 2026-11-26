@@ -1273,6 +1273,44 @@ drain:
 	r.closeRelays()
 	r.stopTimers()
 	// Direct writes: the loop is no longer running.
+	// A send held for a start the session's end gave up (abandonLaunch),
+	// or still in a seat's queue (nothing is taken from one now), was never
+	// typed and never will be: it did not go. In the order they were sent.
+	untyped := map[string]bool{}
+	r.relays.mu.Lock()
+	for _, job := range r.relays.launching {
+		for _, h := range job.held {
+			untyped[h.id] = !h.barrier
+		}
+	}
+	for _, q := range r.relays.queues {
+		for _, h := range q.items {
+			untyped[h.id] = !h.barrier
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, ev := range r.st.Events {
+		var d event.RelaySendData
+		if ev.Type != event.RelaySend || ev.Decode(&d) != nil || !untyped[d.ID] || r.hasOutcome(d.ID) {
+			continue
+		}
+		name := sendHolder(r.st, d.ID, d.Name)
+		gone := event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "the session is ending"})
+		if rel := r.st.Relays[name]; rel != nil {
+			// At the relay's last news, not now: a reattach takes what its
+			// transcript shows after that as new, and what the agent did
+			// since the loop closed is not on the record.
+			gone.Time = rel.LastEventAt
+		}
+		out, err := r.sess.Append(gone)
+		if err != nil {
+			r.ui.Log("append: %v", err)
+			continue
+		}
+		r.st.Apply(out)
+		r.noteWake(out) // the look it is owed, as a resume reads it from the record
+		r.ui.Trace(out)
+	}
 	if r.turns.silent.Count > 0 {
 		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))
 		r.turns.silent = event.ChecksData{}
