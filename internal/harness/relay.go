@@ -2670,6 +2670,11 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 		})
 		return
 	}
+	if cmd == "/upgrade" {
+		// An upgrade takes minutes: an ending session does not wait for
+		// it, as before (its end would wait out its grace for nothing).
+		off = func(fn func()) { go fn() }
+	}
 	off(func() {
 		params := map[string]any{}
 		tool, ack := "relay_control", ""
