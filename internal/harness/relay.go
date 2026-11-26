@@ -1316,7 +1316,9 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 		how, err := res.how, res.err
 		if err != nil {
 			r.sync(func() {
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: err.Error()}))
+				// Under the relay the send is on the record for now: a
+				// switch meanwhile passed it on to the new agent.
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, rel.Name), ID: id, OK: false, Detail: err.Error()}))
 			})
 			return fmt.Sprintf("Could not send to %s: %v", rel.Who(), err), true
 		}
@@ -1841,6 +1843,23 @@ func sendRecord(st *state.State, id string) (event.RelaySendData, bool) {
 		}
 	}
 	return event.RelaySendData{}, false
+}
+
+// sendHolder is the relay a send is on the record for now: the one it was
+// sent to, or the last a switch passed it on to (relay.moved); name when the
+// record has neither.
+func sendHolder(st *state.State, id, name string) string {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		ev := st.Events[i]
+		if ev.Type != event.RelaySend && ev.Type != event.RelayMoved {
+			continue
+		}
+		var d event.RelaySendData
+		if ev.Decode(&d) == nil && d.ID == id {
+			return d.Name
+		}
+	}
+	return name
 }
 
 // relaySendsTo calls fn for each send on the record for a relay, oldest

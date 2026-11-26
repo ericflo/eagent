@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -141,4 +142,50 @@ func TestAWaitingModelChangeDiesWithTheAgentItWasFor(t *testing.T) {
 	if fresh.wasKilled() {
 		t.Error("the new agent was killed")
 	}
+}
+
+// A send that a switch passed on to the new agent is the new agent's on the
+// record. When typing it into that agent fails, the failure is recorded
+// under the new agent's name, so the new agent stops waiting for it.
+func TestASendMovedByASwitchFailsUnderTheAgentItWasMovedTo(t *testing.T) {
+	old := newClosingSeat("one")
+	next := newFakeSeat("two")
+	next.sendErr = errors.New("the terminal went away")
+	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
+	rt := newLaunchRuntime(t)
+	sent := make(chan string, 1)
+	go func() {
+		args := map[string]any{"text": "also run the linter"}
+		text, _ := rt.relayTool("relay_send", argStr(args), argNum(args), argList(args), false)
+		sent <- text
+	}()
+	old.waitEntered(t, "also run the linter")
+	sw := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, sw, "switch")
+	if out := recv(t, sent, "relay_send"); !strings.Contains(out, "Could not send") {
+		t.Fatalf("relay_send: %s", out)
+	}
+	var id string
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			var d event.RelayMovedData
+			if ev.Type == event.RelayMoved && ev.Decode(&d) == nil && d.Text == "also run the linter" {
+				id = d.ID
+			}
+		}
+	})
+	if id == "" {
+		t.Fatal("the send was not moved to the new agent")
+	}
+	waitFor(t, "the failure on the record", func() bool { _, ok := failedDeliveries(rt)[id]; return ok })
+	if d := failedDeliveries(rt)[id]; d.Name != "claude" {
+		t.Errorf("the failure is recorded under %q, not the agent the send was moved to", d.Name)
+	}
+	rt.sync(func() {
+		if _, waits := rt.st.Relays["claude"].Undelivered[id]; waits {
+			t.Error("the new agent still waits for a send that failed")
+		}
+	})
 }
