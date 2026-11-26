@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/config"
 )
@@ -374,15 +376,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
 				// An agent with a spool holds it there; one without has typed
 				// it into its own queue, and it is watched as typed.
-				held := s.spec.Spool != ""
-				if !held && isAgentCommand(text) {
-					// The agent's own command, in its own queue: it runs it,
-					// and no message arrives to confirm; handed over is
-					// delivered.
-					s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
-					return fmt.Sprintf("queued the command for %s; it runs when its current turn ends", label), nil
-				}
-				s.trackHeld(id, text, mode, held)
+				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
 			// No native hand-off available: type it now; the agent queues it.
@@ -538,7 +532,7 @@ func (s *Seat) giveUpHeld(waited time.Duration, screen string) {
 	ids := map[string]bool{}
 	var order []string
 	for {
-		taken, _ := takeSpool(s.spec.Spool, true)
+		taken, _ := takeSpool(s.spec.Spool, 0)
 		if len(taken) == 0 {
 			break
 		}
@@ -589,8 +583,9 @@ func (s *Seat) releaseHeld(now time.Time) {
 		return
 	}
 	s.mu.Lock()
-	// After one it typed, the next waits as long again: a command it typed
-	// (/compact) runs before what was held after it is typed.
+	// After one it typed, the next waits as long again: the agent has begun
+	// on the first (the seat then sees it working), or a command it typed
+	// has run or opened something the next look sees.
 	idle := s.state == "idle" && now.Sub(s.stateAt) >= heldGrace && now.Sub(s.releasedAt) >= heldGrace
 	s.mu.Unlock()
 	if !idle || !spoolWaiting(s.spec.Spool) {
@@ -602,8 +597,16 @@ func (s *Seat) releaseHeld(now time.Time) {
 	// The seat types this by its own decision, so it looks first: only at
 	// the agent's own prompt, with nothing busy and no dialog up (a command
 	// it typed may have opened one, as /model opens a picker). Otherwise the
-	// message waits, and is reported once it has waited heldGiveUp.
+	// message waits, and is reported once it has waited heldGiveUp; an agent
+	// visibly busy (a long compaction) is working, and does not run that
+	// clock.
 	screen, err := s.host.Capture(s.target, 0)
+	if err == nil && s.busy(screen) {
+		s.mu.Lock()
+		s.heldWaitSince = time.Time{}
+		s.mu.Unlock()
+		return
+	}
 	if err != nil || !s.atPrompt(screen) {
 		s.mu.Lock()
 		if s.heldWaitSince.IsZero() {
@@ -619,7 +622,8 @@ func (s *Seat) releaseHeld(now time.Time) {
 	s.mu.Lock()
 	s.heldWaitSince = time.Time{}
 	s.mu.Unlock()
-	taken, texts := takeSpool(s.spec.Spool, true)
+	// One message at a time, each after its own look, in order.
+	taken, texts := takeSpool(s.spec.Spool, 1)
 	if len(taken) == 0 {
 		return
 	}
@@ -1069,11 +1073,11 @@ func (s *Seat) checkScreen(now time.Time) {
 		// A message meant for after the turn is pressed only once the agent
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
-		settled := stuck.mode != "after_turn" || now.Sub(s.stateAt) >= heldGrace
-		// The Enter goes only where the text waits in the agent's input box:
-		// not while it is busy or a dialog it reported is up.
-		free := !s.busy(screen) && s.dialogUp == ""
-		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && settled && free {
+		// A message for after the turn is never pressed again (it may sit in
+		// the box because an interrupt put it back), and no Enter goes while
+		// a dialog is up: known ones were answered above, and one the agent
+		// reports holds the seat.
+		if stuck.mode != "after_turn" && stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
@@ -1208,6 +1212,22 @@ func (s *Seat) ready(screen string) bool {
 		}
 	}
 	return s.agent.ready(screen)
+}
+
+// busyLineNearBottom finds the spinner line Claude and Codex draw by their
+// input box while they work ("✻ Thinking… (12s · esc to interrupt)",
+// "• Working (3s • esc to interrupt)"): among the last n lines that are not
+// blank, one that starts with a glyph and says how to interrupt. The same
+// words in the output above, or in a sentence, are not it.
+func busyLineNearBottom(screen string, n int) bool {
+	for _, l := range strings.Split(lastLines(screen, n), "\n") {
+		l = strings.TrimSpace(l)
+		r, _ := utf8.DecodeRuneInString(l)
+		if l != "" && !unicode.IsLetter(r) && !unicode.IsDigit(r) && strings.Contains(strings.ToLower(l), "esc to interrupt") {
+			return true
+		}
+	}
+	return false
 }
 
 // busyScreen is an agent whose prompt or status line stays on screen while

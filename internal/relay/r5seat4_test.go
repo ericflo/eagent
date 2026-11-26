@@ -134,17 +134,30 @@ func TestAHeldMessageThatNeverFindsThePromptIsReported(t *testing.T) {
 	}
 }
 
-// A stuck send's Enter is pressed again only where it sits in the agent's
-// input box, not while the agent is busy or a dialog it reported is up.
-func TestAStuckSendIsNotPressedWhileTheAgentIsBusy(t *testing.T) {
+// A stuck send's Enter is pressed again whatever the agent's busy line
+// shows, as at 80f4746.
+func TestAStuckSendIsPressedAgainWhileTheAgentIsBusy(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true, screen: "> fix the tests\n✻ Compacting… (esc to interrupt)\n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
 	s.state = "idle"
 	s.track("r1", "fix the tests", "queue")
 	s.checkScreen(time.Now().Add(7 * time.Second))
+	if strings.Join(h.keys, " ") != "Enter" {
+		t.Fatalf("keys %q", h.keys)
+	}
+}
+
+// No Enter is pressed again while the agent reports a dialog.
+func TestAStuckSendIsNotPressedWhileADialogIsReported(t *testing.T) {
+	t.Parallel()
+	h := &fakeHost{alive: true, screen: "> fix the tests\n  ⏵⏵ bypass permissions on"}
+	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
+	s.state, s.dialogUp = "idle", "Allow rm?"
+	s.track("r1", "fix the tests", "queue")
+	s.checkScreen(time.Now().Add(7 * time.Second))
 	if len(h.keys) != 0 {
-		t.Fatalf("pressed %q while the agent was busy", h.keys)
+		t.Fatalf("keys %q", h.keys)
 	}
 }
 

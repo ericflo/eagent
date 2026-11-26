@@ -45,7 +45,9 @@ func (antigravityAgent) ready(screen string) bool {
 // agent that went quiet would otherwise be called idle, and such an agent
 // still takes messages and goes back to work on its next transcript line.
 func (antigravityAgent) busy(screen string) bool {
-	_, rest, ok := strings.Cut(screen, "Antigravity relay · ")
+	// The line is drawn at the bottom; the same words in output above it
+	// are not it.
+	_, rest, ok := strings.Cut(lastLines(screen, 3), "Antigravity relay · ")
 	if !ok {
 		return false
 	}

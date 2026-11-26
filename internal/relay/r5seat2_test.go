@@ -192,10 +192,9 @@ func TestAReleasedHeldCommandIsNotReportedLost(t *testing.T) {
 }
 
 // An after-turn message typed in because the agent has no hand-over of its
-// own, and left in the input box when the turn was interrupted, gets no
-// Enter until the agent has stayed idle a while: whatever the interrupt
-// was for goes first, as for pi.
-func TestAnAfterTurnMessageIsNotPressedRightAfterAnInterrupt(t *testing.T) {
+// own, and left in the input box when the turn was interrupted, never gets
+// an Enter from the seat, as at 80f4746.
+func TestAnAfterTurnMessageInTheInputBoxIsNotPressedAgain(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true, screen: "> then run the tests\n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
@@ -211,12 +210,9 @@ func TestAnAfterTurnMessageIsNotPressedRightAfterAnInterrupt(t *testing.T) {
 	s.state, s.stateAt = "idle", start.Add(-time.Second) // interrupted a second ago
 	s.mu.Unlock()
 	s.checkScreen(start)
-	if len(h.keys) != 0 {
-		t.Fatalf("pressed %q a second after the interrupt", h.keys)
-	}
 	s.checkScreen(start.Add(heldGrace))
-	if strings.Join(h.keys, " ") != "Enter" {
-		t.Fatalf("keys %q once the agent stayed idle", h.keys)
+	if len(h.keys) != 0 {
+		t.Fatalf("pressed %q", h.keys)
 	}
 }
 

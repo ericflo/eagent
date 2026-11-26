@@ -108,17 +108,18 @@ func TestAHeldCommandDoesNotSwallowAHeldMessage(t *testing.T) {
 	}
 }
 
-// The held messages after a command are typed once it has been, in order,
-// as their own message, each heldGrace after the one before: a command
-// runs before what was held after it is typed.
-func TestHeldMessagesAfterACommandAreTypedAfterIt(t *testing.T) {
+// Held messages left in the spool are typed one at a time, in order, each
+// as its own paste after its own look and heldGrace after the one before;
+// a command among them is typed on its own like any other.
+func TestHeldMessagesLeftInTheSpoolAreTypedOneAtATimeInOrder(t *testing.T) {
 	saved, savedSettle := heldGrace, typeSettle
 	heldGrace, typeSettle = 50*time.Millisecond, time.Millisecond
 	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
 	spool := filepath.Join(t.TempDir(), "after_turn")
 	h := &fakeHost{alive: true, screen: claudePromptScreen}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	for _, text := range []string{"first", "/compact", "then run the tests", "and report"} {
+	texts := []string{"first", "/compact", "then run the tests", "and report"}
+	for _, text := range texts {
 		if err := spoolMessage(spool, "m", text); err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +132,8 @@ func TestHeldMessagesAfterACommandAreTypedAfterIt(t *testing.T) {
 		defer h.mu.Unlock()
 		return strings.Join(h.typed, "|")
 	}
-	for i, want := range []string{"first", "first|/compact", "first|/compact|then run the tests\n\nand report"} {
+	for i := range texts {
+		want := strings.Join(texts[:i+1], "|")
 		at := t0.Add(time.Duration(i) * heldGrace)
 		s.releaseHeld(at)
 		if got := typed(); got != want {
@@ -145,11 +147,9 @@ func TestHeldMessagesAfterACommandAreTypedAfterIt(t *testing.T) {
 	}
 }
 
-// Claude's Stop hook hands over the messages before a held command, and
-// leaves the command (and what follows it) for the seat to type at the
-// prompt, where Claude runs it: handed over as the hook's reason it would
-// be read as text.
-func TestTheStopHookLeavesAHeldCommandForThePrompt(t *testing.T) {
+// Claude's Stop hook hands over every held message, in order, as text, a
+// held command among them, as at 80f4746.
+func TestTheStopHookHandsOverEveryHeldMessageAsText(t *testing.T) {
 	t.Parallel()
 	spool := t.TempDir()
 	for _, text := range []string{"first", "/compact", "after"} {
@@ -160,17 +160,11 @@ func TestTheStopHookLeavesAHeldCommandForThePrompt(t *testing.T) {
 	}
 	var out strings.Builder
 	RunStopHook(spool, strings.NewReader("{}"), &out)
-	if !strings.Contains(out.String(), `"reason":"first"`) {
+	if !strings.Contains(out.String(), `"reason":"first\n\n/compact\n\nafter"`) {
 		t.Fatalf("hook said %q", out.String())
 	}
-	left, _ := filepath.Glob(filepath.Join(spool, "*.txt"))
-	if len(left) != 2 {
+	if left, _ := filepath.Glob(filepath.Join(spool, "*")); len(left) != 0 {
 		t.Fatalf("left %v", left)
-	}
-	out.Reset()
-	RunStopHook(spool, strings.NewReader("{}"), &out)
-	if out.Len() != 0 {
-		t.Fatalf("with a command first the hook said %q", out.String())
 	}
 }
 
@@ -222,9 +216,9 @@ func TestAnInterruptReachesAQuietSeatButTypesOnlyAtThePrompt(t *testing.T) {
 	}
 }
 
-// An after-turn command handed to an agent's own queue (typed into agy) is
-// not waited for: it runs, and no message arrives.
-func TestAnAfterTurnCommandInAnAgentsOwnQueueIsNotReportedLost(t *testing.T) {
+// An after-turn text handed to an agent's own queue (typed into agy) is
+// watched like any message, a command too, as at 80f4746.
+func TestAnAfterTurnCommandInAnAgentsOwnQueueIsTracked(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true}
 	s := newSeat(Spec{Name: "antigravity"}, antigravityAgent{}, h, "x", "")
@@ -232,7 +226,7 @@ func TestAnAfterTurnCommandInAnAgentsOwnQueueIsNotReportedLost(t *testing.T) {
 	if _, err := s.Send("c1", "/compact", "after_turn"); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Snapshot().Pending) != 0 {
+	if len(s.Snapshot().Pending) != 1 {
 		t.Fatalf("pending %v", s.Snapshot().Pending)
 	}
 }

@@ -33,9 +33,9 @@ func (claudeAgent) ready(screen string) bool {
 	return strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "for shortcuts")
 }
 
-// busy: Claude's footer stays while it works; its spinner line says how
-// to stop it.
-func (claudeAgent) busy(screen string) bool { return strings.Contains(screen, "esc to interrupt") }
+// busy: Claude's footer stays while it works; its spinner line, drawn just
+// above the input box, says how to stop it.
+func (claudeAgent) busy(screen string) bool { return busyLineNearBottom(screen, 6) }
 
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
@@ -122,9 +122,7 @@ func (a claudeAgent) canResume(spec Spec, innerID string) bool {
 // turn end.
 func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
-	// A held command is left for the seat to type at the prompt: handed
-	// over here it would be read as text, not run.
-	taken, texts := takeSpool(spool, false)
+	taken, texts := takeSpool(spool, 0)
 	for _, path := range taken {
 		_ = os.Remove(path)
 	}
@@ -136,14 +134,11 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	return 0
 }
 
-// takeSpool claims the next messages waiting in spool, oldest first,
-// renaming each to .taken first so the Stop hook and the seat never both
-// hand one over. A message that is the agent's own command ("/compact")
-// only runs typed at its prompt on its own: the messages before it are
-// claimed without it, and with command set one that comes first is
-// claimed alone (without, it and what follows stay). It returns the
-// claimed files and their texts.
-func takeSpool(spool string, command bool) (taken, texts []string) {
+// takeSpool claims up to max messages waiting in spool (every one when max
+// is 0), oldest first, renaming each to .taken first so the Stop hook and
+// the seat never both hand one over. It returns the claimed files and
+// their texts.
+func takeSpool(spool string, max int) (taken, texts []string) {
 	entries, err := os.ReadDir(spool)
 	if err != nil {
 		return nil, nil
@@ -156,25 +151,17 @@ func takeSpool(spool string, command bool) (taken, texts []string) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		path := filepath.Join(spool, name)
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue // another taker got it
-		}
-		text := strings.TrimSpace(string(raw))
-		isCommand := isAgentCommand(text)
-		if isCommand && (len(taken) > 0 || !command) {
+		if max > 0 && len(taken) >= max {
 			break
 		}
+		path := filepath.Join(spool, name)
 		if os.Rename(path, path+".taken") != nil {
 			continue // another taker got it
 		}
 		taken = append(taken, path+".taken")
-		if text != "" {
-			texts = append(texts, text)
-		}
-		if isCommand {
-			break
+		raw, err := os.ReadFile(path + ".taken")
+		if err == nil && strings.TrimSpace(string(raw)) != "" {
+			texts = append(texts, strings.TrimSpace(string(raw)))
 		}
 	}
 	return taken, texts
