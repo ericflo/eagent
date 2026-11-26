@@ -2629,19 +2629,18 @@ var relayCommands = map[string]bool{"/interrupt": true, "/restart": true, "/mode
 // goroutine (an upgrade takes minutes) and the outcome is told to the user
 // directly, in plain words, without waiting for a model.
 func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
-	// A session with no terminal ends by itself (maybeEnd), also while a
-	// command's work is under way: that work is then the session's in
-	// flight, as a turn is (r.wg), and the end runs its steps on the loop
-	// until it is done (finish), so it is done and told first. A session
-	// at a terminal ends when the user ends it; nothing is added once the
-	// session is ending.
+	// A session with no terminal ends by itself (maybeEnd), but not while
+	// a command's work is under way (r.commands, counted here on the loop,
+	// also for a command the session is resumed with, before Run's first
+	// look): it is done and told first. A session at a terminal ends when
+	// the user ends it; nothing is counted once the session is ending.
 	off := func(fn func()) {
 		if r.ending || r.opts.Interactive {
 			go fn()
 			return
 		}
-		r.wg.Add(1)
-		go func() { defer r.wg.Done(); fn() }()
+		r.commands++
+		go func() { fn(); r.post(func() { r.commands-- }) }()
 	}
 	if len(r.st.RelayOrder) == 0 {
 		r.ui.Log("no agent has been started in this session")
@@ -2660,7 +2659,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 		})
 		return
 	case "/notify-done":
-		r.armNotifyDone()
+		r.armNotifyDone(off)
 		return
 	case "/screen":
 		active := r.st.ActiveRelays()
@@ -2685,11 +2684,6 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 			}
 		})
 		return
-	}
-	if cmd == "/upgrade" {
-		// An upgrade takes minutes: an ending session does not wait for
-		// it, as before (its end would wait out its grace for nothing).
-		off = func(fn func()) { go fn() }
 	}
 	off(func() {
 		params := map[string]any{}
@@ -2788,11 +2782,12 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 }
 
 // armNotifyDone handles /notify-done: the agent's next turn report buzzes
-// the phone. Loop goroutine.
-func (r *Runtime) armNotifyDone() {
+// the phone. Loop goroutine; off runs the reply as relayCommand runs a
+// command's work.
+func (r *Runtime) armNotifyDone(off func(func())) {
 	active := r.st.ActiveRelays()
 	if len(active) == 0 {
-		go r.tell("No agent is running.", false)
+		off(func() { r.tell("No agent is running.", false) })
 		return
 	}
 	rel := active[0]
@@ -2806,7 +2801,7 @@ func (r *Runtime) armNotifyDone() {
 		msg = rel.Who() + " is not working right now; you'll get a buzz when its next turn ends."
 	}
 	r.ui.Log("%s", msg)
-	go r.tell(msg, false)
+	off(func() { r.tell(msg, false) })
 }
 
 // modelAndEffort reads a command's "[model] [effort]" into tool

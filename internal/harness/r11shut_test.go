@@ -2,9 +2,13 @@ package harness
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -88,5 +92,107 @@ func TestR11AQueuedPhoneSendNotSentAtTheEndFailsOnThePhone(t *testing.T) {
 	}
 	if got := r11Receipt(fp, second); got != "failed" {
 		t.Errorf("the phone's receipt for the send recorded not_sent is %q, want failed", got)
+	}
+}
+
+// r11Unanswerable is a batch session that stopped on a question nobody
+// could answer, its agent still running.
+func r11Unanswerable(t *testing.T) (string, string) {
+	t.Helper()
+	rt, _, _ := batchExit(t, 2, brief, "Both are ready. Merge to main, or open a pull request?", func(_ string, msgs []map[string]any) reply {
+		if strings.Contains(lastUserText(msgs), "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" {
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge to main, or open a pull request?"}`)}}
+		}
+		return hold()
+	})
+	return rt.sess.Path, rt.opts.Project
+}
+
+// Finding 4, a question nobody can answer. The session is resumed with
+// /restart or /switch: the command runs (it is not refused as the session
+// ending), its outcome is told, and then the session ends again on the
+// open question.
+func TestR11ACommandResumingAnUnanswerableSessionRuns(t *testing.T) {
+	for _, c := range []struct{ cmd, told string }{{"/restart", "Restarted"}, {"/switch claude", "Handed over"}} {
+		t.Run(c.cmd, func(t *testing.T) {
+			path, project := r11Unanswerable(t)
+			useRelayFactory(t, "Back on it.") // a seat of its own for each agent
+			model := newScripted(func(string, []map[string]any) reply { return hold() })
+			t.Cleanup(model.srv.Close)
+			ui2 := &fakeUI{}
+			rt2, err := Resume(testConfig(model.srv.URL), Options{Project: project, Prompt: c.cmd}, ui2, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := contextWithCancel()
+			defer cancel()
+			done := make(chan int, 1)
+			go func() { done <- rt2.Run(ctx) }()
+			var code int
+			select {
+			case code = <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the session did not end")
+			}
+			if saidWith(ui2, "the session is ending") || !saidWith(ui2, c.told) {
+				t.Fatalf("%s was refused or not told: said %q", c.cmd, ui2.said())
+			}
+			if code != 2 {
+				t.Fatalf("exit code %d, want 2 (the question is still open)", code)
+			}
+		})
+	}
+}
+
+// Finding 4, a finished session. Resumed with /restart, it asks for no
+// closing look while the restart is under way: the agent the restart
+// brings up keeps it going, and nobody is told the session is ending.
+func TestR11ARestartResumingAFinishedSessionAsksNoClosingLook(t *testing.T) {
+	path, project := rv10Finished(t)
+	seat2 := newFakeSeat("Back on it.")
+	entered, gate := make(chan struct{}, 1), make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	old := launchRelay
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		entered <- struct{}{}
+		<-gate
+		return seat2, relay.Started{Host: "tmux", Target: relay.Target(spec.Session, spec.Name), InnerID: innerID, Command: []string{spec.Profile.Agent}}, nil
+	}
+	t.Cleanup(func() { release(); launchRelay = old })
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
+	t.Cleanup(model.srv.Close)
+	ui2 := &fakeUI{}
+	rt2, err := Resume(testConfig(model.srv.URL), Options{Project: project, Prompt: "/restart"}, ui2, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := contextWithCancel()
+	done := make(chan int, 1)
+	go func() { done <- rt2.Run(ctx) }()
+	t.Cleanup(func() {
+		release()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the start never began")
+	}
+	closing := func() bool {
+		asked := true
+		rt2.sync(func() { asked = rt2.turns.finalAsked })
+		return asked
+	}
+	if closing() {
+		t.Fatal("a closing look was asked for while the restart was under way")
+	}
+	release()
+	waitFor(t, "the restart's outcome", func() bool { return saidWith(ui2, "Restarted") || len(done) > 0 })
+	if !saidWith(ui2, "Restarted") || closing() || len(done) > 0 {
+		t.Fatalf("said %q, exited %v", ui2.said(), len(done) > 0)
 	}
 }

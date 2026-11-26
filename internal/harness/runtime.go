@@ -193,6 +193,7 @@ type Runtime struct {
 	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
+	commands        int                    // commands whose work is under way in a session with no terminal (relayCommand); loop-owned
 	// startFailed: the last attempt to start an agent failed (startRelay).
 	startFailed bool
 	// inboxTaken: the ids of the inbox submissions this run handled (pollInbox). Loop goroutine.
@@ -1191,6 +1192,9 @@ func (r *Runtime) maybeEnd() {
 		// They closed the question to say something else; wait for it.
 		return
 	}
+	if r.commands > 0 {
+		return // a command's work is done and told first (relayCommand)
+	}
 	switch {
 	case t.finalAsked:
 	case down:
@@ -1254,9 +1258,7 @@ drain:
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			// r.wg holds the turn in flight and, in a session with no
-			// terminal, a command's work (relayCommand).
-			r.ui.Log("a model call or a command did not finish in time")
+			r.ui.Log("a model call did not stop in time")
 			break drain
 		}
 	}
