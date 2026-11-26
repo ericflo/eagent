@@ -58,6 +58,35 @@ func TestSaveUnderEnvKeepsNullOverrides(t *testing.T) {
 	}
 }
 
+// Finding 26: each built-in preset's suggestion describes that preset,
+// whatever EAGENT_CONFIG names as the configuration in use.
+func TestPresetSuggestionsIgnoreEnvConfig(t *testing.T) {
+	clearRouteEnv(t)
+	project := t.TempDir()
+	writeFile(t, config.BundlePath(project, "cheap"), `{"model":{"protocol":"openai-chat","base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3","api_key_env":"OPENROUTER_API_KEY"}}`)
+	t.Setenv("EAGENT_CONFIG", "cheap")
+	want := config.Defaults()
+	config.Presets["anthropic-high"](&want)
+	lists := map[string][]control.Suggestion{"project": PresetSuggestions(project), "session": SessionConfigSuggestions(project)}
+	for list, suggestions := range lists {
+		found := false
+		for _, s := range suggestions {
+			if s.Value != "anthropic-high" {
+				continue
+			}
+			found = true
+			for _, key := range []string{"/model/model", "/routes/eagent/model"} {
+				if v, ok := s.Implies[key]; ok && v != want.Model.Model {
+					t.Fatalf("%s list: anthropic-high implies %s = %v", list, key, v)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s list has no anthropic-high", list)
+		}
+	}
+}
+
 // Finding 28: an undo of a pick of a fallback's model puts back the
 // fields the pick gave the fallback route, as for a primary route.
 func TestRemoteUndoOfFallbackModelPick(t *testing.T) {

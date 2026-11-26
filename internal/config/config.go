@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -842,13 +843,31 @@ func ChosenPreset(project, preset string) (Config, error) {
 
 // ChosenPresetWithFile is ChosenPreset over given file contents.
 func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessage) (Config, error) {
-	if _, ok := ResolvePreset(preset); !ok {
+	canon, ok := ResolvePreset(preset)
+	if !ok {
 		return Defaults(), fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 	}
 	rest, _ := DropModelChoice(file)
 	delete(rest, "default_config")
 	delete(rest, "preset")
-	return LoadBundleWithFile(project, preset, "", rest)
+	// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
+	cfg, err := LoadBundleWithFile(project, preset, preset, rest)
+	// Nor does the model the environment names, for the reason the file's
+	// does not: the preset's model and where it is reached are put back.
+	env := EnvOverrides()
+	if !slices.ContainsFunc([]string{"model", "protocol", "base_url", "api_key_env"}, func(f string) bool { _, set := env["/model/"+f]; return set }) {
+		return cfg, err
+	}
+	if err != nil {
+		if v := cfg.Validate(); v == nil || v.Error() != err.Error() {
+			return cfg, err // not the environment's model at fault
+		}
+	}
+	chosen := Defaults()
+	Presets[canon](&chosen)
+	cfg.Model.Protocol, cfg.Model.BaseURL, cfg.Model.Model, cfg.Model.APIKeyEnv = chosen.Model.Protocol, chosen.Model.BaseURL, chosen.Model.Model, chosen.Model.APIKeyEnv
+	cfg.Model.ContextTokens, cfg.Model.Fallback = chosen.Model.ContextTokens, chosen.Model.Fallback
+	return cfg, cfg.Validate()
 }
 
 // modelChoiceFields are the fields of a route that say which model it is
