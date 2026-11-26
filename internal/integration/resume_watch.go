@@ -425,22 +425,28 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 		return PhoneMessage{}, false, nil
 	}
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
+	var big []finalechat.Attachment
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
 		if errors.Is(err, finalechat.ErrTooLarge) {
-			// It will never fit: the session comes back with the rest of
-			// the message, and the sender is told about the file. When the
-			// notice cannot be posted, nothing is taken, as for a failed
-			// download.
-			if rerr := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, err); rerr != nil {
-				return PhoneMessage{}, false, rerr
-			}
+			big = append(big, a)
 			continue
 		}
 		if err != nil {
 			return PhoneMessage{}, false, err
 		}
 		msg.Attachments = append(msg.Attachments, saved)
+	}
+	// A file too large will never fit: the session comes back with the
+	// rest of the message, and the sender is told about the file, once
+	// every other file came (a failed download posts nothing, so the
+	// thread's latest message is still the reply for the watcher's sweep).
+	// When a notice cannot be posted, nothing is taken, as for a failed
+	// download.
+	for _, a := range big {
+		if err := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, finalechat.ErrTooLarge); err != nil {
+			return PhoneMessage{}, false, err
+		}
 	}
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
