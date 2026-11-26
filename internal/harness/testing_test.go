@@ -622,21 +622,35 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 // settled waits until the loop has nothing in flight and nothing owed a
-// look, and has stayed so for a moment.
+// look, nothing is queued for it and the fake agent has nothing unread,
+// and all of that has held for settleQuiet. The queue and the agent's
+// events are looked at directly, so the quiet only has to outlast a hop
+// between goroutines (the agent's pump to the loop, a timer's post).
 func (s *session) settled() {
 	s.t.Helper()
-	quiet := 0
-	s.waitFor("the loop to settle", func() bool {
+	deadline := time.Now().Add(15 * time.Second)
+	var quietSince time.Time
+	for time.Now().Before(deadline) {
 		idle := false
 		s.rt.sync(func() { idle = !s.rt.turns.busy && !s.rt.wakePending() && len(s.rt.later) == 0 })
-		if idle {
-			quiet++
-		} else {
-			quiet = 0
+		idle = idle && len(s.rt.loop) == 0 && (s.seat == nil || len(s.seat.events) == 0)
+		switch {
+		case !idle:
+			quietSince = time.Time{}
+		case quietSince.IsZero():
+			quietSince = time.Now()
+		case time.Since(quietSince) >= settleQuiet:
+			return
 		}
-		return quiet >= 8
-	})
+		time.Sleep(time.Millisecond)
+	}
+	s.t.Fatalf("timed out waiting for the loop to settle")
 }
+
+// settleQuiet is how long settled wants the loop to stay quiet: many times
+// a goroutine hop under the race detector. It was eight polls 5ms apart
+// (about 45ms a call, over 200 calls).
+const settleQuiet = 20 * time.Millisecond
 
 // type_ sends a line as the user at the terminal.
 func (s *session) type_(line string) { s.ui.input <- line }
