@@ -1,9 +1,18 @@
 package harness
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
 )
 
 // Finding 21: a reply with no tool call and no words (a provider's error or
@@ -68,4 +77,115 @@ func TestR7AClosingWordOfOnlyControlTokensIsNotTakenAsSaid(t *testing.T) {
 			t.Fatalf("said %q", said)
 		}
 	})
+}
+
+// r7EffortOnly changes the effort of eagent's model and nothing else, as a
+// live settings change does: the same chain, a new client.
+func r7EffortOnly(rt *Runtime) {
+	rt.sync(func() {
+		m := rt.models[event.ActorEagent]
+		eps := append([]llm.Endpoint(nil), m.routes...)
+		eps[0].ReasoningEffort = "low"
+		rt.swapRoute(routeSwap{who: event.ActorEagent, eps: eps, conf: config.ModelRoute{BaseURL: eps[0].BaseURL, Model: eps[0].Model}})
+		rt.models[event.ActorEagent].client.MaxAttempts = 1
+	})
+}
+
+// Finding 22, case 2: the primary was out (the user was told) and answers
+// a call during which only the effort changed. The outage is over: the
+// route answered, whatever client now serves it.
+func TestR7ThePrimaryBackUnderAnEffortChangeEndsTheOutage(t *testing.T) {
+	model := netModel(t)
+	var answer atomic.Bool
+	held, release := make(chan struct{}, 1), make(chan struct{})
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answer.Load() {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
+		}
+		select {
+		case held <- struct{}{}:
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		default:
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(primary.Close)
+	rt, _ := netRuntime(t, primary.URL, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	waitFor(t, "the outage notice", func() bool { return len(outageNotices(rt)) > 0 })
+	answer.Store(true)
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the primary was not asked again")
+	}
+	r7EffortOnly(rt)
+	close(release)
+	if o := netWait(t, ch); o.err != nil {
+		t.Fatal(o.err)
+	}
+	var out outage
+	rt.sync(func() { out = rt.models[event.ActorEagent].out })
+	if out.down() || out.told {
+		t.Fatalf("the primary answered, yet the outage stands: %+v", out)
+	}
+}
+
+// Finding 22, case 3: the primary is dead and a fallback, asked in its
+// place past the bound, answers after an effort-only change. It takes over
+// as it would without the change, on the chain now configured.
+func TestR7AFallbackThatAnswersAfterAnEffortChangeTakesOver(t *testing.T) {
+	model := netModel(t)
+	held, release := make(chan struct{}, 1), make(chan struct{})
+	fb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case held <- struct{}{}:
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		default:
+		}
+		model.srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(fb.Close)
+	rt, _ := netRuntime(t, "http://"+downAddr(t), fb.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch := netCallAsync(rt, ctx)
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fallback was not asked")
+	}
+	r7EffortOnly(rt)
+	close(release)
+	if o := netWait(t, ch); o.err != nil || o.resp.Text != "from eagent-fallback" {
+		t.Fatalf("call: %v %+v", o.err, o.resp)
+	}
+	var at int
+	var ep llm.Endpoint
+	rt.sync(func() { m := rt.models[event.ActorEagent]; at, ep = m.at, m.client.Endpoint })
+	if at != 1 || ep.Model != "eagent-fallback" {
+		t.Fatalf("the fallback answered past the bound, yet the session is on route %d (%s)", at, ep)
+	}
+	var routes []event.RouteData
+	for _, r := range netRoutes(rt) {
+		if strings.Contains(r.Reason, "cannot be reached") {
+			routes = append(routes, r)
+		}
+	}
+	if len(routes) != 1 {
+		t.Fatalf("takeovers on the record: %+v", routes)
+	}
 }

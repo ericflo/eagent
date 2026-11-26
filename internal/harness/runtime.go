@@ -551,13 +551,22 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		}
 		if err == nil {
 			r.sync(func() {
+				// The route the call went to, whatever client now serves it
+				// (an effort-only change makes a new one).
 				m := r.models[who]
-				if m == nil || m.client != onRoute {
+				if m == nil || m.client == nil || !sameRoute(m.client.Endpoint, onRoute.Endpoint) {
 					return // the route moved on while the call was out
 				}
 				if probe < 0 {
 					m.out.answer(time.Now())
 					return
+				}
+				if m.client != onRoute {
+					// The chain was configured again: take over on it.
+					if probe >= len(m.routes) || !sameRoute(m.routes[probe], probeClient.Endpoint) {
+						return
+					}
+					probeClient = r.newClient(m.routes[probe], who)
 				}
 				// A route of the chain answered while the one in use could
 				// not be reached: the session goes on with it, as after a
@@ -597,7 +606,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 		var ep llm.Endpoint // the route asked next
 		r.sync(func() {
 			m := r.models[who]
-			if m == nil || m.client != onRoute {
+			if m == nil || m.client == nil || !sameRoute(m.client.Endpoint, onRoute.Endpoint) {
 				moved = true // another call already moved on; use its route
 				return
 			}
