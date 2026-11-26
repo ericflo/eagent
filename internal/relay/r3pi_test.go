@@ -3,10 +3,14 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,16 +21,16 @@ import (
 // zero, the seat expects the session id it chose ("launched"), and pi has
 // not written that session's file yet (it does so at the first message),
 // though its status file already names it.
+// The caller's top-level test has called isolatePi.
 func newFreshPiSeat(t *testing.T) *piSwitchSeat {
 	t.Helper()
-	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
-	t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
 	dir := t.TempDir()
 	w := &piSwitchSeat{t: t, dir: dir, status: filepath.Join(dir, "pi-status.json"), first: filepath.Join(dir, "launched.jsonl")}
 	writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: w.first, SessionID: "launched", SessionEntries: entries(0)})
 	w.s = newSeat(Spec{StatusFile: w.status, Dir: dir}, piAgent{label: "Pi"}, &fakeHost{alive: true}, "pi-fresh-"+filepath.Base(dir), "launched")
 	w.s.state = "idle"
 	w.s.launched = time.Now()
+	w.s.poll = piLook
 	go w.s.watch()
 	t.Cleanup(w.s.Close)
 	return w
@@ -49,6 +53,7 @@ func olderSession(t *testing.T, dir string, at time.Time) string {
 // binds is the resumed one. Its history stays quiet; what follows is
 // reported once.
 func TestFreshPiResumedBeforeItsFirstMessageKeepsTheHistoryQuiet(t *testing.T) {
+	isolatePi(t)
 	for _, tc := range []struct {
 		name    string
 		entries *int
@@ -61,12 +66,13 @@ func TestFreshPiResumedBeforeItsFirstMessageKeepsTheHistoryQuiet(t *testing.T) {
 		{"older extension without the count", nil, time.Now().Add(-3 * time.Hour)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			w := newFreshPiSeat(t)
-			time.Sleep(1500 * time.Millisecond) // a few looks at the empty start
+			time.Sleep(looks(8)) // a few looks at the empty start
 			older := olderSession(t, w.dir, tc.oldAt)
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: older, SessionID: "older", SessionEntries: tc.entries})
 			got := w.until(5*time.Second, innerIs(older))
-			got = append(got, w.quiet(2*time.Second)...)
+			got = append(got, w.quiet(looks(quietLooks))...)
 			if turns := turnsIn(got); len(turns) != 0 {
 				t.Fatalf("history reported as new: %q", turns)
 			}
@@ -78,7 +84,7 @@ func TestFreshPiResumedBeforeItsFirstMessageKeepsTheHistoryQuiet(t *testing.T) {
 			if turns := turnsIn(got); len(turns) != 1 || turns[0] != "New answer." {
 				t.Fatalf("turns %q", turns)
 			}
-			if again := w.quiet(1500 * time.Millisecond); len(turnsIn(again)) != 0 {
+			if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 {
 				t.Fatalf("reported again: %+v", again)
 			}
 		})
@@ -88,6 +94,7 @@ func TestFreshPiResumedBeforeItsFirstMessageKeepsTheHistoryQuiet(t *testing.T) {
 // The resumed session's first new turn can be on disk before the seat
 // first looks at it. It is news, and the history before it is not.
 func TestFreshPiResumedReportsATurnWrittenBeforeTheFirstLook(t *testing.T) {
+	isolatePi(t)
 	for _, tc := range []struct {
 		name    string
 		entries *int
@@ -96,16 +103,17 @@ func TestFreshPiResumedReportsATurnWrittenBeforeTheFirstLook(t *testing.T) {
 		{"older extension without the count", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			w := newFreshPiSeat(t)
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(looks(8))
 			older := olderSession(t, w.dir, time.Now().Add(-3*time.Hour))
-			appendLines(t, older, piTurnLines("n1", "right away", "Fast answer.", time.Now())...)
+			appendLines(t, older, piTurnLines("n1", "right away", "Fast answer.", time.Now().Add(stampAhead))...)
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: older, SessionID: "older", SessionEntries: tc.entries, Settled: 1})
 			got := w.until(5*time.Second, isTurn)
 			if turns := turnsIn(got); len(turns) != 1 || turns[0] != "Fast answer." {
 				t.Fatalf("turns %q", turns)
 			}
-			if again := w.quiet(2 * time.Second); len(turnsIn(again)) != 0 {
+			if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 {
 				t.Fatalf("reported more: %q", turnsIn(again))
 			}
 		})
@@ -115,8 +123,9 @@ func TestFreshPiResumedReportsATurnWrittenBeforeTheFirstLook(t *testing.T) {
 // The usual fresh launch: pi writes the session it was started on at its
 // first message, and that turn is reported.
 func TestFreshPiLaunchReportsItsFirstTurn(t *testing.T) {
+	isolatePi(t)
 	w := newFreshPiSeat(t)
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(looks(8))
 	now := time.Now()
 	writeLines(t, w.first, append([]string{piHeaderLine("launched", now), piModelLine(now)}, piTurnLines("f", "hello", "First reply.", now)...)...)
 	got := w.until(5*time.Second, isTurn)
@@ -337,55 +346,197 @@ type piHandOver struct {
 	Text, DeliverAs string
 }
 
-// runPiExtension starts the extension with a spool holding one message
-// and returns the spool, a function that lists what it holds, and one that
-// waits for the run to end and returns the hand-overs.
-func runPiExtension(t *testing.T, accept bool, run time.Duration, env ...string) (func() []string, func() []piHandOver) {
+// The hand-over tests run on the extension's own timers: a look every
+// second while pi is idle, a hand-over given back after 5 s (refused before
+// the input hook) or 120 s (after it). Run as shipped, a scenario takes most
+// of ten seconds, so the tests run a copy of the extension whose timers (the
+// constants at its top, and only those lines) are divided by piFast, and
+// divide every delay of their own by the same factor: the run's length, the
+// stand-in's PREFLIGHT_MS and RUN_EACH_MS, its steps and the tests' sleeps.
+// The tests are written in the extension's real units, so every ratio a
+// scenario rests on is the one it has with the real timers. piReal runs the
+// extension as shipped.
+const (
+	piReal = 1
+	piFast = 5
+)
+
+// piTimers are the extension's timer constants, as shipped.
+var piTimers = map[string]int{"TICK_MS": 1000, "GIVE_BACK_MS": 5000, "GIVE_BACK_SEEN_MS": 120000, "RETRY_MS": 5000, "RETRY_MAX_MS": 60000}
+
+var piTimerLine = regexp.MustCompile(`(?m)^const ([A-Z_]+_MS) = (\d+);`)
+
+// piExtensionAt is the extension with its timers divided by speed. It
+// fails the test if the extension does not declare exactly piTimers, each
+// once, so a timer added or renamed cannot stay unscaled unnoticed.
+func piExtensionAt(t *testing.T, speed int) string {
+	t.Helper()
+	found := map[string]int{}
+	for _, m := range piTimerLine.FindAllStringSubmatch(piExtension, -1) {
+		ms, _ := strconv.Atoi(m[2])
+		if _, dup := found[m[1]]; dup {
+			t.Fatalf("the extension declares %s twice", m[1])
+		}
+		found[m[1]] = ms
+	}
+	if !maps.Equal(found, piTimers) {
+		t.Fatalf("the extension's timers are %v, the tests know %v: scale the new ones too", found, piTimers)
+	}
+	src := piExtension
+	for name, ms := range piTimers {
+		line := fmt.Sprintf("const %s = %d;", name, ms)
+		src = strings.Replace(src, line, fmt.Sprintf("const %s = %d;", name, ms/speed), 1)
+	}
+	return src
+}
+
+// piScaleSteps divides the times of a stand-in's STEPS by speed.
+func piScaleSteps(t *testing.T, steps string, speed int) string {
+	t.Helper()
+	var list [][]any
+	if err := json.Unmarshal([]byte(steps), &list); err != nil {
+		t.Fatalf("steps %s: %v", steps, err)
+	}
+	for _, step := range list {
+		step[0] = int(step[0].(float64)) / speed
+	}
+	raw, _ := json.Marshal(list)
+	return string(raw)
+}
+
+// lockedOutput is a stand-in's output, readable while it runs.
+type lockedOutput struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (o *lockedOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.Write(p)
+}
+
+func (o *lockedOutput) String() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.buf.String()
+}
+
+// piDriverRun is a stand-in for pi running the extension under node.
+type piDriverRun struct {
+	t     *testing.T
+	cmd   *exec.Cmd
+	out   *lockedOutput
+	spool string
+}
+
+// piScaledEnv are the stand-ins' delays a test sets, divided by speed.
+var piScaledEnv = map[string]bool{"PREFLIGHT_MS": true, "RUN_EACH_MS": true}
+
+// startPiDriver writes the extension (timers divided by speed) and driver,
+// a spool holding text, and starts node. run and the env values in
+// piScaledEnv are divided by speed; defaults are such values the stand-in
+// assumes when they are absent, passed divided as well.
+func startPiDriver(t *testing.T, speed int, driver, text string, run time.Duration, defaults map[string]int, env ...string) *piDriverRun {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed")
 	}
 	dir := t.TempDir()
-	ext, driver, spool := filepath.Join(dir, "eagent-relay.ts"), filepath.Join(dir, "driver.mjs"), filepath.Join(dir, "after_turn")
-	if err := os.WriteFile(ext, []byte(piExtension), 0o644); err != nil {
+	ext, script, spool := filepath.Join(dir, "eagent-relay.ts"), filepath.Join(dir, "driver.mjs"), filepath.Join(dir, "after_turn")
+	if err := os.WriteFile(ext, []byte(piExtensionAt(t, speed)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(driver, []byte(piExtensionDriver), 0o644); err != nil {
+	if err := os.WriteFile(script, []byte(driver), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := spoolMessage(spool, "a1", "the held message"); err != nil {
+	if err := spoolMessage(spool, "a1", text); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(node, driver, ext)
-	cmd.Env = append(os.Environ(), "EAGENT_PI_STATUS="+filepath.Join(dir, "pi-status.json"), "EAGENT_PI_SPOOL="+spool, fmt.Sprintf("RUN_MS=%d", run.Milliseconds()))
-	if accept {
-		cmd.Env = append(cmd.Env, "ACCEPT=1")
+	given := map[string]bool{}
+	var scaled []string
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if piScaledEnv[k] {
+			ms, err := strconv.Atoi(v)
+			if err != nil {
+				t.Fatalf("%s: %v", kv, err)
+			}
+			given[k] = true
+			kv = fmt.Sprintf("%s=%d", k, ms/speed)
+		}
+		scaled = append(scaled, kv)
 	}
-	cmd.Env = append(cmd.Env, env...)
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
+	for k, ms := range defaults {
+		if !given[k] {
+			scaled = append(scaled, fmt.Sprintf("%s=%d", k, ms/speed))
+		}
+	}
+	cmd := exec.Command(node, script, ext)
+	cmd.Env = append(os.Environ(), "EAGENT_PI_STATUS="+filepath.Join(dir, "pi-status.json"), "EAGENT_PI_SPOOL="+spool,
+		fmt.Sprintf("RUN_MS=%d", (run/time.Duration(speed)).Milliseconds()))
+	cmd.Env = append(cmd.Env, scaled...)
+	out := &lockedOutput{}
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return &piDriverRun{t: t, cmd: cmd, out: out, spool: spool}
+}
+
+// waitFor waits until the stand-in has printed s.
+func (r *piDriverRun) waitFor(s string) {
+	r.t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !strings.Contains(r.out.String(), s) {
+		if time.Now().After(deadline) {
+			r.t.Fatalf("the stand-in never printed %s:\n%s", s, r.out.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// lines waits for the stand-in to exit and returns what it printed, a JSON
+// value per line.
+func (r *piDriverRun) lines() []string {
+	r.t.Helper()
+	if err := r.cmd.Wait(); err != nil {
+		r.t.Fatalf("stand-in: %v\n%s", err, r.out.String())
+	}
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(r.out.String()), "\n") {
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// runPiExtension starts the extension against piExtensionDriver with a
+// spool holding one message. It returns a function that lists what the
+// spool holds, one that waits for the run to end and returns the
+// hand-overs, and the run.
+func runPiExtension(t *testing.T, speed int, accept bool, run time.Duration, env ...string) (func() []string, func() []piHandOver, *piDriverRun) {
+	t.Helper()
+	if accept {
+		env = append(env, "ACCEPT=1")
+	}
+	// The driver's own 20 ms preflight and 50 ms run are not scenario times
+	// and stay as they are.
+	r := startPiDriver(t, speed, piExtensionDriver, "the held message", run, nil, env...)
 	list := func() []string {
-		names, _ := filepath.Glob(filepath.Join(spool, "*"))
+		names, _ := filepath.Glob(filepath.Join(r.spool, "*"))
 		for i := range names {
 			names[i] = filepath.Base(names[i])
 		}
 		return names
 	}
 	wait := func() []piHandOver {
-		if err := cmd.Wait(); err != nil {
-			t.Fatalf("extension driver: %v\n%s", err, out.String())
-		}
 		var got []piHandOver
-		for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		for _, line := range r.lines() {
 			var h piHandOver
-			if line == "" {
-				continue
-			}
 			if json.Unmarshal([]byte(line), &h) != nil {
 				t.Fatalf("driver printed %q", line)
 			}
@@ -393,15 +544,18 @@ func runPiExtension(t *testing.T, accept bool, run time.Duration, env ...string)
 		}
 		return got
 	}
-	return list, wait
+	return list, wait, r
 }
 
 // pi refuses a hand-over it cannot take (a prompt while it compacts, no
 // model): the message is not gone, and goes again later.
 func TestPiExtensionKeepsAMessagePiRefused(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiExtension(t, false, 9*time.Second)
-	time.Sleep(2500 * time.Millisecond) // the extension looks every second
+	list, wait, run := runPiExtension(t, piFast, false, 9*time.Second)
+	// pi was handed it at the extension's first look and refused it; the
+	// extension looks again a second later.
+	run.waitFor(`"text":"the held message"`)
+	time.Sleep(1500 * time.Millisecond / piFast)
 	if got := list(); len(got) != 1 {
 		t.Fatalf("after a refused hand-over the spool holds %v", got)
 	}
@@ -422,7 +576,7 @@ func TestPiExtensionKeepsAMessagePiRefused(t *testing.T) {
 // pi takes it: the message goes once and leaves the spool.
 func TestPiExtensionHandsAMessageOverOnce(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiExtension(t, true, 9*time.Second)
+	list, wait, _ := runPiExtension(t, piFast, true, 9*time.Second)
 	sent := wait()
 	if len(sent) != 1 || sent[0].Text != "the held message" || sent[0].DeliverAs != "followUp" {
 		t.Fatalf("hand-overs %+v", sent)

@@ -17,9 +17,12 @@ import (
 // interrupts the run; the editor gets that message, not the held one.
 func TestPiHandOverRefusedAfterTheHookSurvivesAnUnrelatedInterruptedRun(t *testing.T) {
 	t.Parallel()
-	list, wait := runPiPromptPath(t, 8*time.Second,
-		`[[1500, "type", "a typed message"], [1800, "type", "a second typed message"]]`,
-		"REFUSE_AFTER=1", "RUN_EACH_MS=1500", "ABORT_QUEUED=1")
+	// The hooks see it at the extension's first look (1 s); the typed run
+	// goes from 2 s to 4.5 s, the second typed message at 3 s: a second or
+	// more between each.
+	list, wait, _ := runPiPromptPath(t, piFast, 8*time.Second,
+		`[[2000, "type", "a typed message"], [3000, "type", "a second typed message"]]`,
+		"REFUSE_AFTER=1", "RUN_EACH_MS=2500", "ABORT_QUEUED=1")
 	r := wait()
 	if r.count("sent", held) != 1 || r.count("ran", "a typed message") != 1 {
 		t.Fatalf("the scenario did not run as meant:\n%s", r.out)

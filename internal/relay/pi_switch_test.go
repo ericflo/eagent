@@ -54,6 +54,27 @@ func appendLines(t *testing.T, file string, lines ...string) {
 
 func entries(n int) *int { return &n }
 
+// piLook is how often the watched pi seats in these tests look: pollEvery
+// (700 ms) in production. What the tests wait out is a number of looks, so
+// a quiet window spans a dozen looks where it spanned two or three.
+const piLook = 25 * time.Millisecond
+
+// looks is n of the watcher's looks.
+func looks(n int) time.Duration { return time.Duration(n) * piLook }
+
+// quietLooks is how many looks a test waits for something not to happen.
+const quietLooks = 12
+
+// stampAhead is how far ahead a test stamps a turn it writes to a session
+// before the status file names that session. pi stamps a turn after it has
+// left the old session, so the watcher can never have seen it still on the
+// old one after the turn's stamp. A test writes the turn first, and a look
+// between the two writes, should writing take more than the millisecond of
+// grace the seat gives, would date the move after the turn: an order pi
+// never produces. With looks every 25 ms it happened in one run of a few
+// dozen under the race detector on a loaded machine.
+const stampAhead = 100 * time.Millisecond
+
 // piSwitchSeat watches a pi seat whose status file names first (session
 // id "first") and waits until it follows it.
 type piSwitchSeat struct {
@@ -64,10 +85,19 @@ type piSwitchSeat struct {
 	first  string
 }
 
-func newPiSwitchSeat(t *testing.T, since time.Time, firstLines []string, firstEntries *int) *piSwitchSeat {
+// isolatePi gives a test and its subtests a pi home of their own. The
+// seat helpers leave it to the top-level test, so that its subtests can
+// run in parallel (a test that sets the environment cannot).
+func isolatePi(t *testing.T) {
 	t.Helper()
 	t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 	t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
+}
+
+// newPiSwitchSeat starts the seat. The caller's top-level test has called
+// isolatePi.
+func newPiSwitchSeat(t *testing.T, since time.Time, firstLines []string, firstEntries *int) *piSwitchSeat {
+	t.Helper()
 	dir := t.TempDir()
 	w := &piSwitchSeat{t: t, dir: dir, status: filepath.Join(dir, "pi-status.json"), first: filepath.Join(dir, "first.jsonl")}
 	writeLines(t, w.first, firstLines...)
@@ -75,6 +105,7 @@ func newPiSwitchSeat(t *testing.T, since time.Time, firstLines []string, firstEn
 	w.s = newSeat(Spec{StatusFile: w.status, Dir: dir}, piAgent{label: "Pi"}, &fakeHost{alive: true}, "pi-switch-"+filepath.Base(dir), "first")
 	w.s.state = "idle"
 	w.s.since = since
+	w.s.poll = piLook
 	go w.s.watch()
 	t.Cleanup(w.s.Close)
 	return w
@@ -143,6 +174,7 @@ func isTurn(ev Event) bool { return ev.Kind == KindTurn }
 // kickoff from withSession; the whole first turn of the new session is on
 // disk before the watcher's next poll sees the switch. It is reported, once.
 func TestPiSwitchReportsAFastFirstTurn(t *testing.T) {
+	isolatePi(t)
 	for _, tc := range []struct {
 		name    string
 		entries *int // what the status file says the session held at its start
@@ -151,12 +183,13 @@ func TestPiSwitchReportsAFastFirstTurn(t *testing.T) {
 		{"older extension without the count", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			now := time.Now()
 			w := newPiSwitchSeat(t, time.Time{}, []string{piHeaderLine("first", now)}, entries(0))
 			w.until(5*time.Second, innerIs(w.first))
 			second := filepath.Join(w.dir, "second.jsonl")
 			// pi writes the new file and its whole first turn...
-			lines := append([]string{piHeaderLine("second", time.Now()), piModelLine(time.Now())}, piTurnLines("k", "Continue in the replacement session", "Kickoff done.", time.Now())...)
+			lines := append([]string{piHeaderLine("second", time.Now()), piModelLine(time.Now())}, piTurnLines("k", "Continue in the replacement session", "Kickoff done.", time.Now().Add(stampAhead))...)
 			writeLines(t, second, lines...)
 			// ...and the status file names it, before any poll looks.
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: second, SessionID: "second", Settled: 1, SessionEntries: tc.entries})
@@ -173,9 +206,9 @@ func TestPiSwitchReportsAFastFirstTurn(t *testing.T) {
 			// The status file rewritten for the same session says nothing new.
 			for i := 0; i < 3; i++ {
 				writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: second, SessionID: "second", Settled: 1, SessionEntries: tc.entries, At: time.Now().String()})
-				time.Sleep(300 * time.Millisecond)
+				time.Sleep(looks(4))
 			}
-			if again := w.quiet(1500 * time.Millisecond); len(turnsIn(again)) != 0 || hasInner(again) {
+			if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 || hasInner(again) {
 				t.Fatalf("reported again: %+v", again)
 			}
 		})
@@ -185,17 +218,18 @@ func TestPiSwitchReportsAFastFirstTurn(t *testing.T) {
 // pi writes a new session's file only once it holds a message: the status
 // file can name it before it exists. The first turn still comes through.
 func TestPiSwitchBeforeTheFileExists(t *testing.T) {
+	isolatePi(t)
 	w := newPiSwitchSeat(t, time.Time{}, []string{piHeaderLine("first", time.Now())}, entries(0))
 	w.until(5*time.Second, innerIs(w.first))
 	second := filepath.Join(w.dir, "second.jsonl")
 	writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: second, SessionID: "second", SessionEntries: entries(1)})
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(looks(8))
 	writeLines(t, second, append([]string{piHeaderLine("second", time.Now()), piModelLine(time.Now())}, piTurnLines("k", "go", "First reply.", time.Now())...)...)
 	got := w.until(5*time.Second, isTurn)
 	if turns := turnsIn(got); len(turns) != 1 || turns[0] != "First reply." || !innerSeen(got, second, "second") {
 		t.Fatalf("events %+v", got)
 	}
-	if again := w.quiet(1500 * time.Millisecond); len(turnsIn(again)) != 0 {
+	if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 {
 		t.Fatalf("reported again: %+v", again)
 	}
 }
@@ -203,6 +237,7 @@ func TestPiSwitchBeforeTheFileExists(t *testing.T) {
 // /resume of an older conversation, or a fork: the session pi opens already
 // holds finished turns. They stay quiet; the next turn is reported.
 func TestPiSwitchKeepsHistoryQuiet(t *testing.T) {
+	isolatePi(t)
 	for _, tc := range []struct {
 		name    string
 		entries *int
@@ -215,6 +250,7 @@ func TestPiSwitchKeepsHistoryQuiet(t *testing.T) {
 		{"resume of an older conversation, older extension", nil, time.Now().Add(-3 * time.Hour)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			w := newPiSwitchSeat(t, time.Time{}, []string{piHeaderLine("first", time.Now())}, entries(0))
 			w.until(5*time.Second, innerIs(w.first))
 			older := filepath.Join(w.dir, "older.jsonl")
@@ -224,7 +260,7 @@ func TestPiSwitchKeepsHistoryQuiet(t *testing.T) {
 			writeLines(t, older, lines...)
 			writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: older, SessionID: "older", SessionEntries: tc.entries})
 			got := w.until(5*time.Second, innerIs(older))
-			got = append(got, w.quiet(2*time.Second)...)
+			got = append(got, w.quiet(looks(quietLooks))...)
 			if turns := turnsIn(got); len(turns) != 0 {
 				t.Fatalf("history reported as new: %q", turns)
 			}
@@ -233,7 +269,7 @@ func TestPiSwitchKeepsHistoryQuiet(t *testing.T) {
 			if turns := turnsIn(got); len(turns) != 1 || turns[0] != "New answer." {
 				t.Fatalf("turns %q", turns)
 			}
-			if again := w.quiet(1500 * time.Millisecond); len(turnsIn(again)) != 0 {
+			if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 {
 				t.Fatalf("reported again: %+v", again)
 			}
 		})
@@ -243,25 +279,28 @@ func TestPiSwitchKeepsHistoryQuiet(t *testing.T) {
 // A normal launch reads its session from the top; an eagent-side resume
 // (since set at launch) leaves the history quiet. Neither changes.
 func TestPiLaunchAndResumeUnchanged(t *testing.T) {
+	isolatePi(t)
 	t.Run("launch", func(t *testing.T) {
+		t.Parallel()
 		now := time.Now()
 		w := newPiSwitchSeat(t, time.Time{}, append([]string{piHeaderLine("first", now), piModelLine(now)}, piTurnLines("f", "hello", "Hi there.", now)...), entries(0))
 		got := w.until(5*time.Second, isTurn)
 		if turns := turnsIn(got); len(turns) != 1 || turns[0] != "Hi there." || !innerSeen(got, w.first, "first") {
 			t.Fatalf("events %+v", got)
 		}
-		if again := w.quiet(1500 * time.Millisecond); len(turnsIn(again)) != 0 {
+		if again := w.quiet(looks(quietLooks)); len(turnsIn(again)) != 0 {
 			t.Fatalf("reported again: %+v", again)
 		}
 	})
 	t.Run("resume", func(t *testing.T) {
+		t.Parallel()
 		old := time.Now().Add(-time.Hour)
 		lines := append([]string{piHeaderLine("first", old), piModelLine(old)}, piTurnLines("f", "hello", "Old reply.", old)...)
 		// The resumed session's status counts its history, and since is
 		// the launch: both keep the history quiet.
 		w := newPiSwitchSeat(t, time.Now(), lines, entries(4))
 		got := w.until(5*time.Second, innerIs(w.first))
-		got = append(got, w.quiet(1500*time.Millisecond)...)
+		got = append(got, w.quiet(looks(quietLooks))...)
 		if turns := turnsIn(got); len(turns) != 0 {
 			t.Fatalf("history reported: %q", turns)
 		}
@@ -276,6 +315,7 @@ func TestPiLaunchAndResumeUnchanged(t *testing.T) {
 // Back and forth: /resume to the first session again after a switch. Its
 // turns were reported once already and are not reported again.
 func TestPiSwitchBackDoesNotRepeat(t *testing.T) {
+	isolatePi(t)
 	now := time.Now()
 	w := newPiSwitchSeat(t, time.Time{}, append([]string{piHeaderLine("first", now)}, piTurnLines("f", "hello", "First turn.", now)...), entries(0))
 	if turns := turnsIn(w.until(5*time.Second, isTurn)); len(turns) != 1 || turns[0] != "First turn." {
@@ -290,7 +330,7 @@ func TestPiSwitchBackDoesNotRepeat(t *testing.T) {
 	// Back to the first, which pi loads with its 3 entries.
 	writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: w.first, SessionID: "first", SessionEntries: entries(3)})
 	got := w.until(5*time.Second, innerIs(w.first))
-	got = append(got, w.quiet(2*time.Second)...)
+	got = append(got, w.quiet(looks(quietLooks))...)
 	if turns := turnsIn(got); len(turns) != 0 {
 		t.Fatalf("repeated: %q", turns)
 	}
