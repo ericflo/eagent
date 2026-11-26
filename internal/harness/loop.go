@@ -956,8 +956,9 @@ func (r *Runtime) turn(w wake) {
 					// again at once, tell the user after their closing
 					// report that the model cannot be reached, or restart
 					// the conversation, and end the session as one that
-					// waits on them.
+					// waits on them. Nor is the failed call owed (wakeFor).
 					r.ui.Log("thread summary: %s; the title and summary keep their last values", shortErr(err))
+					closedOut = true
 					return
 				}
 				r.turnFailed(err)
@@ -1122,8 +1123,9 @@ func (r *Runtime) turn(w wake) {
 			reason := end
 			if closedOut {
 				// The closing turn failed after its word (the model's
-				// report or eagent's own): nothing is owed, where an
-				// "error" end owes the failed call (wakeFor).
+				// report or eagent's own), or the last title and summary
+				// did (one attempt): nothing is owed, where an "error"
+				// end owes the failed call (wakeFor).
 				reason = "error, closing"
 			}
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
