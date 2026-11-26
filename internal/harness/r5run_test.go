@@ -14,10 +14,10 @@ import (
 )
 
 // A run that resumes a session while the last run is still writing its
-// final events waits for the lock (store's short retry) and must then read
-// the record as it stands after that run let go: what was committed in the
-// wait is part of the history, and the new run's events follow it in
-// order, one number after another.
+// final events waits for the lock and must then read the record as it
+// stands after that run let go: what was committed in the wait is part of
+// the history, and the new run's events follow it in order, one number
+// after another.
 func TestResumingWhileTheLastRunFinishesWritingKeepsTheRecordInOrder(t *testing.T) {
 	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
 	s.settled()
@@ -37,14 +37,25 @@ func TestResumingWhileTheLastRunFinishesWritingKeepsTheRecordInOrder(t *testing.
 		rt  *Runtime
 		err error
 	}
+	// The next run finds the lock taken and waits until the last run has
+	// written its final events and let go.
+	waiting, released := make(chan struct{}), make(chan struct{})
+	defer store.OnLockWait(path, func() {
+		close(waiting)
+		<-released
+	})()
 	next := make(chan result, 1)
 	go func() {
 		rt, err := resume()
 		next <- result{rt, err}
 	}()
-	// Well inside the lock's retry window, the last run commits its final
-	// events and lets go.
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-waiting:
+	case got := <-next:
+		t.Fatalf("the next run did not wait for the lock: %v", got.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the next run never reached the lock")
+	}
 	for i := 0; i < 3; i++ {
 		if _, err := last.sess.Append(event.New(event.Message, event.ActorEagent, event.MessageData{Text: "written while the next run waited"})); err != nil {
 			t.Fatal(err)
@@ -52,6 +63,7 @@ func TestResumingWhileTheLastRunFinishesWritingKeepsTheRecordInOrder(t *testing.
 	}
 	lastSeq := last.sess.LastSeq()
 	last.sess.Close()
+	close(released)
 
 	got := <-next
 	if got.err != nil {

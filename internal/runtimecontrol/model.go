@@ -116,6 +116,25 @@ func routeFor(project string, a config.ModelRoute) Route {
 	return Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
 }
 
+// Names reports whether rt is a pick of the configured route a: its model
+// at its provider's address (no provider, for an address none knows).
+func Names(project string, a config.ModelRoute, rt Route) bool {
+	return a.Model == rt.Model && routeFor(project, a).Provider == rt.Provider
+}
+
+// ChainEntry is the entry of a configured chain (a route and its
+// fallbacks) that rt picks, with the fallbacks after it. A pick of a model
+// the chain already has starts from that entry, so its own limits and key
+// variable carry over rather than the first route's or the catalog's.
+func ChainEntry(project string, chain config.ModelRoute, rt Route) (config.ModelRoute, bool) {
+	for cur := &chain; cur != nil; cur = cur.Fallback {
+		if Names(project, *cur, rt) {
+			return *cur, true
+		}
+	}
+	return config.ModelRoute{}, false
+}
+
 // StopOperation stops the running session, as Stop in eagent's web UI does.
 // A server that does not know it (no feature session-stop.v1) is asked for
 // the grant without it; see WithoutStop.
@@ -534,7 +553,21 @@ func ConfigFromValues(project string, values Values) (config.Config, error) {
 	}
 	pick := func(key string, base config.ModelRoute) (config.ModelRoute, bool, error) {
 		rt, ok := values.Routes[key]
-		if !ok || rt.Provider == "" || rt.Model == "" {
+		if !ok || rt.Model == "" {
+			return base, false, nil
+		}
+		// A model the configured chain has (the fallback a session moved
+		// to, say) is saved as that entry is configured.
+		if entry, ok := ChainEntry(project, base, rt); ok {
+			base = entry
+			if rt.Provider == "" {
+				// At an address no provider knows there is no catalog to
+				// pick from: the entry as it is, at the effort shown.
+				base.ReasoningEffort = rt.Effort
+				return base, true, nil
+			}
+		}
+		if rt.Provider == "" {
 			return base, false, nil
 		}
 		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, rt.Effort)

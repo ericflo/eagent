@@ -191,13 +191,24 @@ func Create(root string, now time.Time) (*Session, error) {
 		}
 	}
 	s := &Session{ID: id, Path: path}
-	if err := s.acquireLock(); err != nil {
-		return nil, err
-	}
-	if _, err := s.newSubsession(now); err != nil {
+	if err := s.start(now); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// start takes a new session's lock and makes its first file. A file it
+// cannot make lets the lock go again, so the directory is not left taken by
+// a run that never started.
+func (s *Session) start(now time.Time) error {
+	if err := s.acquireLock(); err != nil {
+		return err
+	}
+	if _, err := s.newSubsession(now); err != nil {
+		s.Close()
+		return err
+	}
+	return nil
 }
 
 // Open opens an existing session for appending and returns its committed
@@ -280,6 +291,18 @@ func ReadOnly(path string) *Session {
 	return &Session{ID: filepath.Base(path), Path: path, closed: true}
 }
 
+// lockWaitHooks: session path -> what OnLockWait registered.
+var lockWaitHooks sync.Map
+
+// OnLockWait has fn called, once per open, when a run finds the session at
+// path locked and begins to wait for it; the run tries the lock again as
+// soon as fn returns. Tests use it to put events in a known order around
+// the wait. The returned function removes it.
+func OnLockWait(path string, fn func()) (remove func()) {
+	lockWaitHooks.Store(path, fn)
+	return func() { lockWaitHooks.Delete(path) }
+}
+
 func (s *Session) acquireLock() error {
 	lockPath := filepath.Join(s.Path, ".lock")
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
@@ -289,9 +312,16 @@ func (s *Session) acquireLock() error {
 	// A liveness probe holds a shared lock for a moment; wait it out before
 	// declaring the session taken.
 	var lerr error
+	hooked := false
 	for i := 0; i < 50; i++ {
 		if lerr = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr == nil {
 			break
+		}
+		if fn, ok := lockWaitHooks.Load(s.Path); ok && !hooked {
+			hooked = true
+			fn.(func())()
+			i-- // the wait starts after the hook
+			continue
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
