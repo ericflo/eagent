@@ -631,9 +631,13 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		body := "→ " + who + ":\n" + d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq)})
+			// An agent's post without a status clears the thread's line;
+			// the agent is still at work, so the line rides along.
+			act := p.attach()
+			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
 			if err == nil {
 				p.remember(msg.ID)
+				p.markSent(act)
 			}
 		})
 	case event.UserMessage:
