@@ -26,8 +26,10 @@ import (
 //     line ends as "\n" and tabs as four spaces; an extension can read
 //     the editor's text.
 //
-// STEPS is a JSON list of [ms, action, text]: "type" a message, or "spool"
-// one for the extension. Every observation is a JSON line.
+// STEPS is a JSON list of [ms, action, text]: "type" a message, "spool"
+// one for the extension, "abort" the run going (as Escape does: it settles
+// aborted, what was queued back in the editor), or "mark" the output with
+// text. Every observation is a JSON line.
 const piPromptPath = `import { pathToFileURL } from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -43,6 +45,17 @@ const runMs = Number(process.env.RUN_EACH_MS || 300);
 const log = (o) => console.log(JSON.stringify(o));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let editor = "";
+let interrupt = null, interrupted = false;
+const runFor = (ms) => new Promise((r) => {
+	const t = setTimeout(() => { interrupt = null; r(); }, ms);
+	interrupt = () => { clearTimeout(t); interrupt = null; interrupted = true; r(); };
+});
+const backToEditor = () => {
+	const back = queue.splice(0);
+	editor = [back.map((q) => q.text).join("\n\n"), editor].filter((t) => t.trim()).join("\n\n")
+		.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
+	log({ editor: back.map((q) => q.text) });
+};
 const ctx = {
 	isIdle: () => !running,
 	hasPendingMessages: () => queue.length > 0,
@@ -58,15 +71,17 @@ async function startRun(text, source) {
 	await emit("agent_start", { type: "agent_start" });
 	await emit("message_start", { type: "message_start", message: userMsg(text) });
 	log({ ran: text, source });
-	await sleep(runMs);
+	await runFor(runMs);
 	let aborted = false;
-	while (queue.length) {
+	if (interrupted) {
+		interrupted = false;
+		if (queue.length) backToEditor();
+		aborted = true;
+	}
+	while (!aborted && queue.length) {
 		if (abortQueued) {
 			abortQueued = false;
-			const back = queue.splice(0);
-			editor = [back.map((q) => q.text).join("\n\n"), editor].filter((t) => t.trim()).join("\n\n")
-				.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
-			log({ editor: back.map((q) => q.text) });
+			backToEditor();
 			aborted = true;
 			break;
 		}
@@ -131,6 +146,11 @@ handlers.session_start({}, ctx);
 for (const [ms, action, text] of JSON.parse(process.env.STEPS || "[]")) {
 	setTimeout(() => {
 		if (action === "type") prompt(text, "interactive");
+		if (action === "abort" && interrupt) {
+			log({ abort: true });
+			interrupt();
+		}
+		if (action === "mark") log({ mark: text });
 		if (action === "spool") {
 			const name = String(Date.now() * 1000000) + "-x.txt";
 			fs.writeFileSync(path.join(process.env.EAGENT_PI_SPOOL, "." + name), text);
