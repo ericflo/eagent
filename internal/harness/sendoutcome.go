@@ -76,16 +76,48 @@ func judgeSend(o state.SendOutcome, who, id, to, atts string) sendVerdict {
 		refusal: fmt.Sprintf("that message already went to %s as written (%s); to add to it, use relay_send", who, id)}
 }
 
-// mergeReceipt is a message's phone receipt after one of its sends moves
-// to next. A message has one receipt however many agents it went to, and
-// once one agent has it, that stays true: a later send of it elsewhere
-// that is on its way or failed does not take the check mark back (and a
-// "Not delivered · Retry" there would resend it to the agent that has it).
-func mergeReceipt(cur, next string) string {
-	if cur == "delivered" {
-		return cur
+// messageReceipt is the phone's one receipt for a user message, from the
+// outcomes of all its sends (to however many agents, in any order; a send
+// a switch moved counts by its outcome where it went):
+//
+//	sends                                           receipt
+//	any arrived                                     delivered
+//	else any waiting or typed and never confirmed   sent
+//	else any held for the end of a turn             held
+//	else (every one certainly did not go)           failed
+//	none                                            ""
+//
+// A send id the state never noted counts as waiting.
+//
+// "failed" is the only receipt with a Retry on the phone, and Retry types
+// the words into the agent again: it is offered only when no agent can
+// have them or be about to.
+func messageReceipt(outcomes []state.SendOutcome) string {
+	rank := map[string]int{"failed": 1, "held": 2, "sent": 3, "delivered": 4}
+	best := ""
+	for _, o := range outcomes {
+		if o == "" {
+			// A send the state never noted (no relay under its name): it
+			// was recorded and nothing is known of it since.
+			o = state.SendWaiting
+		}
+		if r := judgeSend(o, "", "", "", "").receipt; rank[r] > rank[best] {
+			best = r
+		}
 	}
-	return next
+	return best
+}
+
+// sendsReceipt is messageReceipt over every send of the user message at
+// seq, found through sendSeq (send id to message seq).
+func sendsReceipt(st *state.State, sendSeq map[string]int64, seq int64) string {
+	var outcomes []state.SendOutcome
+	for id, s := range sendSeq {
+		if s == seq {
+			outcomes = append(outcomes, st.SendOutcome(id))
+		}
+	}
+	return messageReceipt(outcomes)
 }
 
 // sendErrOutcome is how sure a send that failed with err is not to have
