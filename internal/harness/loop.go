@@ -1077,31 +1077,28 @@ func (r *Runtime) turn(w wake) {
 		if recorded {
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
 		}
-		switch {
-		case tc.handled && (answerDealt() || end == "error" || end == "interrupted" || end == "timeout"):
-			// Dealt with, however the turn then ended: a turn cut off or
-			// failed after its answer went out owes that message nothing,
-			// in this run or in one resumed from the record. An answer
-			// that arrived mid-turn and was not dealt with is not lost:
-			// the call that showed it left no record, so it is still newer
-			// than what was seen and its wake brings it up again.
+		e := turnEnding{
+			cut:            end == "error" || end == "interrupted" || end == "timeout",
+			handled:        tc.handled,
+			held:           held > 0,
+			heldSeen:       held > 0 && held <= r.turns.seen,
+			heldOwed:       held > 0 && held == r.turns.owed,
+			answer:         answerSeq > 0,
+			answerDealt:    answerDealt(),
+			answerSeen:     answerSeq > 0 && answerSeq <= r.turns.seen,
+			remindedAnswer: remindedAnswer,
+			answerDebt:     answerDebt,
+		}
+		switch e.settle() {
+		case clearDebt:
 			r.clearOwed()
-		case end == "error" || end == "interrupted" || end == "timeout":
-			// What asked for the look is still owed one.
-		case held > 0 && !tc.handled:
+		case oweMessage:
 			r.oweAnswer(held)
-		case answerSeq > 0 && !remindedAnswer:
-			// It held on the user's answer and the turn had no call left
-			// to send that back (owes): it is said once, later. What the
-			// turn dealt with before the answer came is settled.
-			if tc.handled {
+		case oweTheAnswer:
+			if e.handled || e.answerDebt {
 				r.clearOwed()
 			}
 			r.oweReminder(answerSeq)
-		case answerDebt || tc.handled:
-			// It was told, in this turn's tail, that the answer has
-			// reached nobody else. A hold after that stands.
-			r.clearOwed()
 		}
 		if end == "call limit" {
 			r.afterCallLimit(maxCalls)
@@ -1113,6 +1110,88 @@ func (r *Runtime) turn(w wake) {
 			r.fallbackFinal()
 		}
 	})
+}
+
+// turnEnding is what the end of a turn knows about what it owes the user.
+type turnEnding struct {
+	// cut: the turn ended on an error, was stopped under it (interrupted),
+	// or ran out of its own time (timeout). Otherwise its last call came
+	// back (it replied, held, or reached the call limit).
+	cut bool
+	// handled: some call of the turn answered the user or did something
+	// with the agent (tc.handled).
+	handled bool
+	// held: a message kept for eagent that the turn was shown (the mark).
+	// heldSeen: a call that came back has seen it, so no wake will bring
+	// it up again. heldOwed: it is already the debt being reminded about.
+	held, heldSeen, heldOwed bool
+	// answer: the user answered a question and the turn was shown it.
+	// answerDealt: a call after it was shown answered or acted.
+	// answerSeen: a call that came back has seen it (no wake left for it).
+	// remindedAnswer: the turn already told the model the answer reached
+	// nobody else (sent back, or said in the tail of a reminder).
+	answer, answerDealt, answerSeen, remindedAnswer bool
+	// answerDebt: the turn was made with an earlier answer owed its one
+	// reminder, and its tail was that reminder.
+	answerDebt bool
+}
+
+// turnSettle is what the end of a turn does with the debt (turnState.owed).
+type turnSettle int
+
+const (
+	keepDebt     turnSettle = iota // leave it as it stands
+	clearDebt                      // clearOwed: nothing is owed
+	oweMessage                     // oweAnswer(held): the message is owed a reminder
+	oweTheAnswer                   // oweReminder(answer), after clearing what was dealt with
+)
+
+// settle decides what a turn leaves owed. The rule, by what happened in the
+// turn (rows, first match wins) and how it ended (replied or held: its
+// last call came back; cut: error, interrupted or timeout):
+//
+//	what happened in the turn                          replied/held   cut
+//	a message shown, nothing done about it             owe message    owe message if a call that
+//	                                                                  came back saw it and it was
+//	                                                                  not already the debt; else keep
+//	an answer shown, nothing done after it, seen by    owe answer     owe answer (sent back
+//	  a call that came back; not yet sent back                        or not)
+//	  (replied/held) or sent back or not (cut)
+//	something done (the message answered, or the       clear          clear
+//	  answer acted on)
+//	nothing done                                       see below      keep
+//	  the turn was the answer's reminder               clear (a hold after it stands)
+//	  otherwise                                        keep
+//
+// Why "keep" on a cut: what asked for the look was not seen by a call that
+// came back, so its wake is still pending and the retry (or the resumed
+// run) makes the look again; an earlier debt keeps its own reminder. Why
+// "owe" on a cut when a call that came back saw it: that look is spent,
+// nothing will wake for it again, and the turn did nothing with it, so it
+// would reach nobody. This holds with no earlier debt too: an answer seen
+// by a look and then cut off is owed its one reminder, even when it had
+// been sent back in the turn: a hold after the send-back stands, but here
+// the model's next word was cut off, not a hold. A message that is
+// already the debt is left alone on a cut: a provider failure does not use
+// up its reminders. "Owe answer" clears first what the turn dealt with (the
+// message it answered, an earlier answer's spent reminder), so nothing
+// already said is brought up again; while a message for eagent is still
+// owed, its reminders come first (oweReminder).
+func (e turnEnding) settle() turnSettle {
+	pending := e.answer && !e.answerDealt && e.answerSeen && (!e.remindedAnswer || e.cut)
+	switch {
+	case e.held && !e.handled && (!e.cut || (e.heldSeen && !e.heldOwed)):
+		return oweMessage
+	case pending:
+		return oweTheAnswer
+	case e.handled:
+		return clearDebt
+	case e.cut:
+		return keepDebt
+	case e.answerDebt:
+		return clearDebt
+	}
+	return keepDebt
 }
 
 // stopReason names why a turn whose context is done ended: its own time
