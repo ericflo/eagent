@@ -383,3 +383,38 @@ func TestSendMessageAttachesAPictureThatViewImageTakes(t *testing.T) {
 		t.Fatalf("the session keeps %d copies, want the look and the send", len(entries))
 	}
 }
+
+// A deleted thread takes its cards and their keys with it, so the card a
+// resume then makes in the new thread has the plain key again. On the
+// resume after that, the question still has that one open card: a second
+// must not go up beside it.
+func TestAQuestionAskedAgainAfterTheThreadWasDeletedKeepsOneCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	// The user deletes the thread on the phone: its questions and their
+	// keys go with it.
+	fp.mu.Lock()
+	clear(fp.questions)
+	clear(fp.qkeys)
+	fp.mu.Unlock()
+	g.resume(Options{})
+	waitFor(t, "a card in the new thread", func() bool { return fp.pendingQuestions() == 1 })
+	waitFor(t, "the new card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	g.interrupt()
+	g.resume(Options{})
+	waitFor(t, "the question to be asked again", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.asks) >= 3 })
+	waitFor(t, "the card to be watched", func() bool {
+		var p *phone
+		g.rt.sync(func() { p = g.rt.phone })
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.open) == 1
+	})
+	if n := fp.pendingQuestions(); n != 1 {
+		t.Fatalf("%d open cards for one question after the second resume, want 1", n)
+	}
+}
