@@ -1827,11 +1827,11 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
 			continue
 		}
-		if at, ok := holderAt(r.st, d.Name, ev.Seq); !ok {
+		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
 			if !names[d.Name] {
 				continue
 			}
-		} else if !inChain(handed, at, targets) {
+		} else if !inChain(handed, holder{d.Name, at.StartSeq}, targets) {
 			// Said to an agent whose work did not come to this one: a
 			// later holder of a name, one that was stopped rather than
 			// handed over, or another agent altogether.
@@ -1862,18 +1862,6 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 type holder struct {
 	name  string
 	start int64
-}
-
-// holderAt is the agent that held a name when the event at seq was
-// written: the package's one test of "the same agent". A restart, or a
-// start that continues the agent's own conversation, is the same agent; a
-// fresh start under a stopped name (a new start, a switch back) is
-// another. False for a name the record does not have.
-func holderAt(st *state.State, name string, seq int64) (holder, bool) {
-	if rel := st.RelayAt(name, seq); rel != nil {
-		return holder{name, rel.StartSeq}, true
-	}
-	return holder{}, false
 }
 
 // handedOver maps each agent that a switch replaced to the agent that took
@@ -2205,18 +2193,12 @@ func sendOutcomeFor(st *state.State, id string, movedOn map[string]string) (o st
 // hand.
 func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id, refusal string) {
 	who := relayName
-	// Only sends to the agent that holds the name now count: one started
-	// fresh under a stopped name never saw what its predecessor was sent.
 	if rel := st.Relays[relayName]; rel != nil {
 		who = rel.Who()
 	}
-	var now holder
-	if n := len(st.Events); n > 0 {
-		now, _ = holderAt(st, relayName, st.Events[n-1].Seq)
-	}
 	var ids []string
-	movedOn := relaySendsTo(st, relayName, func(ev event.Event, d event.RelaySendData) {
-		if at, ok := holderAt(st, d.Name, ev.Seq); d.From == "user" && d.Seq == seq && (!ok || at == now) {
+	movedOn := relaySendsTo(st, relayName, func(_ event.Event, d event.RelaySendData) {
+		if d.From == "user" && d.Seq == seq {
 			ids = append(ids, d.ID)
 		}
 	})
