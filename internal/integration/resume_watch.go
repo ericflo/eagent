@@ -174,6 +174,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	m, found, err := nextPhoneMessage(ctx, w.client, info, held)
 	if err != nil {
 		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
+		return // a reply kept for retry stays kept
 	}
 	if !found {
 		if trigger.ID != "" {
