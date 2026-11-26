@@ -406,7 +406,10 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		r.relays.mu.Lock()
 		q.typing = ""
 		r.relays.mu.Unlock()
-		if res.err != nil && r.passOn(q, h) {
+		// A send typing failed part way may be in the old agent already:
+		// it is reported (unconfirmed), never typed into the new one.
+		var half *relay.TypingError
+		if res.err != nil && !errors.As(res.err, &half) && r.passOn(q, h) {
 			continue
 		}
 		if errors.Is(res.err, relay.ErrClosed) {
