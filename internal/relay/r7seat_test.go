@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,5 +39,41 @@ func TestR7ACutShortLongSendIsNotTakenByAShortSendInsideIt(t *testing.T) {
 		if got := s.matchPending(entry); !slices.Equal(got, []string{"r2"}) {
 			t.Errorf("the entry %q confirmed %v, want r2", entry, got)
 		}
+	}
+}
+
+// closingHost closes the seat the first time the send takes its last look
+// at the screen before typing: a stop that lands after the seat said it was
+// ready and before the text is pasted.
+type closingHost struct {
+	*fakeHost
+	once sync.Once
+	seat *Seat
+}
+
+func (h *closingHost) Capture(target string, lines int) (string, error) {
+	h.once.Do(h.seat.Close)
+	return h.fakeHost.Capture(target, lines)
+}
+
+// Finding 12: a seat closed after it was found ready, before the text is
+// typed, types nothing and says so with ErrClosed (not_sent), not as a
+// send that may have gone.
+func TestR7ASeatClosedJustBeforeTypingTypesNothing(t *testing.T) {
+	t.Parallel()
+	fh := &fakeHost{alive: true}
+	h := &closingHost{fakeHost: fh}
+	s := newSeat(Spec{}, claudeAgent{}, h, "x", "")
+	h.seat = s
+	s.state = "idle"
+	close(s.done)
+	_, err := s.Send("r1", "count the chairs", "queue")
+	if !errors.Is(err, ErrClosed) {
+		t.Errorf("Send returned %v, want ErrClosed", err)
+	}
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if len(fh.typed) != 0 || len(fh.keys) != 0 {
+		t.Errorf("typed %q, pressed %q into a closed seat", fh.typed, fh.keys)
 	}
 }

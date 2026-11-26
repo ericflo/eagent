@@ -497,6 +497,13 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown mode %q (queue, interrupt, after_turn)", mode)
 	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		// Stopped during the last look or the interrupt's pause: nothing typed.
+		return "", ErrClosed
+	}
 	if err := s.typeText(text); err != nil {
 		return "", &TypingError{err}
 	}
