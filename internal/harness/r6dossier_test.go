@@ -128,7 +128,6 @@ func r6QuietRestart(t *testing.T, window int, during func(s *session, pass int))
 // r6Restart is r6QuietRestart, with first run while the first answer is
 // out: what it records is unseen when the restart begins, right after.
 func r6Restart(t *testing.T, window int, first func(s *session), during func(s *session, pass int)) (*session, *r5PictureRoute) {
-	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
 	route := &r5PictureRoute{window: window, ceiling: 16384, picture: r6PictureTokens}
 	inner := r6Brain(route.window, route.ceiling, 100)
 	var passes, answers atomic.Int32
@@ -148,7 +147,7 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 		}
 		return r
 	}
-	s = startSession(t, "", brain, func(c *config.Config) {
+	s = r4StartSession(t, "", brain, func(c *config.Config) {
 		c.RolloverTokens = 0
 		c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
 	})
@@ -350,9 +349,10 @@ func r6Reachable(t *testing.T, s *session, sent []event.Event) {
 // and TestALongMessageSentDuringAPassThatCarriedNothingGetsOneMoreRestart.)
 // On the 200k route the burst is of pictures, which the provider counts
 // as many tokens and the record holds as paths.
-func TestABurstDuringAPassGetsOneMoreRestartOnEveryRouteSize(t *testing.T) {
+func r6BurstOnEveryRouteSize(t *testing.T) {
 	for _, window := range []int{128_000, 200_000, 1_000_000} {
 		t.Run(fmt.Sprint(window), func(t *testing.T) {
+			t.Parallel()
 			var sent []event.Event
 			s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 				if pass != 1 {
@@ -385,7 +385,7 @@ func TestABurstDuringAPassGetsOneMoreRestartOnEveryRouteSize(t *testing.T) {
 
 // One excerpt during the pass fits beside the briefing: the first call goes
 // through, and no second restart is made.
-func TestOneExcerptDuringAPassFitsWithoutAnotherRestart(t *testing.T) {
+func r6OneExcerptFits(t *testing.T) {
 	s, _ := r6QuietRestart(t, 128_000, func(s *session, pass int) {
 		if pass == 1 {
 			r6SendBurst(s, 1)
@@ -403,7 +403,7 @@ func TestOneExcerptDuringAPassFitsWithoutAnotherRestart(t *testing.T) {
 // out. It is more than a restart carries whole, so the restart lists it by
 // place from the start: one restart, the user answered, the briefing says
 // where each excerpt is.
-func TestABurstJustBeforeAPassIsGivenByPlaceAtOnce(t *testing.T) {
+func r6BurstJustBefore(t *testing.T) {
 	var sent []event.Event
 	// One whole excerpt is already past what a restart carries whole
 	// (80,000 bytes); six would be given by place the same way.
@@ -420,7 +420,7 @@ func TestABurstJustBeforeAPassIsGivenByPlaceAtOnce(t *testing.T) {
 // Pictures just before the pass: small in the record, so the restart
 // carries them whole, and the provider counts them as more than the window.
 // The restart after it carries nothing and gives them by place.
-func TestPicturesJustBeforeAPassAreCarriedThenGivenByPlace(t *testing.T) {
+func r6PicturesJustBefore(t *testing.T) {
 	s, _ := r6Restart(t, 128_000, func(s *session) { r6SendPictures(s, 128_000) }, func(*session, int) {})
 	if n := len(s.events(event.Dossier)); n != 2 {
 		t.Fatalf("%d restarts, want 2: one that carried the pictures, one that gave them by place", n)
@@ -437,7 +437,7 @@ func TestPicturesJustBeforeAPassAreCarriedThenGivenByPlace(t *testing.T) {
 // the one more try, so it is the last: the user is told once, in words that
 // say what happened (not that the notes and instructions are too large),
 // and their messages stay in the record, by place.
-func TestABurstDuringBothPassesStopsAtTheBoundAndSaysWhatHappened(t *testing.T) {
+func r6BurstDuringBothPasses(t *testing.T) {
 	var last []event.Event
 	s, _ := r6QuietRestart(t, 128_000, func(s *session, pass int) {
 		if pass <= 2 {
@@ -538,11 +538,13 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 // answered. The opening itself leaves room, so the conversation is
 // restarted again at the next look, as any conversation past the size is,
 // and the user is not told the notes are too large.
-func TestABurstPastTheRestartSizeButInsideTheWindowIsRestartedNormally(t *testing.T) {
-	const window = 200_000
+func r6BurstPastTheSizeInsideTheWindow(t *testing.T) {
+	const window = 128_000
 	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 		if pass == 1 {
-			r6SendBurst(s, 5) // five whole excerpts, about 120k tokens: past half the window, inside it
+			// Three whole excerpts, about 72k tokens: past the 64k
+			// restart size, inside the window.
+			r6SendBurst(s, 3)
 		}
 	})
 	if n := r5Told(s, "Noted."); n < 2 {
@@ -567,7 +569,7 @@ func r6Instructions(n int) string {
 // instructions. Every conversation a restart opens is past the restart size
 // on its first call, which goes through (it is inside the window). No
 // restart can make room: the user is told so once, and the restarts stop.
-func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *testing.T) {
+func r6ProviderCountsMore(t *testing.T) {
 	const window, ceiling = 200_000, 16384
 	route := &r5PictureRoute{window: window, ceiling: ceiling, picture: 30000}
 	inner := route.brain()
@@ -582,13 +584,13 @@ func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *t
 		}
 		return r
 	}
-	s := startSession(t, "", brain, func(c *config.Config) {
+	s := r4StartSession(t, "", brain, func(c *config.Config) {
 		c.RolloverTokens = 0
 		c.Model.ContextTokens, c.Model.MaxTokens = window, ceiling
 		c.Instructions = r6Instructions(62_000)
 	})
 	r5LogOnFailure(s)
-	s.settled()
+	r4Settled(s)
 	var limit int
 	var small bool
 	s.rt.sync(func() {
@@ -610,7 +612,7 @@ func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *t
 		if r6ToldFull(s) > 0 {
 			break
 		}
-		s.settled()
+		r4Settled(s)
 	}
 	n := len(s.events(event.Dossier))
 	if n > 3 {
@@ -631,9 +633,7 @@ func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *t
 // puts the opening itself past the size gets one restart and the user is
 // told once that no restart can make room; one whose count leaves it
 // under the size needs no restart.
-func TestRestartsByHowTheProviderCounts(t *testing.T) {
-	r4ParallelSessions(t)
-	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+func r6ByHowTheProviderCounts(t *testing.T) {
 	for _, c := range []struct {
 		window, rollover, ratio, instructions int
 		restarts, told                        int
@@ -700,7 +700,7 @@ func TestRestartsByHowTheProviderCounts(t *testing.T) {
 // but not for ever: after three restarts in a row whose conversations
 // were too long from their start, the restarts stop, and the user is
 // told once, in words that say so.
-func TestRestartsPastTheSizeEveryTimeStopAfterThreeInARow(t *testing.T) {
+func r6PastTheSizeEveryTime(t *testing.T) {
 	const window = 200_000
 	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
 		r6SendEach(s, 1, func(int) event.UserMessageData {
@@ -726,8 +726,8 @@ func TestRestartsPastTheSizeEveryTimeStopAfterThreeInARow(t *testing.T) {
 // hours): the note of what was not seen stays a few lines long, gives the
 // first and the last one by one, and every message between them lies in
 // a span of lines it names.
-func TestTheNoteOfWhatWasNotSeenStaysShortAndLosesNothing(t *testing.T) {
-	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+func r6NoteStaysShort(t *testing.T) {
+	s := r4StartSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
 	var note string
 	var sent []event.Event
 	s.rt.sync(func() {
@@ -771,5 +771,34 @@ func TestTheNoteOfWhatWasNotSeenStaysShortAndLosesNothing(t *testing.T) {
 	}
 	if total != covered {
 		t.Fatalf("the spans count %d messages, want %d", total, covered)
+	}
+}
+
+// What arrives around a dossier pass, and how the restarts that follow are
+// bounded, on routes of every size. The sessions run side by side: each
+// has its own fake provider and project, and what they share (the retry
+// pause, the test key, the hooks that start an agent) is set here once.
+func TestRestartsAroundADossierPass(t *testing.T) {
+	r4ParallelSessions(t)
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	for _, c := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"a burst during a pass gets one more restart on every route size", r6BurstOnEveryRouteSize},
+		{"one excerpt during a pass fits without another restart", r6OneExcerptFits},
+		{"a burst just before a pass is given by place at once", r6BurstJustBefore},
+		{"pictures just before a pass are carried, then given by place", r6PicturesJustBefore},
+		{"a burst during both passes stops at the bound and says what happened", r6BurstDuringBothPasses},
+		{"a burst past the restart size but inside the window is restarted normally", r6BurstPastTheSizeInsideTheWindow},
+		{"restarts past the size every time stop after three in a row", r6PastTheSizeEveryTime},
+		{"a provider that counts more than the estimate does not restart after every look", r6ProviderCountsMore},
+		{"restarts by how the provider counts", r6ByHowTheProviderCounts},
+		{"the note of what was not seen stays short and loses nothing", r6NoteStaysShort},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			c.run(t)
+		})
 	}
 }
