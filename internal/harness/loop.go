@@ -800,6 +800,7 @@ func (r *Runtime) turn(w wake) {
 	var extra []llm.Message
 	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
 	end := "done"
+	closedOut := false // the closing word failed and fallbackFinal spoke
 	// tail is the end of the prompt: written when the turn starts, and
 	// again when something that asks for a look arrives while the turn is
 	// running (the user writes, the agent ends a turn), so that nothing
@@ -964,6 +965,7 @@ func (r *Runtime) turn(w wake) {
 				if w.final && mustSpeak && !tc.spoke {
 					// The user must still get something.
 					r.fallbackFinal()
+					closedOut = true
 				}
 			})
 			end = "error"
@@ -1115,7 +1117,13 @@ func (r *Runtime) turn(w wake) {
 	}
 	r.sync(func() {
 		if recorded {
-			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: end}))
+			reason := end
+			if closedOut {
+				// The closing word failed and eagent closed in its own
+				// words: nothing is owed (an "error" end is; wakeFor).
+				reason = "error, closed in eagent's words"
+			}
+			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
 		}
 		e := turnEnding{
 			cut:            end == "error" || end == "interrupted" || end == "timeout",
