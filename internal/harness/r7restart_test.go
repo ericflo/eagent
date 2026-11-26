@@ -137,3 +137,107 @@ func TestARefusalAfterASentBackCallDoesNotRestartWithoutEnd(t *testing.T) {
 		t.Fatalf("told %d times that the restarts stopped as the window was reached again, want once", n)
 	}
 }
+
+// After restarts in a row stopped on a 60k model, the user picks a 128k
+// model, as the notice advises. It takes the conversation and answers.
+// When the conversation later fills that window it is restarted: the
+// restarts counted on the old model do not stop it (an independent read's
+// case; the session's end also checks the first call's size against the
+// record).
+func TestALargerModelThatFillsLaterIsRestartedForItsWindow(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if strings.HasPrefix(lastUserText(m), "[eagent] That reply had no tool call") {
+			return r7TooLong
+		}
+		return reply{text: "let me think about that"}
+	}
+	s := startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 60000, 2048
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
+	r6Until(t, "the fullGrew notice", func() bool {
+		return r5Told(s, fullNotice+": after several restarts in a row") > 0 || r6Dossiers(s) > restartRescueMax+3
+	})
+	if r5Told(s, fullNotice+": after several restarts in a row") == 0 {
+		t.Fatalf("no fullGrew notice")
+	}
+	var full, restarted atomic.Bool
+	r5Swap(t, s, 128_000, func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			restarted.Store(true)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if full.Load() && !restarted.Load() {
+			return r7TooLong
+		}
+		return r7RestartLooks(m, 5000)
+	})
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
+	r6Until(t, "the 128k model answers", func() bool { return r5Told(s, "Noted.") > 0 })
+	before := r6Dossiers(s)
+	full.Store(true)
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "and now?", Route: "eagent"}) })
+	r6Until(t, "a restart on 128k, or the user told the message waits", func() bool {
+		return r6Dossiers(s) > before || r5Told(s, stillFullNotice+`"and now?"`) > 0
+	})
+}
+
+// The same pick, and the 128k model refuses the conversation as it stands:
+// one restart on it makes room, and that restart is made.
+func TestALargerModelPickedAfterRestartsStoppedGetsItsOwn(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if strings.HasPrefix(lastUserText(m), "[eagent] That reply had no tool call") {
+			return r7TooLong
+		}
+		return reply{text: "let me think about that"}
+	}
+	s := startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 60000, 2048
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
+	r6Until(t, "the fullGrew notice", func() bool {
+		return r5Told(s, fullNotice+": after several restarts in a row") > 0 || r6Dossiers(s) > restartRescueMax+3
+	})
+	if r5Told(s, fullNotice+": after several restarts in a row") == 0 {
+		t.Fatalf("no fullGrew notice")
+	}
+	before := r6Dossiers(s)
+	var restarted atomic.Bool
+	var refused atomic.Int64
+	r5Swap(t, s, 128_000, func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			restarted.Store(true)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if !restarted.Load() {
+			refused.Add(1)
+			return r7TooLong
+		}
+		return r7RestartLooks(m, 5000)
+	})
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
+	r6Until(t, "an answer, or the user told the message waits", func() bool {
+		return r5Told(s, "Noted.") > 0 || r5Told(s, stillFullNotice+`"still there?"`) > 0
+	})
+	if n := r5Told(s, stillFullNotice+`"still there?"`); n > 0 {
+		t.Fatalf("on the 128k model: refused %d times, %d restarts; the user was told the message waits, though one restart makes room", refused.Load(), r6Dossiers(s)-before)
+	}
+}

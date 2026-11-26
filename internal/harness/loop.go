@@ -245,6 +245,7 @@ func (t *turnState) init(st *state.State) {
 	// conversation, and a resumed session whose prompt the provider then
 	// refused would never be restarted from a dossier again.
 	if cur := st.Current(); cur != nil {
+		var first int64 // the seq that recorded the conversation's first call
 		for _, ev := range st.Events {
 			if ev.Seq < cur.StartSeq || ev.Actor != event.ActorEagent || ev.Task != "" {
 				continue
@@ -254,7 +255,7 @@ func (t *turnState) init(st *state.State) {
 				var d event.AssistantData
 				if ev.Decode(&d) == nil {
 					if t.subCalls == 0 {
-						t.firstPrompt = provTokens(d.Usage.Input)
+						t.firstPrompt, first = provTokens(d.Usage.Input), ev.Seq
 					}
 					t.subCalls++
 				}
@@ -276,10 +277,15 @@ func (t *turnState) init(st *state.State) {
 						case d.Count == 1:
 							t.firstPrompt = provTokens(d.Usage.Input)
 						}
+						first = ev.Seq
 					}
 					t.subCalls += d.Count
 				}
 			}
+		}
+		if first < st.Moved() {
+			// Measured on another model than the one in use (recordRoute).
+			t.firstPrompt = 0
 		}
 	}
 	// Until its upgrade dossier is written, the first thing it does is

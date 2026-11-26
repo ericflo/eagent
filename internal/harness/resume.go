@@ -47,7 +47,7 @@ func (r *Runtime) closeInterrupted() {
 			continue
 		}
 		if ep := m.client.Endpoint; ep.Model != "" && (r.st.Models[who] != ep.Model || r.st.Hosts[who] != ep.BaseURL) {
-			r.append(event.New(event.Route, event.ActorHarness, event.RouteData{Actor: who, Provider: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model, Reason: "the session was resumed with this model"}))
+			r.recordRoute(event.RouteData{Actor: who, Provider: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model, Reason: "the session was resumed with this model"})
 		}
 	}
 	if cut && !legacy {

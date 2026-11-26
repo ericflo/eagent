@@ -254,7 +254,6 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
 	moved := true
 	old := r.models[sw.who]
-	oldWindow, _ := r.window()
 	if old != nil && old.client != nil {
 		moved = !sameRoute(old.client.Endpoint, sw.eps[0])
 	}
@@ -265,8 +264,9 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	if sw.who == event.ActorEagent && moved {
 		// What the old model did belongs to it: its failures and the wait
 		// before the next try (up to an hour), a refusal of the prompt as
-		// too long (which would write the next dossier from the files), and
-		// how its provider counts tokens. The new one starts clean and is
+		// too long (which would write the next dossier from the files), the
+		// restarts in a row it needed, and how its provider counts tokens
+		// (recordRoute forgets the first call's size). The new one starts clean and is
 		// tried at the loop's next tick (the poll that applied the change
 		// is followed by one); if it fails too, it backs off on its own
 		// count.
@@ -274,16 +274,11 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
 		t.overflowed, t.futileLogged = false, false
 		r.tokenScale = 0
-		if w, _ := r.window(); w != oldWindow {
-			// The first call's size was measured against a briefing sized
-			// for the old window: on another window it says nothing about
-			// whether a restart can make room.
-			t.firstPrompt = 0
-		}
+		r.restartRetried, r.restartRescues = false, 0
 	}
-	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+	r.recordRoute(event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),
-	}))
+	})
 	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.who, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
 }

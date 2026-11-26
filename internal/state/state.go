@@ -116,7 +116,10 @@ type State struct {
 	// left empty in the key), to price a reply that came back from the
 	// route before the one in use.
 	hostModels map[RouteKey]string
-	Calls      map[string]int
+	// moved is the seq of the newest route event that put eagent on
+	// another model or address (Moved).
+	moved int64
+	Calls map[string]int
 	// Latencies holds every model call's wall time per actor, for percentiles.
 	Latencies map[string][]int64
 
@@ -305,6 +308,10 @@ func (s *State) OnRoute(actor, host, asked string) bool {
 	return host == "" || asked == "" || (host == s.Hosts[actor] && asked == s.Models[actor])
 }
 
+// Moved is the seq of the newest route event that put eagent on another
+// model or address, 0 when none did.
+func (s *State) Moved() int64 { return s.moved }
+
 // Apply folds one event.
 func (s *State) Apply(ev event.Event) {
 	s.Events = append(s.Events, ev)
@@ -376,6 +383,9 @@ func (s *State) Apply(ev event.Event) {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		if d.Actor != "" {
+			if d.Actor == event.ActorEagent && ((d.Model != "" && d.Model != s.Models[d.Actor]) || (d.BaseURL != "" && d.BaseURL != s.Hosts[d.Actor])) {
+				s.moved = ev.Seq
+			}
 			if d.Model != "" {
 				s.Models[d.Actor] = d.Model
 			}

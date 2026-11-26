@@ -713,11 +713,25 @@ func (r *Runtime) takeRoute(who string, m *modelRoute, at int, client *llm.Clien
 	// Nothing is known of the new route yet.
 	m.out = outage{}
 	r.flushSilent() // the looks so far were made on the old route
-	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
+	r.recordRoute(event.RouteData{
 		Actor: who, Provider: next.Protocol, BaseURL: next.BaseURL, Model: next.Model,
 		Reason: "the configured route " + why + ": " + shortErr(err),
-	}))
+	})
 	r.followRoute(who)
+}
+
+// recordRoute writes down the model an actor's calls go to now. When that
+// puts eagent on another model or address, the size of the conversation's
+// first call is forgotten: it was measured on a briefing sized for the old
+// one, and says nothing about whether a restart can make room on this one.
+// A resumed run does the same from the record (turnState.init). Loop
+// goroutine (or before the loop starts).
+func (r *Runtime) recordRoute(d event.RouteData) {
+	was := r.st.Moved()
+	r.append(event.New(event.Route, event.ActorHarness, d))
+	if r.st.Moved() != was {
+		r.turns.firstPrompt = 0
+	}
 }
 
 // sameRoute says two endpoints are the same model at the same address: a
