@@ -825,6 +825,16 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	return cfg, cfg.Validate()
 }
 
+// OverDefaults is a bundle's contents over the built-in defaults, laid on
+// as LoadBundle lays a bundle file (overlay): keys of the three-actor
+// design carried over, a null clearing what the defaults set. Nothing else
+// is read: no preset, project file or environment variable.
+func OverDefaults(project string, bundle map[string]json.RawMessage) (Config, error) {
+	cfg := Defaults()
+	err := overlay(project, &cfg, bundle, "config")
+	return cfg, err
+}
+
 // ChosenPreset is a built-in preset as a running session gets it when the
 // user picks it from the list of configurations: the project file's
 // settings over the preset, as at a start with --preset, except which model
