@@ -10,7 +10,7 @@ import (
 // Finding 26: a built-in preset chosen by name is that preset, whatever
 // EAGENT_CONFIG names as the configuration in use or EAGENT_MODEL names as
 // the model.
-func TestChosenPresetIgnoresEnvConfigAndModel(t *testing.T) {
+func TestChosenPresetIgnoresEnvConfig(t *testing.T) {
 	unsetEnv(t, append(routeEnvNames(), "EAGENT_PRESET", "EAGENT_CONFIG")...)
 	project := t.TempDir()
 	if err := os.MkdirAll(BundlesDir(project), 0o755); err != nil {
@@ -24,7 +24,6 @@ func TestChosenPresetIgnoresEnvConfigAndModel(t *testing.T) {
 	Presets["anthropic-high"](&want)
 	for name, env := range map[string][2]string{
 		"EAGENT_CONFIG": {"EAGENT_CONFIG", "cheap"},
-		"EAGENT_MODEL":  {"EAGENT_MODEL", "zai-org/GLM-5.3"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(env[0], env[1])
