@@ -352,7 +352,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err := s.Interrupt(); err != nil {
 				return "", err
 			}
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(interruptPause)
 		}
 	case "after_turn":
 		if state == "working" {
@@ -384,6 +384,10 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	}
 	return fmt.Sprintf("typed into %s", label), nil
 }
+
+// interruptPause is how long a send waits after interrupting the agent
+// before it types. Tests shorten it.
+var interruptPause = 1500 * time.Millisecond
 
 // ErrClosed is a send to a seat that was closed or killed (the relay was
 // stopped, restarted or switched) before its text could be typed. It is
