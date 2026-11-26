@@ -509,15 +509,16 @@ func TestSessionViewReadsNaturally(t *testing.T) {
 	if groups["eagent"] != 3 || groups["Summarizer"] != 3 {
 		t.Fatalf("groups = %v", groups)
 	}
-	// Choosing a configuration keeps the session's summarizer route, set to
-	// what that configuration would give it.
+	// Choosing a configuration with no dedicated summarizer keeps the
+	// session's summarizer route as it is (r7settings_test.go has the
+	// reason).
 	t.Setenv("ANTHROPIC_API_KEY", "test")
 	p := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: "gen", Edits: []control.Edit{{Op: "set", Key: "/config", Value: "anthropic-med"}, {Op: "set", Key: "/quiet_seconds", Value: float64(0)}}}
 	out, err := ApplyValues(project, values, p, view, grant)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Routes[RouteEagent].Model != "claude-opus-5-5" || out.Routes[RouteSummarizer].Model != "claude-opus-5-5" || out.QuietSeconds != 0 {
+	if out.Routes[RouteEagent].Model != "claude-opus-5-5" || out.Routes[RouteSummarizer].Model != "z-ai/glm-5.3-flash" || out.QuietSeconds != 0 {
 		t.Fatalf("after anthropic-med: %+v", out)
 	}
 	// An inline session has no summarizer route at all.

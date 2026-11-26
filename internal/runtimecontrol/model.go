@@ -387,9 +387,14 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 			return before, fmt.Errorf("configuration %s: %w", name, err)
 		}
 		// The session keeps the routes it has: a summarizer route, when
-		// there is one, takes the one the configuration would give it.
+		// there is one, takes the one the configuration would give it if
+		// the configuration has a dedicated summarizer (as sessionImplies
+		// says), and is kept otherwise.
 		chosen := map[string]Route{RouteEagent: routeFor(project, cfg.Model), RouteSummarizer: routeFor(project, cfg.Summarizer.Route(cfg.Model))}
 		for key := range routes {
+			if key == RouteSummarizer && cfg.Summarizer.Mode != config.SummarizerDedicated {
+				continue
+			}
 			routes[key] = chosen[key]
 			touched[key] = true
 		}
