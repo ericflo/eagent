@@ -36,7 +36,50 @@ func r7FailFirstRead(t *testing.T, target string) string {
 	return srv.URL
 }
 
-// Finding 15: a session last run without the ledger, resumed at the
+// Finding 19: a file sent from the phone while the session is shutting
+// down (a turn still finishing) is neither refused in the thread nor taken
+// in: the next run takes it.
+func TestAFileSentDuringShutdownIsLeftForTheNextRun(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	fp.files["att-1"] = phoneFakeFile{name: "IMG_1.png", contentType: "image/png", data: tinyPNG}
+	g := phoneStart(t, fp, "wait for me", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	g.rt.wg.Add(1) // a turn still finishing holds the shutdown in its drain
+	g.cancel()
+	waitFor(t, "the shutdown", func() bool { return g.rt.ctx.Err() != nil })
+	fp.userReplyWith("", []map[string]any{{"id": "att-1", "kind": "image", "content_type": "image/png", "filename": "IMG_1.png", "size": len(tinyPNG), "width": 1, "height": 1, "url": "/api/v1/attachments/att-1"}})
+	id := fp.lastMessageID()
+	waitFor(t, "the poll to read it", func() bool {
+		for _, l := range g.ui.logged() {
+			if strings.Contains(l, "could not fetch IMG_1.png") {
+				return true
+			}
+		}
+		return false
+	})
+	g.rt.wg.Done()
+	g.exit(20 * time.Second)
+	if refused := fp.postsWhere(func(m map[string]any) bool {
+		meta, _ := m["meta"].(map[string]any)
+		return meta["kind"] == "attachment_refused"
+	}); len(refused) > 0 {
+		t.Fatalf("told the phone the file was refused: %v", refused)
+	}
+	for _, got := range r6PhoneIDs(g.rt.sess.Path) {
+		if got == id {
+			t.Fatalf("the message %s was recorded as taken", id)
+		}
+	}
+	for _, ev := range g.log() {
+		var d event.PhoneReadData
+		if ev.Type == event.PhoneRead && ev.Decode(&d) == nil && d.MessageID == id {
+			t.Fatalf("the message %s was recorded as read", id)
+		}
+	}
+}
+
+// Finding 15:a session last run without the ledger, resumed at the
 // terminal while two app messages wait, takes both when the first read of
 // the thread fails once.
 func TestMessagesThatWaitedAreTakenWhenTheFirstReadFails(t *testing.T) {

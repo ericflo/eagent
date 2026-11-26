@@ -1062,6 +1062,11 @@ func (p *phone) poll(r *Runtime) {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
+					if r.ctx.Err() != nil {
+						// The session is shutting down, which failed the
+						// fetch: the message is left for the next run.
+						return
+					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
 					// without a word.
