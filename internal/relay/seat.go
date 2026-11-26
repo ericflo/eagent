@@ -897,7 +897,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.mu.Lock()
 		s.hung = s.state == "blocked"
 		s.mu.Unlock()
-	} else if state == "blocked" && ready && !s.busy(screen) && !s.dialogShowing() {
+	} else if state == "blocked" && ready && !(s.hung && s.busy(screen)) && !s.dialogShowing() {
+		// A quiet agent's prompt or status line shows while it works, so
+		// it is idle only if its screen does not also say it is busy. A
+		// slow start is over as soon as the prompt shows.
 		s.setState("idle", "")
 	}
 }

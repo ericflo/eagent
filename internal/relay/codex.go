@@ -191,8 +191,11 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	return nil
 }
 
+// codexQueueArgs is the codex queue command for a message. The values go
+// joined to their flags: codex's parser takes a separate "-x ..." for an
+// unknown flag and refuses the command, and "--" does not help there.
 func codexQueueArgs(id, text string) []string {
-	return []string{"codex", "queue", "--thread", id, "--message", text}
+	return []string{"codex", "queue", "--thread=" + id, "--message=" + text}
 }
 
 // ---- choices ------------------------------------------------------------------

@@ -222,6 +222,11 @@ func AgentOf(relayName string) string {
 // status file, a spool). stateDir is a directory the relay owns. An
 // unknown agent is left for Launch to refuse.
 func Prepare(spec *Spec, stateDir string) error {
+	// The paths made here go on the agent's command line as arguments of
+	// their own; an absolute one can never be read as a flag.
+	if abs, err := filepath.Abs(stateDir); err == nil {
+		stateDir = abs
+	}
 	if a := AgentByName(spec.Profile.Agent); a != nil {
 		return a.prepare(spec, stateDir)
 	}
