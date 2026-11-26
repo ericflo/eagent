@@ -116,7 +116,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		case onPhone:
 			return "asked on the user's phone; the session waits for the answer, which will appear as a message from them", false, false
 		}
-		return "shown to the user; nobody is at a terminal and no phone is connected, so this session ends now and they can answer with `eagent resume --answer`", false, false
+		return "shown to the user; nobody is at a terminal and no phone is connected, so this session ends now and they can answer with `eagent resume " + r.sess.ID + " --answer \"...\"`", false, false
 
 	case tools.UpdateThread:
 		tc.threaded = true

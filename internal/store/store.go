@@ -200,19 +200,24 @@ func Create(root string, now time.Time) (*Session, error) {
 	return s, nil
 }
 
-// Open opens an existing session for appending. It does not read history;
-// use Read for that.
-func Open(path string, lastSeq int64, now time.Time) (*Session, error) {
+// Open opens an existing session for appending and returns its committed
+// events. The lock is taken before anything is read: a run that is still
+// finishing (its last events, a new subsession) holds it until it is done,
+// and what it wrote in that time is part of the history this run goes on
+// from, so its numbering and its file are the ones the record ends with.
+func Open(path string, now time.Time) (*Session, []event.Event, error) {
+	s := &Session{ID: filepath.Base(path), Path: path}
+	if err := s.acquireLock(); err != nil {
+		return nil, nil, err
+	}
 	files, err := subsessionFiles(path)
 	if err != nil {
-		return nil, err
+		s.Close()
+		return nil, nil, err
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("%s has no subsession files", path)
-	}
-	s := &Session{ID: filepath.Base(path), Path: path, seq: lastSeq}
-	if err := s.acquireLock(); err != nil {
-		return nil, err
+		s.Close()
+		return nil, nil, fmt.Errorf("%s has no subsession files", path)
 	}
 	current := files[len(files)-1]
 	if len(files) > 1 {
@@ -230,17 +235,25 @@ func Open(path string, lastSeq int64, now time.Time) (*Session, error) {
 	}
 	if err := s.repairTail(filepath.Join(path, current)); err != nil {
 		s.Close()
-		return nil, err
+		return nil, nil, err
+	}
+	events, err := Read(path)
+	if err != nil {
+		s.Close()
+		return nil, nil, err
+	}
+	if n := len(events); n > 0 {
+		s.seq = events[n-1].Seq
 	}
 	f, err := os.OpenFile(filepath.Join(path, current), os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		s.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	s.file = f
 	s.current = current
 	s.line = countLines(filepath.Join(path, current))
-	return s, nil
+	return s, events, nil
 }
 
 // countLines counts the lines of a subsession file, so an event appended

@@ -964,7 +964,7 @@ func TestAudit2AskUserResultSaysWhatHappensNext(t *testing.T) {
 			return hold()
 		})
 		res := audit2Results(mustReadCore(t, rt.sess.Path), "ask_user")
-		if len(res) != 1 || !strings.Contains(res[0].Output, "this session ends now") || !strings.Contains(res[0].Output, "`eagent resume --answer`") {
+		if len(res) != 1 || !strings.Contains(res[0].Output, "this session ends now") || !strings.Contains(res[0].Output, "`eagent resume "+rt.sess.ID+" --answer \"...\"`") {
 			t.Fatalf("result %+v", res)
 		}
 	})

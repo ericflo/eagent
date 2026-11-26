@@ -91,6 +91,10 @@ func main() {
 func read(in io.Reader, out io.Writer) (report, error) {
 	var r report
 	output := map[string][]string{} // "pkg" or "pkg\x00test" -> lines
+	// Every test of a package, in the order it first wrote: a package that
+	// times out, or a goroutine that panics, ends the binary with tests
+	// still running, and those never get a pass or fail of their own.
+	running := map[string][]string{} // pkg -> keys
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 1<<20), 64<<20)
 	for sc.Scan() {
@@ -103,6 +107,9 @@ func read(in io.Reader, out io.Writer) (report, error) {
 		case "build-output":
 			fmt.Fprint(out, e.Output) // a package that did not compile
 		case "output":
+			if _, seen := output[key]; !seen && e.Test != "" {
+				running[e.Package] = append(running[e.Package], key)
+			}
 			output[key] = append(output[key], e.Output)
 		case "pass", "fail", "skip":
 			took := time.Duration(e.Elapsed * float64(time.Second))
@@ -112,6 +119,15 @@ func read(in io.Reader, out io.Writer) (report, error) {
 					r.packages = append(r.packages, timed{pkg: e.Package, took: took})
 					r.total += took
 				}
+				// What the tests that never finished wrote, the panic and
+				// its stacks among it, then the package's own lines.
+				for _, k := range running[e.Package] {
+					if e.Action == "fail" {
+						fmt.Fprint(out, strings.Join(output[k], ""))
+					}
+					delete(output, k)
+				}
+				delete(running, e.Package)
 				if e.Action == "fail" {
 					r.failed = append(r.failed, e.Package)
 					fmt.Fprint(out, strings.Join(output[key], ""))

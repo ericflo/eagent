@@ -117,11 +117,8 @@ func (r *Runtime) window() (tokens, reply int) {
 	tokens, reply = r.cfg.Model.ContextTokens, r.cfg.Model.MaxTokens
 	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
 		ep := m.client.Endpoint
-		for cur := &m.conf; cur != nil; cur = cur.Fallback {
-			if cur.BaseURL == ep.BaseURL && cur.Model == ep.Model {
-				tokens, reply = cur.ContextTokens, cur.MaxTokens
-				break
-			}
+		if cur := m.confAt(); cur != nil {
+			tokens, reply = cur.ContextTokens, cur.MaxTokens
 		}
 		if tokens <= 0 {
 			if known, ok := config.Lookup(ep.BaseURL, ep.Model); ok {

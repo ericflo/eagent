@@ -65,7 +65,7 @@ var all = []llm.Tool{
 		"Pass one of the user's messages to the agent verbatim, with its attachments. Only for a message that was held back for you: the others were passed on when they arrived.",
 		`{"type":"object","properties":{
 			"relay":{"type":"string","description":"Which agent, when more than one runs."},
-			"seq":{"type":"integer","description":"The message's number (default: the user's latest)."},
+			"seq":{"type":"integer","description":"The message's seq, shown by session_read raw=true (default: the user's latest)."},
 			"mode":{"type":"string","enum":["queue","interrupt","after_turn"]}
 		}}`),
 	def(RelaySend,
