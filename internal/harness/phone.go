@@ -72,7 +72,7 @@ type phone struct {
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
 	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
-	taken      map[string]bool   // cards whose answer has been taken, by the poll or a re-ask (takeCard)
+	taken      map[string]bool   // cards whose answer has been taken (handOver, markAnswerTaken, the record)
 	threadID   string
 	threadSeen bool
 	dropping   bool // the last enqueue found the queue full
@@ -768,18 +768,14 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// answer did not reach the session as the answer (it came with
 			// no word of the card, and the card could not be checked). The
 			// card holds it: the question closes with it, unless the poll
-			// took the card's answer message first (takeCard).
+			// took the card's answer message first (handOver). Answered
+			// at the terminal meanwhile, the card's answer is a message.
 			p.mu.Lock()
 			delete(p.open, q.ID)
 			p.mu.Unlock()
-			if !p.takeCard(r, q.ID) {
-				return
-			}
-			answer := cardAnswer(q.Answer)
+			fid, answer := q.ID, cardAnswer(q.Answer)
 			r.post(func() {
-				if r.phone == p && r.st.Question != nil && r.st.Question.ID == qid && answer != "" {
-					r.handleInbox(InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat"})
-				}
+				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat"})
 			})
 			return
 		}
@@ -1026,8 +1022,8 @@ func (p *phone) poll(r *Runtime) {
 				p.mu.Lock()
 				qid, known := p.fromPhone[fid]
 				p.mu.Unlock()
-				if !p.takeCard(r, fid) {
-					continue // its answer was taken from the card itself
+				if p.isTaken(fid) {
+					continue // its answer was taken already (handOver claims it)
 				}
 				if !known {
 					// A card from before this run (the thread outlives the
@@ -1044,7 +1040,7 @@ func (p *phone) poll(r *Runtime) {
 				}
 				caps := capsFromMeta(m.Meta)
 				r.post(func() {
-					r.handleInbox(InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts})
+					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts})
 				})
 				continue
 			}
@@ -1302,20 +1298,31 @@ func liveCards(st *state.State, qid string) []string {
 	return out
 }
 
-// takeCard claims a card's answer for whoever takes it: the message poll
-// meeting the card's answer message, or a re-ask finding the card already
-// answered. Only the first claim succeeds, so one answer is never taken
-// twice (once as the answer, once more as a message). A claim is recorded
-// (phone.answer_taken), and the phone starts with every claim the record
-// holds, so it holds across a stop. Any goroutine.
-func (p *phone) takeCard(r *Runtime, fid string) bool {
-	if !p.claim(fid) {
-		return false
+// handOver gives the session a card's answer, once, whoever comes first:
+// the message poll meeting the card's answer message, or a re-ask finding
+// the card already answered. msg is an "answer" for the card's question;
+// handleInbox makes it a message when that question is no longer open
+// (answered elsewhere meanwhile), so it is never dropped. The claim and
+// the hand-over are one step on the loop, and the claim is recorded
+// (phone.answer_taken) only after the answer or message it became: a stop
+// can leave an answer without its claim, never a claim without its answer.
+// The phone starts with every claim the record holds. Loop goroutine.
+func (r *Runtime) handOver(p *phone, fid string, msg InboxMessage) {
+	if msg.Text == "" && len(msg.Attachments) == 0 {
+		return
 	}
-	r.post(func() {
-		r.append(event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: fid}))
-	})
-	return true
+	if !p.claim(fid) {
+		return // taken already
+	}
+	r.handleInbox(msg)
+	r.append(event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: fid}))
+}
+
+// isTaken reports whether a card's answer was claimed already.
+func (p *phone) isTaken(fid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.taken[fid]
 }
 
 // claim marks a card's answer taken in memory; false if it already was.

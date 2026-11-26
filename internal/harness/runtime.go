@@ -335,7 +335,8 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	// What the resume records from here on closes the question's cards on
 	// the phone, in every thread (withdrawAnswered, below).
 	planFrom := len(r.st.Events)
-	holdBack := r.planResume(opts).Words == wordsMessage
+	plan := r.planResume(opts)
+	holdBack := plan.Words == wordsMessage
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil && !holdBack {
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
@@ -375,6 +376,9 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		} else {
 			r.handleInbox(in)
 		}
+	}
+	if plan.WordsCard != "" {
+		r.markAnswerTaken(plan.WordsCard) // now that the words are recorded
 	}
 	if r.phone != nil {
 		r.phone.withdrawAnswered(r, r.st.Events[planFrom:])
