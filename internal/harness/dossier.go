@@ -360,6 +360,7 @@ func (r *Runtime) needsDossier() bool {
 				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My conversation is full again right after I restarted it from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."})
 			}
 		}
+		r.tellStillFull()
 		return false
 	}
 	return true
@@ -377,57 +378,80 @@ func (r *Runtime) restartFull(limit int) bool {
 	if _, small := r.room(); !small {
 		return true
 	}
-	if r.refusedFirst() {
-		// Refused before any call of this conversation went through. When
-		// it holds more than its opening (what the restart carried whole,
-		// what came while the dossier was written), the next restart takes
-		// that in by place and carries nothing (startDossier), so it can
-		// make room. When it holds its opening alone, no restart can; the
-		// harness's own words (the reread notice, the notices that say the
-		// conversation is full) are not something a restart could take in.
-		// Once that is decided it stands until a call goes through: what
-		// is added after the refusal (a message) cannot make the opening
-		// fit. The decision is read from the record too (toldFull), so a
-		// resumed session does not start the restarts again.
-		return r.turns.futileLogged || r.toldFull() || !r.carriesMore()
+	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, decided: r.turns.futileLogged || r.toldFull()}
+	if !f.refused {
+		_, fixed := r.inputRoom()
+		if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
+			fixed += llm.EstimateTokens(v[0].Text)
+		}
+		// Room for one message beside the opening, in the provider's
+		// count: without it another restart could only open on the same
+		// full prompt.
+		span, _, carry := r.smallBudget()
+		f.openingFits = span > 0 && r.provider(fixed)+carry < limit
 	}
-	_, fixed := r.inputRoom()
-	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
-		fixed += llm.EstimateTokens(v[0].Text)
-	}
-	// Room for one message beside the opening, in the provider's count:
-	// without it another restart could only open on the same full prompt.
-	span, _, carry := r.smallBudget()
-	return span <= 0 || r.provider(fixed)+carry >= limit
+	return !restartHelps(f)
 }
 
-// carriesMore reports that the conversation holds something past its
-// opening that a restart could take in by place: an event after what its
-// dossier covers that shows in the conversation and is not eagent's or
-// the harness's own (shows). Loop goroutine only.
-func (r *Runtime) carriesMore() bool {
-	cur := r.st.Current()
-	if cur == nil {
+// carried is what the restart that began the conversation carried whole
+// into it: events no look had taken in yet (startDossier).
+type carried int
+
+const (
+	carriedUnknown carried = iota // not known: this run did not make that restart
+	carriedSome
+	carriedNothing
+)
+
+// restartFacts is what decides whether another restart is worth trying for
+// a conversation a restart began and that was too long from its start.
+type restartFacts struct {
+	// refused: the provider refused the conversation as too long before
+	// any of its calls went through. When false, its first call went
+	// through and was already past the restart size.
+	refused bool
+	// carried: what the restart that began it carried whole.
+	carried carried
+	// decided: no restart can make room was already found for this
+	// conversation and said (futileLogged in this run, toldFull from the
+	// record), and no call has gone through since.
+	decided bool
+	// openingFits (not refused): the system prompt, the tools and the
+	// briefing, with room for one message, fit under the restart size.
+	openingFits bool
+}
+
+// restartHelps answers the one question every rule here comes from:
+// would another restart send the provider a smaller opening than the one
+// it just refused?
+//
+//   - Refused, and the restart carried something whole: the next restart
+//     carries nothing (startDossier), so its opening is smaller. Yes.
+//   - Refused, and the restart carried nothing: the next one carries
+//     nothing too, and opens on a briefing sized the same way for the same
+//     route. Whatever was recorded since (the harness's notices, the
+//     agent's progress and turns, a timer, a message from the user, the
+//     phone) goes into its facts by place and adds nothing to the opening
+//     the provider refused. No. The user's message still gets its
+//     answer path: it is owed a look, the look is made on every wake and
+//     goes out the moment the conversation fits (a model with a larger
+//     window, picked in the thread's settings, takes the same opening
+//     without a restart), and the user is told it waits (tellStillFull).
+//   - Refused, and not known what it carried (the restart was made by an
+//     earlier run): one more restart, whose carrying this run then knows.
+//   - Once decided, it stands until a call goes through.
+//   - Not refused (the first call went through, past the restart size):
+//     what came after the opening is now seen and is not carried again,
+//     so a restart helps when the opening itself leaves room.
+func restartHelps(f restartFacts) bool {
+	switch {
+	case !f.refused:
+		return f.openingFits
+	case f.decided:
 		return false
+	default:
+		return f.carried != carriedNothing
 	}
-	covers := int64(-1)
-	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
-		if ev := r.st.Events[i]; ev.Type == event.Dossier {
-			var d event.DossierData
-			if ev.Decode(&d) == nil {
-				covers = d.CoversSeq
-			}
-		}
-	}
-	if covers < 0 {
-		return false
-	}
-	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > covers; i-- {
-		if shows(r.st.Events[i]) {
-			return true
-		}
-	}
-	return false
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
@@ -472,6 +496,7 @@ type dossierJob struct {
 	tokens int
 	adopt  bool // the record is the three-actor design's (resume.go)
 	fresh  bool // written from the files, without the conversation
+	carry  bool // the new conversation carries whole what no look took in
 }
 
 // dossierResult is what a pass came back with.
@@ -512,7 +537,7 @@ func (r *Runtime) startDossier() {
 		// the conversation being replaced was itself begun by a restart
 		// and refused on its first call: what that restart carried did
 		// not fit, and carrying it again would only be refused again.)
-		job.covers = t.seen
+		job.covers, job.carry = t.seen, true
 	}
 	switch {
 	case t.adopt:
@@ -561,10 +586,14 @@ const rereadNotice = "I'm rereading the session so far, to carry on with a clear
 // message or an answer of theirs for eagent waits on the pass: one written
 // during it, or one no look had taken in when it began. A message typed
 // straight into the agent's terminal is not waiting on eagent and says
-// nothing. It is recorded as eagent's words and shown in the next
-// conversation, so the model knows what the user was told; it is not
-// taken for an answer (saidAt and saidSeq stay as they were). Loop
-// goroutine only.
+// nothing. It is recorded as eagent's words, and is said before the place
+// the dossier covers is fixed. So when the restart carries what no look
+// took in (the usual case), the notice is carried with it and the model
+// sees what the user was told; when the restart carries nothing, the
+// notice is in the record and its facts by place, not in the new
+// conversation, and the message it promised an answer to is still owed a
+// look either way. It is not taken for an answer (saidAt and saidSeq stay
+// as they were). Loop goroutine only.
 func (r *Runtime) tellRereading() {
 	t := &r.turns
 	if !t.compacting || t.rereadTold || r.ending {
@@ -605,6 +634,50 @@ scan:
 	}
 	r.append(event.New(event.Message, event.ActorEagent, event.MessageData{Auto: true, Text: rereadNotice}))
 	r.ui.Say(rereadNotice)
+}
+
+// stillFullNotice opens what the user is told when they write to eagent
+// after it found no restart can make room.
+const stillFullNotice = "I can't answer "
+
+// tellStillFull answers, in the harness's words, a message or an answer
+// for eagent that came after the user was told no restart can make room,
+// while the provider still refuses the conversation: once for each, naming
+// it, so a person who writes again is neither met with silence nor with
+// the same notice each time. The message stays owed a look, and is
+// answered by the model once the conversation fits. Loop goroutine only.
+func (r *Runtime) tellStillFull() {
+	t := &r.turns
+	if !r.refusedFirst() || r.ending {
+		return
+	}
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > t.seen; i-- {
+		ev := r.st.Events[i]
+		text := ""
+		switch ev.Type {
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			if ev.Decode(&d) == nil {
+				text = d.Text
+			}
+		case event.UserMessage:
+			var d event.UserMessageData
+			if ev.Decode(&d) != nil || d.Held == "" {
+				continue
+			}
+			text = d.Text
+		case event.Message:
+			var d event.MessageData
+			if ev.Decode(&d) == nil && d.Auto && (strings.HasPrefix(d.Text, fullNotice) || strings.HasPrefix(d.Text, stillFullNotice)) {
+				return // they were told since they last wrote
+			}
+			continue
+		default:
+			continue
+		}
+		r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s%q yet: my model still refuses my conversation as too long, even right after a restart. It is kept, and I'll answer it as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now.", stillFullNotice, clipRunes(oneLine(text, 120), 120))})
+		return
+	}
 }
 
 // dossierRefused is why a pass is written from the files after the
@@ -1048,6 +1121,10 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
+	r.restartCarried = carriedNothing
+	if job.carry {
+		r.restartCarried = carriedSome
+	}
 	// A new conversation: if this one turns out too long from its first
 	// call as well, the user is told again.
 	t.futileLogged = false
