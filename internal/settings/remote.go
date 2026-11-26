@@ -172,7 +172,9 @@ func (s *Service) RemoteSnapshot(grant control.Grant) (RemoteView, error) {
 			}
 		}
 		out.Descriptor.Fields = append(out.Descriptor.Fields, field)
-		if v, ok := pointerValue(onDisk, prefix); ok && v != nil {
+		// A null the file holds is saved too: it clears what the preset
+		// sets, and unsetting it puts the preset's value back.
+		if v, ok := pointerValue(onDisk, prefix); ok {
 			out.Snapshot.Saved[prefix] = v
 		}
 		if v, ok := pointerValue(effective, prefix); ok && v != nil {
