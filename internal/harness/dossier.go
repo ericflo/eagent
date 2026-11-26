@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -167,9 +168,24 @@ const (
 	scaleMax  = 4 * scaleUnit
 )
 
-// scale is the ratio learned so far, in thousandths. Loop goroutine only.
+// scale is the ratio learned so far on the route in use, in thousandths.
+// One learned on another route (before a fallback took over, or before a
+// model was picked in the thread's settings) says nothing about this one,
+// which starts at 1 again. Loop goroutine only.
 func (r *Runtime) scale() int {
+	if r.tokenScaleOn != r.routeKey() {
+		return scaleUnit
+	}
 	return max(r.tokenScale, scaleUnit)
+}
+
+// routeKey names the route eagent's calls go to right now. Loop goroutine
+// only.
+func (r *Runtime) routeKey() string {
+	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
+		return m.client.Endpoint.BaseURL + " " + m.client.Endpoint.Model
+	}
+	return ""
 }
 
 // provider is an estimate in the provider's count; estimate is the
@@ -179,16 +195,29 @@ func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale
 
 // calibrate learns from one of eagent's calls how its provider counts
 // against the estimate (see scale). Any goroutine: what it learns is
-// applied on the loop. A request with pictures teaches nothing (the
-// estimate does not see them), nor one too small to measure by.
+// applied on the loop, to the route in use then (a call that moves to a
+// fallback route posts this before the move).
+//
+// A picture that goes out with the request teaches nothing: a provider
+// counts one as anything from a few hundred tokens to many thousands, and
+// the estimate does not see it. One that does not go out (refused before,
+// so a note stands in its place, or too large to be sent) is no reason to
+// learn nothing. Reasoning replayed verbatim (Native) is counted by some
+// providers and dropped by others; its estimate is the most it can be, so
+// a request that carries it only teaches a ratio at least this high, and
+// never lowers one learned before. Nor does a request too small to measure
+// by teach anything.
 func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err error) {
 	if who != event.ActorEagent {
 		return
 	}
 	est := llm.EstimateTokens(req.System) + toolTokens()
+	unknown := 0
 	for _, m := range req.Messages {
-		if len(m.Images) > 0 {
-			return
+		for _, im := range m.Images {
+			if sentPicture(im) {
+				return
+			}
 		}
 		est += llm.EstimateTokens(m.Text)
 		for _, c := range m.ToolCalls {
@@ -197,26 +226,49 @@ func (r *Runtime) calibrate(who string, req llm.Request, resp *llm.Response, err
 		for _, res := range m.Results {
 			est += llm.EstimateTokens(res.Output)
 		}
+		if len(m.Native) > 0 {
+			unknown += llm.EstimateTokens(string(m.Native))
+		}
 	}
 	if est < 1000 {
 		return
 	}
+	// learn sets the ratio to k, or (raise) only raises it. On the loop.
+	learn := func(k int, raise bool) {
+		k = min(k, scaleMax)
+		if key := r.routeKey(); r.tokenScaleOn != key {
+			r.tokenScale, r.tokenScaleOn = 0, key
+		}
+		if raise && k <= r.scale() {
+			return
+		}
+		r.tokenScale = k
+	}
 	var ae *llm.APIError
 	switch {
 	case err == nil && resp != nil && resp.Usage.Input > 0:
-		k := min(resp.Usage.Input*scaleUnit/est, scaleMax)
-		r.post(func() { r.tokenScale = k })
+		k := max(resp.Usage.Input-unknown, 0) * scaleUnit / est
+		r.post(func() { learn(k, unknown > 0) })
 	case errors.As(err, &ae) && ae.ContextOverflow():
 		// Refused as too long: the provider counts at least the room it
 		// has for input in this request. A tenth more is held back, as
 		// the refusal says only that it was over.
 		r.post(func() {
 			input, _ := r.inputRoom()
-			if k := min(input*scaleUnit*11/10/est, scaleMax); k > r.scale() {
-				r.tokenScale = k
-			}
+			learn(max(input-unknown, 0)*11/10*scaleUnit/est, true)
 		})
 	}
+}
+
+// sentPicture reports that a picture in a request goes out as a picture:
+// it is not marked refused, and the file is there and small enough to be
+// inlined (llm.Image).
+func sentPicture(im llm.Image) bool {
+	if im.Refused {
+		return false
+	}
+	st, err := os.Stat(im.Path)
+	return err == nil && st.Size() > 0 && st.Size() <= 10<<20
 }
 
 // smallBudget is how a small route's room is shared out, in the

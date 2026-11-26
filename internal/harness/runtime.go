@@ -131,6 +131,7 @@ type Runtime struct {
 
 	turns          turnState             // the model loop (loop.go); loop-owned
 	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
+	tokenScaleOn   string                // the route tokenScale was learned on (dossier.go); loop-owned
 	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl *runtimecontrol.Controller

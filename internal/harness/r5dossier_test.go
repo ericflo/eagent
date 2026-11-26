@@ -178,3 +178,86 @@ func r5LogOnFailure(s *session) {
 		}
 	})
 }
+
+// r5Scale runs calibrate for a request of the given messages, answered
+// with a prompt of input tokens, and returns the ratio the loop holds
+// after it.
+func r5Scale(s *session, msgs []llm.Message, input int) int {
+	req := llm.Request{System: s.rt.system, Messages: msgs}
+	s.rt.calibrate(event.ActorEagent, req, &llm.Response{Usage: event.Usage{Input: input}}, nil)
+	k := 0
+	s.rt.sync(func() { k = s.rt.scale() })
+	return k
+}
+
+// r5Estimate is eagent's estimate of a request of these messages.
+func r5Estimate(s *session, msgs []llm.Message) int {
+	est := llm.EstimateTokens(s.rt.system) + toolTokens()
+	for _, m := range msgs {
+		est += llm.EstimateTokens(m.Text)
+	}
+	return est
+}
+
+// A picture the record says was refused goes out as a note, so it does not
+// keep the request from teaching the ratio; one that goes out still does.
+func TestTheProviderRatioIsLearnedPastAPictureThatIsNotSent(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	shot := filepath.Join(s.rt.opts.Project, "shot.png")
+	if err := os.WriteFile(shot, tinyPNG, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("the heron lands at dusk ", 200)
+	refused := []llm.Message{{Role: "user", Text: text, Images: []llm.Image{{Path: shot, Refused: true}}}}
+	if k := r5Scale(s, refused, 2*r5Estimate(s, refused)); k < 1900 || k > 2000 {
+		t.Fatalf("ratio %d after a request whose only picture was refused, want about 2000", k)
+	}
+	sent := []llm.Message{{Role: "user", Text: text, Images: []llm.Image{{Path: shot}}}}
+	if k := r5Scale(s, sent, 3*r5Estimate(s, sent)); k > 2000 {
+		t.Fatalf("ratio %d after a request that sent a picture, want the 2000 learned before", k)
+	}
+}
+
+// Reasoning replayed verbatim may or may not be counted by the provider. A
+// request that carries it never lowers the ratio, and the reasoning's own
+// size is not taken for the text's.
+func TestReplayedReasoningDoesNotInflateTheProviderRatio(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	native := json.RawMessage(`[{"type":"reasoning","encrypted_content":"` + strings.Repeat("Zm9v", 6000) + `"}]`)
+	msgs := []llm.Message{{Role: "user", Text: "go on"}, {Role: "assistant", Text: "on it", Native: native, NativeProtocol: llm.ProtocolResponses}}
+	est, reasoning := r5Estimate(s, msgs), llm.EstimateTokens(string(native))
+	// Counted by the provider: the text itself is counted as estimated.
+	if k := r5Scale(s, msgs, est+reasoning); k != 1000 {
+		t.Fatalf("ratio %d when the provider counted the reasoning and the text as estimated, want 1000", k)
+	}
+	plain := []llm.Message{{Role: "user", Text: strings.Repeat("go on ", 400)}}
+	if k := r5Scale(s, plain, r5Estimate(s, plain)*3/2); k < 1450 || k > 1500 {
+		t.Fatalf("ratio %d after a plain request counted at 1.5 times, want about 1500", k)
+	}
+	// Dropped by the provider: that does not lower what was learned.
+	if k := r5Scale(s, msgs, est); k < 1450 || k > 1500 {
+		t.Fatalf("ratio %d after a request whose reasoning the provider dropped, want the 1500 learned before", k)
+	}
+}
+
+// The ratio belongs to the route it was learned on: after a move to
+// another route (a fallback, a model picked in the thread's settings) it
+// starts at 1 again.
+func TestTheProviderRatioIsNotCarriedToAnotherRoute(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	plain := []llm.Message{{Role: "user", Text: strings.Repeat("go on ", 400)}}
+	if k := r5Scale(s, plain, r5Estimate(s, plain)*2); k < 1950 {
+		t.Fatalf("ratio %d, want about 2000", k)
+	}
+	k := 0
+	s.rt.sync(func() {
+		m := s.rt.models[event.ActorEagent]
+		ep := m.client.Endpoint
+		ep.Model = "another-model"
+		m.client = s.rt.newClient(ep, event.ActorEagent)
+		k = s.rt.scale()
+	})
+	if k != 1000 {
+		t.Fatalf("ratio %d on another route, want 1000", k)
+	}
+}
