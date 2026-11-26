@@ -130,19 +130,34 @@ func tmux(stdin []byte, args ...string) (string, error) {
 	return string(out), nil
 }
 
+// tmuxArg keeps one argument an argument. tmux splits its own command line
+// at any argument that ends in ";" (a lone ";" included) and runs what
+// follows as another tmux command, such as run-shell, so a program's
+// arguments, a folder or a key could otherwise run a shell command. tmux
+// reads a trailing "\;" as a literal ";" and leaves every other character
+// alone.
+func tmuxArg(s string) string {
+	if strings.HasSuffix(s, ";") {
+		return s[:len(s)-1] + `\;`
+	}
+	return s
+}
+
 func (Tmux) Start(name, dir string, argv, env []string) error {
 	// The scrollback limit only applies to panes created after it is set, so
 	// it goes first, on eagent's private server.
 	args := []string{"start-server", ";", "set-option", "-g", "history-limit", "50000", ";",
-		"new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", dir}
+		"new-session", "-d", "-s", tmuxArg(name), "-x", "200", "-y", "50", "-c", tmuxArg(dir)}
 	for _, kv := range env {
-		args = append(args, "-e", kv)
+		args = append(args, "-e", tmuxArg(kv))
 	}
 	args = append(args, "--")
-	args = append(args, argv...)
+	for _, a := range argv {
+		args = append(args, tmuxArg(a))
+	}
 	// Keep the pane when the program exits, so its last words can be read
 	// and the exit noticed rather than the session silently vanishing.
-	args = append(args, ";", "set-option", "-t", name, "remain-on-exit", "on")
+	args = append(args, ";", "set-option", "-t", name+":", "remain-on-exit", "on")
 	_, err := tmux(nil, args...)
 	return err
 }
@@ -172,7 +187,8 @@ func (Tmux) Paste(name, text string) error {
 
 func (Tmux) Keys(name string, keys ...string) error {
 	for _, k := range keys {
-		if _, err := tmux(nil, "send-keys", "-t", name+":", k); err != nil {
+		// "--" so a key that starts with "-" is typed, not read as a flag.
+		if _, err := tmux(nil, "send-keys", "-t", name+":", "--", tmuxArg(k)); err != nil {
 			return err
 		}
 	}

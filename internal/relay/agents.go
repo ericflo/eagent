@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/ericflo/eagent/internal/config"
 )
@@ -233,14 +234,26 @@ func CheckPick(p config.RelayProfile, model, effort string) error {
 	if efforts := AgentEfforts(p.Agent); effort != "" && len(efforts) > 0 && !slices.Contains(efforts, effort) {
 		return fmt.Errorf("%s takes reasoning effort %s, not %q", AgentName(p.Agent), strings.Join(efforts, ", "), effort)
 	}
+	if !pickWord(effort) {
+		return fmt.Errorf("%q is not a reasoning effort", effort)
+	}
 	a := AgentByName(p.Agent)
-	if len(model) > 200 || strings.ContainsAny(model, "\r\t\n") || a != nil && !a.validModel(model) || a == nil && strings.Contains(model, " ") {
+	if len(model) > 200 || !pickWord(model) || a != nil && !a.validModel(model) || a == nil && strings.Contains(model, " ") {
 		return fmt.Errorf("%q is not a model name", model)
 	}
 	if a == nil {
 		return nil
 	}
 	return a.checkPick(p.With(model, effort))
+}
+
+// pickWord reports whether a model or effort pick can go on an agent's
+// command line and into its terminal as a value: no control character (a
+// newline would submit, an escape would end a paste), nothing starting
+// with "-" (the agent would read a flag) and no ";" (no model name has one,
+// and terminal multiplexers split commands at it).
+func pickWord(s string) bool {
+	return !strings.HasPrefix(s, "-") && !strings.Contains(s, ";") && !strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // UpgradeCommand is the argv that updates an agent's CLI.
