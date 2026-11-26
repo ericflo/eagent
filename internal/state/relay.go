@@ -321,6 +321,15 @@ func (s *State) keepHeld(r, prev *Relay) {
 		}
 		if text, ok := prev.Undelivered[d.ID]; ok {
 			r.Undelivered[d.ID] = text
+			if ev.Seq < r.StartSeq {
+				// Held for a new agent under the name (a restart on its own
+				// conversation holds it from its first start already): the
+				// send is that agent's own, and it holds the name from it.
+				r.StartSeq, r.Sends = ev.Seq, r.Sends+1
+				if r.LastSendAt.IsZero() {
+					r.LastSendFrom, r.LastSendAt = d.From, ev.Time
+				}
+			}
 		}
 	}
 }

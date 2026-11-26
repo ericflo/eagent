@@ -92,6 +92,53 @@ func TestR10ASendOfAStoppedHolderIsNotOnItsWayToTheNewOne(t *testing.T) {
 	}
 }
 
+// Finding 7. Codex is stopped, a fresh Codex is started, and the user's
+// instruction is forwarded while it starts: the new Codex is typed it and
+// confirms it. A switch to Claude then hands that instruction over in the
+// brief, as the new Codex's own.
+func TestR10AnInstructionHeldForAFreshStartIsInTheNextBrief(t *testing.T) {
+	const text = "build the payment webhook handler"
+	fresh, claude := newFakeSeat("two"), newFakeSeat("three")
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), fresh, claude}, nil)
+	rt := newLaunchRuntime(t)
+	tool := func(name string, args map[string]any) (string, bool) {
+		return rt.relayTool(name, argStr(args), argNum(args), argList(args), false)
+	}
+	if out, isErr := tool("relay_control", map[string]any{"relay": "codex", "action": "stop"}); isErr {
+		t.Fatalf("stop: %s", out)
+	}
+	started := make(chan string, 1)
+	go func() {
+		out, _ := tool("relay_start", map[string]any{"profile": "codex"})
+		started <- out
+	}()
+	g.waitEntered(t)
+	var seq int64
+	rt.sync(func() { seq = rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text})).Seq })
+	if out, isErr := tool("relay_forward", map[string]any{"relay": "codex", "seq": int(seq)}); isErr || !strings.Contains(out, "is starting") {
+		t.Fatalf("forward while the fresh Codex starts: %q", out)
+	}
+	id := lastSendID(rt)
+	g.release <- struct{}{}
+	if out := recv(t, started, "relay_start"); !strings.Contains(out, "Started.") {
+		t.Fatalf("relay_start: %q", out)
+	}
+	waitFor(t, "the new Codex to confirm the instruction", func() bool {
+		var o state.SendOutcome
+		rt.sync(func() { o = rt.st.SendOutcome(id) })
+		return o == state.SendArrived
+	})
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	if out := recv(t, switched, "switch"); !strings.Contains(out, "Handed over") {
+		t.Fatalf("switch: %q", out)
+	}
+	if sent := claude.sentTexts(); len(sent) == 0 || !strings.Contains(sent[0], text) {
+		t.Fatalf("Claude's brief leaves out the instruction:\n%q", sent)
+	}
+}
+
 // Finding 9, its bound. A send passed back to the name after the earlier
 // holder was stopped is the agent's that holds it now: on its way to it.
 func TestR10ASendMovedOntoTheNewHolderIsItsOwn(t *testing.T) {
