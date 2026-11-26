@@ -135,6 +135,13 @@ func invAfterRun(r *Runtime) {
 	for _, d := range invCompare(&live, &fresh) {
 		invFail("%s: after the session ended, %s is %s in the loop and %s rebuilt from the record", test, d[0], d[1], d[2])
 	}
+	// A send can wait to be confirmed only while its agent is there to
+	// confirm it.
+	for name, rel := range st.Relays {
+		if (rel.Ended || rel.State == "exited") && len(rel.Undelivered) > 0 {
+			invFail("%s: %d sends are still waiting on %s, which is %s", test, len(rel.Undelivered), name, rel.State)
+		}
+	}
 }
 
 var (

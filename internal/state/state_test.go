@@ -398,6 +398,30 @@ func TestWaiting(t *testing.T) {
 	}
 }
 
+// An agent that is gone confirms nothing more: a send the record still
+// lists as unconfirmed for it must not hold the session, whether or not
+// anything wrote its outcome.
+func TestASendToAnAgentThatIsGoneIsNotAwaited(t *testing.T) {
+	b := newBuilder()
+	b.startClaude()
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "idle"}))
+	b.add(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Text: "go", Auto: true}))
+	st := Replay(b.events)
+	if st.Waiting() || st.Relays["claude"].Awaited() != 1 {
+		t.Fatalf("a send to a running agent is awaited")
+	}
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "exited"}))
+	st = Replay(b.events)
+	if rel := st.Relays["claude"]; !st.Waiting() || rel.Awaited() != 0 || len(rel.Undelivered) != 1 {
+		t.Fatalf("an exited agent: waiting %v, awaited %d, listed %d", st.Waiting(), rel.Awaited(), len(rel.Undelivered))
+	}
+	b.add(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: "claude"}))
+	st = Replay(b.events)
+	if rel := st.Relays["claude"]; !st.Waiting() || rel.Awaited() != 0 {
+		t.Fatalf("a stopped agent: waiting %v, awaited %d", st.Waiting(), rel.Awaited())
+	}
+}
+
 func TestSummaryCallsAreCountedUnderWhoMadeThem(t *testing.T) {
 	b := newBuilder()
 	b.add(event.New(event.ThreadTitle, event.ActorSummarizer, event.ThreadTitleData{Title: "Importer rewrite", Description: "Rewriting the importer.", By: "summary", SeenSeq: 2, Usage: &event.Usage{Input: 900, Output: 40}, ElapsedMS: 700}))

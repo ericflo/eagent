@@ -1112,7 +1112,7 @@ func (r *Runtime) checkIdleAgents() {
 	for _, rel := range active {
 		// Between turns (or gone), with nothing on its way to it and no
 		// standing order (autopilot has its own check).
-		if rel.State != "idle" && rel.State != "exited" || rel.Autopilot != nil || len(rel.Undelivered) > 0 {
+		if rel.State != "idle" && rel.State != "exited" || rel.Autopilot != nil || rel.Awaited() > 0 {
 			return
 		}
 		who = append(who, rel.Who())

@@ -653,7 +653,7 @@ func (s *State) Conversation() *Subsession {
 // still on its way. A session with no agent running is waiting too.
 func (s *State) Waiting() bool {
 	for _, r := range s.ActiveRelays() {
-		if r.State == "starting" || r.State == "working" || len(r.Undelivered) > 0 {
+		if r.State == "starting" || r.State == "working" || r.Awaited() > 0 {
 			return false
 		}
 	}

@@ -294,6 +294,18 @@ func (s *State) applyRelay(ev event.Event) {
 	}
 }
 
+// Awaited is how many sends to r are still expected to be confirmed. An
+// agent that has exited or been stopped confirms nothing more, so nothing
+// is awaited from it, whatever the record still lists as unconfirmed: a
+// decision that waits for sends to arrive must not wait on an agent that
+// is gone.
+func (r *Relay) Awaited() int {
+	if r.Ended || r.State == "exited" {
+		return 0
+	}
+	return len(r.Undelivered)
+}
+
 // RelayAt returns the relay that held a name when the event at seq was
 // written: the name can be taken again by a new agent (a custom profile now
 // backed by another program, a switch back), and what is said about an
