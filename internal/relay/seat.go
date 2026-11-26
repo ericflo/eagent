@@ -479,6 +479,10 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// through the spool.
 				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
+			} else if errors.As(err, new(typedErr)) {
+				// It was being typed when it failed: typing it again
+				// could put it into the agent twice.
+				return "", err
 			}
 			// No native hand-off available: type it now; the agent queues it.
 		}

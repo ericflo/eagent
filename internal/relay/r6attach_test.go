@@ -10,6 +10,43 @@ import (
 	"time"
 )
 
+// enterFails is a terminal whose first Enter is refused (a slow or busy
+// tmux), after the paste went in.
+type enterFails struct {
+	*fakeHost
+	failed bool
+}
+
+func (h *enterFails) Keys(target string, keys ...string) error {
+	if !h.failed && slices.Contains(keys, "Enter") {
+		h.failed = true
+		return fmt.Errorf("tmux: timed out")
+	}
+	return h.fakeHost.Keys(target, keys...)
+}
+
+// A message held for Antigravity is typed into its native queue. If that
+// typing fails after the paste went in, the text is not pasted a second
+// time: the send fails and the model decides.
+func TestAntigravityHeldMessageIsNeverPastedTwice(t *testing.T) {
+	saved := typeSettle
+	typeSettle = time.Millisecond
+	t.Cleanup(func() { typeSettle = saved })
+	h := &enterFails{fakeHost: &fakeHost{alive: true}}
+	s := newSeat(Spec{Name: "antigravity"}, antigravityAgent{}, h, "x", "")
+	s.state = "working"
+	_, err := s.Send("r1", "then run the tests", "after_turn")
+	h.mu.Lock()
+	typed := slices.Clone(h.typed)
+	h.mu.Unlock()
+	if len(typed) != 1 {
+		t.Fatalf("pasted %d times: %q (err %v)", len(typed), typed, err)
+	}
+	if err == nil {
+		t.Fatal("a send whose Enter was refused reported success")
+	}
+}
+
 // stamp is a transcript timestamp as pi and Claude write them.
 func stamp(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000Z") }
 
