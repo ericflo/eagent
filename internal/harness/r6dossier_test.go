@@ -551,3 +551,70 @@ func TestABurstPastTheRestartSizeButInsideTheWindowIsRestartedNormally(t *testin
 		t.Fatal("the user was told the notes and instructions are too large, and the opening leaves room")
 	}
 }
+
+// r6Instructions is about n tokens (by the estimate) of a project's
+// standing instructions.
+func r6Instructions(n int) string {
+	line := "Always run make check before a commit, and keep the work on main with no branches.\n"
+	return strings.Repeat(line, n*7/2/len(line)+1)
+}
+
+// An ordinary route (200k window, restart size 100k) whose provider counts
+// 1.45 tokens for each one eagent estimates, evenly, as code, logs and
+// lists of places can on real tokenizers, with about 62k tokens of standing
+// instructions. Every conversation a restart opens is past the restart size
+// on its first call, which goes through (it is inside the window). No
+// restart can make room: the user is told so once, and the restarts stop.
+func TestAProviderThatCountsMoreThanTheEstimateDoesNotRestartAfterEveryLook(t *testing.T) {
+	const window, ceiling = 200_000, 16384
+	route := &r5PictureRoute{window: window, ceiling: ceiling, picture: 30000}
+	inner := route.brain()
+	brain := func(model string, m []map[string]any) reply {
+		r := inner(model, m)
+		if dossierRequest(m) != "" || r.status != 0 {
+			return r
+		}
+		r.prompt = r.prompt * 145 / 100
+		if r.prompt > window-ceiling {
+			return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
+		}
+		return r
+	}
+	s := startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = window, ceiling
+		c.Instructions = r6Instructions(62_000)
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	var limit int
+	var small bool
+	s.rt.sync(func() {
+		limit = s.rt.rolloverTokens()
+		_, small = s.rt.room()
+	})
+	if small || limit != 100_000 {
+		t.Fatalf("the setup is not the ordinary 200k route it means to be")
+	}
+	for i := 0; i < 6; i++ {
+		before := len(s.events(event.Dossier))
+		s.rt.sync(func() {
+			s.rt.userMessage(event.UserMessageData{Text: fmt.Sprintf("@e status %d?", i), Route: "eagent"})
+		})
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && len(s.events(event.Dossier)) == before && r6ToldFull(s) == 0 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		if r6ToldFull(s) > 0 {
+			break
+		}
+		s.settled()
+	}
+	n := len(s.events(event.Dossier))
+	if n > 3 {
+		t.Fatalf("%d restarts for 6 short messages: each conversation's first call is past the restart size in the provider's count", n)
+	}
+	if told := r6ToldFull(s); told != 1 {
+		t.Fatalf("the user was told %d times that no restart can make room, want once", told)
+	}
+}
