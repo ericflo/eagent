@@ -306,7 +306,7 @@ func TestMessageHeldDuringASwitchIsTheNewAgentsOwn(t *testing.T) {
 		if brief := rt.handoffBrief(claude); !strings.Contains(brief, "A: use the staging") {
 			t.Errorf("a later handoff brief from the new agent leaves out A:\n%s", brief)
 		}
-		if forwardedAs(st, "claude", seqA) == "" {
+		if id, _ := forwardedAs(st, "claude", seqA, ""); id == "" {
 			t.Error("relay_forward could send A to the new agent again")
 		}
 	})

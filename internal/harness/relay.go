@@ -455,7 +455,7 @@ func (r *Runtime) settleSend(name string, h heldSend, res sendResult) {
 		h.done <- res
 	case res.err != nil && !h.barrier:
 		r.post(func() {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: h.id, OK: false, Detail: clipRunes(res.err.Error(), 2000)}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: h.id, OK: false, Outcome: sendErrOutcome(res.err), Detail: clipRunes(res.err.Error(), 2000)}))
 		})
 	}
 }
@@ -630,7 +630,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: fmt.Errorf("the agent could not start again: %w", err)}
 				continue
 			}
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -874,7 +874,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			r.applyWaitingRepick(name)
 		}
 	case relay.KindDelivered:
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Detail: clipRunes(ev.Detail, 2000)}))
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
 	case relay.KindProgress:
 		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
 	case relay.KindTurn:
@@ -1262,7 +1262,7 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 	seat := r.relays.get(name)
 	if seat == nil {
 		if !r.holdSend(name, heldSend{id: id, text: text, mode: mode}) {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Detail: "the agent is not running"}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 		}
 		return
 	}
@@ -1384,13 +1384,15 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 					err = fmt.Errorf("no user message with seq %d", seq)
 					return
 				}
-				if prev := forwardedAs(r.st, rel.Name, seq); prev != "" {
-					err = fmt.Errorf("that message already went to %s as written (%s); to add to it, use relay_send", rel.Who(), prev)
+				lines := ""
+				for _, a := range atts {
+					lines += fmt.Sprintf("\n\n[The user attached %s: %s]", a.Name, a.Path)
+				}
+				if prev, why := forwardedAs(r.st, rel.Name, seq, lines); prev != "" {
+					err = errors.New(why)
 					return
 				}
-				for _, a := range atts {
-					text += fmt.Sprintf("\n\n[The user attached %s: %s]", a.Name, a.Path)
-				}
+				text += lines
 			} else {
 				text = strings.TrimSpace(str("text"))
 			}
@@ -1410,7 +1412,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				return
 			}
 			if held = r.holdSend(rel.Name, heldSend{id: id, text: text, mode: mode}); !held {
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Detail: "the agent is not running"}))
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 			}
 		})
 		if !ran {
@@ -1431,7 +1433,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			r.sync(func() {
 				// Under the relay the send is on the record for now: a
 				// switch meanwhile passed it on to the new agent.
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, rel.Name), ID: id, OK: false, Detail: err.Error()}))
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, rel.Name), ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: err.Error()}))
 			})
 			return fmt.Sprintf("Could not send to %s: %v", rel.Who(), err), true
 		}
@@ -1579,7 +1581,7 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 				// On the record like any send that failed: it wakes eagent,
 				// and the new relay stops waiting for its arrival.
 				r.sync(func() {
-					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Detail: clipRunes(berr.Error(), 2000)}))
+					r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: started, ID: sw.briefID, OK: false, Outcome: sendErrOutcome(berr), Detail: clipRunes(berr.Error(), 2000)}))
 					// It was never told the work: a switch away from it says so.
 					if b, ok := r.relays.briefed[started]; ok && b.ho == sw.handover {
 						b.failed = true
@@ -2134,9 +2136,8 @@ func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.
 }
 
 // userSends lists the latest user messages sent to a relay, each with when
-// it went and whether its arrival was confirmed. Loop goroutine.
+// it went and where it got to (judgeSend). Loop goroutine.
 func userSends(st *state.State, name string, n int) []string {
-	rel := st.Relays[name]
 	type sent struct {
 		at time.Time
 		d  event.RelaySendData
@@ -2150,21 +2151,8 @@ func userSends(st *state.State, name string, n int) []string {
 	var out []string
 	for _, s := range sends {
 		d := s.d
-		status := "arrived"
-		if to, ok := movedOn[d.ID]; ok {
-			// It waited for a switch and went to the agent that took over.
-			status = "went to " + to
-			if t := st.Relays[to]; t != nil {
-				status = "went to " + t.Who()
-			}
-		} else if rel != nil {
-			if _, waiting := rel.Undelivered[d.ID]; waiting {
-				status = "not confirmed yet"
-				if d.Mode == "after_turn" {
-					status = "held for the end of its turn"
-				}
-			}
-		}
+		o, to := sendOutcomeFor(st, d.ID, movedOn)
+		status := judgeSend(o, "", d.ID, to, "").listed
 		out = append(out, fmt.Sprintf("%s %s ago (%s): %s", d.ID, roundDur(time.Since(s.at)), status, clipRunes(oneLine(d.Text, 200), 200)))
 	}
 	if len(out) > n {
@@ -2173,15 +2161,42 @@ func userSends(st *state.State, name string, n int) []string {
 	return out
 }
 
-// forwardedAs names the send that already forwarded a user message.
-func forwardedAs(st *state.State, relayName string, seq int64) string {
-	id := ""
-	relaySendsTo(st, relayName, func(_ event.Event, d event.RelaySendData) {
-		if id == "" && d.From == "user" && d.Seq == seq {
-			id = d.ID
+// sendOutcomeFor is a send's outcome as the relay it is listed under sees
+// it: a send a switch passed on went to the agent that took over (to).
+func sendOutcomeFor(st *state.State, id string, movedOn map[string]string) (o state.SendOutcome, to string) {
+	if to, ok := movedOn[id]; ok {
+		if t := st.Relays[to]; t != nil {
+			to = t.Who()
+		}
+		return sendMoved, to
+	}
+	return st.SendOutcome(id), ""
+}
+
+// forwardedAs names the send that keeps relay_forward from sending a user
+// message to a relay again, with judgeSend's reason, or "" when none does:
+// it may go again only when every earlier send of it there certainly did
+// not go. The newest send that forbids it is named. atts are the
+// message's attachment lines, for a refusal that says how to send it by
+// hand.
+func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id, refusal string) {
+	who := relayName
+	if rel := st.Relays[relayName]; rel != nil {
+		who = rel.Who()
+	}
+	var ids []string
+	movedOn := relaySendsTo(st, relayName, func(_ event.Event, d event.RelaySendData) {
+		if d.From == "user" && d.Seq == seq {
+			ids = append(ids, d.ID)
 		}
 	})
-	return id
+	for i := len(ids) - 1; i >= 0; i-- {
+		o, to := sendOutcomeFor(st, ids[i], movedOn)
+		if v := judgeSend(o, who, ids[i], to, atts); !v.again {
+			return ids[i], v.refusal
+		}
+	}
+	return "", ""
 }
 
 // relayStatusText describes an agent in full: for the user who asks with

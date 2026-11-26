@@ -33,6 +33,7 @@ type Event struct {
 	Text        string
 	SendID      string
 	OK          bool
+	Outcome     string // with OK false: OutcomeNotSent or OutcomeUnconfirmed
 	InnerID     string
 	Transcript  string
 	DurationMS  int64
@@ -386,7 +387,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return "", fmt.Errorf("unknown mode %q (queue, interrupt, after_turn)", mode)
 	}
 	if err := s.typeText(text); err != nil {
-		return "", err
+		return "", &TypingError{err}
 	}
 	if isAgentCommand(text) {
 		// The agent's own command (/goal, /compact): it runs it rather than
@@ -545,7 +546,7 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 	s.mu.Unlock()
 	detail := s.agent.Label() + "'s turn ended before it took this message (for example after an interrupt), so it was not delivered; send it again if it is still wanted"
 	for _, id := range order {
-		s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Detail: detail})
+		s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Outcome: OutcomeNotSent, Detail: detail})
 	}
 }
 
@@ -982,7 +983,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		if state != "working" && now.Sub(stuck.at) > 45*time.Second && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
-			s.emit(Event{Kind: KindDelivered, SendID: stuck.id, OK: false, Detail: "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)})
+			s.emit(Event{Kind: KindDelivered, SendID: stuck.id, OK: false, Outcome: OutcomeUnconfirmed, Detail: "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)})
 			return
 		}
 	}

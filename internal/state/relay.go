@@ -87,6 +87,56 @@ func (s *State) RelayWorking() bool {
 	return false
 }
 
+// SendOutcome is where a send got to, as the record tells it.
+type SendOutcome string
+
+const (
+	// SendWaiting: queued or typed, and no word yet of its arrival.
+	SendWaiting SendOutcome = "waiting"
+	// SendHeld: sent after_turn, for the agent to read when its current
+	// turn ends, and no word yet of its arrival.
+	SendHeld SendOutcome = "held"
+	// SendArrived: the agent's transcript showed it (or it was the agent's
+	// own command, which is delivered once typed).
+	SendArrived SendOutcome = "arrived"
+	// SendNotSent: certainly nothing reached the agent.
+	SendNotSent SendOutcome = "not_sent"
+	// SendUnconfirmed: typed, and its arrival never shown. It may have
+	// reached the agent.
+	SendUnconfirmed SendOutcome = "unconfirmed"
+)
+
+// DeliveryOutcome reads a relay.delivered event. A failure that does not
+// say how sure it is (a record from before failures said so, or a value
+// this build does not know) may have reached the agent.
+func DeliveryOutcome(d event.RelayDeliveredData) SendOutcome {
+	switch {
+	case d.OK:
+		return SendArrived
+	case d.Outcome == event.DeliveryNotSent:
+		return SendNotSent
+	}
+	return SendUnconfirmed
+}
+
+// SendOutcome says where the send with this id got to; "" for an id the
+// record does not have. A send that a switch passed on to another agent
+// (relay.moved) is that agent's from then on, and this is its outcome
+// there.
+func (s *State) SendOutcome(id string) SendOutcome {
+	return s.sendOutcomes[id]
+}
+
+func (s *State) noteSend(d event.RelaySendData) {
+	if s.sendOutcomes == nil {
+		s.sendOutcomes = map[string]SendOutcome{}
+	}
+	s.sendOutcomes[d.ID] = SendWaiting
+	if d.Mode == "after_turn" {
+		s.sendOutcomes[d.ID] = SendHeld
+	}
+}
+
 // NextRelaySendID allocates a send id that continues after replay.
 func (s *State) NextRelaySendID() string {
 	s.relaySendSeq++
@@ -173,6 +223,7 @@ func (s *State) applyRelay(ev event.Event) {
 		r.Sends++
 		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
 		r.Undelivered[d.ID] = d.Text
+		s.noteSend(d)
 	case event.RelayMoved:
 		// The send is the new relay's from here on; the relay it was first
 		// sent to no longer waits for it.
@@ -185,10 +236,16 @@ func (s *State) applyRelay(ev event.Event) {
 		r.Sends++
 		r.LastSendFrom, r.LastSendAt = d.From, ev.Time
 		r.Undelivered[d.ID] = d.Text
+		s.noteSend(d.RelaySendData)
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
 		delete(r.Undelivered, d.ID)
+		if _, known := s.sendOutcomes[d.ID]; known {
+			// The newest word on a send is how it ended: a late
+			// confirmation after one that gave up means it arrived.
+			s.sendOutcomes[d.ID] = DeliveryOutcome(d)
+		}
 	case event.RelayState:
 		var d event.RelayStateData
 		_ = ev.Decode(&d)
@@ -312,7 +369,11 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
-		if !d.OK {
+		switch DeliveryOutcome(d) {
+		case SendNotSent:
+			// Only records that say so: what older ones rendered stays.
+			return fmt.Sprintf("[%s A message to %s (%s) did not go; nothing of it reached the agent: %s]", ts, s.relayWho(d.Name, ev.Seq), d.ID, clip(d.Detail, detailChars))
+		case SendUnconfirmed:
 			return fmt.Sprintf("[%s A message to %s (%s) could not be confirmed: %s]", ts, s.relayWho(d.Name, ev.Seq), d.ID, clip(d.Detail, detailChars))
 		}
 	case event.RelayState:

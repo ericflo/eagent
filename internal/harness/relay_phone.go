@@ -9,6 +9,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // What a relay thread on the phone shows beyond the narrator: a receipt
@@ -96,11 +97,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 			if ev.Decode(&d) != nil || sendSeq[d.ID] == 0 {
 				continue
 			}
-			status := "delivered"
-			if !d.OK {
-				status = "failed"
-			}
-			set(sendSeq[d.ID], status)
+			set(sendSeq[d.ID], judgeSend(state.DeliveryOutcome(d), "", d.ID, "", "").receipt)
 		}
 	}
 	if len(receipts) > maxReceipts {
@@ -201,11 +198,7 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 		if seq == 0 {
 			return
 		}
-		status := "delivered"
-		if !d.OK {
-			status = "failed"
-		}
-		p.setReceipt(r, seq, status)
+		p.setReceipt(r, seq, judgeSend(state.DeliveryOutcome(d), "", d.ID, "", "").receipt)
 	case event.RelayTurn:
 		var d event.RelayTurnData
 		if ev.Decode(&d) != nil {

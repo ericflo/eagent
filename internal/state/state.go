@@ -129,6 +129,8 @@ type State struct {
 	// conversation under a stopped relay's name adds one, a restart
 	// replaces the last. See RelayAt.
 	relayHolders map[string][]*Relay
+	// sendOutcomes is where each send got to, by send id (see SendOutcome).
+	sendOutcomes map[string]SendOutcome
 
 	// lastMoveSeq is the newest thing an agent did that the user might be
 	// asked about: a finished turn, a dialog it is stuck on, an exit.

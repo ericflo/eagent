@@ -531,7 +531,21 @@ type RelayDeliveredData struct {
 	ID     string `json:"id"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail,omitempty"`
+	// Outcome says, when OK is false, how sure the failure is:
+	// DeliveryNotSent or DeliveryUnconfirmed. Empty in a record written
+	// before it existed, which reads as DeliveryUnconfirmed.
+	Outcome string `json:"outcome,omitempty"`
 }
+
+// The outcomes of a send that did not arrive.
+const (
+	// DeliveryNotSent: certainly nothing reached the agent. Nothing was
+	// typed, or the copy held for the end of its turn was taken back
+	// unread.
+	DeliveryNotSent = "not_sent"
+	// DeliveryUnconfirmed: it was typed, and its arrival was never shown.
+	DeliveryUnconfirmed = "unconfirmed"
+)
 
 // RelayStateData is the agent's condition: starting, working, idle, blocked
 // (a dialog on its screen needs an answer) or exited.
