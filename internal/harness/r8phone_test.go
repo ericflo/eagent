@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/event"
 )
 
 // r8BeforeMirror stands in front of the phone service and runs before once,
@@ -67,5 +71,99 @@ func TestAReplyWrittenWhileTheTerminalWordsAreMirroredIsTaken(t *testing.T) {
 	stop()
 	if got := r6PhoneIDs(path); len(got) != 2 || got[0] != first || got[1] != second {
 		t.Fatalf("recorded %v, want %v", got, []string{first, second})
+	}
+}
+
+// r8Choices is n short distinct choices.
+func r8Choices(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("branch-%02d", i+1)
+	}
+	return out
+}
+
+// r8AskSession is a session with no terminal whose model asks question
+// with the choices once its agent has finished a turn, and stops the agent.
+func r8AskSession(t *testing.T, fp *phoneFake, question string, choices []string) *phoneRig {
+	t.Helper()
+	g := phoneStart(t, fp, "pick the branch to ship", false, func(_ string, msgs []map[string]any) reply {
+		all := allText(msgs)
+		switch {
+		case phoneLastIsTool(msgs):
+			return hold()
+		case phoneEnding(msgs):
+			if strings.Contains(all, "Shipping it") {
+				return hold()
+			}
+			return say("Shipping it; done.")
+		case strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(all, question):
+			return phoneAskAndStop(question, choices...)
+		}
+		return hold()
+	}, nil)
+	return g
+}
+
+// Finding 7 of the eighth review: the service takes at most twenty choices
+// on a card. A question with twenty-one still reaches the phone, as a
+// message that carries the question and every choice; the session waits as
+// it does on a card, and the user's reply answers it.
+func TestAQuestionThePhoneRefusesAsACardReachesItAsAMessage(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	choices := r8Choices(21)
+	g := r8AskSession(t, fp, "Which branch?", choices)
+	asked := func() []map[string]any {
+		return fp.postsWhere(func(p map[string]any) bool {
+			body, _ := p["body"].(string)
+			return strings.Contains(body, "Which branch?") && p["sender"] != "user"
+		})
+	}
+	waitFor(t, "the question in the thread", func() bool { return len(asked()) == 1 })
+	body, _ := asked()[0]["body"].(string)
+	for i, c := range choices {
+		if !strings.Contains(body, fmt.Sprintf("%d. %s", i+1, c)) {
+			t.Fatalf("choice %d is not in the message:\n%s", i+1, body)
+		}
+	}
+	if n := fp.pendingQuestions(); n != 0 {
+		t.Fatalf("%d cards, want none: the service refused it", n)
+	}
+	g.agentStopped()
+	g.running(10*loopPoll, "while its question waits on the phone")
+	fp.userReply("21")
+	if code := g.exit(25 * time.Second); code != 0 {
+		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
+	}
+	var answers []event.UserAnswerData
+	for _, ev := range g.log() {
+		if ev.Type == event.UserAnswer {
+			var d event.UserAnswerData
+			_ = ev.Decode(&d)
+			answers = append(answers, d)
+		}
+	}
+	if len(answers) != 1 || answers[0].Text != "branch-21" || answers[0].Source != "finalechat" || answers[0].QuestionID != "q1" {
+		t.Fatalf("answers = %+v", answers)
+	}
+	if got := asked(); len(got) != 1 {
+		t.Fatalf("the question was posted %d times", len(got))
+	}
+}
+
+// Twenty choices are a card, as before, and no message stands in for it.
+func TestAQuestionWithTwentyChoicesIsACard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r8AskSession(t, fp, "Which branch?", r8Choices(20))
+	waitFor(t, "the card", func() bool { return fp.pendingQuestions() == 1 })
+	g.agentStopped()
+	g.running(5*loopPoll, "while waiting on the card")
+	if got := fp.postsWhere(func(p map[string]any) bool {
+		body, _ := p["body"].(string)
+		return strings.Contains(body, "Which branch?")
+	}); len(got) != 0 {
+		t.Fatalf("a message stands in for a card that was posted: %v", got)
 	}
 }

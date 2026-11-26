@@ -2,7 +2,9 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -801,6 +803,22 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 				p.threadID = thread.ID
 			}
 			p.mu.Unlock()
+		}
+		var refused *finalechat.Error
+		if errors.As(err, &refused) && refused.Status == http.StatusUnprocessableEntity {
+			// The service does not take the card as asked (more choices than
+			// a card holds, say). The question still goes to the phone, as a
+			// message with its choices, and the session waits for the
+			// user's reply in the thread, which is the answer. (A message
+			// does not expire as a card does.)
+			body := text + "\n"
+			for i, o := range options {
+				body += fmt.Sprintf("\n%d. %s", i+1, o)
+			}
+			if m, _, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text")}); perr == nil {
+				p.remember(m.ID)
+				return
+			}
 		}
 		if err != nil {
 			p.mu.Lock()
