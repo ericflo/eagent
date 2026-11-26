@@ -170,7 +170,24 @@ func (r *Runtime) configRoute(who string) config.ModelRoute {
 // pays for the whole prompt once.
 func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
+	moved := true
+	if old := r.models[sw.who]; old != nil && old.client != nil {
+		moved = old.client.Endpoint.BaseURL != sw.eps[0].BaseURL || old.client.Endpoint.Model != sw.eps[0].Model
+	}
 	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
+	if sw.who == event.ActorEagent && moved {
+		// What the old model did belongs to it: its failures and the wait
+		// before the next try (up to an hour), a refusal of the prompt as
+		// too long (which would write the next dossier from the files), and
+		// how its provider counts tokens. The new one starts clean and is
+		// tried at the loop's next tick (the poll that applied the change
+		// is followed by one); if it fails too, it backs off on its own
+		// count.
+		t := &r.turns
+		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+		t.overflowed, t.futileLogged = false, false
+		r.tokenScale = 0
+	}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),
