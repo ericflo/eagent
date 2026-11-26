@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,6 +235,9 @@ func (f *relayPhone) handle(w http.ResponseWriter, r *http.Request) {
 					out = append(out, m)
 				}
 			}
+			if after == "" {
+				out = fakeWindow(out, r.URL.Query())
+			}
 			if len(out) > 0 || wait == 0 || time.Now().After(deadline) {
 				break
 			}
@@ -338,4 +342,44 @@ func relayPhoneConfig(t *testing.T, project, modelURL string, fp *relayPhone) co
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+// fakeWindow is the service's page of a thread's messages (already filtered
+// by sender, oldest first) for a request that names no message to read on
+// after: those written after after_time (the first limit of them), the
+// limit just before the message named by before, or with neither the
+// newest limit. The limit is 100 unless the request says.
+func fakeWindow(msgs []map[string]any, q url.Values) []map[string]any {
+	limit := 100
+	fmt.Sscanf(q.Get("limit"), "%d", &limit)
+	if v := q.Get("after_time"); v != "" {
+		since, _ := time.Parse(time.RFC3339Nano, v)
+		var out []map[string]any
+		for _, m := range msgs {
+			var at time.Time
+			switch c := m["created_at"].(type) {
+			case time.Time:
+				at = c
+			case string:
+				at, _ = time.Parse(time.RFC3339Nano, c)
+			}
+			if at.After(since) && len(out) < limit {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	if v := q.Get("before"); v != "" {
+		end := 0
+		for i, m := range msgs {
+			if m["id"] == v {
+				end = i
+			}
+		}
+		msgs = msgs[:end]
+	}
+	if len(msgs) > limit {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	return msgs
 }

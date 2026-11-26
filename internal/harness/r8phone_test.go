@@ -167,3 +167,41 @@ func TestAQuestionWithTwentyChoicesIsACard(t *testing.T) {
 		t.Fatalf("a message stands in for a card that was posted: %v", got)
 	}
 }
+
+// Finding 6 of the eighth review: a session with no cursor is resumed at
+// the terminal while 101 app messages wait. The service lists a thread's
+// newest hundred when asked with no cursor; all 101 are still taken, in
+// order, each once.
+func TestALongBacklogIsTakenFromItsFirstMessage(t *testing.T) {
+	cfg, project, path, fp := stoppedRelaySession(t)
+	bphoneOlder(t, path)
+	var want []string
+	for i := 1; i <= 101; i++ {
+		// Addressed to eagent, so that nothing is typed into the agent
+		// and the test is about what is taken in.
+		want = append(want, fp.userSays(fmt.Sprintf("note %d", i), map[string]any{"eagent.route": "eagent"}))
+	}
+	rt, stop := bphoneRun(t, func() *Runtime {
+		useFakeRelays(t, newFakeSeat("Done."))
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rt
+	})
+	waitFor(t, "the last of them in the record", func() bool {
+		ids := r6PhoneIDs(path)
+		return len(ids) > 0 && ids[len(ids)-1] == want[len(want)-1]
+	})
+	rt.sync(func() {})
+	stop()
+	got := r6PhoneIDs(path)
+	if len(got) != len(want) {
+		t.Fatalf("recorded %d messages (first %q), want %d from %q", len(got), got[0], len(want), want[0])
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("message %d recorded as %q, want %q", i+1, got[i], want[i])
+		}
+	}
+}

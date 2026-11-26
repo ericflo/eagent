@@ -324,6 +324,9 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 					out = append(out, m)
 				}
 			}
+			if after == "" {
+				out = fakeWindow(out, r.URL.Query())
+			}
 			if len(out) > 0 || wait == 0 || time.Now().After(deadline) {
 				break
 			}

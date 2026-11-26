@@ -164,7 +164,7 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		return finalechat.Message{}, false, err
 	}
 	if l.Keeps && l.Cursor != "" {
-		m, _, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, l.Takeable)
+		m, _, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, time.Time{}, l.Takeable)
 		if err != nil {
 			return fallback(err)
 		}
@@ -198,19 +198,31 @@ func (l PhoneLedger) Waiting(ctx context.Context, client *finalechat.Client, ext
 	if l.Keeps {
 		since = l.Since
 	}
-	m, prev, found, _, err = firstInThread(ctx, client, ext, "", func(m finalechat.Message) bool {
+	m, prev, found, _, err = firstInThread(ctx, client, ext, "", since, func(m finalechat.Message) bool {
 		return l.Takeable(m) && m.CreatedAt.After(since)
 	})
 	return m, prev, found, err
 }
 
-// firstInThread pages the user's messages after an anchor (from the start
-// with none) and returns the first that ok accepts, with the one listed
-// before it (the anchor for the first listed). unknown says the service
-// does not know the anchor.
-func firstInThread(ctx context.Context, client *finalechat.Client, ext, after string, ok func(finalechat.Message) bool) (finalechat.Message, string, bool, bool, error) {
+// firstInThread pages the user's messages after an anchor (with none,
+// those written after since) and returns the first that ok accepts, with
+// the one listed before it in the thread (the anchor for the first listed;
+// "" when the thread has none before it). unknown says the service does
+// not know the anchor.
+func firstInThread(ctx context.Context, client *finalechat.Client, ext, after string, since time.Time, ok func(finalechat.Message) bool) (finalechat.Message, string, bool, bool, error) {
+	ref := finalechat.Ref(ext)
 	for i := 0; i < 50; i++ {
-		msgs, _, unknown, err := client.MessagesPage(ctx, finalechat.Ref(ext), after, "user", 0, 100)
+		var msgs []finalechat.Message
+		var unknown bool
+		var err error
+		if after == "" {
+			// Forward from since. Asked with no cursor the service lists the
+			// thread's newest page, and the earliest message that waited
+			// can be older than that page.
+			msgs, err = client.MessagesSince(ctx, ref, since, "user", 100)
+		} else {
+			msgs, _, unknown, err = client.MessagesPage(ctx, ref, after, "user", 0, 100)
+		}
 		if err != nil {
 			return finalechat.Message{}, "", false, false, err
 		}
@@ -221,6 +233,13 @@ func firstInThread(ctx context.Context, client *finalechat.Client, ext, after st
 			prev := after
 			after = m.ID
 			if ok(m) {
+				if prev == "" {
+					// The first written after since: the one before it is
+					// older than what was listed.
+					if prev, err = client.MessageBefore(ctx, ref, m, "user"); err != nil {
+						return finalechat.Message{}, "", false, false, err
+					}
+				}
 				return m, prev, true, false, nil
 			}
 		}

@@ -1008,7 +1008,17 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 		after := p.lastID
 		p.mu.Unlock()
 		start := time.Now()
-		msgs, _, anchorUnknown, err := p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		var msgs []finalechat.Message
+		var anchorUnknown bool
+		var err error
+		if after == "" {
+			// No message to read on from: the thread from its start, oldest
+			// first. (Asked with no cursor the service lists its newest
+			// page, which passes over what is older.)
+			msgs, err = p.client.MessagesSince(p.ctx, p.ref, time.Time{}, "user", 100)
+		} else {
+			msgs, _, anchorUnknown, err = p.client.MessagesPage(p.ctx, p.ref, after, "user", 600, 100)
+		}
 		p.mu.Lock()
 		resumedBy, fallback := p.resumedBy, p.fallback
 		p.mu.Unlock()

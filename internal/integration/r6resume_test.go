@@ -3,8 +3,10 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +63,9 @@ func newR6Thread(t *testing.T) *r6Thread {
 						out = append(out, m)
 					}
 				}
+			}
+			if after == "" {
+				out = r6Window(out, r.URL.Query())
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "anchor_unknown": unknown})
 		case strings.HasPrefix(r.URL.Path, "/files/"):
@@ -287,4 +292,44 @@ func TestTwoSweepsAtOnceResumeTheSessionOnce(t *testing.T) {
 	if host.calls() != 1 || host.resumed[0].ID != "m1" {
 		t.Fatalf("resumed %d times: %#v", host.calls(), host.resumed)
 	}
+}
+
+// r6Window is the service's page of a thread's messages (already filtered
+// by sender, oldest first) for a request that names no message to read on
+// after: those written after after_time (the first limit of them), the
+// limit just before the message named by before, or with neither the
+// newest limit. The limit is 100 unless the request says.
+func r6Window(msgs []map[string]any, q url.Values) []map[string]any {
+	limit := 100
+	fmt.Sscanf(q.Get("limit"), "%d", &limit)
+	if v := q.Get("after_time"); v != "" {
+		since, _ := time.Parse(time.RFC3339Nano, v)
+		var out []map[string]any
+		for _, m := range msgs {
+			var at time.Time
+			switch c := m["created_at"].(type) {
+			case time.Time:
+				at = c
+			case string:
+				at, _ = time.Parse(time.RFC3339Nano, c)
+			}
+			if at.After(since) && len(out) < limit {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	if v := q.Get("before"); v != "" {
+		end := 0
+		for i, m := range msgs {
+			if m["id"] == v {
+				end = i
+			}
+		}
+		msgs = msgs[:end]
+	}
+	if len(msgs) > limit {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	return msgs
 }
