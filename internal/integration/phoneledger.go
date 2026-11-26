@@ -3,7 +3,6 @@ package integration
 import (
 	"context"
 	"strings"
-	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -13,14 +12,16 @@ import (
 // PhoneLedger is what a session's record says of the messages the user
 // sent from the app that the session took in. Every message the session
 // takes in leaves its id in the record in the step that takes it: on the
-// user.message it became (phone_id), or as a phone.read when it became
-// something else (an answer, a command, nothing but refused files). A
-// mirror that starts keeping the ledger writes a phone.read for the
-// message it reads on from, so a record that holds any phone.read keeps
-// the ledger from that point on; one that holds none (written before the
-// ledger, or by an eagent without it) is read by time, as it was.
+// user.message or user.answer it became (phone_id, and card_id for a
+// card's answer), or as a phone.read when it became something else (a
+// command, nothing, nothing but refused files). Every mirror that starts
+// writes a phone.read for the message it reads on from. So a run that
+// wrote one kept the ledger; a run that did not (an eagent without it, as
+// during an upgrade or a rollback, or one whose mirror never started) may
+// have taken messages it did not record, and its record is read by time,
+// as before.
 type PhoneLedger struct {
-	// Keeps: the record keeps the ledger.
+	// Keeps: the last run in the record kept the ledger.
 	Keeps bool
 	// Cursor is the newest app message taken in, in the order the record
 	// took them, which is the thread's order: a resumed session reads on
@@ -33,20 +34,41 @@ type PhoneLedger struct {
 	Cards map[string]bool
 }
 
-// ReadPhoneLedger reads the ledger off a session's events.
+// ReadPhoneLedger reads the ledger off a session's events. A process that
+// has begun a run passes the events before that run's start.
 func ReadPhoneLedger(evs []event.Event) PhoneLedger {
 	l := PhoneLedger{Taken: map[string]bool{}, Cards: map[string]bool{}}
+	took := func(id string) {
+		if id != "" {
+			l.Cursor, l.Taken[id] = id, true
+		}
+	}
+	card := func(id string) {
+		if id != "" {
+			l.Cards[id] = true
+		}
+	}
 	for _, ev := range evs {
 		switch ev.Type {
+		case event.SessionStart, event.SessionResume:
+			l.Keeps = false // until this run's mirror says it keeps the ledger
 		case event.PhoneRead:
 			var d event.PhoneReadData
 			if ev.Decode(&d) == nil && d.MessageID != "" {
-				l.Keeps, l.Cursor, l.Taken[d.MessageID] = true, d.MessageID, true
+				l.Keeps = true
+				took(d.MessageID)
 			}
 		case event.UserMessage:
 			var d event.UserMessageData
-			if ev.Decode(&d) == nil && d.PhoneID != "" {
-				l.Cursor, l.Taken[d.PhoneID] = d.PhoneID, true
+			if ev.Decode(&d) == nil {
+				took(d.PhoneID)
+				card(d.CardID)
+			}
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			if ev.Decode(&d) == nil {
+				took(d.PhoneID)
+				card(d.CardID)
 			}
 		case event.PhoneAnswerTaken:
 			var d event.PhoneAnswerTakenData
@@ -156,9 +178,3 @@ func firstInThread(ctx context.Context, client *finalechat.Client, ext, after st
 	}
 	return finalechat.Message{}, false, false, nil
 }
-
-// sweepSlack is how long before a session's last log write a message may
-// have been written and still not be taken in: a session stopped hard
-// right after it received one writes little or nothing after it. Only a
-// record that keeps the ledger can tell such a message from one it took.
-const sweepSlack = 10 * time.Minute

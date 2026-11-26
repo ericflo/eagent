@@ -224,9 +224,9 @@ func (r *Runtime) planResume(opts Options) resumePlan {
 		// The service keeps the answer, not the phone's client details
 		// (those ride on the transcript message only), so none are carried.
 		if plan.CardAsMessage {
-			r.userMessage(event.UserMessageData{Text: c.Answer, Source: "finalechat"})
+			r.userMessage(event.UserMessageData{Text: c.Answer, Source: "finalechat", CardID: c.ID})
 		} else {
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: c.Answer, Source: "finalechat"}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: c.Answer, Source: "finalechat", CardID: c.ID}))
 		}
 		r.markAnswerTaken(c.ID)
 	}

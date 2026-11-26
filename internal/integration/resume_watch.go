@@ -291,9 +291,10 @@ func (w *resumeWatcher) session(id string) (store.Info, bool) {
 }
 
 // sweep finds threads whose latest message is the user's and newer than the
-// session's last log write (less sweepSlack when the record keeps the
-// ledger, which can tell a message it never took in from one it took):
-// a reply nothing was watching for.
+// session's last log write: a reply nothing was watching for. Which message
+// to resume with is nextPhoneMessage's to say; a message the session never
+// took in that is older than its last write is still found then, first,
+// once the person writes again or the session is resumed from elsewhere.
 func (w *resumeWatcher) sweep(ctx context.Context) {
 	var page struct {
 		Threads []struct {
@@ -322,11 +323,7 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 		if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
 			continue
 		}
-		since := info.Modified
-		if evs, err := store.Read(info.Path); err == nil && ReadPhoneLedger(evs).Keeps {
-			since = since.Add(-sweepSlack)
-		}
-		if !t.LastActivityAt.After(since) {
+		if !t.LastActivityAt.After(info.Modified) {
 			continue
 		}
 		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})

@@ -114,17 +114,22 @@ func (r *Runtime) startPhone() {
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
 		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{}, taken: map[string]bool{},
 	}
-	// Answers already taken from cards, in this run or an earlier one.
-	for _, ev := range r.st.Events {
-		var d event.PhoneAnswerTakenData
-		if ev.Type == event.PhoneAnswerTaken && ev.Decode(&d) == nil {
-			p.taken[d.CardID] = true
+	// Which app messages the session has taken in (integration.PhoneLedger),
+	// as the runs before this one left it: a resumed session reads on after
+	// the newest of them, so what was sent while it was stopped is taken in
+	// order, once. Answers already taken from cards, in any run, are not
+	// taken again.
+	before := len(r.st.Events)
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		if t := r.st.Events[i].Type; t == event.SessionStart || t == event.SessionResume {
+			before = i
+			break
 		}
 	}
-	// Which app messages the session has taken in (integration.PhoneLedger):
-	// a resumed session reads on after the newest of them, so what was sent
-	// while it was stopped is taken in order, once.
-	ledger := integration.ReadPhoneLedger(r.st.Events)
+	ledger := integration.ReadPhoneLedger(r.st.Events[:before])
+	for card := range integration.ReadPhoneLedger(r.st.Events).Cards {
+		p.taken[card] = true
+	}
 	r.phone = p
 	p.wg.Add(1)
 	go p.worker()
@@ -285,13 +290,13 @@ func (r *Runtime) startPhone() {
 		if !resumed && strings.TrimSpace(prompt) != "" && promptSeq > 0 {
 			p.recordMirror(r, promptSeq, msg.ID)
 		}
-		if !ledger.Keeps {
-			// The record starts keeping the ledger here: the poll reads on
-			// after anchor, and everything it takes in is recorded.
-			r.post(func() {
-				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
-			})
-		}
+		// This run keeps the ledger from here: the poll reads on after
+		// anchor, and everything it takes in is recorded. Written by every
+		// run, so a run by an eagent without the ledger shows by its
+		// absence (integration.PhoneLedger.Keeps).
+		r.post(func() {
+			r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
+		})
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
@@ -794,7 +799,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			p.mu.Unlock()
 			fid, answer := q.ID, cardAnswer(q.Answer)
 			r.post(func() {
-				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat"})
+				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat", CardID: fid})
 			})
 			return
 		}
@@ -1069,7 +1074,7 @@ func (p *phone) poll(r *Runtime) {
 				caps := capsFromMeta(m.Meta)
 				r.post(func() {
 					from := len(r.st.Events)
-					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts})
+					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts, PhoneID: phoneID, CardID: fid})
 					r.tookPhoneMessage(phoneID, from)
 				})
 				continue
@@ -1079,6 +1084,12 @@ func (p *phone) poll(r *Runtime) {
 			route, delivery := routeFromMeta(m.Meta)
 			r.post(func() {
 				from := len(r.st.Events)
+				if r.ownCommand(body, "finalechat") {
+					// A command is recorded as taken before it runs: lost
+					// in a kill between the two, it can be typed again; run
+					// twice, it may not be undone (/quit, /kill, /stop).
+					r.tookPhoneMessage(phoneID, from)
+				}
 				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery, PhoneID: phoneID})
 				r.tookPhoneMessage(phoneID, from)
 			})
@@ -1350,8 +1361,9 @@ func (r *Runtime) handOver(p *phone, fid string, msg InboxMessage) {
 }
 
 // tookPhoneMessage records that the session took in app message id, in
-// the same loop step that took it: unless what it became (recorded from
-// index from on) is a user.message naming it, a phone.read says so. The
+// the same loop step that took it: unless what was recorded from index
+// from on already names it (the user.message or user.answer it became, or
+// a phone.read written ahead of a command), a phone.read says so. The
 // newest of these is where a resume reads on (integration.PhoneLedger).
 // Loop goroutine.
 func (r *Runtime) tookPhoneMessage(id string, from int) {
@@ -1360,9 +1372,15 @@ func (r *Runtime) tookPhoneMessage(id string, from int) {
 	}
 	if from >= 0 && from <= len(r.st.Events) {
 		for _, ev := range r.st.Events[from:] {
-			var d event.UserMessageData
-			if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id {
-				return
+			var d struct {
+				PhoneID   string `json:"phone_id"`
+				MessageID string `json:"message_id"`
+			}
+			switch ev.Type {
+			case event.UserMessage, event.UserAnswer, event.PhoneRead:
+				if ev.Decode(&d) == nil && (d.PhoneID == id || d.MessageID == id) {
+					return
+				}
 			}
 		}
 	}
