@@ -137,3 +137,17 @@ func TestAReaskCostsAFewRequestsHoweverOftenItWasAsked(t *testing.T) {
 		g.interrupt()
 	}
 }
+
+// Words typed at the terminal or in the web UI answer the question the
+// person sees there; that the phone cannot be reached does not make them
+// a mere message.
+func TestATerminalAnswerStandsWhenThePhoneCannotBeReached(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	fp.mu.Lock()
+	fp.questionsDown = true
+	fp.mu.Unlock()
+	g.resume(Options{Prompt: "blue", PromptSource: "web"})
+	waitFor(t, "the answer to be recorded", func() bool { n, open := r5Answers(g); return n == 1 && !open })
+}

@@ -335,6 +335,11 @@ type MessageData struct {
 type PhoneQuestionData struct {
 	QuestionID string `json:"question_id"`
 	CardID     string `json:"card_id"`
+	// ThreadID is the thread the card was made in and Key the number of
+	// its client key (1 for the plain key), so a later ask of the same
+	// question starts its walk at the newest card of that thread.
+	ThreadID string `json:"thread_id,omitempty"`
+	Key      int    `json:"key,omitempty"`
 }
 
 // PhoneMirrorData records which thread message shows a user message the
