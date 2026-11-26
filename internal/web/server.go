@@ -573,9 +573,19 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // somebody is running it, and otherwise by resuming it here with them
 // (resume). One at a time: of two requests for a stopped session the
 // second waits for the first's resume and then goes to the inbox of the
-// run it started, where it used to fail on the session's lock.
+// run it started, where it used to fail on the session's lock. A run here
+// that is ending reads its inbox no more: they wait for it to stop (its
+// shutdown is bounded) and resume the session then.
 func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
 	s.resuming.Lock()
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if h != nil && h.rt != nil && h.rt.Ending() {
+		s.resuming.Unlock()
+		<-h.done
+		s.resuming.Lock()
+	}
 	defer s.resuming.Unlock()
 	if alive(info.Path) || s.isHosted(info.ID) {
 		return "inbox", harness.PostInbox(info.Path, msg)

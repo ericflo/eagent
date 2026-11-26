@@ -856,6 +856,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			p.mu.Unlock()
 			fid, answer := q.ID, cardAnswer(q.Answer)
 			r.post(func() {
+				if r.ending {
+					return // the card holds it for the next run
+				}
 				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat", CardID: fid})
 			})
 			return
@@ -1124,11 +1127,15 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			// Every message the poll takes in is recorded in the loop step
 			// that takes it (tookPhoneMessage), so a resume after any stop
 			// goes on after the last one, neither taking one twice nor
-			// skipping one; a step dropped at shutdown leaves its message
-			// for the next run.
+			// skipping one; a step dropped at shutdown, or run once the
+			// session is ending, leaves its message for the next run.
 			phoneID := m.ID
 			if body == "" && len(atts) == 0 {
-				r.post(func() { r.tookPhoneMessage(phoneID, len(r.st.Events)) })
+				r.post(func() {
+					if !r.ending {
+						r.tookPhoneMessage(phoneID, len(r.st.Events))
+					}
+				})
 				continue
 			}
 			if fid, ok := m.IsAnswer(); ok {
@@ -1137,7 +1144,11 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				p.mu.Unlock()
 				if p.isTaken(fid) {
 					// Its answer was taken already (handOver claims it).
-					r.post(func() { r.tookPhoneMessage(phoneID, len(r.st.Events)) })
+					r.post(func() {
+						if !r.ending {
+							r.tookPhoneMessage(phoneID, len(r.st.Events))
+						}
+					})
 					continue
 				}
 				if !known {
@@ -1155,6 +1166,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				}
 				caps := capsFromMeta(m.Meta)
 				r.post(func() {
+					if r.ending {
+						return
+					}
 					from := len(r.st.Events)
 					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts, PhoneID: phoneID, CardID: fid})
 					r.tookPhoneMessage(phoneID, from)
@@ -1165,6 +1179,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
 			r.post(func() {
+				if r.ending {
+					return
+				}
 				from := len(r.st.Events)
 				if r.ownCommand(body, "finalechat") {
 					// A command is recorded as taken before it runs: lost
@@ -1372,6 +1389,11 @@ func (r *Runtime) waitingOnPhone() bool {
 	_, asked := p.questions[r.st.Question.ID]
 	return asked
 }
+
+// Ending reports whether the session has begun to stop (beginShutdown): as
+// with a phone message read from then on, words put in its inbox now wait
+// for its next run. Safe from any goroutine.
+func (r *Runtime) Ending() bool { return r.ctx.Err() != nil }
 
 // latestKeys is, for each thread the record knows a card of question qid
 // in, the highest key number among those cards. Cards recorded without a
