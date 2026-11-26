@@ -343,6 +343,9 @@ func (r *Runtime) needsDossier() bool {
 		return false
 	}
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || (t.overflowed && t.subCalls == 0)) && r.restartFull(limit) {
+		// burst: what was refused held what arrived during the pass, and
+		// the restart that set it aside was refused the same way.
+		burst := r.restartFactsNow(limit).sinceOpening
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
 		// Restarting again would only rebuild the same prompt. A session
@@ -360,13 +363,21 @@ func (r *Runtime) needsDossier() bool {
 				} else {
 					r.ui.Log("this model's window leaves %d tokens for a request, and its provider counts eagent's system prompt and tools alone as about %d of them, so no restart can make room; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md", input, r.provider(fixed))
 				}
+			} else if burst {
+				r.ui.Log("what arrived while the session was being reread is more than this model's window holds, also after restarting once more to set it aside; stopping the restarts")
 			} else {
 				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			}
 			// The user is told, once: it is theirs to fix, and nothing
-			// else will say why eagent grows slower and dearer.
+			// else will say why eagent grows slower and dearer. What is
+			// said is what was refused: the opening alone, or what kept
+			// arriving while the session was reread.
 			if !r.toldFull() {
-				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My conversation is full again right after I restarted it from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."})
+				text := fullNotice + " from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."
+				if burst {
+					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
+				}
+				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
 			}
 		}
 		r.tellStillFull()
@@ -384,24 +395,34 @@ func (r *Runtime) needsDossier() bool {
 // restart takes in what came after it and does make room. Loop goroutine
 // only.
 func (r *Runtime) restartFull(limit int) bool {
-	if _, small := r.room(); !small {
-		return true
-	}
+	return !restartHelps(r.restartFactsNow(limit))
+}
+
+// restartFactsNow gathers restartFacts for the conversation as it stands,
+// on a route of any size: the decision is the same on all of them. What
+// differs by size is only how much room one message is given beside the
+// opening: a sixth of a small route's span (smallBudget), and on an
+// ordinary route the most a restart carries whole (dossierUnseenBytes).
+// Loop goroutine only.
+func (r *Runtime) restartFactsNow(limit int) restartFacts {
 	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, decided: r.turns.futileLogged || r.toldFull()}
 	if f.refused {
 		f.sinceOpening = r.recordedSinceOpening()
-	} else {
-		_, fixed := r.inputRoom()
-		if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
-			fixed += llm.EstimateTokens(v[0].Text)
-		}
-		// Room for one message beside the opening, in the provider's
-		// count: without it another restart could only open on the same
-		// full prompt.
+		return f
+	}
+	_, fixed := r.inputRoom()
+	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
+		fixed += llm.EstimateTokens(v[0].Text)
+	}
+	// Room for one message beside the opening, in the provider's count:
+	// without it another restart could only open on the same full prompt.
+	if _, small := r.room(); small {
 		span, _, carry := r.smallBudget()
 		f.openingFits = span > 0 && r.provider(fixed)+carry < limit
+	} else {
+		f.openingFits = r.provider(fixed+r.carryBytes()*2/7) < limit
 	}
-	return !restartHelps(f)
+	return f
 }
 
 // carried is what the restart that began the conversation carried whole
@@ -725,6 +746,58 @@ scan:
 // unseenHeading opens the part of a dossier that lists what the user sent
 // eagent that no look has taken in and the new conversation does not carry.
 const unseenHeading = "NOT SEEN YET"
+
+// unseenNote is that part of a dossier that covers the record up to
+// covers: every message and answer the user wrote for eagent after the
+// last look, up to covers, each with its place, size and opening words,
+// and what to do with them. "" when there are none (the usual case: what
+// came unseen is carried whole, after covers). Loop goroutine only.
+func (r *Runtime) unseenNote(covers int64) string {
+	type item struct {
+		place, when, text string
+		size              int
+	}
+	var items []item
+	for _, ev := range r.st.Events {
+		if ev.Seq <= r.turns.seen || ev.Seq > covers {
+			continue
+		}
+		text := ""
+		switch ev.Type {
+		case event.UserAnswer:
+			var d event.UserAnswerData
+			if ev.Decode(&d) != nil {
+				continue
+			}
+			text = d.Text
+		case event.UserMessage:
+			var d event.UserMessageData
+			if ev.Decode(&d) != nil || d.Held == "" {
+				continue
+			}
+			text = d.Text
+			if n := len(d.Attachments); n > 0 {
+				text += fmt.Sprintf(" [%d attachment(s)]", n)
+			}
+		default:
+			continue
+		}
+		items = append(items, item{place: fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line), when: r.when(ev.Time), text: text, size: len(ev.Data)})
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	noun := "messages"
+	if len(items) == 1 {
+		noun = "message"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\n%s: the user sent you %d %s that you have not seen in full; this conversation does not show them. Read each with session_read at its place before you answer (a long one in pieces, going on from the offset each piece gives), then answer them:", unseenHeading, len(items), noun)
+	for _, it := range items {
+		fmt.Fprintf(&b, "\n- %s (%s, %d KB): %q", it.place, it.when, (it.size+1023)/1024, clipRunes(oneLine(it.text, 100), 100))
+	}
+	return b.String()
+}
 
 // stillFullNotice opens what the user is told when they write to eagent
 // after it found no restart can make room.
@@ -1236,7 +1309,13 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 		_, d, _ := r.smallBudget()
 		limit = r.estimate(d)
 	}
-	body := strings.TrimSpace(text) + "\n\n" + r.dossierFacts(job.covers, next)
+	// What the user sent eagent that no look took in and this restart does
+	// not carry is said first, plainly, with its places: the briefing's
+	// own lists may give it only in passing, and then the model never
+	// reads it. It is a line a message, and is never cut.
+	unseen := r.unseenNote(job.covers)
+	text = strings.TrimSpace(text) + unseen
+	body := text + "\n\n" + r.dossierFacts(job.covers, next)
 	if llm.EstimateTokens(body) <= limit {
 		return body
 	}
@@ -1250,6 +1329,7 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 			default:
 				text = r.fallbackBriefingWith(res.text, 1, 200, 300)
 			}
+			text = strings.TrimSpace(text) + unseen
 		}
 		body = strings.TrimSpace(text) + "\n\n" + r.dossierFactsWith(job.covers, next, lim)
 		if llm.EstimateTokens(body) <= limit {
