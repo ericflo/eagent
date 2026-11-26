@@ -68,6 +68,8 @@ type Spec struct {
 	// first: the new seat confirms them from the transcript as the old one
 	// would have, and never types them again.
 	Restore []Restored
+	// State, on a reattach, is the relay's state on the record.
+	State string
 }
 
 // Restored is a send recorded before eagent stopped whose arrival the
@@ -282,7 +284,8 @@ func (s *Seat) restore(list []Restored) {
 // wait a live send gets, and is never pressed or typed again.
 //
 // The state the history left the seat in (foldHistory) is said here, once:
-// working, or idle when the history showed a turn end.
+// working, or idle when the history showed a turn end. A history that ends
+// inside a turn leaves a relay the record says is blocked blocked.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	if !s.catchingUp {
@@ -310,8 +313,15 @@ func (s *Seat) caughtUp(now time.Time) {
 	// may still say working, starting or blocked from before the stop, and
 	// the harness drops a state the record already has.
 	state, ended := s.state, !s.turnEndAt.IsZero()
+	// Inside a turn the record said was blocked (a dialog, or quiet for
+	// long), and nothing since: it still is, with the record's detail, as
+	// the seat that blocked it held it (hung).
+	kept := s.attached && state == "working" && s.spec.State == "blocked"
+	if kept {
+		s.state, s.hung = "blocked", true
+	}
 	s.mu.Unlock()
-	if state != "idle" || ended {
+	if !kept && (state != "idle" || ended) {
 		s.emit(Event{Kind: KindState, State: state})
 	}
 }
@@ -491,6 +501,13 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		}
 	case "after_turn":
 		if state == "working" {
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed {
+				// Stopped during the last look: nothing held or typed.
+				return "", ErrClosed
+			}
 			// An agent with a spool holds it there; one without hands it to
 			// its own queue. Either way it is tracked for its arrival before
 			// it is handed over (so an arrival or a sweep of the spool right
@@ -678,11 +695,18 @@ var heldGrace = 5 * time.Second
 // the screen (after going quiet) is no turn end, and leaves the spool to
 // the hook.
 //
-// A held message tracked before that turn ended whose file is gone (the
-// hook claimed it, and may have died before handing it over) is lost from
-// now: confirmed if the transcript shows it, reported unconfirmed after the
-// usual wait otherwise.
-func (s *Seat) reportLeftOvers(now time.Time) {
+// A held message tracked before that turn ended whose file is gone, or
+// still claimed (.taken) now, is lost from now: the hook claimed it and may
+// have died before handing it over. It is confirmed if the transcript shows
+// it, reported unconfirmed after the usual wait otherwise; a claimed file
+// left behind is removed.
+func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
+
+// leftOvers is reportLeftOvers; with sweep false, for an agent whose own
+// hook hands the spool over whenever the agent is idle (pi's extension),
+// nothing is taken from the spool, and a claimed file is the hook's
+// hand-over under way: only a held message whose file is gone is lost.
+func (s *Seat) leftOvers(now time.Time, sweep bool) {
 	if s.spec.Spool == "" {
 		return
 	}
@@ -693,7 +717,12 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 	if !over {
 		return
 	}
-	taken, _ := takeSpool(s.spec.Spool)
+	var taken []string
+	holds := spoolHolds
+	if sweep {
+		taken, _ = takeSpool(s.spec.Spool)
+		holds = spoolWaits
+	}
 	var order []string
 	ids := map[string]bool{}
 	for _, path := range taken {
@@ -704,6 +733,7 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		}
 	}
 	names := spoolNames(s.spec.Spool)
+	var stale []string
 	s.mu.Lock()
 	same := s.state == "idle" && s.turnEndAt.Equal(end)
 	keep := s.pending[:0]
@@ -711,13 +741,21 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolHolds(names, p.id) {
+		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
 			p.lost, p.at = true, now
+			for _, n := range names {
+				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {
+					stale = append(stale, filepath.Join(s.spec.Spool, n))
+				}
+			}
 		}
 		keep = append(keep, p)
 	}
 	s.pending = keep
 	s.mu.Unlock()
+	for _, path := range stale {
+		_ = os.Remove(path)
+	}
 	if len(order) == 0 {
 		return
 	}

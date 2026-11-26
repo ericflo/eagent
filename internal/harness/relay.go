@@ -1010,7 +1010,7 @@ func (r *Runtime) reattachRelays() []string {
 		if err == nil {
 			// The new seat confirms what the record still waits on from the
 			// transcript, as the old one would have; nothing is typed again.
-			spec.Restore = unresolvedSends(r.st, rel)
+			spec.Restore, spec.State = unresolvedSends(r.st, rel), rel.State
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)
