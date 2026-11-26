@@ -97,7 +97,9 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		if !after {
 			return &config.ErrConflict{}
 		}
-		change, err := s.PrepareResource(editor, inverse, grant)
+		// The bytes to restore come from the record read above, which
+		// eagent wrote from this machine's files; the request only names it.
+		change, err := s.PrepareRestore(editor, inverse, grant, original.Resource.Before)
 		if err != nil {
 			return err
 		}
