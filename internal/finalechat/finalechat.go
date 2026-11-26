@@ -732,14 +732,18 @@ func (c *Client) MessagesSince(ctx context.Context, ref string, since time.Time,
 }
 
 // MessageBefore is the id of the message listed just before m, "" when m
-// is the first (or the service's answer is not a message older than m, as
-// from one that does not know the request).
+// is the first (or the service's answer is not a message listed before m,
+// as from one that does not know the request). The service lists by time
+// written, then by id.
 func (c *Client) MessageBefore(ctx context.Context, ref string, m Message, sender string) (string, error) {
 	msgs, err := c.window(ctx, ref, url.Values{"before": {m.ID}}, sender, 1)
-	if err != nil || len(msgs) != 1 || msgs[0].ID == m.ID || msgs[0].CreatedAt.After(m.CreatedAt) {
+	if err != nil || len(msgs) != 1 {
 		return "", err
 	}
-	return msgs[0].ID, nil
+	if b := msgs[0]; b.CreatedAt.Before(m.CreatedAt) || (b.CreatedAt.Equal(m.CreatedAt) && b.ID < m.ID) {
+		return b.ID, nil
+	}
+	return "", nil
 }
 
 func (c *Client) window(ctx context.Context, ref string, q url.Values, sender string, limit int) ([]Message, error) {
