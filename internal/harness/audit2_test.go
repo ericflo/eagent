@@ -795,11 +795,14 @@ func TestAudit2EndReasons(t *testing.T) {
 		model := audit2Model(t, func(string, []map[string]any) reply { return hold() })
 		s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief}, newFakeSeat("Merged #42."), model, nil)
 		s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
+		// The look at the turn is over and nothing is left to run: a session
+		// that ended now would end on this tick or the next few.
+		s.settled()
 		select {
 		case code := <-s.done:
 			s.done <- code
 			t.Fatalf("the session ended (%d) with its agent still running", code)
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(10 * loopPoll):
 		}
 	})
 	t.Run("agent stopped with nothing open", func(t *testing.T) {
@@ -874,7 +877,7 @@ func TestAudit2ShutdownGivesTheClosingWordItsGrace(t *testing.T) {
 		case <-time.After(15 * time.Second):
 			t.Fatal("no closing look")
 		}
-		time.AfterFunc(800*time.Millisecond, func() { close(slow) })
+		time.AfterFunc(200*time.Millisecond, func() { close(slow) }) // well after the stop
 		s.stop()
 		msgs := audit2Messages(mustReadCore(t, s.rt.sess.Path))
 		if len(msgs) != 1 || msgs[0].Text != "Final: #42 and #44 are merged." {
