@@ -250,11 +250,14 @@ func (t *turnState) init(st *state.State) {
 			if ev.Seq < cur.StartSeq || ev.Actor != event.ActorEagent || ev.Task != "" {
 				continue
 			}
+			// A reply from a route eagent had moved off (one still out when
+			// the model changed) is a call of the conversation, but its
+			// prompt was the old model's (promptOf).
 			switch ev.Type {
 			case event.Assistant:
 				var d event.AssistantData
 				if ev.Decode(&d) == nil {
-					if t.subCalls == 0 {
+					if t.subCalls == 0 && st.OnRoute(event.ActorEagent, d.Host, d.Asked) {
 						t.firstPrompt, first = provTokens(d.Usage.Input), ev.Seq
 					}
 					t.subCalls++
@@ -262,7 +265,7 @@ func (t *turnState) init(st *state.State) {
 			case event.Checks:
 				var d event.ChecksData
 				if ev.Decode(&d) == nil && d.Count > 0 {
-					if t.subCalls == 0 {
+					if t.subCalls == 0 && st.OnRoute(event.ActorEagent, d.Host, d.Asked) {
 						// The looks that left no record are kept as a
 						// total. The first prompt is known when the record
 						// says it, or when there was one look. A record
@@ -1373,9 +1376,10 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	if p := r.promptOf(resp); p > 0 {
 		t.promptTokens = p
 	}
-	// The first prompt is the conversation's, whichever model counted it,
-	// as a resumed session reads it from the record (turnState.init).
-	r.called(provTokens(resp.Usage.Input))
+	// The first prompt is the conversation's on the model in use: a reply
+	// still out when the model changed counted the old one's (promptOf). A
+	// resumed session reads it the same from the record (turnState.init).
+	r.called(r.promptOf(resp))
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
@@ -1429,7 +1433,7 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 		t.silent.SeenSeq = seen
 		r.looked(seen, resp, w)
 	} else {
-		r.called(provTokens(resp.Usage.Input))
+		r.called(r.promptOf(resp))
 	}
 	if t.silent.Count >= 20 {
 		r.flushSilent()

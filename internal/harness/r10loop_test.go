@@ -126,3 +126,107 @@ func TestAFallbackWithALargerWindowGetsItsOwnRestart(t *testing.T) {
 			fallback.count("other-model"), refused.Load(), r6Dossiers(s)-before, r5Told(s, stillFullNotice))
 	}
 }
+
+// r10LateReply runs a session on a 200k model through one restart, then
+// moves eagent to a 60k model in settings while the first call after that
+// restart is still out on the 200k one. That reply lands after the move,
+// with a prompt of 38k, and answers the user. It returns the session and
+// the 60k model.
+func r10LateReply(t *testing.T) (*session, *scripted) {
+	t.Helper()
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	var prompt atomic.Int64
+	prompt.Store(120_000)
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	var blockNext, out atomic.Bool
+	s := startSession(t, "", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			prompt.Store(38_000)
+			blockNext.Store(true)
+			// A long briefing, as a 200k model's dossier is.
+			return reply{text: briefing(p[max(0, len(p)-3):]) + "\n" + strings.Repeat("The work on the parser went through many steps. ", 2000)}
+		}
+		r := r7RestartLooks(m, int(prompt.Load()))
+		if blockNext.CompareAndSwap(true, false) {
+			out.Store(true)
+			r.block = gate
+		}
+		return r
+	}, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 200_000, 2048
+	})
+	t.Cleanup(release)
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "first", Route: "eagent"}) })
+	r6Until(t, "the first restart", func() bool { return r6Dossiers(s) == 1 })
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "second", Route: "eagent"}) })
+	r6Until(t, "the first call after the restart to go out", out.Load)
+	// The 60k model counts the conversation the 200k briefing opens as
+	// 40k, past its restart size, until it is restarted for its window.
+	var restarted atomic.Bool
+	small := r5Swap(t, s, 60_000, func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			restarted.Store(true)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if !restarted.Load() {
+			return r7RestartLooks(m, 40_000)
+		}
+		return r7RestartLooks(m, 5000)
+	})
+	release()
+	r6Until(t, "the late answer", func() bool { return r5Told(s, "Noted.") >= 2 })
+	s.settled()
+	return s, small
+}
+
+// The late reply's prompt was the 200k model's: it is not taken for the
+// first prompt of the conversation on the 60k model. So when the user
+// writes next, the conversation is restarted for 60k (a briefing sized for
+// it), and the user is not told that no restart can make room.
+func TestALateReplyFromTheOldModelIsNotTheNewOnesFirstPrompt(t *testing.T) {
+	s, _ := r10LateReply(t)
+	var first int
+	s.rt.sync(func() { first = int(s.rt.turns.firstPrompt) })
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "third", Route: "eagent"}) })
+	r6Until(t, "a restart on the 60k model, or the full notice", func() bool {
+		return r6Dossiers(s) >= 2 || r6ToldFull(s) > 0
+	})
+	if n := r6ToldFull(s); n > 0 {
+		t.Fatalf("told %d times that no restart can make room, after a late 200k reply set the first prompt to %d", n, first)
+	}
+}
+
+// The same from the record: a session stopped after the late reply and
+// resumed on the 60k model rebuilds the first prompt as the running one
+// holds it, not from the 200k model's reply.
+func TestALateReplyFromTheOldModelIsNotTheFirstPromptOnResume(t *testing.T) {
+	s, small := r10LateReply(t)
+	var first, calls int
+	s.rt.sync(func() { first, calls = int(s.rt.turns.firstPrompt), s.rt.turns.subCalls })
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	useFakeRelays(t, newFakeSeat("unused"))
+	cfg := testConfig(small.srv.URL)
+	cfg.RolloverTokens = 0
+	cfg.Model.Model, cfg.Model.ContextTokens, cfg.Model.MaxTokens = "other-model", 60_000, 2048
+	rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 8)}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range rt.st.Events {
+		var d event.RouteData
+		if ev.Type == event.Route && ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "the session was resumed") {
+			t.Fatal("resumed on another model than the 60k one")
+		}
+	}
+	if int(rt.turns.firstPrompt) == 38_000 || int(rt.turns.firstPrompt) != first || rt.turns.subCalls != calls {
+		t.Fatalf("resumed with a first prompt of %d and %d calls; the running session had %d and %d, and the 200k reply was 38000", rt.turns.firstPrompt, rt.turns.subCalls, first, calls)
+	}
+}
