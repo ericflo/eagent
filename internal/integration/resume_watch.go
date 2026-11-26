@@ -216,10 +216,21 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
-		if err != nil {
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			// It will never fit: the session comes back with the rest of
+			// the message, once the sender is told about the file.
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
-			tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err)
-			continue
+			if err = tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err); err == nil {
+				continue
+			}
+		}
+		if err != nil {
+			// Not taken in without the file: the reply waits for a sweep.
+			w.logf("finalechat: could not fetch %s for session %s: %v (will retry)", a.Filename, sid, err)
+			if ctx.Err() == nil {
+				w.retryLater(ctx, thread, m, "eagent could not fetch a file of your reply yet. It keeps trying every minute.")
+			}
+			return
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
@@ -373,10 +384,11 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 
 // tellRefused posts, in the thread, why a file the user sent was not
 // taken. The key makes it once per file whoever notices first.
-func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) {
+func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) error {
 	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 	defer stop()
-	_, _, _ = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+	_, _, err = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+	return err
 }
 
 // saveAttachment downloads a phone attachment under the session directory,
