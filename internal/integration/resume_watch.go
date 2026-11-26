@@ -420,8 +420,12 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 		saved, err := saveAttachment(ctx, client, info.Path, a)
 		if errors.Is(err, finalechat.ErrTooLarge) {
 			// It will never fit: the session comes back with the rest of
-			// the message, and the sender is told about the file.
-			tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, err)
+			// the message, and the sender is told about the file. When the
+			// notice cannot be posted, nothing is taken, as for a failed
+			// download.
+			if rerr := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, err); rerr != nil {
+				return PhoneMessage{}, false, rerr
+			}
 			continue
 		}
 		if err != nil {
