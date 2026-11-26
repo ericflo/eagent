@@ -994,7 +994,7 @@ func followModel(project string, a *ModelRoute, before []string, layer json.RawM
 		}
 		_, window := obj["context_tokens"]
 		switch {
-		case cur.Model != prev && !window:
+		case cur.Model != prev && (!window || null("context_tokens")):
 			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
 		case null("context_tokens"):
 			cur.ContextTokens = 0
