@@ -279,3 +279,54 @@ func TestKeptReasoningIsCutOnAWholeCharacter(t *testing.T) {
 		t.Fatalf("short reasoning changed: %q", short)
 	}
 }
+
+// A timer that fired while the loop was busy has its callback queued; the
+// loop then sets a new one in its place. The old callback, run after, must
+// not take the new timer for its own and clear it: the reminder would go
+// out at once instead of after its delay, and a call would start before
+// the events it waits for have settled.
+func TestAStaleTimerCallbackDoesNotClearTheTimerThatReplacedIt(t *testing.T) {
+	t.Run("reminder", func(t *testing.T) {
+		s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+		s.settled()
+		s.rt.sync(func() {
+			s.rt.armOwed(time.Millisecond)
+			time.Sleep(20 * time.Millisecond) // it fires; its callback waits for the loop
+			s.rt.armOwed(time.Hour)
+		})
+		var armed bool
+		s.rt.sync(func() { armed = s.rt.turns.owedTimer != nil })
+		s.rt.sync(func() { s.rt.clearOwed() })
+		if !armed {
+			t.Fatal("the reminder set for an hour was cleared by the callback of the one it replaced")
+		}
+	})
+	t.Run("settle", func(t *testing.T) {
+		setFor(t, &wakeSettle, time.Millisecond)
+		s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+		s.settled()
+		ev := event.Event{Type: event.HarnessMessage, Actor: event.ActorEagent}
+		var was int64
+		s.rt.sync(func() {
+			was = s.rt.turns.wakes[wakeNotice]
+			ev.Seq = s.rt.turns.seen // asks for nothing new: no turn starts
+			s.rt.noteWake(ev)
+			time.Sleep(20 * time.Millisecond)
+			wakeSettle = time.Hour
+			s.rt.noteWake(ev)
+			wakeSettle = time.Millisecond
+		})
+		var waiting bool
+		s.rt.sync(func() {
+			waiting = s.rt.turns.settle != nil
+			s.rt.turns.wakes[wakeNotice] = was
+			if s.rt.turns.settle != nil {
+				s.rt.turns.settle.Stop()
+				s.rt.turns.settle = nil
+			}
+		})
+		if !waiting {
+			t.Fatal("the settle set for an hour was cleared by the callback of the one it replaced")
+		}
+	})
+}

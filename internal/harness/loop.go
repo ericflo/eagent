@@ -364,9 +364,18 @@ func (r *Runtime) noteWake(ev event.Event) {
 	if t.settle != nil {
 		t.settle.Stop()
 	}
-	t.settle = time.AfterFunc(wakeSettle, func() {
-		r.post(func() { r.turns.settle = nil })
+	// A timer that fired while the loop was busy has its callback queued
+	// behind this one: it clears only itself, never the timer that took
+	// its place.
+	var tm *time.Timer
+	tm = time.AfterFunc(wakeSettle, func() {
+		r.post(func() {
+			if r.turns.settle == tm {
+				r.turns.settle = nil
+			}
+		})
 	})
+	t.settle = tm
 }
 
 // wakePending reports whether something still asks for a look.
@@ -478,9 +487,17 @@ func (r *Runtime) armOwed(d time.Duration) {
 	if t.owedTimer != nil {
 		t.owedTimer.Stop()
 	}
-	t.owedTimer = time.AfterFunc(d, func() {
-		r.post(func() { r.turns.owedTimer = nil })
+	// As for the settle timer (noteWake): a stale callback clears only
+	// its own timer, or the next reminder would go out at once.
+	var tm *time.Timer
+	tm = time.AfterFunc(d, func() {
+		r.post(func() {
+			if r.turns.owedTimer == tm {
+				r.turns.owedTimer = nil
+			}
+		})
 	})
+	t.owedTimer = tm
 }
 
 // recordOwed writes the debt as it now stands (event.Owed), so that a
