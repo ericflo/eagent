@@ -144,7 +144,7 @@ func (r *Runtime) rolloverTokens() provTokens {
 	}
 	window, reply := r.window()
 	_, est := r.inputRoom()
-	fixed := unscaled[provTokens](est) // MIXED: not shown safe (an ordinary route's opening, held as the provider's count)
+	fixed := unscaled[provTokens](est) // an ordinary route takes the ratio as 1: its restart size is half a large window, and the opening is a small part of it
 	if _, small := r.room(); small {
 		fixed = r.provider(est)
 	}
@@ -200,7 +200,9 @@ func endpointKey(ep llm.Endpoint) string {
 // reply ceiling, and every limit derived from them (rollover_tokens
 // included). provider is an estimate in the provider's count; estimate is
 // the reverse. unscaled reads one as the other without the ratio: each use
-// says why that is safe there, or is marked MIXED. Loop goroutine only.
+// says why. An ordinary route takes the ratio as 1 by design (only a small
+// route's sizes are tight enough for it to matter), and the four places
+// that rest on that say so. Loop goroutine only.
 type (
 	estTokens  int
 	provTokens int
@@ -1045,7 +1047,7 @@ func (r *Runtime) dossierFromFiles(job *dossierJob, reason string) {
 	// thousand tokens to spare: on a small route its oldest lines give way
 	// (session_search finds them), so the pass can be written at all.
 	window, fixed := r.inputRoom()
-	input := unscaled[estTokens](window) // MIXED: not shown safe (an ordinary route's room, read as the estimate)
+	input := unscaled[estTokens](window) // an ordinary route takes the ratio as 1; a briefing the provider then refuses as too long is made smaller
 	if _, small := r.room(); small {
 		// The provider's count, brought back to the estimate's.
 		input = r.estimate(window)
@@ -1088,7 +1090,7 @@ const smallRoom = 64_000
 // small (smallRoom). Loop goroutine only.
 func (r *Runtime) room() (provTokens, bool) {
 	input, fixed := r.inputRoom()
-	room := max(0, input-unscaled[provTokens](fixed)) // MIXED: not shown safe (decides small; ordinary routes take the ratio as 1)
+	room := max(0, input-unscaled[provTokens](fixed)) // decides whether the route is small, before any ratio applies
 	return room, room < smallRoom
 }
 
@@ -1492,7 +1494,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 // harness wrote is cut down with them). Loop goroutine only.
 func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by, next string) string {
 	room, small := r.room()
-	limit := unscaled[estTokens](room / 2) // MIXED: not shown safe (an ordinary route's room, read as the estimate)
+	limit := unscaled[estTokens](room / 2) // an ordinary route takes the ratio as 1: half its room leaves a provider that counts up to twice the estimate inside the window
 	if small {
 		_, d, _ := r.smallBudget()
 		limit = r.estimate(d)
