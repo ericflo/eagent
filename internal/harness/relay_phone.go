@@ -49,7 +49,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 	set := func(seq int64, status string) {
 		for i := range receipts {
 			if receipts[i].seq == seq {
-				receipts[i].status = status
+				receipts[i].status = mergeReceipt(receipts[i].status, status)
 				return
 			}
 		}
@@ -134,7 +134,7 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 	found := false
 	for i := range p.receipts {
 		if p.receipts[i].seq == seq {
-			p.receipts[i].status = status
+			p.receipts[i].status = mergeReceipt(p.receipts[i].status, status)
 			found = true
 		}
 	}

@@ -36,13 +36,21 @@ type sendVerdict struct {
 //	held         held for the end of its turn         no, it is on its way       held
 //	arrived      arrived                              no, it went as written     delivered
 //	not_sent     did not go                           yes, word for word         failed
-//	unconfirmed  typed, arrival never confirmed       no, look at its screen     failed
+//	unconfirmed  typed, arrival never confirmed       no, look at its screen     sent
 //	moved        went to <agent>                      no, it went there          (the send there decides)
+//	"" (no id)   arrived                              no, it went as written     delivered
 //
 // Only a send that certainly did not go may go again: anything typed may
 // be in the agent's hands, and sending it blind could have the agent do
-// the work twice. A record with no outcome (older than outcomes) is read
-// as arrived, as it always was.
+// the work twice. For the same reason the phone does not call an
+// unconfirmed send "failed": FinaleChat shows that as "Not delivered" with
+// a Retry that sends the words again. "sent" says what is known (it was
+// typed into the agent), and a late confirmation turns it into delivered.
+//
+// Older records: a success is arrived; a failure without an outcome is
+// unconfirmed (state.DeliveryOutcome). The "" row is a send id the state
+// never noted (a relay.send under a name with no relay.start), which reads
+// as arrived, as every send not waiting did before outcomes existed.
 func judgeSend(o state.SendOutcome, who, id, to, atts string) sendVerdict {
 	switch o {
 	case state.SendWaiting:
@@ -54,7 +62,7 @@ func judgeSend(o state.SendOutcome, who, id, to, atts string) sendVerdict {
 	case state.SendNotSent:
 		return sendVerdict{listed: "did not go; nothing of it reached the agent", again: true, receipt: "failed"}
 	case state.SendUnconfirmed:
-		v := sendVerdict{listed: "typed, but its arrival was never confirmed", receipt: "failed",
+		v := sendVerdict{listed: "typed, but its arrival was never confirmed", receipt: "sent",
 			refusal: fmt.Sprintf("that message was typed into %s (%s), but its arrival was never confirmed, so it may have reached it; relay_forward does not send it blind. Look at relay_screen first: if %s never got it, send the same words with relay_send", who, id, who)}
 		if atts != "" {
 			v.refusal += ", with these lines for the user's attachments:" + atts
@@ -66,6 +74,18 @@ func judgeSend(o state.SendOutcome, who, id, to, atts string) sendVerdict {
 	}
 	return sendVerdict{listed: "arrived", receipt: "delivered",
 		refusal: fmt.Sprintf("that message already went to %s as written (%s); to add to it, use relay_send", who, id)}
+}
+
+// mergeReceipt is a message's phone receipt after one of its sends moves
+// to next. A message has one receipt however many agents it went to, and
+// once one agent has it, that stays true: a later send of it elsewhere
+// that is on its way or failed does not take the check mark back (and a
+// "Not delivered · Retry" there would resend it to the agent that has it).
+func mergeReceipt(cur, next string) string {
+	if cur == "delivered" {
+		return cur
+	}
+	return next
 }
 
 // sendErrOutcome is how sure a send that failed with err is not to have
