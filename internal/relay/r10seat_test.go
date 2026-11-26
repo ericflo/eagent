@@ -179,8 +179,11 @@ func TestR10AReattachReplaysHistoryQuietlyAndSaysItsStateOnce(t *testing.T) {
 		want  []string
 		live  bool
 	}{
-		{5, false, nil, false},
-		{140, false, nil, true},
+		// Idle is said once when the history ends after a turn: the
+		// record may still say working, starting or blocked (a reader
+		// proved the record was left so when idle was not said).
+		{5, false, []string{"idle"}, false},
+		{140, false, []string{"idle"}, true},
 		{140, true, []string{"working"}, false},
 	} {
 		var lines []string

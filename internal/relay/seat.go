@@ -281,8 +281,8 @@ func (s *Seat) restore(list []Restored) {
 // one whose file is gone among them, is reported unconfirmed after the
 // wait a live send gets, and is never pressed or typed again.
 //
-// The state the history left the seat in (foldHistory) is said here, once,
-// if it is not the idle the reattached seat started with.
+// The state the history left the seat in (foldHistory) is said here, once:
+// working, or idle when the history showed a turn end.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	if !s.catchingUp {
@@ -306,9 +306,12 @@ func (s *Seat) caughtUp(now time.Time) {
 		}
 		p.at, p.lost = now, p.mode == "after_turn"
 	}
-	state := s.state
+	// Idle too, once the history showed a turn end (turnEndAt): the record
+	// may still say working, starting or blocked from before the stop, and
+	// the harness drops a state the record already has.
+	state, ended := s.state, !s.turnEndAt.IsZero()
 	s.mu.Unlock()
-	if state != "idle" {
+	if state != "idle" || ended {
 		s.emit(Event{Kind: KindState, State: state})
 	}
 }
