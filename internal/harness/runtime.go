@@ -228,7 +228,7 @@ func New(cfg config.Config, opts Options, ui UI) (*Runtime, error) {
 		name = cfg.Preset
 	}
 	r.append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{
-		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Efforts: efforts, Config: name, TZ: localZone(),
+		Session: sess.ID, Cwd: opts.Project, Version: Version, Interactive: opts.Interactive, Models: models, Endpoints: endpoints, Efforts: efforts, Config: name, TZ: localZone(), PhoneLedger: true,
 	}))
 	r.append(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: sess.Current(), Index: 0, Reason: "new"}))
 	if dir := strings.TrimSpace(opts.StartDir); dir != "" && !sameDir(dir, r.projectPath()) {

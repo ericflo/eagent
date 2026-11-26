@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -15,18 +16,29 @@ import (
 // user.message or user.answer it became (phone_id, and card_id for a
 // card's answer), or as a phone.read when it became something else (a
 // command, nothing, nothing but refused files). Every mirror that starts
-// writes a phone.read for the message it reads on from. So a run that
-// wrote one kept the ledger; a run that did not (an eagent without it, as
-// during an upgrade or a rollback, or one whose mirror never started) may
-// have taken messages it did not record, and its record is read by time,
-// as before.
+// writes a phone.read for the message it reads on from: the cursor.
+//
+// Whether a run keeps the ledger is said by its first write: the
+// session.start or session.resume of a run by this eagent has
+// phone_ledger set. A run whose mirror never started (the phone off, the
+// service down, a hard stop in its first seconds) still keeps it: it takes
+// in nothing from the app but the words it was resumed with, which carry
+// their id. A run by an eagent without the ledger (an upgrade, a rollback)
+// may have taken messages it did not record: its record is read by time,
+// and a ledger run after it starts afresh, judging what came before it by
+// the time it started.
 type PhoneLedger struct {
 	// Keeps: the last run in the record kept the ledger.
 	Keeps bool
-	// Cursor is the newest app message taken in, in the order the record
-	// took them, which is the thread's order: a resumed session reads on
-	// after it.
+	// Cursor is the newest app message taken in since the ledger last
+	// started, in the order the record took them, which is the thread's
+	// order: a resumed session reads on after it. Empty when the runs that
+	// kept the ledger have taken nothing yet.
 	Cursor string
+	// Since is when the ledger last started: messages written before it
+	// were for runs that did not keep it, and are judged by time. Zero for
+	// a session that kept the ledger from its start.
+	Since time.Time
 	// Taken holds every app message id the record names; Cards the cards
 	// whose answer was taken (phone.answer_taken), so a card's answer
 	// message is not taken a second time.
@@ -48,14 +60,23 @@ func ReadPhoneLedger(evs []event.Event) PhoneLedger {
 			l.Cards[id] = true
 		}
 	}
+	var last time.Time // the time of the event before this one
 	for _, ev := range evs {
 		switch ev.Type {
 		case event.SessionStart, event.SessionResume:
-			l.Keeps = false // until this run's mirror says it keeps the ledger
+			var d struct {
+				PhoneLedger bool `json:"phone_ledger"`
+			}
+			_ = ev.Decode(&d)
+			if d.PhoneLedger && !l.Keeps {
+				// The ledger starts here: what came before was taken (or
+				// not) by runs that did not record it.
+				l.Cursor, l.Since = "", last
+			}
+			l.Keeps = d.PhoneLedger
 		case event.PhoneRead:
 			var d event.PhoneReadData
 			if ev.Decode(&d) == nil && d.MessageID != "" {
-				l.Keeps = true
 				took(d.MessageID)
 			}
 		case event.UserMessage:
@@ -76,6 +97,7 @@ func ReadPhoneLedger(evs []event.Event) PhoneLedger {
 				l.Cards[d.CardID] = true
 			}
 		}
+		last = ev.Time
 	}
 	return l
 }
@@ -145,8 +167,16 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		// The thread no longer has the cursor's message (it was taken back,
 		// or the thread was recreated): judge by time.
 	}
+	// By time: after the session's last write for a record without the
+	// ledger; for one that keeps it, after the ledger started, since every
+	// message its runs took is in it (a ledger run that took nothing yet,
+	// as one cut off before its mirror's first post).
+	since := info.Modified
+	if l.Keeps {
+		since = l.Since
+	}
 	m, found, _, err := firstInThread(ctx, client, ext, "", func(m finalechat.Message) bool {
-		return l.Takeable(m) && m.CreatedAt.After(info.Modified)
+		return l.Takeable(m) && m.CreatedAt.After(since)
 	})
 	if err != nil || !found {
 		return fallback(err)

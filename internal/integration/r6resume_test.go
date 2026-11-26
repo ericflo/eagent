@@ -152,6 +152,11 @@ func r6Record(t *testing.T, project, sid string, evs ...event.Event) {
 	sess.Close()
 }
 
+// r6Run is the first write of a run that keeps the ledger.
+func r6Run() event.Event {
+	return event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{PhoneLedger: true})
+}
+
 func r6Read(id string) event.Event {
 	return event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: id})
 }
@@ -182,13 +187,15 @@ func TestWhereAStoppedSessionGoesOnReadingItsThread(t *testing.T) {
 		{"messages from before the stop are not taken again, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}}, ""},
 		{"an older message, then a new one, by time", nil, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
 		{"an agent's own post and a taken-back message are passed over", nil, []said{{"x1", "mirror", time.Minute, nil, "token"}, {"d1", "never mind", 90 * time.Second, nil, "deleted"}, {"m1", "go on", 2 * time.Minute, nil, ""}}, "m1"},
-		{"a run by an eagent without the ledger is read by time", []event.Event{r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}}, ""},
-		{"a run by an eagent without the ledger, then a new message", []event.Event{r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
-		{"ledger: after the last message taken in", []event.Event{r6Read("start"), r6Took("m1", "a")}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
-		{"ledger: a message received just before a hard stop is not lost", []event.Event{r6Read("m1")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Second, nil, ""}, {"m3", "c", time.Minute, nil, ""}}, "m2"},
-		{"ledger: everything taken in", []event.Event{r6Read("m1"), r6Took("m2", "b")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Minute, nil, ""}}, ""},
-		{"ledger: an answer whose card was taken another way", []event.Event{r6Read("m1"), event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: "card-1"})}, []said{{"m1", "a", -time.Hour, nil, ""}, {"a1", "blue", time.Minute, card, ""}, {"m2", "b", 2 * time.Minute, nil, ""}}, "m2"},
-		{"ledger: the cursor's message is gone, by time", []event.Event{r6Read("gone")}, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
+		{"a run by an eagent without the ledger is read by time", []event.Event{r6Run(), r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}}, ""},
+		{"a run by an eagent without the ledger, then a new message", []event.Event{r6Run(), r6Read("start"), r6Took("m1", "a"), event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{})}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
+		{"a ledger run with no cursor yet, after runs without it: by when it started", []event.Event{event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}), r6Took("m0", "a"), r6Run()}, []said{{"m0", "a", -2 * time.Hour, nil, ""}, {"q1", "/quit", -time.Hour, nil, ""}, {"m1", "b", time.Minute, nil, ""}}, "m1"},
+		{"a session that kept the ledger from its start, cut before its mirror's first post", []event.Event{event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{PhoneLedger: true})}, []said{{"m1", "a", -time.Second, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m1"},
+		{"ledger: after the last message taken in", []event.Event{r6Run(), r6Read("start"), r6Took("m1", "a")}, []said{{"start", "", -time.Hour, nil, "token"}, {"m1", "a", -time.Minute, nil, ""}, {"m2", "b", time.Minute, nil, ""}}, "m2"},
+		{"ledger: a message received just before a hard stop is not lost", []event.Event{r6Run(), r6Read("m1")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Second, nil, ""}, {"m3", "c", time.Minute, nil, ""}}, "m2"},
+		{"ledger: everything taken in", []event.Event{r6Run(), r6Read("m1"), r6Took("m2", "b")}, []said{{"m1", "a", -time.Hour, nil, ""}, {"m2", "b", -time.Minute, nil, ""}}, ""},
+		{"ledger: an answer whose card was taken another way", []event.Event{r6Run(), r6Read("m1"), event.New(event.PhoneAnswerTaken, event.ActorHarness, event.PhoneAnswerTakenData{CardID: "card-1"})}, []said{{"m1", "a", -time.Hour, nil, ""}, {"a1", "blue", time.Minute, card, ""}, {"m2", "b", 2 * time.Minute, nil, ""}}, "m2"},
+		{"ledger: the cursor's message is gone, by what the ledger took", []event.Event{r6Run(), r6Took("m0", "old"), r6Read("gone")}, []said{{"m0", "old", -time.Hour, nil, ""}, {"m1", "new", time.Minute, nil, ""}}, "m1"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			project := t.TempDir()
