@@ -540,7 +540,7 @@ func TestDossierWrittenFromTheRecordGetsItsOwnRewrite(t *testing.T) {
 // the model does then stands.
 func TestAnAnswerHeldOnWithNoCallLeftIsBroughtUpOnceMore(t *testing.T) {
 	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, time.Hour, time.Hour}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, time.Hour, time.Hour}
 	defer func() { owedRetryDelays = old }()
 	for _, c := range []struct {
 		name   string
@@ -570,7 +570,7 @@ func TestAnAnswerHeldOnWithNoCallLeftIsBroughtUpOnceMore(t *testing.T) {
 			s.type_("main")
 			s.waitFor("the reminder", func() bool { return reminded.Load() >= 1 })
 			s.settled()
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(10 * owedRetryDelays[0]) // ten of the first delay: a second reminder would come in one
 			s.settled()
 			if n := reminded.Load(); n != 1 {
 				t.Fatalf("the model was reminded of the answer %d times, want once", n)
@@ -600,7 +600,7 @@ func TestAnAnswerHeldOnWithNoCallLeftIsBroughtUpOnceMore(t *testing.T) {
 // in the same turn, once, and no later call is made for it.
 func TestAnAnswerHeldOnIsSentBackOnceInItsTurn(t *testing.T) {
 	old := owedRetryDelays
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, time.Hour, time.Hour}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, time.Hour, time.Hour}
 	defer func() { owedRetryDelays = old }()
 	brain := func(_ string, msgs []map[string]any) reply {
 		if strings.Contains(lastUserText(msgs), "kept for you") && msgs[len(msgs)-1]["role"] != "tool" {
@@ -617,7 +617,7 @@ func TestAnAnswerHeldOnIsSentBackOnceInItsTurn(t *testing.T) {
 	s.type_("main")
 	s.waitFor("the two calls", func() bool { return s.model.count(testModel)-before >= 2 })
 	s.settled()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0]) // ten of the first delay: a later call would come in one
 	s.settled()
 	if n := s.model.count(testModel) - before; n != 2 {
 		t.Fatalf("the answer took %d calls, want the hold and the one sent back", n)

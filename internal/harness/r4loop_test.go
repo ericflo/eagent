@@ -74,11 +74,11 @@ func TestAQuestionHeldOnIsAskedAboutAgainAfterAResume(t *testing.T) {
 	path, project := s.rt.sess.Path, s.rt.opts.Project
 	s.stop()
 
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 	s2 := resumeOneCall(t, path, project, s.model)
 	s2.waitFor("the question to be asked about again", func() bool { return reminders.Load() >= 1 })
 	s2.waitFor("eagent to give up", func() bool { return gaveUp(s2) })
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s2.settled()
 	if n := reminders.Load(); n != int32(len(owedRetryDelays)) {
 		t.Fatalf("the resumed session reminded the model %d times, want %d", n, len(owedRetryDelays))
@@ -87,7 +87,7 @@ func TestAQuestionHeldOnIsAskedAboutAgainAfterAResume(t *testing.T) {
 
 	s3 := resumeOneCall(t, path, project, s.model)
 	s3.settled()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s3.settled()
 	s3.stop()
 	if n := reminders.Load(); n != int32(len(owedRetryDelays)) {
@@ -126,7 +126,15 @@ func TestStoppingDuringEachReminderDoesNotStartThemOver(t *testing.T) {
 	for run := 0; run < 2*len(owedRetryDelays)+2; run++ {
 		before := reminders.Load()
 		sn := resumeOneCall(t, path, project, s.model)
-		deadline := time.Now().Add(600 * time.Millisecond)
+		// Once the loop runs, a reminder still to come is armed or on its
+		// way; with none, fifteen of its delays show that none comes.
+		var pending bool
+		sn.rt.sync(func() { pending = sn.rt.turns.owedTimer != nil || sn.rt.turns.busy || sn.rt.wakePending() })
+		wait := 600 * time.Millisecond
+		if !pending {
+			wait = 15 * owedRetryDelays[0]
+		}
+		deadline := time.Now().Add(wait)
 		for time.Now().Before(deadline) && reminders.Load() == before {
 			time.Sleep(5 * time.Millisecond)
 		}
@@ -250,10 +258,10 @@ func TestAnAnswerHeldOnIsBroughtUpOnceAfterAResume(t *testing.T) {
 	path, project := s.rt.sess.Path, s.rt.opts.Project
 	s.stop()
 
-	owedRetryDelays = []time.Duration{30 * time.Millisecond, 30 * time.Millisecond, 30 * time.Millisecond}
+	owedRetryDelays = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond}
 	s2 := resumeOneCall(t, path, project, s.model)
 	s2.waitFor("the answer to be brought up", func() bool { return reminded.Load() >= 1 })
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s2.settled()
 	var owed int64
 	s2.rt.sync(func() { owed = s2.rt.turns.owed })
@@ -263,7 +271,7 @@ func TestAnAnswerHeldOnIsBroughtUpOnceAfterAResume(t *testing.T) {
 	s2.stop()
 	s3 := resumeOneCall(t, path, project, s.model)
 	s3.settled()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * owedRetryDelays[0])
 	s3.settled()
 	s3.stop()
 	if n := reminded.Load(); n != 1 {

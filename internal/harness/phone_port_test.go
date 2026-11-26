@@ -74,7 +74,10 @@ func TestPhoneAnswersQuestionInBatchSession(t *testing.T) {
 		return hold()
 	}, nil)
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
-	g.running(1500*time.Millisecond, "while waiting on the phone")
+	// With the agent stopped nothing but the question is left: a session
+	// that did not wait would end on the tick that saw it, or the next.
+	g.agentStopped()
+	g.running(10*loopPoll, "while waiting on the phone")
 	if !fp.answer("blue", "") {
 		t.Fatal("no pending question to answer")
 	}
@@ -547,13 +550,17 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 	}, nil)
 	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
 	fp.tokenUserMessage("red")
-	g.running(1500*time.Millisecond, "on a token-origin message")
+	g.phoneWeighed(fp.lastMessageID())
+	g.running(10*loopPoll, "on a token-origin message")
 	g.rt.sync(func() {}) // the token message has been weighed
 	before := g.model.count(testModel)
 	if !fp.dismiss() {
 		t.Fatal("nothing to dismiss")
 	}
-	g.running(2500*time.Millisecond, "on the dismissal")
+	waitFor(t, "the dismissal to be recorded", func() bool { return len(g.events(event.UserDismiss)) == 1 })
+	// The turn and the end are decided on the tick that recorded it; ten
+	// more ticks for anything that waits on the clock.
+	g.running(10*loopPoll, "on the dismissal")
 	if got := g.model.count(testModel); got != before {
 		t.Fatalf("the dismissal called the model: %d calls before, %d after", before, got)
 	}
@@ -621,6 +628,9 @@ func TestPhoneIgnoresTokenOriginAndDismissalSendsNothing(t *testing.T) {
 // session ends, having asked once and posted one card. (How it ends, which
 // the old test also held, is in gaps_phone_test.go.)
 func TestPhoneDismissedQuestionIsNotAskedAgain(t *testing.T) {
+	// The question's four seconds, at 100ms each: the session listens for
+	// 400ms after the question, many times what the dismissal takes to arrive.
+	setFor(t, &questionSecond, 100*time.Millisecond)
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, phoneDismissedBrain(), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
@@ -770,7 +780,10 @@ func TestSlashDismissClosesQuestionAndPhoneCard(t *testing.T) {
 		defer fp.mu.Unlock()
 		return len(fp.dismissedByToken) == 1
 	})
-	time.Sleep(1500 * time.Millisecond)
+	// /dismiss ran on the loop before the card was closed; ten more ticks
+	// for anything it would have set off.
+	time.Sleep(10 * loopPoll)
+	g.rt.sync(func() {})
 	if got := g.model.count(testModel); got != before {
 		t.Fatalf("/dismiss called the model: %d calls before, %d after", before, got)
 	}
@@ -857,8 +870,8 @@ func TestRedactSecrets(t *testing.T) {
 // rather than cancelling it mid-flight.
 func TestPhoneClosingNoteSurvivesSlowNetwork(t *testing.T) {
 	fp := newPhoneFake(false)
-	fp.latency = 150 * time.Millisecond
-	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
+	fp.latency = 50 * time.Millisecond // the note's two round trips take 100ms
+	t.Cleanup(fp.srv.Close)            // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "idle", false, phoneStopAndClose("Nothing to do."), nil)
 	if code := g.exit(25 * time.Second); code != 0 {
 		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
@@ -1018,7 +1031,8 @@ func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 	// must not become "yes" to wiping the branch.
 	fp.injectQuestion("old-card", "q-from-another-run")
 	fp.answerQuestion("old-card", "blue")
-	g.running(1500*time.Millisecond, "on a stale card's answer")
+	g.phoneWeighed(fp.lastMessageID())
+	g.running(10*loopPoll, "on a stale card's answer")
 	for _, ev := range g.log() {
 		if ev.Type == event.UserAnswer {
 			t.Fatalf("a stale card's answer was bound to the open question: %s", ev.Data)
@@ -1048,16 +1062,20 @@ func TestPhoneUnknownQuestionAnswersAreNotMisbound(t *testing.T) {
 // answers the long poll at once with nothing (an unknown anchor) is not
 // asked again at once, and the recreated thread is logged once.
 func TestPhonePollPacesItselfWhenTheServerDoesNotHold(t *testing.T) {
+	// The pause starts at 50ms and doubles: polls at 0, 50, 150 and 350ms
+	// make four in the window of three first pauses, as 0, 1 and 3 seconds
+	// did in three seconds. With no pacing it would be hundreds.
+	setFor(t, &phonePollFloor, 50*time.Millisecond)
 	fp := newPhoneFake(false)
 	fp.anchorUnknown = true
 	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "", true, func(string, []map[string]any) reply { return hold() }, nil)
 	waitFor(t, "the first poll", func() bool { return fp.getCount() >= 1 })
-	time.Sleep(3 * time.Second)
+	time.Sleep(3 * phonePollFloor)
 	n := fp.getCount()
 	g.interrupt()
 	if n > 5 {
-		t.Fatalf("%d polls in three seconds against a server that does not hold requests", n)
+		t.Fatalf("%d polls in three first pauses against a server that does not hold requests", n)
 	}
 	said := 0
 	for _, l := range g.ui.logged() {

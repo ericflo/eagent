@@ -206,7 +206,7 @@ func (r *Runtime) startPhone() {
 			if attempt == 3 {
 				r.ui.Log("finalechat: %v; retrying until the service is reachable", err)
 			}
-			timer := time.NewTimer(min(time.Duration(attempt)*time.Second, time.Minute))
+			timer := time.NewTimer(min(time.Duration(attempt)*phoneRetryStep, time.Minute))
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -825,6 +825,15 @@ func (r *Runtime) adoptThread(p *phone, thread finalechat.Thread) {
 // loop paces itself rather than asking again at once.
 const pollFloorAfter = 30 * time.Second
 
+// phonePollFloor is the first pause of a poll the server answers at once
+// with nothing; it doubles up to 30 seconds. phoneRetryStep is how much
+// longer each try of the session's first call waits than the one before
+// while the service cannot be reached. Variables so tests can shorten them.
+var (
+	phonePollFloor = time.Second
+	phoneRetryStep = time.Second
+)
+
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
@@ -867,7 +876,7 @@ func (p *phone) poll(r *Runtime) {
 			// the request (an unknown anchor, or no wait support). Pace
 			// ourselves instead of hammering the user's own account.
 			if floor == 0 {
-				floor = time.Second
+				floor = phonePollFloor
 			} else if floor < 30*time.Second {
 				floor *= 2
 			}
@@ -1084,7 +1093,7 @@ func (p *phone) watchQuestion(r *Runtime, fid, qid string) {
 			// Answered at once and still pending: the server is not holding
 			// the request. Pace the loop.
 			if floor == 0 {
-				floor = time.Second
+				floor = phonePollFloor
 			} else if floor < 30*time.Second {
 				floor *= 2
 			}

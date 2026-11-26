@@ -218,6 +218,7 @@ func (f *relayPhone) handle(w http.ResponseWriter, r *http.Request) {
 		wait := 0
 		fmt.Sscanf(r.URL.Query().Get("wait"), "%d", &wait)
 		deadline := time.Now().Add(time.Duration(wait) * time.Second)
+		defer wakeAt(r, &f.mu, f.cond, deadline)()
 		f.mu.Lock()
 		f.gets++
 		var out []map[string]any
@@ -236,7 +237,6 @@ func (f *relayPhone) handle(w http.ResponseWriter, r *http.Request) {
 			if len(out) > 0 || wait == 0 || time.Now().After(deadline) {
 				break
 			}
-			go func() { time.Sleep(200 * time.Millisecond); f.mu.Lock(); f.cond.Broadcast(); f.mu.Unlock() }()
 			f.cond.Wait()
 			if r.Context().Err() != nil {
 				f.mu.Unlock()

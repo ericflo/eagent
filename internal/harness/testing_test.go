@@ -261,9 +261,26 @@ func TestMain(m *testing.M) {
 	}
 	agentInstalled = func(string) bool { return true }
 	wakeSettle, keysSettle = 0, 0
+	// The phone's status line is written at most every 2.5 seconds; a test
+	// that waits for a status would wait that out after every change.
+	statusMinGap = 20 * time.Millisecond
+	// The loop reads its inbox and looks at the clock every half second;
+	// a test that posts to the inbox, or waits on a time the loop notices
+	// only then, would wait up to that much each time.
+	loopPoll = 25 * time.Millisecond
 	// A minute for the closing word and 75 seconds of grace at shutdown
 	// are real waits when a test's model is already gone.
 	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
+	// Sessions record to temporary directories (t.TempDir) and fsync every
+	// event; on a memory filesystem that costs nothing. All of it is
+	// removed when the run ends.
+	var memTmp string
+	if dir := memoryDisk(); dir != "" {
+		if d, err := os.MkdirTemp(dir, "eagent-harness-test"); err == nil {
+			memTmp = d
+			os.Setenv("TMPDIR", d)
+		}
+	}
 	os.Setenv("EAGENT_FINALECHAT", "off")
 	// The thread's title and summary are kept by the loop's own model, which
 	// would add a call most scripts have no reply for; the tests that cover
@@ -279,6 +296,9 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("FINALECHAT_URL")
 	http.DefaultTransport = loopbackOnlyTransport{base: http.DefaultTransport}
 	code := m.Run()
+	if memTmp != "" {
+		os.RemoveAll(memTmp)
+	}
 	if n := testDeniedHTTP.Load(); n != 0 {
 		fmt.Fprintf(os.Stderr, "hermetic test guard: %d non-loopback HTTP requests were refused\n", n)
 		if code == 0 {
@@ -463,6 +483,15 @@ func attachedTargets(p *[]string) []string {
 	fakeRelaysMu.Lock()
 	defer fakeRelaysMu.Unlock()
 	return append([]string(nil), *p...)
+}
+
+// setFor sets a package variable (a delay, usually) for one test and puts
+// it back when the test ends.
+func setFor[T any](t *testing.T, v *T, val T) {
+	t.Helper()
+	old := *v
+	*v = val
+	t.Cleanup(func() { *v = old })
 }
 
 // session is a running test session: an interactive runtime with a fake

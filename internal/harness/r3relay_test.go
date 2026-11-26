@@ -227,7 +227,7 @@ func TestStopSessionWaitsForARestartStartedOffTheTurn(t *testing.T) {
 			select {
 			case <-done:
 				t.Fatal("the session ended while an agent was still starting")
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(200 * time.Millisecond): // a stop that did not wait ends in a few ms
 			}
 			g.release <- struct{}{}
 			select {

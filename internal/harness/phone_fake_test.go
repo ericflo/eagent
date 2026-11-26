@@ -51,6 +51,7 @@ type phoneFake struct {
 	latency          time.Duration            // added to every request, to imitate a real network
 	anchorUnknown    bool                     // every GET …/messages answers at once with an unknown anchor
 	gets             int                      // GET …/messages calls
+	after            string                   // the anchor of the latest GET …/messages
 	// The thread's title and summary as the app would show them, with the
 	// service's pin rule: what the user wrote stays, whatever a token sends.
 	title, desc             string
@@ -198,6 +199,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodGet:
 		f.mu.Lock()
 		f.gets++
+		f.after = r.URL.Query().Get("after")
 		unknown := f.anchorUnknown
 		f.mu.Unlock()
 		if unknown {
@@ -209,6 +211,7 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		wait := 0
 		fmt.Sscanf(r.URL.Query().Get("wait"), "%d", &wait)
 		deadline := time.Now().Add(time.Duration(wait) * time.Second)
+		defer wakeAt(r, &f.mu, f.cond, deadline)()
 		f.mu.Lock()
 		var out []map[string]any
 		for {
@@ -227,7 +230,6 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			// wake on new messages or every 200ms to re-check the deadline
-			go func() { time.Sleep(200 * time.Millisecond); f.mu.Lock(); f.cond.Broadcast(); f.mu.Unlock() }()
 			f.cond.Wait()
 			if r.Context().Err() != nil {
 				f.mu.Unlock()
@@ -281,10 +283,10 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		wait := 0
 		fmt.Sscanf(r.URL.Query().Get("wait"), "%d", &wait)
 		deadline := time.Now().Add(time.Duration(wait) * time.Second)
+		defer wakeAt(r, &f.mu, f.cond, deadline)()
 		f.mu.Lock()
 		q := f.questions[id]
 		for q != nil && q["status"] == "pending" && wait > 0 && time.Now().Before(deadline) {
-			go func() { time.Sleep(200 * time.Millisecond); f.mu.Lock(); f.cond.Broadcast(); f.mu.Unlock() }()
 			f.cond.Wait()
 			if r.Context().Err() != nil {
 				f.mu.Unlock()
@@ -344,6 +346,16 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"` + path + `"}}`))
 	}
+}
+
+// wakeAt wakes a long poll waiting on cond when its request ends or its
+// deadline passes, so it neither outlives its client nor oversleeps; the
+// changes it waits for broadcast on their own. The returned func stops it.
+func wakeAt(r *http.Request, mu *sync.Mutex, cond *sync.Cond, deadline time.Time) func() {
+	wake := func() { mu.Lock(); cond.Broadcast(); mu.Unlock() }
+	stopCtx := context.AfterFunc(r.Context(), wake)
+	timer := time.AfterFunc(time.Until(deadline), wake)
+	return func() { stopCtx(); timer.Stop() }
 }
 
 // userReply is the user typing on the phone.
@@ -643,6 +655,26 @@ func (g *phoneRig) running(d time.Duration, why string) {
 		g.t.Fatalf("the session ended (%d) %s; logs %v", code, why, g.ui.logged())
 	case <-time.After(d):
 	}
+}
+
+// lastMessageID is the id of the newest message in the thread.
+func (f *phoneFake) lastMessageID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.messages[len(f.messages)-1]["id"].(string)
+}
+
+// phoneWeighed waits until the message poll has handled the message id:
+// it has asked for what comes after it, which it does only once it is done
+// with it, and what it handed the loop has run.
+func (g *phoneRig) phoneWeighed(id string) {
+	g.t.Helper()
+	waitFor(g.t, "the poll to take the message", func() bool {
+		g.fp.mu.Lock()
+		defer g.fp.mu.Unlock()
+		return g.fp.after == id
+	})
+	g.rt.sync(func() {})
 }
 
 // interrupt cancels the run and waits for it.

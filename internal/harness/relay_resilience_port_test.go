@@ -76,7 +76,11 @@ func TestFullLoopQueueDoesNotWedgeTheSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan int, 1)
 	go func() { runDone <- rt.Run(ctx) }()
-	time.Sleep(500 * time.Millisecond)
+	waitFor(t, "the brief to reach the agent", func() bool {
+		seat.mu.Lock()
+		defer seat.mu.Unlock()
+		return len(seat.sent) > 0
+	})
 	go func() {
 		defer close(seat.events)
 		for i := 0; ; i++ {
@@ -377,6 +381,8 @@ func TestModelCallsWaitForTheNetwork(t *testing.T) {
 // not switch it off, and a reply from the phone still reaches the session.
 func TestPhoneMirrorSurvivesAnOutageAtStart(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
+	// Each try waits this much longer than the one before: 10, 20, 30 ms...
+	setFor(t, &phoneRetryStep, 10*time.Millisecond)
 	useFakeRelays(t, newFakeSeat("ok"))
 	project := t.TempDir()
 	model := newScripted(func(string, []map[string]any) reply { return hold() })
@@ -384,10 +390,14 @@ func TestPhoneMirrorSurvivesAnOutageAtStart(t *testing.T) {
 	fp := newRelayPhone()
 	t.Cleanup(fp.srv.Close)
 	var down atomic.Bool
+	var refused atomic.Int32 // first calls answered 503
 	down.Store(true)
 	inner := fp.srv.Config.Handler
 	fp.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if down.Load() {
+			if r.URL.Path == "/api/v1/me" {
+				refused.Add(1)
+			}
 			w.WriteHeader(503)
 			_, _ = w.Write([]byte(`{"error":{"code":"unavailable","message":"upstream down"}}`))
 			return
@@ -403,7 +413,8 @@ func TestPhoneMirrorSurvivesAnOutageAtStart(t *testing.T) {
 	defer cancel()
 	done := make(chan int, 1)
 	go func() { done <- rt.Run(ctx) }()
-	time.Sleep(5 * time.Second) // longer than the old three tries
+	// More tries than the old three, which then switched the mirror off.
+	waitFor(t, "five tries of the first call", func() bool { return refused.Load() >= 5 })
 	down.Store(false)
 	for deadline := time.Now().Add(30 * time.Second); fp.postCount() == 0; {
 		if time.Now().After(deadline) {

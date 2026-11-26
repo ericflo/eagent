@@ -501,6 +501,11 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 // offlineWait paces calls while the network is down (up to four times it).
 var offlineWait = 15 * time.Second
 
+// loopPoll is how often the loop reads its inbox and live settings and
+// looks at the time-based parts of its state; a variable so tests can
+// shorten it.
+var loopPoll = 500 * time.Millisecond
+
 // networkDown reports a failure to reach the provider at all, which waiting
 // fixes. A whole call running past its limit is not one: the provider was
 // reached and is slow, and the turn's own error handling decides.
@@ -614,7 +619,7 @@ func (r *Runtime) Run(ctx context.Context) int {
 		q := r.st.Question
 		r.ui.Ask(q.ID, q.Text, q.Options)
 	}
-	inbox := time.NewTicker(500 * time.Millisecond)
+	inbox := time.NewTicker(loopPoll)
 	defer inbox.Stop()
 	r.pollInbox()
 	r.pollRuntimeSettings()
@@ -905,7 +910,7 @@ func (r *Runtime) dismissQuestion(qid, source string) {
 			break
 		}
 	}
-	r.listenUntil = asked.Add(time.Duration(r.cfg.Finalechat.QuestionTimeout()) * time.Second)
+	r.listenUntil = asked.Add(time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond)
 	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: source}))
 	r.ui.Log("question %s dismissed without an answer; nothing was sent to the agent", q.ID)
 }
@@ -947,6 +952,11 @@ func (r *Runtime) settleDismissedWhileAway() {
 	}
 	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: "finalechat"}))
 }
+
+// questionSecond is one second of a question's time as a batch session
+// listens after a dismissal; a variable so tests can run it in
+// milliseconds.
+var questionSecond = time.Second
 
 // listeningAfterDismissal reports that the user closed a question a while
 // ago and a batch session is still giving them the question's time to

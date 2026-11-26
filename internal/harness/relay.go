@@ -1743,6 +1743,10 @@ func autopilotUntil(d event.RelayAutopilotData) string {
 // not wake by itself.
 var autopilotCheckAfter = 10 * time.Minute
 
+// autopilotEndFloor is the least wait before an autopilot's deadline is
+// acted on, also when it has passed; a variable so tests can shorten it.
+var autopilotEndFloor = time.Second
+
 // armAutopilotCheck (re)starts the idle check for one relay: if the agent is
 // still idle after its last turn, with autopilot on and nothing sent to it,
 // the model is woken, and again every autopilotCheckAfter while that lasts.
@@ -1807,7 +1811,7 @@ func (r *Runtime) armAutopilots() {
 			continue
 		}
 		name := rel.Name
-		r.autopilotTimers[name] = time.AfterFunc(max(time.Until(until), time.Second), func() {
+		r.autopilotTimers[name] = time.AfterFunc(max(time.Until(until), autopilotEndFloor), func() {
 			r.post(func() {
 				cur := r.st.Relays[name]
 				if cur == nil || cur.Autopilot == nil || cur.Autopilot.Until != ap.Until || r.ending {
