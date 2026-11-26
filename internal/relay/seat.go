@@ -135,8 +135,10 @@ type pending struct {
 	// restored: recorded before eagent stopped (see Seat.restore); sentAt
 	// is when. Such a send can be confirmed by transcript lines from before
 	// the reattach, and is never pressed again. dormant: the seat has not
-	// caught up on the transcript yet. lost: a held one whose spool file
-	// was gone at the catch-up, watched on a timer as a typed send is.
+	// caught up on the transcript yet. lost: an after-turn send no longer
+	// waiting where eagent put it (its spool file gone at the catch-up, or
+	// once the turn it waited for ended), watched on a timer as a typed send
+	// is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
 }
@@ -313,9 +315,11 @@ func spoolHolds(names []string, id string) bool {
 
 // timed says whether a pending send is watched on a timer: pressed again
 // when its text sits in the input box, and reported unconfirmed when it
-// never arrives. A message held for the end of a turn is not, unless it was
-// restored and nothing holds it any more; nor is a restored send before
-// the catch-up has ended.
+// never arrives. A message held for the end of a turn is not until it is
+// lost: restored with nothing holding it any more, handed to the agent's
+// own queue and its turn over (fold), or its turn over and its spool file
+// gone (reportLeftOvers). Nor is a restored send before the catch-up has
+// ended.
 func (p *pending) timed() bool {
 	return !p.dormant && (p.mode != "after_turn" || p.lost)
 }
@@ -475,9 +479,10 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
 				// An agent with a spool holds it there; one without has handed
 				// it to its own queue. Either way it is tracked for its arrival,
-				// and, as every after-turn send, never pressed again or reported
-				// lost on a timer. Only Claude's and pi's hand-overs go
-				// through the spool.
+				// and, as every after-turn send, never pressed again, nor
+				// reported lost on a timer before its turn is over (see
+				// pending.lost). Only Claude's and pi's hand-overs go through
+				// the spool.
 				s.trackHeld(id, text, mode, s.spec.Spool != "")
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
@@ -619,12 +624,18 @@ var heldGrace = 5 * time.Second
 // reported in order. Nothing here reads the screen: an idle seen only on
 // the screen (after going quiet) is no turn end, and leaves the spool to
 // the hook.
+//
+// A held message tracked before that turn ended whose file is gone (the
+// hook claimed it, and may have died before handing it over) is lost from
+// now: confirmed if the transcript shows it, reported unconfirmed after the
+// usual wait otherwise.
 func (s *Seat) reportLeftOvers(now time.Time) {
 	if s.spec.Spool == "" {
 		return
 	}
 	s.mu.Lock()
-	over := s.state == "idle" && !s.turnEndAt.IsZero() && now.Sub(s.turnEndAt) >= heldGrace
+	end := s.turnEndAt
+	over := s.state == "idle" && !end.IsZero() && now.Sub(end) >= heldGrace
 	s.mu.Unlock()
 	if !over {
 		return
@@ -639,18 +650,24 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 			order = append(order, id)
 		}
 	}
-	if len(order) == 0 {
-		return
-	}
+	names := spoolNames(s.spec.Spool)
 	s.mu.Lock()
+	same := s.state == "idle" && s.turnEndAt.Equal(end)
 	keep := s.pending[:0]
 	for _, p := range s.pending {
-		if !ids[p.id] {
-			keep = append(keep, p)
+		if ids[p.id] {
+			continue
 		}
+		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolHolds(names, p.id) && !isAgentCommand(p.text) {
+			p.lost, p.at = true, now
+		}
+		keep = append(keep, p)
 	}
 	s.pending = keep
 	s.mu.Unlock()
+	if len(order) == 0 {
+		return
+	}
 	detail := s.agent.Label() + "'s turn ended before it took this message (for example after an interrupt), so it was not delivered; send it again if it is still wanted"
 	for _, id := range order {
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Outcome: OutcomeNotSent, Detail: detail})
@@ -1124,6 +1141,14 @@ func (s *Seat) fold(o obs) {
 			s.setState("idle", "")
 			s.mu.Lock()
 			s.turnEndAt = time.Now() // the transcript says the turn is over
+			for _, p := range s.pending {
+				// An after-turn send handed to the agent's own queue (or typed)
+				// waited for this turn: from now on its arrival is due. The
+				// agent's own command shows no arrival, and stays as it was.
+				if p.mode == "after_turn" && !p.held && !p.dormant && !p.lost && !isAgentCommand(p.text) {
+					p.lost, p.at = true, s.turnEndAt
+				}
+			}
 			s.mu.Unlock()
 		}
 	case "limit":
@@ -1248,7 +1273,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		if !p.timed() || now.Sub(p.at) <= 6*time.Second {
 			continue
 		}
-		if press == nil && !p.restored {
+		if press == nil && !p.restored && !p.lost {
 			press = p
 		}
 		if report == nil && now.Sub(p.at) > 45*time.Second {
