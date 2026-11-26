@@ -330,6 +330,14 @@ func (r *Runtime) needsDossier() bool {
 		// before anything else, from the conversation it was replacing.
 		return true
 	}
+	if r.restartDecided() {
+		// No restart can make room, and nothing since has changed that:
+		// whatever door would lead to one (the provider's refusal, the
+		// size past the threshold, a size too near the window to write
+		// in), the answer is the same.
+		r.tellStillFull()
+		return false
+	}
 	limit := r.rolloverTokens()
 	if !t.overflowed && r.contextTokens() < limit {
 		return false
@@ -342,6 +350,7 @@ func (r *Runtime) needsDossier() bool {
 		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
+			r.decidedWindow, _ = r.window()
 			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
 				input, fixed := r.inputRoom()
 				if at := r.cfg.RolloverTokens; at > 0 && at < input && input > r.provider(fixed) {
@@ -504,6 +513,29 @@ func (r *Runtime) recordedSinceOpening() bool {
 		}
 	}
 	return false
+}
+
+// restartDecided reports that, for a conversation a restart began, no
+// restart can make room was found and said (this run, or by the record's
+// full notice), and no call has gone through since. That stands across a
+// model picked in the thread's settings, unless the new model's window is
+// larger than the one it was found on: then the conversation is sent to it
+// as it is (needsDossier asks the size of the new window as usual). The
+// window it was found on is kept by this run; a resumed run takes the
+// window it resumes on. Loop goroutine only.
+func (r *Runtime) restartDecided() bool {
+	cur := r.st.Current()
+	if cur == nil || (cur.Reason != "rollover" && cur.Reason != "upgrade") || r.turns.subCalls > 0 {
+		return false
+	}
+	if !r.turns.futileLogged && !r.toldFull() {
+		return false
+	}
+	window, _ := r.window()
+	if r.decidedWindow == 0 {
+		r.decidedWindow = window
+	}
+	return window <= r.decidedWindow
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
@@ -1175,7 +1207,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
-	r.restartCarried, r.restartRetried = carriedNothing, job.retry
+	r.restartCarried, r.restartRetried, r.decidedWindow = carriedNothing, job.retry, 0
 	if job.carry {
 		r.restartCarried = carriedSome
 	}

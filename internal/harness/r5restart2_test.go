@@ -147,7 +147,14 @@ func TestAModelWithALargerWindowTakesWhatNoRestartCouldFit(t *testing.T) {
 		return hold()
 	})
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
-	r4Until(t, "the answer from the larger model", func() bool { return r5Told(s, "Here it is.") == 1 })
+	// The look the larger model is sent first may answer the message that
+	// waited since before the switch, this one, or both at once.
+	r4Until(t, "the answer from the larger model", func() bool { return r5Told(s, "Here it is.") >= 1 })
+	s.waitFor("the loop to take in both messages", func() bool {
+		idle := false
+		s.rt.sync(func() { idle = !s.rt.turns.busy && !s.rt.wakePending() })
+		return idle
+	})
 	if n := len(s.events(event.Dossier)); n != before {
 		t.Fatalf("%d restarts on the larger model, want none", n-before)
 	}
@@ -193,5 +200,57 @@ func TestEachMessageAfterNoRestartCanMakeRoomIsToldItWaits(t *testing.T) {
 	}
 	if n := r5Told(s, fullNotice); n != 1 {
 		t.Fatalf("the full notice was said %d times, want once", n)
+	}
+}
+
+// Right after a switch to a model with a smaller window, before any call
+// has gone to it, the conversation is past the new model's restart size.
+// That door leads to the same decision: no restart can make room. With a
+// larger window, the decision no longer stands and the size of the new
+// window is asked as usual.
+func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
+	refuse := func(string, []map[string]any) reply {
+		return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
+	}
+	for _, c := range []struct {
+		window  int
+		decided bool
+	}{{30_000, true}, {60_000, true}, {200_000, false}} {
+		s, _ := r5FullSession(t)
+		// The refused calls are retried after an hour from here on (set on
+		// the loop, which reads it), so none is out when the switch comes.
+		s.rt.sync(func() { errorRetryDelays = []time.Duration{time.Hour} })
+		r4Until(t, "the full notice decided and no call out", func() bool {
+			ok := false
+			s.rt.sync(func() { ok = s.rt.turns.futileLogged && !s.rt.turns.busy && s.rt.turns.failures > 0 })
+			return ok
+		})
+		srv := newScripted(refuse)
+		t.Cleanup(srv.srv.Close)
+		conf := config.ModelRoute{Protocol: llm.ProtocolChat, BaseURL: srv.srv.URL, Model: "other-model", APIKeyEnv: "EAGENT_TEST_KEY", ContextTokens: c.window, MaxTokens: 2048}
+		eps, err := conf.Routes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decided, needs bool
+		var prompt, size int
+		s.rt.sync(func() {
+			// The switch, and the loop's next look at the size, at once:
+			// before any call has gone to the new model.
+			s.rt.swapRoute(routeSwap{who: event.ActorEagent, pick: runtimecontrol.Route{Provider: "test", Model: "other-model"}, eps: eps, conf: conf})
+			decided = s.rt.restartDecided()
+			needs = s.rt.needsDossier()
+			prompt, size = s.rt.contextTokens(), s.rt.rolloverTokens()
+		})
+		if c.decided && prompt < size {
+			t.Fatalf("window %d: the prompt (%d) is under the new restart size (%d), so the size door is not tested", c.window, prompt, size)
+		}
+		if decided != c.decided {
+			t.Errorf("window %d: decided %v, want %v", c.window, decided, c.decided)
+		}
+		if c.decided && needs {
+			t.Errorf("window %d: a restart is asked for right after the switch, and no restart can make room", c.window)
+		}
+		s.stop()
 	}
 }
