@@ -3,10 +3,12 @@ package harness
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -328,4 +330,56 @@ func TestAStatusTheServiceTurnedDownIsWrittenAgain(t *testing.T) {
 	fp.rejectActivity = false
 	fp.mu.Unlock()
 	waitFor(t, "the step on the phone", func() bool { return fp.shownStatus() == line })
+}
+
+// A picture eagent may look at because the user or an agent named it may
+// also be sent to the user: the two tools hold a picture to one rule. A
+// named file that is not a picture, and a picture nobody named, still stay.
+func TestSendMessageAttachesAPictureThatViewImageTakes(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	run := func(name, args string) (string, bool) {
+		out, isErr, _ := s.rt.runTool(context.Background(), &turnCalls{}, tc(name, args))
+		return out, isErr
+	}
+	dir := t.TempDir()
+	shot, notes, never := filepath.Join(dir, "shot.png"), filepath.Join(dir, "notes.txt"), filepath.Join(dir, "never.png")
+	for path, data := range map[string][]byte{shot: tinyPNG, notes: []byte("secret notes"), never: tinyPNG} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.rt.sync(func() {
+		s.rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "look at " + shot + " and " + notes, Source: "terminal"}))
+	})
+	s.settled()
+	view, _ := json.Marshal(map[string]string{"path": shot})
+	if out, isErr := run("view_image", string(view)); isErr {
+		t.Fatalf("view_image: %s", out)
+	}
+	send := func(path string) (string, bool) {
+		args, _ := json.Marshal(map[string]any{"text": "Here.", "attachments": []string{path}})
+		return run("send_message", string(args))
+	}
+	if out, isErr := send(shot); isErr {
+		t.Fatalf("send_message refused the picture view_image took: %s", out)
+	}
+	if out, isErr := send(notes); !isErr {
+		t.Fatalf("a named file that is not a picture was sent: %s", out)
+	}
+	if out, isErr := send(never); !isErr {
+		t.Fatalf("a picture nobody named was sent: %s", out)
+	}
+	var sent []event.Attachment
+	for _, ev := range s.events(event.Message) {
+		var d event.MessageData
+		if ev.Decode(&d) == nil {
+			sent = append(sent, d.Attachments...)
+		}
+	}
+	if len(sent) != 1 || sent[0].Name != "shot.png" {
+		t.Fatalf("sent %+v", sent)
+	}
+	if entries, _ := os.ReadDir(attachmentsDir(s.rt.sess.Path)); len(entries) != 2 {
+		t.Fatalf("the session keeps %d copies, want the look and the send", len(entries))
+	}
 }
