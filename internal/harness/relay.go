@@ -672,6 +672,17 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
 	}
+	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil && rel.Active() {
+		// A restart: what was typed into the process that was just
+		// stopped and not yet confirmed has nobody to confirm it, and the
+		// new start begins with nothing waited on. What is held for this
+		// start is typed below, by the new seat.
+		var waiting []string
+		for _, h := range held {
+			waiting = append(waiting, h.id)
+		}
+		r.settleExited(rel, waiting...)
+	}
 	// A session with an agent started is not ending: its closing word is
 	// asked again once this agent's work is done.
 	r.summary.final, r.turns.finalAsked = false, false
@@ -955,12 +966,16 @@ func (r *Runtime) reattachRelays() []string {
 }
 
 // settleExited reports, once, each send rel still waited on as not
-// confirmed: its agent has exited, and nothing watches its transcript any
-// more. A send still waiting in the seat's queue to be typed is left out:
-// typing it fails, and that is reported where it fails; so is one the
-// caller names in except. Called where an exit is recorded: live, at a
-// resume, and when a restart cannot start. Loop goroutine (or before the
-// loop starts).
+// confirmed: the process it was typed into is gone (it exited or was
+// restarted), and nothing watches for its arrival any more. A send still
+// waiting in the seat's queue to be typed is left out: typing it fails,
+// and that is reported where it fails; so is one the caller names in
+// except. Called where an agent's process ends and its conversation does
+// not: an exit seen live or found at a resume, a restart that cannot
+// start, and a restart that does (before the new start is recorded). A
+// stop is not one of them (the agent and its work are ended on purpose),
+// nor is a switch to another agent: its hand-over brief carries what the
+// old agent was sent. Loop goroutine (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
 	for _, id := range except {
@@ -979,11 +994,15 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 	}
 	r.relays.mu.Unlock()
+	how := "exited"
+	if rel.State != "exited" {
+		how = "was restarted"
+	}
 	for _, s := range unresolvedSends(r.st, rel) {
 		if queued[s.ID] {
 			continue
 		}
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent exited before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}))
 	}
 }
 
@@ -2308,10 +2327,65 @@ func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id,
 	for i := len(ids) - 1; i >= 0; i-- {
 		o, to := sendOutcomeFor(st, ids[i], movedOn)
 		if v := judgeSend(o, who, ids[i], to, atts); !v.again {
+			if wentToEarlierHolder(st, relayName, ids, movedOn) {
+				v.refusal = fmt.Sprintf("that message went as written (%s) to the agent that held the name %s before, which was stopped; %s, running now, was not sent it as its own message (its hand-over brief may quote it); to give it to this one, send the words with relay_send", ids[i], relayName, who)
+			}
 			return ids[i], v.refusal
 		}
 	}
 	return "", ""
+}
+
+// wentToEarlierHolder says whether every send in ids (all under name) was
+// recorded and confirmed arrived before the relay.end that stopped the
+// agent which held name before, and the agent holding name now started
+// after that end and runs. Only the words of a refusal hang on it: which
+// sends count stays as forwardedAs counts them.
+func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map[string]string) bool {
+	rel := st.Relays[name]
+	if rel == nil || !rel.Active() {
+		return false
+	}
+	var endSeq int64
+	sentAt, arrivedAt := map[string]int64{}, map[string]int64{}
+	for _, ev := range st.Events {
+		if ev.Seq >= rel.StartSeq {
+			break
+		}
+		switch ev.Type {
+		case event.RelayEnd:
+			var d event.RelayEndData
+			if ev.Decode(&d) == nil && d.Name == name {
+				endSeq = ev.Seq
+			}
+		case event.RelaySend, event.RelayMoved:
+			var d event.RelaySendData
+			if ev.Decode(&d) == nil && d.Name == name {
+				sentAt[d.ID] = ev.Seq
+			}
+		case event.RelayDelivered:
+			var d event.RelayDeliveredData
+			if ev.Decode(&d) == nil && d.OK {
+				if _, seen := arrivedAt[d.ID]; !seen {
+					arrivedAt[d.ID] = ev.Seq
+				}
+			}
+		}
+	}
+	if endSeq == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if _, moved := movedOn[id]; moved || st.SendOutcome(id) != state.SendArrived {
+			return false
+		}
+		s, sent := sentAt[id]
+		a, arrived := arrivedAt[id]
+		if !sent || !arrived || s > endSeq || a > endSeq {
+			return false
+		}
+	}
+	return true
 }
 
 // relayStatusText describes an agent in full: for the user who asks with
