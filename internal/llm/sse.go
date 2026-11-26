@@ -54,7 +54,7 @@ func (c *Client) post(ctx context.Context, path string, body any, headers map[st
 	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	var waited atomic.Bool
-	timer := time.AfterFunc(idle, func() { waited.Store(true); cancel() })
+	timer := idleAfterFunc(idle, func() { waited.Store(true); cancel() })
 	resp, err := c.HTTP.Do(req.WithContext(reqCtx))
 	if !timer.Stop() && waited.Load() {
 		if err == nil {
@@ -196,6 +196,10 @@ func (c *Client) readSSE(ctx context.Context, resp *http.Response, fn func(ev ss
 		}
 	}
 }
+
+// idleAfterFunc starts the idle timer for the wait for a response. Tests
+// replace it to fire the timer at a moment of their choosing.
+var idleAfterFunc = func(d time.Duration, f func()) interface{ Stop() bool } { return time.AfterFunc(d, f) }
 
 // errStop lets an SSE handler end the stream early without error.
 var errStop = errors.New("stop")
