@@ -67,6 +67,9 @@ func TestGapPhoneRepeatViewImageIsShortCircuited(t *testing.T) {
 // not done or a question is open). The branch's maybeEnd ends it "done",
 // exit 0, and the phone is told "eagent finished this session".
 func TestGapPhoneDismissedQuestionEndsAwaitingInput(t *testing.T) {
+	// The question's four seconds, at 100ms each: the session listens for
+	// 400ms after the question, many times what the dismissal takes to arrive.
+	setFor(t, &questionSecond, 100*time.Millisecond)
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close) // after the session has stopped: Close waits for the long poll
 	g := phoneStart(t, fp, "paint it", false, phoneDismissedBrain(), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
@@ -155,7 +158,7 @@ func TestGapPhoneStatusFollowsTheAgentsStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the message to reach the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
-	time.Sleep(3 * time.Second) // past the status's minimum gap
+	time.Sleep(4 * statusMinGap) // past the status's minimum gap
 	g.seat.emit(agentDoes("running go test ./..."))
 	waitFor(t, "the status to name the step", func() bool {
 		for _, a := range fp.statuses() {

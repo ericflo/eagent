@@ -20,13 +20,16 @@ import (
 // cleared when the session ends. It never creates a thread and never
 // notifies anyone.
 
+// statusMinGap is the least time between writes; a variable so tests can
+// shorten it.
+var statusMinGap = 2500 * time.Millisecond
+
 const (
-	statusMinGap      = 2500 * time.Millisecond // between writes
-	statusRefresh     = 40 * time.Second        // re-send an unchanged busy status
-	statusWaitRefresh = 4 * time.Minute         // re-send an unchanged waiting status
-	statusTTL         = 90                      // seconds a busy status lives without a refresh
-	statusWaitTTL     = 300                     // seconds a waiting status lives
-	meRefresh         = 3 * time.Minute         // re-read the account (remote mode, features)
+	statusRefresh     = 40 * time.Second // re-send an unchanged busy status
+	statusWaitRefresh = 4 * time.Minute  // re-send an unchanged waiting status
+	statusTTL         = 90               // seconds a busy status lives without a refresh
+	statusWaitTTL     = 300              // seconds a waiting status lives
+	meRefresh         = 3 * time.Minute  // re-read the account (remote mode, features)
 )
 
 // phoneStats is what the keeper reports as thread meta.

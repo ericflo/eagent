@@ -261,6 +261,13 @@ func TestMain(m *testing.M) {
 	}
 	agentInstalled = func(string) bool { return true }
 	wakeSettle, keysSettle = 0, 0
+	// The phone's status line is written at most every 2.5 seconds; a test
+	// that waits for a status would wait that out after every change.
+	statusMinGap = 20 * time.Millisecond
+	// The loop reads its inbox and looks at the clock every half second;
+	// a test that posts to the inbox, or waits on a time the loop notices
+	// only then, would wait up to that much each time.
+	loopPoll = 25 * time.Millisecond
 	// A minute for the closing word and 75 seconds of grace at shutdown
 	// are real waits when a test's model is already gone.
 	finalReportTimeout, finalReportGrace = 3*time.Second, 4*time.Second
@@ -476,6 +483,15 @@ func attachedTargets(p *[]string) []string {
 	fakeRelaysMu.Lock()
 	defer fakeRelaysMu.Unlock()
 	return append([]string(nil), *p...)
+}
+
+// setFor sets a package variable (a delay, usually) for one test and puts
+// it back when the test ends.
+func setFor[T any](t *testing.T, v *T, val T) {
+	t.Helper()
+	old := *v
+	*v = val
+	t.Cleanup(func() { *v = old })
 }
 
 // session is a running test session: an interactive runtime with a fake
