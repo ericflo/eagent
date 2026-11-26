@@ -274,10 +274,22 @@ func (r *Runtime) startPhone() {
 		// record by an eagent without the ledger, or a ledger run cut before
 		// it read the thread): the messages that waited are found by time,
 		// and the poll reads on from just before the earliest of them.
-		waited, waitedPrev := false, ""
+		// The read is retried as the first call is; one that never succeeds
+		// leaves the cursor unrecorded rather than past what waited.
+		waited, waitedPrev, unread := false, "", false
 		if resumed && r.opts.PromptPhoneID == "" && !(ledger.Keeps && ledger.Cursor != "") {
-			if _, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); err == nil && found {
-				waited, waitedPrev = true, prev
+			for attempt := 1; ; attempt++ {
+				_, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{})
+				if err == nil || ctx.Err() != nil || !finalechat.Transient(err) {
+					waited, waitedPrev, unread = err == nil && found, prev, err != nil
+					break
+				}
+				timer := time.NewTimer(min(time.Duration(attempt)*phoneRetryStep, time.Minute))
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+				case <-timer.C:
+				}
 			}
 		}
 		p.mu.Lock()
@@ -314,9 +326,11 @@ func (r *Runtime) startPhone() {
 		// The cursor: the poll reads on after anchor, and everything it
 		// takes in is recorded. (That this run keeps the ledger was said in
 		// its first write, on session.start or session.resume.)
-		r.post(func() {
-			r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
-		})
+		if !unread {
+			r.post(func() {
+				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
+			})
+		}
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
