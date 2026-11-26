@@ -11,9 +11,9 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// r7Looks answers looks as the scripted models here do: a message kept for
+// r7RestartLooks answers looks as the scripted models here do: a message kept for
 // eagent gets "Noted.", anything else holds.
-func r7Looks(m []map[string]any, prompt int) reply {
+func r7RestartLooks(m []map[string]any, prompt int) reply {
 	r := hold()
 	if strings.Contains(lastUserText(m), "kept for you") && m[len(m)-1]["role"] != "tool" {
 		r = say("Noted.")
@@ -41,7 +41,7 @@ func TestALargerModelPickedAfterTheFullNoticeGetsItsOwnRestart(t *testing.T) {
 			// than this window takes too, until a restart sets it aside.
 			return r7TooLong
 		}
-		return r7Looks(m, 5000)
+		return r7RestartLooks(m, 5000)
 	})
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
 	r6Until(t, "an answer, or the user told the message waits", func() bool {
@@ -67,7 +67,7 @@ func TestASmallerModelPickedAfterARestartIsRestartedForItsWindow(t *testing.T) {
 			// A long briefing, as a 200k model's dossier is.
 			return reply{text: briefing(p[max(0, len(p)-3):]) + "\n" + strings.Repeat("The work on the parser went through many steps. ", 2000)}
 		}
-		return r7Looks(m, int(prompt.Load()))
+		return r7RestartLooks(m, int(prompt.Load()))
 	}, func(c *config.Config) {
 		c.RolloverTokens = 0
 		c.Model.ContextTokens, c.Model.MaxTokens = 200_000, 2048
@@ -87,7 +87,7 @@ func TestASmallerModelPickedAfterARestartIsRestartedForItsWindow(t *testing.T) {
 			p := places(ask)
 			return reply{text: briefing(p[max(0, len(p)-3):])}
 		}
-		return r7Looks(m, 5000)
+		return r7RestartLooks(m, 5000)
 	})
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "third", Route: "eagent"}) })
 	r6Until(t, "a restart on the 60k model, or the full notice", func() bool {
