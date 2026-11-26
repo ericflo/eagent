@@ -372,14 +372,21 @@ func (r *Runtime) enqueueSend(name string, seat relaySeat, items ...heldSend) {
 // drainSends types a seat's queued sends in order and ends when the queue
 // is empty. Sends for a seat that is no longer the relay's (stopped, or
 // replaced) are not typed: they are recorded undelivered, as a send to a
-// stopped relay is. Once the session has ended they are dropped. Never on
-// the loop goroutine.
+// stopped relay is. Once the session has ended nothing more is taken from
+// the queue: what is left in it is recorded not sent by finish, which
+// reads it under the same lock. Never on the loop goroutine.
 func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 	for {
 		r.relays.mu.Lock()
-		if len(q.items) == 0 {
+		ended := false
+		select {
+		case <-r.closed:
+			ended = true
+		default:
+		}
+		if len(q.items) == 0 || ended {
 			q.running = false
-			if r.relays.queues[seat] == q {
+			if r.relays.queues[seat] == q && len(q.items) == 0 {
 				delete(r.relays.queues, seat)
 			}
 			close(q.idle)
@@ -392,17 +399,12 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
-		select {
-		case <-r.closed:
-			res.err = fmt.Errorf("the session is ending")
+		switch {
+		case h.barrier:
+		case !current:
+			res.err = fmt.Errorf("the agent is not running")
 		default:
-			switch {
-			case h.barrier:
-			case !current:
-				res.err = fmt.Errorf("the agent is not running")
-			default:
-				res.how, res.err = seat.Send(h.id, h.text, h.mode)
-			}
+			res.how, res.err = seat.Send(h.id, h.text, h.mode)
 		}
 		// A send typing failed part way may be in the old agent already:
 		// it is reported (unconfirmed), never typed into the new one.
@@ -799,7 +801,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 
 // abandonLaunch is a start whose result could not be recorded because the
 // session ended: the new agent is stopped, as nothing would watch it, and
-// whoever waits on a send held for it is told. Not on the loop goroutine.
+// whoever waits on a send held for it is told. The held sends stay on the
+// job, which stays among the launches, for finish to record as not sent.
+// Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
 	defer r.relayOps.Done()
 	if job.err == nil {
@@ -807,7 +811,6 @@ func (r *Runtime) abandonLaunch(job *relayLaunch) {
 	}
 	r.relays.mu.Lock()
 	held := job.held
-	job.held = nil
 	r.relays.mu.Unlock()
 	for _, h := range held {
 		if h.done != nil {
