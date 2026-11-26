@@ -36,6 +36,8 @@ type InboxMessage struct {
 	Delivery string `json:"delivery,omitempty"`
 	// PhoneID is the Finalechat message id of a message from the phone.
 	PhoneID string `json:"phone_id,omitempty"`
+	// CardID is the phone card an answer was written on.
+	CardID string `json:"card_id,omitempty"`
 }
 
 // PostInbox writes a message for the session at sessionPath.
@@ -100,12 +102,12 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 	case "answer":
 		if q := r.st.Question; q != nil && (msg.QuestionID == "" || msg.QuestionID == q.ID) && text != "" {
 			r.ui.Idle(false)
-			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments}))
+			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID}))
 			return
 		}
 		if text != "" || len(msg.Attachments) > 0 { // no matching question: treat as a message
 			r.ui.Idle(false)
-			r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments})
+			r.userMessage(event.UserMessageData{Text: text, Source: msg.From, Client: msg.Client, Attachments: msg.Attachments, PhoneID: msg.PhoneID, CardID: msg.CardID})
 		}
 	case "dismiss":
 		r.dismissQuestion(msg.QuestionID, msg.From)
@@ -124,7 +126,7 @@ func (r *Runtime) handleInbox(msg InboxMessage) {
 				return
 			}
 		}
-		r.onInputFrom(text, msg.From, msg.Client, msg.Attachments...)
+		r.onInputFrom(text, msg.From, msg.PhoneID, msg.Client, msg.Attachments...)
 	}
 }
 

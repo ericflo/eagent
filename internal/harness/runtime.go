@@ -366,6 +366,9 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		// It comes after the mirror starts, so what it does reaches the phone
 		// (a screen, a receipt) as it would while running.
 		in := InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID}
+		if r.ownCommand(strings.TrimSpace(opts.Prompt), in.From) {
+			r.tookPhoneMessage(opts.PromptPhoneID, wordsFrom) // a command is recorded as taken before it runs, as the poll does
+		}
 		if text := strings.TrimSpace(opts.Prompt); strings.HasPrefix(text, "/") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(text) {
 			// Words that only begin with a slash (a path, say) and no
 			// agent running to take them. A running session calls that an
@@ -374,7 +377,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			// they are what they were before: a message, or the answer.
 			r.ui.Idle(false)
 			if q := r.st.Question; q != nil && !holdBack {
-				r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments}))
+				r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, PhoneID: in.PhoneID}))
 			} else {
 				r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
 			}
@@ -1130,11 +1133,12 @@ func (r *Runtime) appendDirect(ev event.Event) {
 
 // ---- user input -----------------------------------------------------------
 
-func (r *Runtime) onInput(line string) { r.onInputFrom(line, "", nil) }
+func (r *Runtime) onInput(line string) { r.onInputFrom(line, "", "", nil) }
 
 // onInputFrom records a line from the user; source is "" for the terminal,
-// otherwise "web" or "finalechat".
-func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts ...event.Attachment) {
+// otherwise "web" or "finalechat". phoneID is the app message it came in,
+// which an answer carries so the record names the message in one write.
+func (r *Runtime) onInputFrom(line, source, phoneID string, client *clientcaps.Caps, atts ...event.Attachment) {
 	line = strings.TrimSpace(line)
 	if line == "" && len(atts) == 0 {
 		return
@@ -1149,10 +1153,10 @@ func (r *Runtime) onInputFrom(line, source string, client *clientcaps.Caps, atts
 		if n := optionIndex(line, q.Options); n >= 0 {
 			text = q.Options[n]
 		}
-		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts}))
+		r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: source, Client: client, Attachments: atts, PhoneID: phoneID}))
 		return
 	}
-	r.userMessage(event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts})
+	r.userMessage(event.UserMessageData{Text: line, Source: source, Client: client, Attachments: atts, PhoneID: phoneID})
 }
 
 // userMessage records something the user wrote and, unless it is held back
