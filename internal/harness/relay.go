@@ -1436,6 +1436,9 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				var ok bool
 				if text, atts, ok = userEventText(r.st, seq); !ok {
 					err = fmt.Errorf("no user message with seq %d", seq)
+					if seq == 0 {
+						err = errors.New("you have been shown no message from the user yet, so there is nothing to forward; to send words of your own, use relay_send")
+					}
 					return
 				}
 				lines := ""
