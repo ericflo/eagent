@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 )
 
@@ -30,6 +31,13 @@ func TestATurnsEndSettlesWhatIsOwedByOneRule(t *testing.T) {
 	add("message not answered, seen by a call that came back", turnEnding{held: true, heldSeen: true}, oweMessage, oweMessage)
 	add("message not answered, only the failed call saw it", turnEnding{held: true}, oweMessage, keepDebt)
 	add("reminder about a message not answered", turnEnding{held: true, heldSeen: true, heldOwed: true}, oweMessage, keepDebt)
+	// The message not answered and an answer pending beside it.
+	add("message not answered, answer pending", turnEnding{held: true, heldSeen: true, answer: true, answerSeen: true}, oweBoth, oweBoth)
+	add("message not answered, answer pending, the message already the debt", turnEnding{held: true, heldSeen: true, heldOwed: true, answer: true, answerSeen: true}, oweBoth, keepDebt)
+	add("message not answered, answer sent back once", turnEnding{held: true, heldSeen: true, answer: true, answerSeen: true, remindedAnswer: true}, oweMessage, oweBoth)
+	// The answer acted on; a message came after that and was not answered
+	// (its arrival reset what the turn had done, heldSince).
+	add("answer acted on, a later message not answered", turnEnding{held: true, heldSeen: true, answer: true, answerSeen: true, answerDealt: true}, oweMessage, oweMessage)
 	// A mid-turn answer, after the message was answered.
 	add("message answered, answer dealt with", turnEnding{held: true, heldSeen: true, handled: true, answer: true, answerDealt: true, answerSeen: true}, clearDebt, clearDebt)
 	add("message answered, answer seen by a call that came back, not dealt with", turnEnding{held: true, heldSeen: true, handled: true, answer: true, answerSeen: true}, oweTheAnswer, oweTheAnswer)
@@ -51,6 +59,71 @@ func TestATurnsEndSettlesWhatIsOwedByOneRule(t *testing.T) {
 	}
 }
 
+// The user answers eagent's question and, in the same wake, writes it a
+// message. The one call of the turn (max_calls_per_turn 1) holds on both.
+// The message's reminder names the answer too, and once that reminder is
+// answered nothing more is owed: each is brought up once, neither dropped.
+func TestAnAnswerHeldOnBesideAnUnansweredMessageIsBroughtUpWithIt(t *testing.T) {
+	setFor(t, &owedRetryDelays, []time.Duration{10 * time.Millisecond, 10 * time.Millisecond, 10 * time.Millisecond})
+	const answerPhrase = "nothing has been done with the answer"
+	var mu sync.Mutex
+	phase := 0
+	var tails []string
+	var reminder string
+	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+		mu.Lock()
+		defer mu.Unlock()
+		tail := lastUserText(msgs)
+		if msgs[len(msgs)-1]["role"] != "tool" {
+			tails = append(tails, tail)
+		}
+		switch {
+		case phase == 0 && strings.Contains(tail, "kept for you"):
+			phase = 1
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge #45 as well?","options":["yes","no"]}`)}}
+		case phase == 1:
+			// The turn that shows the answer and the message: it holds.
+			phase = 2
+		case phase == 2 && strings.Contains(tail, owedPhrase):
+			phase, reminder = 3, tail
+			r := say("Codex is idle; I will merge #45 too.")
+			r.calls = append(r.calls, tc("relay_send", `{"text":"Merge #45 as well."}`))
+			return r
+		}
+		return hold()
+	}, func(cfg *config.Config) { cfg.MaxCallsPerTurn = 1 })
+	s.type_("@e should I merge #44?")
+	s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+	s.settled()
+	// Both in one step of the loop: one wake.
+	s.rt.sync(func() {
+		s.rt.onInput("yes")
+		s.rt.onInput("@e and what is Codex up to?")
+	})
+	s.waitFor("the reminder to be answered", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return phase == 3
+	})
+	s.settled()
+	var owed int64
+	s.rt.sync(func() { owed = s.rt.turns.owed })
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(reminder, "what is Codex up to") || !strings.Contains(reminder, answerPhrase) || !strings.Contains(reminder, `"yes"`) {
+		t.Fatalf("the message's reminder does not name both the message and the answer:\n%s", reminder)
+	}
+	n := 0
+	for _, tl := range tails {
+		if strings.Contains(tl, answerPhrase) {
+			n++
+		}
+	}
+	if n != 1 || owed != 0 {
+		t.Fatalf("the answer was brought up %d times (want 1), and %d is still owed; tails:\n%s", n, owed, strings.Join(tails, "\n---\n"))
+	}
+}
+
 func settleName(s turnSettle) string {
 	switch s {
 	case keepDebt:
@@ -61,6 +134,8 @@ func settleName(s turnSettle) string {
 		return "owe the message"
 	case oweTheAnswer:
 		return "owe the answer"
+	case oweBoth:
+		return "owe both"
 	}
 	return fmt.Sprint(int(s))
 }

@@ -1094,6 +1094,8 @@ func (r *Runtime) turn(w wake) {
 			r.clearOwed()
 		case oweMessage:
 			r.oweAnswer(held)
+		case oweBoth:
+			r.oweAnswer(min(held, answerSeq))
 		case oweTheAnswer:
 			if e.handled || e.answerDebt {
 				r.clearOwed()
@@ -1144,6 +1146,10 @@ const (
 	clearDebt                      // clearOwed: nothing is owed
 	oweMessage                     // oweAnswer(held): the message is owed a reminder
 	oweTheAnswer                   // oweReminder(answer), after clearing what was dealt with
+	// oweBoth: oweAnswer from the older of the message and the answer.
+	// The debt is the messages and answers from that mark on, and each of
+	// its reminders names them all (owedTail).
+	oweBoth
 )
 
 // settle decides what a turn leaves owed. The rule, by what happened in the
@@ -1151,6 +1157,9 @@ const (
 // last call came back; cut: error, interrupted or timeout):
 //
 //	what happened in the turn                          replied/held   cut
+//	a message shown, nothing done about it, and an     owe both       owe both if a call that came
+//	  answer pending (as in the next row but one)                     back saw the message and it was
+//	                                                                  not already the debt; else keep
 //	a message shown, nothing done about it             owe message    owe message if a call that
 //	                                                                  came back saw it and it was
 //	                                                                  not already the debt; else keep
@@ -1175,13 +1184,28 @@ const (
 // already the debt is left alone on a cut: a provider failure does not use
 // up its reminders. "Owe answer" clears first what the turn dealt with (the
 // message it answered, an earlier answer's spent reminder), so nothing
-// already said is brought up again; while a message for eagent is still
-// owed, its reminders come first (oweReminder).
+// already said is brought up again. While a message for eagent is owed,
+// an answer is not owed on its own (oweReminder does nothing): the debt
+// runs from its mark, the older of the two, and every reminder of it names
+// the messages and the answers since the mark (owedTail), so the answer is
+// brought up with the message and settled with it. On a cut where the
+// message was already the debt ("keep"), a newer answer is past the mark
+// and is named by the retried reminder. One act after both were shown
+// deals with both: what it was for cannot be told apart. A message that
+// arrives after the answer was acted on resets that (heldSince), so it is
+// still owed.
 func (e turnEnding) settle() turnSettle {
 	pending := e.answer && !e.answerDealt && e.answerSeen && (!e.remindedAnswer || e.cut)
 	switch {
 	case e.held && !e.handled && (!e.cut || (e.heldSeen && !e.heldOwed)):
+		if pending {
+			return oweBoth
+		}
 		return oweMessage
+	case e.held && !e.handled && e.cut && e.heldOwed:
+		// The reminder that was the debt is tried again as it was, and
+		// names any answer that came after its mark.
+		return keepDebt
 	case pending:
 		return oweTheAnswer
 	case e.handled:
