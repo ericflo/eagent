@@ -1668,10 +1668,13 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
 	var texts []string
-	seen := map[string]int64{}
+	// A name can be in the chain more than once (a quick switch back), each
+	// time with the agent that held it then.
+	seen := map[string][]int64{}
 	for _, n := range ho.names {
-		seen[n.name] = n.start
+		seen[n.name] = append(seen[n.name], n.start)
 	}
+	handed := handedOver(r.st)
 	quoted := map[string]bool{}
 	// One pass in record order over every relay in the handover, so the
 	// order is the order the user wrote them and a send moved from one to
@@ -1692,12 +1695,14 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 		default:
 			continue
 		}
-		start, ok := seen[d.Name]
+		starts, ok := seen[d.Name]
 		if !ok || d.From != "user" || quoted[d.ID] || pending[d.ID] {
 			continue
 		}
-		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && at.StartSeq > start {
-			continue // said to a later agent that took the name
+		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil && !inChain(handed, holder{d.Name, at.StartSeq}, d.Name, starts) {
+			// Said to another agent that held the name: a later one, or an
+			// earlier one that was stopped rather than handed over.
+			continue
 		}
 		quoted[d.ID] = true
 		texts = append(texts, d.Text)
@@ -1714,6 +1719,55 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 	}
 	b.WriteString("\nCheck the working tree and recent commits, then continue where it left off.")
 	return b.String()
+}
+
+// holder is one agent under a relay name: the name and the sequence at
+// which that agent first started under it.
+type holder struct {
+	name  string
+	start int64
+}
+
+// handedOver maps each agent that a switch replaced to the agent that took
+// over from it. A switch records the old relay's end ("handed over to …")
+// and the new relay's start as neighbouring events (finishLaunch).
+func handedOver(st *state.State) map[holder]holder {
+	out := map[holder]holder{}
+	for i := 0; i+1 < len(st.Events); i++ {
+		ev, next := st.Events[i], st.Events[i+1]
+		if ev.Type != event.RelayEnd || next.Type != event.RelayStart {
+			continue
+		}
+		var end event.RelayEndData
+		var start event.RelayStartData
+		if ev.Decode(&end) != nil || next.Decode(&start) != nil || !strings.HasPrefix(end.Reason, "handed over to ") {
+			continue
+		}
+		from, to := st.RelayAt(end.Name, ev.Seq), st.RelayAt(start.Name, next.Seq)
+		if from == nil || to == nil {
+			continue
+		}
+		out[holder{end.Name, from.StartSeq}] = holder{start.Name, to.StartSeq}
+	}
+	return out
+}
+
+// inChain reports whether the agent h is one of the agents under name that
+// a brief quotes (starts), or an earlier one whose work reached one of them
+// through switches: Codex, Claude, Codex again is one piece of work. An
+// earlier agent that was stopped, not handed over, did other work.
+func inChain(handed map[holder]holder, h holder, name string, starts []int64) bool {
+	for steps := 0; steps <= len(handed); steps++ {
+		if h.name == name && slices.Contains(starts, h.start) {
+			return true
+		}
+		next, ok := handed[h]
+		if !ok {
+			return false
+		}
+		h = next
+	}
+	return false
 }
 
 // parseUntil reads an autopilot deadline: "10:00" (the next such local

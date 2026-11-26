@@ -231,3 +231,75 @@ func TestASlashMessageFromThePhoneWithNoAgentRunningIsKept(t *testing.T) {
 		}
 	})
 }
+
+// relayTurned waits until the relay named has finished turns turns.
+func relayTurned(t *testing.T, rt *Runtime, name string, turns int) {
+	t.Helper()
+	waitFor(t, name+"'s turn on the record", func() bool {
+		n := -1
+		rt.sync(func() {
+			if rel := rt.st.Relays[name]; rel != nil && rel.Active() {
+				n = rel.Turns
+			}
+		})
+		return n == turns
+	})
+}
+
+// A brief quotes what the user told the agents whose work it hands over.
+// An earlier agent that had the same name and was stopped, not handed
+// over, did other work: what the user told it is not quoted.
+func TestABriefLeavesOutWhatWasSaidToAStoppedAgentOfTheSameName(t *testing.T) {
+	const second = "only touch the docs directory"
+	first, fresh, claude := newFakeSeat("one"), newFakeSeat("two"), newFakeSeat("three")
+	useSeatList(t, first, fresh, claude)
+	rt := newLaunchRuntime(t)
+	userSays(t, rt, r4Task)
+	r4CodexTurned(t, rt)
+	if out := relayToolNamed(t, rt, "relay_control", map[string]any{"action": "stop"}); !strings.Contains(out, "Stopped") {
+		t.Fatalf("stop: %s", out)
+	}
+	if out := relayToolNamed(t, rt, "relay_start", map[string]any{"profile": "codex"}); !strings.Contains(out, "Started") {
+		t.Fatalf("start: %s", out)
+	}
+	userSays(t, rt, second)
+	relayTurned(t, rt, "codex", 1)
+	recv(t, relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"}), "switch")
+	waitFor(t, "Claude's brief typed", func() bool { return len(claude.sentTexts()) >= 1 })
+	brief := claude.sentTexts()[0]
+	if !strings.Contains(brief, second) {
+		t.Errorf("the work handed over is missing from the brief:\n%s", brief)
+	}
+	if strings.Contains(brief, r4Task) {
+		t.Errorf("the brief quotes what the user told an earlier, stopped agent named codex:\n%s", brief)
+	}
+}
+
+// A switch back to an agent of a name used before is the same work: Codex,
+// then Claude, then Codex again, then pi. pi's brief still quotes what the
+// user told the first Codex.
+func TestASwitchBackKeepsTheFirstAgentsInstructionsInTheBrief(t *testing.T) {
+	first, claude, back, pi := newFakeSeat("one"), newFakeSeat("two"), newFakeSeat("three"), newFakeSeat("four")
+	useSeatList(t, first, claude, back, pi)
+	rt := newLaunchRuntime(t)
+	userSays(t, rt, r4Task)
+	r4CodexTurned(t, rt)
+	recv(t, relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude", "relay": "codex"}), "switch to Claude")
+	relayTurned(t, rt, "claude", 1)
+	recv(t, relayToolAsync(rt, map[string]any{"action": "switch", "profile": "codex", "relay": "claude"}), "switch back to Codex")
+	relayTurned(t, rt, "codex", 1)
+	recv(t, relayToolAsync(rt, map[string]any{"action": "switch", "profile": "pi", "relay": "codex"}), "switch to pi")
+	waitFor(t, "pi's brief typed", func() bool { return len(pi.sentTexts()) >= 1 })
+	if brief := pi.sentTexts()[0]; !strings.Contains(brief, r4Task) {
+		t.Errorf("pi's brief lost the first Codex's instructions:\n%s", brief)
+	}
+}
+
+// A chain of quick switches that comes back to a name it passed through
+// (Codex, Claude, Codex again, none of them past its brief, then pi) holds
+// the name twice: the first Codex's instructions are still the work.
+func TestAQuickChainThroughTheSameNameTwiceKeepsTheTask(t *testing.T) {
+	typed, said := r4Chain(t, []string{"claude", "codex", "pi"})
+	r4CheckFinal(t, typed, "Claude")
+	r4CheckSaid(t, said)
+}
