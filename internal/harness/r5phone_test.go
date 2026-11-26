@@ -236,8 +236,8 @@ func TestPhoneIsToldWhenAFileItSentIsTooLarge(t *testing.T) {
 // until the phone shows that step and the status keeper has nothing armed.
 func r5Working(t *testing.T, fp *phoneFake) (*phoneRig, string) {
 	t.Helper()
-	// The keeper's first look, a second in at most, comes at once.
-	setFor(t, &statusFirstLook, 50*time.Millisecond)
+	// The keeper's first look and its floor between looks in milliseconds.
+	quickKeeper(t)
 	g := phoneStart(t, fp, "", false, phoneStopAndClose("Ran it."), nil)
 	g.seat.mu.Lock()
 	g.seat.hang = true
@@ -300,6 +300,7 @@ func TestTheAgentsScreenOnThePhoneKeepsItsStatusLine(t *testing.T) {
 // taken for shown: the keeper writes it again soon, not at its next
 // refresh forty seconds on.
 func TestAStatusTheServiceTurnedDownIsWrittenAgain(t *testing.T) {
+	quickKeeper(t) // the retry waits at least the keeper's floor between looks
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close)
 	fp.mu.Lock()

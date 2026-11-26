@@ -28,6 +28,10 @@ var statusMinGap = 2500 * time.Millisecond
 // a variable so tests can shorten it.
 var statusFirstLook = time.Second
 
+// statusLookFloor is the least time between two looks of the keeper; a
+// variable so tests can shorten it.
+var statusLookFloor = 200 * time.Millisecond
+
 const (
 	statusRefresh     = 40 * time.Second // re-send an unchanged busy status
 	statusWaitRefresh = 4 * time.Minute  // re-send an unchanged waiting status
@@ -212,8 +216,8 @@ func (p *phone) keeper(r *Runtime) {
 		if d := meRefresh - time.Since(lastMe); d < next {
 			next = d
 		}
-		if next < 200*time.Millisecond {
-			next = 200 * time.Millisecond
+		if next < statusLookFloor {
+			next = statusLookFloor
 		}
 		timer.Reset(next)
 	}
