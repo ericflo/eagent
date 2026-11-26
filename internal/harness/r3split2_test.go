@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"math/rand"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -79,7 +81,14 @@ func r3vRejoin(body string, parts []string) string {
 func TestSplitReportsRejoinExactlyWhateverTheyHold(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	pieces := []string{"plain words here", "```go", "```", "````", "~~~", "~~~ python", "    ```", "`inline` code", "日本語のテキスト", strings.Repeat("x", 300), "", "``` ", "```js extra", "  ~~~~", "\t```", "> ```"}
-	for n := 0; n < 30000; n++ {
+	// The cases are drawn in order from the one seed, then checked on
+	// several cores: splitReport and the check are pure.
+	type splitCase struct {
+		body  string
+		limit int
+	}
+	cases := make([]splitCase, 30000)
+	for n := range cases {
 		var lines []string
 		for k := rng.Intn(60); k > 0; k-- {
 			lines = append(lines, pieces[rng.Intn(len(pieces))])
@@ -88,15 +97,40 @@ func TestSplitReportsRejoinExactlyWhateverTheyHold(t *testing.T) {
 		if rng.Intn(2) == 0 {
 			body += "\n"
 		}
-		limit := 120 + rng.Intn(400)
+		cases[n] = splitCase{body, 120 + rng.Intn(400)}
+	}
+	check := func(n int) string {
+		body, limit := cases[n].body, cases[n].limit
 		parts := splitReport(body, limit)
 		for i, p := range parts {
 			if len(p) > limit {
-				t.Fatalf("case %d: part %d is %d bytes, limit %d", n, i, len(p), limit)
+				return fmt.Sprintf("case %d: part %d is %d bytes, limit %d", n, i, len(p), limit)
 			}
 		}
 		if why := r3vRejoin(body, parts); why != "" {
-			t.Fatalf("case %d (limit %d): %s\nbody %q\nparts %q", n, limit, why, body, parts)
+			return fmt.Sprintf("case %d (limit %d): %s\nbody %q\nparts %q", n, limit, why, body, parts)
+		}
+		return ""
+	}
+	workers := min(runtime.GOMAXPROCS(0), 8)
+	failed := make([]string, workers) // each worker's first failure
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := w; n < len(cases); n += workers {
+				if why := check(n); why != "" {
+					failed[w] = why
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, why := range failed {
+		if why != "" {
+			t.Error(why)
 		}
 	}
 }
