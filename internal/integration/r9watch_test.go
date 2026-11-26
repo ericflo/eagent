@@ -123,49 +123,54 @@ func r9Taken(t *testing.T, project, sid, id string) bool {
 	return ReadPhoneLedger(evs).Taken[id]
 }
 
-// Finding 2: a screenshot sent alone whose download fails for a moment
-// does not resume the session without it (which would record the message
-// as taken in, and lose it): the reply waits for the next sweep, which
-// resumes the session with the file.
-func TestAFileThatCouldNotBeFetchedYetWaitsForTheNextSweep(t *testing.T) {
+// Finding 2: a screenshot sent alone whose download fails, when the note
+// that tells the sender cannot be posted either, is not taken in (nobody
+// would know what became of it): the next sweep looks again. Once the
+// note goes, the session comes back with the message as the running
+// mirror takes one: without the file, the sender told why.
+func TestAFileThatCouldNotBeFetchedIsNotDroppedUntold(t *testing.T) {
 	project, sid, _, fr, host, w := r9Stopped(t, "", r9Shot())
 	fr.files.Store(http.StatusBadGateway)
+	fr.posts.Store(http.StatusForbidden) // not retried by the client, unlike a 502
 	w.sweep(context.Background())
-	if host.calls() != 0 {
-		t.Fatalf("resumed while its file could not be fetched: %#v", host.resumed)
+	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
+		t.Fatalf("taken in while nobody could be told: %#v", host.resumed)
 	}
-	if r9Taken(t, project, sid, "m1") {
-		t.Fatal("the message was recorded as taken in without its file")
+	fr.posts.Store(0)
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 0 {
+		t.Fatalf("once the note can go: %#v", host.resumed)
 	}
-	if _, kept := w.retries.replies["m1"]; !kept {
-		t.Fatal("the reply was not kept for the next sweep")
-	}
+	told := false
 	for _, n := range fr.posted() {
-		if strings.Contains(n, "did not take") {
-			t.Fatalf("told the sender the file was refused: %q", n)
-		}
+		told = told || strings.Contains(n, "shot.png")
 	}
-	fr.files.Store(0)
-	w.sweep(context.Background())
-	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 1 {
-		t.Fatalf("after the download works: %#v", host.resumed)
+	if !told {
+		t.Fatalf("the sender was not told: %q", fr.posted())
 	}
 }
 
-// Finding 2: words and a file, the file's download failing for a moment:
-// the session is not resumed with the words and the file missing.
-func TestWordsAndAFileThatCouldNotBeFetchedYetWaitTogether(t *testing.T) {
-	_, _, _, fr, host, w := r9Stopped(t, "see the screenshot", r9Shot())
-	fr.files.Store(http.StatusBadGateway)
-	w.sweep(context.Background())
-	if host.calls() != 0 {
-		t.Fatalf("resumed while its file could not be fetched: %#v", host.resumed)
-	}
-	fr.files.Store(0)
-	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 1 {
-		t.Fatalf("after the download works: %#v", host.resumed)
+// Finding 2's first correction made every failed download wait; an
+// independent read proved a file that can never be fetched (404, 403)
+// then held the session back for good. As the running mirror does, the
+// sender is told and the session comes back with the words.
+func TestWordsAndAFileThatCannotBeFetchedComeBackWithTheWords(t *testing.T) {
+	for _, status := range []int32{http.StatusNotFound, http.StatusForbidden, http.StatusBadGateway} {
+		t.Run(http.StatusText(int(status)), func(t *testing.T) {
+			_, _, _, fr, host, w := r9Stopped(t, "see the screenshot", r9Shot())
+			fr.files.Store(status)
+			w.sweep(context.Background())
+			if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 {
+				t.Fatalf("resumed %#v, want once with the words", host.resumed)
+			}
+			told := false
+			for _, n := range fr.posted() {
+				told = told || strings.Contains(n, "shot.png")
+			}
+			if !told {
+				t.Fatalf("the sender was not told: %q", fr.posted())
+			}
+		})
 	}
 }
 
@@ -238,6 +243,31 @@ func r9Ends(t *testing.T, sess *store.Session, f *r6Thread, sid string, evs ...e
 	f.mu.Lock()
 	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "bye", "sender": "system", "origin": "session", "body": "eagent stopped", "created_at": time.Now().Add(time.Second)})
 	f.mu.Unlock()
+}
+
+// Finding 7's first correction retried the copy of the message the event
+// stream brought; an independent read proved a message deleted in the app
+// since was then used to resume the session. The thread is read instead.
+func TestADeletedReplyToARunningSessionIsNotResumed(t *testing.T) {
+	_, sid, sess, f, host, w := r9Running(t, true)
+	r9Says(w, f, sid, "m1", "ignore this, sent by mistake")
+	f.mu.Lock()
+	for _, m := range f.threads[sid] {
+		if m["id"] == "m1" {
+			m["deleted"] = true
+			m["body"] = ""
+		}
+	}
+	f.mu.Unlock()
+	r9Ends(t, sess, f, sid)
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if host.calls() != 0 {
+		t.Fatalf("resumed with a deleted message: %#v", host.resumed)
+	}
+	if n := len(w.retries.replies); n != 0 {
+		t.Fatalf("%d replies still kept after the session stopped", n)
+	}
 }
 
 // Finding 7: a message that reaches a session as it shuts down, which the

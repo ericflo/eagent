@@ -180,6 +180,9 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
 		return // a reply kept for retry stays kept
 	}
+	// A reply kept while the session ran (keepUntilStopped) has had its
+	// look: the session has stopped and its thread is read now.
+	w.dropKept(thread.ExternalID)
 	if !found {
 		if trigger.ID != "" {
 			w.retries.mu.Lock()
@@ -220,21 +223,17 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
-		if errors.Is(err, finalechat.ErrTooLarge) {
-			// It will never fit: the session comes back with the rest of
-			// the message, once the sender is told about the file.
-			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
-			if err = tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err); err == nil {
-				continue
-			}
-		}
 		if err != nil {
-			// Not taken in without the file: the reply waits for a sweep.
-			w.logf("finalechat: could not fetch %s for session %s: %v (will retry)", a.Filename, sid, err)
-			if ctx.Err() == nil {
-				w.retryLater(ctx, thread, m, "eagent could not fetch a file of your reply yet. It keeps trying every minute.")
+			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			// As the running mirror does: the sender is told, and the
+			// session comes back with the rest of the message. Not when
+			// nobody could be told (the fetch was cut off by the watcher's
+			// stop or the sweep's deadline, or the note did not go): the
+			// reply is not taken in, and is looked at again by a sweep.
+			if ctx.Err() != nil || tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err) != nil {
+				return
 			}
-			return
+			continue
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
@@ -283,6 +282,17 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	}
 }
 
+// dropKept forgets the replies keepUntilStopped kept for a thread.
+func (w *resumeWatcher) dropKept(externalID string) {
+	w.retries.mu.Lock()
+	defer w.retries.mu.Unlock()
+	for id, p := range w.retries.replies {
+		if !p.told && p.thread.ExternalID == externalID {
+			delete(w.retries.replies, id)
+		}
+	}
+}
+
 // retryLater keeps a reply that could not resume its session for the next
 // sweeps, and says so in the thread once, so it does not look ignored.
 func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread, m finalechat.Message, note string) {
@@ -318,6 +328,13 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 	for _, p := range pending {
 		if ctx.Err() != nil {
 			return
+		}
+		if !p.told {
+			// Kept while its session ran: the thread is read as a sweep
+			// reads it, not from the copy kept, which knows nothing of a
+			// deletion since.
+			w.consider(ctx, p.thread, finalechat.Message{})
+			continue
 		}
 		w.consider(ctx, p.thread, p.msg)
 	}
