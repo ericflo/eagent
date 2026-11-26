@@ -66,6 +66,10 @@ type Options struct {
 	// "to eagent / to the agent" and "queue / interrupt / after this turn"
 	// choices, as a running session reads them off the message.
 	PromptPhoneID, PromptRoute, PromptDelivery string
+	// PromptAnswers is, for a Prompt the user wrote on a question's card on
+	// the phone, the card's id (the message's meta says so): the Prompt is
+	// that question's answer.
+	PromptAnswers string
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string
