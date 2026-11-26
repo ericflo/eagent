@@ -108,11 +108,16 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		}
 		return nil, err
 	}
-	// The request was taken: its breakpoints are where the next call's
-	// cache entries are.
-	c.anthropicCached.add(cached)
+	// Once the provider has read the prompt, this request's breakpoints are
+	// where the next call's cache entries are. Not before: a stream that
+	// fails before it starts wrote nothing, and taking its breakpoints for
+	// entries would cost the retry its bridge to the entry that is there.
 	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
-		return c.anthropicNonStreaming(resp)
+		out, err := c.anthropicNonStreaming(resp)
+		if err == nil {
+			c.anthropicCached.add(cached)
+		}
+		return out, err
 	}
 
 	type block struct {
@@ -171,6 +176,7 @@ func (c *Client) anthropicTry(ctx context.Context, req Request, obs *Observer, m
 		}
 		switch frame.Type {
 		case "message_start":
+			c.anthropicCached.add(cached)
 			if frame.Message != nil {
 				out.Model = frame.Message.Model
 				out.Usage.Input = frame.Message.Usage.Input + frame.Message.Usage.CacheRead + frame.Message.Usage.CacheWrite
