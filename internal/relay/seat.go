@@ -135,8 +135,8 @@ type pending struct {
 	// restored: recorded before eagent stopped (see Seat.restore); sentAt
 	// is when. Such a send can be confirmed by transcript lines from before
 	// the reattach, and is never pressed again. dormant: the seat has not
-	// caught up on the transcript yet. lost: an after-turn send no longer
-	// waiting where eagent put it (its spool file gone at the catch-up, or
+	// caught up on the transcript yet. lost: a held send no longer waiting
+	// where eagent put it (its spool file gone at the catch-up, or gone
 	// once the turn it waited for ended), watched on a timer as a typed send
 	// is, but never pressed.
 	restored, dormant, lost bool
@@ -316,10 +316,11 @@ func spoolHolds(names []string, id string) bool {
 // timed says whether a pending send is watched on a timer: pressed again
 // when its text sits in the input box, and reported unconfirmed when it
 // never arrives. A message held for the end of a turn is not until it is
-// lost: restored with nothing holding it any more, handed to the agent's
-// own queue and its turn over (fold), or its turn over and its spool file
-// gone (reportLeftOvers). Nor is a restored send before the catch-up has
-// ended.
+// lost: restored with nothing holding it any more, or its turn over and its
+// spool file gone (reportLeftOvers). One handed to an agent's own queue
+// (Codex, Antigravity) is never timed: that queue runs one message a turn,
+// so the end of a turn does not say a queued message is due. Nor is a
+// restored send before the catch-up has ended.
 func (p *pending) timed() bool {
 	return !p.dormant && (p.mode != "after_turn" || p.lost)
 }
@@ -1141,14 +1142,6 @@ func (s *Seat) fold(o obs) {
 			s.setState("idle", "")
 			s.mu.Lock()
 			s.turnEndAt = time.Now() // the transcript says the turn is over
-			for _, p := range s.pending {
-				// An after-turn send handed to the agent's own queue (or typed)
-				// waited for this turn: from now on its arrival is due. The
-				// agent's own command shows no arrival, and stays as it was.
-				if p.mode == "after_turn" && !p.held && !p.dormant && !p.lost && !isAgentCommand(p.text) {
-					p.lost, p.at = true, s.turnEndAt
-				}
-			}
 			s.mu.Unlock()
 		}
 	case "limit":

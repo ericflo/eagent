@@ -138,33 +138,27 @@ func TestBSeatHeldMessageLeftInTheSpoolIsReportedOnceAsLeftOver(t *testing.T) {
 	}
 }
 
-// An after-turn send handed to the agent's own queue (Codex, Antigravity)
-// that the agent dropped is reported unconfirmed once, the usual wait after
-// the turn it waited for ended; never while that turn runs.
-func TestBSeatAfterTurnSendTheAgentsQueueDroppedIsReportedUnconfirmed(t *testing.T) {
-	t.Parallel()
-	for _, a := range []Agent{codexAgent{}, antigravityAgent{}} {
-		h := &fakeHost{alive: true, screen: "  then run the tests\n› Ask Codex to do anything\n> \nAntigravity relay · idle"}
-		s := newSeat(Spec{Name: a.Name()}, a, h, "x", "")
-		s.state = "working"
-		s.trackHeld("r1", "then run the tests", "after_turn", false) // as Send does after afterTurn
-		late := time.Now().Add(3 * time.Hour)
-		s.checkScreen(late)
-		if got := deliveries(drain(s.events)); len(got) != 0 {
-			t.Fatalf("%s: reported while its turn ran: %+v", a.Name(), got)
-		}
-		s.fold(obs{kind: "turn", text: "Done."})
-		end := time.Now()
-		s.checkScreen(end.Add(44 * time.Second))
-		for _, after := range []time.Duration{46, 120} {
-			s.checkScreen(end.Add(after * time.Second))
-		}
-		got := deliveries(drain(s.events))
-		if len(got) != 1 || got[0].SendID != "r1" || got[0].Outcome != OutcomeUnconfirmed {
-			t.Fatalf("%s: deliveries %+v, want r1 unconfirmed once", a.Name(), got)
-		}
-		if len(h.keys) != 0 || len(h.typed) != 0 {
-			t.Fatalf("%s: typed %q, pressed %q", a.Name(), h.typed, h.keys)
+// Two after-turn sends queued in Codex's own queue during turn 1. Codex runs
+// the first as turn 2; the second still waits in its queue for turn 2's end.
+// Turn 2 goes quiet (a long build) and the seat calls it blocked. The second
+// send must not be reported unconfirmed while turn 2 still runs and it is
+// still queued.
+func TestBSeatAMessageInTheAgentsOwnQueueIsNotReportedWhileItWaits(t *testing.T) {
+	h := &fakeHost{alive: true, screen: "› Ask Codex to do anything\n  esc to interrupt\n"}
+	s := newSeat(Spec{Name: "codex"}, codexAgent{}, h, "x", "")
+	s.state = "working"
+	s.trackHeld("a", "first queued message here", "after_turn", false)
+	s.trackHeld("b", "second queued message here", "after_turn", false)
+	s.fold(obs{kind: "turn", text: "Done."})
+	s.fold(obs{kind: "user", text: "first queued message here"})
+	s.fold(obs{kind: "working"})
+	drain(s.events)
+	base := time.Now()
+	s.checkScreen(base.Add(11 * time.Minute)) // quiet turn 2: blocked
+	s.checkScreen(base.Add(11*time.Minute + 20*time.Second))
+	for _, ev := range deliveries(drain(s.events)) {
+		if ev.SendID == "b" {
+			t.Fatalf("b reported while turn 2 runs and b still waits in Codex's queue: %+v", ev)
 		}
 	}
 }
