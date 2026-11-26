@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -49,8 +51,14 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 		return err
 	}
 	// The file says its own name ("inbox_id"), which marks that name as
-	// this submission's and no other's (see inboxFileID).
-	stamp := time.Now().UTC().Format("20060102T150405.000000000")
+	// this submission's and no other's (see inboxFileID). The time orders
+	// the files; the random part keeps two posts in the same instant
+	// apart, and so does a temporary file of each post's own.
+	var salt [4]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000") + "-" + hex.EncodeToString(salt[:])
 	raw, err := json.Marshal(struct {
 		InboxMessage
 		ID string `json:"inbox_id"`
@@ -58,12 +66,25 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	if err != nil {
 		return err
 	}
-	name := filepath.Join(dir, stamp+".json")
-	tmp := name + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, "post-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, name) // atomic: readers never see a partial file
+	tmp := f.Name()
+	_, err = f.Write(raw)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(dir, stamp+".json")) // atomic: readers never see a partial file
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // pollInbox drains pending inbox files. Loop goroutine only.
