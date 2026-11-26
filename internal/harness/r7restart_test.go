@@ -1,13 +1,103 @@
 package harness
 
 import (
+	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 )
+
+// r7Looks answers looks as the scripted models here do: a message kept for
+// eagent gets "Noted.", anything else holds.
+func r7Looks(m []map[string]any, prompt int) reply {
+	r := hold()
+	if strings.Contains(lastUserText(m), "kept for you") && m[len(m)-1]["role"] != "tool" {
+		r = say("Noted.")
+	}
+	r.prompt = prompt
+	return r
+}
+
+// After the user was told on a 60k model that no restart can make room,
+// they pick a 128k model, as the notice advises. The 128k model refuses the
+// conversation as it stands (it still holds what the 60k one could not
+// take), but one restart on it would fit. That restart is made and the
+// message is answered: what was decided on the 60k window is not applied
+// to the 128k one.
+func TestALargerModelPickedAfterTheFullNoticeGetsItsOwnRestart(t *testing.T) {
+	s, _ := r5FullSession(t)
+	before := r6Dossiers(s)
+	r5Swap(t, s, 128_000, func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if raw, _ := json.Marshal(m); strings.Contains(string(raw), fullNotice) {
+			// What the 60k conversation holds since its briefing: more
+			// than this window takes too, until a restart sets it aside.
+			return r7TooLong
+		}
+		return r7Looks(m, 5000)
+	})
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
+	r6Until(t, "an answer, or the user told the message waits", func() bool {
+		return r5Told(s, "Noted.") > 0 || r5Told(s, stillFullNotice+`"still there?"`) > 0
+	})
+	if n := r5Told(s, stillFullNotice+`"still there?"`); n > 0 {
+		t.Fatalf("the user was told their message waits (%d restarts on the 128k model), though one restart on it makes room", r6Dossiers(s)-before)
+	}
+}
+
+// After a normal restart on a 200k model whose first call was 38k, the
+// user picks a 60k model. The briefing was sized for 200k; a restart for
+// 60k writes one sized for 60k. So the conversation is restarted, and the
+// user is not told that no restart can make room.
+func TestASmallerModelPickedAfterARestartIsRestartedForItsWindow(t *testing.T) {
+	t.Skip("finding 4, next commit")
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	var prompt atomic.Int64
+	prompt.Store(120_000)
+	s := startSession(t, "", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			prompt.Store(38_000)
+			// A long briefing, as a 200k model's dossier is.
+			return reply{text: briefing(p[max(0, len(p)-3):]) + "\n" + strings.Repeat("The work on the parser went through many steps. ", 2000)}
+		}
+		return r7Looks(m, int(prompt.Load()))
+	}, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 200_000, 2048
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "first", Route: "eagent"}) })
+	r6Until(t, "the first restart", func() bool { return r6Dossiers(s) == 1 })
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "second", Route: "eagent"}) })
+	r6Until(t, "the first call after the restart", func() bool {
+		fp := 0
+		s.rt.sync(func() { fp = int(s.rt.turns.firstPrompt) })
+		return fp == 38_000 && r5Told(s, "Noted.") >= 2
+	})
+	r5Swap(t, s, 60_000, func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		return r7Looks(m, 5000)
+	})
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "third", Route: "eagent"}) })
+	r6Until(t, "a restart on the 60k model, or the full notice", func() bool {
+		return r6Dossiers(s) >= 2 || r6ToldFull(s) > 0
+	})
+	if n := r6ToldFull(s); n > 0 {
+		t.Fatalf("told %d times that no restart can make room, right after a switch to a smaller window", n)
+	}
+}
 
 // r7TooLong is a provider's refusal of a request as too long.
 var r7TooLong = reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}

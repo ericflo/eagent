@@ -432,7 +432,12 @@ func (r *Runtime) restartFull(limit provTokens) bool {
 // ordinary route the most a restart carries whole (dossierUnseenBytes).
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
-	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || r.toldFull()}
+	// The full notice in the record was found on the window this run
+	// found it on (decidedWindow), or, when this run did not, on the
+	// window it resumed on: a larger window picked since is asked afresh.
+	window, _ := r.window()
+	told := r.toldFull() && (r.decidedWindow == 0 || window <= r.decidedWindow)
+	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || told}
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
 	// size below is in the provider's count (the estimate times the ratio
