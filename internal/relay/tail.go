@@ -15,6 +15,8 @@ type tailer struct {
 	// skipPartial drops the bytes up to the first newline: the read started
 	// mid-file, inside a line.
 	skipPartial bool
+	// atEnd: the last call read up to the end the file had then.
+	atEnd bool
 }
 
 // next returns the complete lines appended since the last call.
@@ -32,7 +34,9 @@ func (t *tailer) next() ([][]byte, error) {
 		// Truncated or replaced: start again from the top.
 		t.offset, t.rest = 0, nil
 	}
+	t.atEnd = false
 	if st.Size() == t.offset {
+		t.atEnd = true
 		return nil, nil
 	}
 	if _, err := f.Seek(t.offset, io.SeekStart); err != nil {
@@ -46,6 +50,7 @@ func (t *tailer) next() ([][]byte, error) {
 		return nil, err
 	}
 	t.offset += int64(n)
+	t.atEnd = t.offset >= st.Size()
 	data := append(t.rest, buf[:n]...)
 	if t.skipPartial {
 		i := bytes.IndexByte(data, '\n')

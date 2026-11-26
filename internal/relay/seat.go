@@ -63,6 +63,17 @@ type Spec struct {
 	Spool      string
 	Files      map[string]string
 	Env        []string
+	// Restore, on a reattach, is the sends the record still waits on, oldest
+	// first: the new seat confirms them from the transcript as the old one
+	// would have, and never types them again.
+	Restore []Restored
+}
+
+// Restored is a send recorded before eagent stopped whose arrival the
+// record has not confirmed.
+type Restored struct {
+	ID, Text, Mode string
+	At             time.Time // when it was recorded
 }
 
 // Started is what a launch did, for the relay.start event.
@@ -108,6 +119,7 @@ type Seat struct {
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
+	catchingUp bool                 // restored sends wait for the first read to the transcript's end
 	closed     bool
 
 	typing sync.Mutex // one message is pasted and entered at a time
@@ -119,6 +131,13 @@ type pending struct {
 	nudges         int
 	// held: the message waits in the spool for a hook to hand it over.
 	held bool
+	// restored: recorded before eagent stopped (see Seat.restore); sentAt
+	// is when. Such a send can be confirmed by transcript lines from before
+	// the reattach, and is never pressed again. dormant: the seat has not
+	// caught up on the transcript yet. lost: a held one whose spool file
+	// was gone at the catch-up, watched on a timer as a typed send is.
+	restored, dormant, lost bool
+	sentAt                  time.Time
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -216,11 +235,88 @@ func Attach(spec Spec, hostName, target, innerID, transcript string, since time.
 	if !host.Alive(target) {
 		return nil, errors.New("not running")
 	}
+	s := attachSeat(spec, a, host, target, innerID, transcript, since)
+	go s.watch()
+	return s, nil
+}
+
+// attachSeat is the seat Attach watches, before it starts watching.
+func attachSeat(spec Spec, a Agent, host Host, target, innerID, transcript string, since time.Time) *Seat {
 	s := newSeat(spec, a, host, target, innerID)
 	s.transcript = transcript
 	s.markAttached(since)
-	go s.watch()
-	return s, nil
+	s.restore(spec.Restore)
+	return s
+}
+
+// restore takes over the sends the record still waits on. Until the seat
+// has caught up on the transcript they are only matched: no timer runs for
+// them, since the transcript may show them arriving while eagent was down.
+// A message held for the end of a turn is held as it was, if its agent
+// hands such messages over through the spool.
+func (s *Seat) restore(list []Restored) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range list {
+		mode := r.Mode
+		if mode == "" {
+			mode = "queue"
+		}
+		held := mode == "after_turn" && s.spec.Spool != "" && s.spec.Hook != ""
+		s.pending = append(s.pending, &pending{id: r.ID, text: r.Text, mode: mode, at: r.At, held: held, restored: true, dormant: true, sentAt: r.At})
+		s.catchingUp = true
+	}
+}
+
+// caughtUp ends the catch-up: the restored sends the transcript did not
+// show are watched from now on as a live send is, from now. One held in
+// the spool (claimed or not) stays held: the hook hands it over at the end
+// of a turn, or the seat reports it left over. Any other, a held one whose
+// file is gone among them, is reported unconfirmed after the wait a live
+// send gets, and is never pressed or typed again.
+func (s *Seat) caughtUp(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.catchingUp {
+		return
+	}
+	s.catchingUp = false
+	var names []string
+	for _, p := range s.pending {
+		if !p.dormant {
+			continue
+		}
+		p.dormant, p.at = false, now
+		if p.held {
+			if names == nil {
+				names = spoolNames(s.spec.Spool)
+			}
+			if spoolHolds(names, p.id) {
+				continue
+			}
+		}
+		p.lost = p.mode == "after_turn"
+	}
+}
+
+// spoolHolds says whether the spool still has the held message id, waiting
+// or claimed by a hook that has not handed it over yet.
+func spoolHolds(names []string, id string) bool {
+	for _, n := range names {
+		if strings.HasSuffix(n, "-"+id+".txt") || strings.HasSuffix(n, "-"+id+".txt.taken") {
+			return true
+		}
+	}
+	return false
+}
+
+// timed says whether a pending send is watched on a timer: pressed again
+// when its text sits in the input box, and reported unconfirmed when it
+// never arrives. A message held for the end of a turn is not, unless it was
+// restored and nothing holds it any more; nor is a restored send before
+// the catch-up has ended.
+func (p *pending) timed() bool {
+	return !p.dormant && (p.mode != "after_turn" || p.lost)
 }
 
 // markAttached starts a reattached seat. The agent may be in the middle of
@@ -578,29 +674,50 @@ func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // matchPending confirms the sends one user entry of the transcript shows
 // arriving (see arrivals) and returns their ids, oldest first.
-func (s *Seat) matchPending(text string) []string {
+func (s *Seat) matchPending(text string) []string { return s.matchSends(text, time.Time{}) }
+
+// matchSends is matchPending for an entry the transcript stamped at. An
+// entry from before the reattach (history, at set) is the arrival only of
+// a restored send recorded no later than the entry: it may have arrived
+// just before the record's last event, but a send of the same words
+// confirmed earlier, or sent after the reattach, is not it.
+func (s *Seat) matchSends(text string, at time.Time) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	views := make([]sendView, len(s.pending))
-	var spool []string
+	var cands []int
 	for i, p := range s.pending {
-		views[i].text = p.text
+		if at.IsZero() || p.restored && !at.Before(p.sentAt.Truncate(time.Millisecond)) {
+			cands = append(cands, i)
+		}
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	views := make([]sendView, len(cands))
+	var spool []string
+	for k, i := range cands {
+		p := s.pending[i]
+		views[k].text = p.text
 		if p.held {
 			if spool == nil {
 				spool = spoolNames(s.spec.Spool)
 			}
-			views[i].waiting = spoolWaits(spool, p.id)
-			views[i].handed = !views[i].waiting
+			views[k].waiting = spoolWaits(spool, p.id)
+			views[k].handed = !views[k].waiting
 		}
 	}
 	got := arrivals(views, text)
 	if len(got) == 0 {
 		return nil
 	}
+	drop := map[int]bool{}
+	for _, k := range got {
+		drop[cands[k]] = true
+	}
 	var ids []string
 	keep := s.pending[:0]
 	for i, p := range s.pending {
-		if slices.Contains(got, i) {
+		if drop[i] {
 			ids = append(ids, p.id)
 			continue
 		}
@@ -895,11 +1012,15 @@ func (s *Seat) watch() {
 						}
 					}
 				}
-				since := s.since
+				since, restoring := s.since, s.catchingUp
 				s.mu.Unlock()
-				if !since.IsZero() && !exact {
+				if !since.IsZero() && !exact && !restoring {
 					// Reattached or resumed: the history is already on the
-					// record; read only the end of a long transcript.
+					// record; read only the end of a long transcript. With
+					// sends to confirm, all of it is read: one may have
+					// arrived long before the record's last event (a send
+					// typed while the agent was busy), and history only
+					// confirms them, it reports nothing else again.
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
 						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
 					}
@@ -921,6 +1042,14 @@ func (s *Seat) watch() {
 					}
 				}
 			}
+			if err != nil || tail.atEnd {
+				// Read to the end as it stood (or there is nothing to read):
+				// what the transcript did not show of the restored sends
+				// did not arrive while eagent was down.
+				s.caughtUp(time.Now())
+			}
+		} else {
+			s.caughtUp(time.Now()) // no transcript to catch up on
 		}
 		if now.Sub(lastAlive) >= 3*time.Second {
 			lastAlive = now
@@ -960,7 +1089,13 @@ func (s *Seat) fold(o obs) {
 	s.mu.Unlock()
 	if !since.IsZero() && !o.at.IsZero() && !o.at.After(since) && o.kind != "meta" {
 		// Already on the record before this eagent attached; it only says
-		// whether the agent is still in a turn.
+		// whether the agent is still in a turn, and whether a send the
+		// record still waits on arrived just before the record ends.
+		if o.kind == "user" {
+			for _, id := range s.matchSends(o.text, o.at) {
+				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+			}
+		}
 		s.foldHistory(o)
 		return
 	}
@@ -1110,7 +1245,7 @@ func (s *Seat) wantsDialogCheck(now time.Time) bool {
 	}
 	if s.state != "working" {
 		for _, p := range s.pending {
-			if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+			if p.timed() && now.Sub(p.at) > 6*time.Second {
 				return true
 			}
 		}
@@ -1146,7 +1281,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Lock()
 	var stuck *pending
 	for _, p := range s.pending {
-		if p.mode != "after_turn" && now.Sub(p.at) > 6*time.Second {
+		if p.timed() && now.Sub(p.at) > 6*time.Second {
 			stuck = p
 			break
 		}
@@ -1157,8 +1292,11 @@ func (s *Seat) checkScreen(now time.Time) {
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
 		// No Enter goes while a dialog is up: known ones were answered
-		// above, and one the agent reports holds the seat.
-		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
+		// above, and one the agent reports holds the seat. A send from
+		// before eagent restarted is never pressed: its words on screen may
+		// be from long ago, and whatever the box holds now may be someone
+		// else's.
+		if !stuck.restored && stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
@@ -1168,7 +1306,11 @@ func (s *Seat) checkScreen(now time.Time) {
 		if state != "working" && now.Sub(stuck.at) > 45*time.Second && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
-			s.emit(Event{Kind: KindDelivered, SendID: stuck.id, OK: false, Detail: "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)})
+			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
+			if stuck.restored {
+				detail = "was recorded before eagent restarted, and the agent's transcript does not show it arriving; it was not typed again, so send it again if it is still wanted. The screen ends:\n" + lastLines(screen, 8)
+			}
+			s.emit(Event{Kind: KindDelivered, SendID: stuck.id, OK: false, Detail: detail})
 			return
 		}
 	}

@@ -919,7 +919,11 @@ func (r *Runtime) reattachRelays() []string {
 			continue
 		}
 		spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort})
+		restore := unresolvedSends(r.st, rel)
 		if err == nil {
+			// The new seat confirms what the record still waits on from the
+			// transcript, as the old one would have; nothing is typed again.
+			spec.Restore = restore
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)
@@ -927,9 +931,46 @@ func (r *Runtime) reattachRelays() []string {
 			}
 		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: rel.Name, State: "exited", Detail: "it was not running when eagent resumed (" + err.Error() + ")"}))
+		// Nothing watches its transcript any more: what it was still to
+		// confirm stays unconfirmed, and is said so once.
+		for _, s := range restore {
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Detail: "the agent was no longer running when eagent resumed, so whether it arrived cannot be confirmed"}))
+		}
 		lost = append(lost, fmt.Sprintf("relay %s (%s) was no longer running", rel.Name, rel.Who()))
 	}
 	return lost
+}
+
+// unresolvedSends are the sends the record still waits on for rel, oldest
+// first, as their relay.send (or relay.moved, for one that changed agents)
+// recorded them: text, mode and when.
+func unresolvedSends(st *state.State, rel *state.Relay) []relay.Restored {
+	if len(rel.Undelivered) == 0 {
+		return nil
+	}
+	var out []relay.Restored
+	at := map[string]int{}
+	for _, ev := range st.Events {
+		if ev.Type != event.RelaySend && ev.Type != event.RelayMoved {
+			continue
+		}
+		var d event.RelaySendData
+		if ev.Decode(&d) != nil || d.Name != rel.Name {
+			continue
+		}
+		text, waiting := rel.Undelivered[d.ID]
+		if !waiting {
+			continue
+		}
+		s := relay.Restored{ID: d.ID, Text: text, Mode: d.Mode, At: ev.Time}
+		if i, seen := at[d.ID]; seen {
+			out[i] = s
+			continue
+		}
+		at[d.ID] = len(out)
+		out = append(out, s)
+	}
+	return out
 }
 
 // A session with no terminal and a phone keeps its agent after the work,
