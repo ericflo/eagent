@@ -13,7 +13,6 @@ import (
 // a reply ceiling or a window under a preset that sets one) is cleared
 // again by the undo of a remote edit of it, not unset to the preset's.
 func TestR10UndoKeepsANullClearedField(t *testing.T) {
-	t.Skip("known, not fixed: a set of null is refused by control.Proposal.Validate; see the fixer's report")
 	clearRouteEnv(t)
 	for _, c := range []struct {
 		leaf  string
