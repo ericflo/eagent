@@ -255,7 +255,7 @@ func startConnectorAt(ctx context.Context, project, path, lockPath string, logf 
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(connectorRetry):
 			}
 		}
 	}()
@@ -265,6 +265,11 @@ func startConnectorAt(ctx context.Context, project, path, lockPath string, logf 
 func RunConnector(ctx context.Context, project string, logf func(string, ...any)) error {
 	return runConnectorAt(ctx, project, connectorPath(project), logf)
 }
+
+// connectorRetry is how long the connector waits before it tries again
+// after a failure, or looks again at a connector that is not active yet.
+// A variable so that tests need not wait it out.
+var connectorRetry = 5 * time.Second
 
 var errConnectorOccupied = errors.New("another settings connection is still active; waiting for it to disconnect")
 
@@ -316,7 +321,7 @@ func runConnectorAt(ctx context.Context, project, path string, logf func(string,
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(connectorRetry):
 		}
 	}
 	return ctx.Err()
@@ -352,7 +357,7 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Second):
+			case <-time.After(connectorRetry):
 				continue
 			}
 		}

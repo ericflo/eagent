@@ -17,6 +17,10 @@ import (
 )
 
 func TestConnectorRetainsIdentityOnRetryAndReleasesOnShutdown(t *testing.T) {
+	// The retry itself is what is tested, not how long it waits.
+	old := connectorRetry
+	connectorRetry = 50 * time.Millisecond
+	t.Cleanup(func() { connectorRetry = old })
 	for _, failure := range []string{"heartbeat response", "command poll"} {
 		t.Run(failure, func(t *testing.T) {
 			t.Setenv("EAGENT_FINALECHAT", "on")
