@@ -414,7 +414,8 @@ func TestCoreStartDirIsWhereTheAgentStarts(t *testing.T) {
 // reads a message and a quick answer in one call.)
 func TestCoreAnswerFollowsTheAgentNotAheadOfIt(t *testing.T) {
 	old := wakeSettle
-	wakeSettle = 300 * time.Millisecond
+	// The fake agent's turn lands a millisecond or two after the message.
+	wakeSettle = 100 * time.Millisecond
 	defer func() { wakeSettle = old }()
 	var seen tails
 	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
