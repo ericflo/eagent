@@ -22,8 +22,11 @@ type turnCalls struct {
 	// speak again.
 	said bool
 	// handled: the turn answered the user or did something with the agent,
-	// so a message kept for eagent has not been left lying.
+	// so a message kept for eagent has not been left lying. dealt counts
+	// the calls that did so, so that something that arrives in the middle
+	// of a turn is dealt with only by a call made after it (handle).
 	handled bool
+	dealt   int
 	// images are the pictures view_image brought back in the call being
 	// run, recorded with its result.
 	images []event.Attachment
@@ -37,6 +40,13 @@ type turnCalls struct {
 	// covered by them too (coverOwnWords).
 	stamped bool
 	own     []int64
+}
+
+// handle notes a call that answered the user or did something with the
+// agent.
+func (tc *turnCalls) handle() {
+	tc.handled = true
+	tc.dealt++
 }
 
 // loopReadChars bounds one session_read in eagent's own conversation,
@@ -83,7 +93,8 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 				tc.own = append(tc.own, r.st.Events[n-1].Seq)
 			}
 		})
-		tc.spoke, tc.said, tc.handled = true, true, true
+		tc.spoke, tc.said = true, true
+		tc.handle()
 		if len(atts) > 0 {
 			return fmt.Sprintf("delivered with %d attachment(s)", len(atts)), false, false
 		}
@@ -122,7 +133,8 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return refused, true, false
 		}
 		r.ui.Ask(id, text, opts)
-		tc.spoke, tc.said, tc.handled = true, true, true
+		tc.spoke, tc.said = true, true
+		tc.handle()
 		switch {
 		case r.opts.Interactive:
 			return "asked; the answer will appear as a message from the user", false, false
@@ -208,7 +220,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: id, Kind: s.Kind, Spec: spec, Note: note, Next: next}))
 			r.armSchedule(id, next)
 		})
-		tc.handled = true
+		tc.handle()
 		return fmt.Sprintf("timer %s set (%s); it first comes due at %s", id, s.Kind, next.In(r.st.Location()).Format("15:04:05")), false, false
 
 	case tools.CancelSchedule:
@@ -228,7 +240,9 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			r.append(event.New(event.ScheduleCancel, event.ActorEagent, event.ScheduleCancelData{ID: id}))
 			msg = "timer " + id + " cancelled"
 		})
-		tc.handled = tc.handled || !bad
+		if !bad {
+			tc.handle()
+		}
 		return msg, bad, bad
 	}
 	// The rest drive the agent.
@@ -248,7 +262,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		})
 	}
 	if !isErr && !tools.Looks(c.Name) {
-		tc.handled = true
+		tc.handle()
 	}
 	switch {
 	case tools.Looks(c.Name):

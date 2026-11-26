@@ -2,6 +2,7 @@ package harness
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,4 +95,62 @@ func TestAThreadUpdateInTheReplyThatAnswersCoversTheAnswer(t *testing.T) {
 	// News the reply did not make is still brought up.
 	s.type_("merge the pending PRs")
 	s.waitFor("a later look at the title and summary", func() bool { return threadCalls.Load() > 0 })
+}
+
+// The user answers eagent's question while the turn that asked it is still
+// going: the first call asked and looked at something, and a later call is
+// the first to see the answer. A hold on it is sent back once, as it would
+// be in a turn of its own: asking the question did nothing with its answer.
+func TestAnAnswerArrivingBetweenTheCallsOfATurnIsNotTakenAsDealtWith(t *testing.T) {
+	var mu sync.Mutex
+	var phase, reminded int
+	var sawAnswer bool
+	gate := make(chan struct{})
+	called := make(chan struct{}, 1)
+	s := startSession(t, "", func(_ string, msgs []map[string]any) reply {
+		mu.Lock()
+		defer mu.Unlock()
+		tail := lastUserText(msgs)
+		afterTool := msgs[len(msgs)-1]["role"] == "tool"
+		switch {
+		case strings.Contains(lastText(msgs), "The user's answer has reached nobody but you"):
+			reminded++
+			return hold()
+		case strings.Contains(tail, "The user answered your question"):
+			sawAnswer = true
+			return hold()
+		case afterTool && phase == 1:
+			// The look's follow-up; the user answers while it is out.
+			phase = 2
+			select {
+			case called <- struct{}{}:
+			default:
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"merge"}`)}, block: gate}
+		case afterTool:
+			return hold()
+		case strings.Contains(tail, "kept for you") && phase == 0:
+			phase = 1
+			return reply{calls: []event.ToolCall{
+				tc("ask_user", `{"text":"Merge #45 as well?","options":["yes","no"]}`),
+				tc("session_search", `{"query":"#45"}`),
+			}}
+		}
+		return hold()
+	}, nil)
+	s.type_("@e ask me whether to merge #45")
+	<-called
+	s.waitFor("the question", func() bool { return s.ui.askedCount() == 1 })
+	s.type_("yes")
+	s.waitFor("the answer", func() bool { return len(s.events(event.UserAnswer)) == 1 })
+	close(gate)
+	s.settled()
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawAnswer {
+		t.Fatal("no call was told the user answered")
+	}
+	if reminded != 1 {
+		t.Fatalf("the held answer was sent back %d times, want 1", reminded)
+	}
 }
