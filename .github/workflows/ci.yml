@@ -28,8 +28,16 @@ jobs:
             printf 'Go files require gofmt:\n%s\n' "$unformatted"; exit 1
           fi
       - run: go vet ./...
-      - run: go test -race ./...
+      - name: go test -race ./...
+        run: go test -race -json ./... > "$RUNNER_TEMP/test.json"
         env:
           EAGENT_FINALECHAT: "off"
+      # What failed, where the time went, and a warning for every test over
+      # two seconds. A test over twenty seconds fails the job.
+      - name: test report
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f "$RUNNER_TEMP/test.json" ] || exit 0
+          go run ./scripts/testtimes -fail 20s -summary "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/test.json"
       - run: go build -o eagent ./cmd/eagent
       - run: ./eagent version
