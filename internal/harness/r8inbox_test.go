@@ -2,6 +2,7 @@ package harness
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -9,10 +10,12 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 )
 
-// An inbox file is taken exactly once: the user.message or user.answer it
-// becomes is written before the file is removed and names the file, so a
-// removal that fails (or a process cut before it) leaves a file a later
-// poll or run recognises as already taken.
+// An inbox file that carries an id (PostInbox gives each one) is taken
+// exactly once: the user.message or user.answer it becomes is written
+// before the file is removed and carries the id, so a removal that fails
+// (or a process cut before it) leaves a file a later poll or run recognises
+// as already taken. A file without an id is removed and then taken, as
+// inbox files were before.
 
 // r8cUI notes, at each user.message or user.answer written, whether the
 // inbox file it names was still in the inbox.
@@ -98,8 +101,9 @@ func r8cOne(t *testing.T, what string, got []string, name string) {
 	if len(got) != 1 {
 		t.Fatalf("%s: %d of them (%q), want 1", what, len(got), got)
 	}
-	if got[0] != name {
-		t.Fatalf("%s names %q, want %q", what, got[0], name)
+	// PostInbox names the file after the id it gives.
+	if want := strings.TrimSuffix(name, ".json"); got[0] != want {
+		t.Fatalf("%s carries %q, want %q", what, got[0], want)
 	}
 }
 
@@ -175,7 +179,7 @@ func TestR8InboxAnswerRemovalFailsTakesOnce(t *testing.T) {
 	r8cOne(t, "user.answer", r8cWords(rt, event.UserAnswer, "r8c yes"), name)
 }
 
-// An event that did not come from an inbox file carries no file name.
+// An event that did not come from an inbox file carries no inbox id.
 func TestR8InboxNameOnlyOnInboxWords(t *testing.T) {
 	rt := r8cNew(t, &fakeUI{})
 	rt.onInput("r8c typed")
@@ -189,6 +193,76 @@ func TestR8InboxNameOnlyOnInboxWords(t *testing.T) {
 		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer && strings.Contains(string(ev.Data), `"inbox"`) {
 			t.Fatalf("%s carries a file name: %s", ev.Type, ev.Data)
 		}
+	}
+}
+
+// r8cDrop writes an inbox file with no id under a name of the writer's
+// choosing, as a script does.
+func r8cDrop(t *testing.T, sessPath, name, text string) {
+	t.Helper()
+	dir := InboxDir(sessPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"type":"message","text":"`+text+`","from":"script"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A script that writes each of its messages under the same name (found by
+// a third reader, when a file was known by its name): each is taken, and
+// none carries an inbox id.
+func TestR8InboxAFileWithNoIDUnderAReusedNameIsTaken(t *testing.T) {
+	rt := r8cNew(t, &fakeUI{})
+	for _, text := range []string{"r8c first", "r8c second"} {
+		r8cDrop(t, rt.sess.Path, "note.json", text)
+		rt.pollInbox()
+		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] != "" {
+			t.Fatalf("%s: %q, want one with no inbox id", text, got)
+		}
+	}
+}
+
+// The same when the second is written while the session is stopped.
+func TestR8InboxAFileWithNoIDUnderAReusedNameIsTakenByTheNextRun(t *testing.T) {
+	rt := r8cNew(t, &fakeUI{})
+	r8cDrop(t, rt.sess.Path, "note.json", "r8c one")
+	rt.pollInbox()
+	path := rt.sess.Path
+	rt.sess.Close()
+	r8cDrop(t, path, "note.json", "r8c two")
+	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt2.sess.Close()
+	rt2.pollInbox()
+	for _, text := range []string{"r8c one", "r8c two"} {
+		if got := r8cWords(rt2, event.UserMessage, text); len(got) != 1 {
+			t.Fatalf("%s: %d user.message, want 1", text, len(got))
+		}
+	}
+}
+
+// Two submissions never share an id, so a second one is taken even when
+// the first one's file is still in the inbox.
+func TestR8InboxEachSubmissionIsTaken(t *testing.T) {
+	rt := r8cNew(t, &fakeUI{})
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "r8c a", From: "web"})
+	r8cLock(t, rt)
+	rt.pollInbox()
+	os.Chmod(InboxDir(rt.sess.Path), 0o755)
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: "r8c b", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.pollInbox()
+	for _, text := range []string{"r8c a", "r8c b"} {
+		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] == "" {
+			t.Fatalf("%s: %q, want one that carries its id", text, got)
+		}
+	}
+	if entries, _ := os.ReadDir(InboxDir(rt.sess.Path)); len(entries) != 0 {
+		t.Fatalf("files left in the inbox: %v", entries)
 	}
 }
 

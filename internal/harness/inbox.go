@@ -15,13 +15,21 @@ import (
 // The inbox lets other processes (the web UI, a script) talk to a running
 // session without owning it: they drop small JSON files into
 // <session>/inbox/ and the runtime folds them into the log. Files are
-// processed in name order and deleted once recorded (see pollInbox).
+// processed in name order. One that carries an id (PostInbox gives each
+// one) is deleted once it is recorded and is never taken twice; one
+// without is deleted and then taken (see pollInbox).
 
 // InboxDir is where messages for a session are dropped.
 func InboxDir(sessionPath string) string { return filepath.Join(sessionPath, "inbox") }
 
 // InboxMessage is one dropped file.
 type InboxMessage struct {
+	// ID names this submission and no other; PostInbox gives each one. The
+	// user.message or user.answer it becomes carries it, which is how a file
+	// still in the inbox is known to have been taken already. A file
+	// written without one is handled as inbox files always were: removed,
+	// then taken.
+	ID         string `json:"inbox_id,omitempty"`
 	Type       string `json:"type"` // message | answer | dismiss | stop
 	Text       string `json:"text,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
@@ -46,11 +54,15 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000")
+	if msg.ID == "" {
+		msg.ID = stamp
+	}
 	raw, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	name := filepath.Join(dir, time.Now().UTC().Format("20060102T150405.000000000")+".json")
+	name := filepath.Join(dir, stamp+".json")
 	tmp := name + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
@@ -83,31 +95,34 @@ func (r *Runtime) pollInbox() {
 			_ = os.Remove(path)
 			continue
 		}
-		// The file is removed only after what it became is on the record,
-		// which names it: a file still here that this run handled, or
+		// Words that carry an id are recorded, with the id, before their
+		// file is removed: a file still here whose id this run handled, or
 		// that an earlier run left and the record names, is not taken
 		// again (its removal failed, or the process was cut before it).
+		// Everything else has its file removed first, as inbox files
+		// always had: a command, a stop or a dismissal leaves no event to
+		// name it, and a file with no id cannot be told from another
+		// written later under the same name.
+		id := msg.ID
 		switch {
-		case r.inboxTaken[name] || r.sess.Stale[name] && r.inboxRecorded(name):
+		case id != "" && (r.inboxTaken[id] || r.sess.Stale[name] && r.inboxRecorded(id)):
 		case msg.Type == "stop" && r.sess.Stale[name]:
 			// A stop that was already in the inbox when this run took the
 			// session lock was meant for an earlier run; it must not quit
 			// this one before its first tick. Messages and answers are kept.
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
-		case !inboxWords(msg, r.ownCommand):
-			// A command, a stop or a dismissal leaves no event that names
-			// its file, so a later run could not tell that it was carried
-			// out. Its file goes first, as it always did: a cut in between
-			// loses the command and never repeats it.
+		case id == "" || !inboxWords(msg, r.ownCommand):
 			_ = os.Remove(path)
-			r.handleInboxFile(msg, name)
+			r.handleInboxFile(msg, id)
 		default:
-			r.handleInboxFile(msg, name)
+			r.handleInboxFile(msg, id)
 		}
-		if r.inboxTaken == nil {
-			r.inboxTaken = map[string]bool{}
+		if id != "" {
+			if r.inboxTaken == nil {
+				r.inboxTaken = map[string]bool{}
+			}
+			r.inboxTaken[id] = true
 		}
-		r.inboxTaken[name] = true
 		_ = os.Remove(path)
 	}
 }
@@ -126,13 +141,13 @@ func inboxWords(msg InboxMessage, command func(line, source string) bool) bool {
 }
 
 // inboxRecorded reports whether the record holds the user.message or
-// user.answer that inbox file name became. Loop goroutine only.
-func (r *Runtime) inboxRecorded(name string) bool {
+// user.answer that the inbox submission id became. Loop goroutine only.
+func (r *Runtime) inboxRecorded(id string) bool {
 	for _, ev := range r.st.Events {
 		var d struct {
 			Inbox string `json:"inbox"`
 		}
-		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil && d.Inbox == name {
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil && d.Inbox == id {
 			return true
 		}
 	}
@@ -141,8 +156,9 @@ func (r *Runtime) inboxRecorded(name string) bool {
 
 func (r *Runtime) handleInbox(msg InboxMessage) { r.handleInboxFile(msg, "") }
 
-// handleInboxFile takes msg; file is the inbox file it came in ("" when it
-// did not come in one), named on the user.message or user.answer it becomes.
+// handleInboxFile takes msg; file is the id of the inbox submission it
+// came in ("" for none), carried by the user.message or user.answer it
+// becomes.
 func (r *Runtime) handleInboxFile(msg InboxMessage, file string) {
 	text := strings.TrimSpace(msg.Text)
 	switch msg.Type {

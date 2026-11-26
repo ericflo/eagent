@@ -195,7 +195,7 @@ type Runtime struct {
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
 	// startFailed: the last attempt to start an agent failed (startRelay).
 	startFailed bool
-	// inboxTaken: the inbox files this run handled (pollInbox). Loop goroutine.
+	// inboxTaken: the ids of the inbox submissions this run handled (pollInbox). Loop goroutine.
 	inboxTaken  map[string]bool
 	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
