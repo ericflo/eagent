@@ -254,6 +254,7 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 	r.flushSilent() // the looks so far were made on the old route
 	moved := true
 	old := r.models[sw.who]
+	oldWindow, _ := r.window()
 	if old != nil && old.client != nil {
 		moved = !sameRoute(old.client.Endpoint, sw.eps[0])
 	}
@@ -273,6 +274,12 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
 		t.overflowed, t.futileLogged = false, false
 		r.tokenScale = 0
+		if w, _ := r.window(); w != oldWindow {
+			// The first call's size was measured against a briefing sized
+			// for the old window: on another window it says nothing about
+			// whether a restart can make room.
+			t.firstPrompt = 0
+		}
 	}
 	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
 		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,

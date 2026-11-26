@@ -57,7 +57,6 @@ func TestALargerModelPickedAfterTheFullNoticeGetsItsOwnRestart(t *testing.T) {
 // 60k writes one sized for 60k. So the conversation is restarted, and the
 // user is not told that no restart can make room.
 func TestASmallerModelPickedAfterARestartIsRestartedForItsWindow(t *testing.T) {
-	t.Skip("finding 4, next commit")
 	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
 	var prompt atomic.Int64
 	prompt.Store(120_000)
