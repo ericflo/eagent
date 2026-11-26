@@ -180,15 +180,15 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
 		return // a reply kept for retry stays kept
 	}
-	// A reply kept while the session ran (keepUntilStopped) has had its
-	// look: the session has stopped and its thread is read now.
-	w.dropKept(thread.ExternalID)
 	if !found {
 		if trigger.ID != "" {
 			w.retries.mu.Lock()
 			delete(w.retries.replies, trigger.ID)
 			w.retries.mu.Unlock()
 		}
+		// The session stopped and took in all there is: a reply kept
+		// while it ran (keepUntilStopped) has had its look.
+		w.dropKept(thread.ExternalID)
 		return
 	}
 	w.mu.Lock()
@@ -226,11 +226,11 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
 			// As the running mirror does: the sender is told, and the
-			// session comes back with the rest of the message. Not when
-			// nobody could be told (the fetch was cut off by the watcher's
-			// stop or the sweep's deadline, or the note did not go): the
-			// reply is not taken in, and is looked at again by a sweep.
-			if ctx.Err() != nil || tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err) != nil {
+			// session comes back with the rest of the message. The note
+			// gets its own time, as the fetch may have used up the
+			// sweep's. When it cannot be posted nobody would know: the
+			// reply is not taken in, and a sweep looks again.
+			if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, a, err) != nil {
 				return
 			}
 			continue
@@ -249,6 +249,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	w.retries.mu.Lock()
 	delete(w.retries.replies, m.ID)
 	w.retries.mu.Unlock()
+	w.dropKept(thread.ExternalID)
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
 }
 
