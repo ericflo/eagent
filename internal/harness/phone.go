@@ -72,7 +72,7 @@ type phone struct {
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
 	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
-	taken      map[string]bool   // cards whose answer was read off the card on a re-ask
+	taken      map[string]bool   // cards whose answer has been taken, by the poll or a re-ask (takeCard)
 	threadID   string
 	threadSeen bool
 	dropping   bool // the last enqueue found the queue full
@@ -760,12 +760,14 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// Answered on the phone while the session was stopped, and the
 			// answer did not reach the session as the answer (it came with
 			// no word of the card, and the card could not be checked). The
-			// card holds it: the question closes with it, and the poll
-			// leaves the card's answer message alone if it meets it.
+			// card holds it: the question closes with it, unless the poll
+			// took the card's answer message first (takeCard).
 			p.mu.Lock()
 			delete(p.open, q.ID)
-			p.taken[q.ID] = true
 			p.mu.Unlock()
+			if !p.takeCard(q.ID) {
+				return
+			}
 			answer := cardAnswer(q.Answer)
 			r.post(func() {
 				if r.phone == p && r.st.Question != nil && r.st.Question.ID == qid && answer != "" {
@@ -1016,9 +1018,8 @@ func (p *phone) poll(r *Runtime) {
 			if fid, ok := m.IsAnswer(); ok {
 				p.mu.Lock()
 				qid, known := p.fromPhone[fid]
-				taken := p.taken[fid]
 				p.mu.Unlock()
-				if taken {
+				if !p.takeCard(fid) {
 					continue // its answer was taken from the card itself
 				}
 				if !known {
@@ -1294,15 +1295,35 @@ func liveCards(st *state.State, qid string) []string {
 	return out
 }
 
+// takeCard claims a card's answer for whoever takes it: the message poll
+// meeting the card's answer message, or a re-ask finding the card already
+// answered. Only the first claim succeeds, so one answer is never taken
+// twice (once as the answer, once more as a message).
+func (p *phone) takeCard(fid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.taken[fid] {
+		return false
+	}
+	p.taken[fid] = true
+	return true
+}
+
 // cardAnswer is the answer a card holds, as the words the user gave.
 func cardAnswer(a *finalechat.Answer) string {
 	if a == nil {
 		return ""
 	}
+	// As the service writes the card's answer message: the options chosen,
+	// then " — " and the words.
+	out := strings.Join(a.Selected, ", ")
 	if t := strings.TrimSpace(a.Text); t != "" {
-		return t
+		if out != "" {
+			out += " — "
+		}
+		out += t
 	}
-	return strings.Join(a.Selected, ", ")
+	return out
 }
 
 // answersOpenCard reports whether card is one of the open question's

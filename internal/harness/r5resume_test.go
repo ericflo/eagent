@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -138,5 +139,27 @@ func TestWordsOnAnEarlierQuestionsCardDoNotAnswerTheOpenOne(t *testing.T) {
 	g.rt.sync(func() { open = g.rt.st.Question != nil && g.rt.st.Question.ID == "q2" })
 	if !open {
 		t.Fatal("q2 is not open")
+	}
+}
+
+// One card's answer is taken once, whoever comes first: the poll meeting
+// the answer message or a re-ask finding the card answered.
+func TestACardsAnswerIsTakenOnceWhoeverComesFirst(t *testing.T) {
+	p := &phone{taken: map[string]bool{}}
+	if !p.takeCard("c1") || p.takeCard("c1") || !p.takeCard("c2") {
+		t.Fatal("a card's answer was taken twice, or another card's not at all")
+	}
+	for _, c := range []struct {
+		a    *finalechat.Answer
+		want string
+	}{
+		{&finalechat.Answer{Selected: []string{"red"}}, "red"},
+		{&finalechat.Answer{Selected: []string{"red", "blue"}, Text: "both"}, "red, blue — both"},
+		{&finalechat.Answer{Text: " teal "}, "teal"},
+		{nil, ""},
+	} {
+		if got := cardAnswer(c.a); got != c.want {
+			t.Errorf("cardAnswer(%+v) = %q, want %q (as the service writes the answer message)", c.a, got, c.want)
+		}
 	}
 }
