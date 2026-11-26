@@ -81,6 +81,11 @@ func (r *Runtime) pollInbox() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if r.ending {
+			// A stop, a quit or a record that could not be written ended
+			// the session: what is still here is the next run's.
+			return
+		}
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -113,7 +118,12 @@ func (r *Runtime) pollInbox() {
 			r.handleInboxFile(msg, id)
 		default:
 			r.handleInboxFile(msg, id)
-			_ = os.Remove(path)
+			if !r.ending {
+				// When the session ended taking it, the write may have
+				// failed: the file stays, and the next run takes it or,
+				// finding its id on the record, removes it.
+				_ = os.Remove(path)
+			}
 		}
 		if id != "" {
 			if r.inboxTaken == nil {
