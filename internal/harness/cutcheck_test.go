@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -191,6 +192,28 @@ func TestCutEveryWriteTwoPlainReplies(t *testing.T) {
 	s.settled()
 	s.type_("@e cutq two")
 	s.waitFor("the second reply", func() bool { return cutSentCount(s) >= 2 })
+	sid, evs := cutRecord(t, s)
+	cutCheck(t, sid, evs, s.model)
+}
+
+// (b) a user message that arrives while a model call is out.
+func TestCutEveryWriteMessageDuringACall(t *testing.T) {
+	release := make(chan struct{})
+	var held atomic.Bool
+	s := startSession(t, "", func(m string, msgs []map[string]any) reply {
+		r := cutBrain(m, msgs)
+		if len(r.calls) == 1 && r.calls[0].Name == "send_message" && held.CompareAndSwap(false, true) {
+			r.block = release
+		}
+		return r
+	}, nil)
+	s.settled()
+	s.type_("@e cutq one")
+	s.waitFor("the call to be out", held.Load)
+	s.type_("@e cutq two")
+	s.waitFor("the second message", func() bool { return len(s.events(event.UserMessage)) == 2 })
+	close(release)
+	s.waitFor("the replies", func() bool { return cutSentCount(s) >= 2 })
 	sid, evs := cutRecord(t, s)
 	cutCheck(t, sid, evs, s.model)
 }
