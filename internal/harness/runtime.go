@@ -332,6 +332,9 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	r.closeInterrupted()
 	// What the cards of an open question say, and so what the resuming
 	// words become, is decided in one place (resumecards.go).
+	// What the resume records from here on closes the question's cards on
+	// the phone, in every thread (withdrawAnswered, below).
+	planFrom := len(r.st.Events)
 	holdBack := r.planResume(opts).Words == wordsMessage
 	if a := strings.TrimSpace(opts.Answer); a != "" {
 		if st.Question != nil && !holdBack {
@@ -351,7 +354,6 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		// and a session that stopped on a question takes it as the answer.
 		// It comes after the mirror starts, so what it does reaches the phone
 		// (a screen, a receipt) as it would while running.
-		from := len(r.st.Events)
 		in := InboxMessage{Type: "message", Text: opts.Prompt, From: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments, Route: opts.PromptRoute, Delivery: opts.PromptDelivery, PhoneID: opts.PromptPhoneID}
 		if text := strings.TrimSpace(opts.Prompt); strings.HasPrefix(text, "/") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(text) {
 			// Words that only begin with a slash (a path, say) and no
@@ -373,9 +375,9 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		} else {
 			r.handleInbox(in)
 		}
-		if r.phone != nil {
-			r.phone.withdrawAnswered(r, r.st.Events[from:])
-		}
+	}
+	if r.phone != nil {
+		r.phone.withdrawAnswered(r, r.st.Events[planFrom:])
 	}
 	r.renderSystem()
 	return r, nil
