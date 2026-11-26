@@ -48,8 +48,11 @@ type Server struct {
 
 	mu      sync.Mutex
 	running map[string]*hosted
-	mux     *http.ServeMux
-	logf    func(string, ...any)
+	// resuming is held while a request from the browser decides between a
+	// session's inbox and resuming it (deliver).
+	resuming sync.Mutex
+	mux      *http.ServeMux
+	logf     func(string, ...any)
 
 	token    string // per-process page token echoed on every mutating request
 	addr     string // the address the server listens on, for Host checks
@@ -554,21 +557,30 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}); err != nil {
-			writeErr(w, 500, err)
-			return
-		}
-		writeJSON(w, map[string]any{"delivered": "inbox"})
-		return
-	}
-	// Nobody is running it: resume here with the message as the prompt,
-	// from the web as the inbox message above would be.
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
+	// Nobody running it: resume here with the message as the prompt, from
+	// the web as the inbox message would be.
+	how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true)
+	})
+	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, map[string]any{"delivered": "resumed"})
+	writeJSON(w, map[string]any{"delivered": how})
+}
+
+// deliver hands words from the browser to a session: to its inbox when
+// somebody is running it, and otherwise by resuming it here with them
+// (resume). One at a time: of two requests for a stopped session the
+// second waits for the first's resume and then goes to the inbox of the
+// run it started, where it used to fail on the session's lock.
+func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	if alive(info.Path) || s.isHosted(info.ID) {
+		return "inbox", harness.PostInbox(info.Path, msg)
+	}
+	return "resumed", resume()
 }
 
 func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
@@ -582,19 +594,14 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}); err != nil {
-			writeErr(w, 500, err)
-			return
-		}
-		writeJSON(w, map[string]any{"delivered": "inbox"})
-		return
-	}
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
+	how, err := s.deliver(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true)
+	})
+	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, map[string]any{"delivered": "resumed"})
+	writeJSON(w, map[string]any{"delivered": how})
 }
 
 // postDismiss closes the session's open question with no answer. Nothing

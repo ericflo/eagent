@@ -201,12 +201,17 @@
         // were gone. Another preset, or none, without one is no removal.
         for (const route of ['/model', '/summarizer/model']) {
           const has = values => Object.keys(values).some(key => key.startsWith(route + '/fallback/'));
-          if (has(loaded) && has(baseValues) && !has(form) && !has(resource.snapshot.saved)) throw new Error('The fallback this route has comes from its preset and cannot be removed from FinaleChat. Remove it in the local editor, or pick another model.');
+          if (has(loaded) && has(baseValues) && !has(form)) throw new Error('The fallback this route has comes from its preset and cannot be removed from FinaleChat. Remove it in the local editor, or pick another model.');
         }
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
           if (kept(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
           if (!canEdit(key)) continue;
+          // A route whose model differs from the base's takes the new
+          // model's window unless the file names one (config.Overlay,
+          // followModel): the window the form shows is written.
+          const routeModel = key.endsWith('/context_tokens') ? key.slice(0, -'context_tokens'.length) + 'model' : '';
+          if (routeModel && form[key] != null && canonical(form[routeModel]) !== canonical(baseValues[routeModel])) { desired[key] = form[key]; continue; }
           if (body.mode !== 'pin' && canonical(form[key]) === canonical(loaded[key]) && body.base_preset === (resource.snapshot.saved['/preset'] || '')) continue;
           if (form[key] === undefined || form[key] === null || body.mode !== 'pin' && canonical(form[key]) === canonical(baseValues[key])) delete desired[key];
           else desired[key] = form[key];

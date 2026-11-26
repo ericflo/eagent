@@ -848,7 +848,10 @@ func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessag
 	rest, _ := DropModelChoice(file)
 	delete(rest, "default_config")
 	delete(rest, "preset")
-	return LoadBundleWithFile(project, preset, "", rest)
+	// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
+	// A route the environment pins (EAGENT_MODEL and the like) still wins,
+	// as it does everywhere; a choice that cannot hold under it is refused.
+	return LoadBundleWithFile(project, preset, preset, rest)
 }
 
 // modelChoiceFields are the fields of a route that say which model it is

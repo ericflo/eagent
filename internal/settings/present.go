@@ -312,7 +312,8 @@ func PresetSuggestions(project string) []control.Suggestion {
 	var out []control.Suggestion
 	for _, name := range config.PresetNames() {
 		s := control.Suggestion{Value: name, Group: "Presets"}
-		if cfg, err := config.LoadBundleWithFile(project, name, "", map[string]json.RawMessage{}); err == nil {
+		// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
+		if cfg, err := config.LoadBundleWithFile(project, name, name, map[string]json.RawMessage{}); err == nil {
 			s.Detail = clip(lineup(project, cfg), 300)
 			s.Implies = projectImplies(cfg)
 			if pr, ok := config.ProviderForURLFor(project, cfg.Model.BaseURL); ok {

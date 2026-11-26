@@ -293,7 +293,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		// With no summarizer route written, the one in effect is made by the
 		// environment from the main model's: it is the environment's as a
 		// whole, and none of it is written.
-		if _, written := pointerIn(onDisk, []string{"summarizer", "model"}); !written {
+		if v, written := pointerIn(onDisk, []string{"summarizer", "model"}); !written || string(v) == "null" {
 			name := ""
 			for ptr, v := range env {
 				if strings.HasPrefix(ptr, "/summarizer/model/") {
@@ -371,7 +371,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 // object.
 func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bool) {
 	v, ok := m[segs[0]]
-	if !ok || v == nil || string(v) == "null" {
+	if !ok || v == nil {
 		return nil, false
 	}
 	if len(segs) == 1 {
