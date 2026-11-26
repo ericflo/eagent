@@ -14,6 +14,7 @@ import (
 	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // The phone mirror keeps a Finalechat thread in step with the session: the
@@ -71,6 +72,7 @@ type phone struct {
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
 	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
+	taken      map[string]bool   // cards whose answer has been taken, by the poll or a re-ask (takeCard)
 	threadID   string
 	threadSeen bool
 	dropping   bool // the last enqueue found the queue full
@@ -109,7 +111,7 @@ func (r *Runtime) startPhone() {
 		timeout: fc.QuestionTimeout(), mirror: fc.Mirror(),
 		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
-		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{},
+		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{}, taken: map[string]bool{},
 	}
 	r.phone = p
 	p.wg.Add(1)
@@ -674,15 +676,16 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// it, whatever became of that question. A card of an earlier run that
 	// expired or was withdrawn would come back dead and the question would
 	// never be shown again, so each later card has a key of its own: the
-	// first keeps the plain key, the nth adds n. The walk always starts at
-	// the plain key. The service keeps keys per thread, never reopens a
-	// card that left "pending", and a key is tried only once every key
-	// before it in the thread came back dead, so stepping past the dead
-	// ones lands on the card still open (reused, not doubled) or on the
-	// first free key; a deleted thread takes all its keys at once. The
-	// record's count of cards cannot stand in for this: cards of a deleted
-	// thread are in it too. Each resume costs one call per dead card in
-	// the thread, plus one.
+	// first keeps the plain key, the nth adds n. The service keeps keys per
+	// thread and never reopens a card that left "pending", and a key is
+	// tried only once every key before it in the thread came back dead. So
+	// the walk starts at the newest key the record holds for this thread
+	// (at the plain key in a thread it holds none for, as after the user
+	// deleted the thread, which takes all its keys with it) and steps past
+	// dead ones to the card still open (reused, not doubled) or to the
+	// first free key. A resume costs one call, or two when the newest card
+	// died, plus one for each card the record lost.
+	newest := latestKeys(r.st, qid)
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -695,7 +698,11 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		var q finalechat.Question
 		var thread finalechat.Thread
 		var err error
-		for n := 1; ; n++ {
+		p.mu.Lock()
+		start := max(1, newest[p.threadID])
+		p.mu.Unlock()
+		n := start
+		for ; ; n++ {
 			key := p.key("q", qid)
 			if n > 1 && key != "" {
 				key = p.key("q", qid, strconv.Itoa(n))
@@ -704,7 +711,15 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// A dismissed card stays the answer: the user closed it, and
 			// asking again would undo that. Only a card that timed out or
 			// was withdrawn is passed over.
-			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") || n >= 50 {
+			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") {
+				break
+			}
+			if n >= start+100 {
+				// A hundred dead cards past the newest the record knows
+				// cannot come from lost records; something else is wrong.
+				// Say so rather than walk on.
+				err = fmt.Errorf("a hundred of its cards had already closed")
+				p.say("finalechat: the question %q was not posted to the phone: %v", clipLabel(text, 80), err)
 				break
 			}
 		}
@@ -729,13 +744,38 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.fromPhone[q.ID] = qid
 		p.open[q.ID] = qid
 		p.mu.Unlock()
-		cardID := q.ID
+		cardID, cardThread, cardKey := q.ID, thread.ID, n
+		if cardThread == "" {
+			p.mu.Lock()
+			cardThread = p.threadID
+			p.mu.Unlock()
+		}
 		r.post(func() {
 			if r.ending {
 				return
 			}
-			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID}))
+			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID, ThreadID: cardThread, Key: cardKey}))
 		})
+		if q.Status == "answered" {
+			// Answered on the phone while the session was stopped, and the
+			// answer did not reach the session as the answer (it came with
+			// no word of the card, and the card could not be checked). The
+			// card holds it: the question closes with it, unless the poll
+			// took the card's answer message first (takeCard).
+			p.mu.Lock()
+			delete(p.open, q.ID)
+			p.mu.Unlock()
+			if !p.takeCard(q.ID) {
+				return
+			}
+			answer := cardAnswer(q.Answer)
+			r.post(func() {
+				if r.phone == p && r.st.Question != nil && r.st.Question.ID == qid && answer != "" {
+					r.handleInbox(InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat"})
+				}
+			})
+			return
+		}
 		if q.Created {
 			// A card found by its key was left as it was, status line
 			// included: only a new one carried the line.
@@ -979,6 +1019,9 @@ func (p *phone) poll(r *Runtime) {
 				p.mu.Lock()
 				qid, known := p.fromPhone[fid]
 				p.mu.Unlock()
+				if !p.takeCard(fid) {
+					continue // its answer was taken from the card itself
+				}
 				if !known {
 					// A card from before this run (the thread outlives the
 					// session id) or from an ask whose reply was lost. Recover
@@ -1201,6 +1244,109 @@ func (r *Runtime) waitingOnPhone() bool {
 	}
 	_, asked := p.questions[r.st.Question.ID]
 	return asked
+}
+
+// latestKeys is, for each thread the record knows a card of question qid
+// in, the highest key number among those cards. Cards recorded without a
+// thread (by an older eagent) are left out; the walk then starts at the
+// plain key, as it always did.
+func latestKeys(st *state.State, qid string) map[string]int {
+	out := map[string]int{}
+	for _, ev := range st.Events {
+		var d event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.ThreadID != "" && d.Key > out[d.ThreadID] {
+			out[d.ThreadID] = d.Key
+		}
+	}
+	return out
+}
+
+// liveCards are the recorded cards of question qid that may still be open
+// on the service, newest first: in each thread only the card with the
+// highest key can be (every key before it was dead when it was made, and
+// a card never reopens), and every card recorded without its thread.
+func liveCards(st *state.State, qid string) []string {
+	best := map[string]event.PhoneQuestionData{}
+	var out []string
+	seen := map[string]bool{}
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		var d event.PhoneQuestionData
+		if ev := st.Events[i]; ev.Type != event.PhoneQuestion || ev.Decode(&d) != nil || d.QuestionID != qid || d.CardID == "" {
+			continue
+		}
+		if d.ThreadID == "" {
+			if !seen[d.CardID] {
+				seen[d.CardID] = true
+				out = append(out, d.CardID)
+			}
+			continue
+		}
+		if b, ok := best[d.ThreadID]; !ok || d.Key > b.Key {
+			best[d.ThreadID] = d
+		}
+	}
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		var d event.PhoneQuestionData
+		if ev := st.Events[i]; ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.ThreadID != "" && best[d.ThreadID].CardID == d.CardID && !seen[d.CardID] {
+			seen[d.CardID] = true
+			out = append(out, d.CardID)
+		}
+	}
+	return out
+}
+
+// takeCard claims a card's answer for whoever takes it: the message poll
+// meeting the card's answer message, or a re-ask finding the card already
+// answered. Only the first claim succeeds, so one answer is never taken
+// twice (once as the answer, once more as a message).
+func (p *phone) takeCard(fid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.taken[fid] {
+		return false
+	}
+	p.taken[fid] = true
+	return true
+}
+
+// cardAnswer is the answer a card holds, as the words the user gave.
+func cardAnswer(a *finalechat.Answer) string {
+	if a == nil {
+		return ""
+	}
+	// As the service writes the card's answer message: the options chosen,
+	// then " — " and the words.
+	out := strings.Join(a.Selected, ", ")
+	if t := strings.TrimSpace(a.Text); t != "" {
+		if out != "" {
+			out += " — "
+		}
+		out += t
+	}
+	return out
+}
+
+// answersOpenCard reports whether card is one of the open question's
+// recorded cards: a message written on it is that question's answer.
+func (r *Runtime) answersOpenCard(card string) bool {
+	if card == "" || r.st.Question == nil {
+		return false
+	}
+	for _, ev := range r.st.Events {
+		var d event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == r.st.Question.ID && d.CardID == card {
+			return true
+		}
+	}
+	return false
+}
+
+// AnsweredCard is, for a phone message written on a question's card, that
+// card's id (its meta says so), or "". A process resuming a session with
+// the message passes it as Options.PromptAnswers.
+func AnsweredCard(meta map[string]any) string {
+	id, _ := finalechat.Message{Meta: meta}.IsAnswer()
+	return id
 }
 
 // phoneReaskWait bounds how long a resumed session with no terminal waits

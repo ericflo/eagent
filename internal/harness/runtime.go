@@ -66,6 +66,10 @@ type Options struct {
 	// "to eagent / to the agent" and "queue / interrupt / after this turn"
 	// choices, as a running session reads them off the message.
 	PromptPhoneID, PromptRoute, PromptDelivery string
+	// PromptAnswers is, for a Prompt the user wrote on a question's card on
+	// the phone, the card's id (the message's meta says so): the Prompt is
+	// that question's answer.
+	PromptAnswers string
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string
@@ -92,9 +96,6 @@ type modelRoute struct {
 	// conf is the configured chain the routes came from: it knows each
 	// model's context window and reply ceiling, which an endpoint does not.
 	conf config.ModelRoute
-	// picked: conf is a route a settings pick resolved, not the configured
-	// chain (pickBase).
-	picked bool
 }
 
 // confAt is the configured route the client is on: the at-th of the chain
@@ -106,7 +107,9 @@ func (m *modelRoute) confAt() *config.ModelRoute {
 		return nil
 	}
 	ep := m.client.Endpoint
-	same := func(cur *config.ModelRoute) bool { return cur.BaseURL == ep.BaseURL && cur.Model == ep.Model }
+	same := func(cur *config.ModelRoute) bool {
+		return llm.SameBaseURL(cur.BaseURL, ep.BaseURL) && cur.Model == ep.Model
+	}
 	i := 0
 	for cur := &m.conf; cur != nil; cur = cur.Fallback {
 		if _, err := cur.Endpoint(); err != nil {
@@ -327,9 +330,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
-	cardUnknown := r.settleDismissedWhileAway()
+	// What the cards of an open question say, and so what the resuming
+	// words become, is decided in one place (resumecards.go).
+	holdBack := r.planResume(opts).Words == wordsMessage
 	if a := strings.TrimSpace(opts.Answer); a != "" {
-		if st.Question != nil {
+		if st.Question != nil && !holdBack {
 			r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: st.Question.ID, Text: a, Source: opts.PromptSource, Client: opts.PromptClient, Attachments: opts.PromptAttachments}))
 		} else {
 			// Answered elsewhere first (the phone, another resume): the words
@@ -355,15 +360,14 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 			// was woken for these words and nobody is at a terminal, so
 			// they are what they were before: a message, or the answer.
 			r.ui.Idle(false)
-			if q := r.st.Question; q != nil && !cardUnknown {
+			if q := r.st.Question; q != nil && !holdBack {
 				r.append(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: q.ID, Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments}))
 			} else {
 				r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
 			}
-		} else if text := strings.TrimSpace(opts.Prompt); cardUnknown && r.st.Question != nil && !r.ownCommand(text, in.From) {
-			// The card may have been dismissed while the session was
-			// stopped and the service could not say: the words are a
-			// message, and the question stays open.
+		} else if text := strings.TrimSpace(opts.Prompt); holdBack && r.st.Question != nil && !r.ownCommand(text, in.From) {
+			// Words that are not the open question's answer (planResume):
+			// a message, and the question stays open.
 			r.ui.Idle(false)
 			r.userMessage(event.UserMessageData{Text: text, Source: in.From, Client: in.Client, Attachments: in.Attachments, Route: in.Route, Delivery: in.Delivery, PhoneID: in.PhoneID})
 		} else {
@@ -992,60 +996,6 @@ func (r *Runtime) dismissQuestion(qid, source string) {
 	r.listenUntil = asked.Add(time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond)
 	r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: source}))
 	r.ui.Log("question %s dismissed without an answer; nothing was sent to the agent", q.ID)
-}
-
-// settleDismissedWhileAway records a dismissal the session was not running
-// to hear: the user closed the open question's card on the phone while the
-// session was down. Without this, what they wrote next (the message that
-// resumes the session) would be taken for the answer. Every card recorded
-// for the question is asked about, newest first: a re-ask may have moved
-// the question to a later card, or a lost record left an earlier one
-// newest. One the service no longer has went with its thread. It reports
-// unknown when a card's state could not be learned (the service could not
-// be reached): the card may have been dismissed, so the caller must not
-// take the resuming message as its answer. Called before the loop starts.
-func (r *Runtime) settleDismissedWhileAway() (unknown bool) {
-	q := r.st.Question
-	if q == nil {
-		return false
-	}
-	var cards []string
-	seen := map[string]bool{}
-	for i := len(r.st.Events) - 1; i >= 0; i-- {
-		if ev := r.st.Events[i]; ev.Type == event.PhoneQuestion {
-			var d event.PhoneQuestionData
-			if ev.Decode(&d) == nil && d.QuestionID == q.ID && d.CardID != "" && !seen[d.CardID] {
-				seen[d.CardID] = true
-				cards = append(cards, d.CardID)
-			}
-		}
-	}
-	fc := r.cfg.Finalechat
-	if len(cards) == 0 || !fc.Wanted() || finalechat.Disabled() {
-		return false
-	}
-	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
-	if !ok {
-		return false
-	}
-	client.UserAgent = "eagent/" + Version
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, card := range cards {
-		got, err := client.Question(ctx, card, 0)
-		if finalechat.Gone(err) {
-			continue
-		}
-		if err != nil {
-			unknown = true
-			continue
-		}
-		if got.Status == "dismissed" {
-			r.append(event.New(event.UserDismiss, event.ActorUser, event.UserDismissData{QuestionID: q.ID, Source: "finalechat"}))
-			return false
-		}
-	}
-	return unknown
 }
 
 // questionSecond is one second of a question's time as a batch session

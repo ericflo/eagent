@@ -217,7 +217,7 @@ func TestClaudeIdleWithAHeldMessageTypesIt(t *testing.T) {
 	heldGrace = 200 * time.Millisecond
 	t.Cleanup(func() { heldGrace = saved })
 	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true}
+	h := &fakeHost{alive: true, screen: claudePromptScreen}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
 	s.state = "working"
 	if msg, err := s.Send("r1", "then run the tests", "after_turn"); err != nil || !strings.Contains(msg, "held for") {

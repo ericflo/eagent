@@ -211,7 +211,9 @@ func (c *Controller) process(q Request) error {
 	presetName := SavePresetName(q.Proposal)
 	var presetCfg config.Config
 	if presetName != "" {
-		presetCfg, err = ConfigFromValues(c.Project, values)
+		// The configuration the session runs is the one its settings named
+		// before this change: saving a preset renames it to the new one.
+		presetCfg, err = ConfigFromValuesOn(c.Project, c.Values.Config, values)
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}

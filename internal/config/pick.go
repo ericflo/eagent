@@ -37,7 +37,9 @@ func PickRoute(project string, a ModelRoute, providerID, modelID, effort string)
 			return a, fmt.Errorf("model %q does not list effort %q (known: %s)", modelID, effort, strings.Join(m.Efforts, ", "))
 		}
 	}
-	if a.BaseURL != pr.BaseURL || a.Model != m.ID {
+	// The same address with or without a trailing slash (llm.SameBaseURL):
+	// a route written either way keeps its key, window and fallbacks.
+	if strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(pr.BaseURL, "/") || a.Model != m.ID {
 		a.Protocol, a.BaseURL, a.Model, a.APIKeyEnv, a.Fallback = m.ProtocolForProvider(pr), pr.BaseURL, m.ID, pr.KeyEnv, nil
 		a.ContextTokens = m.Context
 	}

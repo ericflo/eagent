@@ -181,9 +181,15 @@ func (r *Runtime) scale() int {
 // only.
 func (r *Runtime) routeKey() string {
 	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
-		return m.client.Endpoint.BaseURL + " " + m.client.Endpoint.Model
+		return endpointKey(m.client.Endpoint)
 	}
 	return ""
+}
+
+// endpointKey names a route by its address and model, written the same
+// whether or not its base URL ends in a slash.
+func endpointKey(ep llm.Endpoint) string {
+	return strings.TrimRight(ep.BaseURL, "/") + " " + ep.Model
 }
 
 // provider is an estimate in the provider's count; estimate is the
@@ -236,7 +242,7 @@ func (r *Runtime) calibrate(who string, ep llm.Endpoint, req llm.Request, resp *
 	learn := func(k int, raise bool) {
 		k = min(k, scaleMax)
 		key := r.routeKey()
-		if key != ep.BaseURL+" "+ep.Model {
+		if key != endpointKey(ep) {
 			return // the route changed while the call was out
 		}
 		if r.tokenScaleOn != key {

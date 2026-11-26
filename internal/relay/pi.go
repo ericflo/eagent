@@ -368,6 +368,13 @@ func (piAgent) ready(screen string) bool {
 	return piFooter.MatchString(screen) || strings.Contains(screen, "escape interrupt · ctrl+c/ctrl+d clear/exit")
 }
 
+// reportedWorking: the extension's status file says pi is in a turn. pi
+// reports its dialogs there too, so a working pi shows none.
+func (piAgent) reportedWorking(s *Seat) bool {
+	st, ok := readPiStatus(s.spec.StatusFile)
+	return ok && st.State == "working" && strings.TrimSpace(st.Prompt) == ""
+}
+
 // reportedReady is what the extension's status file says: idle with no
 // dialog open is ready, working is not. Without a status file, or with a
 // state it does not know, the screen decides.
