@@ -133,6 +133,11 @@ func r10BehindAQuit(t *testing.T, fp *phoneFake, msgs ...map[string]any) (*phone
 	}
 	ids := r10Says(fp, append([]map[string]any{r10Msg("/quit")}, msgs...)...)
 	waitFor(t, "the poll to read the page", func() bool {
+		for _, l := range g.ui.logged() {
+			if strings.Contains(l, "could not fetch") {
+				return true // it asks the loop, held, whether the session is ending
+			}
+		}
 		fp.mu.Lock()
 		defer fp.mu.Unlock()
 		return fp.after == ids[len(ids)-1]

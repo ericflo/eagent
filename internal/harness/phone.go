@@ -1108,6 +1108,15 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 						// fetch: the message is left for the next run.
 						return
 					}
+					// Nor is the sender told anything by a session that is
+					// ending (a /quit before it in the page, say): its step
+					// would not take the message, which is left for the
+					// next run.
+					ending := true
+					r.sync(func() { ending = r.ending })
+					if ending {
+						return
+					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
 					// without a word.

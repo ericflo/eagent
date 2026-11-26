@@ -448,11 +448,12 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not
-// taken. The key makes it once per file whoever notices first.
+// taken. The key, the running mirror's for the same notice, makes it once
+// per file whoever notices first.
 func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) error {
 	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 	defer stop()
-	_, _, err = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+	_, _, err = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: externalID + ":refused:" + msgID + ":" + a.ID})
 	return err
 }
 
