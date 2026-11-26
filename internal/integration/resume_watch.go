@@ -88,7 +88,8 @@ type resumeWatcher struct {
 	handled map[string]time.Time // message ids acted on, or being acted on
 }
 
-// pendingReply is a reply whose session could not be resumed yet.
+// pendingReply is a reply whose session could not be resumed yet, or one
+// that reached a running session (told false: keepUntilStopped).
 type pendingReply struct {
 	thread finalechat.Thread
 	msg    finalechat.Message
@@ -165,6 +166,9 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	}
 	if store.Alive(info.Path) || w.host.Hosted(sid) {
 		w.logf("finalechat: reply to session %s left to its running mirror", sid)
+		if trigger.ID != "" {
+			w.keepUntilStopped(info, thread, trigger)
+		}
 		return
 	}
 	var held *finalechat.Message
@@ -216,10 +220,21 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	for _, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
-		if err != nil {
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			// It will never fit: the session comes back with the rest of
+			// the message, once the sender is told about the file.
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
-			tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err)
-			continue
+			if err = tellRefused(ctx, w.client, thread.ExternalID, m.ID, a, err); err == nil {
+				continue
+			}
+		}
+		if err != nil {
+			// Not taken in without the file: the reply waits for a sweep.
+			w.logf("finalechat: could not fetch %s for session %s: %v (will retry)", a.Filename, sid, err)
+			if ctx.Err() == nil {
+				w.retryLater(ctx, thread, m, "eagent could not fetch a file of your reply yet. It keeps trying every minute.")
+			}
+			return
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
@@ -236,6 +251,36 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	delete(w.retries.replies, m.ID)
 	w.retries.mu.Unlock()
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
+}
+
+// keepUntilStopped keeps, quietly, a reply that reached a running session,
+// for the sweeps to look at once it has stopped: a session shutting down
+// may drop it, and its closing note then hides the thread from the sweep.
+// The session's ledger says then whether it took the reply in
+// (nextPhoneMessage), so only a run that keeps the ledger has it kept. One
+// per thread is enough: the session is resumed with the earliest message
+// it has not taken in, whichever reply brought it up.
+func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thread, m finalechat.Message) {
+	w.retries.mu.Lock()
+	_, kept := w.retries.replies[m.ID]
+	w.retries.mu.Unlock()
+	if kept {
+		return // being retried, or sent twice by the stream
+	}
+	evs, err := store.Read(info.Path)
+	if err != nil || !ReadPhoneLedger(evs).Keeps {
+		return
+	}
+	w.retries.mu.Lock()
+	defer w.retries.mu.Unlock()
+	for id, p := range w.retries.replies {
+		if !p.told && p.thread.ExternalID == thread.ExternalID {
+			delete(w.retries.replies, id)
+		}
+	}
+	if _, kept := w.retries.replies[m.ID]; !kept {
+		w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+	}
 }
 
 // retryLater keeps a reply that could not resume its session for the next
@@ -373,10 +418,11 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 
 // tellRefused posts, in the thread, why a file the user sent was not
 // taken. The key makes it once per file whoever notices first.
-func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) {
+func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) error {
 	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 	defer stop()
-	_, _, _ = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+	_, _, err = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: "attachment-refused-" + msgID + "-" + a.ID})
+	return err
 }
 
 // saveAttachment downloads a phone attachment under the session directory,
