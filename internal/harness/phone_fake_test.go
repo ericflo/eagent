@@ -67,6 +67,10 @@ type phoneFake struct {
 	// questionsDown makes every GET …/questions/<id> fail as a service
 	// that cannot be reached does.
 	questionsDown bool
+	// onAsk, when set, runs before a POST …/questions is answered, outside
+	// the fake's lock: a test does there what happens while an ask is in
+	// flight.
+	onAsk func()
 }
 
 // threadJSON is the thread as the service returns it. Call with f.mu held.
@@ -323,6 +327,12 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": out, "has_more": false, "thread_id": "t1", "timed_out": len(out) == 0})
 	case strings.HasSuffix(path, "/questions") && r.Method == http.MethodPost:
+		f.mu.Lock()
+		hook := f.onAsk
+		f.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		f.mu.Lock()
 		// The service answers a known key with the question it made for it,
 		// whatever has become of that question since (expired, cancelled,
