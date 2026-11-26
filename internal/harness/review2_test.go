@@ -577,7 +577,9 @@ func TestSessionSearchIsBoundedInTheLoop(t *testing.T) {
 		}
 	})
 	s.settled()
-	out, isErr, _ := s.rt.runTool(context.Background(), &turnCalls{}, tc("session_search", `{"query":"e","max_results":50000}`))
+	// "step" is in every line once; a query in every line hundreds of
+	// times ("e") finds the same lines and spends a second marking where.
+	out, isErr, _ := s.rt.runTool(context.Background(), &turnCalls{}, tc("session_search", `{"query":"step","max_results":50000}`))
 	if isErr {
 		t.Fatal(out)
 	}
@@ -585,7 +587,7 @@ func TestSessionSearchIsBoundedInTheLoop(t *testing.T) {
 		t.Fatalf("a search for 50000 results returned %d characters", len(out))
 	}
 	// The record's own search never returns more than its limit.
-	all, err := s.rt.archive.Search("e", "", 50000)
+	all, err := s.rt.archive.Search("step", "", 50000)
 	if err != nil {
 		t.Fatal(err)
 	}
