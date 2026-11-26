@@ -184,7 +184,7 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 		switch {
 		case t.saidAt.IsZero():
 			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. The user has heard nothing from you yet. Send a complete final report, marked important: what was done, where it is, how to run it, what was verified, and what is missing or uncertain. Do not hold.")
-		case t.saidSeq <= r.st.LastUserSeq:
+		case closingWordOwed(r.st.LastUserSeq, t.saidSeq, t.spokeSeen):
 			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. The user has written since you last spoke and has heard nothing back. Send a complete final report, marked important: what was done, where it is, how to run it, what was verified, and what is missing or uncertain. Do not hold.")
 		default:
 			b.WriteString("The session is ending now: no agent is running and nobody is at a terminal. If your last message already covers the final state (what was done, where it is, how to run it, what was verified, what is missing), hold. Otherwise send one final report with what is missing from it. Never repeat yourself.")

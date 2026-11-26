@@ -159,7 +159,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 				id = r.st.NextQuestionID()
 				r.append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: id, Text: text, Options: opts}))
 				asked := r.st.Events[len(r.st.Events)-1]
-				r.turns.saidAt, r.turns.saidSeq = asked.Time, asked.Seq
+				r.turns.saidAt, r.turns.saidSeq, r.turns.spokeSeen = asked.Time, asked.Seq, r.turns.seen
 				tc.own = append(tc.own, asked.Seq)
 				onPhone = r.phone != nil
 			}
