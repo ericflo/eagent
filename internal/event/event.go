@@ -166,6 +166,11 @@ type SessionResumeData struct {
 	Closed      []string `json:"closed,omitempty"` // human-readable list of things marked interrupted
 	// PhoneLedger: as on SessionStartData, for this run.
 	PhoneLedger bool `json:"phone_ledger,omitempty"`
+	// After is the seq of the newest event the record held when this run
+	// opened it. A resume repairs a cut turn before it writes this event,
+	// so the event just before it can be the run's own; After says where
+	// the run before really stopped.
+	After int64 `json:"after,omitempty"`
 }
 
 // SessionEndData records why the runner stopped.

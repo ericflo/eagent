@@ -13,7 +13,8 @@ import (
 // the three-actor design is given a briefing to continue from. Called
 // before the loop starts.
 func (r *Runtime) closeInterrupted() {
-	r.finishOpening() // first: whatever is written next belongs in the new file
+	opened := r.st.LastSeq() // where the run before stopped: everything below is this run's
+	r.finishOpening()        // first: whatever is written next belongs in the new file
 	// The agents run in terminals of their own and survive eagent stopping;
 	// pick them up again, and say which are gone.
 	closed := r.reattachRelays()
@@ -31,7 +32,7 @@ func (r *Runtime) closeInterrupted() {
 		r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: "interrupted"}))
 	}
 	legacy := r.st.Legacy() && !r.st.Upgraded()
-	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed, PhoneLedger: true}))
+	r.append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: r.opts.Interactive, Closed: closed, PhoneLedger: true, After: opened}))
 	// The record names the model that speaks as eagent, and the phone and
 	// the views show it from there. A session last run with another model,
 	// or by the eagent of three models (which had none under this name),

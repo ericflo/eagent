@@ -26,7 +26,7 @@ import (
 // their id. A run by an eagent without the ledger (an upgrade, a rollback)
 // may have taken messages it did not record: its record is read by time,
 // and a ledger run after it starts afresh, judging what came before it by
-// the time it started.
+// the time the run before it stopped (the resume says where that was).
 type PhoneLedger struct {
 	// Keeps: the last run in the record kept the ledger.
 	Keeps bool
@@ -61,17 +61,27 @@ func ReadPhoneLedger(evs []event.Event) PhoneLedger {
 		}
 	}
 	var last time.Time // the time of the event before this one
-	for _, ev := range evs {
+	for i, ev := range evs {
 		switch ev.Type {
 		case event.SessionStart, event.SessionResume:
 			var d struct {
-				PhoneLedger bool `json:"phone_ledger"`
+				PhoneLedger bool  `json:"phone_ledger"`
+				After       int64 `json:"after"`
 			}
 			_ = ev.Decode(&d)
 			if d.PhoneLedger && !l.Keeps {
 				// The ledger starts here: what came before was taken (or
-				// not) by runs that did not record it.
+				// not) by runs that did not record it. "Before" ends where
+				// that run stopped, which the resume names (after): the
+				// events between there and here are the resume's own
+				// repairs of a cut turn, written at the resume's time.
 				l.Cursor, l.Since = "", last
+				for j := i - 1; d.After > 0 && j >= 0; j-- {
+					if evs[j].Seq <= d.After {
+						l.Since = evs[j].Time
+						break
+					}
+				}
 			}
 			l.Keeps = d.PhoneLedger
 		case event.PhoneRead:
@@ -154,7 +164,7 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		return finalechat.Message{}, false, err
 	}
 	if l.Keeps && l.Cursor != "" {
-		m, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, l.Takeable)
+		m, _, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, l.Takeable)
 		if err != nil {
 			return fallback(err)
 		}
@@ -167,44 +177,56 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		// The thread no longer has the cursor's message (it was taken back,
 		// or the thread was recreated): judge by time.
 	}
-	// By time: after the session's last write for a record without the
-	// ledger; for one that keeps it, after the ledger started, since every
-	// message its runs took is in it (a ledger run that took nothing yet,
-	// as one cut off before its mirror's first post).
-	since := info.Modified
-	if l.Keeps {
-		since = l.Since
-	}
-	m, found, _, err := firstInThread(ctx, client, ext, "", func(m finalechat.Message) bool {
-		return l.Takeable(m) && m.CreatedAt.After(since)
-	})
+	m, _, found, err := l.Waiting(ctx, client, ext, info.Modified)
 	if err != nil || !found {
 		return fallback(err)
 	}
 	return m, true, nil
 }
 
+// Waiting is the earliest app message in the thread that waited for the
+// session, judged by time: written after the session's last write
+// (lastWrite) for a record without the ledger; for one that keeps it,
+// after the ledger started, since every message its runs took is in it (a
+// ledger run that took nothing yet, as one cut off before its mirror's
+// first post). prev is the user message listed just before it, empty when
+// it is the first: reading on after prev reads it first. The reply
+// watcher resumes with it; a session resumed with no app message reads on
+// after prev.
+func (l PhoneLedger) Waiting(ctx context.Context, client *finalechat.Client, ext string, lastWrite time.Time) (m finalechat.Message, prev string, found bool, err error) {
+	since := lastWrite
+	if l.Keeps {
+		since = l.Since
+	}
+	m, prev, found, _, err = firstInThread(ctx, client, ext, "", func(m finalechat.Message) bool {
+		return l.Takeable(m) && m.CreatedAt.After(since)
+	})
+	return m, prev, found, err
+}
+
 // firstInThread pages the user's messages after an anchor (from the start
-// with none) and returns the first that ok accepts. unknown says the
-// service does not know the anchor.
-func firstInThread(ctx context.Context, client *finalechat.Client, ext, after string, ok func(finalechat.Message) bool) (finalechat.Message, bool, bool, error) {
+// with none) and returns the first that ok accepts, with the one listed
+// before it (the anchor for the first listed). unknown says the service
+// does not know the anchor.
+func firstInThread(ctx context.Context, client *finalechat.Client, ext, after string, ok func(finalechat.Message) bool) (finalechat.Message, string, bool, bool, error) {
 	for i := 0; i < 50; i++ {
 		msgs, _, unknown, err := client.MessagesPage(ctx, finalechat.Ref(ext), after, "user", 0, 100)
 		if err != nil {
-			return finalechat.Message{}, false, false, err
+			return finalechat.Message{}, "", false, false, err
 		}
 		if unknown {
-			return finalechat.Message{}, false, true, nil
+			return finalechat.Message{}, "", false, true, nil
 		}
 		for _, m := range msgs {
+			prev := after
 			after = m.ID
 			if ok(m) {
-				return m, true, false, nil
+				return m, prev, true, false, nil
 			}
 		}
 		if len(msgs) < 100 {
 			break
 		}
 	}
-	return finalechat.Message{}, false, false, nil
+	return finalechat.Message{}, "", false, false, nil
 }
