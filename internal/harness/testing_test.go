@@ -134,13 +134,19 @@ func say(text string) reply {
 func newScripted(brain func(model string, msgs []map[string]any) reply) *scripted {
 	s := &scripted{brain: brain, calls: map[string]int{}}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
+		raw, rerr := io.ReadAll(r.Body)
 		var body struct {
 			Model    string            `json:"model"`
 			Messages []json.RawMessage `json:"messages"`
 			Tools    json.RawMessage   `json:"tools"`
 		}
-		_ = json.Unmarshal(raw, &body)
+		if err := json.Unmarshal(raw, &body); rerr != nil || err != nil {
+			// A request cut off on its way in: the session was stopped while
+			// it was sending (seen under load). It is not a call, and the
+			// brain is not asked about a conversation it cannot read.
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		msgs := make([]map[string]any, len(body.Messages))
 		for i, m := range body.Messages {
 			_ = json.Unmarshal(m, &msgs[i])
