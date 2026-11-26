@@ -12,6 +12,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // useSeatList makes the session's agent starts take the given seats in
@@ -346,55 +347,170 @@ func TestAnAutopilotDeadlineIsReadInTheUsersTimeZone(t *testing.T) {
 	}
 }
 
-// A batch session with the phone keeps its agent after the work, so the
-// user can steer it from the phone. Once the work is done and nobody has
-// written for a question's time (finalechat.question_timeout_seconds), the
-// harness stops the agent, saying how to bring it back, and the session
-// ends done: it does not leave eagent, the terminal and the agent running
-// for ever.
-func TestABatchPhoneSessionEndsWhenItsWorkIsDoneAndNobodyWrites(t *testing.T) {
-	// Four seconds of question time at 50ms each: the session waits 200ms.
-	setFor(t, &questionSecond, 50*time.Millisecond)
-	fp := newPhoneFake(false)
-	t.Cleanup(fp.srv.Close)
-	brain := func(_ string, msgs []map[string]any) reply {
+// idleBrain reports the agent's turn to the user, and on an idle check
+// stops the agent when stop is set, else holds.
+func idleBrain(stop bool) func(string, []map[string]any) reply {
+	return func(_ string, msgs []map[string]any) reply {
+		last, all := lastUserText(msgs), allText(msgs)
 		switch {
 		case phoneLastIsTool(msgs), phoneEnding(msgs):
 			return hold()
-		case strings.Contains(lastUserText(msgs), "finished a turn"):
+		case stop && strings.Contains(all, idleCheckPrefix) && !strings.Contains(all, "Stopped Codex"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"its work is done"}`)}}
+		case strings.Contains(last, "finished a turn"):
 			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Merged #42 and #44; main is green.","important":true}`)}}
 		}
 		return hold()
 	}
-	g := phoneStart(t, fp, "merge the open PRs", false, brain, func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
+}
+
+// idleNotices are the idle checks on a record, oldest first.
+func idleNotices(evs []event.Event) []event.Event {
+	var out []event.Event
+	for _, ev := range evs {
+		var d event.HarnessMessageData
+		if ev.Type == event.HarnessMessage && ev.Decode(&d) == nil && strings.HasPrefix(d.Text, idleCheckPrefix) {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// lastOf is the newest event of the given types before seq.
+func lastOf(evs []event.Event, before int64, types ...string) event.Event {
+	var out event.Event
+	for _, ev := range evs {
+		if ev.Seq < before && slices.Contains(types, ev.Type) {
+			out = ev
+		}
+	}
+	return out
+}
+
+// A batch session with the phone keeps its agent after the work, so the
+// user can steer it from the phone. Once the agent has been between turns
+// and nobody has written for a question's time, the harness stops nothing
+// itself (the agent may be waiting on work of its own): it asks the model.
+// When the model stops the agent, the session ends done.
+func TestAnIdleBatchPhoneSessionAsksTheModelWhichStopsTheAgent(t *testing.T) {
+	// Four seconds of question time at 50ms each: a 200ms window.
+	setFor(t, &questionSecond, 50*time.Millisecond)
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "merge the open PRs", false, idleBrain(true), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
 	if code := g.exit(10 * time.Second); code != 0 {
 		t.Fatalf("exit %d, want 0 (done)", code)
 	}
 	if !g.seat.wasKilled() {
-		t.Error("the agent was left running")
+		t.Error("the agent the model stopped is still running")
 	}
 	evs := g.log()
-	var end *event.Event
-	for i := range evs {
-		if evs[i].Type == event.RelayEnd {
-			end = &evs[i]
+	notices := idleNotices(evs)
+	if len(notices) != 1 {
+		t.Fatalf("%d idle checks, want 1", len(notices))
+	}
+	var d event.HarnessMessageData
+	_ = notices[0].Decode(&d)
+	for _, want := range []string{"relay_control stop", "relay_control restart", "leave it alone"} {
+		if !strings.Contains(d.Text, want) {
+			t.Errorf("the idle check does not say %q: %s", want, d.Text)
 		}
 	}
-	if end == nil {
-		t.Fatal("no relay.end on the record")
+	turn := lastOf(evs, notices[0].Seq, event.RelayTurn)
+	if gap := notices[0].Time.Sub(turn.Time); gap < 200*time.Millisecond {
+		t.Errorf("the model was asked %v after the agent's turn, before the 200ms window", gap)
 	}
-	var d event.RelayEndData
-	_ = end.Decode(&d)
-	if !strings.Contains(d.Reason, "relay_control restart") {
-		t.Errorf("the stop does not say how to bring the agent back: %q", d.Reason)
-	}
-	// It waited the whole question time after the last thing that happened.
-	for i := range evs {
-		if evs[i].Seq == end.Seq-1 {
-			if gap := end.Time.Sub(evs[i].Time); gap < 200*time.Millisecond {
-				t.Errorf("the agent was stopped %v after the last event, before the 200ms the user has to write", gap)
-			}
+	var ends []event.RelayEndData
+	for _, ev := range evs {
+		var e event.RelayEndData
+		if ev.Type == event.RelayEnd && ev.Decode(&e) == nil {
+			ends = append(ends, e)
 		}
+	}
+	if len(ends) != 1 || ends[0].Reason != "its work is done" {
+		t.Errorf("relay ends %+v, want the model's stop only", ends)
+	}
+}
+
+// A model that leaves the agent alone (it is waiting on its own work)
+// keeps it: the harness stops nothing, and asks again only after twice the
+// window. Asked again across a resume, the schedule is the record's.
+func TestAnIdleAgentLeftAloneIsAskedAboutAgainAfterTwiceTheWait(t *testing.T) {
+	// Two seconds of question time at 25ms each: a 50ms window.
+	setFor(t, &questionSecond, 25*time.Millisecond)
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "merge the open PRs", false, idleBrain(false), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 2 })
+	waitFor(t, "two idle checks", func() bool { return len(idleNotices(g.log())) >= 2 })
+	evs := g.log()
+	n := idleNotices(evs)
+	if gap := n[1].Time.Sub(n[0].Time); gap < 100*time.Millisecond {
+		t.Errorf("asked again %v after a check the model held on, want at least twice the 50ms window", gap)
+	}
+	if g.seat.wasKilled() {
+		t.Fatal("the harness stopped the agent")
+	}
+	for _, ev := range evs {
+		if ev.Type == event.RelayEnd {
+			t.Fatal("the agent was stopped")
+		}
+	}
+	g.interrupt()
+	// Resumed: the third check waits twice the second wait, counted from
+	// the second check on the record.
+	g.seat = newFakeSeat("Merged.")
+	useFakeRelays(t, g.seat)
+	g.resume(Options{})
+	waitFor(t, "a third idle check", func() bool { return len(idleNotices(g.log())) >= 3 })
+	n = idleNotices(g.log())
+	if gap := n[2].Time.Sub(n[1].Time); gap < 200*time.Millisecond {
+		t.Errorf("after a resume, asked again %v after the second check, want at least 200ms", gap)
+	}
+	g.interrupt()
+}
+
+// The schedule, from the record: one window after the quiet began, then
+// each ask doubles the wait from the last ask, up to a day; a turn of the
+// agent or a word from the user starts over at one window. The model's own
+// turns and messages are not activity.
+func TestTheIdleCheckScheduleFollowsTheRecord(t *testing.T) {
+	const w = time.Minute
+	t0 := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	var evs []event.Event
+	add := func(at time.Duration, typ, actor string, data any) {
+		ev := event.New(typ, actor, data)
+		ev.Seq, ev.Time = int64(len(evs)+1), t0.Add(at)
+		evs = append(evs, ev)
+	}
+	notice := func(at time.Duration) {
+		add(at, event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: idleCheckPrefix + "…] …"})
+	}
+	due := func(want time.Duration, wantAsked int) {
+		t.Helper()
+		got, asked := idleCheckDue(state.Replay(evs), w)
+		if !got.Equal(t0.Add(want)) || asked != wantAsked {
+			t.Errorf("due %v (asked %d), want %v (asked %d)", got.Sub(t0), asked, want, wantAsked)
+		}
+	}
+	add(0, event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "codex", Text: "done"})
+	due(w, 0)
+	add(5*time.Second, event.Message, event.ActorEagent, event.MessageData{Text: "Done."})
+	due(w, 0) // eagent speaking is not activity
+	notice(w)
+	add(w+time.Second, event.Assistant, event.ActorEagent, event.AssistantData{})
+	due(3*w, 1)
+	notice(3 * w)
+	due(7*w, 2)
+	add(8*w, event.UserMessage, event.ActorUser, event.UserMessageData{Text: "status?"})
+	due(9*w, 0)
+	notice(9 * w)
+	add(10*w, event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "codex", Text: "again"})
+	due(11*w, 0)
+	for i := range 20 {
+		notice(11*w + time.Duration(i)*time.Second)
+	}
+	if got, _ := idleCheckDue(state.Replay(evs), w); got.Sub(t0.Add(11*w+19*time.Second)) != idleCheckCap {
+		t.Errorf("after many asks the wait is %v, want the %v cap", got.Sub(t0.Add(11*w+19*time.Second)), idleCheckCap)
 	}
 }
 
@@ -405,16 +521,7 @@ func TestABatchPhoneSessionKeepsItsAgentWhileTheUserWrites(t *testing.T) {
 	setFor(t, &questionSecond, 50*time.Millisecond)
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close)
-	brain := func(_ string, msgs []map[string]any) reply {
-		switch {
-		case phoneLastIsTool(msgs), phoneEnding(msgs):
-			return hold()
-		case strings.Contains(lastUserText(msgs), "finished a turn"):
-			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done.","important":true}`)}}
-		}
-		return hold()
-	}
-	g := phoneStart(t, fp, "merge the open PRs", false, brain, func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
+	g := phoneStart(t, fp, "merge the open PRs", false, idleBrain(true), func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
 	waitFor(t, "the first report on the phone", func() bool { return len(g.ui.said()) == 1 })
 	g.rt.sync(func() {
 		g.rt.handleInbox(InboxMessage{Type: "message", Text: "now tag a release", From: "finalechat", PhoneID: "m1"})
@@ -424,5 +531,13 @@ func TestABatchPhoneSessionKeepsItsAgentWhileTheUserWrites(t *testing.T) {
 	}
 	if sent := g.seat.sentTexts(); len(sent) != 2 || sent[1] != "now tag a release" {
 		t.Fatalf("the agent was typed %q, want the task and then the user's reply", sent)
+	}
+	evs := g.log()
+	n := idleNotices(evs)
+	if len(n) != 1 {
+		t.Fatalf("%d idle checks, want 1 (after the second turn)", len(n))
+	}
+	if turn := lastOf(evs, n[0].Seq, event.RelayTurn); n[0].Time.Sub(turn.Time) < 200*time.Millisecond {
+		t.Errorf("asked %v after the agent's answer to the reply, before the window", n[0].Time.Sub(turn.Time))
 	}
 }

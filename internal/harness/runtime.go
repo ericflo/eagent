@@ -788,7 +788,7 @@ func (r *Runtime) maybeEnd() {
 	// resumed session picks it up.
 	unanswerable := r.st.Question != nil && r.phone == nil
 	if len(r.st.ActiveRelays()) > 0 && !unanswerable {
-		r.stopIdleAgents()
+		r.checkIdleAgents()
 		return
 	}
 	if len(r.st.ActiveSchedules()) > 0 {
