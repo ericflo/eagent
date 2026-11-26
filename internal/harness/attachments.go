@@ -101,8 +101,15 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		if real, err := filepath.EvalSymlinks(abs); err == nil {
 			abs = real
 		}
+		// A picture the user or an agent named is one eagent may look at
+		// (view_image); it may go to the user too, under the same rule.
+		// Only a picture: a named file of any other kind stays.
+		byName := false
 		if !r.sendable(abs) {
-			return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
+			if !r.named(abs) {
+				return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder, and the agent did not report it as a picture it made", p)
+			}
+			byName = true
 		}
 		st, err := os.Stat(abs)
 		if err != nil {
@@ -120,6 +127,10 @@ func (r *Runtime) messageAttachments(raw any) ([]event.Attachment, error) {
 		att, err := r.copyAttachment(abs, "out")
 		if err != nil {
 			return nil, err
+		}
+		if byName && att.Kind != "image" {
+			_ = os.Remove(att.Path)
+			return nil, fmt.Errorf("attachment %s is outside the project and the agent's folder; a file named in the conversation can be sent from there only if it is a picture (png, jpeg, gif, webp)", p)
 		}
 		out = append(out, att)
 	}
