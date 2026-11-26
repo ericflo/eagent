@@ -2411,11 +2411,13 @@ func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id,
 }
 
 // wentToEarlierHolder says whether every send in ids (all under name) that
-// may have gone, and there is at least one, was recorded and confirmed
-// arrived before the relay.end that stopped the
-// agent which held name before, and the agent holding name now started
-// after that end and runs. Only the words of a refusal hang on it: which
-// sends count stays as forwardedAs counts them.
+// may have gone, and there is at least one, was put to name last before
+// the relay.end that stopped the agent which held name before (and, if it
+// arrived, arrived before then), and the agent holding name now started
+// after that end and runs. Such a send was that agent's, whether it
+// arrived, waits or was never confirmed: the agent now was never sent it.
+// Only the words of a refusal hang on it: which sends count stays as
+// forwardedAs counts them.
 func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map[string]string) bool {
 	rel := st.Relays[name]
 	if rel == nil || !rel.Active() {
@@ -2424,23 +2426,22 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	var endSeq int64
 	sentAt, arrivedAt := map[string]int64{}, map[string]int64{}
 	for _, ev := range st.Events {
-		if ev.Seq >= rel.StartSeq {
-			break
-		}
 		switch ev.Type {
 		case event.RelayEnd:
 			var d event.RelayEndData
-			if ev.Decode(&d) == nil && d.Name == name {
+			if ev.Seq < rel.StartSeq && ev.Decode(&d) == nil && d.Name == name {
 				endSeq = ev.Seq
 			}
 		case event.RelaySend, event.RelayMoved:
+			// The whole record: a send passed back to name since is not
+			// the earlier agent's.
 			var d event.RelaySendData
 			if ev.Decode(&d) == nil && d.Name == name {
 				sentAt[d.ID] = ev.Seq
 			}
 		case event.RelayDelivered:
 			var d event.RelayDeliveredData
-			if ev.Decode(&d) == nil && d.OK {
+			if ev.Seq < rel.StartSeq && ev.Decode(&d) == nil && d.OK {
 				if _, seen := arrivedAt[d.ID]; !seen {
 					arrivedAt[d.ID] = ev.Seq
 				}
@@ -2452,15 +2453,16 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	}
 	matched := false
 	for _, id := range ids {
-		if st.SendOutcome(id) == state.SendNotSent {
+		o := st.SendOutcome(id)
+		if o == state.SendNotSent {
 			continue // it certainly did not go: it says nothing of where the message went
 		}
-		if _, moved := movedOn[id]; moved || st.SendOutcome(id) != state.SendArrived {
+		if _, moved := movedOn[id]; moved {
 			return false
 		}
 		s, sent := sentAt[id]
 		a, arrived := arrivedAt[id]
-		if !sent || !arrived || s > endSeq || a > endSeq {
+		if !sent || s > endSeq || o == state.SendArrived && (!arrived || a > endSeq) {
 			return false
 		}
 		matched = true

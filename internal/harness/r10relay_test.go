@@ -64,3 +64,46 @@ func TestR10ASendThatDidNotGoIsNotClaimedForTheEarlierHolder(t *testing.T) {
 		t.Errorf("refused as %s: %q, want r1 as gone to Claude", id, why)
 	}
 }
+
+const r10Earlier = "that message went as written (r1) to the agent that held the name codex before, which was stopped; Codex, running now, was not sent it as its own message (its hand-over brief may quote it); to give it to this one, send the words with relay_send"
+
+// Finding 9. A send typed into the Codex that was stopped, whose arrival
+// that Codex never confirmed (still waiting, or given up on), was that
+// Codex's: the refusal says so, not that it is on its way to the Codex
+// started since, which was never sent it.
+func TestR10ASendOfAStoppedHolderIsNotOnItsWayToTheNewOne(t *testing.T) {
+	for _, outcome := range []string{"", event.DeliveryUnconfirmed} {
+		rec := &relayRecord{t: time.Now()}
+		rec.start("codex", "codex")
+		seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
+		rec.send("codex", "r1", seq)
+		if outcome != "" {
+			rec.failed("codex", "r1", outcome)
+		}
+		rec.add(event.RelayEnd, event.RelayEndData{Name: "codex", Reason: "stopped"})
+		rec.start("codex", "codex")
+		st := state.Replay(rec.evs)
+		if n := st.Relays["codex"].Awaited(); n != 0 {
+			t.Fatalf("the new Codex awaits %d sends", n)
+		}
+		if id, why := forwardedAs(st, "codex", seq, ""); id != "r1" || why != r10Earlier {
+			t.Errorf("outcome %q: refused as %s:\n %q\nwant r1:\n %q", outcome, id, why, r10Earlier)
+		}
+	}
+}
+
+// Finding 9, its bound. A send passed back to the name after the earlier
+// holder was stopped is the agent's that holds it now: on its way to it.
+func TestR10ASendMovedOntoTheNewHolderIsItsOwn(t *testing.T) {
+	rec := &relayRecord{t: time.Now()}
+	rec.start("codex", "codex")
+	seq := rec.add(event.UserMessage, event.UserMessageData{Text: "check the version"})
+	rec.send("codex", "r1", seq)
+	r10switch(rec, "codex", "claude")
+	r10moved(rec, "claude", "codex", "r1", seq)
+	r10switch(rec, "claude", "codex")
+	r10moved(rec, "codex", "claude", "r1", seq)
+	if id, why := forwardedAs(state.Replay(rec.evs), "codex", seq, ""); id != "r1" || !strings.Contains(why, "already on its way to Codex") {
+		t.Errorf("refused as %s: %q, want r1 as on its way", id, why)
+	}
+}
