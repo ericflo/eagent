@@ -75,7 +75,7 @@ func TestALookOutAcrossASwitchIsCountedOnTheRouteThatServedIt(t *testing.T) {
 		t.Fatal(o.err)
 	}
 	var late int
-	rt.sync(func() { late = rt.turns.promptTokens })
+	rt.sync(func() { late = int(rt.turns.promptTokens) })
 	if late == 5678 {
 		t.Fatal("the old model's late look set the new model's prompt size")
 	}
@@ -85,7 +85,7 @@ func TestALookOutAcrossASwitchIsCountedOnTheRouteThatServedIt(t *testing.T) {
 	}
 	rt.sync(rt.flushSilent)
 	var prompt, size int
-	rt.sync(func() { prompt, size = rt.turns.promptTokens, rt.st.ContextTokens() })
+	rt.sync(func() { prompt, size = int(rt.turns.promptTokens), rt.st.ContextTokens() })
 	if prompt != 100 || size != 100 {
 		t.Fatalf("the prompt size is %d (record %d), not the new model's 100", prompt, size)
 	}

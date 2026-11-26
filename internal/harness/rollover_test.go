@@ -91,7 +91,7 @@ func TestConversationRestartsAtHalfTheWindowByDefault(t *testing.T) {
 	s.waitFor("the agent's turn", func() bool { return len(s.events(event.RelayTurn)) == 1 })
 	s.settled()
 	var limit int
-	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
 	if limit != 40_000 {
 		t.Fatalf("an 80k window restarts at %d, want 40000", limit)
 	}

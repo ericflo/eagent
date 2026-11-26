@@ -77,7 +77,7 @@ func r4CheckFloor(t *testing.T, rt *Runtime) string {
 	_, share, _ := rt.smallBudget()
 	n := llm.EstimateTokens(text)
 	t.Logf("after %d files, the dossier is %d tokens (by the estimate) of the %d it may take", len(rt.st.Subsessions), n, rt.estimate(share))
-	if n > rt.estimate(share) {
+	if n > int(rt.estimate(share)) {
 		t.Fatalf("the dossier takes %d tokens of the %d it may:\n%s", n, rt.estimate(share), text)
 	}
 	return text
@@ -284,7 +284,7 @@ func TestNarrowestDossierIsSaidInTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, share, _ := rt.smallBudget()
-	limit := rt.estimate(share)
+	limit := int(rt.estimate(share))
 	floor := llm.EstimateTokens(rt.dossierFactsWith(covers, next, factLevels[len(factLevels)-1]))
 	above := llm.EstimateTokens(rt.dossierFactsWith(covers, next, factLevels[len(factLevels)-2]))
 	if floor >= above || above-floor < 20 {

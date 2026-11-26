@@ -763,7 +763,7 @@ func TestDossierLookupBudgetFollowsTheModelsWindow(t *testing.T) {
 		s.rt.sync(func() {
 			conf := &s.rt.models[event.ActorEagent].conf
 			conf.ContextTokens, conf.MaxTokens = window, 32768
-			n = s.rt.dossierBudget(prompt, fresh)
+			n = s.rt.dossierBudget(provTokens(prompt), fresh)
 		})
 		return n
 	}

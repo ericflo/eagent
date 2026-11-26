@@ -49,7 +49,7 @@ func TestRolloverThresholdFitsASmallWindowAndStaysOnOrdinaryOnes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := rt.rolloverTokens(); got != c.want {
+		if got := int(rt.rolloverTokens()); got != c.want {
 			t.Errorf("window %d, reply %d: restarts at %d, want %d", c.window, c.reply, got, c.want)
 		}
 		if got := config.AutoRollover(c.window, c.reply); got != c.want {
@@ -66,7 +66,7 @@ func TestRolloverThresholdFitsASmallWindowAndStaysOnOrdinaryOnes(t *testing.T) {
 	}
 	defer rt.sess.Close()
 	fixed := r4Fixed(rt)
-	if got := rt.rolloverTokens(); got >= 16384-2048 || got <= fixed {
+	if got := int(rt.rolloverTokens()); got >= 16384-2048 || got <= fixed {
 		t.Fatalf("a 16,384-token route with a 2,048-token reply restarts at %d (the system prompt and tools take about %d)", got, fixed)
 	}
 }

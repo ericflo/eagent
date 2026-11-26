@@ -100,7 +100,7 @@ const (
 // (rollover_tokens fixed close to it, or one turn that took the
 // conversation far past the limit); such a pass is not written inside the
 // conversation (startDossier). Loop goroutine only.
-func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
+func (r *Runtime) dossierBudget(promptTokens provTokens, fresh bool) int {
 	input, _ := r.inputRoom()
 	limit := dossierReadMax
 	if fresh {
@@ -108,23 +108,23 @@ func (r *Runtime) dossierBudget(promptTokens int, fresh bool) int {
 	}
 	free := input - promptTokens - 8000
 	// About three characters of the record to a token, with a fifth held back.
-	return min(limit, free*3*4/5)
+	return min(limit, int(free)*3*4/5)
 }
 
 // window is the context window of the model eagent's calls go to right now,
 // and the reply ceiling of those calls: the configured model's, the one a
 // runtime setting picked, or a fallback's once the route has moved to it.
 // Loop goroutine only.
-func (r *Runtime) window() (tokens, reply int) {
-	tokens, reply = r.cfg.Model.ContextTokens, r.cfg.Model.MaxTokens
+func (r *Runtime) window() (tokens, reply provTokens) {
+	tokens, reply = provTokens(r.cfg.Model.ContextTokens), provTokens(r.cfg.Model.MaxTokens)
 	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
 		ep := m.client.Endpoint
 		if cur := m.confAt(); cur != nil {
-			tokens, reply = cur.ContextTokens, cur.MaxTokens
+			tokens, reply = provTokens(cur.ContextTokens), provTokens(cur.MaxTokens)
 		}
 		if tokens <= 0 {
 			if known, ok := config.Lookup(ep.BaseURL, ep.Model); ok {
-				tokens = known.Context
+				tokens = provTokens(known.Context)
 			}
 		}
 	}
@@ -138,16 +138,17 @@ func (r *Runtime) window() (tokens, reply int) {
 // a dossier: the number the configuration fixes, or by default half the
 // window of the model in use (config.AutoRollover), so it moves with the
 // model. Loop goroutine only.
-func (r *Runtime) rolloverTokens() int {
+func (r *Runtime) rolloverTokens() provTokens {
 	if n := r.cfg.RolloverTokens; n > 0 {
-		return n
+		return provTokens(n)
 	}
 	window, reply := r.window()
-	_, fixed := r.inputRoom()
+	_, est := r.inputRoom()
+	fixed := unscaled[provTokens](est) // MIXED: not shown safe (an ordinary route's opening, held as the provider's count)
 	if _, small := r.room(); small {
-		fixed = r.provider(fixed)
+		fixed = r.provider(est)
 	}
-	return config.AutoRolloverWithin(window, reply, fixed)
+	return provTokens(config.AutoRolloverWithin(int(window), int(reply), int(fixed)))
 }
 
 // A small route's sizes are held against what its provider counts, which
@@ -192,10 +193,26 @@ func endpointKey(ep llm.Endpoint) string {
 	return strings.TrimRight(ep.BaseURL, "/") + " " + ep.Model
 }
 
-// provider is an estimate in the provider's count; estimate is the
-// reverse. Loop goroutine only.
-func (r *Runtime) provider(est int) int    { return est * r.scale() / scaleUnit }
-func (r *Runtime) estimate(tokens int) int { return tokens * scaleUnit / r.scale() }
+// Token sizes come in two units, and mixing them needs the learned ratio
+// (scale). estTokens is eagent's own estimate (llm.EstimateTokens,
+// toolTokens). provTokens is what the provider counts: the sizes it
+// reports (Usage.Input, the record's prompt sizes), the model's window and
+// reply ceiling, and every limit derived from them (rollover_tokens
+// included). provider is an estimate in the provider's count; estimate is
+// the reverse. unscaled reads one as the other without the ratio: each use
+// says why that is safe there, or is marked MIXED. Loop goroutine only.
+type (
+	estTokens  int
+	provTokens int
+)
+
+func (r *Runtime) provider(est estTokens) provTokens {
+	return provTokens(int(est) * r.scale() / scaleUnit)
+}
+func (r *Runtime) estimate(tokens provTokens) estTokens {
+	return estTokens(int(tokens) * scaleUnit / r.scale())
+}
+func unscaled[To, From estTokens | provTokens](x From) To { return To(x) }
 
 // calibrate learns from one of eagent's calls how its provider counts
 // against the estimate (see scale). Any goroutine: what it learns is
@@ -216,23 +233,23 @@ func (r *Runtime) calibrate(who string, ep llm.Endpoint, req llm.Request, resp *
 	if who != event.ActorEagent {
 		return
 	}
-	est := llm.EstimateTokens(req.System) + toolTokens()
-	unknown := 0
+	est := estTokens(llm.EstimateTokens(req.System)) + toolTokens()
+	unknown := estTokens(0)
 	for _, m := range req.Messages {
 		for _, im := range m.Images {
 			if sentPicture(im) {
 				return
 			}
 		}
-		est += llm.EstimateTokens(m.Text)
+		est += estTokens(llm.EstimateTokens(m.Text))
 		for _, c := range m.ToolCalls {
-			est += llm.EstimateTokens(c.Name + string(c.Args))
+			est += estTokens(llm.EstimateTokens(c.Name + string(c.Args)))
 		}
 		for _, res := range m.Results {
-			est += llm.EstimateTokens(res.Output)
+			est += estTokens(llm.EstimateTokens(res.Output))
 		}
 		if len(m.Native) > 0 {
-			unknown += llm.EstimateTokens(string(m.Native))
+			unknown += estTokens(llm.EstimateTokens(string(m.Native)))
 		}
 	}
 	if est < 1000 {
@@ -256,7 +273,8 @@ func (r *Runtime) calibrate(who string, ep llm.Endpoint, req llm.Request, resp *
 	var ae *llm.APIError
 	switch {
 	case err == nil && resp != nil && resp.Usage.Input > 0:
-		k := max(resp.Usage.Input-unknown, 0) * scaleUnit / est
+		// unknown is the most Native can be, so k is only a floor: it only raises.
+		k := int(max(provTokens(resp.Usage.Input)-unscaled[provTokens](unknown), 0)) * scaleUnit / int(est)
 		r.post(func() { learn(k, unknown > 0) })
 	case errors.As(err, &ae) && ae.ContextOverflow():
 		// Refused as too long: the provider counts at least the room it
@@ -264,7 +282,8 @@ func (r *Runtime) calibrate(who string, ep llm.Endpoint, req llm.Request, resp *
 		// the refusal says only that it was over.
 		r.post(func() {
 			input, _ := r.inputRoom()
-			learn(max(input-unknown, 0)*11/10*scaleUnit/est, true)
+			// As above: unknown taken whole makes k a floor, used only to raise.
+			learn(int(max(input-unscaled[provTokens](unknown), 0))*11/10*scaleUnit/int(est), true)
 		})
 	}
 }
@@ -287,7 +306,7 @@ func sentPicture(im llm.Image) bool {
 // most a third and what is carried over whole at most a sixth, which
 // leaves at least half for the conversation to grow in. Loop goroutine
 // only.
-func (r *Runtime) smallBudget() (span, dossier, carry int) {
+func (r *Runtime) smallBudget() (span, dossier, carry provTokens) {
 	input, fixed := r.inputRoom()
 	span = max(0, min(r.rolloverTokens(), input)-r.provider(fixed))
 	return span, span / 3, span / 6
@@ -299,18 +318,18 @@ func (r *Runtime) smallBudget() (span, dossier, carry int) {
 // the tool list take, which open every request. Both are counted with the
 // estimate used before the provider has reported a size. Loop goroutine
 // only.
-func (r *Runtime) inputRoom() (input, fixed int) {
+func (r *Runtime) inputRoom() (input provTokens, fixed estTokens) {
 	window, reply := r.window()
 	if reply <= 0 {
 		reply = 16384
 	}
-	return window - reply, llm.EstimateTokens(r.system) + toolTokens()
+	return window - reply, estTokens(llm.EstimateTokens(r.system)) + toolTokens()
 }
 
 // toolTokens estimates the tool list every request carries.
-var toolTokens = sync.OnceValue(func() int {
+var toolTokens = sync.OnceValue(func() estTokens {
 	b, _ := json.Marshal(tools.All())
-	return llm.EstimateTokens(string(b))
+	return estTokens(llm.EstimateTokens(string(b)))
 })
 
 // needsDossier reports that the conversation should be restarted from a
@@ -355,7 +374,7 @@ func (r *Runtime) needsDossier() bool {
 			r.decidedWindow, _ = r.window()
 			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
 				input, fixed := r.inputRoom()
-				if at := r.cfg.RolloverTokens; at > 0 && at < input && input > r.provider(fixed) {
+				if at := provTokens(r.cfg.RolloverTokens); at > 0 && at < input && input > r.provider(fixed) {
 					// The window has the room; the restart size set
 					// by hand does not.
 					r.ui.Log("rollover_tokens is %d, and this model's provider counts eagent's system prompt and tools alone as about %d tokens, so no restart can make room; raise rollover_tokens (or remove it) or shorten .agents/eagent/INSTRUCTIONS.md", at, r.provider(fixed))
@@ -396,7 +415,7 @@ func (r *Runtime) needsDossier() bool {
 // a restart, or while it is written, can be more than any window holds (a
 // burst of pasted logs, pictures), and another restart sets that aside by
 // place. Loop goroutine only.
-func (r *Runtime) restartFull(limit int) bool {
+func (r *Runtime) restartFull(limit provTokens) bool {
 	return !restartHelps(r.restartFactsNow(limit))
 }
 
@@ -406,7 +425,7 @@ func (r *Runtime) restartFull(limit int) bool {
 // opening: a sixth of a small route's span (smallBudget), and on an
 // ordinary route the most a restart carries whole (dossierUnseenBytes).
 // Loop goroutine only.
-func (r *Runtime) restartFactsNow(limit int) restartFacts {
+func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
 	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || r.toldFull()}
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
@@ -415,7 +434,7 @@ func (r *Runtime) restartFactsNow(limit int) restartFacts {
 	// size and the refusal are: one ruler for both sides of the question.
 	input, fixed := r.inputRoom()
 	if v := r.st.View(&r.view); len(v) > 0 && r.st.Current().Dossier != "" {
-		fixed += llm.EstimateTokens(v[0].Text)
+		fixed += estTokens(llm.EstimateTokens(v[0].Text))
 	}
 	opening := r.provider(fixed)
 	if f.refused {
@@ -429,7 +448,7 @@ func (r *Runtime) restartFactsNow(limit int) restartFacts {
 		span, _, carry := r.smallBudget()
 		f.openingFits = span > 0 && opening+carry < limit
 	} else {
-		f.openingFits = opening+r.provider(r.carryBytes()*2/7) < limit
+		f.openingFits = opening+r.provider(estTokens(r.carryBytes()*2/7)) < limit
 	}
 	return f
 }
@@ -682,7 +701,7 @@ type dossierJob struct {
 	lines  map[string]int // lines in each record file, to check citations (brought up to date before each check)
 	budget int            // characters of lookups the pass may read back
 	covers int64
-	tokens int
+	tokens provTokens
 	adopt  bool // the record is the three-actor design's (resume.go)
 	fresh  bool // written from the files, without the conversation
 	carry  bool // the new conversation carries whole what no look took in
@@ -1025,17 +1044,18 @@ func (r *Runtime) dossierFromFiles(job *dossierJob, reason string) {
 	// The index is what the request has room for beside the rest, with a
 	// thousand tokens to spare: on a small route its oldest lines give way
 	// (session_search finds them), so the pass can be written at all.
-	input, fixed := r.inputRoom()
+	window, fixed := r.inputRoom()
+	input := unscaled[estTokens](window) // MIXED: not shown safe (an ordinary route's room, read as the estimate)
 	if _, small := r.room(); small {
 		// The provider's count, brought back to the estimate's.
-		input = r.estimate(input)
+		input = r.estimate(window)
 		data.Files = r.fileTableChained("")
 	}
-	used := fixed + llm.EstimateTokens(r.prompts.Render("DOSSIER.md", data)) + 1000
+	used := fixed + estTokens(llm.EstimateTokens(r.prompts.Render("DOSSIER.md", data))) + 1000
 	for _, m := range msgs {
-		used += llm.EstimateTokens(m.Text)
+		used += estTokens(llm.EstimateTokens(m.Text))
 	}
-	data.Index = r.dossierIndexWithin((input - used) * 7 / 2)
+	data.Index = r.dossierIndexWithin(int(input-used) * 7 / 2)
 	job.fresh = true
 	job.budget = max(dossierReadChars, r.dossierBudget(job.tokens, true))
 	job.msgs = state.WithTail(msgs, r.prompts.Render("DOSSIER.md", data))
@@ -1055,7 +1075,7 @@ func (r *Runtime) carryBytes() int {
 		return dossierUnseenBytes
 	}
 	_, _, carry := r.smallBudget()
-	return r.estimate(carry) * 7 / 2
+	return int(r.estimate(carry)) * 7 / 2
 }
 
 // smallRoom is the room below which a route is small: what a request can
@@ -1066,9 +1086,9 @@ const smallRoom = 64_000
 // room is what a request on the route in use has room for beside the
 // system prompt and the tools, in tokens, and whether that makes the route
 // small (smallRoom). Loop goroutine only.
-func (r *Runtime) room() (int, bool) {
+func (r *Runtime) room() (provTokens, bool) {
 	input, fixed := r.inputRoom()
-	room := max(0, input-fixed)
+	room := max(0, input-unscaled[provTokens](fixed)) // MIXED: not shown safe (decides small; ordinary routes take the ratio as 1)
 	return room, room < smallRoom
 }
 
@@ -1472,7 +1492,7 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 // harness wrote is cut down with them). Loop goroutine only.
 func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by, next string) string {
 	room, small := r.room()
-	limit := room / 2
+	limit := unscaled[estTokens](room / 2) // MIXED: not shown safe (an ordinary route's room, read as the estimate)
 	if small {
 		_, d, _ := r.smallBudget()
 		limit = r.estimate(d)
@@ -1484,7 +1504,7 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 	unseen := r.unseenNote(job.covers)
 	text = strings.TrimSpace(text) + unseen
 	body := text + "\n\n" + r.dossierFacts(job.covers, next)
-	if llm.EstimateTokens(body) <= limit {
+	if estTokens(llm.EstimateTokens(body)) <= limit {
 		return body
 	}
 	level := 0
@@ -1500,11 +1520,11 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 			text = strings.TrimSpace(text) + unseen
 		}
 		body = strings.TrimSpace(text) + "\n\n" + r.dossierFactsWith(job.covers, next, lim)
-		if llm.EstimateTokens(body) <= limit {
+		if estTokens(llm.EstimateTokens(body)) <= limit {
 			break
 		}
 	}
-	n := llm.EstimateTokens(body)
+	n := estTokens(llm.EstimateTokens(body))
 	switch file, line, _, linked := r.chainLink(); {
 	case level == len(factLevels)-1 && n > limit:
 		r.ui.Log("dossier: written at its narrowest and still %d tokens (by eagent's estimate) of the %d it may take; the briefing itself is most of it", n, limit)
@@ -1520,7 +1540,7 @@ func (r *Runtime) dossierBody(text string, job dossierJob, res dossierResult, by
 
 // openSubsession ends the current subsession file and starts the next.
 // Loop goroutine (or before the loop starts).
-func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (string, error) {
+func (r *Runtime) openSubsession(endReason, startReason string, tokens provTokens) (string, error) {
 	// The next file is made before the record says this one has ended: a
 	// session that cannot make it (a full disk, a directory it may no
 	// longer write) keeps its conversation and its record as they are.
@@ -1528,7 +1548,7 @@ func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (str
 	if err != nil {
 		return "", err
 	}
-	r.append(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: endReason, NextFile: next, InputTokens: tokens}))
+	r.append(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: endReason, NextFile: next, InputTokens: int(tokens)}))
 	if _, err := r.sess.OpenSubsession(next); err != nil {
 		return "", err
 	}
@@ -1539,12 +1559,12 @@ func (r *Runtime) openSubsession(endReason, startReason string, tokens int) (str
 
 // closedTokens is the prompt size the last subsession.end recorded: how
 // long the conversation was when its file was closed. Loop goroutine only.
-func (r *Runtime) closedTokens() int {
+func (r *Runtime) closedTokens() provTokens {
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		if ev := r.st.Events[i]; ev.Type == event.SubsessionEnd {
 			var d event.SubsessionEndData
 			_ = ev.Decode(&d)
-			return d.InputTokens
+			return provTokens(d.InputTokens)
 		}
 	}
 	return 0

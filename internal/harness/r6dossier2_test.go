@@ -134,7 +134,7 @@ func TestRestartsInARowStartCountingAgainAfterAResume(t *testing.T) {
 	r5LogOnFailure(s)
 	r4Settled(s)
 	limit := 0
-	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
 	// Hold the first call of the conversation the second restart opens.
 	mu.Lock()
 	stopAt = 2

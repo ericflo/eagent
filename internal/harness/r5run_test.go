@@ -143,7 +143,7 @@ func TestTwoRoutesToTheSameModelAreEachTriedOnce(t *testing.T) {
 		t.Errorf("the record has %d route switches, want 1", n)
 	}
 	var window int
-	rt.sync(func() { window, _ = rt.window() })
+	rt.sync(func() { w, _ := rt.window(); window = int(w) })
 	if window != 300_000 {
 		t.Errorf("on the second route the window is %d, want that route's 300000", window)
 	}

@@ -285,7 +285,7 @@ func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
 			s.rt.swapRoute(routeSwap{who: event.ActorEagent, pick: runtimecontrol.Route{Provider: "test", Model: "other-model"}, eps: eps, conf: conf})
 			decided = s.rt.restartDecided()
 			needs = s.rt.needsDossier()
-			prompt, size = s.rt.contextTokens(), s.rt.rolloverTokens()
+			prompt, size = int(s.rt.contextTokens()), int(s.rt.rolloverTokens())
 		})
 		if c.decided && prompt < size {
 			t.Fatalf("window %d: the prompt (%d) is under the new restart size (%d), so the size door is not tested", c.window, prompt, size)

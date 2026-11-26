@@ -196,7 +196,7 @@ func r5Scale(s *session, msgs []llm.Message, input int) int {
 
 // r5Estimate is eagent's estimate of a request of these messages.
 func r5Estimate(s *session, msgs []llm.Message) int {
-	est := llm.EstimateTokens(s.rt.system) + toolTokens()
+	est := llm.EstimateTokens(s.rt.system) + int(toolTokens())
 	for _, m := range msgs {
 		est += llm.EstimateTokens(m.Text)
 	}

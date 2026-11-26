@@ -45,7 +45,7 @@ const r6PictureTokens = 16_000
 // is sent and nothing else, evenly. It reads each text once and marshals
 // nothing, so a request of half a megabyte costs one pass over it.
 func r6Count(m []map[string]any, ratio int) int {
-	n := toolTokens()
+	n := int(toolTokens())
 	pictures := 0
 	text := func(s string) {
 		n += len(s)*2/7 + 1
@@ -159,7 +159,7 @@ func r6Restart(t *testing.T, window int, first func(s *session), during func(s *
 	r5LogOnFailure(s)
 	r4Settled(s)
 	limit := 0
-	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
 	r6SendEach(s, 1, func(int) event.UserMessageData {
 		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
 	})
@@ -506,7 +506,7 @@ func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	// Pictures enough to put the first look past the restart size: the
 	// next quiet moment restarts.
 	limit := 0
-	s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
 	r6SendEach(s, 1, func(int) event.UserMessageData {
 		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
 	})
@@ -583,7 +583,7 @@ func r6ProviderCountsMore(t *testing.T) {
 	var limit int
 	var small bool
 	s.rt.sync(func() {
-		limit = s.rt.rolloverTokens()
+		limit = int(s.rt.rolloverTokens())
 		_, small = s.rt.room()
 	})
 	if small || limit != 100_000 {
@@ -657,7 +657,7 @@ func r6ByHowTheProviderCounts(t *testing.T) {
 			})
 			r5LogOnFailure(s)
 			limit := 0
-			s.rt.sync(func() { limit = s.rt.rolloverTokens() })
+			s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
 			progress := func() int {
 				return r5Told(s, "Noted.") + r5Told(s, stillFullNotice) + r6ToldFull(s)
 			}
