@@ -97,14 +97,7 @@ func TestALongSendIsConfirmedHoweverTheTranscriptShowsIt(t *testing.T) {
 		"after":     "first held message\n\n" + long,
 	} {
 		s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
-		if name == "joined" || name == "after" {
-			// Only the hook joins a message with others it held, so only a
-			// held message the hook took arrives beside other text.
-			s.spec.Spool = t.TempDir()
-			s.trackHeld("r1", long, "after_turn", true)
-		} else {
-			s.track("r1", long, "queue")
-		}
+		s.track("r1", long, "queue")
 		if ids := s.matchPending(got); len(ids) != 1 {
 			t.Fatalf("%s: confirmed %v", name, ids)
 		}

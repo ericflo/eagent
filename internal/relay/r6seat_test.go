@@ -36,7 +36,7 @@ func TestOneTranscriptEntryConfirmsOneSend(t *testing.T) {
 // view is a pending send for the table: typed (t), held and still waiting
 // in the spool (w), or held and taken by the hook (h).
 func view(kind, text string) sendView {
-	return sendView{text: text, waiting: kind == "w", handed: kind == "h"}
+	return sendView{text: text, waiting: kind == "w"}
 }
 
 // The rule arrivals' comment states, row by row. Each row is a pending
@@ -89,20 +89,28 @@ func TestArrivalsTable(t *testing.T) {
 			[]send{{"r1", "t", "continue"}}, []string{"what are you doing?"}, [][]string{nil}},
 		{"a short entry that is the start of a send is not it",
 			[]send{{"r1", "t", "deploy to staging and tell me"}}, []string{"deploy"}, [][]string{nil}},
-		{"an entry that quotes a typed send inside other text",
-			[]send{{"r1", "t", "deploy"}}, []string{"Earlier you said:\n\ndeploy\n\nShould I still?"}, [][]string{nil}},
-		{"an entry that quotes a typed send on one line",
-			[]send{{"r1", "t", "fix the login test"}}, []string{"The user said fix the login test, so I did."}, [][]string{nil}},
+		{"a send inside other text is shown (a wrapper, text left in the box)",
+			[]send{{"r1", "t", "deploy"}}, []string{"Earlier you said:\n\ndeploy\n\nShould I still?"}, [][]string{{"r1"}}},
+		{"a send inside other text on one line",
+			[]send{{"r1", "t", "fix the login test"}}, []string{"The user said fix the login test, so I did."}, [][]string{{"r1"}}},
 		{"a typed send and other text joined at a line break",
-			[]send{{"r1", "t", "first"}}, []string{"first\nsecond"}, [][]string{nil}},
+			[]send{{"r1", "t", "first"}}, []string{"first\nsecond"}, [][]string{{"r1"}}},
+		{"Claude's wrapper around a multi-line paste",
+			[]send{{"r1", "t", "check these:\n1. the sizes\n2. the times"}}, []string{"\n\n<pasted_content id=\"a1\">\ncheck these:\n1. the sizes\n2. the times\n</pasted_content id=\"a1\">\n"}, [][]string{{"r1"}}},
+		{"a send typed after text left in the box, glued to it",
+			[]send{{"r1", "t", "hold off on the release for now."}, {"r2", "t", "stop for a second so I can type"}}, []string{"hold off on the release for now.stop for a second so I can type"}, [][]string{{"r1", "r2"}}},
+		{"a hook hands over five held messages",
+			[]send{{"r1", "h", "one"}, {"r2", "h", "two"}, {"r3", "h", "three"}, {"r4", "h", "four"}, {"r5", "h", "five"}}, []string{"one\n\ntwo\n\nthree\n\nfour\n\nfive"}, [][]string{{"r1", "r2", "r3", "r4", "r5"}}},
+		{"three identical sends, an entry holding the words twice: two",
+			[]send{{"r1", "t", "continue"}, {"r2", "t", "continue"}, {"r3", "t", "continue"}}, []string{"continue\n\ncontinue"}, [][]string{{"r1", "r2"}}},
 		{"a held message still waiting in the spool, quoted",
 			[]send{{"r1", "w", "then run the tests"}}, []string{"an older message\n\nthen run the tests"}, [][]string{nil}},
 		{"a held message still waiting in the spool, typed by a person word for word",
 			[]send{{"r1", "w", "continue"}}, []string{"continue"}, [][]string{nil}},
 		{"a waiting held message does not take a typed one's arrival",
 			[]send{{"r1", "w", "continue"}, {"r2", "t", "continue"}}, []string{"continue"}, [][]string{{"r2"}}},
-		{"a hand-over takes held messages only, never a typed one quoted beside them",
-			[]send{{"r1", "t", "deploy"}, {"r2", "h", "then run the tests"}}, []string{"deploy now?\n\nthen run the tests"}, [][]string{{"r2"}}},
+		{"a typed send and a held one in one entry, apart",
+			[]send{{"r1", "t", "deploy"}, {"r2", "h", "then run the tests"}}, []string{"deploy now?\n\nthen run the tests"}, [][]string{{"r1", "r2"}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			list := slices.Clone(c.pending)
