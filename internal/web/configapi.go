@@ -356,6 +356,10 @@ func (s *Server) loadChecks() map[string]checkRecord {
 	if err == nil {
 		_ = json.Unmarshal(raw, &out)
 	}
+	if out == nil {
+		// A file holding null; recordCheck writes into what this returns.
+		out = map[string]checkRecord{}
+	}
 	return out
 }
 

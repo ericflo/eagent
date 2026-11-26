@@ -655,6 +655,10 @@ func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 		return res, &ErrConflict{Current: res.Previous, ETag: res.PrevETag}
 	}
 	existing, _ = MigrateLegacy(existing)
+	if existing == nil {
+		// A file holding null loads as no file; a save starts it afresh.
+		existing = map[string]json.RawMessage{}
+	}
 	for k, v := range edits {
 		if k == "relay" {
 			v = mergeRelay(existing[k], v)
@@ -704,6 +708,10 @@ func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) 
 	m := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return res, fmt.Errorf("not valid JSON: %v", err)
+	}
+	if m == nil {
+		// null decodes into a map without an error, as no map at all.
+		return res, fmt.Errorf("the configuration must be a JSON object, not null")
 	}
 	out := []byte(raw)
 	if !strings.HasSuffix(raw, "\n") {
