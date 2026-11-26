@@ -1339,6 +1339,12 @@ func (r *Runtime) onLoop(fn func()) bool {
 // sends the agent is then marked so, and shows in the model's conversation
 // as a notice. Not on the loop goroutine.
 func (r *Runtime) relayTool(name string, str func(string) string, num func(string, int) int, list func(string) []string, auto bool) (string, bool) {
+	return r.relayToolAt(name, str, num, list, auto, 0)
+}
+
+// relayToolAt is relayTool for a model's call: view is the newest event
+// that call was shown (0 acts on the record as it is, as a command does).
+func (r *Runtime) relayToolAt(name string, str func(string) string, num func(string, int) int, list func(string) []string, auto bool, view int64) (string, bool) {
 	switch name {
 	case "relay_start":
 		profile := strings.TrimSpace(str("profile"))
@@ -1375,8 +1381,15 @@ func (r *Runtime) relayTool(name string, str func(string) string, num func(strin
 			if name == "relay_forward" {
 				from = "user"
 				seq = int64(num("seq", 0))
-				if seq == 0 {
-					seq = r.st.LastUserSeq
+				switch {
+				case seq == 0:
+					// The user's latest that the call was shown: one that
+					// came in while it was out was not read, and may be
+					// for eagent alone.
+					seq = userSeqAsOf(r.st, view)
+				case view > 0 && seq > view:
+					err = fmt.Errorf("message %d came in after you made this call, so you have not read it; it will be shown to you next, and you can forward it then if it is for %s", seq, rel.Who())
+					return
 				}
 				var atts []event.Attachment
 				var ok bool

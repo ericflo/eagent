@@ -1030,7 +1030,7 @@ func (r *Runtime) turn(w wake) {
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
-		tc.said, tc.stamped, tc.own = false, false, nil
+		tc.said, tc.stamped, tc.own, tc.view = false, false, nil, covered
 		for _, c := range resp.ToolCalls {
 			out, isErr, more := "interrupted", true, false
 			if ctx.Err() == nil {
