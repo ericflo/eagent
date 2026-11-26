@@ -64,6 +64,10 @@ type phoneFake struct {
 	// rejectActivity makes every POST …/activity answer applied=false,
 	// as the service does when a newer status is live.
 	rejectActivity bool
+	// holdPost holds the next post of this body for holdFor before it is
+	// taken: a slow post, as on a loaded network.
+	holdPost string
+	holdFor  time.Duration
 	// questionsDown makes every GET …/questions/<id> fail as a service
 	// that cannot be reached does.
 	questionsDown bool
@@ -235,6 +239,15 @@ func (f *phoneFake) handle(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"auth": "token", "base_url": f.srv.URL, "push_enabled": true, "version": "test", "features": f.features, "user": map[string]any{"display_name": "Tester", "email": "t@x", "settings": map[string]any{"notify_all_messages": false, "remote_mode": f.remote}}})
 	case strings.HasSuffix(path, "/messages") && r.Method == http.MethodPost:
 		f.mu.Lock()
+		if f.holdPost != "" && body["body"] == f.holdPost {
+			f.holdPost = ""
+			f.mu.Unlock()
+			select {
+			case <-time.After(f.holdFor):
+			case <-r.Context().Done():
+			}
+			f.mu.Lock()
+		}
 		if key, _ := body["client_key"].(string); key != "" {
 			if id, ok := f.keys[key]; ok {
 				f.dupes++
