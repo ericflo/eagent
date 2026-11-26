@@ -690,7 +690,13 @@ var heldGrace = 5 * time.Second
 // have died before handing it over. It is confirmed if the transcript shows
 // it, reported unconfirmed after the usual wait otherwise; a claimed file
 // left behind is removed.
-func (s *Seat) reportLeftOvers(now time.Time) {
+func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
+
+// leftOvers is reportLeftOvers; with sweep false, for an agent whose own
+// hook hands the spool over whenever the agent is idle (pi's extension),
+// nothing is taken from the spool, and a claimed file is the hook's
+// hand-over under way: only a held message whose file is gone is lost.
+func (s *Seat) leftOvers(now time.Time, sweep bool) {
 	if s.spec.Spool == "" {
 		return
 	}
@@ -701,7 +707,12 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 	if !over {
 		return
 	}
-	taken, _ := takeSpool(s.spec.Spool)
+	var taken []string
+	holds := spoolHolds
+	if sweep {
+		taken, _ = takeSpool(s.spec.Spool)
+		holds = spoolWaits
+	}
 	var order []string
 	ids := map[string]bool{}
 	for _, path := range taken {
@@ -720,7 +731,7 @@ func (s *Seat) reportLeftOvers(now time.Time) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !spoolWaits(names, p.id) {
+		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
 			p.lost, p.at = true, now
 			for _, n := range names {
 				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {

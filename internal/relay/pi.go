@@ -487,7 +487,12 @@ func globEscape(s string) string {
 // extension's ctx.newSession): the status file then names a session the
 // seat does not follow. pi may have written a whole turn there already;
 // startEntries says where the new session's news begins.
+//
+// A held message the extension handed into a run that was then interrupted
+// is back in pi's editor, its file removed: nothing will hand it over, so
+// it is lost once its turn is over (leftOvers, which takes nothing).
 func (piAgent) poll(s *Seat, now time.Time) {
+	s.leftOvers(now, false)
 	st, ok := readPiStatus(s.spec.StatusFile)
 	if !ok || st.SessionID == "" {
 		return

@@ -2,7 +2,9 @@ package relay
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,5 +66,56 @@ func TestR11AHeldSendWhoseHookDiedAfterClaimingItIsReported(t *testing.T) {
 	}
 	if names := spoolNames(spool); len(h.typed) != 0 || len(h.keys) != 0 || len(names) != 0 {
 		t.Fatalf("typed %q, pressed %q, spool %v", h.typed, h.keys, names)
+	}
+}
+
+// Finding 8: pi's extension hands a held message over into a run that is
+// then interrupted; pi puts it back in its editor and the extension removes
+// its spool file. While the extension still holds it (.taken, pi has not
+// taken it yet) it stays held, however long. Once its file is gone and the
+// turn it waited for is over, it is lost: reported unconfirmed after the
+// usual wait, once; never typed, and no Enter on the words in the editor.
+func TestR11APiHeldSendPutBackInTheEditorIsReported(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
+	dir := t.TempDir()
+	spool, status := filepath.Join(dir, "after_turn"), filepath.Join(dir, "pi-status.json")
+	writePiStatus(t, status, piStatus{State: "idle", SessionFile: filepath.Join(dir, "s.jsonl"), SessionID: "id"})
+	h := &fakeHost{alive: true, screen: "  then run the tests\n" + piFooterScreen}
+	pi := piAgent{name: "pi", label: "Pi", binary: "pi"}
+	s := newSeat(Spec{Name: "pi", Spool: spool, Hook: filepath.Join(dir, "eagent-relay.ts"), StatusFile: status}, pi, h, "x", "id")
+	s.state = "working"
+	if msg, err := s.Send("r1", "then run the tests", "after_turn"); err != nil || !strings.Contains(msg, "held for") {
+		t.Fatalf("send: %q %v", msg, err)
+	}
+	taken, _ := takeSpool(spool) // the extension's claim of it
+	s.fold(obs{kind: "aborted"})
+	drain(s.events)
+	seen := time.Now().Add(20 * time.Second)
+	look := func(at time.Time) {
+		pi.poll(s, at)
+		s.checkScreen(at)
+	}
+	for _, after := range []time.Duration{0, 46, 200} {
+		look(seen.Add(after * time.Second))
+	}
+	if got := deliveries(drain(s.events)); len(got) != 0 || len(s.Snapshot().Pending) != 1 {
+		t.Fatalf("while the extension holds it: deliveries %+v, pending %v", got, s.Snapshot().Pending)
+	}
+	for _, path := range taken { // put back in the editor: handed() removes it
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, after := range []time.Duration{300, 346, 420} {
+		look(seen.Add(after * time.Second))
+	}
+	got := deliveries(drain(s.events))
+	if len(got) != 1 || got[0].SendID != "r1" || got[0].OK || got[0].Outcome != OutcomeUnconfirmed {
+		t.Fatalf("deliveries %+v, want r1 unconfirmed once (pending %v)", got, s.Snapshot().Pending)
+	}
+	if len(h.typed) != 0 || len(h.keys) != 0 {
+		t.Fatalf("typed %q, pressed %q", h.typed, h.keys)
 	}
 }
