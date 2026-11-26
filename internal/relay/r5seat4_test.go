@@ -8,61 +8,6 @@ import (
 	"time"
 )
 
-// pickerHost shows Claude's prompt until a command that opens a picker is
-// pasted; from then on it shows the picker, as Claude Code does for /model.
-type pickerHost struct {
-	fakeHost
-	opens, picker string
-}
-
-func (h *pickerHost) Paste(target, text string) error {
-	_ = h.fakeHost.Paste(target, text)
-	h.mu.Lock()
-	if strings.TrimSpace(text) == h.opens {
-		h.screen = h.picker
-	}
-	h.mu.Unlock()
-	return nil
-}
-
-// A held "/model" then a held message, for Claude: the seat types "/model"
-// on its own and Claude opens its model picker. The message waits while the
-// picker is up; it is never pasted into it, and no Enter picks a model.
-func TestAHeldMessageAfterAHeldPickerCommandIsNotTypedIntoThePicker(t *testing.T) {
-	saved, savedSettle := heldGrace, typeSettle
-	heldGrace, typeSettle = 20*time.Millisecond, time.Millisecond
-	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
-	spool := filepath.Join(t.TempDir(), "after_turn")
-	prompt := "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
-	picker := " Select model\n ❯ 1. Default (recommended)\n   2. Opus\n   3. Haiku\n\n Enter to confirm · Esc to exit"
-	h := &pickerHost{fakeHost: fakeHost{alive: true, screen: prompt}, opens: "/model", picker: picker}
-	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	s.state = "working"
-	if _, err := s.Send("c1", "/model", "after_turn"); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(time.Millisecond) // spool names are ordered by time
-	if _, err := s.Send("m1", "then run the tests", "after_turn"); err != nil {
-		t.Fatal(err)
-	}
-	// The turn ends; the Stop hook leaves both (the command is first).
-	var out strings.Builder
-	RunStopHook(spool, strings.NewReader("{}"), &out)
-	s.mu.Lock()
-	s.state, s.stateAt = "idle", time.Now().Add(-time.Second)
-	s.mu.Unlock()
-	t0 := time.Now()
-	s.releaseHeld(t0)
-	s.releaseHeld(t0.Add(10 * heldGrace))
-	h.mu.Lock()
-	typed := append([]string(nil), h.typed...)
-	screen := h.screen
-	h.mu.Unlock()
-	if screen == picker && len(typed) > 1 {
-		t.Fatalf("the held message was pasted (and Enter pressed) into Claude's model picker: typed %q", typed)
-	}
-}
-
 // A held message that starts with a path (the user wrote
 // "/home/... has the plan") is a message: Claude's Stop hook hands it over
 // at the turn's end like any other.
@@ -97,13 +42,12 @@ func TestAnAfterTurnMessageThatStartsWithAPathIsStillTracked(t *testing.T) {
 
 const claudePromptScreen = "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
 
-// A held message that never finds the agent at its prompt (the picker
-// stays up) is reported undelivered after heldGiveUp, with the screen, and
-// taken out of the spool, so it is neither kept for ever nor typed later.
-func TestAHeldMessageThatNeverFindsThePromptIsReported(t *testing.T) {
-	saved, savedGive := heldGrace, heldGiveUp
-	heldGrace, heldGiveUp = 0, 100*time.Millisecond
-	t.Cleanup(func() { heldGrace, heldGiveUp = saved, savedGive })
+// A left-over is reported whatever the screen shows (here a picker left
+// open): nothing on that path reads the screen.
+func TestALeftOverIsReportedWhateverTheScreenShows(t *testing.T) {
+	saved := heldGrace
+	heldGrace = 0
+	t.Cleanup(func() { heldGrace = saved })
 	spool := filepath.Join(t.TempDir(), "after_turn")
 	h := &fakeHost{alive: true, screen: " Select model\n ❯ 1. Default\n\n Enter to confirm · Esc to exit"}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
@@ -111,40 +55,44 @@ func TestAHeldMessageThatNeverFindsThePromptIsReported(t *testing.T) {
 	if _, err := s.Send("m1", "then run the tests", "after_turn"); err != nil {
 		t.Fatal(err)
 	}
-	s.state = "idle"
-	t0 := time.Now()
-	s.releaseHeld(t0)
-	s.releaseHeld(t0.Add(heldGiveUp / 2))
-	if evs := drain(s.events); len(evs) != 0 {
-		t.Fatalf("reported before heldGiveUp: %+v", evs)
-	}
-	s.releaseHeld(t0.Add(heldGiveUp))
-	var lost []Event
+	s.fold(obs{kind: "turn"})
+	s.reportLeftOvers(time.Now().Add(time.Second))
+	var lost int
 	for _, ev := range drain(s.events) {
 		if ev.Kind == KindDelivered && !ev.OK && ev.SendID == "m1" {
-			lost = append(lost, ev)
+			lost++
 		}
 	}
 	left, _ := os.ReadDir(spool)
-	if len(lost) != 1 || !strings.Contains(lost[0].Detail, "Select model") || len(left) != 0 || len(h.typed) != 0 {
-		t.Fatalf("lost %+v, spool %v, typed %q", lost, left, h.typed)
-	}
-	if len(s.Snapshot().Pending) != 0 {
-		t.Fatalf("still pending %v", s.Snapshot().Pending)
+	if lost != 1 || len(left) != 0 || len(h.typed) != 0 || len(s.Snapshot().Pending) != 0 {
+		t.Fatalf("lost %d, spool %v, typed %q, pending %v", lost, left, h.typed, s.Snapshot().Pending)
 	}
 }
 
-// A stuck send's Enter is pressed again only where it sits in the agent's
-// input box, not while the agent is busy or a dialog it reported is up.
-func TestAStuckSendIsNotPressedWhileTheAgentIsBusy(t *testing.T) {
+// A stuck send's Enter is pressed again whatever the agent's busy line
+// shows, as at 80f4746.
+func TestAStuckSendIsPressedAgainWhileTheAgentIsBusy(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true, screen: "> fix the tests\n✻ Compacting… (esc to interrupt)\n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
 	s.state = "idle"
 	s.track("r1", "fix the tests", "queue")
 	s.checkScreen(time.Now().Add(7 * time.Second))
+	if strings.Join(h.keys, " ") != "Enter" {
+		t.Fatalf("keys %q", h.keys)
+	}
+}
+
+// No Enter is pressed again while the agent reports a dialog.
+func TestAStuckSendIsNotPressedWhileADialogIsReported(t *testing.T) {
+	t.Parallel()
+	h := &fakeHost{alive: true, screen: "> fix the tests\n  ⏵⏵ bypass permissions on"}
+	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
+	s.state, s.dialogUp = "idle", "Allow rm?"
+	s.track("r1", "fix the tests", "queue")
+	s.checkScreen(time.Now().Add(7 * time.Second))
 	if len(h.keys) != 0 {
-		t.Fatalf("pressed %q while the agent was busy", h.keys)
+		t.Fatalf("keys %q", h.keys)
 	}
 }
 

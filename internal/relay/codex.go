@@ -33,10 +33,9 @@ func (codexAgent) ready(screen string) bool {
 	return strings.Contains(screen, "Ask Codex to do anything")
 }
 
-// busy: Codex's working line says how to stop it.
-func (codexAgent) busy(screen string) bool {
-	return strings.Contains(strings.ToLower(screen), "esc to interrupt")
-}
+// busy: Codex's working line, drawn just above its composer, says how to
+// stop it.
+func (codexAgent) busy(screen string) bool { return codexSpinner.MatchString(screen) }
 
 func (codexAgent) dialogs() []dialog {
 	return []dialog{

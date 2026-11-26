@@ -1,9 +1,7 @@
 package relay
 
 import (
-	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -158,9 +156,9 @@ func (h *orderHost) Keys(target string, keys ...string) error {
 	return nil
 }
 
-// A held "/" command the seat releases runs as Claude's command, which
-// writes no message: it is confirmed when typed, not reported lost.
-func TestAReleasedHeldCommandIsNotReportedLost(t *testing.T) {
+// A held command left over is reported undelivered like any message: the
+// seat types nothing by itself.
+func TestALeftOverHeldCommandIsReportedNotTyped(t *testing.T) {
 	saved := heldGrace
 	heldGrace = 0
 	t.Cleanup(func() { heldGrace = saved })
@@ -172,30 +170,22 @@ func TestAReleasedHeldCommandIsNotReportedLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.fold(obs{kind: "aborted"})
-	s.releaseHeld(time.Now().Add(time.Second))
-	if len(h.typed) != 1 || h.typed[0] != "/compact" {
-		t.Fatalf("typed %q", h.typed)
-	}
-	start := time.Now()
-	for _, after := range []time.Duration{7, 14, 60} {
-		s.checkScreen(start.Add(after * time.Second))
-	}
-	var evs []Event
+	s.reportLeftOvers(time.Now().Add(time.Second))
+	var lost int
 	for _, ev := range drain(s.events) {
-		if ev.Kind == KindDelivered {
-			evs = append(evs, ev)
+		if ev.Kind == KindDelivered && !ev.OK && ev.SendID == "c1" {
+			lost++
 		}
 	}
-	if len(evs) != 1 || !evs[0].OK || slices.Contains(h.keys[1:], "Enter") {
-		t.Fatalf("deliveries %+v, keys %q", evs, h.keys)
+	if lost != 1 || len(h.typed) != 0 {
+		t.Fatalf("lost %d, typed %q", lost, h.typed)
 	}
 }
 
 // An after-turn message typed in because the agent has no hand-over of its
-// own, and left in the input box when the turn was interrupted, gets no
-// Enter until the agent has stayed idle a while: whatever the interrupt
-// was for goes first, as for pi.
-func TestAnAfterTurnMessageIsNotPressedRightAfterAnInterrupt(t *testing.T) {
+// own, and left in the input box when the turn was interrupted, never gets
+// an Enter from the seat, as at 80f4746.
+func TestAnAfterTurnMessageInTheInputBoxIsNotPressedAgain(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true, screen: "> then run the tests\n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude"}, claudeAgent{}, h, "x", "")
@@ -211,45 +201,39 @@ func TestAnAfterTurnMessageIsNotPressedRightAfterAnInterrupt(t *testing.T) {
 	s.state, s.stateAt = "idle", start.Add(-time.Second) // interrupted a second ago
 	s.mu.Unlock()
 	s.checkScreen(start)
-	if len(h.keys) != 0 {
-		t.Fatalf("pressed %q a second after the interrupt", h.keys)
-	}
 	s.checkScreen(start.Add(heldGrace))
-	if strings.Join(h.keys, " ") != "Enter" {
-		t.Fatalf("keys %q once the agent stayed idle", h.keys)
+	if len(h.keys) != 0 {
+		t.Fatalf("pressed %q", h.keys)
 	}
 }
 
-// A Claude relay whose transcript does not exist (restarted before its
-// first message) still types a held message left from before the restart.
-func TestClaudeWithoutATranscriptStillReleasesAHeldMessage(t *testing.T) {
-	saved := heldGrace
-	heldGrace = 0
-	t.Cleanup(func() { heldGrace = saved })
-	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+// A seat that has seen no turn end in the transcript (restarted before its
+// first message, or idle only by its screen) reports nothing and leaves the
+// spool to the Stop hook.
+func TestASeatWithoutATurnEndLeavesTheSpoolToTheHook(t *testing.T) {
+	t.Parallel()
 	spool := filepath.Join(t.TempDir(), "after_turn")
 	if err := spoolMessage(spool, "r1", "kept over the restart"); err != nil {
 		t.Fatal(err)
 	}
 	h := &fakeHost{alive: true, screen: claudePromptScreen}
-	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "0b8f6a52-6d1e-4c8e-9f55-3f2d8b8f1a11")
-	s.state, s.poll = "idle", 5*time.Millisecond
-	go s.watch()
-	defer s.Close()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		h.mu.Lock()
-		n := len(h.typed)
-		h.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the held message was never typed")
-		}
-		time.Sleep(5 * time.Millisecond)
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
+	s.state = "idle"
+	s.reportLeftOvers(time.Now().Add(time.Hour))
+	// Quiet for ten minutes, then idle by its screen: still no turn end.
+	s.state, s.stateAt, s.lastLine = "working", time.Now().Add(-11*time.Minute), time.Now().Add(-11*time.Minute)
+	s.checkScreen(time.Now())
+	s.checkScreen(time.Now().Add(2 * time.Second))
+	if st := s.Snapshot().State; st != "idle" {
+		t.Fatalf("seat is %s", st)
 	}
-	if _, err := os.Stat(spool); err != nil {
-		t.Fatal(err)
+	s.reportLeftOvers(time.Now().Add(time.Hour))
+	if names, _ := filepath.Glob(filepath.Join(spool, "*.txt")); len(names) != 1 || len(h.typed) != 0 {
+		t.Fatalf("spool %v, typed %q", names, h.typed)
+	}
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindDelivered {
+			t.Fatalf("reported %+v", ev)
+		}
 	}
 }

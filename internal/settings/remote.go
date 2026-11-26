@@ -407,6 +407,10 @@ func fileValues(raw string) (map[string]any, error) {
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, err
 	}
+	if m == nil {
+		// A file holding null loads as no file; edits start from nothing.
+		return values, nil
+	}
 	if !config.HasLegacyKeys(m) {
 		return values, json.Unmarshal([]byte(raw), &values)
 	}

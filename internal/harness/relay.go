@@ -1903,12 +1903,17 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 	}
 	for _, layout := range []string{"15:04", "3:04pm", "3pm", "15"} {
 		if t, err := time.ParseInLocation(layout, strings.ToLower(strings.ReplaceAll(s, " ", "")), now.Location()); err == nil {
-			at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+			at := clockOn(now, 0, t.Hour(), t.Minute())
+			if later := at.Add(time.Hour); !at.After(now) && later.After(now) && later.Format("15:04") == at.Format("15:04") {
+				// The hour the clocks go back happens twice: at is its first
+				// pass, and the second is the next on the clock.
+				at = later
+			}
 			if !at.After(now) {
 				// Tomorrow's, built on the calendar: across a daylight-saving
 				// change a day is 23 or 25 hours, and adding 24 would land
 				// an hour off the clock time asked for.
-				at = time.Date(now.Year(), now.Month(), now.Day()+1, t.Hour(), t.Minute(), 0, 0, now.Location())
+				at = clockOn(now, 1, t.Hour(), t.Minute())
 			}
 			return at, nil
 		}
@@ -1919,6 +1924,21 @@ func parseUntil(s string, now time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("could not read %q as a time: use 10:00, 8h, or 2026-10-28T10:00", s)
+}
+
+// clockOn is hour:minute on the clock, days after now's date, in now's zone.
+// A time the clocks skip that day (02:30 when they jump from 02:00 to 03:00)
+// is as long after midnight as it is on any other day: 03:30. time.Date
+// alone may give the hour before the jump instead (01:30), which reads as a
+// time already past or an hour short.
+func clockOn(now time.Time, days, hour, minute int) time.Time {
+	loc := now.Location()
+	at := time.Date(now.Year(), now.Month(), now.Day()+days, hour, minute, 0, 0, loc)
+	if at.Hour() != hour || at.Minute() != minute {
+		midnight := time.Date(now.Year(), now.Month(), now.Day()+days, 0, 0, 0, 0, loc)
+		at = midnight.Add(time.Duration(hour)*time.Hour + time.Duration(minute)*time.Minute)
+	}
+	return at
 }
 
 // userZone is where the user is: the time zone their newest message or

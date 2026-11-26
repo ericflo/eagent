@@ -8,9 +8,10 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
-// A preset saved from the settings of a session on its fallback is that
-// fallback as configured: its key variable, window and reply ceiling, not
-// the catalog's defaults for the model.
+// A controller the session gave no routes (Controller.Routes unset) looks
+// a route up in the project's own configuration: a preset saved on its
+// fallback is that fallback as configured, its key variable, window and
+// reply ceiling, not the catalog's defaults for the model.
 func TestAPresetSavedOnAFallbackIsTheFallbackAsConfigured(t *testing.T) {
 	for _, url := range []string{"https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/"} {
 		t.Run(url, func(t *testing.T) { presetOnFallback(t, url) })
@@ -35,7 +36,7 @@ func presetOnFallback(t *testing.T, fallbackURL string) {
 		t.Fatal(err)
 	}
 	values := Values{TickSeconds: 30, QuietSeconds: 180, Routes: map[string]Route{RouteEagent: {Provider: "openrouter", Model: "z-ai/glm-5.3-flash", Effort: "medium"}}}
-	cfg, err := ConfigFromValues(project, values)
+	cfg, err := ConfigFromRoutes(project, values, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +46,10 @@ func presetOnFallback(t *testing.T, fallbackURL string) {
 	}
 }
 
-// A session on a model at an address no provider is known for, which the
-// project's configuration does not have (it came from another preset), has
-// nothing a preset can be built from: saving says so instead of quietly
-// saving the project's own model under the new name.
+// With no routes from the session, a model at an address no provider is
+// known for, which the project's configuration does not have, has nothing
+// a preset can be built from: saving says so instead of quietly saving the
+// project's own model under the new name.
 func TestAPresetOfAModelNoProviderKnowsOutsideTheProjectsChainIsRefused(t *testing.T) {
 	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_SUMMARIZER_MODE", "EAGENT_SUMMARIZER_MODEL", "EAGENT_MODEL"} {
 		t.Setenv(n, "")
@@ -63,7 +64,7 @@ func TestAPresetOfAModelNoProviderKnowsOutsideTheProjectsChainIsRefused(t *testi
 		t.Fatal(err)
 	}
 	values := Values{TickSeconds: 30, QuietSeconds: 180, Routes: map[string]Route{RouteEagent: {Model: "local-model", Effort: "low"}}}
-	cfg, err := ConfigFromValues(project, values)
+	cfg, err := ConfigFromRoutes(project, values, nil)
 	if err == nil {
 		t.Fatalf("saved %s for a session on local-model", cfg.Model.Model)
 	}

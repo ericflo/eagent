@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -92,6 +93,11 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			continue
 		}
 		reply, _, err := pendingReply(ctx, s.Project, info)
+		if finalechat.Gone(err) {
+			// FinaleChat says the session has no thread there, so no reply
+			// can be waiting in one: it comes back as it was.
+			reply, err = integration.PhoneMessage{}, nil
+		}
 		if err != nil {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)
 			continue

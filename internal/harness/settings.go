@@ -18,6 +18,7 @@ func (r *Runtime) startRuntimeSettings() {
 		return
 	}
 	c.Stop = r.acceptRemoteStop
+	c.Routes = r.runningRoutes
 	r.runtimeControl = c
 	r.append(event.New("settings.runtime_started", event.ActorHarness, map[string]any{"format": runtimecontrol.Schema, "generation": c.Generation, "values": r.activeSettings, "persistence": "this process only"}))
 }
@@ -134,26 +135,9 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 		if !ok || pick == before[who] || pick.Model == "" || r.models[who] == nil {
 			continue
 		}
-		var a config.ModelRoute
-		base, known := r.pickBase(who, pick)
-		switch {
-		case known && pick.Provider == "":
-			// An address no provider knows has no catalog to pick from:
-			// the entry as configured, at the effort asked for.
-			if pick.Effort != "" && config.EffortIndex(pick.Effort) == len(config.EffortOrder) {
-				return nil, fmt.Errorf("%s: effort %q is not a known level (%s)", who, pick.Effort, strings.Join(config.EffortOrder, ", "))
-			}
-			a = base
-		case pick.Provider == "":
-			return nil, fmt.Errorf("%s: model %q is not at an address eagent knows a provider for, and this session's routes do not have it; pick a provider", who, pick.Model)
-		default:
-			if !known {
-				base = r.configRoute(who)
-			}
-			var err error
-			if a, err = config.PickRoute(r.opts.Project, base, pick.Provider, pick.Model, pick.Effort); err != nil {
-				return nil, fmt.Errorf("%s: %w", who, err)
-			}
+		a, err := r.resolvePick(who, pick)
+		if err != nil {
+			return nil, err
 		}
 		// The pick names the effort the session reports (ApplyValues
 		// resolves it), "" (send none) included, so it is the one sent,
@@ -192,6 +176,65 @@ func (r *Runtime) pickBase(who string, pick runtimecontrol.Route) (config.ModelR
 		}
 	}
 	return config.ModelRoute{}, false
+}
+
+// resolvePick is the configured route a changed pick of who's model
+// starts from: the entry of a chain the session has that the pick names
+// (pickBase), else the configured route picked from the catalog.
+func (r *Runtime) resolvePick(who string, pick runtimecontrol.Route) (config.ModelRoute, error) {
+	var a config.ModelRoute
+	base, known := r.pickBase(who, pick)
+	switch {
+	case known && pick.Provider == "":
+		// An address no provider knows has no catalog to pick from:
+		// the entry as configured, at the effort asked for.
+		if pick.Effort != "" && config.EffortIndex(pick.Effort) == len(config.EffortOrder) {
+			return a, fmt.Errorf("%s: effort %q is not a known level (%s)", who, pick.Effort, strings.Join(config.EffortOrder, ", "))
+		}
+		a = base
+	case pick.Provider == "":
+		return a, fmt.Errorf("%s: model %q is not at an address eagent knows a provider for, and this session's routes do not have it; pick a provider", who, pick.Model)
+	default:
+		if !known {
+			base = r.configRoute(who)
+		}
+		var err error
+		if a, err = config.PickRoute(r.opts.Project, base, pick.Provider, pick.Model, pick.Effort); err != nil {
+			return a, fmt.Errorf("%s: %w", who, err)
+		}
+	}
+	return a, nil
+}
+
+// runningRoutes is Controller.Routes: for each of the session's models
+// that routes names, the chain it runs as configured (from the entry it is
+// on, so a session on a fallback is saved as that fallback and those
+// after it), or, for a pick this change makes, the one it will run once
+// the change is applied. Loop goroutine (the controller's poll).
+func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route) (map[string]config.ModelRoute, error) {
+	out := map[string]config.ModelRoute{}
+	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
+		pick, ok := routes[who]
+		m := r.models[who]
+		if !ok || m == nil || pick.Model == "" {
+			continue
+		}
+		if pick == r.activeSettings.Routes[who] {
+			if cur := m.confAt(); cur != nil {
+				out[who] = *cur
+			} else {
+				out[who] = m.conf
+			}
+			continue
+		}
+		a, err := r.resolvePick(who, pick)
+		if err != nil {
+			return nil, err
+		}
+		a.ReasoningEffort = pick.Effort
+		out[who] = a
+	}
+	return out, nil
 }
 
 // configRoute is the configured route of one of the session's models.
