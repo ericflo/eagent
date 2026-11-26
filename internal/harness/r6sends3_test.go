@@ -95,12 +95,14 @@ func TestOneReceiptForAMessageSentToTwoAgents(t *testing.T) {
 	}
 }
 
-// "The same agent" is the agent that holds the name now, by the one
-// definition the brief uses too (holderAt): a fresh start under a stopped
-// name is another agent and may be sent the message; a restart, or a start
-// that continues the agent's own conversation, is the same one and has it.
-// A stop and resume of the session replays the same answer.
-func TestForwardingAgainCountsOnlyTheAgentHoldingTheNameNow(t *testing.T) {
+// relay_forward's duplicate check counts every send of the message to any
+// agent that held the relay's name, replayed from the record. One row is a
+// known wrong refusal, older than send outcomes: an agent started fresh
+// under a stopped name never saw the message, yet forwarding it is refused
+// (relay_send still sends it). It is left because counting only the agent
+// holding the name now let a message be typed twice (after a switch back,
+// whose brief quotes it, and for a send held while a fresh start launched).
+func TestForwardingAgainCountsEverySendUnderTheName(t *testing.T) {
 	type step func(r *relayRecord)
 	stop := func(r *relayRecord) { r.add(event.RelayEnd, event.RelayEndData{Name: "codex", Reason: "stopped"}) }
 	fresh := func(r *relayRecord) { r.start("codex", "codex") }
@@ -121,10 +123,10 @@ func TestForwardingAgainCountsOnlyTheAgentHoldingTheNameNow(t *testing.T) {
 		refused bool
 	}{
 		{"the same agent", nil, true},
-		{"stopped, then started fresh", []step{stop, fresh}, false},
+		{"stopped, then started fresh (known wrong refusal)", []step{stop, fresh}, true},
 		{"restarted, continuing its conversation", []step{continues}, true},
 		{"stopped, then started again on its own conversation", []step{stop, continues}, true},
-		{"a switch away and back", []step{switchAway, switchBack}, false},
+		{"a switch away and back", []step{switchAway, switchBack}, true},
 	} {
 		rec := &relayRecord{t: time.Now()}
 		rec.start("codex", "codex")
