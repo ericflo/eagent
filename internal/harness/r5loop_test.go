@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/sched"
 	"github.com/ericflo/eagent/internal/state"
 )
 
@@ -329,4 +330,32 @@ func TestAStaleTimerCallbackDoesNotClearTheTimerThatReplacedIt(t *testing.T) {
 			t.Fatal("the settle set for an hour was cleared by the callback of the one it replaced")
 		}
 	})
+}
+
+// A repeating timer comes due by the machine's steady clock, and the wall
+// clock can read a moment earlier than the time it was due (a clock set
+// back, a slewed second). The next time it is due is after the one that
+// just came, not that same time again: it fires once.
+func TestARepeatingTimerFiredBeforeItsWallClockTimeDoesNotFireTwice(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.settled()
+	spec, err := sched.Parse("* * * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var due, next time.Time
+	s.rt.sync(func() {
+		id := s.rt.st.NextScheduleID()
+		due = spec.Next(time.Now())
+		s.rt.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: id, Kind: spec.Kind, Spec: "* * * * *", Note: "check the build", Next: due}))
+		s.rt.fireSchedule(id) // the wall clock still reads before due
+		next = s.rt.st.Schedules[id].Next
+		if tm := s.rt.timers[id]; tm != nil {
+			tm.Stop()
+			delete(s.rt.timers, id)
+		}
+	})
+	if !next.After(due) {
+		t.Fatalf("the timer due at %s was set to come due again at %s", due.Format(time.TimeOnly), next.Format(time.TimeOnly))
+	}
 }
