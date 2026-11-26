@@ -54,6 +54,14 @@ func pickOnFallback(rt *Runtime, change func(*runtimecontrol.Route)) error {
 	if err != nil {
 		return err
 	}
+	// As applyRuntimeSettings does: the values become the session's, then
+	// the routes change.
+	routes := map[string]runtimecontrol.Route{}
+	for k, v := range before {
+		routes[k] = v
+	}
+	routes[runtimecontrol.RouteEagent] = pick
+	rt.activeSettings.Routes = routes
 	for _, sw := range swaps {
 		rt.swapRoute(sw)
 	}
