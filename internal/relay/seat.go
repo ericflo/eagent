@@ -429,7 +429,7 @@ func (s *Seat) matchPending(text string) []string {
 	keep := s.pending[:0]
 	for _, p := range s.pending {
 		want := normalize(p.text)
-		if want != "" && (strings.Contains(got, clipText(want, 160)) || strings.Contains(want, clipText(got, 160)) && len(got) > 20) {
+		if want != "" && (strings.Contains(got, head(want, 160)) || strings.Contains(want, head(got, 160)) && len(got) > 20) {
 			ids = append(ids, p.id)
 			continue
 		}
@@ -438,6 +438,10 @@ func (s *Seat) matchPending(text string) []string {
 	s.pending = keep
 	return ids
 }
+
+// head is the start of s, at most n bytes, cut at a character and without
+// the ellipsis clipText adds: it is looked for in other text.
+func head(s string, n int) string { return strings.TrimSuffix(clipText(s, n), "…") }
 
 // ---- watching ---------------------------------------------------------------
 
@@ -742,9 +746,8 @@ func (s *Seat) checkScreen(now time.Time) {
 		}
 	}
 	if stuck != nil {
-		head := clipText(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
-		head = strings.TrimSuffix(head, "…")
-		if stuck.nudges < 2 && head != "" && strings.Contains(screen, head) && state != "working" {
+		start := head(strings.TrimSpace(strings.SplitN(stuck.text, "\n", 2)[0]), 40)
+		if stuck.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" {
 			stuck.nudges++
 			stuck.at = now
 			s.mu.Unlock()
