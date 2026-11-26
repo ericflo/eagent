@@ -187,8 +187,7 @@ func TestPhoneSaysEagentIsThinkingWhileACallIsOut(t *testing.T) {
 	// And the line goes back when the call is over.
 	waitFor(t, "the answer", func() bool { return g.ui.messageCount() > 0 })
 	waitFor(t, "the status to leave thinking", func() bool {
-		st := fp.statuses()
-		return len(st) > 0 && st[len(st)-1]["text"] != "Thinking about the next step"
+		return fp.shownStatus() != "Thinking about the next step"
 	})
 }
 

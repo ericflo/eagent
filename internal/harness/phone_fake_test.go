@@ -516,6 +516,32 @@ func (f *phoneFake) statuses() []map[string]any {
 	return append([]map[string]any(nil), f.activity...)
 }
 
+// shownStatus is the status line the app shows now: the newest by seq of
+// what was set through …/activity and what rode on a post, as the service
+// applies both. A post can carry the line's latest change, after which the
+// keeper has nothing left to write.
+func (f *phoneFake) shownStatus() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var best float64
+	text := ""
+	consider := func(a map[string]any) {
+		if seq, _ := a["seq"].(float64); seq >= best {
+			best = seq
+			text, _ = a["text"].(string)
+		}
+	}
+	for _, a := range f.activity {
+		consider(a)
+	}
+	for _, p := range f.posts {
+		if a, ok := p["activity"].(map[string]any); ok {
+			consider(a)
+		}
+	}
+	return text
+}
+
 func (f *phoneFake) clearedCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.cleared }
 
 func (f *phoneFake) metaPatches() []map[string]any {
