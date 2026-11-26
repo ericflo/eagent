@@ -756,6 +756,7 @@ func (r *Runtime) unseenNote(covers int64) string {
 	type item struct {
 		place, when, text string
 		size              int
+		files             []string
 	}
 	var items []item
 	for _, ev := range r.st.Events {
@@ -763,26 +764,30 @@ func (r *Runtime) unseenNote(covers int64) string {
 			continue
 		}
 		text := ""
+		var atts []event.Attachment
 		switch ev.Type {
 		case event.UserAnswer:
 			var d event.UserAnswerData
 			if ev.Decode(&d) != nil {
 				continue
 			}
-			text = d.Text
+			text, atts = d.Text, d.Attachments
 		case event.UserMessage:
 			var d event.UserMessageData
 			if ev.Decode(&d) != nil || d.Held == "" {
 				continue
 			}
-			text = d.Text
-			if n := len(d.Attachments); n > 0 {
-				text += fmt.Sprintf(" [%d attachment(s)]", n)
-			}
+			text, atts = d.Text, d.Attachments
 		default:
 			continue
 		}
-		items = append(items, item{place: fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line), when: r.when(ev.Time), text: text, size: len(ev.Data)})
+		it := item{place: fmt.Sprintf("%s:%d", ev.Source.File, ev.Source.Line), when: r.when(ev.Time), text: text, size: len(ev.Data)}
+		for _, a := range atts {
+			// The readable form of the line leaves its files out; the
+			// model needs the path to look at one (view_image).
+			it.files = append(it.files, a.Path)
+		}
+		items = append(items, it)
 	}
 	if len(items) == 0 {
 		return ""
@@ -795,6 +800,9 @@ func (r *Runtime) unseenNote(covers int64) string {
 	fmt.Fprintf(&b, "\n\n%s: the user sent you %d %s that you have not seen in full; this conversation does not show them. Read each with session_read at its place before you answer (a long one in pieces, going on from the offset each piece gives), then answer them:", unseenHeading, len(items), noun)
 	for _, it := range items {
 		fmt.Fprintf(&b, "\n- %s (%s, %d KB): %q", it.place, it.when, (it.size+1023)/1024, clipRunes(oneLine(it.text, 100), 100))
+		if len(it.files) > 0 {
+			b.WriteString(", attached: " + strings.Join(it.files, ", "))
+		}
 	}
 	return b.String()
 }
