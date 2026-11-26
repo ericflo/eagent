@@ -38,11 +38,15 @@ Changing `cmd/eagent-replay-wasm` or the reducer means running
 - One change per PR, with a test where the behaviour can be tested (most
   can: the harness tests and the chaos suites are the model to copy).
 - `make check` must pass; CI runs it on Go 1.24 and the current release.
-- Keep the suite fast. A test should take well under a second, and none more
-  than two: wait on the event instead of the clock, and when a test would
-  wait out a delay of the program (a retry, a grace period, a poll), make
-  that delay a package variable the test shortens. CI lists every test over
-  two seconds and fails one over twenty; `make test-times` shows the same.
+- Keep the suite fast: the whole race run takes under a minute, and a new
+  test should take well under a second. Wait on the event instead of the
+  clock. When a test would wait out a delay of the program (a retry, a grace
+  period, a poll), make that delay a package variable the test shortens.
+  When a test's point is an order of events, give the fake a stated delay
+  instead of relying on how long the disk or the machine takes.
+  `make test-times` lists every test over two seconds (today: the provider
+  retry tests and pi's extension at its shipped timers); CI warns over five
+  seconds and fails a test over thirty.
 - Keep the README truthful: if a flag, a preset or a default changes, the
   README and `eagent --help` change in the same commit.
 
