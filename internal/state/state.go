@@ -295,6 +295,14 @@ func (s *State) servedBy(actor, host, asked string) RouteKey {
 	return rk
 }
 
+// OnRoute says a reply that names the route that served it (its host and
+// the model asked for) came from the route actor is on now. One still out
+// when the route changed did not: its prompt size is the old model's
+// count, not the new one's. A reply that names no route is taken to be.
+func (s *State) OnRoute(actor, host, asked string) bool {
+	return host == "" || asked == "" || (host == s.Hosts[actor] && asked == s.Models[actor])
+}
+
 // Apply folds one event.
 func (s *State) Apply(ev event.Event) {
 	s.Events = append(s.Events, ev)
@@ -348,7 +356,7 @@ func (s *State) Apply(ev event.Event) {
 					s.SummarySeq = d.SeenSeq
 				}
 				if d.Usage != nil {
-					s.account(summaryActor(ev), "", "", *d.Usage, 1, d.ElapsedMS)
+					s.account(summaryActor(ev), d.Host, d.Asked, *d.Usage, 1, d.ElapsedMS)
 				}
 			}
 		}
@@ -444,8 +452,15 @@ func (s *State) Apply(ev event.Event) {
 		if d.Usage != nil {
 			// A dossier is written in several calls (the lookups, then the
 			// text): each counts, and the latency kept is one call's share.
+			// Calls another route served earlier in the pass are priced on
+			// that route.
 			calls := max(d.Calls, 1)
-			s.account(event.ActorEagent, "", "", *d.Usage, calls, d.ElapsedMS/int64(calls))
+			rest := calls
+			for _, e := range d.Earlier {
+				s.account(event.ActorEagent, e.Host, e.Asked, e.Usage, e.Calls, d.ElapsedMS/int64(calls))
+				rest -= e.Calls
+			}
+			s.account(event.ActorEagent, d.Host, d.Asked, *d.Usage, max(rest, 1), d.ElapsedMS/int64(calls))
 		}
 	case event.UserMessage, event.UserAnswer:
 		s.LastUserSeq = ev.Seq
@@ -470,7 +485,7 @@ func (s *State) Apply(ev event.Event) {
 	case event.Assistant:
 		var d event.AssistantData
 		_ = ev.Decode(&d)
-		if ev.Task == "" {
+		if ev.Task == "" && s.OnRoute(ev.Actor, d.Host, d.Asked) {
 			s.LastUsage[ev.Actor] = d.Usage
 		}
 		s.account(ev.Actor, d.Host, d.Asked, d.Usage, 1, d.ElapsedMS)
@@ -511,8 +526,8 @@ func (s *State) Apply(ev event.Event) {
 		var d event.ChecksData
 		if ev.Decode(&d) == nil && d.Count > 0 {
 			actor := ev.Actor
-			s.account(actor, "", "", d.Usage, d.Count, 0)
-			if d.PromptTokens > 0 {
+			s.account(actor, d.Host, d.Asked, d.Usage, d.Count, 0)
+			if d.PromptTokens > 0 && s.OnRoute(actor, d.Host, d.Asked) {
 				u := s.LastUsage[actor]
 				u.Input = d.PromptTokens
 				s.LastUsage[actor] = u

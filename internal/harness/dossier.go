@@ -594,6 +594,20 @@ type dossierResult struct {
 	calls     int
 	consulted []string // the lookups it made, for the record
 	bad       []string // citations that point nowhere
+
+	// host and asked are the route that served the calls in usage;
+	// earlier, the calls of this pass another route served before it.
+	host, asked string
+	earlier     []event.RouteUsage
+}
+
+// countCalls is how many calls some batches of usage hold.
+func countCalls(us []event.RouteUsage) int {
+	n := 0
+	for _, u := range us {
+		n += u.Calls
+	}
+	return n
 }
 
 // startDossier begins the dossier pass. The loop makes no other model call
@@ -1044,6 +1058,13 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 			}
 			continue
 		}
+		if res.calls > 0 && (res.host != resp.BaseURL || res.asked != resp.Asked) {
+			// The model changed during the pass: what the old one used is
+			// priced on it.
+			res.earlier = append(res.earlier, event.RouteUsage{Host: res.host, Asked: res.asked, Usage: res.usage, Calls: res.calls - countCalls(res.earlier)})
+			res.usage = event.Usage{}
+		}
+		res.host, res.asked = resp.BaseURL, resp.Asked
 		res.calls++
 		res.usage.Input += resp.Usage.Input
 		res.usage.Output += resp.Usage.Output
@@ -1202,8 +1223,8 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	// of files shows the closed one whole and says where this dossier sits.
 	body := r.dossierBody(text, job, res, by, next)
 	d := event.DossierData{Text: body, CoversSeq: job.covers, CoversNone: job.covers == 0, By: by, NoMap: by == "eagent" && res.noMap != "", ElapsedMS: res.elapsed.Milliseconds(), Calls: res.calls, Consulted: res.consulted}
-	if res.usage != (event.Usage{}) {
-		d.Usage = &res.usage
+	if res.usage != (event.Usage{}) || len(res.earlier) > 0 {
+		d.Usage, d.Host, d.Asked, d.Earlier = &res.usage, res.host, res.asked, res.earlier
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false

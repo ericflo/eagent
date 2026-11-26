@@ -955,7 +955,7 @@ func (r *Runtime) turn(w wake) {
 					Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
 					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 				}))
-				r.looked(covered, resp.Usage.Input, w)
+				r.looked(covered, r.promptOf(resp), w)
 				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
 			})
 			recorded, tailKept, tc.spoke = true, true, true
@@ -1026,7 +1026,7 @@ func (r *Runtime) turn(w wake) {
 				ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
 				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 			}))
-			r.looked(covered, resp.Usage.Input, w)
+			r.looked(covered, r.promptOf(resp), w)
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
@@ -1334,6 +1334,13 @@ func (r *Runtime) called(promptTokens int) {
 // (the next call's carries the exchange on top). Loop goroutine.
 func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	t := &r.turns
+	if t.silent.Count > 0 && (t.silent.Host != resp.BaseURL || t.silent.Asked != resp.Asked) {
+		// Served by another route than the looks so far (one still out when
+		// the model changed, or the one after it): each batch is priced on
+		// the route that made it.
+		r.flushSilent()
+	}
+	t.silent.Host, t.silent.Asked = resp.BaseURL, resp.Asked
 	t.silent.Count++
 	t.silent.Usage.Input += resp.Usage.Input
 	t.silent.Usage.Output += resp.Usage.Output
@@ -1348,13 +1355,24 @@ func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
 	}
 	if seen > 0 {
 		t.silent.SeenSeq = seen
-		r.looked(seen, resp.Usage.Input, w)
+		r.looked(seen, r.promptOf(resp), w)
 	} else {
-		r.called(resp.Usage.Input)
+		r.called(r.promptOf(resp))
 	}
 	if t.silent.Count >= 20 {
 		r.flushSilent()
 	}
+}
+
+// promptOf is the prompt size a reply reports, when the route eagent is on
+// served it. One still out when the model changed counts the old model's
+// tokens; the new model's size comes from its own first call. Loop
+// goroutine.
+func (r *Runtime) promptOf(resp *llm.Response) int {
+	if !r.st.OnRoute(event.ActorEagent, resp.BaseURL, resp.Asked) {
+		return 0
+	}
+	return resp.Usage.Input
 }
 
 // flushSilent records the looks that left no trace since the last record,
