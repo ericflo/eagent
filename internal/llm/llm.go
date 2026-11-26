@@ -656,7 +656,10 @@ func (e *APIError) ContextOverflow() bool {
 		strings.Contains(b, "prompt is too long") || strings.Contains(b, "exceeds the limit") ||
 		strings.Contains(b, "input tokens exceed") ||
 		// Anthropic: "input length and `max_tokens` exceed context limit".
-		strings.Contains(b, "exceed context limit")
+		strings.Contains(b, "exceed context limit") ||
+		// llama-server: "request (N tokens) exceeds the available context
+		// size (M tokens)", type exceed_context_size_error.
+		strings.Contains(b, "exceeds the available context size") || strings.Contains(b, "exceed_context_size_error")
 }
 
 // streamError builds the error for a failure reported inside a stream,
