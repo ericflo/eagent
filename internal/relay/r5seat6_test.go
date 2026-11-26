@@ -43,14 +43,23 @@ func TestTheSpinnerLineIsReadByItsShape(t *testing.T) {
 		"────────────────────────────────────────────────────────────\n> \n" +
 		"────────────────────────────────────────────────────────────\n" +
 		"  ⏵⏵ bypass permissions on (shift+tab to cycle)"
-	for screen, want := range map[string]bool{
-		quoted: false,
-		todo:   true,
-		"✻ Thinking… (10m 12s · esc to interrupt)\n  ⏵⏵ bypass permissions on": true,
-		"• Working (10m 3s • esc to interrupt)\n› Ask Codex to do anything":    true,
+	codex := "• Working (10m 3s • esc to interrupt)\n› Ask Codex to do anything"
+	for _, c := range []struct {
+		agent  busyScreen
+		screen string
+		want   bool
+	}{
+		{claudeAgent{}, quoted, false},
+		{claudeAgent{}, todo, true},
+		{claudeAgent{}, "✻ Thinking… (10m 12s · esc to interrupt)\n  ⏵⏵ bypass permissions on", true},
+		{claudeAgent{}, "✽ Compacting conversation… (esc to interrupt)\n  ⏵⏵ bypass permissions on", true},
+		// Each agent's own glyphs only: Codex's bullet is not Claude's spinner.
+		{claudeAgent{}, codex, false},
+		{codexAgent{}, codex, true},
+		{codexAgent{}, "  - quoted: ✻ Thinking… (esc to interrupt)\n› Ask Codex to do anything", false},
 	} {
-		if got := (claudeAgent{}).busy(screen); got != want {
-			t.Errorf("busy = %v for\n%s", got, screen)
+		if got := c.agent.busy(c.screen); got != c.want {
+			t.Errorf("%T busy = %v for\n%s", c.agent, got, c.screen)
 		}
 	}
 }

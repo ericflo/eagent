@@ -373,8 +373,10 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	case "after_turn":
 		if state == "working" {
 			if err := s.agent.afterTurn(s, id, text); err == nil {
-				// An agent with a spool holds it there; one without has typed
-				// it into its own queue, and it is watched as typed.
+				// An agent with a spool holds it there; one without has handed
+				// it to its own queue. Either way it is tracked for its arrival,
+				// and, as every after-turn send, never pressed again or reported
+				// lost on a timer.
 				s.track(id, text, mode)
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			}
@@ -1107,16 +1109,21 @@ func (s *Seat) ready(screen string) bool {
 	return s.agent.ready(screen)
 }
 
-// spinnerLine is the line Claude and Codex draw while they work: a glyph,
-// a few words, and at the end of the line a parenthesis that says how to
-// interrupt ("✻ Thinking… (12s · esc to interrupt)", "• Working (3s • esc
-// to interrupt)"). A sentence or a bullet that quotes the words has more
-// after the parenthesis, or no parenthesis around them.
-var spinnerLine = regexp.MustCompile(`(?im)^\s*[^\w\s"']\s+[^()\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+// spinnerLine matches the line Claude and Codex draw while they work: one of
+// the agent's own spinner glyphs, a few words, and at the end of the line a
+// parenthesis that says how to interrupt ("✻ Thinking… (12s · esc to
+// interrupt)", "• Working (3s • esc to interrupt)"). A markdown bullet ("-",
+// "1.") or a sentence that quotes the words is not it.
+func spinnerLine(glyphs string) *regexp.Regexp {
+	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^()\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+}
 
-// spinnerShown says whether the screen shows that line, anywhere: the agent
-// redraws it while it works and takes it away when it stops.
-func spinnerShown(screen string) bool { return spinnerLine.MatchString(screen) }
+// The spinner glyphs each agent draws: Claude cycles through these frames,
+// Codex draws a bullet.
+var (
+	claudeSpinner = spinnerLine("·✢✳✶✻✽*")
+	codexSpinner  = spinnerLine("•")
+)
 
 // busyScreen is an agent whose prompt or status line stays on screen while
 // it works (Claude's footer, Antigravity's relay line), and that shows

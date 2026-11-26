@@ -35,7 +35,7 @@ func (claudeAgent) ready(screen string) bool {
 
 // busy: Claude's footer stays while it works; its spinner line, drawn just
 // above the input box, says how to stop it.
-func (claudeAgent) busy(screen string) bool { return spinnerShown(screen) }
+func (claudeAgent) busy(screen string) bool { return claudeSpinner.MatchString(screen) }
 
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
