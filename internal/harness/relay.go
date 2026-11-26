@@ -2308,16 +2308,19 @@ func sendHolder(st *state.State, id, name string) string {
 }
 
 // relaySendsTo calls fn for each send on the record for a relay, oldest
-// first: its own, and those a switch to it passed on from the relay it took
-// over from (relay.moved). movedOn names, by send id, the sends of this
-// relay that went to another relay that way.
+// first, once each: its own, and those a switch to it passed on from the
+// relay it took over from (relay.moved). movedOn names, by send id, the
+// sends of this relay that went to another relay that way and were not
+// passed back to it since.
 func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.RelaySendData)) (movedOn map[string]string) {
 	movedOn = map[string]string{}
+	listed := map[string]bool{}
 	for _, ev := range st.Events {
 		switch ev.Type {
 		case event.RelaySend:
 			var d event.RelaySendData
 			if ev.Decode(&d) == nil && d.Name == name {
+				listed[d.ID] = true
 				fn(ev, d)
 			}
 		case event.RelayMoved:
@@ -2326,7 +2329,11 @@ func relaySendsTo(st *state.State, name string, fn func(ev event.Event, d event.
 				continue
 			}
 			if d.Name == name {
-				fn(ev, d.RelaySendData)
+				delete(movedOn, d.ID)
+				if !listed[d.ID] {
+					listed[d.ID] = true
+					fn(ev, d.RelaySendData)
+				}
 			}
 			if d.Prev == name {
 				movedOn[d.ID] = d.Name
@@ -2403,8 +2410,9 @@ func forwardedAs(st *state.State, relayName string, seq int64, atts string) (id,
 	return "", ""
 }
 
-// wentToEarlierHolder says whether every send in ids (all under name) was
-// recorded and confirmed arrived before the relay.end that stopped the
+// wentToEarlierHolder says whether every send in ids (all under name) that
+// may have gone, and there is at least one, was recorded and confirmed
+// arrived before the relay.end that stopped the
 // agent which held name before, and the agent holding name now started
 // after that end and runs. Only the words of a refusal hang on it: which
 // sends count stays as forwardedAs counts them.
@@ -2442,6 +2450,7 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 	if endSeq == 0 {
 		return false
 	}
+	matched := false
 	for _, id := range ids {
 		if st.SendOutcome(id) == state.SendNotSent {
 			continue // it certainly did not go: it says nothing of where the message went
@@ -2454,8 +2463,10 @@ func wentToEarlierHolder(st *state.State, name string, ids []string, movedOn map
 		if !sent || !arrived || s > endSeq || a > endSeq {
 			return false
 		}
+		matched = true
 	}
-	return true
+	// Sends that all certainly did not go say nothing of the earlier holder.
+	return matched
 }
 
 // relayStatusText describes an agent in full: for the user who asks with
