@@ -74,6 +74,9 @@ type relaySeats struct {
 	// eagent resumed while one is still in its first turn writes the next
 	// brief directly from it, as before.
 	briefed map[string]briefedAgent
+	// idleStop: the agents are being stopped because their work was done
+	// and nobody wrote (stopIdleAgents). Loop goroutine only.
+	idleStop bool
 }
 
 // briefedAgent is an agent handed the work by a brief: the agent under its
@@ -662,7 +665,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	}
 	// A session with an agent started is not ending: its closing word is
 	// asked again once this agent's work is done.
-	r.summary.final, r.turns.finalAsked = false, false
+	r.summary.final, r.turns.finalAsked, r.relays.idleStop = false, false, false
 	spec, started := job.spec, job.started
 	r.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{
 		Name: job.name, Profile: job.profile, Agent: spec.Profile.Agent, AgentLabel: relay.AgentLabel(spec.Profile.Agent), Label: spec.Profile.Label, Dir: job.dir,
@@ -930,6 +933,51 @@ func (r *Runtime) reattachRelays() []string {
 		lost = append(lost, fmt.Sprintf("relay %s (%s) was no longer running", rel.Name, rel.Who()))
 	}
 	return lost
+}
+
+// stopIdleAgents ends a session with no terminal whose agents' work is done
+// and to which nobody has written for a while. With a phone, such a
+// session keeps its agent after the work so the user can steer it from
+// there; without a bound, eagent, the terminal and the agent would run for
+// ever once they stop writing. The bound is a question's time (an open
+// question waits that long for the phone too). The agents are stopped as
+// relay_control stop stops them, saying how to bring one back, and the
+// session then ends as one whose agent was stopped: the closing look, and
+// "done". A reply brings the session back. Loop goroutine (maybeEnd).
+func (r *Runtime) stopIdleAgents() {
+	if r.phone == nil || r.opts.Interactive || r.relays.idleStop || len(r.st.Events) == 0 {
+		return
+	}
+	// Anything still open keeps the agent: a question, even a dismissed
+	// one (a dismissal decides nothing), a timer, a message owed an answer.
+	if r.st.Question != nil || r.st.DismissalStands() || len(r.st.ActiveSchedules()) > 0 || r.turns.owed > 0 {
+		return
+	}
+	wait := time.Duration(r.cfg.Finalechat.QuestionTimeout()) * questionSecond
+	if time.Since(r.st.Events[len(r.st.Events)-1].Time) < wait {
+		return
+	}
+	r.relays.mu.Lock()
+	busy := len(r.relays.launching) > 0 || len(r.relays.stopping) > 0
+	r.relays.mu.Unlock()
+	if busy {
+		return
+	}
+	active := r.st.ActiveRelays()
+	for _, rel := range active {
+		// Done: between turns (or gone), with nothing on its way to it
+		// and no standing order to keep it working.
+		if rel.State != "idle" && rel.State != "exited" || rel.Autopilot != nil || len(rel.Undelivered) > 0 {
+			return
+		}
+	}
+	r.relays.idleStop = true
+	reason := fmt.Sprintf("its work was done and nobody wrote for %s, so the session ends; relay_control restart brings it back on its own conversation", roundDur(wait))
+	r.ui.Log("nobody wrote for %s after the work was done: stopping the agent and ending the session", roundDur(wait))
+	for _, rel := range active {
+		args := map[string]string{"action": "stop", "relay": rel.Name, "reason": reason}
+		go r.relayTool("relay_control", func(k string) string { return args[k] }, func(_ string, d int) int { return d }, func(string) []string { return nil }, true)
+	}
 }
 
 // closeRelays stops watching every relay; the agents keep running so a

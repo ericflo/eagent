@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/clientcaps"
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 )
@@ -342,5 +343,86 @@ func TestAnAutopilotDeadlineIsReadInTheUsersTimeZone(t *testing.T) {
 	}
 	if !strings.Contains(out, "10:00") {
 		t.Errorf("the tool does not say the deadline as the user gave it: %s", out)
+	}
+}
+
+// A batch session with the phone keeps its agent after the work, so the
+// user can steer it from the phone. Once the work is done and nobody has
+// written for a question's time (finalechat.question_timeout_seconds), the
+// harness stops the agent, saying how to bring it back, and the session
+// ends done: it does not leave eagent, the terminal and the agent running
+// for ever.
+func TestABatchPhoneSessionEndsWhenItsWorkIsDoneAndNobodyWrites(t *testing.T) {
+	// Four seconds of question time at 50ms each: the session waits 200ms.
+	setFor(t, &questionSecond, 50*time.Millisecond)
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	brain := func(_ string, msgs []map[string]any) reply {
+		switch {
+		case phoneLastIsTool(msgs), phoneEnding(msgs):
+			return hold()
+		case strings.Contains(lastUserText(msgs), "finished a turn"):
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Merged #42 and #44; main is green.","important":true}`)}}
+		}
+		return hold()
+	}
+	g := phoneStart(t, fp, "merge the open PRs", false, brain, func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
+	if code := g.exit(10 * time.Second); code != 0 {
+		t.Fatalf("exit %d, want 0 (done)", code)
+	}
+	if !g.seat.wasKilled() {
+		t.Error("the agent was left running")
+	}
+	evs := g.log()
+	var end *event.Event
+	for i := range evs {
+		if evs[i].Type == event.RelayEnd {
+			end = &evs[i]
+		}
+	}
+	if end == nil {
+		t.Fatal("no relay.end on the record")
+	}
+	var d event.RelayEndData
+	_ = end.Decode(&d)
+	if !strings.Contains(d.Reason, "relay_control restart") {
+		t.Errorf("the stop does not say how to bring the agent back: %q", d.Reason)
+	}
+	// It waited the whole question time after the last thing that happened.
+	for i := range evs {
+		if evs[i].Seq == end.Seq-1 {
+			if gap := end.Time.Sub(evs[i].Time); gap < 200*time.Millisecond {
+				t.Errorf("the agent was stopped %v after the last event, before the 200ms the user has to write", gap)
+			}
+		}
+	}
+}
+
+// What the user writes from the phone after the work keeps the session
+// and its agent: the message reaches the agent, and the wait starts again
+// from the agent's answer.
+func TestABatchPhoneSessionKeepsItsAgentWhileTheUserWrites(t *testing.T) {
+	setFor(t, &questionSecond, 50*time.Millisecond)
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	brain := func(_ string, msgs []map[string]any) reply {
+		switch {
+		case phoneLastIsTool(msgs), phoneEnding(msgs):
+			return hold()
+		case strings.Contains(lastUserText(msgs), "finished a turn"):
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Done.","important":true}`)}}
+		}
+		return hold()
+	}
+	g := phoneStart(t, fp, "merge the open PRs", false, brain, func(cfg *config.Config) { cfg.Finalechat.QuestionTimeoutSeconds = 4 })
+	waitFor(t, "the first report on the phone", func() bool { return len(g.ui.said()) == 1 })
+	g.rt.sync(func() {
+		g.rt.handleInbox(InboxMessage{Type: "message", Text: "now tag a release", From: "finalechat", PhoneID: "m1"})
+	})
+	if code := g.exit(10 * time.Second); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if sent := g.seat.sentTexts(); len(sent) != 2 || sent[1] != "now tag a release" {
+		t.Fatalf("the agent was typed %q, want the task and then the user's reply", sent)
 	}
 }
