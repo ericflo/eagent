@@ -116,9 +116,9 @@ func restartPropFail(t *testing.T, i int, d restartDraw, format string, args ...
 // refusal the opening alone explains is never worded as a burst.
 func TestRestartPropOutcomes(t *testing.T) {
 	rng := rand.New(rand.NewSource(restartPropSeed))
-	var seen [2][3]int // [helps][fullCause] when told, [1][0] when restarted
+	var seen [2][4]int // [helps][fullCause] when told, [1][0] when restarted
 	defer func() {
-		if !t.Failed() && (seen[1][0] == 0 || seen[0][fullOpening] == 0 || seen[0][fullBurst] == 0 || seen[0][fullAgain] == 0) {
+		if !t.Failed() && (seen[1][0] == 0 || seen[0][fullOpening] == 0 || seen[0][fullBurst] == 0 || seen[0][fullAgain] == 0 || seen[0][fullGrew] == 0) {
 			t.Fatalf("seed=%d: the draws miss an outcome: %v", restartPropSeed, seen)
 		}
 	}()
@@ -129,14 +129,14 @@ func TestRestartPropOutcomes(t *testing.T) {
 			seen[1][0]++
 			continue
 		}
-		if c := causeOf(f); c >= 0 && int(c) < 3 {
+		if c := causeOf(f); c >= 0 && int(c) < 4 {
 			seen[0][c]++
 		}
-		if f.refusedAfterCalls {
-			restartPropFail(t, i, d, "a refusal after calls went through was not restarted")
+		if f.refusedAfterCalls && f.rescues <= restartRescueMax {
+			restartPropFail(t, i, d, "a refusal after calls went through was not restarted inside the bound")
 		}
 		switch c := causeOf(f); c {
-		case fullOpening, fullBurst, fullAgain:
+		case fullOpening, fullBurst, fullAgain, fullGrew:
 			if f.refused && !f.openingAloneFits && c != fullOpening {
 				restartPropFail(t, i, d, "the opening alone does not fit, but the notice says %d", c)
 			}
@@ -147,9 +147,7 @@ func TestRestartPropOutcomes(t *testing.T) {
 }
 
 // TestRestartPropNoFlipFlop: the same facts with one more restart already
-// made in a row never turn "tell the user" back into "restart". The
-// documented exception, a refusal after calls went through, always
-// restarts whatever the count, so it is the same on both sides here.
+// made in a row never turn "tell the user" back into "restart".
 func TestRestartPropNoFlipFlop(t *testing.T) {
 	rng := rand.New(rand.NewSource(restartPropSeed + 1))
 	for i := range restartPropDraws {
@@ -158,21 +156,17 @@ func TestRestartPropNoFlipFlop(t *testing.T) {
 		more := d
 		more.rescues++
 		after := restartHelps(more.facts())
-		if !before && after && !d.facts().refusedAfterCalls {
+		if !before && after {
 			restartPropFail(t, i, d, "told at rescues=%d, restart at rescues=%d", d.rescues, more.rescues)
-		}
-		if d.facts().refusedAfterCalls && !(before && after) {
-			restartPropFail(t, i, d, "a refusal after calls went through was not always restarted")
 		}
 	}
 }
 
 // TestRestartPropBounded: from any drawn facts, feeding each restart back
-// in as startDossier and the restart's landing do (a rescue counts one more
-// in a row unless the conversation grew to the window with calls through,
-// which starts the count again at 0; the new conversation carried nothing,
-// was retried when the refused one carried nothing, is not decided, and no
-// call goes through) reaches "tell the user" within 4 steps, while the
+// in as startDossier and the restart's landing do (each counts one more
+// in a row; the new conversation carried nothing, was retried when the
+// refused one carried nothing, is not decided, and is refused the same way,
+// before or after calls went through) reaches "tell the user" within 4 steps, while the
 // conversation stays too long from its start every time (the worst case:
 // the same sizes again, something arriving during every pass).
 func TestRestartPropBounded(t *testing.T) {
@@ -189,14 +183,12 @@ func TestRestartPropBounded(t *testing.T) {
 			f := cur.facts()
 			next := cur
 			next.retried = f.refused && cur.carried == carriedNothing
-			if f.refusedAfterCalls {
-				next.rescues = 0
-			} else {
-				next.rescues = cur.rescues + 1
-			}
+			next.rescues = cur.rescues + 1 // the worst case: nothing new was taken in, so nothing grew
 			next.carried = carriedNothing
 			next.told = false
-			next.calls = 0
+			// The calls stay as drawn: a conversation refused after its
+			// calls went through (a reply sent back, a read that fills the
+			// window) is refused the same way after the restart.
 			next.since = true
 			cur = next
 		}

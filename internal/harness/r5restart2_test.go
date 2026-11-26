@@ -126,8 +126,8 @@ func TestWhenAnotherRestartIsWorthTrying(t *testing.T) {
 		}
 	}
 	// Refused after calls of this conversation went through (it grew to
-	// the window): always a restart, whatever was found before about
-	// restarts made for size. After "three times in a row" (rescues 2)
+	// the window): a restart, whatever was found before about restarts
+	// made for size, up to one past the bound on restarts in a row. After "three times in a row" (rescues 2)
 	// and after "the notes and instructions alone" when that was found on
 	// a first call that went through (openingFits false), calls go
 	// through and a later refusal is this row. When "the notes and
@@ -138,11 +138,15 @@ func TestWhenAnotherRestartIsWorthTrying(t *testing.T) {
 		{refusedAfterCalls: true, rescues: 2, decided: true},
 		{refusedAfterCalls: true, openingFits: false},
 		{refusedAfterCalls: true, carried: carriedNothing, retried: true},
-		{refusedAfterCalls: true, rescues: 7},
 	} {
 		if !restartHelps(f) {
 			t.Errorf("%+v: no restart, though the conversation grew to the window", f)
 		}
+	}
+	// Past one more than the bound, those restarts stop too, and the user is
+	// told the conversation reached the window again.
+	if f := (restartFacts{refusedAfterCalls: true, rescues: restartRescueMax + 1}); restartHelps(f) || causeOf(f) != fullGrew {
+		t.Errorf("%+v: restarted, or told cause %d, after the restarts in a row were spent", f, causeOf(f))
 	}
 }
 
