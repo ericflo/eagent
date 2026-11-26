@@ -102,11 +102,6 @@ func (r *Runtime) pollInbox() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if r.ending {
-			// A stop, a quit or a record that could not be written ended
-			// the session: what is still here is the next run's.
-			return
-		}
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -137,14 +132,15 @@ func (r *Runtime) pollInbox() {
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
+		case r.ending:
+			// Words that came after a stop or a quit in this poll: the
+			// ending session would pass them on and close before anything
+			// is typed. They stay for the next run, which takes them as it
+			// takes a file left by a cut.
+			continue
 		default:
 			r.handleInboxFile(msg, id)
-			if !r.ending {
-				// When the session ended taking it, the write may have
-				// failed: the file stays, and the next run takes it or,
-				// finding its id on the record, removes it.
-				_ = os.Remove(path)
-			}
+			_ = os.Remove(path)
 		}
 		if id != "" {
 			if r.inboxTaken == nil {

@@ -42,17 +42,61 @@ func TestR9InboxWordsAfterAStopAreLeftForTheNextRun(t *testing.T) {
 	}
 }
 
-// Second half: the record cannot be written when a message from eagent
-// serve is taken. Its file stays, so the message is not lost.
-func TestR9InboxWordsWhoseWriteFailedKeepTheirFile(t *testing.T) {
-	rt := r8cNew(t, &fakeUI{})
-	r8cPost(t, rt, InboxMessage{Type: "message", Text: "r9 kept", From: "web"})
+// A message for the running agent taken while the record cannot be
+// written: the ending run still types it, so its file goes as before and
+// the next run does not type it again (a reader proved that keeping the
+// file typed it twice).
+func TestR9InboxWordsWhoseWriteFailedAreTypedOnce(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("ok")
+	useFakeRelays(t, seat)
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const text = "r9 please run the tests"
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: text, From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	path := rt.sess.Path
 	rt.sess.Close()
 	rt.pollInbox()
 	if !rt.ending {
 		t.Fatalf("a failed write did not end the session")
 	}
-	if entries, _ := os.ReadDir(InboxDir(rt.sess.Path)); len(entries) != 1 {
-		t.Fatalf("inbox after a failed write: %v, want the message's file", entries)
+	waitFor(t, "the ending run to type it", func() bool { return len(seat.sentTexts()) == 1 })
+	close(rt.closed)
+	if entries, _ := os.ReadDir(InboxDir(path)); len(entries) != 0 {
+		t.Fatalf("inbox after the failed write: %v, want it empty", entries)
+	}
+	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt2.sess.Close()
+	rt2.pollInbox()
+	if got := r8cWords(rt2, event.UserMessage, text); len(got) != 0 {
+		t.Fatalf("the next run took the message again: %q", got)
+	}
+}
+
+// A command after a stop in the same poll is carried out by the ending
+// run, as before: only words are left for the next one.
+func TestR9InboxACommandAfterAStopIsNotLeft(t *testing.T) {
+	ui := &r8cHelpUI{}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "stop", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: "/help"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.pollInbox()
+	if !rt.ending || len(ui.files) != 1 {
+		t.Fatalf("ending %v, /help carried out %d times; want the stop and /help once", rt.ending, len(ui.files))
+	}
+	if entries, _ := os.ReadDir(ui.dir); len(entries) != 0 {
+		t.Fatalf("files left: %v", entries)
 	}
 }
