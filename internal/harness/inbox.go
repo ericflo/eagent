@@ -87,6 +87,24 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	return err
 }
 
+// Take writes msg into the session's inbox and reads the inbox at once, on
+// the run's loop, unless the run has begun to end: then nothing is
+// written, and Take reports false. Handed over this way, words are taken
+// before Take returns or not at all; a file left from outside can come
+// after an ending run's last look.
+func (r *Runtime) Take(msg InboxMessage) (took bool, err error) {
+	r.sync(func() {
+		if r.ending {
+			return
+		}
+		if err = PostInbox(r.sess.Path, msg); err == nil {
+			took = true
+			r.pollInbox()
+		}
+	})
+	return took, err
+}
+
 // pollInbox drains pending inbox files. Loop goroutine only.
 func (r *Runtime) pollInbox() {
 	dir := InboxDir(r.sess.Path)

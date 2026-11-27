@@ -128,6 +128,64 @@ func k1Refused(t *testing.T, s *Server, info store.Info, w *httptest.ResponseRec
 	}
 }
 
+// k1Terminal is a run's UI with a terminal the test types into. It tells
+// the test each time the loop has looked at what is due (and so, the first
+// time, has read its inbox once).
+type k1Terminal struct {
+	*webUI
+	in     chan string
+	looked chan struct{}
+}
+
+func (u k1Terminal) Input() <-chan string { return u.in }
+func (u k1Terminal) Idle(bool) {
+	select {
+	case u.looked <- struct{}{}:
+	default:
+	}
+}
+
+// D3: words from the browser for a session this server runs, which is
+// then stopped before its next look at its inbox (half a second on), are
+// on its record: the run took them before the browser was answered. They
+// used to stay in its inbox, answered "delivered", with nothing to bring
+// a run to read them; and the session the user stopped stays stopped.
+func TestK1WordsForARunHereThatThenStopsAreTaken(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := k1Model(t, s, project)
+	info := r11Session(t, project)
+	ui := k1Terminal{newWebUI(func(string, ...any) {}), make(chan string, 1), make(chan struct{}, 1)}
+	rt, err := harness.Resume(cfg, harness.Options{Project: project, Interactive: true}, ui, info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.run(rt, ui.webUI)
+	<-ui.looked // its first look at the inbox is behind it
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	const words = "one more thing"
+	how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: words, From: "web"}, func() error {
+		t.Error("a running session was resumed")
+		return nil
+	})
+	if err != nil || how != "inbox" {
+		t.Fatalf("delivered %q, %v; want the running session", how, err)
+	}
+	ui.in <- "/quit" // the user stops it, before its next look at its inbox
+	<-h.done
+	if n := k1Recorded(t, info, words); n != 1 {
+		left, _ := os.ReadDir(harness.InboxDir(info.Path))
+		t.Fatalf("the words are on record %d times; %d file(s) left in the inbox of a run that has stopped", n, len(left))
+	}
+	if left, _ := os.ReadDir(harness.InboxDir(info.Path)); len(left) != 0 {
+		t.Fatalf("%d file(s) left in the inbox", len(left))
+	}
+	if s.isHosted(info.ID) || alive(info.Path) {
+		t.Fatal("the session the user stopped is running again")
+	}
+}
+
 // D4: a message from the browser for a stopped session once the server's
 // shutdown has begun starts no run: the process exit would kill it. It is
 // refused (503), and the page keeps the words.

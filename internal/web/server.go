@@ -581,21 +581,27 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // (resume). One at a time: of two requests for a stopped session the
 // second waits for the first's resume and then goes to the inbox of the
 // run it started, where it used to fail on the session's lock. A run here
-// that is ending reads its inbox no more: they wait for it to stop (its
-// shutdown is bounded) and resume the session then, and wait again when
-// the run another request resumed it with meanwhile is ending too. Once
-// the server's shutdown has begun they resume nothing (the exit would kill
-// the run): that is errStopping, and the page keeps the words.
+// takes them on its own loop (Take), so they are on its record before the
+// answer; one that is ending reads its inbox no more: they wait for it to
+// stop (its shutdown is bounded) and resume the session then, and wait
+// again when the run another request resumed it with meanwhile is ending
+// too. Once the server's shutdown has begun they resume nothing (the exit
+// would kill the run): that is errStopping, and the page keeps the words.
 func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
 	s.resuming.Lock()
 	for {
 		s.mu.Lock()
 		h := s.running[info.ID]
 		s.mu.Unlock()
-		if h == nil || h.rt == nil || !h.rt.Ending() {
+		if h == nil || h.rt == nil {
 			break
 		}
 		s.resuming.Unlock()
+		if !h.rt.Ending() {
+			if took, err := h.rt.Take(msg); took || err != nil {
+				return "inbox", err
+			}
+		}
 		<-h.done
 		s.resuming.Lock()
 	}
