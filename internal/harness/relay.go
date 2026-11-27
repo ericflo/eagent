@@ -72,6 +72,11 @@ type relaySeats struct {
 	// drained holds, for each seat watched, what is closed once all it saw
 	// is on the record: its events have ended and the last was recorded.
 	drained map[relaySeat]chan struct{}
+	// overtaken are the starts whose agent came up after the loop ended,
+	// in that order, for finish to record one at a time before the
+	// session's end (abandonLaunch); late once finish has taken them.
+	overtaken []*relayLaunch
+	late      bool
 }
 
 type relayActivity struct {
@@ -921,21 +926,30 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	return job.name, nil
 }
 
-// abandonLaunch is a start whose result could not be recorded because the
-// session ended: the new agent is stopped, as nothing would watch it, and
-// whoever waits on a send held for it is told. The held sends stay on the
-// job, which stays among the launches, for finish to record as not sent.
+// abandonLaunch is a start whose result the loop could not take because
+// the session ended. One whose agent is up is handed to finish (overtaken),
+// which records it as the loop would have, one at a time and before its
+// own writes; like every agent at a quit it outlives the session, for a
+// resume to reattach to. Any other, or one that comes up after finish has
+// stopped waiting for starts (relayOpsGrace), cannot be recorded: its
+// agent is stopped, as nothing would watch it or know it runs, and whoever
+// waits on a send held for it is told. The held sends stay on the job,
+// which stays among the launches, for finish to record as not sent.
 // Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
 	if job.err == nil {
-		// The new agent is up. Like every agent at a quit it outlives the
-		// session (closeRelays only stops watching): it is recorded as
-		// started, as the loop would have, for a resume to reattach to.
-		// The loop has ended and finish writes nothing until this start
-		// is done (relayOps), so it is recorded here. A start Stop session
-		// stopped is still killed there (finishLaunch).
-		_, _ = r.finishLaunch(job)
-		return
+		r.relays.mu.Lock()
+		late := r.relays.late
+		if !late {
+			r.relays.overtaken = append(r.relays.overtaken, job)
+		}
+		r.relays.mu.Unlock()
+		if !late {
+			r.relayOps.Done()
+			return
+		}
+		r.ui.Log("relay %s: it came up after the session had ended and is stopped", job.name)
+		_ = job.seat.Kill()
 	}
 	defer r.relayOps.Done()
 	r.relays.mu.Lock()
