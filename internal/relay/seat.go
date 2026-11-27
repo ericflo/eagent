@@ -564,7 +564,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			s.mu.Lock()
 			closed = s.closed
 			s.mu.Unlock()
-			if err == nil && closed && s.spec.Spool != "" && unspool(s.spec.Spool, id) && s.untrack(id) {
+			if err == nil && closed && s.spec.Spool != "" && Unspool(s.spec.Spool, id) && s.untrack(id) {
 				// Stopped during the hand-over, before a hook took it
 				// from the spool: taken back, so nothing is held.
 				return "", ErrClosed
@@ -974,10 +974,12 @@ func spoolWaits(names []string, id string) bool {
 	return false
 }
 
-// unspool takes held message id back from the spool, with the rename a hook
+// Unspool takes held message id back from the spool, with the rename a hook
 // claims it with, and says whether it could: false once a hook or a sweep
-// has claimed it.
-func unspool(spool, id string) bool {
+// has claimed it. The seat does it for a hand-over its stop cut short; the
+// harness for an agent that is to be started again, whose launch clears
+// the spool. Taken back, the message certainly did not go.
+func Unspool(spool, id string) bool {
 	for _, n := range spoolNames(spool) {
 		path := filepath.Join(spool, n)
 		if !strings.HasPrefix(n, ".") && strings.HasSuffix(n, "-"+id+".txt") && os.Rename(path, path+".taken") == nil {

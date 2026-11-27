@@ -191,6 +191,10 @@ type relayLaunch struct {
 	// (watchSeat), closed the loop's end. undrained: run went on without it.
 	oldDrained, closed <-chan struct{}
 	undrained          bool
+	// spooled, for a restart, are the messages the record holds for the
+	// replaced agent's turn end; takenBack those of them run took back,
+	// unclaimed, from the spool the launch clears (relay.Unspool).
+	spooled, takenBack []string
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -594,6 +598,13 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	job.replaces = replaces
 	if rel := r.st.Relays[replaces]; replaces != "" && rel != nil && rel.Active() {
 		job.wasActive = true
+		if replaces == job.name {
+			for _, s := range unresolvedSends(r.st, rel) {
+				if s.Mode == "after_turn" {
+					job.spooled = append(job.spooled, s.ID)
+				}
+			}
+		}
 	}
 	// Waited for at the session's end (finish), which must not exit while
 	// an agent is coming up; finishLaunch or abandonLaunch marks it done.
@@ -662,6 +673,14 @@ func (job *relayLaunch) run() {
 			job.undrained = true
 		}
 	}
+	// A message held for the old agent's turn end still waiting in the
+	// spool, which the launch clears, was never taken: taken back now, it
+	// is not sent (finishLaunch).
+	for _, id := range job.spooled {
+		if relay.Unspool(job.spec.Spool, id) {
+			job.takenBack = append(job.takenBack, id)
+		}
+	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
 
@@ -690,6 +709,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	r.relays.mu.Unlock()
 	if job.undrained {
 		r.ui.Log("relay %s: the agent it replaces had not said all it saw after %s; what it said after that is not recorded", firstNonEmpty(job.replaces, job.name), oldSendSettle)
+	}
+	for _, id := range job.takenBack {
+		if !r.hasOutcome(id) {
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, job.replaces), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
+		}
 	}
 	err = job.err
 	if err == nil {
