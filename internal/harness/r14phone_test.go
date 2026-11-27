@@ -307,3 +307,103 @@ func TestR14AMessageAnEarlierRunTookIsNotTakenAgainAfterALostAnchor(t *testing.T
 		}
 	}
 }
+
+// r14AskedAgain is a session on a service that keeps no client keys: it
+// asks its question on the phone and stops, and is resumed (interactive
+// or not); the resume asks the question again on a second card. It
+// returns once the phone has done everything the ask queued, with the
+// first card's id.
+func r14AskedAgain(t *testing.T, fp *phoneFake, interactive bool) (*phoneRig, string) {
+	t.Helper()
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r5AskedAndStopped(t, fp)
+	g.resume(Options{Interactive: interactive})
+	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	r14Drained(t, g)
+	var first event.PhoneQuestionData
+	_ = g.events(event.PhoneQuestion)[0].Decode(&first)
+	return g, first.CardID
+}
+
+// r14Status is a card's status on the service.
+func r14Status(fp *phoneFake, fid string) string {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	s, _ := fp.questions[fid]["status"].(string)
+	return s
+}
+
+// Finding 14 of the fourteenth review: on a service that keeps no client
+// keys, the question asked again on a resume stands on a new card beside
+// the earlier one. The earlier card is withdrawn then, so one card of the
+// question is open, and a dismissal on it can no longer go unseen while
+// the person's next words are taken as the answer.
+func TestR14AQuestionAskedAgainWithNoKeyWithdrawsItsEarlierCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g, first := r14AskedAgain(t, fp, false)
+	if s := r14Status(fp, first); s != "pending" {
+		if s != "cancelled" {
+			t.Fatalf("the earlier card is %q, want it withdrawn", s)
+		}
+		return
+	}
+	// The earlier card is still up: the person closes it, then writes.
+	fp.mu.Lock()
+	q := fp.questions[first]
+	q["status"], q["answered_at"] = "dismissed", time.Now().UTC().Format(time.RFC3339Nano)
+	fp.cond.Broadcast()
+	fp.mu.Unlock()
+	fp.userReply("hold off and check the tests first")
+	waitFor(t, "the words to be recorded", func() bool {
+		return len(g.events(event.UserMessage))+len(g.events(event.UserAnswer)) > 1
+	})
+	t.Fatalf("the earlier card stayed open beside the new one; dismissals %d, answers %+v", len(g.events(event.UserDismiss)), r14Answers(g))
+}
+
+// Finding 14, a dismissal just before the withdrawal: the person closes
+// the earlier card while the resumed session is asking the question again.
+// The withdrawal finds the card dismissed, and that is their dismissal.
+func TestR14AnEarlierCardDismissedAsTheQuestionIsAskedAgainIsADismissal(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r5AskedAndStopped(t, fp)
+	var first event.PhoneQuestionData
+	_ = r13Logged(g, event.PhoneQuestion)[0].Decode(&first)
+	fp.mu.Lock()
+	fp.onAsk = func() {
+		fp.mu.Lock()
+		q := fp.questions[first.CardID]
+		q["status"], q["answered_at"] = "dismissed", time.Now().UTC().Format(time.RFC3339Nano)
+		fp.cond.Broadcast()
+		fp.mu.Unlock()
+	}
+	fp.mu.Unlock()
+	g.resume(Options{})
+	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	r14Drained(t, g)
+	g.rt.sync(func() {})
+	if n := len(r13Logged(g, event.UserDismiss)); n != 1 {
+		t.Fatalf("dismissals = %d, want the one on the earlier card", n)
+	}
+}
+
+// Finding 14, an answer: the question asked again on a second card is
+// answered at the terminal. Neither card stays open to be tapped and the
+// answer typed in a second time.
+func TestR14AnAnswerAfterAnAskWithNoKeyLeavesNoCardOpen(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g, first := r14AskedAgain(t, fp, true)
+	g.ui.input <- "blue"
+	waitFor(t, "the answer", func() bool { return len(r14Answers(g)) == 1 })
+	r14Drained(t, g)
+	if fp.pendingQuestions() == 0 {
+		return
+	}
+	fp.answerQuestion(first, "blue")
+	g.phoneWeighed(fp.lastMessageID())
+	waitFor(t, "the tap to be taken", func() bool { return len(g.events(event.UserMessage)) > 1 })
+	t.Fatalf("the earlier card stayed open after the answer; its tap was taken again: %d user messages", len(g.events(event.UserMessage)))
+}

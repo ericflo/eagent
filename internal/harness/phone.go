@@ -772,7 +772,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// dead ones to the card still open (reused, not doubled) or to the
 	// first free key. A resume costs one call, or two when the newest card
 	// died, plus one for each card the record lost.
-	newest := latestKeys(r.st, qid)
+	newest, earlier := latestKeys(r.st, qid), liveCards(r.st, qid)
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -864,6 +864,18 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			}
 			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID, ThreadID: cardThread, Key: cardKey}))
 		})
+		if key == "" {
+			// Asked with no client key, the question stands on a new card
+			// beside those the record holds: they are withdrawn, so one card
+			// of it is open, as on a service that keeps keys. One the person
+			// dismissed before this is their dismissal.
+			for _, fid := range earlier {
+				_ = p.client.Cancel(ctx, fid)
+				if c, err := p.client.Question(ctx, fid, 0); err == nil && c.Status == "dismissed" {
+					p.dismissed(r, qid)
+				}
+			}
+		}
 		if q.Status == "answered" {
 			// Answered on the phone while the session was stopped, and the
 			// answer did not reach the session as the answer (it came with

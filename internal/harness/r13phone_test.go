@@ -189,14 +189,28 @@ func r13Logged(g *phoneRig, ty string) []event.Event {
 
 // Finding 19: on a service that keeps no client keys, each run asks the
 // open question on a new card in the same thread, and the earlier card
-// stays open. The person dismisses the first card while the session is
-// stopped and writes a plain message, which resumes it: the dismissal is
-// found on that card, and the words are not taken as the answer.
+// stays open when the service does not let it be withdrawn. The person
+// dismisses the first card while the session is stopped and writes a
+// plain message, which resumes it: the dismissal is found on that card,
+// and the words are not taken as the answer.
 func TestR13EveryOpenCardIsCheckedWhenTheServiceKeepsNoKeys(t *testing.T) {
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	fp.features = []string{"activity", "dismiss", "attachments"}
 	g := r5AskedAndStopped(t, fp)
+	var asked event.PhoneQuestionData
+	_ = r13Logged(g, event.PhoneQuestion)[0].Decode(&asked)
+	keep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/questions/"+asked.CardID+"/cancel" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no question"}}`))
+			return
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(keep.Close)
+	g.cfg.Finalechat.BaseURL = keep.URL
 	g.resume(Options{})
 	waitFor(t, "the question on a second card", func() bool { return fp.pendingQuestions() == 2 })
 	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
