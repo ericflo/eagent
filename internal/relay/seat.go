@@ -2237,7 +2237,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		if changed {
 			// Said (blocked again, with what changed): a change waiting on
 			// the agent is looked at again only when the seat says something.
-			detail := "still no transcript activity, and it no longer shows it is at work; the screen ends:\n" + lastLines(screen, 10)
+			detail := "still no transcript activity, and it does not show it is at work; the screen ends:\n" + lastLines(screen, 10)
 			if work {
 				detail = "still no transcript activity; it shows it is at work again"
 			}

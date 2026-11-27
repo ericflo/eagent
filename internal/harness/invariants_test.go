@@ -117,6 +117,13 @@ func invAfterRun(r *Runtime) {
 	if live.busy || live.finalBusy || live.compacting {
 		return // stopped with a call still out: the record is behind on purpose
 	}
+	if r.recordFailed {
+		// An event could not be written, and the session ended for it: what
+		// the loop did between that write and its end (a model call that
+		// came back) is in its state and cannot be on the record. A resume
+		// starts from the record.
+		return
+	}
 	test := invTestOf(r.opts.Project)
 	if _, ok := invWritesState[test]; ok {
 		return

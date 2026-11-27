@@ -1464,12 +1464,19 @@ func (r *Runtime) settleEnded() {
 	for _, name := range names {
 		rel := r.st.Relays[name]
 		_, switched := handed[holder{rel.Name, rel.StartSeq}]
-		since := sentSinceEnd(r.st, rel)
-		var except []string
+		// Its end is the name's last: rel is who holds the name now.
+		var ended int64
+		for i := len(r.st.Events) - 1; i >= 0 && ended == 0; i-- {
+			var d event.RelayEndData
+			if ev := r.st.Events[i]; ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Name == name {
+				ended = ev.Seq
+			}
+		}
+		except := sentAfter(r.st, name, ended)
 		for _, s := range unresolvedSends(r.st, rel) {
 			d, ok := sendRecord(r.st, s.ID)
 			switch {
-			case since[s.ID]:
+			case slices.Contains(except, s.ID):
 				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for a start of the agent, and eagent stopped before the agent came up: it was never typed"}))
 			case switched && (!ok || d.From != "eagent"):
 				except = append(except, s.ID)
@@ -1479,33 +1486,22 @@ func (r *Runtime) settleEnded() {
 	}
 }
 
-// sentSinceEnd are the ids of the sends recorded to rel's name after rel's
-// own end (a stop, or a switch away): its agent had stopped, so none was
-// typed into it. Each is held for a start under the name, and the record
-// keeps it on the stopped relay too until that start is recorded (state
-// keepHeld reads the same order). Empty for a relay that has not ended.
-func sentSinceEnd(st *state.State, rel *state.Relay) map[string]bool {
-	if !rel.Ended {
-		return nil
-	}
-	since := map[string]bool{}
-	ended := false
-	for _, ev := range st.Events {
-		if ev.Seq <= rel.StartSeq || ev.Type != event.RelaySend && ev.Type != event.RelayMoved && ev.Type != event.RelayEnd {
-			continue
-		}
-		var d event.RelaySendData // a relay.end names its agent the same way
-		if ev.Decode(&d) != nil || d.Name != rel.Name {
-			continue
-		}
-		switch {
-		case ev.Type == event.RelayEnd:
-			ended = true // the first is rel's own
-		case ended:
-			since[d.ID] = true
+// sentAfter are the ids of the sends recorded to a relay's name after the
+// event at seq, the relay.end of the agent that held the name: that agent
+// had stopped, so none was typed into it. Each is held for a start under
+// the name and settled where it is typed, or not typed (the record keeps
+// it on the stopped relay too until that start is recorded: state
+// keepHeld). None for seq 0.
+func sentAfter(st *state.State, name string, seq int64) []string {
+	var ids []string
+	for i := len(st.Events) - 1; seq > 0 && i >= 0 && st.Events[i].Seq > seq; i-- {
+		ev := st.Events[i]
+		var d event.RelaySendData
+		if (ev.Type == event.RelaySend || ev.Type == event.RelayMoved) && ev.Decode(&d) == nil && d.Name == name {
+			ids = append(ids, d.ID)
 		}
 	}
-	return since
+	return ids
 }
 
 // settleExited reports, once, each send rel still waited on as not
@@ -1533,12 +1529,6 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		how = "was stopped"
 	case rel.State != "exited":
 		how = "was restarted"
-	}
-	// What was sent to the name once rel's agent had stopped is not that
-	// agent's: it is held for a start under the name, and settled where
-	// it is typed (or not typed).
-	for id := range sentSinceEnd(r.st, rel) {
-		queued[id] = true
 	}
 	r.relays.mu.Lock()
 	// The queues of rel's agents: once a start under the name has been
@@ -2380,6 +2370,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				// the session ends first, by finish.
 				cur := r.st.Relays[rel.Name]
 				settle := cur.Active() && r.relays.launch(rel.Name) == nil
+				var ended int64 // this stop's relay.end on the record
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
 					// The session's end waits for the kill, so the agent
@@ -2400,23 +2391,16 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 						after = func() {
 							// What this stop took out of use (cur, the record
 							// as it stood), and only that: a start under the
-							// name waits for this stop (stopping), and what it
-							// holds is its to type.
-							var held []string
-							r.relays.mu.Lock()
-							if job := r.relays.launching[name]; job != nil {
-								for _, h := range job.held {
-									held = append(held, h.id)
-								}
-							}
-							r.relays.mu.Unlock()
-							r.settleExited(cur, held...)
+							// name waits for this stop (stopping), and what was
+							// sent to the name since is that start's to type,
+							// whether it has typed it yet or not.
+							r.settleExited(cur, sentAfter(r.st, name, ended)...)
 						}
 					}
 					r.retire(rel.Name, current, cur, after)
 				}
 				r.stopLaunches(rel.Name, "stopped")
-				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
+				ended = r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")})).Seq
 				if settle && current == nil {
 					r.settleExited(cur)
 				}
