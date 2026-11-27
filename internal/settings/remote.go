@@ -698,34 +698,21 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
-	return s.prepare(p, grant, nil)
+	return s.prepare(p, grant, false, nil)
 }
 
-// prepare is Prepare. undoing is nil for a person's proposal, and for an
-// undo's reversal the file before the command it undoes. A person's pick of
-// a route's model, address or preset brings the rest of the route with it
-// (the summarizer's seed and routePicks); a reversal names every field it
-// puts back and writes those only. A reversal puts back what that file
-// held: a value it held is accepted where the choices offered now no
-// longer list it, and so is a route that pairs an address and a key
-// variable as that file or the configuration now does.
-func (s *Service) prepare(p control.Proposal, grant control.Grant, undoing map[string]any) (raw string, etag string, before RemoteView, err error) {
-	picks := undoing == nil
+// prepare is Prepare. A person's pick of a route's model, address or preset
+// brings the rest of the route with it (the summarizer's seed and
+// routePicks); an undo's reversal (undo) writes the fields it names and the
+// routes it puts back to null (nulls), and no other. Either file is checked
+// as a person's save of it is.
+func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nulls []string) (raw string, etag string, before RemoteView, err error) {
+	picks := !undo
 	before, err = s.RemoteSnapshot(grant)
 	if err != nil {
 		return
 	}
-	d := before.Descriptor
-	if !picks {
-		d.Fields = slices.Clone(d.Fields)
-		for i, f := range d.Fields {
-			v, held := pointerValue(undoing, f.Key)
-			if held && len(f.Shape.Enum) > 0 && slices.ContainsFunc(p.Edits, func(e control.Edit) bool { return e.Key == f.Key && e.Op == "set" && reflect.DeepEqual(e.Value, v) }) {
-				d.Fields[i].Shape.Enum = append(slices.Clone(f.Shape.Enum), v)
-			}
-		}
-	}
-	if err = p.Validate(d, grant); err != nil {
+	if err = p.Validate(before.Descriptor, grant); err != nil {
 		return
 	}
 	if p.ExpectedVersion != before.Snapshot.Version || p.Generation != "" {
@@ -772,6 +759,9 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undoing map[s
 		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
 	}
+	for _, key := range nulls {
+		setPointer(values, key, nil, false)
+	}
 	// Picks are compared with the layers the file builds on, which the
 	// summarizer's route above is seeded from: what the environment makes
 	// of a route is not the file's.
@@ -796,10 +786,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undoing map[s
 	if err != nil {
 		return
 	}
-	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil && !picks && s.pairedAsHeld(cfg, res.Effective, undoing) {
-		err = nil
-	}
-	if err != nil {
+	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil {
 		return
 	}
 	for _, problem := range cfg.Problems() {
@@ -812,37 +799,10 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undoing map[s
 	return
 }
 
-// pairedAsHeld says whether every route of cfg pairs its address and key
-// variable as a route of now, or of the file held (loaded over today's
-// layers), does.
-func (s *Service) pairedAsHeld(cfg, now config.Config, held map[string]any) bool {
-	raw, _ := json.Marshal(held)
-	var file map[string]json.RawMessage
-	_ = json.Unmarshal(raw, &file)
-	prior, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
-	if err != nil {
-		return false
-	}
-	pairs := map[[2]string]bool{}
-	each := func(c config.Config, f func([2]string) bool) bool {
-		for _, a := range configRoutes(c) {
-			for cur := &a; cur != nil; cur = cur.Fallback {
-				if !f([2]string{strings.TrimRight(cur.BaseURL, "/"), cur.APIKeyEnv}) {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	each(now, func(k [2]string) bool { pairs[k] = true; return true })
-	each(prior, func(k [2]string) bool { pairs[k] = true; return true })
-	return each(cfg, func(k [2]string) bool { return pairs[k] })
-}
-
 // routePicks gives a route whose model or base_url a proposal changes the
 // rest of what that model at that provider takes, the way a pick in the
 // local editor does: its protocol, key variable, an effort it accepts, and
-// the new model's context window (routePickFields). A field the proposal
+// the new model's context window. A field the proposal
 // sets itself, or one the connector may not write, is left as it is. A
 // model no list knows gets the provider's protocol and key variable when
 // the address changes, keeps the rest of the route, and its window becomes
@@ -986,12 +946,6 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	}
 	return nil
 }
-
-// routePickFields are the fields of a route routePicks may give values to.
-var routePickFields = []string{"protocol", "api_key_env", "reasoning_effort", "context_tokens"}
-
-// routeLeaves are the fields of a route of its own, without its fallback.
-var routeLeaves = []string{"protocol", "base_url", "model", "api_key_env", "reasoning_effort", "replay_reasoning", "max_tokens", "context_tokens"}
 
 func (s *Service) Apply(ctx context.Context, p control.Proposal, grant control.Grant) (config.SaveResult, RemoteView, error) {
 	serverEdits, savePreset, hasSavePreset, configEdits := SplitSpecialEdits(p)
