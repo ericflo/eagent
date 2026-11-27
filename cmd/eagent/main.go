@@ -1238,8 +1238,14 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		if len(args) < 1 {
 			return fail(errors.New("usage: eagent presets save NAME [description]"))
 		}
-		cfg, err := config.LoadBundle(project, preset, bundle)
-		if err != nil {
+		// What the files and the bundle say, never a value only a variable
+		// gives (as the saved presets of the settings do).
+		res := config.Resolve(project, preset, bundle)
+		if res.LoadError != "" {
+			return fail(errors.New(res.LoadError))
+		}
+		cfg := res.Layered
+		if err := cfg.Validate(); err != nil {
 			return fail(err)
 		}
 		cfg.Preset = ""
