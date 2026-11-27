@@ -1,7 +1,9 @@
 package harness
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -120,6 +122,108 @@ func TestR14AfterTheRestartsStopARefusedSecondCallWaitsLongerEachTime(t *testing
 	if said, made := r4Logged(s, "restarting the conversation from a dossier"), r6Dossiers(s); said != made {
 		t.Fatalf("said %d times that the conversation is restarted from a dossier, and %d restarts were made", said, made)
 	}
+}
+
+// Two new conversations in a row are past the restart size on their first
+// call, and the third is refused as too long after its lookup: that one
+// is restarted too, one past the bound on restarts in a row. The fourth is
+// past the restart size again, and the restarts stop. What the user is
+// told then about the window must hold when the window is reached: no
+// restart is made there, so none is promised, and the refusal there is
+// not said to come after a restart that was never made.
+func TestR14NoRestartAtTheWindowIsPromisedWhenNoneWillBeMade(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	const (
+		holding = iota
+		past    // every call is past the restart size
+		lookup  // a lookup, and the call after it refused as too long
+	)
+	var phase atomic.Int32
+	var limit, refusals atomic.Int64
+	var s *session
+	// send records a message for eagent with a picture: a request that
+	// sends one teaches no ratio (calibrate), neither from the sizes
+	// reported nor from a refusal, so the sizes stay those the provider
+	// reports.
+	send := func(i int) {
+		d := r6WithPictures(fmt.Sprintf("status %d?", i), 1, s)
+		s.rt.sync(func() { s.rt.userMessage(d) })
+	}
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch phase.Load() {
+		case past:
+			r := say("Noted.")
+			r.prompt = int(limit.Load()) + 5000
+			return r
+		case lookup:
+			if m[len(m)-1]["role"] == "tool" {
+				if refusals.Add(1) == 1 {
+					// A message arrives meanwhile, which the restart
+					// carries; the conversation it opens is past the
+					// restart size on its first call.
+					send(5)
+					phase.Store(past)
+				}
+				return r7TooLong
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"tests"}`)}}
+		}
+		return hold()
+	}
+	s = startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 200_000, 2048
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { limit.Store(int64(s.rt.rolloverTokens())) })
+	phase.Store(past)
+	for i := 1; i <= 3; i++ {
+		// The first restart, for size, and two for conversations past the
+		// restart size on their first call.
+		send(i)
+		r6Until(t, fmt.Sprintf("restart %d", i), func() bool { return r6Dossiers(s) >= i })
+	}
+	s.settled()
+	phase.Store(lookup)
+	send(4)
+	r6Until(t, "the user told the restarts stop", func() bool { return r6ToldFull(s) > 0 || r6Dossiers(s) > 4 })
+	var notice string
+	for _, m := range s.ui.said() {
+		if strings.HasPrefix(m, fullNotice) {
+			notice = m
+		}
+	}
+	if !strings.Contains(notice, "past my restart size on its very first call") {
+		t.Fatalf("restarts %d, and the user was told %q", r6Dossiers(s), notice)
+	}
+	promised := strings.Contains(notice, "when it reaches my model's window")
+	// The conversation reaches the window.
+	s.settled()
+	phase.Store(lookup)
+	send(6)
+	const after = "even after I restarted it"
+	r6Until(t, "a restart, or the user told the model refuses the conversation", func() bool {
+		return r6Dossiers(s) > 4 || r5Told(s, "My model refuses my conversation as too long") > 0
+	})
+	if restarted := r6Dossiers(s) > 4; promised && !restarted {
+		t.Fatalf("the user was promised a restart at the window, and none was made there (then told %q %d times): %q", after, r14Said(s, after), notice)
+	}
+}
+
+// r14Said counts what the user was told that contains text.
+func r14Said(s *session, text string) int {
+	n := 0
+	for _, m := range s.ui.said() {
+		if strings.Contains(m, text) {
+			n++
+		}
+	}
+	return n
 }
 
 // The same while a restart cannot be made (the file for the next

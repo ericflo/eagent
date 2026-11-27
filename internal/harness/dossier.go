@@ -413,6 +413,12 @@ func (r *Runtime) needsDossier() bool {
 					}
 				case fullAgain:
 					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting for that. I carry on with a conversation longer than it should be, which makes each answer slower and dearer, and restart it from my notes when it reaches my model's window. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
+					if !restartHelps(restartFacts{refusedAfterCalls: true, rescues: facts.rescues}) {
+						// The restarts in a row are past the bound even
+						// for one at the window (restartHelps): none is
+						// made there either.
+						text = fullNotice + ": after several restarts in a row, the new conversation was again past my restart size on its very first call, so I've stopped restarting. I carry on with a conversation longer than it should be, which makes each answer slower and dearer. When it reaches my model's window I can't restart it again; a model with a larger context, picked in this thread's settings, would take it then. Raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help too."
+					}
 				}
 				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
 			}
