@@ -143,31 +143,3 @@ func k4Restores(t *testing.T) *[]string {
 	}
 	return &replies
 }
-
-// The server runs a bundle that names the phone's server and token
-// variable; the project's own file names none. A restart brings a session
-// back with the reply that waited in its thread on that account.
-func TestK4ARestoreReadsTheThreadOnTheServesAccount(t *testing.T) {
-	s, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	t.Setenv("FINALECHAT_URL", "")
-	t.Setenv("FINALECHAT_TOKEN", "")
-	t.Setenv("K4_PHONE_TOKEN", "fc_fixture")
-	sess := newSession(t, project)
-	_ = sess.Close()
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "phone2"), []byte(`{"finalechat": {"base_url": "`+k4Phone(t)+`", "token_env": "K4_PHONE_TOKEN"}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s.running[sess.ID] = fakeHosted()
-	s.rememberHosted()
-	replies := k4Restores(t)
-	next := New(project, nil)
-	next.Bundle = "phone2"
-	next.restoreHosted(context.Background())
-	if len(*replies) != 1 || (*replies)[0] != "are you still there?" {
-		t.Fatalf("brought back with %q, want the reply on the serve's account", *replies)
-	}
-}

@@ -224,7 +224,7 @@ func TestSR8WebAPhoneReplyResumesTheSessionWithThePhoneOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
-	if fc, err := s.PhoneConfig(); err != nil || !fc.Wanted() {
+	if own, err := s.loadConfig("", ""); err != nil || !own.Finalechat.Wanted() {
 		t.Fatalf("setup: the server's phone is off (%v): the reply watcher would not act", err)
 	}
 	info := r11Session(t, project)

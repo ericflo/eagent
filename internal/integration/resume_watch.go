@@ -9,12 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -35,9 +33,6 @@ type PhoneMessage struct {
 	// session that takes the message records them refused (phone.refused),
 	// and its mirror tells the sender, as when it is running.
 	Refused []RefusedFile
-	// Account is the service (base URL) the reply was read on, for a
-	// restore that gives it back (ReleaseReply).
-	Account string
 }
 
 // RefusedFile is a file of a phone message that was not passed on, and the
@@ -119,22 +114,16 @@ type keptReply struct {
 	// Released: the restore gave it back (ReleaseReply); only this ends a
 	// hold on the same message.
 	Released bool `json:"released,omitempty"`
-	// Account is the service (base URL) the reply came from: only the
-	// connection to it retries it. Empty (written before the field): the
-	// project file's.
-	Account string `json:"account,omitempty"`
+	// (An "account" field, written for a while, is read and ignored: the
+	// watcher watches one account, the project file's.)
 }
 
-// AccountOf is accountOf, for other packages that compare phone services
-// the way the reply watcher does (a server's stop finding the account of a
-// session's thread).
-func AccountOf(baseURL string) string { return accountOf(baseURL) }
-
-// accountOf is the account a base URL names, as kept replies are compared
-// by it: the scheme and host lower-cased, localhost as 127.0.0.1, the
-// default port filled in, no trailing slash. Two spellings of one service
-// are one account.
-func accountOf(baseURL string) string {
+// AccountOf is the account a base URL names, for comparing two phone
+// services (a server's stop finding the account of a session's thread):
+// the scheme and host lower-cased, localhost as 127.0.0.1, the default
+// port filled in, no trailing slash. Two spellings of one service are one
+// account.
+func AccountOf(baseURL string) string {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || u.Host == "" {
 		return strings.ToLower(strings.TrimRight(baseURL, "/"))
@@ -175,7 +164,7 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) erro
 		if old, ok := kept[id]; ok && p.restored && old.Released {
 			continue // given back by its restore (ReleaseReply): the hold is over
 		}
-		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored, Released: p.released, Account: p.account}
+		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored, Released: p.released}
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
@@ -212,12 +201,12 @@ func (r *replyRetries) takeUp(project string) {
 			if !k.Restored && r.held(k.Thread, id, k.Released) {
 				continue // a restore's hold on the thread stays; its entry looks at the thread too
 			}
-			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored, account: k.Account})
+			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored})
 			continue
 		}
 		r.mu.Lock()
 		if _, ok := r.replies[id]; !ok {
-			r.replies[id] = pendingReply{thread: thread, msg: k.Message, since: k.Since, told: true, account: k.Account}
+			r.replies[id] = pendingReply{thread: thread, msg: k.Message, since: k.Since, told: true}
 		}
 		r.mu.Unlock()
 	}
@@ -231,24 +220,6 @@ type resumeWatcher struct {
 	retries *replyRetries
 	mu      sync.Mutex
 	handled map[string]time.Time // message ids acted on, or being acted on
-	// secondary: not the connection kept replies with no account (written
-	// before kept replies recorded one) belong to: the project file's, or
-	// the only one.
-	secondary bool
-	// live are the accounts the watcher's connections watch (accountOf).
-	live []string
-}
-
-// mine reports whether p is this connection's to retry: it came from this
-// connection's account; or, for the project file's connection, it has no
-// account or one no connection watches, so that no kept reply is left
-// with nobody to retry it.
-func (w *resumeWatcher) mine(p pendingReply) bool {
-	account := accountOf(p.account)
-	if p.account != "" && account == accountOf(w.client.BaseURL) {
-		return true
-	}
-	return !w.secondary && (p.account == "" || !slices.Contains(w.live, account))
 }
 
 // pendingReply is a reply whose session could not be resumed yet, or one
@@ -258,9 +229,8 @@ type pendingReply struct {
 	msg      finalechat.Message
 	since    time.Time
 	told     bool
-	restored bool   // keptReply.Restored
-	released bool   // keptReply.Released, as ReleaseReply writes it down
-	account  string // keptReply.Account
+	restored bool // keptReply.Restored
+	released bool // keptReply.Released, as ReleaseReply writes it down
 }
 
 // replyRetries outlives one connection to the event stream: a reply that
@@ -273,88 +243,23 @@ type replyRetries struct {
 // leaveWithWatcher writes m down, quietly, for the next sweep of whoever
 // holds the project's watch (this process or another), as a stopping
 // watcher writes down what it keeps.
-// restored says the restore resumes the session with m; account is the
-// service m came from ("" for the project file's).
-func leaveWithWatcher(project string, info store.Info, m finalechat.Message, restored bool, account string) error {
-	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now(), restored: restored, account: account}}}
+// restored says the restore resumes the session with m.
+func leaveWithWatcher(project string, info store.Info, m finalechat.Message, restored bool) error {
+	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now(), restored: restored}}}
 	return r.writeDown(project, func(string, ...any) {})
 }
 
-// hostPhone is the phone section of the configuration the host runs (its
-// server and token): the host's own when it gives one (web.Server's
-// PhoneConfig, which counts the serve's bundle and preset), else the
-// project's. The watcher watches its account besides the project file's.
-func hostPhone(project string, host ResumeHost) (config.Finalechat, error) {
-	if h, ok := host.(interface {
-		PhoneConfig() (config.Finalechat, error)
-	}); ok {
-		return h.PhoneConfig()
-	}
-	cfg, err := config.Load(project, "")
-	return cfg.Finalechat, err
-}
-
-// phoneAccount is the phone's account fc names, as a run's mirror finds it.
-func phoneAccount(fc config.Finalechat) (*finalechat.Client, error) {
-	if finalechat.Disabled() {
-		return nil, finalechat.ErrDisabled
-	}
-	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
-	if !ok {
-		return nil, fmt.Errorf("FinaleChat is not connected")
-	}
-	return client, nil
-}
-
-// watchResumes runs one connection to the event stream, sweeping first and
-// then every minute while it lasts, since the stream has no replay and a
-// busy server may drop an event for a subscriber.
+// watchResumes runs one connection to the event stream of the project
+// file's phone account (as main, whatever its enabled says), sweeping
+// first and then every minute while it lasts, since the stream has no
+// replay and a busy server may drop an event for a subscriber.
 func watchResumes(ctx context.Context, project string, host ResumeHost, retries *replyRetries, logf func(string, ...any)) error {
-	// The accounts watched, as main: the project file's (whatever its
-	// enabled says), and the one the host runs (its bundle or preset) when
-	// that names another. Whichever has a token.
-	var clients []*finalechat.Client
-	if c, err := settingsAccount(project); err == nil {
-		clients = append(clients, c)
+	client, err := settingsAccount(project)
+	if err != nil {
+		return err
 	}
-	if fc, err := hostPhone(project, host); err == nil {
-		if c, err := phoneAccount(fc); err == nil && (len(clients) == 0 || !sameAccount(clients[0], c)) {
-			clients = append(clients, c)
-		}
-	}
-	if len(clients) == 0 {
-		return fmt.Errorf("FinaleChat is not connected")
-	}
-	// One connection each; when one ends they all start again.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	errs := make(chan error, len(clients))
-	var live []string
-	for _, c := range clients {
-		live = append(live, accountOf(c.BaseURL))
-	}
-	for i, c := range clients {
-		go func() { errs <- watchAccount(ctx, project, host, c, i > 0, live, retries, logf) }()
-	}
-	err := <-errs
-	cancel()
-	for range clients[1:] {
-		<-errs
-	}
-	return err
-}
-
-// sameAccount reports whether two clients reach the same account.
-func sameAccount(a, b *finalechat.Client) bool {
-	return accountOf(a.BaseURL) == accountOf(b.BaseURL) && a.Token == b.Token
-}
-
-// watchAccount runs one connection to an account's event stream, sweeping
-// it first and then every minute while it lasts. secondary: see
-// resumeWatcher.
-func watchAccount(ctx context.Context, project string, host ResumeHost, client *finalechat.Client, secondary bool, live []string, retries *replyRetries, logf func(string, ...any)) error {
 	client.UserAgent = "eagent-resume/1"
-	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}, secondary: secondary, live: live}
+	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}}
 	w.sweep(ctx)
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	defer stopSweeps()
@@ -568,7 +473,7 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	if err != nil || !ReadPhoneLedger(evs).Keeps {
 		return
 	}
-	w.retries.keepQuietly(pendingReply{thread: thread, msg: m, since: time.Now(), account: accountOf(w.client.BaseURL)})
+	w.retries.keepQuietly(pendingReply{thread: thread, msg: m, since: time.Now()})
 }
 
 // held reports whether the thread's quiet entry is a restore's (restored)
@@ -616,7 +521,7 @@ func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread
 	w.retries.mu.Lock()
 	p, ok := w.retries.replies[m.ID]
 	if !ok {
-		p = pendingReply{thread: thread, msg: m, since: time.Now(), account: accountOf(w.client.BaseURL)}
+		p = pendingReply{thread: thread, msg: m, since: time.Now()}
 	}
 	tell := !p.told
 	p.told = true
@@ -654,9 +559,6 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 	for _, p := range pending {
 		if ctx.Err() != nil {
 			return
-		}
-		if !w.mine(p) {
-			continue // another account's: its own connection retries it
 		}
 		if p.restored && w.restoring(p) {
 			// The restore that left it has not resumed the session with
@@ -768,24 +670,9 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 // Whoever resumes the session passes it as the prompt; the session's poll
 // reads on after it and takes the rest in order. ok is false when there is
 // none, or no phone; err when the thread could not be read. The phone is
-// the project's own (PendingReplyIn takes the one the session resumes on).
+// the project file's account, as the reply watcher watches.
 func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMessage, bool, error) {
-	cfg, err := config.Load(project, "")
-	if err != nil {
-		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
-	}
-	return PendingReplyIn(ctx, cfg.Finalechat, project, info)
-}
-
-// PendingReplyIn is PendingReply on the phone account fc names (the serve's
-// bundle or preset over the project's), the project file's when fc names
-// none with a token, whatever either says of enabled, as the reply
-// watcher watches.
-func PendingReplyIn(ctx context.Context, fc config.Finalechat, project string, info store.Info) (PhoneMessage, bool, error) {
-	client, err := phoneAccount(fc)
-	if err != nil {
-		client, err = settingsAccount(project)
-	}
+	client, err := settingsAccount(project)
 	if err != nil {
 		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
 	}
@@ -796,7 +683,7 @@ func PendingReplyIn(ctx context.Context, fc config.Finalechat, project string, i
 	if !ok {
 		return PhoneMessage{}, false, nil
 	}
-	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta, Account: accountOf(client.BaseURL)}
+	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
 		if errors.Is(err, finalechat.ErrTooLarge) {
@@ -822,7 +709,7 @@ func PendingReplyIn(ctx context.Context, fc config.Finalechat, project string, i
 	// gets the error, as for a notice that could not be posted. A watcher
 	// that takes it up before the restore has started the session leaves
 	// the session to the restore (retryPending).
-	if err := leaveWithWatcher(project, info, last, true, msg.Account); err != nil {
+	if err := leaveWithWatcher(project, info, last, true); err != nil {
 		return PhoneMessage{}, false, fmt.Errorf("%w: %v", ErrHandOver, err)
 	}
 	// Also a message whose files were all refused: the session takes it
@@ -842,20 +729,7 @@ func LeftForNextRun(project, sessionID string, left bool, logf func(string, ...a
 		return
 	}
 	ext := "eagent:" + sessionID
-	// The service the session's thread is on, as its record names it
-	// (phone.thread); none named: the project file's.
-	account := ""
-	if info, err := store.Resolve(store.Root(project), sessionID); err == nil {
-		if evs, err := store.Read(info.Path); err == nil {
-			for _, ev := range evs {
-				var d event.PhoneThreadData
-				if ev.Type == event.PhoneThread && ev.Decode(&d) == nil && d.BaseURL != "" {
-					account = accountOf(d.BaseURL)
-				}
-			}
-		}
-	}
-	if err := leaveWithWatcher(project, store.Info{ID: sessionID}, finalechat.Message{ID: ext}, false, account); err != nil {
+	if err := leaveWithWatcher(project, store.Info{ID: sessionID}, finalechat.Message{ID: ext}, false); err != nil {
 		logf("finalechat: the thread could not be noted for the reply watcher (%v), so a message sent from the phone as the session stopped may wait unread until the next one", err)
 	}
 }
@@ -873,7 +747,7 @@ func ReleaseReply(project string, info store.Info, msg PhoneMessage) error {
 	if msg.ID == "" {
 		return nil
 	}
-	r := &replyRetries{replies: map[string]pendingReply{msg.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: finalechat.Message{ID: msg.ID}, since: time.Now(), released: true, account: msg.Account}}}
+	r := &replyRetries{replies: map[string]pendingReply{msg.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: finalechat.Message{ID: msg.ID}, since: time.Now(), released: true}}}
 	return r.writeDown(project, func(string, ...any) {})
 }
 
