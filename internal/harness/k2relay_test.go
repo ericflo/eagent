@@ -279,6 +279,7 @@ func TestK2AHeldSendGoesToTheAgentANewerChangeBringsUp(t *testing.T) {
 	if got := last.sentTexts(); got[0] != "fix the flaky test" {
 		t.Fatalf("the last agent got %q", got)
 	}
+	waitFor(t, "its arrival recorded", func() bool { return len(deliveredFor(rt, id)) > 0 })
 	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK {
 		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
 	}

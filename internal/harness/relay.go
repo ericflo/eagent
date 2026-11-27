@@ -1029,9 +1029,9 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 	case relay.KindState:
 		if cur := r.st.Relays[name]; cur != nil && cur.State == ev.State && ev.Detail == "" {
 			if ev.State == "idle" {
-				// Idle on the record already (its turn ended while its
-				// seat held it blocked): a change that waited for the
-				// seat applies now.
+				// Idle on the record already (its turn ended while a
+				// dialog it reports held it): a change that waited for
+				// the dialog applies now.
 				r.applyWaitingRepick(name)
 			}
 			return

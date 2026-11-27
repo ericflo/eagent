@@ -3,6 +3,7 @@ package harness
 import (
 	"fmt"
 	"maps"
+	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
@@ -112,7 +113,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
-	if held := r.seatBlocked(name); rel.State == "working" || held {
+	if held := r.dialogHolds(rel); rel.State == "working" || held {
 		if r.relayRepick == nil {
 			r.relayRepick = map[string]relayPick{}
 		}
@@ -120,7 +121,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
 		if held {
-			return rel.Who() + " is blocked (something on its screen waits for an answer, or it has gone quiet in a turn); it starts again with " + r.pickText(rel, pick) + " once that is over and it is between turns, on the same conversation.", nil
+			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen); it starts again with " + r.pickText(rel, pick) + " once that is answered and it is between turns, on the same conversation.", nil
 		}
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
@@ -198,18 +199,25 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...hel
 	return nil
 }
 
-// seatBlocked says whether the relay's terminal holds its agent blocked
-// now: on a dialog (pi's holds it through a turn end it writes under one,
-// which the record takes as idle), quiet in a turn, or a start not yet
-// ready. No change starts it again then: the record's state alone cannot
-// say so. Loop goroutine.
-func (r *Runtime) seatBlocked(name string) bool {
-	seat := r.relays.get(name)
-	return seat != nil && seat.Snapshot().State == "blocked"
+// dialogMark is how a seat names a dialog the agent itself reports in the
+// detail of the blocked state it records (relay's reportDialog: "Pi is
+// waiting on a dialog: …"). It blocks the seat for no other reason.
+const dialogMark = " is waiting on a dialog: "
+
+// dialogHolds says whether a dialog the agent reports holds it now: its
+// terminal says it is blocked, and the last state the record has from it
+// was that dialog (a turn the agent ends under it leaves the record idle,
+// with that detail). No change starts it again then: the record's state
+// alone cannot say so. An agent blocked for a slow start or for going
+// quiet in a turn is not held: a change starts it again at once, as a
+// stuck agent may need. Loop goroutine.
+func (r *Runtime) dialogHolds(rel *state.Relay) bool {
+	seat := r.relays.get(rel.Name)
+	return seat != nil && strings.Contains(rel.Detail, dialogMark) && seat.Snapshot().State == "blocked"
 }
 
 // applyWaitingRepick starts a relay again with a change that waited for its
-// turn to end, unless its seat holds it blocked. Loop goroutine.
+// turn to end, unless a dialog the agent reports holds it. Loop goroutine.
 func (r *Runtime) applyWaitingRepick(name string) {
 	pick, ok := r.relayRepick[name]
 	rel := r.st.Relays[name]
@@ -224,7 +232,7 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	if r.relays.launch(name) != nil {
 		return // a start under way applies it when it is up
 	}
-	if r.seatBlocked(name) {
+	if r.dialogHolds(rel) {
 		return // applied when its seat says it is idle
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
