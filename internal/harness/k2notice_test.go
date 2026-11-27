@@ -134,11 +134,18 @@ func k2Batch(t *testing.T, prompt string, brain func(string, []map[string]any) r
 }
 
 // A session with no terminal stops its agent, and from then on every
-// turn's first call comes back and the call after it fails (400). The
-// model answers each turn, so the session is not one whose model is down:
-// it does not end in eagent's own closing words with exit 2, but tries
-// again after the wait, as a session with an agent would.
-func TestK2ABatchSessionWhoseModelAnswersEachTurnIsNotEndedAsDown(t *testing.T) {
+// turn's first call comes back and the call after it fails (400). Nothing
+// keeps it open, so after two failed looks in a row it ends as down (exit
+// 2) rather than pay for a look an hour for ever. Its words are true for
+// it: its calls kept failing partway, not a model that cannot be reached,
+// and nothing promises a retry it will not make.
+//
+// This test first held (RV15) that such a session is not ended as one
+// whose model is down while the model answers each turn: then it would
+// have closed in words that called a model which answers unreachable. The
+// words still may not; the ending is the coordinator's rule of the sixth
+// self-review.
+func TestK2ABatchSessionWhoseModelAnswersEachTurnEndsAsDownInTrueWords(t *testing.T) {
 	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
 	var calls atomic.Int32
 	_, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
@@ -147,6 +154,38 @@ func TestK2ABatchSessionWhoseModelAnswersEachTurnIsNotEndedAsDown(t *testing.T) 
 			return k1BadRequest
 		case calls.Add(1) == 1:
 			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
+		}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"build"}`)}}
+	})
+	var code int
+	select {
+	case code = <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q", ui.said())
+	}
+	var closing string
+	for _, m := range ui.said() {
+		if strings.HasPrefix(m, failingNotice) || strings.Contains(m, "I keep trying") || strings.Contains(m, "can't reach") {
+			t.Fatalf("told %q, and the session ended", m)
+		}
+		if strings.HasPrefix(m, "This session is ending and I could not write a proper closing report") {
+			closing = m
+		}
+	}
+	if code != 2 || !strings.Contains(closing, "kept failing partway through my looks") {
+		t.Fatalf("exit %d, closing words %q; want exit 2 and words that say its calls kept failing partway", code, closing)
+	}
+}
+
+// The same failures in a session something keeps open (its agent still
+// runs): it keeps trying after the wait, and tells the user its calls keep
+// failing, which is true, and that it keeps trying, which it does.
+func TestK2AKeptOpenBatchSessionWhoseModelAnswersEachTurnKeepsTrying(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+	_, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if m[len(m)-1]["role"] == "tool" {
+			return k1BadRequest
 		}
 		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"build"}`)}}
 	})
@@ -167,12 +206,15 @@ func TestK2ABatchSessionWhoseModelAnswersEachTurnIsNotEndedAsDown(t *testing.T) 
 	select {
 	case code := <-done:
 		done <- code
-		t.Fatalf("the session ended (exit %d) while its model answered each turn; said %q", code, ui.said())
+		t.Fatalf("the session ended (exit %d) while its agent ran; said %q", code, ui.said())
 	case <-time.After(10 * loopPoll):
 	}
 	for _, m := range ui.said() {
-		if strings.HasPrefix(m, "This session is ending and I could not write a proper closing report") {
-			t.Fatalf("closed as one whose model is down: %q", m)
+		if strings.HasPrefix(m, failingNotice) && !strings.Contains(m, "I keep trying") {
+			t.Fatalf("told %q", m)
+		}
+		if strings.HasPrefix(m, "This session is ending") {
+			t.Fatalf("closed while its agent ran: %q", m)
 		}
 	}
 }

@@ -1453,12 +1453,34 @@ func (r *Runtime) stillClosing() bool {
 	return (r.turns.finalAsked || r.summary.final) && !kept && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
+// downWhy says why a session ends as down, from the record: its calls
+// kept failing, partway through its looks when a call of the look that
+// failed last came back first (lastFailedAnswered), which is no model
+// that cannot be reached. Loop goroutine.
+func (r *Runtime) downWhy() string {
+	why := "My calls to my own model kept failing"
+	if r.lastFailedAnswered() {
+		why += " partway through my looks"
+	}
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		var d event.ErrorData
+		if ev := r.st.Events[i]; ev.Type == event.Error && ev.Decode(&d) == nil && d.Where == event.ActorEagent {
+			return why + " (" + shortErr(errors.New(d.Text)) + ")."
+		}
+	}
+	return why + "."
+}
+
 // fallbackFinal makes sure a session with no terminal does not end in
 // silence when the model could not give the closing word: eagent says
 // where things stand in its own words. Loop goroutine.
 func (r *Runtime) fallbackFinal() {
 	var b strings.Builder
 	b.WriteString("This session is ending and I could not write a proper closing report.")
+	if r.turns.failures >= 2 && r.endsDown() {
+		// It ends as down (maybeEnd): it says why, in words true for it.
+		b.WriteString(" " + r.downWhy())
+	}
 	for _, name := range r.st.RelayOrder {
 		rel := r.st.Relays[name]
 		if rel == nil || strings.TrimSpace(rel.LastTurn) == "" {
@@ -1659,12 +1681,12 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
-		if (!answered || r.stillClosing()) && r.endsDown() {
+		if r.endsDown() {
 			// A session with no terminal that nothing keeps open ends on
-			// this as one whose model is down, in its own words
-			// (maybeEnd): it does not keep trying, nor keep what is
-			// written for an answer, so it does not say so. One that is
-			// ending does so whatever came back first (maybeEnd's down).
+			// this as one whose model is down, whatever came back first,
+			// in its own words (maybeEnd, fallbackFinal): it does not keep
+			// trying, nor keep what is written for an answer, so it does
+			// not say so.
 			return
 		}
 		// Unless the restart could not be made (its file could not be
