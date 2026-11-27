@@ -171,6 +171,10 @@ type Runtime struct {
 	// stopped, so the process never exits with an agent coming up or going
 	// down that the record does not account for. Added to on the loop only.
 	relayOps sync.WaitGroup
+	// stopSettles are closed once each relay Stop session stopped is
+	// settled, after its seat has drained (stopSession); finish runs the
+	// loop's queue until they are. Loop-owned, then finish's.
+	stopSettles []chan struct{}
 
 	turns          turnState             // the model loop (loop.go); loop-owned
 	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
@@ -1296,6 +1300,20 @@ drain:
 		case <-deadline.C:
 			r.ui.Log("a model call did not stop in time")
 			break drain
+		}
+	}
+	// Stop session: each relay it stopped is settled once all its seat saw
+	// is on the record; that news and the settle come through the loop's
+	// queue, run here (the wait for the drain is bounded: stopSession).
+	for _, settled := range r.stopSettles {
+	settle:
+		for {
+			select {
+			case fn := <-r.loop:
+				fn()
+			case <-settled:
+				break settle
+			}
 		}
 	}
 	close(r.closed)

@@ -431,5 +431,7 @@ func TestK1ASendTypedIntoAnAgentStopSessionStopsIsSettledOnce(t *testing.T) {
 	rt := newLaunchRuntime(t)
 	id := k1Typed(t, rt, seat)
 	rt.sync(func() { rt.stopSession("stopped from the app") })
+	// Settled once the stopped seat has drained (SR4-3), as at a stop.
+	waitFor(t, "the send settled", func() bool { return len(deliveredFor(rt, id)) > 0 })
 	k1StoppedOnce(t, rt, id)
 }

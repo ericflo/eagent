@@ -1118,6 +1118,13 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 					r.relays.mu.Unlock()
 					ours = job != nil && job.old == seat || stopping
 				}
+				if !ours && ev.Kind == relay.KindInner {
+					// A move the agent made before a stop ended it (pi's
+					// /new): a later restart opens that session.
+					r.relays.mu.Lock()
+					ours = r.relays.stopping[name] != nil
+					r.relays.mu.Unlock()
+				}
 				if job := r.relays.launch(name); !ours && ev.Kind == relay.KindInner && job != nil && job.old == seat && job.replaces == job.name {
 					// The agent a restart replaces moved to another session
 					// of its own (pi's /new) before it was stopped: the
@@ -1148,7 +1155,14 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 // onRelayEvent records what a seat saw. Loop goroutine only.
 func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 	if r.ending {
-		return
+		// Only what a relay Stop session is stopping said last of its own
+		// sends and session, before finish settles it (stopSettles).
+		r.relays.mu.Lock()
+		stopping := r.relays.stopping[name] != nil
+		r.relays.mu.Unlock()
+		if !stopping || ev.Kind != relay.KindDelivered && ev.Kind != relay.KindInner {
+			return
+		}
 	}
 	switch ev.Kind {
 	case relay.KindInner:
@@ -1479,15 +1493,51 @@ func (r *Runtime) idleFor() time.Duration {
 func (r *Runtime) stopSession(reason string) {
 	r.stopLaunches("", reason)
 	for _, rel := range r.st.ActiveRelays() {
+		var drained <-chan struct{}
 		if seat := r.relays.get(rel.Name); seat != nil {
 			if err := seat.Kill(); err != nil {
 				r.ui.Log("relay %s: %v", rel.Name, err)
 			}
 			r.relays.drop(rel.Name, seat)
+			r.relays.mu.Lock()
+			if drained = r.relays.drained[seat]; drained != nil {
+				// What its seat saw last (an arrival, a held message taken
+				// back, a move) is still its word (watchSeat, onRelayEvent).
+				if r.relays.stopping == nil {
+					r.relays.stopping = map[string]chan struct{}{}
+				}
+				done := make(chan struct{})
+				close(done) // killed above
+				r.relays.stopping[rel.Name] = done
+			}
+			r.relays.mu.Unlock()
 		}
 		settle := r.relays.launch(rel.Name) == nil
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: reason}))
-		if settle {
+		switch {
+		case settle && drained != nil:
+			// Once all its seat saw is on the record, as relay_control stop
+			// settles, bounded the same way; finish runs the step before the
+			// session ends (stopSettles).
+			settled, name := make(chan struct{}), rel.Name
+			r.stopSettles = append(r.stopSettles, settled)
+			go func() {
+				select {
+				case <-drained:
+				case <-time.After(oldSendSettle):
+					r.ui.Log("relay %s: the stopped agent had not said all it saw after %s; what it said after that is not recorded", name, oldSendSettle)
+				}
+				r.post(func() {
+					defer close(settled)
+					r.relays.mu.Lock()
+					delete(r.relays.stopping, name) // nothing it says later is taken
+					r.relays.mu.Unlock()
+					if rel := r.st.Relays[name]; rel != nil {
+						r.settleExited(rel)
+					}
+				})
+			}()
+		case settle:
 			r.settleExited(rel)
 		}
 	}
