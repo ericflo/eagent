@@ -230,6 +230,11 @@ func (r *Runtime) chosenEntry(who string, pick runtimecontrol.Route, chosen ...s
 	}
 	route := cfg.Model
 	if who == runtimecontrol.RouteSummarizer {
+		// As choosing it sets the picks: a configuration whose summaries
+		// are inline leaves the session's summarizer route as it is.
+		if cfg.Summarizer.Mode != config.SummarizerDedicated {
+			return config.ModelRoute{}, false
+		}
 		route = cfg.Summarizer.Route(cfg.Model)
 	}
 	return runtimecontrol.ChainEntry(project, route, pick)
