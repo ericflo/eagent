@@ -270,7 +270,7 @@ function localBundleActions() {
     h('p', {class: 'sub'}, 'Pick a saved preset as the project default for new sessions, or delete ones you no longer need.'),
     h('div', {class: 'row'}, selected, h('button', {onclick: async () => {
       try {
-        await api('/api/config', {method: 'PUT', body: JSON.stringify({config: E.loaded, base_preset: E.loadedBase, mode: E.mode, if_match: E.etag, default_config: selected.value})});
+        await api('/api/config', {method: 'PUT', body: JSON.stringify({config: E.loaded, base_preset: E.loadedBase, mode: E.mode, if_match: E.etag, default_config: selected.value, loaded: E.loaded})});
         toast(selected.value ? `default preset set to ${selected.value}` : 'default preset cleared');
         await load(); rerender();
       } catch (e) { toast(e.message, 'bad'); }
@@ -959,7 +959,9 @@ function saveBar() {
 async function save() {
   // Always conditional: the etag the page loaded (or "" for no file yet).
   // A conflict comes back as 409 and is resolved in conflictDialog.
-  const body = {config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag};
+  // loaded: what the form was loaded with, so a value it merely shows (a
+  // window an address variable's server gave) is not taken as entered.
+  const body = {config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag, loaded: E.loaded};
   const changed = changes();
   try {
     const r = await api('/api/config', {method: 'PUT', body: JSON.stringify(body)});

@@ -196,6 +196,10 @@ type Request struct {
 	IfMatch     *string         `json:"if_match"`       // the file etag the editor loaded; omit to skip the check
 	AllowShadow bool            `json:"allow_shadowed"` // write fields an EAGENT_* variable currently overrides anyway
 	Default     *string         `json:"default_config"` // set or clear default_config in the file
+	// Loaded is the configuration the form was loaded with, before the
+	// user's changes; omitted, it is the one in force. A window the form
+	// still shows as loaded is not the user's entry (SaveLocked).
+	Loaded json.RawMessage `json:"loaded,omitempty"`
 }
 
 type EnvField struct {
@@ -298,45 +302,53 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 			}
 		}
 	}
-	// The window of the server an address variable moves a route to, where
-	// no layer names one, stays the user's to set: one entered is written,
-	// and holds as a window the file names. A save that leaves it and the
-	// route's model as they are in force writes none, as a value the preset
-	// gives is not written: in the file it would be the window of the
-	// file's own server once the variable is unset.
+	var onDisk map[string]json.RawMessage
+	readDisk := func() map[string]json.RawMessage {
+		if onDisk == nil {
+			onDisk = map[string]json.RawMessage{}
+			if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
+				_ = json.Unmarshal(raw, &onDisk)
+			}
+			onDisk, _ = config.MigrateLegacy(onDisk)
+		}
+		return onDisk
+	}
+	// A window no variable owns, on a route whose model or address a
+	// variable pins, is the file's to keep: the form shows what the
+	// environment makes of the route (another server's window, or one a
+	// list has since changed), not what the file says. One the user
+	// entered (it differs from the one the form was loaded with) is
+	// written, and holds as a window the file names; one left as loaded,
+	// with the route's model, is written as the file has it. A form that
+	// does not say what it was loaded with was loaded with what is in force.
 	route := func(c *config.Config, ptr string) *config.ModelRoute {
 		if ptr == "/model" {
 			return &c.Model
 		}
 		return c.Summarizer.Model
 	}
+	var loaded config.Config
+	haveLoaded := len(b.Loaded) > 0 && string(b.Loaded) != "null" && json.Unmarshal(b.Loaded, &loaded) == nil
 	for _, ptr := range []string{"/model", "/summarizer/model"} {
 		_, model := env[ptr+"/model"]
-		if _, set := env[ptr+"/base_url"]; model || !set {
+		_, addr := env[ptr+"/base_url"]
+		if _, owned := env[ptr+"/context_tokens"]; owned || !model && !addr {
 			continue
 		}
-		res := resolved()
-		want, now := route(&cfg, ptr), route(&res.Effective, ptr)
-		if res.Sources[ptr+"/context_tokens"] != "env" || want == nil || now == nil || want.Model != now.Model || want.ContextTokens != now.ContextTokens {
+		was := &resolved().Effective
+		if haveLoaded {
+			was = &loaded
+		}
+		want, then := route(&cfg, ptr), route(was, ptr)
+		if want == nil || then == nil || want.Model != then.Model || want.ContextTokens != then.ContextTokens {
 			continue
 		}
-		segs := strings.Split(strings.TrimPrefix(ptr, "/"), "/")
-		var obj map[string]json.RawMessage
-		_ = json.Unmarshal(edits[segs[0]], &obj)
-		if obj != nil && replaceIn(obj, append(segs[1:], "context_tokens"), nil, false) {
-			if len(obj) == 0 {
-				edits[segs[0]] = nil
-			} else {
-				edits[segs[0]], _ = json.Marshal(obj)
-			}
-		}
+		segs := append(strings.Split(strings.TrimPrefix(ptr, "/"), "/"), "context_tokens")
+		fileVal, fileHas := pointerIn(readDisk(), segs)
+		keepFromFile(edits, segs, fileVal, fileHas)
 	}
 	if len(env) > 0 && !b.AllowShadow {
-		onDisk := map[string]json.RawMessage{}
-		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
-			_ = json.Unmarshal(raw, &onDisk)
-		}
-		onDisk, _ = config.MigrateLegacy(onDisk)
+		onDisk := readDisk()
 		// With no summarizer route written, the one in effect is made by the
 		// environment from the main model's: it is the environment's as a
 		// whole, and none of it is written.
@@ -373,21 +385,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 					delete(edits, segs[0])
 				}
 			} else {
-				var obj map[string]json.RawMessage
-				if v, present := edits[segs[0]]; present && v != nil {
-					_ = json.Unmarshal(v, &obj)
-				}
-				if obj == nil {
-					obj = map[string]json.RawMessage{}
-				}
-				touched = replaceIn(obj, segs[1:], fileVal, fileHas)
-				if len(obj) == 0 {
-					if _, present := edits[segs[0]]; present {
-						edits[segs[0]] = nil
-					}
-				} else {
-					edits[segs[0]], _ = json.Marshal(obj)
-				}
+				touched = keepFromFile(edits, segs, fileVal, fileHas)
 			}
 			switch {
 			case fileHas:
@@ -412,6 +410,29 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)}, nil
+}
+
+// keepFromFile puts the file's value of a field inside one of edits'
+// objects (segs, two or more segments) in place of the editor's, or
+// removes the editor's when the file has none. It reports whether edits
+// had a value there.
+func keepFromFile(edits map[string]json.RawMessage, segs []string, fileVal json.RawMessage, fileHas bool) bool {
+	var obj map[string]json.RawMessage
+	if v, present := edits[segs[0]]; present && v != nil {
+		_ = json.Unmarshal(v, &obj)
+	}
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	touched := replaceIn(obj, segs[1:], fileVal, fileHas)
+	if len(obj) == 0 {
+		if _, present := edits[segs[0]]; present {
+			edits[segs[0]] = nil
+		}
+	} else {
+		edits[segs[0]], _ = json.Marshal(obj)
+	}
+	return touched
 }
 
 // pointerIn reads a pointer, split into its segments, out of a raw JSON
