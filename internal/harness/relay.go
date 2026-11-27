@@ -700,12 +700,15 @@ func (job *relayLaunch) run() {
 			job.takenBack = append(job.takenBack, id)
 		}
 	}
+	// The session to open, now that what the old seat saw is in: a move it
+	// reported counts (watchSeat).
+	innerID := job.innerID
 	job.seats.mu.Unlock()
 	if late {
 		job.err = errEnding
 		return
 	}
-	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
+	job.seat, job.started, job.err = job.launch(job.spec, innerID, job.resume && innerID != "")
 }
 
 // oldSendSettle bounds how long a start waits for the send the agent it
@@ -1114,6 +1117,16 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 					stopping := r.relays.stopping[name] != nil
 					r.relays.mu.Unlock()
 					ours = job != nil && job.old == seat || stopping
+				}
+				if job := r.relays.launch(name); !ours && ev.Kind == relay.KindInner && job != nil && job.old == seat && job.replaces == job.name {
+					// The agent a restart replaces moved to another session
+					// of its own (pi's /new) before it was stopped: the
+					// restart opens that one, not the one it left (run takes
+					// it after the old seat has drained).
+					ours = true
+					r.relays.mu.Lock()
+					job.innerID = ev.InnerID
+					r.relays.mu.Unlock()
 				}
 				if ours {
 					r.onRelayEvent(name, ev)
