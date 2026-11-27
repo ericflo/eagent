@@ -254,6 +254,53 @@ func TestK5ClaudeMessageRightAfterClearBeforeItsHookIsNews(t *testing.T) {
 	}
 }
 
+// The reader's suspicion: a message held for the end of Claude's turn,
+// an interrupt (no Stop hook runs), then /clear to a session with no file
+// yet. The held message is still swept and reported not sent after the
+// grace: the seat polls Claude at every look (79de3bc).
+func TestK5HeldMessageAfterAnInterruptThenClearIsReported(t *testing.T) {
+	saved, savedSettle := heldGrace, typeSettle
+	heldGrace, typeSettle = 50*time.Millisecond, 0
+	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	project := filepath.Join(cfg, "projects", "-work")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, b := filepath.Join(project, "a-id.jsonl"), filepath.Join(project, "b-id.jsonl")
+	writeLines(t, a, claudeUser(time.Now().Add(-time.Second), "sort the shelves"))
+	state := t.TempDir()
+	spool := filepath.Join(state, "after_turn")
+	sr4ClaudeHook(t, spool, "a-id", a, "startup")
+	s := newSeat(Spec{Spool: spool, StatusFile: filepath.Join(state, "claude-session.json"), Hook: "eagent relay-hook"}, claudeAgent{}, &fakeHost{alive: true}, "k5-int-clear-"+filepath.Base(state), "a-id")
+	s.state, s.poll = "idle", piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	if !eventually(func() bool { return s.Snapshot().State == "working" }) {
+		t.Fatal("never working")
+	}
+	if _, err := s.Send("r1", "then commit", "after_turn"); err != nil {
+		t.Fatal(err)
+	}
+	appendLines(t, a, claudeUser(time.Now(), "[Request interrupted by user]"))
+	sr4ClaudeHook(t, spool, "b-id", b, "clear")
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-s.events:
+			if ev.Kind == KindDelivered && ev.SendID == "r1" {
+				if ev.OK || ev.Outcome != OutcomeNotSent {
+					t.Fatalf("r1: %+v; want not sent", ev)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("the held message was never reported (spool %v, seat on %q)", spoolNames(spool), s.innerID())
+		}
+	}
+}
+
 // SR4-3. A typed command's delivered event waits for the watcher's next
 // look (9888cae) and is dropped when the seat closes first: a restart, a
 // stop or eagent's own shutdown within a poll of the typing. The record
