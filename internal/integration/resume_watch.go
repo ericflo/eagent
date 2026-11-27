@@ -313,11 +313,11 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	}()
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	failed := make([]error, len(m.Attachments))
-	// The message's files, tries again included, get the time one
-	// download gets: a reply from the event stream holds it no longer.
-	fetchCtx, stopFetch := context.WithTimeout(ctx, fetchBudget)
-	defer stopFetch()
 	for i, a := range m.Attachments {
+		// Each file, its tries again included, gets the time one download
+		// gets: it holds the event stream no longer than its one download
+		// did before it was tried again.
+		fetchCtx, stopFetch := context.WithTimeout(ctx, fetchBudget)
 		saved, err := saveAttachment(fetchCtx, w.client, info.Path, a)
 		// A download that may work later (the service could not be
 		// reached, or answered 429 or 5xx) is tried three times, as the
@@ -329,6 +329,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 				saved, err = saveAttachment(fetchCtx, w.client, info.Path, a)
 			}
 		}
+		stopFetch()
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
 			if errors.Is(ctx.Err(), context.Canceled) {
@@ -397,8 +398,9 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 // before the third; a variable so tests can shorten it.
 var fetchRetryStep = time.Second
 
-// fetchBudget bounds one message's downloads: the limit of one download
-// (finalechat's Download); a variable so tests can shorten it.
+// fetchBudget bounds one file's download and its tries again: the limit
+// of one download (finalechat's Download); a variable so tests can
+// shorten it.
 var fetchBudget = 120 * time.Second
 
 // keepUntilStopped keeps, quietly, a reply that reached a running session,
