@@ -810,16 +810,17 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		apply(&cfg)
 		cfg.Preset = preset
 	}
-	if err := overlay(project, &cfg, fileCfg, File(project)); err != nil {
+	var n named
+	if err := overlay(project, &cfg, fileCfg, File(project), &n); err != nil {
 		return cfg, err
 	}
 	if bundle != "" {
-		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle), &n); err != nil {
 			return cfg, err
 		}
 		cfg.Name = bundle
 	}
-	applyEnv(project, &cfg)
+	applyEnv(project, &cfg, n)
 	normalize(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
@@ -955,11 +956,17 @@ func readJSONMap(path string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
+// named says, of the main route and of the summarizer's own, whether the
+// window it has is one a layer names for it: a variable that moves the
+// route's address leaves that window alone (applyEnv).
+type named struct{ main, summarizer bool }
+
 // overlay merges a JSON object into cfg, carrying over any keys of the
 // three-actor design first. Route objects merge field by field so a bundle
 // can change just a model name; a route whose model the object changes
 // without naming its context window gets the new model's (followModel).
-func overlay(project string, cfg *Config, m map[string]json.RawMessage, source string) error {
+// names says afterwards whose windows a layer names.
+func overlay(project string, cfg *Config, m map[string]json.RawMessage, source string, names *named) error {
 	if len(m) == 0 {
 		return nil
 	}
@@ -972,8 +979,8 @@ func overlay(project string, cfg *Config, m map[string]json.RawMessage, source s
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		return fmt.Errorf("%s: %w", source, err)
 	}
-	followModel(project, &cfg.Model, mainBefore, m["model"])
-	followModel(project, cfg.Summarizer.Model, summarizerBefore, object(m["summarizer"])["model"])
+	names.main = followModel(project, &cfg.Model, mainBefore, m["model"], names.main)
+	names.summarizer = followModel(project, cfg.Summarizer.Model, summarizerBefore, object(m["summarizer"])["model"], names.summarizer)
 	return nil
 }
 
@@ -1002,7 +1009,14 @@ func moved(before, now ModelRoute) bool {
 // A null in layer clears what the layers below set: the editor writes one
 // where it leaves a field empty that the preset sets, such as an effort of
 // "" (send none, the provider's default) under a preset's "high".
-func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.RawMessage) {
+//
+// It returns whether the route's own window is now one a layer names: yes
+// when layer names one, no when layer clears it or moves the route without
+// naming one, else named, as the layers below left it.
+func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.RawMessage, named bool) bool {
+	if a == nil {
+		return false
+	}
 	obj := object(layer)
 	null := func(k string) bool { v, ok := obj[k]; return ok && string(v) == "null" }
 	for i, cur := 0, a; cur != nil; i, cur = i+1, cur.Fallback {
@@ -1011,6 +1025,9 @@ func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.
 			prev = before[i]
 		}
 		_, window := obj["context_tokens"]
+		if i == 0 {
+			named = window && !null("context_tokens") || !window && named && !moved(prev, *cur)
+		}
 		switch {
 		case moved(prev, *cur) && (!window || null("context_tokens")):
 			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
@@ -1025,6 +1042,7 @@ func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.
 		}
 		obj = object(obj["fallback"])
 	}
+	return named
 }
 
 // envFirst returns the first of the named variables that is set and not
@@ -1089,7 +1107,7 @@ func summarizerEnv() string {
 	return ""
 }
 
-func applyEnv(project string, cfg *Config) {
+func applyEnv(project string, cfg *Config, n named) {
 	if value, err := strconv.ParseBool(os.Getenv("EAGENT_FINALECHAT_ARTIFACTS")); err == nil {
 		cfg.Finalechat.Artifacts = value
 	}
@@ -1097,11 +1115,14 @@ func applyEnv(project string, cfg *Config) {
 	// old names still name the model when the new ones are unset, and so
 	// does its effort: the one model does the orchestrator's work. The
 	// narrator's and the task worker's variables are not read; each one set
-	// gets a note.
-	prev := cfg.Model.Model
+	// gets a note. A variable that names another model gives the route that
+	// model's window; one that moves it to another address, that server's,
+	// unless a layer names the window for the route (n).
+	prev := cfg.Model
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
-	if cfg.Model.Model != prev {
+	if cfg.Model.Model != prev.Model || !n.main && moved(prev, cfg.Model) {
 		cfg.Model.ContextTokens = KnownContext(project, cfg.Model.BaseURL, cfg.Model.Model)
+		n.main = false
 	}
 	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
 		cfg.Model.ReasoningEffort = v
@@ -1115,12 +1136,14 @@ func applyEnv(project string, cfg *Config) {
 	if summarizerEnv() != "" || cfg.Summarizer.Model != nil {
 		route := cfg.Summarizer.Route(cfg.Model)
 		route.Fallback = nil
+		own := n.main
 		if cfg.Summarizer.Model != nil {
 			route = *cfg.Summarizer.Model
+			own = n.summarizer
 		}
-		prev := route.Model
+		prev := route
 		applyRouteEnv(&route, "SUMMARIZER_")
-		if route.Model != prev {
+		if route.Model != prev.Model || !own && moved(prev, route) {
 			route.ContextTokens = KnownContext(project, route.BaseURL, route.Model)
 		}
 		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
