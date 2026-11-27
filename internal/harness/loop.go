@@ -1609,8 +1609,10 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		r.closingRefused = true
 		if ae.ContextOverflow() {
 			// Should the session stop ending, the next look restarts
-			// the conversation first (needsDossier).
+			// the conversation first (needsDossier), from the size the
+			// refusal implies, as below.
 			t.overflowed = true
+			t.promptTokens = max(t.promptTokens, r.rolloverTokens())
 			r.ui.Log("eagent: the model refused the prompt as too long (%s); the session is ending, and ends without this look", shortErr(err))
 			return
 		}
