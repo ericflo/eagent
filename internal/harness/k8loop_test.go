@@ -91,6 +91,32 @@ func TestK8ARateLimitedModelIsNotSaidToRefuseTheCalls(t *testing.T) {
 	}
 }
 
+// The quiet-moment restart of a session with no terminal that nothing
+// keeps open (endsAtQuiet). Past the restart size, it is not made: the
+// conversation still fits, and the closing word goes on it. Refused by the
+// provider as too long (overflowed), it is made: the conversation no
+// longer fits, and the restart the refusal was logged with is the one
+// that makes room.
+func TestK8AQuietMomentRestartsAConversationRefusedAsTooLong(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	r, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Prompt: "@e check the build"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.sess.Close() })
+	if !r.endsAtQuiet() {
+		t.Fatal("setup: a session with no terminal and nothing open does not end at a quiet moment")
+	}
+	r.turns.promptTokens = 30000 // past testConfig's restart size of 20,000
+	if r.restartAtQuiet() {
+		t.Fatal("restarted at the quiet moment of a session that ends there, with a conversation that still fits")
+	}
+	r.turns.overflowed = true
+	if !r.restartAtQuiet() {
+		t.Fatal("no restart at the quiet moment for a conversation the provider refused as too long")
+	}
+}
+
 // A batch session's closing look is rate-limited (429, transient since
 // 95b3e69, so no longer the closing path's refusal). turnFailed logs
 // "trying again now" (the first failure's wait is 0), and the session
