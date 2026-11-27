@@ -1412,20 +1412,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 // resume, before the loop starts.
 func (r *Runtime) reattachRelays() []string {
 	var lost []string
-	var ended []string
-	for name, rel := range r.st.Relays {
-		if rel.Ended && len(rel.Undelivered) > 0 {
-			ended = append(ended, name)
-		}
-	}
-	slices.Sort(ended)
-	for _, name := range ended {
-		// Stopped, and eagent ended before the stop's settle (its wait for
-		// the stopped agent's last word): nothing will say how those sends
-		// went now, as for an agent that is gone. Settled once, here, so a
-		// fresh start under the name inherits none of them.
-		r.settleExited(r.st.Relays[name])
-	}
+	r.settleEnded()
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "exited" {
 			// Exited before eagent stopped: what it still waited on was
@@ -1456,6 +1443,71 @@ func (r *Runtime) reattachRelays() []string {
 	return lost
 }
 
+// settleEnded settles, at a resume, what each stopped agent is still waited
+// on for: eagent ended before the stop's settle (its wait for the stopped
+// agent's last word), and nothing will say how those sends went now. Each
+// as the settle that was cut would have settled it, so a fresh start under
+// the name inherits none of them: a send recorded after the stop was held
+// for a start that never came up, and was never typed (not sent); after a
+// switch, the user's messages stay as the switch left them, since its
+// brief carried them (finishLaunch); the rest are settled as for an agent
+// that is gone (settleExited). Called from resume, before the loop starts.
+func (r *Runtime) settleEnded() {
+	var names []string
+	for name, rel := range r.st.Relays {
+		if rel.Ended && len(rel.Undelivered) > 0 {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	handed := handedOver(r.st)
+	for _, name := range names {
+		rel := r.st.Relays[name]
+		_, switched := handed[holder{rel.Name, rel.StartSeq}]
+		since := sentSinceEnd(r.st, rel)
+		var except []string
+		for _, s := range unresolvedSends(r.st, rel) {
+			d, ok := sendRecord(r.st, s.ID)
+			switch {
+			case since[s.ID]:
+				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for a start of the agent, and eagent stopped before the agent came up: it was never typed"}))
+			case switched && (!ok || d.From != "eagent"):
+				except = append(except, s.ID)
+			}
+		}
+		r.settleExited(rel, except...)
+	}
+}
+
+// sentSinceEnd are the ids of the sends recorded to rel's name after rel's
+// own end (a stop, or a switch away): its agent had stopped, so none was
+// typed into it. Each is held for a start under the name, and the record
+// keeps it on the stopped relay too until that start is recorded (state
+// keepHeld reads the same order). Empty for a relay that has not ended.
+func sentSinceEnd(st *state.State, rel *state.Relay) map[string]bool {
+	if !rel.Ended {
+		return nil
+	}
+	since := map[string]bool{}
+	ended := false
+	for _, ev := range st.Events {
+		if ev.Seq <= rel.StartSeq || ev.Type != event.RelaySend && ev.Type != event.RelayMoved && ev.Type != event.RelayEnd {
+			continue
+		}
+		var d event.RelaySendData // a relay.end names its agent the same way
+		if ev.Decode(&d) != nil || d.Name != rel.Name {
+			continue
+		}
+		switch {
+		case ev.Type == event.RelayEnd:
+			ended = true // the first is rel's own
+		case ended:
+			since[d.ID] = true
+		}
+	}
+	return since
+}
+
 // settleExited reports, once, each send rel still waited on as not
 // confirmed: the process it was typed into is gone (it exited, was
 // restarted or was stopped), and nothing watches for its arrival any more.
@@ -1481,6 +1533,12 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		how = "was stopped"
 	case rel.State != "exited":
 		how = "was restarted"
+	}
+	// What was sent to the name once rel's agent had stopped is not that
+	// agent's: it is held for a start under the name, and settled where
+	// it is typed (or not typed).
+	for id := range sentSinceEnd(r.st, rel) {
+		queued[id] = true
 	}
 	r.relays.mu.Lock()
 	// The queues of rel's agents: once a start under the name has been

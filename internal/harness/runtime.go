@@ -1442,6 +1442,22 @@ func (r *Runtime) turnHeldBy() string {
 	return "a model call did not stop in time"
 }
 
+// settleRestRetired settles every seat taken out of use that has a settle
+// and is not settled yet, as it stands (finish, past its bound).
+func (r *Runtime) settleRestRetired() {
+	r.relays.mu.Lock()
+	var rest []relaySeat
+	for seat, e := range r.relays.retiring {
+		if !e.settled && e.settle != nil {
+			rest = append(rest, seat)
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, seat := range rest {
+		r.settleRetired(seat)
+	}
+}
+
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
@@ -1513,17 +1529,7 @@ retired:
 		r.settleDueRetired()
 	}
 	limit.Stop()
-	r.relays.mu.Lock()
-	var rest []relaySeat
-	for seat, e := range r.relays.retiring {
-		if !e.settled && e.settle != nil {
-			rest = append(rest, seat)
-		}
-	}
-	r.relays.mu.Unlock()
-	for _, seat := range rest {
-		r.settleRetired(seat)
-	}
+	r.settleRestRetired()
 	// The queue's end: what it took is run; from here a post is refused
 	// (its caller is told), and a start that ends later is recorded below
 	// (abandonLaunch).
@@ -1552,6 +1558,10 @@ retired:
 		r.relayOps.Add(1) // finishLaunch's, given back by abandonLaunch
 		_, _ = r.finishLaunch(job)
 	}
+	// A start recorded just now may have left the settle of the record it
+	// replaced with a seat still draining (settleOld): past the bound
+	// above, it is settled as it stands, as the rest were.
+	r.settleRestRetired()
 	// The agents are not the session's children: they run in terminals of
 	// their own and outlive this process, so a resumed session (or the
 	// user, attached) picks up where they are. Only stop watching them.
