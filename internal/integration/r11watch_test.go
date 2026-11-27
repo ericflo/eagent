@@ -130,7 +130,6 @@ func TestR11ARestoreThatCannotFetchALaterFileLeavesTheReplyForTheSweep(t *testin
 func TestR11ARestoreWhoseSecondNoticeFailedLeavesTheReplyForTheSweep(t *testing.T) {
 	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	project, sid, _, fr, host, w := r11Restore(t, big2)
-	w.retries = projectRetries(project)
 	fr.failPosts(0, http.StatusForbidden)
 	if msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid)); err == nil || ok {
 		t.Fatalf("taken while nobody could be told about clip2.mov: msg %#v ok=%v err=%v", msg, ok, err)

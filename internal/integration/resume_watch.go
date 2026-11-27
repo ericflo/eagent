@@ -52,7 +52,7 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	retries := projectRetries(project)
+	retries := &replyRetries{replies: map[string]pendingReply{}}
 	go func() {
 		defer close(done)
 		lastError := ""
@@ -178,13 +178,12 @@ type replyRetries struct {
 	replies map[string]pendingReply
 }
 
-// watchRetries holds a project's replyRetries for the life of the process:
-// its reply watcher's, where a restore keeps what PendingReply found.
-var watchRetries sync.Map // project -> *replyRetries
-
-func projectRetries(project string) *replyRetries {
-	r, _ := watchRetries.LoadOrStore(project, &replyRetries{replies: map[string]pendingReply{}})
-	return r.(*replyRetries)
+// leaveWithWatcher writes m down, quietly, for the next sweep of whoever
+// holds the project's watch (this process or another), as a stopping
+// watcher writes down what it keeps.
+func leaveWithWatcher(project string, info store.Info, m finalechat.Message) {
+	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now()}}}
+	r.writeDown(project, func(string, ...any) {})
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
@@ -602,7 +601,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 				// message, which hides the reply from the sweep. The
 				// project's reply watcher keeps it quietly, as it keeps
 				// one whose notice it could not post itself.
-				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last, time.Now())
+				leaveWithWatcher(project, info, last)
 			}
 			return PhoneMessage{}, false, err
 		}
@@ -611,7 +610,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// again (a /quit ends it before it reads on) is looked for by the
 	// project's reply watcher once it has stopped, as after a resume of the
 	// watcher's own: its closing note may hide the thread from the sweep.
-	projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last, time.Now())
+	leaveWithWatcher(project, info, last)
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil

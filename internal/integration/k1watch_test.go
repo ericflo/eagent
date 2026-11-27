@@ -155,7 +155,6 @@ func TestK1AReplyKeptWhileItsSessionRanOutlivesARestartOfTheServe(t *testing.T) 
 		t.Fatal("the reply never reached the first serve's watcher")
 	}
 	stop()
-	watchRetries.Delete(project) // the next serve is another process
 	r9Ends(t, sess, f, sid)
 	stop = StartResumeWatcher(context.Background(), project, host, t.Logf)
 	defer stop()
@@ -408,5 +407,28 @@ func TestK1TwoWatchersStoppingAtOnceKeepBothReplies(t *testing.T) {
 		if _, ok1 := next.replies["m1"]; !ok1 || len(next.replies) != 2 {
 			t.Fatalf("round %d: took up %#v, want both replies", i, next.replies)
 		}
+	}
+}
+
+// Batch 2, the watch held elsewhere: as in B14, a serve restart brings a
+// session back with a /quit and a message after it, but `connector run`
+// holds the project's watch, so the serve's own watcher never sweeps. The
+// connector's watcher resumes the session with the message after the
+// /quit.
+func TestK1ARestoreLeavesTheQuitsFollowerToWhoeverHoldsTheWatch(t *testing.T) {
+	sid, f, quit, _ := r13QuitWaiting(t, "/quit", "actually fix the login bug")
+	t.Setenv("FINALECHAT_URL", f.srv.URL)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid))
+	if err != nil || !ok || msg.ID != "m1" {
+		t.Fatalf("pending reply %#v ok=%v err=%v, want the /quit", msg, ok, err)
+	}
+	if err := quit.Resume(sid, msg); err != nil {
+		t.Fatal(err)
+	}
+	connector := f.watcher(quit.project, quit, t)
+	connector.sweep(context.Background())
+	if got := r13Resumed(quit); len(got) != 2 || got[1] != "m2" {
+		t.Fatalf("resumed %v, want the /quit and then the message after it", got)
 	}
 }
