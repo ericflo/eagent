@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,48 @@ func TestSR5WebAStaleStopMarkKillsTheAgentOfALaterRun(t *testing.T) {
 	st := state.Replay(evs)
 	if len(killed) > 0 || len(ends) > 0 || len(st.ActiveRelays()) == 0 {
 		t.Fatalf("a stop marked for the run before the terminal's resume killed the agent the later run left working (kills %q), recorded relay.end %q, and settled the send it was working on (outcome %q)", killed, ends, st.SendOutcome("s1"))
+	}
+}
+
+// A marked stop the next server cannot finish (here, the record cannot be
+// written) stays marked on the list, for the start after; one it finishes
+// comes off. The list used to be removed before the stop was tried, so a
+// failure, or a cut partway, lost the mark.
+func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root: a read-only file does not stop root from writing it")
+	}
+	s, project := newTestServer(t)
+	k5Kills(t)
+	info := srAgentSession(t, project)
+	s.mu.Lock()
+	s.writeHostedList([]string{info.ID}, time.Now().UTC(), []string{info.ID})
+	s.mu.Unlock()
+	files, _ := filepath.Glob(filepath.Join(info.Path, "*.jsonl"))
+	for _, f := range files {
+		if err := os.Chmod(f, 0o444); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(f, 0o644) })
+	}
+	next := New(project, nil)
+	next.restoreHosted(context.Background())
+	next.mu.Lock()
+	list, ok := next.readHosted()
+	next.mu.Unlock()
+	if !ok || !slices.Contains(list.Stop, info.ID) {
+		t.Fatalf("the stop could not be finished and its mark is gone: %+v (%v)", list, ok)
+	}
+	for _, f := range files {
+		_ = os.Chmod(f, 0o644)
+	}
+	again := New(project, nil)
+	again.restoreHosted(context.Background())
+	if got := srActiveAgents(t, info); len(got) != 0 {
+		t.Fatalf("the start after did not finish the stop: %q still running", got)
+	}
+	if got := k3Listed(t, project); len(got) != 0 {
+		t.Fatalf("the finished stop is still listed: %q", got)
 	}
 }
 

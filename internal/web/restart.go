@@ -240,11 +240,22 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	_ = os.Remove(path)
 	var list hostedList
 	if err := json.Unmarshal(raw, &list); err != nil {
+		_ = os.Remove(path)
 		s.logf("could not read the sessions to bring back: %v", err)
 		return
+	}
+	// The list is used once, but a marked stop stays on it until it is
+	// finished or no longer holds (forgetHosted below): one that fails, or
+	// a cut partway, leaves it for the next start.
+	s.mu.Lock()
+	s.writeHostedList(list.Stop, list.At, list.Stop)
+	s.mu.Unlock()
+	forget := func(id string) {
+		s.mu.Lock()
+		s.forgetHosted(id)
+		s.mu.Unlock()
 	}
 	// Reading the threads waits on the network; it gets a bounded time,
 	// and a session whose thread cannot be read is left to the reply
@@ -256,24 +267,30 @@ func (s *Server) restoreHosted(ctx context.Context) {
 		info, err := store.Resolve(store.Root(s.Project), id)
 		if err != nil || info.ID != id {
 			s.logf("session %s is gone; not bringing it back", id)
+			forget(id)
 			continue
 		}
-		if alive(info.Path) || s.isHosted(id) {
-			continue
-		}
-		if slices.Contains(list.Stop, id) && ranSince(info.Path, list.At) {
+		marked := slices.Contains(list.Stop, id)
+		if marked && ranSince(info.Path, list.At) {
 			// The mark was for a run before one since (the session was
 			// resumed elsewhere after the list was written): it no longer
 			// says what the user wants of the session as it is now.
 			s.logf("session %s: the stop asked before the restart no longer holds: the session has run since", id)
-		} else if slices.Contains(list.Stop, id) {
+			forget(id)
+			marked = false
+		}
+		if alive(info.Path) || s.isHosted(id) {
+			continue
+		}
+		if marked {
 			// The user stopped it while the last server was stopping,
 			// which exited before the stop was done: it is finished here,
 			// and the session stays stopped.
 			if stopped, failed, err := stopAgents(info.Path); err != nil {
-				s.logf("session %s: could not finish the stop asked before the restart: %v", id, err)
+				s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 			} else {
 				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
+				forget(id)
 			}
 			continue
 		}
