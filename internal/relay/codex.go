@@ -193,8 +193,21 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 }
 
 // poll notes a message handed to Codex's queue that a turn's end left
-// there (Codex dropped it): see reportLeftOvers.
-func (codexAgent) poll(s *Seat, now time.Time) { s.reportLeftOvers(now) }
+// there (Codex dropped it): see reportLeftOvers. And after one of Codex's
+// own commands (/new, /fork), until a message arrives where the seat is,
+// it looks for a rollout for its directory begun since: the thread Codex
+// moved to, which the seat follows (Codex says nothing of a move itself).
+func (a codexAgent) poll(s *Seat, now time.Time) {
+	s.reportLeftOvers(now)
+	at := s.commandAt()
+	if at.IsZero() {
+		return
+	}
+	path, id := a.locate(s.spec, at, "")
+	if meta, ok := codexMeta(path); ok && id != s.innerID() && !meta.start.Before(at.Add(-time.Second)) {
+		s.followCommand(id)
+	}
+}
 
 // codexQueueArgs is the codex queue command for a message. The values go
 // joined to their flags: codex's parser takes a separate "-x ..." for an

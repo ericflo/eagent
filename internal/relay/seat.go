@@ -175,6 +175,10 @@ type Seat struct {
 	moveIdle  int
 	quietSaid atomic.Bool
 	sending   int // Sends under way (Send, until it returns)
+	// cmdAt: when one of the agent's own commands was last typed or handed
+	// to its queue; zero once the seat followed a move or a message arrived
+	// after it (an agent that says no move itself looks for one: Codex).
+	cmdAt time.Time
 	// ended: the watcher released what was held for the last time at a
 	// close (a command typed after says its delivered itself). closeLater: watching
 	// ended with a Send under way; the last to return closes events.
@@ -703,7 +707,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// quiet as a typed command does, from the idle after the
 				// turn, when the agent takes it.
 				s.mu.Lock()
-				s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
+				s.moveFrom, s.moveLook, s.moveIdle, s.cmdAt = s.inner, s.looks+1, 0, time.Now()
 				s.mu.Unlock()
 				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
@@ -755,7 +759,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		if !ended {
 			s.held = append(s.held, heldEvent{ev, s.looks})
 		}
-		s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
+		s.moveFrom, s.moveLook, s.moveIdle, s.cmdAt = s.inner, s.looks+1, 0, time.Now()
 		s.mu.Unlock()
 		if ended {
 			// Watching ended as it was typed (a close): nothing releases
@@ -1935,6 +1939,9 @@ func (s *Seat) fold(o obs) {
 		if len(ids) == 0 {
 			s.silentUser = true // readTail says how far it was read
 		}
+		s.mu.Lock()
+		s.cmdAt = time.Time{} // a message arrived here: no move to look for
+		s.mu.Unlock()
 	case "working":
 		s.mu.Lock()
 		fresh := s.state != "working" && !s.heldByDialog("working")
@@ -2413,6 +2420,27 @@ func (s *Seat) followNew(id string) {
 	s.mu.Lock()
 	s.since = s.sinceKept
 	s.mu.Unlock()
+}
+
+// followCommand is follow for a session the agent moved to at one of its
+// own commands (cmdAt, typed by the seat): what it holds from the command
+// on is news; what it copied from before keeps its stamps (history).
+func (s *Seat) followCommand(id string) {
+	s.follow(id, false)
+	s.mu.Lock()
+	s.since = s.cmdAt.Add(-time.Millisecond) // transcripts stamp to the millisecond
+	if s.since.Before(s.readAt) {
+		s.since = s.readAt // what the seat read before is no news
+	}
+	s.cmdAt = time.Time{}
+	s.mu.Unlock()
+}
+
+// commandAt is cmdAt.
+func (s *Seat) commandAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cmdAt
 }
 
 // moveCut is where news begins in a transcript the agent moved to, when the

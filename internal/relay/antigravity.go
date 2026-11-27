@@ -175,6 +175,17 @@ func (antigravityAgent) locate(spec Spec, _ time.Time, id string) (string, strin
 func (antigravityAgent) poll(s *Seat, now time.Time) {
 	s.reportLeftOvers(now)
 	status := antigravityStatus(s.spec.StatusFile)
+	if inner := s.innerID(); inner != "" && status.ID != inner && conversationID.MatchString(status.ID) {
+		// agy is on another conversation (one of its own commands, or its
+		// picker): the seat follows it, news from the command it typed if
+		// any, else from now.
+		if s.commandAt().IsZero() {
+			s.follow(status.ID, false)
+		} else {
+			s.followCommand(status.ID)
+		}
+		return
+	}
 	if status.ID == "" || status.ID != s.innerID() {
 		return
 	}
