@@ -1445,6 +1445,11 @@ drain:
 		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))
 		r.turns.silent = event.ChecksData{}
 	}
+	if r.phone != nil {
+		// The notes the sender is still owed go out before the closing
+		// note, their records before the end.
+		r.phone.payOwed(r.appendDirect)
+	}
 	r.appendDirect(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: r.endReason}))
 	if r.phone != nil {
 		r.phone.close(r.endReason)

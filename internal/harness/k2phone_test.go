@@ -234,6 +234,7 @@ func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
 // before; the session's log says the note could not go out yet (it is
 // tried again until it does: TestK14…).
 func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
+	setFor(t, &phoneCloseWait, 200*time.Millisecond) // the note owed at the end is tried that long
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
