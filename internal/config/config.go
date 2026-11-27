@@ -1098,9 +1098,9 @@ func applyEnv(project string, cfg *Config) {
 	// does its effort: the one model does the orchestrator's work. The
 	// narrator's and the task worker's variables are not read; each one set
 	// gets a note.
-	prev := cfg.Model
+	prev := cfg.Model.Model
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
-	if moved(prev, cfg.Model) {
+	if cfg.Model.Model != prev {
 		cfg.Model.ContextTokens = KnownContext(project, cfg.Model.BaseURL, cfg.Model.Model)
 	}
 	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
@@ -1118,9 +1118,9 @@ func applyEnv(project string, cfg *Config) {
 		if cfg.Summarizer.Model != nil {
 			route = *cfg.Summarizer.Model
 		}
-		prev := route
+		prev := route.Model
 		applyRouteEnv(&route, "SUMMARIZER_")
-		if moved(prev, route) {
+		if route.Model != prev {
 			route.ContextTokens = KnownContext(project, route.BaseURL, route.Model)
 		}
 		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
