@@ -390,9 +390,12 @@ async function send() {
     // of anything typed since. The box they came from may be gone (the
     // request can wait for seconds, and another tab or session rebuilds
     // it): they are the session's draft again, which its box is filled
-    // from, and are put into that box at once when it is on the page.
-    S.drafts[sid] = S.drafts[sid] ? text + '\n' + S.drafts[sid] : text;
-    const box = S.sid === sid && $('#input'); if (box) box.value = S.drafts[sid];
+    // from, and are put into that box at once when it is on the page
+    // (what it holds then is what was typed since).
+    const box = S.sid === sid && $('#input');
+    const since = box ? box.value : S.drafts[sid];
+    S.drafts[sid] = since ? text + '\n' + since : text;
+    if (box) box.value = S.drafts[sid];
     toast(e.message, 'bad');
   }
 }

@@ -50,6 +50,16 @@ p.then(() => want('the box', cur.value, 'and add the retry test\nthen push'));
 `)
 }
 
+// The box holds words the page kept no draft of (the browser put them
+// back after a reload): they stay, behind the refused ones.
+func TestK29RefusedWordsKeepWhatTheBoxHoldsWithoutADraft(t *testing.T) {
+	k2Page(t, k29Refused+`
+cur.value = 'restored by the browser';
+refuse();
+p.then(() => { want('the box', cur.value, 'and add the retry test\nrestored by the browser'); want('the draft', S.drafts.s1, cur.value); });
+`)
+}
+
 // The user opened another session meanwhile: its box is not written in,
 // and the words are kept as the draft of the session they were for.
 func TestK29RefusedWordsAreKeptForTheirOwnSession(t *testing.T) {
