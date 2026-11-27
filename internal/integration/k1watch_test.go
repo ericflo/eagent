@@ -286,3 +286,33 @@ func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
 		t.Fatalf("the sender was not told once: %q", notes)
 	}
 }
+
+// B11: a serve restart finds a reply with two files too large to take. The
+// notice about the first goes out, the one about the second cannot: the
+// restore takes nothing, and eagent's notice is the thread's latest
+// message, which the sweep passes over. The reply watcher, started after
+// the restore as the serve starts it, resumes the session with the words,
+// the sender told about each file.
+func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.T) {
+	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
+	project, sid, f, fr, stopped, _ := r11Restore(t, big2)
+	host := &k1Host{ResumeHost: stopped, next: make(chan PhoneMessage, 4)}
+	fr.failPosts(0, http.StatusForbidden)
+	if msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid)); err == nil || ok {
+		t.Fatalf("taken while nobody could be told about clip2.mov: msg %#v ok=%v err=%v", msg, ok, err)
+	}
+	if p := r10Preview(f, sid); p != "system" {
+		t.Fatalf("the thread's latest message is from %q, want the first notice", p)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := StartResumeWatcher(ctx, project, host, t.Logf)
+	defer stop()
+	defer cancel()
+	m, ok := k1Next(t, host)
+	if !ok || m.ID != "m1" || m.Text != "please look at both" || len(m.Attachments) != 0 {
+		t.Fatalf("resumed %#v (%v), want the words", m, ok)
+	}
+	if n := r11Told(fr, "clip2.mov"); n != 1 {
+		t.Fatalf("%d notices about clip2.mov: %q", n, fr.posted())
+	}
+}

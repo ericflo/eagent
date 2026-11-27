@@ -123,13 +123,14 @@ func TestR11ARestoreThatCannotFetchALaterFileLeavesTheReplyForTheSweep(t *testin
 
 // Finding 12, its other case: both files too large, the notice about the
 // first posted and the one about the second not. The restore takes
-// nothing, but the first notice is the thread's latest message by then,
-// so the watcher's sweep passes the thread over and the reply waits until
-// the person writes again.
+// nothing, and the first notice is the thread's latest message by then,
+// which the sweep passes over: the restore leaves the reply with the
+// project's watcher (B11), whose sweeps resume the session once all is
+// well again.
 func TestR11ARestoreWhoseSecondNoticeFailedLeavesTheReplyForTheSweep(t *testing.T) {
-	t.Skip("known, not fixed: the watcher started after the restore knows nothing of a reply the restore gave up on once a notice went")
 	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	project, sid, _, fr, host, w := r11Restore(t, big2)
+	w.retries = projectRetries(project)
 	fr.failPosts(0, http.StatusForbidden)
 	if msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid)); err == nil || ok {
 		t.Fatalf("taken while nobody could be told about clip2.mov: msg %#v ok=%v err=%v", msg, ok, err)

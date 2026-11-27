@@ -557,8 +557,15 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// thread's latest message is still the reply for the watcher's sweep).
 	// When a notice cannot be posted, nothing is taken, as for a failed
 	// download.
-	for _, a := range big {
+	for i, a := range big {
 		if err := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, finalechat.ErrTooLarge); err != nil {
+			if i > 0 {
+				// A notice before it went: eagent's is the thread's latest
+				// message, which hides the reply from the sweep. The
+				// project's reply watcher keeps it quietly, as it keeps
+				// one whose notice it could not post itself.
+				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+			}
 			return PhoneMessage{}, false, err
 		}
 	}
