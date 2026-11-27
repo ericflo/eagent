@@ -648,13 +648,10 @@ func (s *Server) deliverTo(info store.Info, msg harness.InboxMessage, resume fun
 		s.resuming.Lock()
 	}
 	defer s.resuming.Unlock()
-	if alive(info.Path) || s.isHosted(info.ID) {
-		// Locked by a stop of this server's that the shutdown overtook,
-		// not by a run: nothing will read its inbox.
-		s.mu.Lock()
-		stopped := s.stops[info.ID] != nil
-		s.mu.Unlock()
+	if running, stopped := s.lockState(info); running || stopped {
 		if stopped {
+			// Locked by a stop of this server's that the shutdown
+			// overtook, not by a run: nothing will read its inbox.
 			return "", "", errStopping
 		}
 		if s.isHosted(info.ID) {
@@ -735,16 +732,14 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
-	if !alive(info.Path) && !s.isHosted(info.ID) {
+	running, stopped := s.lockState(info)
+	if !running && !stopped {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
 		return
 	}
-	// Locked by a stop of this server's that the shutdown overtook, not by
-	// a run: nothing will read its inbox.
-	s.mu.Lock()
-	stopped := s.stops[info.ID] != nil
-	s.mu.Unlock()
 	if stopped {
+		// Locked by a stop of this server's that the shutdown overtook,
+		// not by a run: nothing will read its inbox.
 		writeErr(w, handCode(errEnding), errEnding)
 		return
 	}
@@ -788,7 +783,8 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
-	if !alive(info.Path) && !s.isHosted(info.ID) {
+	running, stopped := s.lockState(info)
+	if !running && !stopped {
 		if s.stopForShutdown(w, info) {
 			return
 		}
@@ -799,7 +795,7 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 	}
 	// Locked by a stop of this server's that the shutdown overtook, not by a
 	// run: that stop's answer.
-	if s.answerStop(w, info.ID) {
+	if stopped && s.answerStop(w, info.ID) {
 		return
 	}
 	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
@@ -867,6 +863,39 @@ func (a *stopAnswer) write(w http.ResponseWriter) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "message": a.msg})
+}
+
+// lockState looks at the session's lock: running says a run holds it (here
+// or in another process), stopped that a stop of this server's that the
+// shutdown overtook holds it, which reads no inbox. A stop that had
+// finished before the lock was looked at holds nothing: a lock seen after
+// it is a run's (another process resumed the session meanwhile), and what
+// is sent to the session goes to that run, as it does to any session
+// another process runs. One rule for a Stop, a dismissal and words.
+func (s *Server) lockState(info store.Info) (running, stopped bool) {
+	s.mu.Lock()
+	a := s.stops[info.ID]
+	s.mu.Unlock()
+	finished := false
+	if a != nil {
+		select {
+		case <-a.done:
+			finished = true
+		default:
+		}
+	}
+	if !alive(info.Path) && !s.isHosted(info.ID) {
+		return false, false
+	}
+	if finished {
+		return true, false
+	}
+	// (A stop made since the first look is found here: its answer is made
+	// before it takes the lock.)
+	s.mu.Lock()
+	stopped = s.stops[info.ID] != nil
+	s.mu.Unlock()
+	return !stopped, stopped
 }
 
 // answerStop answers a Stop with the answer of the stop the shutdown
