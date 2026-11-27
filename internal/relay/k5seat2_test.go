@@ -65,6 +65,71 @@ func TestSr4SeatReattachedCodexWithTextInItsComposerRefusesEverySend(t *testing.
 	}
 }
 
+// SR4-1. Claude's seat follows the session its SessionStart hook names
+// only while it has a transcript to read: the watcher polls Claude (which
+// is no sessionStarter) only when tail != nil. Claude writes no file for
+// the session /clear starts until its first prompt, so a second /clear (or
+// an in-app /resume) before that prompt is never seen: the seat looks for
+// the first cleared session's file for ever, and the message typed next,
+// which Claude writes to the session it is really on, is never confirmed,
+// nor its turn reported.
+func TestSr4SeatClaudeSecondClearBeforeAPromptIsNeverFollowed(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	project := filepath.Join(cfg, "projects", "-work")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(project, "a-id.jsonl")
+	b := filepath.Join(project, "b-id.jsonl")
+	c := filepath.Join(project, "c-id.jsonl")
+	writeLines(t, a, claudeTurnLines("sort the shelves", "Sorted.", time.Now().Add(-time.Minute))...)
+	state := t.TempDir()
+	spool := filepath.Join(state, "after_turn")
+	status := filepath.Join(state, "claude-session.json")
+	sr4ClaudeHook(t, spool, "a-id", a, "startup")
+	s := newSeat(Spec{Spool: spool, StatusFile: status, Hook: "eagent relay-hook"}, claudeAgent{}, &fakeHost{alive: true}, "sr4-clear2-"+filepath.Base(state), "a-id")
+	s.state, s.poll = "idle", piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	var seen []string
+	until := func(d time.Duration, match func(Event) bool) bool {
+		t.Helper()
+		deadline := time.After(d)
+		for {
+			select {
+			case ev := <-s.events:
+				if ev.Kind == KindInner {
+					seen = append(seen, ev.InnerID+" "+filepath.Base(ev.Transcript))
+				}
+				if match(ev) {
+					return true
+				}
+			case <-deadline:
+				return false
+			}
+		}
+	}
+	if !until(5*time.Second, func(ev Event) bool { return ev.Kind == KindInner && ev.Transcript == a }) {
+		t.Fatalf("never found the first session; moves %q", seen)
+	}
+	sr4ClaudeHook(t, spool, "b-id", b, "clear") // /clear: no file until a prompt
+	if !until(5*time.Second, func(ev Event) bool { return ev.Kind == KindInner && ev.InnerID == "b-id" }) {
+		t.Fatalf("never followed the first /clear; moves %q", seen)
+	}
+	sr4ClaudeHook(t, spool, "c-id", c, "clear") // /clear again before any prompt
+	s.track("r1", "run the tests", "queue")
+	writeLines(t, c, claudeTurnLines("run the tests", "Ran them.", time.Now())...)
+	confirmed := false
+	turned := until(3*time.Second, func(ev Event) bool {
+		confirmed = confirmed || ev.Kind == KindDelivered && ev.OK && ev.SendID == "r1"
+		return ev.Kind == KindTurn && ev.Text == "Ran them."
+	})
+	if !turned || !confirmed {
+		t.Fatalf("after a second /clear: r1 confirmed %v, turn reported %v, moves recorded %q, seat on %q; want the seat on c-id, r1 confirmed and its turn reported", confirmed, turned, seen, s.innerID())
+	}
+}
+
 // SR4-3. A typed command's delivered event waits for the watcher's next
 // look (9888cae) and is dropped when the seat closes first: a restart, a
 // stop or eagent's own shutdown within a poll of the typing. The record
