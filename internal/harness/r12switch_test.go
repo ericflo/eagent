@@ -59,14 +59,14 @@ func TestAMoveDuringAPassKeepsTheNewModelsCleanCount(t *testing.T) {
 	})
 	var rescues int
 	var retried bool
-	s.rt.sync(func() { rescues, retried = s.rt.restartRescues, s.rt.restartRetried })
+	s.rt.sync(func() { _, retried, rescues = s.rt.restartOf() })
 	if rescues != 0 || retried {
 		t.Fatalf("right after the move: %d restarts in a row counted, retried %v; want none", rescues, retried)
 	}
 	before := r6Dossiers(s)
 	release()
 	r4Until(t, "the pass to land", func() bool { return r6Dossiers(s) > before })
-	s.rt.sync(func() { rescues, retried = s.rt.restartRescues, s.rt.restartRetried })
+	s.rt.sync(func() { _, retried, rescues = s.rt.restartOf() })
 	if rescues != 0 || retried {
 		t.Fatalf("after the pass that began before the move landed: %d restarts in a row counted against the new model, retried %v; want none", rescues, retried)
 	}
@@ -112,7 +112,7 @@ func TestAFallbackDuringAPassKeepsTheNewModelsCleanCount(t *testing.T) {
 	r4Until(t, "the second pass, written by the fallback", func() bool { return fallback.count("other-model") > 0 && r6Dossiers(s) >= 2 })
 	var rescues int
 	var retried bool
-	s.rt.sync(func() { rescues, retried = s.rt.restartRescues, s.rt.restartRetried })
+	s.rt.sync(func() { _, retried, rescues = s.rt.restartOf() })
 	if rescues != 0 || retried {
 		t.Fatalf("after the pass the fallback finished: %d restarts in a row counted against it, retried %v; want none", rescues, retried)
 	}

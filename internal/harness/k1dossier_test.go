@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -181,5 +182,277 @@ func TestK1ABurstDecisionDoesNotStandOnAModelPickedAfterIt(t *testing.T) {
 	}
 	if n := r6Dossiers(s) - before; n != 1 {
 		t.Fatalf("%d restarts on the model picked after the decision, want its one", n)
+	}
+}
+
+// Pictures arrive during every pass, so each new conversation's first
+// call is past the restart size, inside the window: after the restart
+// that started the run and two more in a row, the restarts stop and the
+// user is told. The session is stopped twice while the first call after a
+// restart is out, and resumed: the count of restarts in a row is the
+// record's, so the bound is the same as without the stops (once counted
+// in memory, each stop started it again and bought two more restarts).
+func TestK1RestartsInARowCountOnAcrossAResume(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	const window, ceiling, stops = 200_000, 16384, 2
+	inner := r6Brain(window, ceiling, 100)
+	var cur atomic.Pointer[session]
+	var mu sync.Mutex
+	armed := false // a pass has just landed: the next look is its conversation's first
+	passes := 0    // dossier passes seen
+	stopAt := 0    // the pass whose conversation's first call is held (0: none)
+	var holdCh chan struct{}
+	out := make(chan struct{}, 8)
+	var held []chan struct{}
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			select {
+			case <-c:
+			default:
+				close(c)
+			}
+		}
+	})
+	brain := func(model string, m []map[string]any) reply {
+		if dossierRequest(m) != "" {
+			mu.Lock()
+			passes++
+			n := passes
+			mu.Unlock()
+			if s := cur.Load(); s != nil {
+				r6SendEach(s, 1, func(int) event.UserMessageData {
+					return r6WithPictures(fmt.Sprintf("@e more screenshots, set %d", n), 7, s)
+				})
+			}
+			r := inner(model, m)
+			mu.Lock()
+			armed = true
+			mu.Unlock()
+			return r
+		}
+		mu.Lock()
+		hold := armed && stopAt > 0 && passes == stopAt
+		armed = false
+		var ch chan struct{}
+		if hold {
+			stopAt = 0
+			ch = make(chan struct{})
+			held = append(held, ch)
+			holdCh = ch
+		}
+		mu.Unlock()
+		if hold {
+			out <- struct{}{}
+			<-ch
+		}
+		return inner(model, m)
+	}
+	tune := func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = window, ceiling
+	}
+	s := startSession(t, "", brain, tune)
+	cur.Store(s)
+	r5LogOnFailure(s)
+	r4Settled(s)
+	limit := 0
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
+	// Hold the first call of the conversation the second restart opens.
+	mu.Lock()
+	stopAt = 2
+	mu.Unlock()
+	r6SendEach(s, 1, func(int) event.UserMessageData {
+		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
+	})
+	for i := 0; i < stops; i++ {
+		select {
+		case <-out:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("run %d: the first call after a restart never went out (%d restarts, told %d)", i+1, len(s.events(event.Dossier)), r6ToldFull(s))
+		}
+		if r6ToldFull(s) > 0 {
+			t.Fatalf("run %d: told before the stop", i+1)
+		}
+		cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+		cur.Store(nil)
+		s.stop()
+		mu.Lock()
+		if i+1 < stops {
+			stopAt = passes + 1
+		}
+		close(holdCh)
+		mu.Unlock()
+		s = audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, s.model)
+		cur.Store(s)
+		r5LogOnFailure(s)
+	}
+	r6Until(t, "the user told the restarts stop", func() bool { return r6ToldFull(s) > 0 || len(s.events(event.Dossier)) > 8 })
+	if n := len(s.events(event.Dossier)); n != 3 {
+		t.Fatalf("%d restarts in a row before the user was told, want 3, as without the %d stops", n, stops)
+	}
+	if told := r6ToldFull(s); told != 1 {
+		t.Fatalf("the user was told %d times, want once", told)
+	}
+}
+
+// As in TestR14NoRestartAtTheWindowIsPromisedWhenNoneWillBeMade, the
+// restarts stop one past the bound, and the user is told that none can be
+// made when the conversation reaches the window. The session is stopped
+// and resumed, and then the window is reached: the resumed run counts the
+// restarts in a row from the record, so it makes none there either, and
+// what the user was told holds.
+func TestK1NoRestartAtTheWindowIsMadeAfterAResumeWhenNoneWasPromised(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	const (
+		holding = iota
+		past    // every call is past the restart size
+		lookup  // a lookup, and the call after it refused as too long
+	)
+	var phase atomic.Int32
+	var limit, refusals atomic.Int64
+	var cur atomic.Pointer[session]
+	send := func(i int) {
+		s := cur.Load()
+		d := r6WithPictures(fmt.Sprintf("status %d?", i), 1, s)
+		s.rt.sync(func() { s.rt.userMessage(d) })
+	}
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch phase.Load() {
+		case past:
+			r := say("Noted.")
+			r.prompt = int(limit.Load()) + 5000
+			return r
+		case lookup:
+			if m[len(m)-1]["role"] == "tool" {
+				if refusals.Add(1) == 1 {
+					send(5)
+					phase.Store(past)
+				}
+				return r7TooLong
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"tests"}`)}}
+		}
+		return hold()
+	}
+	tune := func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 200_000, 2048
+	}
+	s := startSession(t, "", brain, tune)
+	cur.Store(s)
+	r5LogOnFailure(s)
+	s.settled()
+	s.rt.sync(func() { limit.Store(int64(s.rt.rolloverTokens())) })
+	phase.Store(past)
+	for i := 1; i <= 3; i++ {
+		send(i)
+		r6Until(t, fmt.Sprintf("restart %d", i), func() bool { return r6Dossiers(s) >= i })
+	}
+	s.settled()
+	phase.Store(lookup)
+	send(4)
+	r6Until(t, "the user told the restarts stop", func() bool { return r6ToldFull(s) > 0 || r6Dossiers(s) > 4 })
+	var notice string
+	for _, m := range s.ui.said() {
+		if strings.HasPrefix(m, fullNotice) {
+			notice = m
+		}
+	}
+	if !strings.Contains(notice, "I can't restart it again") {
+		t.Fatalf("setup: %d restarts, and the user was told %q", r6Dossiers(s), notice)
+	}
+	s.settled()
+	before := len(s.events(event.Dossier))
+	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	s = audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, s.model)
+	cur.Store(s)
+	r5LogOnFailure(s)
+	s.settled()
+	// The conversation reaches the window.
+	phase.Store(lookup)
+	send(6)
+	r6Until(t, "a restart, or the user told the model refuses the conversation", func() bool {
+		return r6Dossiers(s) > 0 || r5Told(s, "My model refuses my conversation as too long") > 0
+	})
+	if n := len(s.events(event.Dossier)) - before; n != 0 {
+		t.Fatalf("the resumed run made %d restarts at the window, and the user was told none can be made there: %q", n, notice)
+	}
+}
+
+// As in r6BurstDuringBothPasses, a burst of pictures arrives during both
+// passes, so the second restart is the one more try, and its first call is
+// refused too: no restart can make room. Here the session is stopped while
+// that call is out, and resumed. The resumed run reads from the record
+// that the restart carried nothing and was the one more try, so it stops
+// the restarts and says so, as the run that was stopped would have; it
+// does not buy a third.
+func TestK1TheOneMoreTryIsTheLastAcrossAResume(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	const window, ceiling = 128_000, 16384
+	inner := r6Brain(window, ceiling, 100)
+	var cur atomic.Pointer[session]
+	var passes, after atomic.Int32
+	out := make(chan struct{}, 1)
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	brain := func(model string, m []map[string]any) reply {
+		if dossierRequest(m) != "" {
+			if n := passes.Add(1); n <= 2 {
+				if s := cur.Load(); s != nil {
+					r6SendPictures(s, window)
+				}
+			}
+			return inner(model, m)
+		}
+		if passes.Load() == 2 && after.Add(1) == 1 {
+			// The first call after the one more try: held while the
+			// session is stopped.
+			out <- struct{}{}
+			<-gate
+		}
+		return inner(model, m)
+	}
+	tune := func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = window, ceiling
+	}
+	s := startSession(t, "", brain, tune)
+	cur.Store(s)
+	r5LogOnFailure(s)
+	r4Settled(s)
+	limit := 0
+	s.rt.sync(func() { limit = int(s.rt.rolloverTokens()) })
+	r6SendEach(s, 1, func(int) event.UserMessageData {
+		return r6WithPictures("@e hello, here is how it looks", limit/r6PictureTokens+1, s)
+	})
+	select {
+	case <-out:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the first call after the second restart never went out (%d restarts)", len(s.events(event.Dossier)))
+	}
+	if n := len(s.events(event.Dossier)); n != 2 || r6ToldFull(s) != 0 {
+		t.Fatalf("setup: %d restarts and told %d times before the stop, want 2 and none", n, r6ToldFull(s))
+	}
+	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+	cur.Store(nil)
+	s.stop()
+	release()
+	s = audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, s.model)
+	r5LogOnFailure(s)
+	r6Until(t, "the user told, or another restart", func() bool { return r6ToldFull(s) > 0 || r6Dossiers(s) > 0 })
+	if n := len(s.events(event.Dossier)); n != 2 {
+		t.Fatalf("%d restarts in all, want the 2 the run that was stopped would have made", n)
+	}
+	if n := r5Told(s, burstNotice); n != 1 {
+		t.Fatalf("told %d times after the resume that what arrived during the passes is too much, want once", n)
 	}
 }

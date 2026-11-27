@@ -466,8 +466,9 @@ func r6BurstDuringBothPasses(t *testing.T) {
 
 // A stop and resume in the middle: the quiet restart's first call is
 // refused on the burst, and the session is stopped before anything else.
-// The resumed run does not know what that restart carried; it tries once
-// more, which lists the burst by place, and the user is answered.
+// The resumed run reads from the record that the restart carried nothing
+// and was not the one more try; as the stopped run would have, it tries
+// once more, which lists the burst by place, and the user is answered.
 func TestABurstRefusedThenAResumeGetsOneMoreRestart(t *testing.T) {
 	setFor(t, &errorRetryDelays, []time.Duration{time.Hour})
 	route := &r5PictureRoute{window: 128_000, ceiling: 16384, picture: r6PictureTokens}
