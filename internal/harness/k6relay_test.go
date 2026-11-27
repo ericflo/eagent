@@ -255,11 +255,17 @@ func TestSR3CtrlCDuringAChangeWithANewerOneWaitingKeepsTheAgent(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the session did not end")
 	}
-	select {
-	case <-g.entered: // a third start, begun after the session's end
+	// A third start, begun after the session's end, would be among the
+	// launches still (finish runs a newer change's start in its own step,
+	// before Run returns, and a start finish records leaves the list): no
+	// time to wait out when there is none.
+	rt.relays.mu.Lock()
+	third := len(rt.relays.launching) > 0
+	rt.relays.mu.Unlock()
+	if third {
+		g.waitEntered(t)
 		g.release <- struct{}{}
 		waitFor(t, "the late third agent stopped", three.wasKilled)
-	case <-time.After(2 * time.Second):
 	}
 	if two.wasKilled() {
 		t.Error("Ctrl-C killed the Codex that finish recorded as started (the newer change was applied after the loop had ended)")
