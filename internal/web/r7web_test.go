@@ -92,7 +92,7 @@ func TestThePageKeepsTheWordsWhenASendFails(t *testing.T) {
 		t.Fatal("app.js has no send()")
 	}
 	script := `
-const ta = {value: '  ship it  ', style: {}};
+const ta = {value: '  ship it  ', style: {}, dataset: {sid: 's1'}};
 const $ = () => ta;
 const S = {sid: 's1', detail: null, drafts: {}};
 const clientCaps = () => ({});

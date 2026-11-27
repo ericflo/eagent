@@ -13,7 +13,7 @@ import (
 // and then refuses it (503 during a shutdown): cur is the chat box on the
 // page, which the script may replace or write in before it calls refuse().
 const k29Refused = `
-let cur = {value: 'and add the retry test', style: {}};
+let cur = {value: 'and add the retry test', style: {}, dataset: {sid: 's1'}};
 const $ = () => cur;
 const S = {sid: 's1', detail: {alive: true, agents: []}, drafts: {}};
 const clientCaps = () => ({});
@@ -34,7 +34,7 @@ const p = send();
 // the words are put into the box that is on the page now.
 func TestK29RefusedWordsGoIntoTheBoxOnThePageNow(t *testing.T) {
 	k2Page(t, k29Refused+`
-cur = {value: '', style: {}};
+cur = {value: '', style: {}, dataset: {sid: 's1'}};
 refuse();
 p.then(() => { want('the box on the page', cur.value, 'and add the retry test'); want('told', told.length, 1); });
 `)
@@ -64,9 +64,41 @@ p.then(() => { want('the box', cur.value, 'and add the retry test\nrestored by t
 // and the words are kept as the draft of the session they were for.
 func TestK29RefusedWordsAreKeptForTheirOwnSession(t *testing.T) {
 	k2Page(t, k29Refused+`
-S.sid = 's2'; cur = {value: 'for the other session', style: {}};
+S.sid = 's2'; cur = {value: 'for the other session', style: {}, dataset: {sid: 's2'}};
 refuse();
 p.then(() => { want('the other session\'s box', cur.value, 'for the other session'); want('the draft kept', S.drafts.s1, 'and add the retry test'); });
+`)
+}
+
+// A click on another session sets the page's session at once, and the
+// chat on the page, with its box, stays the old session's until the new
+// one has loaded. A refusal that lands then, for the session being
+// loaded, leaves the box on the page alone (it is the other session's,
+// with that session's words) and keeps the refused words as their own
+// session's draft.
+func TestK29ARefusalWhileItsSessionLoadsLeavesTheOtherSessionsBoxAlone(t *testing.T) {
+	k2Page(t, k29Refused+`
+S.sid = 's2'; cur = {value: 'only for s2', style: {}, dataset: {sid: 's2'}}; S.drafts.s2 = 'only for s2';
+S.sid = 's1'; // clicked s1 in the list; s2's chat is still on the page
+refuse();
+p.then(() => { want('s2 box', cur.value, 'only for s2'); want('s2 draft', S.drafts.s2, 'only for s2'); want('s1 draft', S.drafts.s1, 'and add the retry test'); });
+`)
+}
+
+// Words sent from a session's box while another session loads go to the
+// session whose box it is, not to the one being loaded.
+func TestK29WordsSentWhileAnotherSessionLoadsGoToTheBoxsSession(t *testing.T) {
+	k2Page(t, `
+const cur = {value: 'for s1', style: {}, dataset: {sid: 's1'}};
+const $ = () => cur;
+const S = {sid: 's2', detail: null, drafts: {s1: 'for s1'}}; // s2 clicked, not loaded yet
+const clientCaps = () => ({});
+const toast = () => {}, showScreen = () => {}, showQueued = () => {};
+const sent = [];
+const api = async path => { sent.push(path); return {}; };
+send().then(() => {
+  if (sent.join() !== '/api/sessions/s1/message' || S.drafts.s1 !== undefined) { console.error('sent ' + JSON.stringify(sent) + ', drafts ' + JSON.stringify(S.drafts)); process.exit(1); }
+});
 `)
 }
 
@@ -105,6 +137,16 @@ made = []; renderChat(pane); // the Timeline tab and back
 want('the box after it was rebuilt', $('#input').value, 'half a thought');
 S.sid = 's2'; made = []; renderChat(pane);
 want('another session\'s box', $('#input').value, '');
+want('the box names its session', $('#input').attrs['data-sid'], 's2');
+// s1 clicked in the list: the page's session is s1 at once, and s2's box
+// stays on the page until s1 has loaded. What is typed in it is s2's.
+const old = $('#input');
+S.sid = 's1';
+old.value = 'for s2'; old.attrs.oninput({target: old});
+want('s2 draft, typed while s1 loads', S.drafts.s2, 'for s2');
+want('s1 draft, untouched', S.drafts.s1, 'half a thought');
+made = []; renderChat(pane); // s1 loaded
+want('s1 box', $('#input').value, 'half a thought');
 `
 	if out, err := exec.Command("node", "-e", script).CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, strings.TrimSpace(string(out)))

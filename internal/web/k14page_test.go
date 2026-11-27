@@ -39,7 +39,7 @@ col.append = n => col.kids.push(n);
 col.insertBefore = (n, ref) => col.kids.splice(col.kids.indexOf(ref), 0, n);
 const working = node('div', {id: 'working'}, []);
 col.kids.push(working);
-const ta = {value: 'and add the retry test', style: {}};
+const ta = {value: 'and add the retry test', style: {}, dataset: {sid: 's1'}};
 const $ = sel => sel === '#input' ? ta : sel === '.chat .col' ? col : sel === '#working' ? working : sel === '.chat .scroll' ? {scrollHeight: 0} : null;
 const document = {querySelector: sel => all.find(n => !n.removed && sel === '[data-queued="' + n.attrs['data-queued'] + '"]') || null};
 const md = s => s;

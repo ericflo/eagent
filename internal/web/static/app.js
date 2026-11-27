@@ -336,12 +336,16 @@ function renderChat(pane) {
   col.append(h('div', {class: 'working hidden', id: 'working'}, h('span', {class: 'dots'}, h('i'), h('i'), h('i')), h('span', {class: 'wtext'})));
   const scroll = h('div', {class: 'scroll'}, col);
   if (ARCHIVE) { pane.replaceChildren(scroll); scroll.scrollTop = scroll.scrollHeight; return; }
+  // The box is this session's (data-sid) for as long as it is on the page,
+  // which is past the click on another session, until that one has loaded:
+  // what is typed and sent in it is this session's, whatever S.sid says.
+  const sid = S.sid;
   const composer = h('div', {class: 'composer'}, h('div', {class: 'col'},
     h('div', {class: 'pending', id: 'pending'}),
     h('form', {onsubmit: e => { e.preventDefault(); send(); }},
-      h('textarea', {id: 'input', placeholder: 'Message the agent… (Enter to send, Shift+Enter for a new line)', rows: 1,
+      h('textarea', {id: 'input', 'data-sid': sid, placeholder: 'Message the agent… (Enter to send, Shift+Enter for a new line)', rows: 1,
         onkeydown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } },
-        oninput: e => { S.drafts[S.sid] = e.target.value; e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
+        oninput: e => { S.drafts[sid] = e.target.value; e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
       h('button', {class: 'primary', type: 'submit'}, 'Send')),
     h('div', {class: 'hint'},
       h('span', {id: 'hint'}),
@@ -349,7 +353,7 @@ function renderChat(pane) {
   pane.replaceChildren(scroll, composer);
   // What the session's box held when it was last on the page (S.drafts:
   // typed and not sent, or sent and refused) is in the new one.
-  const draft = S.drafts[S.sid];
+  const draft = S.drafts[sid];
   if (draft) { const ta = $('#input'); ta.value = draft; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; }
   scroll.scrollTop = scroll.scrollHeight;
   updateComposer();
@@ -373,29 +377,31 @@ function updateComposer() {
 }
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
-  const sid = S.sid;
+  // The words are for the session the box was built for (renderChat). The
+  // page's own state is that session's only while it is the one shown.
+  const sid = ta.dataset.sid;
+  const d = S.sid === sid ? S.detail : null;
   ta.value = ''; ta.style.height = 'auto'; delete S.drafts[sid];
   // /screen shows the agent's terminal here, as its Screen button does: the
   // session itself shows it only at its own terminal and on the phone.
-  const d = S.detail;
   const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
   if (agent) { showScreen(agent.name); return; }
   try {
     let r;
-    if (S.detail && S.detail.question) r = await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
-    else r = await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
+    if (d && d.question) r = await api(`/api/sessions/${sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: d.question.ID, client: clientCaps()})});
+    else r = await api(`/api/sessions/${sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
     if (r && r.delivered === 'queued') showQueued(sid, text, r.message, r.inbox);
   } catch (e) {
     // Refused: the words go back where they can be sent again, in front
     // of anything typed since. The box they came from may be gone (the
     // request can wait for seconds, and another tab or session rebuilds
     // it): they are the session's draft again, which its box is filled
-    // from, and are put into that box at once when it is on the page
-    // (what it holds then is what was typed since).
-    const box = S.sid === sid && $('#input');
-    const since = box ? box.value : S.drafts[sid];
+    // from, and are put into that box at once when it is the one on the
+    // page (what it holds then is what was typed since).
+    const box = $('#input'); const shown = !!box && box.dataset.sid === sid;
+    const since = shown ? box.value : S.drafts[sid];
     S.drafts[sid] = since ? text + '\n' + since : text;
-    if (box) box.value = S.drafts[sid];
+    if (shown) box.value = S.drafts[sid];
     toast(e.message, 'bad');
   }
 }

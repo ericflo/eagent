@@ -43,7 +43,7 @@ func k2Page(t *testing.T, script string) {
 // session's detail is detail.
 func k2Stubs(box, detail string) string {
 	return `
-const ta = {value: ` + box + `, style: {}};
+const ta = {value: ` + box + `, style: {}, dataset: {sid: 's1'}};
 const $ = () => ta;
 const S = {sid: 's1', detail: ` + detail + `, drafts: {}};
 const clientCaps = () => ({});
