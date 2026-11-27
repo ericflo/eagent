@@ -139,11 +139,12 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // stopAgents stops the agents the record of a session nobody runs shows
 // running, as a stop the session takes does (stopSession), under the
 // session's lock and from the record as it then stands: for each one, a
-// message still unclaimed in its spool is taken back first (it did not
-// go), its terminal is killed (not that of one the record shows exited:
+// message still unclaimed in its spool is taken back first and recorded
+// not sent at once (a stop cut after that would leave nothing to say it
+// never went), its terminal is killed (not that of one the record shows exited:
 // it is gone, and nothing is said of it), its relay.end is recorded (one
-// that could not be killed too, as stopSession does), and its sends are
-// settled: not sent for one taken back, unconfirmed for the rest. Before
+// that could not be killed too, as stopSession does), and the rest of its
+// sends are settled unconfirmed. Before
 // that, what the record still waits on with no agent behind it is settled
 // as a resume settles it, by the same rules: not sent for a send held for
 // a start that never came up (state.NeverTyped), and the sends of an agent
@@ -168,35 +169,41 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 	st := state.Replay(evs)
 	// What is settled here, or is to stay as it is.
 	done := map[string]bool{}
-	// settle records how the sends the record still waits on for rel went,
-	// its agent being gone (how): one held for the end of its turn and
-	// still unread in the spool was taken back (takenBack) and did not go;
-	// of the rest nothing can be confirmed.
-	settle := func(rel *state.Relay, waiting []event.RelaySendData, takenBack map[string]bool, how string) error {
+	// takeBack takes the messages held for the end of the turn of rel's
+	// agent, which is gone or about to be (how), out of its spool, where
+	// they are still unread: they did not go. Each is recorded as it is
+	// taken, before anything else is done: once it is out of the spool
+	// nothing else would say it never went.
+	takeBack := func(rel *state.Relay, waiting []event.RelaySendData, how string) error {
+		spool := relaySpool(path, rel)
+		for _, d := range waiting {
+			if done[d.ID] || d.Mode != "after_turn" || spool == "" || !relay.Unspool(spool, d.ID) {
+				continue
+			}
+			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent,
+				Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}
+			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
+				return err
+			}
+			done[d.ID] = true
+		}
+		return nil
+	}
+	// settle records the rest of what the record still waits on for rel,
+	// its agent being gone (how): nothing of it can be confirmed.
+	settle := func(rel *state.Relay, waiting []event.RelaySendData, how string) error {
 		for _, d := range waiting {
 			if done[d.ID] {
 				continue
 			}
 			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
 				Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
-			if takenBack[d.ID] {
-				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent "+how
-			}
 			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
 				return err
 			}
+			done[d.ID] = true
 		}
 		return nil
-	}
-	takeBack := func(rel *state.Relay, waiting []event.RelaySendData) map[string]bool {
-		spool := relaySpool(path, rel)
-		taken := map[string]bool{}
-		for _, d := range waiting {
-			if !done[d.ID] && d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
-				taken[d.ID] = true
-			}
-		}
-		return taken
 	}
 	// As a resume settles a record with no run behind it (harness
 	// reattachRelays), whatever became of each agent: what was held for a
@@ -215,13 +222,22 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 	}
 	for _, rel := range ended {
 		waiting := unsettled(evs, rel)
-		if err := settle(rel, waiting, takeBack(rel, waiting), "was stopped"); err != nil {
+		if err := takeBack(rel, waiting, "was stopped"); err != nil {
+			return nil, nil, err
+		}
+		if err := settle(rel, waiting, "was stopped"); err != nil {
 			return nil, nil, err
 		}
 	}
 	for _, rel := range st.ActiveRelays() {
+		how := "was stopped"
+		if rel.State == "exited" {
+			how = "exited" // as settleExited says it of an agent that exited
+		}
 		waiting := unsettled(evs, rel)
-		takenBack := takeBack(rel, waiting)
+		if err := takeBack(rel, waiting, how); err != nil {
+			return stopped, failed, err
+		}
 		if rel.State != "exited" {
 			if rel.Target != "" {
 				if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
@@ -233,11 +249,7 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
-		how := "was stopped"
-		if rel.State == "exited" {
-			how = "exited" // as settleExited says it of an agent that exited
-		}
-		if err := settle(rel, waiting, takenBack, how); err != nil {
+		if err := settle(rel, waiting, how); err != nil {
 			return stopped, failed, err
 		}
 	}
