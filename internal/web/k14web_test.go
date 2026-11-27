@@ -246,7 +246,8 @@ func TestK14AnOldMarkTellsThePhoneByTheConfigurationTheRecordNames(t *testing.T)
 }
 
 // sr7WatcherGone waits until no watchInbox goroutine is left, or the
-// session is hosted here; it reports whether it is hosted.
+// session is hosted here; it reports whether it is hosted. (The server no
+// longer watches inboxes: it reports whether the session is hosted.)
 func sr7WatcherGone(t *testing.T, s *Server, id string) bool {
 	t.Helper()
 	buf := make([]byte, 1<<20)
@@ -274,9 +275,6 @@ func sr7WatcherGone(t *testing.T, s *Server, id string) bool {
 func TestSR7WebAStopAfterQueuedWordsIsDroppedByTheWatchersResume(t *testing.T) {
 	s, project := newTestServer(t)
 	k1Model(t, s, project)
-	old := inboxWatchEvery
-	inboxWatchEvery = time.Millisecond
-	t.Cleanup(func() { inboxWatchEvery = old })
 	info := r11Session(t, project)
 	sess, _, err := store.Open(info.Path, time.Now()) // the terminal's run, past its last look
 	if err != nil {
@@ -319,9 +317,6 @@ func TestSR7WebAStopAfterQueuedWordsIsDroppedByTheWatchersResume(t *testing.T) {
 func TestK14AQuitAfterQueuedWordsKeepsTheSessionStopped(t *testing.T) {
 	s, project := newTestServer(t)
 	k1Model(t, s, project)
-	old := inboxWatchEvery
-	inboxWatchEvery = time.Millisecond
-	t.Cleanup(func() { inboxWatchEvery = old })
 	info := r11Session(t, project)
 	sess, _, err := store.Open(info.Path, time.Now()) // the terminal's run, past its last look
 	if err != nil {
@@ -350,9 +345,6 @@ func TestK14AQuitAfterQueuedWordsKeepsTheSessionStopped(t *testing.T) {
 // them", which nobody would do.
 func TestK14WordsQueuedDuringTheShutdownPromiseNoResume(t *testing.T) {
 	s, project := newTestServer(t)
-	old := inboxWatchEvery
-	inboxWatchEvery = time.Millisecond
-	t.Cleanup(func() { inboxWatchEvery = old })
 	info := r11Session(t, project)
 	sess, _, err := store.Open(info.Path, time.Now()) // a terminal runs it
 	if err != nil {
@@ -366,8 +358,6 @@ func TestK14WordsQueuedDuringTheShutdownPromiseNoResume(t *testing.T) {
 	if sr7WatcherGone(t, s, info.ID) {
 		t.Fatal("the session was resumed during the shutdown")
 	}
-	s.resuming.Lock() // after the watcher's last step (it unlocks this)
-	s.resuming.Unlock()
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued"`) || strings.Contains(w.Body.String(), "resumed") || !strings.Contains(w.Body.String(), "next runs") {
 		t.Fatalf("answered %d %s", w.Code, w.Body)
 	}
@@ -400,13 +390,13 @@ func (u *sr7Held) Trace(ev event.Event) {
 // run hosted here the same words wait for it to stop and resume the
 // session (finding 15, TestR11WordsWaitForEachEndingRunInTurn); the page
 // was told the words wait "until it takes them ... or it is resumed for
-// them".
+// them". (Adapted: the server no longer resumes a session another process
+// ran for words it left there. The words are kept on the record for the
+// next run, once; nothing resumes the session; the page's Resume runs it
+// here.)
 func TestSR7WebWordsAnEndingTerminalRunTakesAreNeverAnswered(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := k1Model(t, s, project)
-	old := inboxWatchEvery
-	inboxWatchEvery = time.Millisecond
-	t.Cleanup(func() { inboxWatchEvery = old })
 	info := r11Session(t, project)
 	ui := &sr7Held{webUI: newWebUI(func(string, ...any) {}), in: make(chan string, 1), held: make(chan struct{}), hold: make(chan struct{})}
 	rt, err := harness.Resume(cfg, harness.Options{Project: project, Interactive: true}, ui, info.Path)
@@ -430,10 +420,14 @@ func TestSR7WebWordsAnEndingTerminalRunTakesAreNeverAnswered(t *testing.T) {
 	}
 	close(ui.hold)
 	<-runDone
-	hosted := sr7WatcherGone(t, s, info.ID)
+	if sr7WatcherGone(t, s, info.ID) {
+		t.Fatal("the server resumed a session another process ran, for words it left")
+	}
 	left, _ := os.ReadDir(harness.InboxDir(info.Path))
-	n := k1Recorded(t, info, words)
-	if !hosted && !alive(info.Path) {
-		t.Fatalf("the words written after the Stop are on the record %d time(s) (inbox holds %d file(s)), and no run was started for them: the watcher took their removed file as taken; the page was told they wait until the session takes them or is resumed for them", n, len(left))
+	if n := k1Recorded(t, info, words); n != 1 || len(left) != 0 {
+		t.Fatalf("the words are on the record %d time(s), and the inbox holds %d file(s); want them kept on the record once", n, len(left))
+	}
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{}, nil); w.Code != http.StatusOK || !s.isHosted(info.ID) {
+		t.Fatalf("the page's Resume: %d %s", w.Code, w.Body)
 	}
 }

@@ -375,20 +375,22 @@ async function send() {
   const d = S.detail;
   const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
   if (agent) { showScreen(agent.name); return; }
-  const sid = S.sid, after = S.lastSeq;
+  const sid = S.sid;
   try {
     let r;
     if (S.detail && S.detail.question) r = await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
     else r = await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
-    if (r && r.delivered === 'queued') showQueued(sid, text, r.message, after);
+    if (r && r.delivered === 'queued') showQueued(sid, text, r.message, r.inbox);
   } catch (e) { if (!ta.value) ta.value = text; toast(e.message, 'bad'); }
 }
 // Words the server answered "queued" (another process runs the session;
 // they wait in its inbox, not yet on its record) show in the chat with
-// the answer's line under them (S.queued), until the record shows them.
-function showQueued(sid, text, message, after) {
-  if (S.sid === sid && S.events.some(ev => showsWords(ev, {text, after}))) return; // already taken
-  const q = {id: String(++S.queuedSeq), sid, text, message: message || '', after};
+// the answer's line under them (S.queued), until an event on the record
+// carries their inbox id: taken as a turn, carried out as a command, or
+// kept for the next run (which the chat then shows as kept).
+function showQueued(sid, text, message, inbox) {
+  if (S.sid === sid && S.events.some(ev => showsWords(ev, {inbox}))) return; // already taken
+  const q = {id: String(++S.queuedSeq), sid, text, message: message || '', inbox};
   S.queued.push(q);
   const col = S.sid === sid && S.tab === 'chat' && $('.chat .col'); if (!col) return;
   const w = $('#working'); const node = queuedNode(q);
@@ -398,8 +400,9 @@ function showQueued(sid, text, message, after) {
 function queuedNode(q) {
   return h('div', {class: 'msg user', 'data-queued': q.id}, h('div', {class: 'head'}, 'you · waiting'), h('div', {class: 'bubble'}, h('div', {html: md(q.text)})), h('div', {class: 'head'}, q.message));
 }
-// showsWords says whether ev, on the record, shows the waiting words q.
-function showsWords(ev, q) { return ev.seq > q.after && (ev.type === 'user.message' || ev.type === 'user.answer') && !!ev.data && ev.data.text === q.text; }
+// showsWords says whether ev, on the record, carries the waiting words q
+// (their inbox id).
+function showsWords(ev, q) { return !!q.inbox && (ev.type === 'user.message' || ev.type === 'user.answer' || ev.type === 'inbox.taken') && !!ev.data && ev.data.inbox === q.inbox; }
 // takeQueued drops the waiting copy of the words the record now shows (ev).
 function takeQueued(ev) {
   const i = S.queued.findIndex(q => q.sid === S.sid && showsWords(ev, q)); if (i < 0) return;
@@ -424,7 +427,7 @@ function titleNotice(d) {
 function chatNode(ev) {
   const d = ev.data || {};
   switch (ev.type) {
-    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, d.text ? h('div', {html: md(d.text)}) : null, attachmentsNode(d.attachments)));
+    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + (d.held === 'the session was ending' ? ' · kept for the next run' : '') + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, d.text ? h('div', {html: md(d.text)}) : null, attachmentsNode(d.attachments)));
     case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));

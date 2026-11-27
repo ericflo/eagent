@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -153,17 +153,14 @@ func TestSR6WebAStopPressedOnAMarkedSessionKeepsTheOldMarksTime(t *testing.T) {
 // while its agents' starts and sends wind down. The page's message goes to
 // the inbox (the session is alive), and the run lets go without reading
 // it. It used to be answered "delivered" and left there, and the user, who
-// saw it nowhere, sent it again: the next run took both. Now the server
-// watches the file it wrote; when the run lets go of the session with the
-// file still there, the server resumes the session, whose run takes the
-// file, once. (Adapted from the review's test: the answer now says the
-// words wait, and the user does not need to send them again.)
+// saw it nowhere, sent it again: the next run took both. Now the answer
+// says the words wait in the session's inbox, and the page shows them
+// waiting; the session's next run (the page's Resume) takes them, once.
+// (Adapted from the review's test, and again when the server stopped
+// resuming a session another process ran for words it left there.)
 func TestSR6WebWordsLeftInATerminalRunsInboxAreTakenTwice(t *testing.T) {
 	s, project := newTestServer(t)
 	k1Model(t, s, project)
-	old := inboxWatchEvery
-	inboxWatchEvery = time.Millisecond
-	t.Cleanup(func() { inboxWatchEvery = old })
 	info := r11Session(t, project)
 	// The terminal's run, past its last look, still holding the lock.
 	sess, _, err := store.Open(info.Path, time.Now())
@@ -171,19 +168,22 @@ func TestSR6WebWordsLeftInATerminalRunsInboxAreTakenTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	words := map[string]any{"text": "add the retry test"}
-	if w := do(s, "POST", "/api/sessions/"+info.ID+"/message", words, nil); w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"inbox"`) {
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/message", words, nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"delivered":"queued"`) {
 		_ = sess.Close()
 		t.Fatalf("send: %d %s; want it answered as waiting, not delivered", w.Code, w.Body)
 	}
 	_ = sess.Close() // the terminal's run lets go
-	var h *hosted
-	for deadline := time.Now().Add(5 * time.Second); h == nil; runtime.Gosched() {
-		s.mu.Lock()
-		h = s.running[info.ID]
-		s.mu.Unlock()
-		if h == nil && time.Now().After(deadline) {
-			t.Fatal("the session was never resumed for the words left in its inbox")
-		}
+	if left, _ := os.ReadDir(harness.InboxDir(info.Path)); s.isHosted(info.ID) || len(left) != 1 {
+		t.Fatalf("hosted %v, inbox %d file(s); want the words waiting in the inbox", s.isHosted(info.ID), len(left))
+	}
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{}, nil); w.Code != http.StatusOK {
+		t.Fatalf("the page's Resume: %d %s", w.Code, w.Body)
+	}
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if h == nil {
+		t.Fatal("setup: the session is not hosted")
 	}
 	// A no-op hand-over, taken on the run's loop after its first look.
 	if _, err := h.rt.Take(harness.InboxMessage{Type: "message", From: "web"}); err != nil {
