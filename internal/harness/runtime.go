@@ -1169,6 +1169,19 @@ func (r *Runtime) publishStatus() {
 // agent never ends by itself: the user talks to it for days. One whose
 // agent was stopped on purpose (or never started) ends once eagent has had
 // its say and nothing is waiting on the user.
+// endsAtQuiet reports what maybeEnd decides when nothing is due and no
+// call is out: a session with no terminal that nothing keeps open
+// (keptOpen) asks its closing word or ends. maybeTurn asks it before a
+// quiet-moment restart, which such a session would pay for only to end.
+// Loop goroutine.
+func (r *Runtime) endsAtQuiet() bool {
+	if r.opts.Interactive {
+		return false
+	}
+	kept, _ := r.keptOpen()
+	return !kept
+}
+
 func (r *Runtime) maybeEnd() {
 	t := &r.turns
 	if r.ending || t.busy || t.compacting {

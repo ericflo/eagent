@@ -470,12 +470,14 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if r.needsDossier() {
+	if r.needsDossier() && !r.endsAtQuiet() {
 		// Restart at the first quiet moment: the prompt is still in the
 		// provider's cache, so the dossier is cheap to write now, and the
 		// user's next message does not have to wait for it. Not in a
 		// session that is ending: nothing will be asked of it again
-		// (noRestartNow).
+		// (noRestartNow). Nor in one that ends at this quiet moment
+		// (endsAtQuiet): maybeEnd, next in this tick, asks its closing
+		// word on the conversation that still fits, or ends it.
 		r.startDossier()
 		return
 	}
