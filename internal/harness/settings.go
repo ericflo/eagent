@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -148,13 +149,19 @@ type routeSwap struct {
 // not change keeps its routes, including a fallback it switched to. A
 // changed pick starts from the configured route (see config.PickRoute:
 // limits stay, another model drops the old model's fallback chain), or,
-// with a configuration chosen in the same change (chosen: the values'
-// Config), from that configuration's route as it defines it.
+// with a configuration chosen in the same change (chosen, the /config
+// edit's name), from that configuration's route as it defines it: then a
+// pick equal to the one before changes the route too when the chosen
+// route differs from the one the session runs (chosenEntry).
 func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route, chosen ...string) ([]routeSwap, error) {
 	var out []routeSwap
 	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
 		pick, ok := after[who]
-		if !ok || pick == before[who] || pick.Model == "" || r.models[who] == nil {
+		if !ok || pick.Model == "" || r.models[who] == nil {
+			continue
+		}
+		_, named := r.chosenEntry(who, pick, chosen...)
+		if pick == before[who] && !named {
 			continue
 		}
 		a, err := r.resolvePick(who, pick, chosen...)
@@ -165,6 +172,9 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route, ch
 		// resolves it), "" (send none) included, so it is the one sent,
 		// not the configured route's.
 		a.ReasoningEffort = pick.Effort
+		if pick == before[who] && reflect.DeepEqual(a, r.models[who].conf) {
+			continue // the chosen route is the one the session runs
+		}
 		// The picked route itself must be usable (its key set); fallbacks
 		// without a key are skipped as usual.
 		if _, err := a.Endpoint(); err != nil {
@@ -192,21 +202,8 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route, ch
 func (r *Runtime) pickBase(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, bool) {
 	project := r.opts.Project
 	m := r.models[who]
-	if len(chosen) > 0 && chosen[0] != "" {
-		var cfg config.Config
-		var err error
-		if b, isBundle := strings.CutPrefix(chosen[0], "bundle:"); isBundle {
-			cfg, err = config.LoadBundle(project, "", b)
-		} else {
-			cfg, err = config.ChosenPreset(project, chosen[0])
-		}
-		route := cfg.Model
-		if who == runtimecontrol.RouteSummarizer {
-			route = cfg.Summarizer.Route(cfg.Model)
-		}
-		if entry, ok := runtimecontrol.ChainEntry(project, route, pick); err == nil && ok {
-			return entry, true
-		}
+	if entry, ok := r.chosenEntry(who, pick, chosen...); ok {
+		return entry, true
 	}
 	if cur := m.confAt(); cur != nil && runtimecontrol.Names(project, *cur, pick) {
 		return *cur, true
@@ -217,6 +214,32 @@ func (r *Runtime) pickBase(who string, pick runtimecontrol.Route, chosen ...stri
 		}
 	}
 	return config.ModelRoute{}, false
+}
+
+// chosenEntry is the one place a configuration chosen in a change
+// (/config, named by chosen) decides a route: the entry of its route that
+// the pick names, as the configuration defines it, whether or not the
+// session runs that model already.
+func (r *Runtime) chosenEntry(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, bool) {
+	if len(chosen) == 0 || chosen[0] == "" {
+		return config.ModelRoute{}, false
+	}
+	project := r.opts.Project
+	var cfg config.Config
+	var err error
+	if b, isBundle := strings.CutPrefix(chosen[0], "bundle:"); isBundle {
+		cfg, err = config.LoadBundle(project, "", b)
+	} else {
+		cfg, err = config.ChosenPreset(project, chosen[0])
+	}
+	if err != nil {
+		return config.ModelRoute{}, false
+	}
+	route := cfg.Model
+	if who == runtimecontrol.RouteSummarizer {
+		route = cfg.Summarizer.Route(cfg.Model)
+	}
+	return runtimecontrol.ChainEntry(project, route, pick)
 }
 
 // resolvePick is the configured route a changed pick of who's model
@@ -260,7 +283,7 @@ func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route, chosen .
 		if !ok || m == nil || pick.Model == "" {
 			continue
 		}
-		if pick == r.activeSettings.Routes[who] {
+		if _, named := r.chosenEntry(who, pick, chosen...); pick == r.activeSettings.Routes[who] && !named {
 			if cur := m.confAt(); cur != nil {
 				out[who] = *cur
 			} else {
