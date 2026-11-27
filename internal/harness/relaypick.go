@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 
@@ -122,6 +123,8 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		switch {
 		case held == "dialog":
 			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen); it starts again with " + r.pickText(rel, pick) + " once that is answered and it is between turns, on the same conversation.", nil
+		case held == "typing" && rel.State != "working":
+			return rel.Who() + " is being typed one of its own commands; it starts again with " + r.pickText(rel, pick) + " once that is typed, on the same conversation.", nil
 		case rel.State != "working":
 			return rel.Who() + " has a message on its way that it reads next; it starts again with " + r.pickText(rel, pick) + " when the turn that message starts ends, on the same conversation.", nil
 		}
@@ -228,15 +231,29 @@ func (r *Runtime) heldBack(rel *state.Relay) string {
 	if rel.Awaited() == 0 {
 		return ""
 	}
+	held := ""
 	for id, text := range rel.Undelivered {
 		// The agent's own command typed into its prompt (/clear, /status)
-		// runs at once and starts no turn: it holds nothing back. One held
-		// for its turn's end is handed over as words, as any message.
-		if !relay.IsAgentCommand(text) || r.st.SendOutcome(id) == state.SendHeld {
+		// runs at once and starts no turn: it holds a change back only
+		// until it is typed (its arrival, recorded once typed, looks at the
+		// change again: appendOutcome). One held for its turn's end is
+		// handed over as words, as any message.
+		if !typedCommand(r.st, id, text) {
 			return "on its way"
 		}
+		held = "typing"
 	}
-	return ""
+	return held
+}
+
+// typedCommand says whether send id, waiting with text, is one of the
+// agent's own commands typed into its prompt, not held for a turn's end.
+func typedCommand(st *state.State, id, text string) bool {
+	if !relay.IsAgentCommand(text) || st.SendOutcome(id) == state.SendHeld {
+		return false
+	}
+	d, ok := sendRecord(st, id)
+	return ok && d.Mode != "after_turn"
 }
 
 // applyWaitingRepick starts a relay again with a change that waited for its
@@ -267,6 +284,12 @@ func (r *Runtime) applyWaitingRepick(name string) {
 // repickFailed says that a change that waited could not start the agent
 // again: the change is dropped. Loop goroutine.
 func (r *Runtime) repickFailed(rel *state.Relay, pick relayPick, err error) {
-	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
+	text := "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()
+	if errors.Is(err, errEnding) {
+		// Nothing was tried: no agent starts once the session is ending.
+		// Said as that, with what the agent runs.
+		text = fmt.Sprintf("%s runs %s; the change to %s was not made, as the session ended first", rel.Who(), r.pickText(rel, relayPick{rel.Model, rel.Effort}), r.pickText(rel, pick))
+	}
+	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: text}))
 	r.ui.Log("relay %s: %v", rel.Name, err)
 }

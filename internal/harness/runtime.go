@@ -1303,8 +1303,8 @@ drain:
 	// else waits for the next run (pollInbox), as does a file written
 	// after this.
 	r.pollInbox()
-	// A start still under way stops the agent it brings up (abandonLaunch),
-	// as nothing would watch it. Nothing is under way in an ordinary
+	// A start still under way is waited for: one whose agent comes up is
+	// recorded below (abandonLaunch). Nothing is under way in an ordinary
 	// shutdown, so this costs nothing then.
 	opsDone := make(chan struct{})
 	go func() { r.relayOps.Wait(); close(opsDone) }()
@@ -1315,6 +1315,18 @@ drain:
 		r.ui.Log("an agent start or stop did not finish in time")
 	}
 	opsDeadline.Stop()
+	// Direct writes from here: the loop is no longer running. The starts
+	// the end overtook, in the order their agents came up, one at a time
+	// (finishLaunch, as the loop would have); one after this is not
+	// recorded (late).
+	r.relays.mu.Lock()
+	overtaken := r.relays.overtaken
+	r.relays.overtaken, r.relays.late = nil, true
+	r.relays.mu.Unlock()
+	for _, job := range overtaken {
+		r.relayOps.Add(1) // finishLaunch's, given back by abandonLaunch
+		_, _ = r.finishLaunch(job)
+	}
 	// The agents are not the session's children: they run in terminals of
 	// their own and outlive this process, so a resumed session (or the
 	// user, attached) picks up where they are. Only stop watching them.
@@ -1393,7 +1405,7 @@ drain:
 // relayOpsGrace bounds the wait for agent starts and stops at the end of a
 // session. A start can take a minute on its git pull, and closing a
 // terminal's watcher is bounded at 30 s; this covers both.
-const relayOpsGrace = 2 * time.Minute
+var relayOpsGrace = 2 * time.Minute
 
 func (r *Runtime) appendDirect(ev event.Event) {
 	ev, err := r.sess.Append(ev)
