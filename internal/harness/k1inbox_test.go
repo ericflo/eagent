@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,6 +74,60 @@ func k1Next(t *testing.T, rt *Runtime, ui UI) *Runtime {
 	}
 	t.Cleanup(func() { rt2.sess.Close() })
 	return rt2
+}
+
+// k1SnapUI keeps, at each user.message written, the inbox's files: what a
+// cut just before or just after that write would leave there.
+type k1SnapUI struct {
+	fakeUI
+	dir   string
+	snaps []map[string][]byte
+}
+
+func (u *k1SnapUI) Trace(ev event.Event) {
+	if ev.Type != event.UserMessage || u.dir == "" {
+		return
+	}
+	snap := map[string][]byte{}
+	entries, _ := os.ReadDir(u.dir)
+	for _, e := range entries {
+		if raw, err := os.ReadFile(filepath.Join(u.dir, e.Name())); err == nil {
+			snap[e.Name()] = raw
+		}
+	}
+	u.snaps = append(u.snaps, snap)
+}
+
+// D2: a file written by hand, with no id of its own, is still in the inbox
+// when its words are written, so a cut before that write leaves it for the
+// next run; and a cut after it leaves a file the next run knows it took.
+// It used to be removed first, and a cut between the two lost the words.
+func TestK1InboxHandWrittenWordsSurviveACut(t *testing.T) {
+	ui := &k1SnapUI{}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	r8cDrop(t, rt.sess.Path, "note.json", r8cNote("k1 by hand"))
+	rt.pollInbox()
+	if n := len(r8cWords(rt, event.UserMessage, "k1 by hand")); n != 1 || len(ui.snaps) != 1 {
+		t.Fatalf("the words are on record %d times, want once", n)
+	}
+	if len(ui.snaps[0]) == 0 {
+		t.Fatal("the file was removed before its words were written: a cut between the two loses them")
+	}
+	if left, _ := os.ReadDir(ui.dir); len(left) != 0 {
+		t.Fatalf("%d file(s) left in the inbox", len(left))
+	}
+	// The process is cut just after the write: the inbox is as it was then.
+	for name, raw := range ui.snaps[0] {
+		if err := os.WriteFile(filepath.Join(ui.dir, name), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt2 := k1Next(t, rt, &fakeUI{})
+	rt2.pollInbox()
+	if n := len(r8cWords(rt2, event.UserMessage, "k1 by hand")); n != 1 {
+		t.Fatalf("after the cut the words are on record %d times, want once", n)
+	}
 }
 
 // D1: an eagent command from the inbox whose file cannot be removed is
