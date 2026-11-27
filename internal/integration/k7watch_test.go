@@ -2,6 +2,12 @@ package integration
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,5 +79,53 @@ func TestK7TakingBackTheKeptReplyLeavesTheReplyAfterItToBeTaken(t *testing.T) {
 	w.sweep(context.Background())
 	if _, kept := w.retries.replies["m1"]; host.calls() != 1 || host.resumed[0].ID != "m2" || kept {
 		t.Fatalf("resumed %#v, m1 still kept: %v; want m1 let go and the session resumed with m2, the reply after it", host.resumed, kept)
+	}
+}
+
+// As the test before, with the service failing the reads of the thread in
+// the sweep that finds the first reply taken back (a 503 on each read
+// after the cursor). The watcher's note hides the thread from the sweep's
+// list, so the entry of the reply taken back is what brings the thread up
+// again: it stays, quiet, until a read has said what waits there, and the
+// next sweep resumes the session with the second reply. The copy of the
+// first is not tried again.
+func TestK7AFailedReadAfterTheTakeBackStillLeavesTheNextReplyToBeTaken(t *testing.T) {
+	f, w, host, _, sid := k7Kept(t, "drop the staging database")
+	f.say(sid, "m2", "and then run the tests", time.Now(), nil)
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "note", "sender": "system", "origin": "token", "body": "eagent could not resume this session for your reply yet. It keeps trying every minute.", "created_at": time.Now(), "meta": map[string]any{}})
+	f.threads[sid][1]["deleted"] = true
+	f.threads[sid][1]["body"] = ""
+	f.mu.Unlock()
+	target, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := httputil.NewSingleHostReverseProxy(target)
+	var failing atomic.Bool
+	var failed atomic.Int32
+	failing.Store(true)
+	proxy := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if failing.Load() && r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && r.URL.Query().Get("after") != "" {
+			failed.Add(1)
+			http.Error(rw, `{"error":{"code":"unavailable","message":"try again"}}`, http.StatusServiceUnavailable)
+			return
+		}
+		through.ServeHTTP(rw, r)
+	}))
+	defer proxy.Close()
+	w.client.BaseURL = proxy.URL
+	w.sweep(context.Background())
+	if failed.Load() == 0 {
+		t.Fatal("the fixture failed no read")
+	}
+	if p, kept := w.retries.replies["m1"]; host.calls() != 0 || !kept || p.told {
+		t.Fatalf("after the read failed: resumed %#v, kept %#v; want nothing resumed and the thread still kept for a look, quietly", host.resumed, w.retries.replies)
+	}
+	failing.Store(false)
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if _, kept := w.retries.replies["m1"]; host.calls() != 1 || host.resumed[0].ID != "m2" || kept {
+		t.Fatalf("once the service answers: resumed %#v, m1 still kept: %v; want the session resumed once, with m2", host.resumed, kept)
 	}
 }

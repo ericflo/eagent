@@ -578,28 +578,37 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 			// twice.
 			continue
 		}
-		if !p.told {
-			// Kept while its session ran: the thread is read as a sweep
-			// reads it, not from the copy kept, which knows nothing of a
-			// deletion since.
+		told := p.told
+		if told {
+			// Told that it keeps trying: the copy is tried again while
+			// the thread still has the message (takenBack; a thread that
+			// cannot be read leaves the copy to consider, as before). One
+			// the user took back since is tried no more, wherever the
+			// session's cursor stands by now. Its entry stays, quiet: a
+			// reply after it may wait in the thread, which the sweep's
+			// list passes over (its newest message is the watcher's own
+			// note), so the thread is read from here until a read has
+			// said what waits there.
+			if gone, err := takenBack(ctx, w.client, p.thread.ExternalID, p.msg); err == nil && gone {
+				w.retries.mu.Lock()
+				if q, ok := w.retries.replies[p.msg.ID]; ok {
+					q.told = false
+					w.retries.replies[p.msg.ID] = q
+				}
+				w.retries.mu.Unlock()
+				told = false
+			}
+		}
+		if !told {
+			// Kept quietly (while its session ran, or as above): the
+			// thread is read as a sweep reads it, not from the copy kept,
+			// which knows nothing of a deletion since. The entry goes
+			// once a read finds nothing waiting (dropKept), or with the
+			// session's next reply kept in its place (keepQuietly).
 			w.consider(ctx, p.thread, finalechat.Message{})
 			continue
 		}
-		// Told that it keeps trying: the copy is tried again while the
-		// thread still has the message. One the user took back since is
-		// let go, wherever the session's cursor stands by now, and the
-		// thread is read as a sweep reads it: a reply after it may wait
-		// there, and the sweep's list passes over a thread whose newest
-		// message is the watcher's own note. A thread that cannot be read
-		// leaves the copy to consider, as before.
-		msg := p.msg
-		if gone, err := takenBack(ctx, w.client, p.thread.ExternalID, p.msg); err == nil && gone {
-			w.retries.mu.Lock()
-			delete(w.retries.replies, p.msg.ID)
-			w.retries.mu.Unlock()
-			msg = finalechat.Message{}
-		}
-		w.consider(ctx, p.thread, msg)
+		w.consider(ctx, p.thread, p.msg)
 	}
 }
 
