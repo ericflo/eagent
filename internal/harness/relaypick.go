@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 
@@ -267,6 +268,12 @@ func (r *Runtime) applyWaitingRepick(name string) {
 // repickFailed says that a change that waited could not start the agent
 // again: the change is dropped. Loop goroutine.
 func (r *Runtime) repickFailed(rel *state.Relay, pick relayPick, err error) {
-	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
+	text := "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()
+	if errors.Is(err, errEnding) {
+		// Nothing was tried: no agent starts once the session is ending.
+		// Said as that, with what the agent runs.
+		text = fmt.Sprintf("%s runs %s; the change to %s was not made, as the session ended first", rel.Who(), r.pickText(rel, relayPick{rel.Model, rel.Effort}), r.pickText(rel, pick))
+	}
+	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: text}))
 	r.ui.Log("relay %s: %v", rel.Name, err)
 }
