@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,6 +87,11 @@ type phone struct {
 	// the first, so what the user sent while the session was coming back
 	// is read too; from the second if the server does not know the first.
 	resumedBy, fallback string
+
+	// owed are the refusal notes the sender is owed (tellRefused), guarded
+	// by mu; owe wakes tellRefused for a new one.
+	owed []phoneRefusedData
+	owe  chan struct{}
 }
 
 // startPhone wires the mirror up if a token is available and it is not
@@ -117,6 +123,9 @@ func (r *Runtime) startPhone() {
 		sid: r.sess.ID, resumes: r.st.Resumes, features: map[string]bool{}, wake: make(chan struct{}, 1),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 256),
 		posted: map[string]bool{}, questions: map[string]string{}, fromPhone: map[string]string{}, open: map[string]string{}, gone: map[string]bool{}, taken: map[string]bool{},
+		// The refusal notes an earlier run still owed the sender: posted
+		// once the thread is attached (tellRefused).
+		owed: owedRefusals(r.st.Events), owe: make(chan struct{}, 1),
 	}
 	// Which app messages the session has taken in (integration.PhoneLedger),
 	// as the runs before this one left it: a resumed session reads on after
@@ -423,9 +432,10 @@ func (r *Runtime) startPhone() {
 				}
 			})
 		}
-		p.wg.Add(2)
+		p.wg.Add(3)
 		go p.poll(r, started)
 		go p.keeper(r)
+		go p.tellRefused(r)
 	})
 	// The message the session was started or resumed with is passed to
 	// the agent as it is recorded, before this mirror exists. Its receipt
@@ -735,6 +745,23 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		var d event.QuestionData
 		_ = ev.Decode(&d)
 		p.ask(r, d.ID, d.Text, d.Options)
+	case phoneRefusedEvent:
+		// A file was refused: its note is owed until one is posted.
+		var d phoneRefusedData
+		if ev.Decode(&d) != nil || d.Posted {
+			return
+		}
+		p.mu.Lock()
+		if !slices.ContainsFunc(p.owed, func(o phoneRefusedData) bool {
+			return o.MessageID == d.MessageID && o.AttachmentID == d.AttachmentID
+		}) {
+			p.owed = append(p.owed, d)
+		}
+		p.mu.Unlock()
+		select {
+		case p.owe <- struct{}{}:
+		default:
+		}
 	case event.CwdChange:
 		var d event.CwdChangeData
 		_ = ev.Decode(&d)
@@ -1233,7 +1260,6 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
-	held := map[string]int{} // reads each message was held back for (its refusal note could not be posted)
 	for p.ctx.Err() == nil {
 		p.mu.Lock()
 		after := p.lastID
@@ -1314,10 +1340,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			continue
 		}
 		backoff = time.Second
-		heldBack := 0 // how many times the message held back has been, once one is
 		for _, m := range msgs {
 			p.mu.Lock()
-			prevID := p.lastID
 			p.lastID = m.ID
 			mine := p.posted[m.ID]
 			p.mu.Unlock()
@@ -1333,7 +1357,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			p.remember(m.ID)
 			body := strings.TrimSpace(m.Body)
 			var atts []event.Attachment
-			var notes []func(ctx context.Context, taken bool) error
+			var notes []phoneRefusedData
 			for _, a := range m.Attachments {
 				saved, err := r.downloadAttachment(p.client, a)
 				// A download that may work later (the service could not be
@@ -1361,57 +1385,17 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// in the step that takes the message: a session that
 					// is ending (a /quit before it in the page, say) does
 					// not take it, and says nothing.
-					note, key, name := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}, a.Filename
-					notes = append(notes, func(ctx context.Context, taken bool) error {
-						act := p.attach()
-						msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
-						if err == nil {
-							p.rememberIn(msg, thread)
-							p.markSent(act)
-						} else if ctx.Err() == nil && taken {
-							// The words went on without the file; the person
-							// who sent it is not told on the phone, so the
-							// log says so.
-							p.say("finalechat: %s was dropped and its sender could not be told on the phone: %v", name, shortErr(err))
-						}
-						return err
-					})
+					notes = append(notes, phoneRefusedData{MessageID: m.ID, AttachmentID: a.ID, Text: finalechat.RefusedNote(a.Filename, err)})
 					continue
 				}
 				atts = append(atts, saved)
 			}
-			if len(notes) > 0 && held[m.ID] < phoneRefusalTries {
-				// The person is told the file is not taken before its
-				// message is: unless the session is ending (then the step
-				// below leaves it, and says nothing), the notes go out now,
-				// and one that cannot leaves the message untaken, read
-				// again after a pause, as the reply watcher leaves it. After
-				// phoneRefusalTries such reads it is taken without the file,
-				// and the notes are queued as any post is.
-				ending := true
-				r.sync(func() { ending = r.ending })
-				if !ending {
-					var nerr error
-					for _, n := range notes {
-						if nerr = n(p.ctx, false); nerr != nil {
-							break
-						}
-					}
-					if nerr != nil {
-						held[m.ID]++
-						p.mu.Lock()
-						delete(p.posted, m.ID)
-						p.lastID = prevID
-						p.mu.Unlock()
-						heldBack = held[m.ID]
-						break
-					}
-					notes = nil
-				}
-			}
+			// Once the message is on the record without them, the files
+			// refused are too (phone.refused), and the mirror owes the
+			// sender a note for each until one is posted (tellRefused).
 			tell := func() {
 				for _, n := range notes {
-					p.enqueue(func(ctx context.Context) { _ = n(ctx, true) })
+					r.append(event.New(phoneRefusedEvent, event.ActorHarness, n))
 				}
 			}
 			// Every message the poll takes in is recorded in the loop step
@@ -1423,8 +1407,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			if body == "" && len(atts) == 0 {
 				r.post(func() {
 					if !r.ending {
-						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
+						tell()
 					} else if len(notes) > 0 {
 						// Left with files to refuse; one with nothing at all
 						// in it leaves nothing for the next run.
@@ -1441,8 +1425,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// Its answer was taken already (handOver claims it).
 					r.post(func() {
 						if !r.ending {
-							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
+							tell()
 						} else if len(notes) > 0 {
 							p.left = true // its answer is taken; only files to refuse are left
 						}
@@ -1476,10 +1460,10 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 						p.left = true
 						return
 					}
-					tell()
 					from := len(r.st.Events)
 					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts, PhoneID: phoneID, CardID: fid})
 					r.tookPhoneMessage(phoneID, from)
+					tell()
 				})
 				continue
 			}
@@ -1494,8 +1478,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// told. Not past a message left for the next run, which
 					// the cursor would then pass.
 					if !p.left && r.ownCommand(body, "finalechat") {
-						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
+						tell()
 						// Said in the log too: the phone's note may not go
 						// out before the mirror closes.
 						p.say("finalechat: eagent did not run %q from the phone: the session was already ending", clipLabel(body, 80))
@@ -1505,7 +1489,6 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					p.left = true
 					return
 				}
-				tell()
 				from := len(r.st.Events)
 				if r.ownCommand(body, "finalechat") {
 					// A command is recorded as taken before it runs: lost
@@ -1515,25 +1498,95 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				}
 				r.handleInbox(InboxMessage{Type: "message", Text: body, From: "finalechat", Client: caps, Attachments: atts, Route: route, Delivery: delivery, PhoneID: phoneID})
 				r.tookPhoneMessage(phoneID, from)
+				tell()
 			})
-		}
-		if heldBack > 0 {
-			// A refusal note could not be posted: its message, and those
-			// after it, wait for the next read, after a pause that grows
-			// as the first call's retries do.
-			select {
-			case <-time.After(time.Duration(heldBack) * phoneRetryStep):
-			case <-p.ctx.Done():
-				return
-			}
 		}
 	}
 }
 
-// phoneRefusalTries bounds how many reads of a message a refusal note that
-// cannot be posted holds it back for (each after the pause a failed read
-// gets); after them the message is taken without the file.
-const phoneRefusalTries = 3
+// phoneRefusedEvent records that a file of an app message was not passed
+// on, the message having been taken without it, and so that the sender is
+// owed the note saying so; with Posted, that the note went out.
+const phoneRefusedEvent = "phone.refused"
+
+// phoneRefusedData is a phone.refused event's data.
+type phoneRefusedData struct {
+	MessageID    string `json:"message_id"`
+	AttachmentID string `json:"attachment_id"`
+	Text         string `json:"text,omitempty"`
+	Posted       bool   `json:"posted,omitempty"`
+}
+
+// owedRefusals are the notes the record says the sender is owed: files
+// refused (phone.refused) with no posted one for the same file.
+func owedRefusals(evs []event.Event) []phoneRefusedData {
+	var out []phoneRefusedData
+	posted := map[[2]string]bool{}
+	for i := len(evs) - 1; i >= 0; i-- {
+		var d phoneRefusedData
+		if evs[i].Type != phoneRefusedEvent || evs[i].Decode(&d) != nil {
+			continue
+		}
+		k := [2]string{d.MessageID, d.AttachmentID}
+		if d.Posted {
+			posted[k] = true
+		} else if !posted[k] {
+			posted[k] = true // one note per file
+			out = append(out, d)
+		}
+	}
+	slices.Reverse(out)
+	return out
+}
+
+// tellRefused posts every refusal note the sender is owed (p.owed), each
+// with a client key of its own, trying again after a growing pause until
+// it goes out, and records each one posted. One goroutine per mirror.
+func (p *phone) tellRefused(r *Runtime) {
+	defer p.wg.Done()
+	tries := 0
+	said := map[[2]string]bool{} // a note whose first try failed was said in the log
+	for p.ctx.Err() == nil {
+		p.mu.Lock()
+		owed := append([]phoneRefusedData(nil), p.owed...)
+		p.mu.Unlock()
+		failed := false
+		for _, n := range owed {
+			act := p.attach()
+			msg, thread, err := p.client.Post(p.ctx, p.ref, finalechat.PostRequest{Body: n.Text, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key("refused", n.MessageID, n.AttachmentID), Activity: act})
+			if err != nil {
+				failed = true
+				if k := [2]string{n.MessageID, n.AttachmentID}; !said[k] && p.ctx.Err() == nil {
+					said[k] = true
+					p.say("finalechat: could not tell the phone yet (%v): %s It is tried again until it goes out.", shortErr(err), n.Text)
+				}
+				continue
+			}
+			p.rememberIn(msg, thread)
+			p.markSent(act)
+			done := phoneRefusedData{MessageID: n.MessageID, AttachmentID: n.AttachmentID, Posted: true}
+			p.mu.Lock()
+			p.owed = slices.DeleteFunc(p.owed, func(o phoneRefusedData) bool {
+				return o.MessageID == n.MessageID && o.AttachmentID == n.AttachmentID
+			})
+			p.mu.Unlock()
+			r.post(func() { r.append(event.New(phoneRefusedEvent, event.ActorHarness, done)) })
+		}
+		var wait <-chan time.Time
+		if failed {
+			tries++
+			wait = time.After(min(time.Duration(tries)*phoneRetryStep, time.Minute))
+		} else {
+			tries = 0
+		}
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-p.owe:
+		case <-wait:
+		}
+	}
+}
 
 // FromPhone reads what the app says about a message the user sent from the
 // phone, in its meta: the composer's route and delivery, and the client's
