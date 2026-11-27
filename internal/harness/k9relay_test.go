@@ -3,11 +3,15 @@ package harness
 // The sixteenth review of the relay area, sixth pass (sr6).
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // SR6-1. Codex is in a long turn (a build, a test suite, a subagent: its
@@ -46,6 +50,73 @@ func TestSR6AWaitingChangeKillsALongQuietTurn(t *testing.T) {
 	waitRelayStarts(t, rt)
 	waitFor(t, "the message's outcome", func() bool { return len(deliveredFor(rt, id)) > 0 })
 	t.Errorf("the user's message Codex held for its next step: %q %+v", k2Outcome(rt, id), deliveredFor(rt, id))
+}
+
+// k9HalfSeat types a send until the test lets it go, then fails part way
+// (its terminal was killed under it), as relay.Seat's TypingError says.
+type k9HalfSeat struct {
+	*fakeSeat
+	entered chan string
+	gate    chan struct{}
+}
+
+func (s *k9HalfSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
+	s.entered <- id
+	<-s.gate
+	return "", &relay.TypingError{Err: errors.New("can't find pane: k9")}
+}
+
+// The sixth review's suspicion: Stop session while a message is being
+// typed into Codex. The stop's settle leaves the send being typed to
+// settleSend (settleExited), but its step can run first, and the session
+// ends before settleSend's step: the send, typed in part into an agent
+// now gone, had no outcome before session.end. The stop settles after the
+// stopped seat's send queue is done, as it waits for the seat's news.
+func TestK9StopSessionSettlesASendBeingTypedBeforeTheEnd(t *testing.T) {
+	seat := &k9HalfSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 1), gate: make(chan struct{})}
+	rt, _, done := r10Session(t, seat)
+	sent := make(chan string, 1)
+	go func() {
+		out, _ := rt.relayTool("relay_send", argStr(map[string]any{"text": "run the tests"}), argNum(nil), argList(nil), false)
+		sent <- out
+	}()
+	id := <-seat.entered
+	rt.sync(func() { rt.stopSession("the user stopped the session") })
+	waitFor(t, "the stopped seat drained", func() bool {
+		rt.relays.mu.Lock()
+		defer rt.relays.mu.Unlock()
+		_, held := rt.relays.drained[seat]
+		return !held
+	})
+	close(seat.gate) // its terminal is gone: the typing fails part way
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the session did not end")
+	}
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcomes []string
+	ended := false
+	for _, ev := range evs {
+		var d event.RelayDeliveredData
+		switch {
+		case ev.Type == event.SessionEnd:
+			ended = true
+		case ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && d.ID == id:
+			o := d.Outcome
+			if ended {
+				o += " (after session.end)"
+			}
+			outcomes = append(outcomes, o)
+		}
+	}
+	if len(outcomes) != 1 || outcomes[0] != event.DeliveryUnconfirmed {
+		t.Errorf("%s, typed in part as Stop session killed Codex: %v; want one outcome, unconfirmed, before session.end", id, outcomes)
+	}
 }
 
 // The sixth review's suspicion: pi ran /new just before a switch to Claude

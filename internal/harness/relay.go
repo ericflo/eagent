@@ -1505,7 +1505,7 @@ func (r *Runtime) idleFor() time.Duration {
 func (r *Runtime) stopSession(reason string) {
 	r.stopLaunches("", reason)
 	for _, rel := range r.st.ActiveRelays() {
-		var drained <-chan struct{}
+		var drained, typed <-chan struct{}
 		seat := r.relays.get(rel.Name)
 		if seat != nil {
 			if err := seat.Kill(); err != nil {
@@ -1530,6 +1530,12 @@ func (r *Runtime) stopSession(reason string) {
 				close(done) // killed above
 				r.relays.stopping[rel.Name] = done
 			}
+			if q := r.relays.queues[seat]; q != nil && q.running {
+				// A send being typed into it ends now that it is killed, in
+				// a step of its own (settleSend), which goes before the
+				// settle below.
+				typed = q.idle
+			}
 			r.relays.mu.Unlock()
 		}
 		settle := r.relays.launch(rel.Name) == nil
@@ -1543,10 +1549,18 @@ func (r *Runtime) stopSession(reason string) {
 			settled, name := make(chan struct{}), rel.Name
 			r.stopSettles = append(r.stopSettles, settled)
 			go func() {
-				select {
-				case <-drained:
-				case <-time.After(oldSendSettle):
-					r.ui.Log("relay %s: the stopped agent had not said all it saw after %s; what it said after that is not recorded", name, oldSendSettle)
+				limit := time.After(oldSendSettle)
+				for _, ch := range []<-chan struct{}{drained, typed} {
+					if ch == nil {
+						continue
+					}
+					select {
+					case <-ch:
+						continue
+					case <-limit:
+						r.ui.Log("relay %s: the stopped agent had not said all it saw after %s; what it said after that is not recorded", name, oldSendSettle)
+					}
+					break
 				}
 				r.post(func() {
 					defer close(settled)
