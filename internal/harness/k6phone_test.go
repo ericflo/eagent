@@ -5,6 +5,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // TestK2AnAnswerOnALostCardIsTakenOnceWhenTheCardCannotBeChecked, one run
@@ -32,7 +33,7 @@ func TestSRPhoneACardAnswerTakenAsAMessageIsNotTakenAgainAtTheNextResume(t *test
 	g.ui = &fakeUI{input: make(chan string, 16)}
 	g.resume(Options{Interactive: true, Prompt: "blue", PromptSource: "finalechat", PromptPhoneID: fp.lastMessageID(), PromptAnswers: card})
 	waitFor(t, "the re-ask to record the card", func() bool {
-		return len(g.events(event.PhoneQuestion)) == 2
+		return len(g.events(event.PhoneQuestion)) >= 2 // and a new card after it
 	})
 	g.interrupt()
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
@@ -97,5 +98,42 @@ func TestK6AnAnswerTakenFromItsCardIsNotTakenAgainAsResumingWords(t *testing.T) 
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
 		r5takenDump(g)
 		t.Fatalf("one tap on the card is recorded %d times as the answer and %d times as a message", a, m)
+	}
+}
+
+// The question's newest card was answered and its answer taken as a
+// message (its question unknown then), so the question is still open. It
+// is asked again on a new card, by the run whose re-ask finds the card
+// taken and by a later resume, as past a card that expired or was
+// withdrawn: the phone is not left with the question open and no card to
+// answer it on.
+func TestK6AQuestionWhoseCardWasTakenAsAMessageIsAskedOnANewCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	card := r5CardOf(t, g)
+	k2LoseCard(t, g, card)
+	if !fp.answer("blue", "") {
+		t.Fatal("no card to answer")
+	}
+	fp.mu.Lock()
+	fp.questionsDown = true
+	fp.mu.Unlock()
+	g.ui = &fakeUI{input: make(chan string, 16)}
+	g.resume(Options{Interactive: true, Prompt: "blue", PromptSource: "finalechat", PromptPhoneID: fp.lastMessageID(), PromptAnswers: card})
+	waitFor(t, "the re-ask to record the card", func() bool { return len(g.events(event.PhoneQuestion)) >= 2 })
+	g.interrupt()
+	fp.mu.Lock()
+	fp.questionsDown = false
+	fp.mu.Unlock()
+	if st := state.Replay(g.log()); st.Question == nil {
+		t.Fatal("setup: the question is not open")
+	}
+	g.ui = &fakeUI{input: make(chan string, 16)}
+	g.resume(Options{Interactive: true})
+	waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) == 3 })
+	r14Drained(t, g)
+	if n := fp.pendingQuestions(); n != 1 {
+		t.Fatalf("%d cards open for the question, want a new one", n)
 	}
 }
