@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 )
 
 // A model is picked in the thread's settings while the dossier of a
@@ -113,5 +115,99 @@ func TestAFallbackDuringAPassKeepsTheNewModelsCleanCount(t *testing.T) {
 	s.rt.sync(func() { rescues, retried = s.rt.restartRescues, s.rt.restartRetried })
 	if rescues != 0 || retried {
 		t.Fatalf("after the pass the fallback finished: %d restarts in a row counted against it, retried %v; want none", rescues, retried)
+	}
+}
+
+// afterNotesNotice opens what turnFailed tells the user when the
+// provider refuses the conversation as too long after a restart.
+const afterNotesNotice = "My model refuses my conversation as too long, even after I restarted it from my notes"
+
+// r12Failed waits until the loop has told the user of the model in use
+// failing (failTold), which a move to another model sets back (newModel).
+func r12Failed(t *testing.T, s *session) {
+	t.Helper()
+	r4Until(t, "two failed calls on the model in use", func() bool {
+		ok := false
+		s.rt.sync(func() { ok = s.rt.turns.failTold })
+		return ok
+	})
+}
+
+// After no restart could make room on a model whose reply ceiling took a
+// large part of its window, the person picks a model with the same window
+// and a smaller ceiling: it has more room for the conversation, so the
+// decision found on the old one does not stand on it. It refuses the
+// conversation as it is, one restart on it makes room, that restart is
+// made, and the message is answered.
+func TestAModelWithMoreRoomForInputGetsItsOwnRestart(t *testing.T) {
+	s, _ := r5FullSession(t)
+	var restarted atomic.Bool
+	conf := config.ModelRoute{Protocol: llm.ProtocolChat, Model: "other-model", APIKeyEnv: "EAGENT_TEST_KEY", ContextTokens: 60000, MaxTokens: 1024}
+	srv := newScripted(func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			restarted.Store(true)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		if !restarted.Load() {
+			return r7TooLong
+		}
+		if m[len(m)-1]["role"] != "tool" {
+			return say("Here it is.")
+		}
+		return hold()
+	})
+	t.Cleanup(srv.srv.Close)
+	conf.BaseURL = srv.srv.URL
+	eps, err := conf.Routes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := r6Dossiers(s)
+	s.rt.sync(func() {
+		s.rt.swapRoute(routeSwap{who: event.ActorEagent, pick: runtimecontrol.Route{Provider: "test", Model: "other-model"}, eps: eps, conf: conf})
+		s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"})
+	})
+	r4Until(t, "an answer, or the message told it waits", func() bool {
+		return r5Told(s, "Here it is.") > 0 || r5Told(s, stillFullNotice+`"still there?"`) > 0
+	})
+	if r5Told(s, "Here it is.") == 0 {
+		t.Fatalf("on the model with more room (asked %d times): %d restarts, and the user was told their message waits; one restart on it makes room", srv.count("other-model"), r6Dossiers(s)-before)
+	}
+}
+
+// After no restart could make room, the person picks a model with no more
+// room, which refuses the conversation too. The decision stands, and the
+// person who writes is told their message waits; they are not told again
+// that the conversation is refused "even after I restarted it from my
+// notes": the model in use made no restart, and they were told that once,
+// on the model before.
+func TestAMoveDoesNotRepeatTheRefusedAfterARestartNotice(t *testing.T) {
+	s, _ := r5FullSession(t)
+	r12Failed(t, s)
+	if n := r5Told(s, afterNotesNotice); n != 1 {
+		t.Fatalf("on the first model the user was told %d times that it refuses the conversation after a restart, want once", n)
+	}
+	before := r6Dossiers(s)
+	small := newScripted(func(string, []map[string]any) reply { return r7TooLong })
+	t.Cleanup(small.srv.Close)
+	conf := config.ModelRoute{Protocol: llm.ProtocolChat, BaseURL: small.srv.URL, Model: "other-model", APIKeyEnv: "EAGENT_TEST_KEY", ContextTokens: 60000, MaxTokens: 2048}
+	eps, err := conf.Routes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rt.sync(func() {
+		s.rt.swapRoute(routeSwap{who: event.ActorEagent, pick: runtimecontrol.Route{Provider: "test", Model: "other-model"}, eps: eps, conf: conf})
+		s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"})
+	})
+	r12Failed(t, s)
+	if n := r6Dossiers(s) - before; n != 0 {
+		t.Fatalf("%d restarts on a model with no more room, want none", n)
+	}
+	if n := r5Told(s, stillFullNotice+`"still there?"`); n != 1 {
+		t.Fatalf("the user was told %d times that their message waits, want once", n)
+	}
+	if n := r5Told(s, afterNotesNotice); n != 1 {
+		t.Fatalf("the user was told %d times that the conversation is refused after a restart, want once (on the model that made it)", n)
 	}
 }

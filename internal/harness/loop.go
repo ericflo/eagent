@@ -1546,6 +1546,12 @@ func (r *Runtime) turnFailed(err error) {
 		// created, finishDossier): then nothing was restarted, and the user
 		// hears what any failed call tells them.
 		if errors.As(err, &ae) && ae.ContextOverflow() && time.Since(t.dossierFailedAt) >= dossierRetry {
+			if cur := r.st.Current(); cur != nil && cur.StartSeq < r.st.Moved() && r.toldFull() {
+				// The restart was made on a model before the one in use,
+				// and the user was told no restart can make room
+				// (needsDossier): this model restarted nothing.
+				return
+			}
 			who := "the agent"
 			if active := r.st.ActiveRelays(); len(active) > 0 {
 				who = active[0].Who()

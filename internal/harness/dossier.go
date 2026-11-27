@@ -373,7 +373,7 @@ func (r *Runtime) needsDossier() bool {
 		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
-			r.decidedWindow, _ = r.window()
+			r.decidedWindow, _ = r.inputRoom()
 			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
 				input, fixed := r.inputRoom()
 				if at := provTokens(r.cfg.RolloverTokens); at > 0 && at < input && input > r.provider(fixed) {
@@ -432,11 +432,12 @@ func (r *Runtime) restartFull(limit provTokens) bool {
 // ordinary route the most a restart carries whole (dossierUnseenBytes).
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
-	// The full notice in the record was found on the window this run
-	// found it on (decidedWindow), or, when this run did not, on the
-	// window it resumed on: a larger window picked since is asked afresh.
-	window, _ := r.window()
-	told := r.toldFull() && (r.decidedWindow == 0 || window <= r.decidedWindow)
+	// The full notice in the record was found on the room for input this
+	// run found it on (decidedWindow), or, when this run did not, on the
+	// room it resumed on: a model with more room picked since is asked
+	// afresh.
+	room, _ := r.inputRoom()
+	told := r.toldFull() && (r.decidedWindow == 0 || room <= r.decidedWindow)
 	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || told}
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
@@ -657,11 +658,12 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 // restartDecided reports that, for a conversation a restart began, no
 // restart can make room was found and said (this run, or by the record's
 // full notice), and no call has gone through since. That stands across a
-// model picked in the thread's settings, unless the new model's window is
-// larger than the one it was found on: then the conversation is sent to it
-// as it is (needsDossier asks the size of the new window as usual). The
-// window it was found on is kept by this run; a resumed run takes the
-// window it resumes on. Loop goroutine only.
+// model picked in the thread's settings, unless the new model has more
+// room for input (inputRoom: its window less its reply ceiling) than the
+// one it was found on: then the conversation is sent to it as it is
+// (needsDossier asks the size of the new window as usual). The room it was
+// found on is kept by this run; a resumed run takes the room it resumes
+// on. Loop goroutine only.
 func (r *Runtime) restartDecided() bool {
 	cur := r.st.Current()
 	if cur == nil || (cur.Reason != "rollover" && cur.Reason != "upgrade") || r.turns.subCalls > 0 {
@@ -670,11 +672,11 @@ func (r *Runtime) restartDecided() bool {
 	if !r.turns.futileLogged && !r.toldFull() {
 		return false
 	}
-	window, _ := r.window()
+	room, _ := r.inputRoom()
 	if r.decidedWindow == 0 {
-		r.decidedWindow = window
+		r.decidedWindow = room
 	}
-	return window <= r.decidedWindow
+	return room <= r.decidedWindow
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
