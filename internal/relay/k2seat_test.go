@@ -112,3 +112,23 @@ func TestK2AReattachedSeatQuietInATurnTypesNothingIntoADialog(t *testing.T) {
 		})
 	}
 }
+
+// A1: pi's own pickers (/model, /resume, /tree, /login) open in place of
+// its editor and say nothing to an extension: pi's showSelector does not
+// go through the extension runner's UI wrapper (no ui_prompt_start), the
+// built-in commands never reach the input hook, and only /login and an
+// extension's dialogs report "blocked", as OSC 7501 to the terminal, which
+// tmux keeps no copy of. So pi's status says idle, and a send is pasted
+// into the picker and its Enter picks something.
+func TestK2ASendIsNotTypedIntoPisOwnPicker(t *testing.T) {
+	t.Skip("known, not fixed: pi 1.6.1 tells an extension nothing when its own pickers open (see the comment); only a screen reading of each picker could, and pi draws each one differently")
+	isolatePi(t)
+	status := filepath.Join(t.TempDir(), "pi-status.json")
+	writePiStatus(t, status, piStatus{State: "idle"})
+	h := &fakeHost{alive: true, screen: "Select model\n→ anthropic/claude-sonnet\n  openai/gpt-5\n0.4%/1.0M (auto)"}
+	s := newSeat(Spec{StatusFile: status}, piAgent{name: "pi", label: "Pi", binary: "pi"}, h, "k2-a1", "")
+	s.state = "idle"
+	if _, err := s.Send("r1", "run the tests", "queue"); err == nil || len(k1Typed(h)) != 0 {
+		t.Fatalf("typed %q into pi's model picker", k1Typed(h))
+	}
+}
