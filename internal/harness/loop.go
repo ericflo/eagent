@@ -886,9 +886,11 @@ func (r *Runtime) turn(w wake) {
 				// Only something that asks for a look gets a tail of its
 				// own. Anything else that came (a remark from the agent,
 				// what this turn's own calls put on the record) is in the
-				// conversation the call is given, and counts as seen.
+				// conversation the call is given, and counts as seen. A
+				// session the user writes to is not ending (noteWake): from
+				// here on the turn is not its closing turn.
 				if k, ok := r.dueWake(); ok {
-					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
+					w = wake{kind: k, event: true, final: w.final && k != wakeUser, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
@@ -956,8 +958,9 @@ func (r *Runtime) turn(w wake) {
 					// again at once, tell the user after their closing
 					// report that the model cannot be reached, or restart
 					// the conversation, and end the session as one that
-					// waits on them.
+					// waits on them. Nor is the failed call owed (wakeFor).
 					r.ui.Log("thread summary: %s; the title and summary keep their last values", shortErr(err))
+					closedOut = true
 					return
 				}
 				r.turnFailed(err)
@@ -1095,11 +1098,17 @@ func (r *Runtime) turn(w wake) {
 		if tc.stamped && len(tc.own) > 0 {
 			r.sync(func() { r.coverOwnWords(tc.own) })
 		}
-		if w.final && mustSpeak {
+		if w.final {
 			// The closing word belongs to a session that is ending. One
-			// that started an agent in this very turn is not: nothing is
-			// owed, and nothing may say "nothing is running now".
-			r.sync(func() { mustSpeak = len(r.st.ActiveRelays()) == 0 })
+			// that started an agent or set a timer in this very turn is
+			// not: from here on the turn is not its closing turn, no
+			// closing word is owed, nothing may say "nothing is running
+			// now", and a call that fails is owed as any turn's is.
+			r.sync(func() {
+				if len(r.st.ActiveRelays()) > 0 || len(r.st.ActiveSchedules()) > 0 {
+					w.final, tc.wake.final, mustSpeak = false, false, false
+				}
+			})
 		}
 		if !again && end == "done" && call < maxCalls {
 			// The turn would end here. A reply that did something else
@@ -1122,8 +1131,9 @@ func (r *Runtime) turn(w wake) {
 			reason := end
 			if closedOut {
 				// The closing turn failed after its word (the model's
-				// report or eagent's own): nothing is owed, where an
-				// "error" end owes the failed call (wakeFor).
+				// report or eagent's own), or the last title and summary
+				// did (one attempt): nothing is owed, where an "error"
+				// end owes the failed call (wakeFor).
 				reason = "error, closing"
 			}
 			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
