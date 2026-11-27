@@ -984,7 +984,7 @@ func (r *Runtime) turn(w wake) {
 					closedOut = true
 					return
 				}
-				r.turnFailed(err)
+				r.turnFailed(err, covered)
 				answers = false
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				// The closing turn of a session still ending has had its word
@@ -1577,10 +1577,11 @@ var (
 	finalReportGrace   = 75 * time.Second
 )
 
-// turnFailed handles a model call that did not come back. What asked for
-// the look is still owed one, so the loop tries again later; a message from
-// the user tries at once. Loop goroutine.
-func (r *Runtime) turnFailed(err error) {
+// turnFailed handles a model call that did not come back, which had been
+// shown the record up to shown. What asked for the look is still owed one,
+// so the loop tries again later; a message from the user after shown (one
+// written while the call was out too) tries at once. Loop goroutine.
+func (r *Runtime) turnFailed(err error, shown int64) {
 	t := &r.turns
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
@@ -1598,14 +1599,13 @@ func (r *Runtime) turnFailed(err error) {
 	}
 	t.failures++
 	wait := errorRetryDelays[min(t.failures, len(errorRetryDelays))-1]
-	t.retryAt, t.failSeq = time.Now().Add(wait), r.st.LastSeq()
+	t.retryAt, t.failSeq = time.Now().Add(wait), shown
 	if wait <= 0 {
 		r.ui.Log("eagent: model call failed: %s; trying again now", shortErr(err))
 	} else {
 		r.ui.Log("eagent: model call failed: %s; trying again in %s", shortErr(err), roundDur(wait))
 	}
 	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: event.ActorEagent, Text: err.Error()}))
-	t.failSeq = r.st.LastSeq()
 	if t.retryTime != nil {
 		t.retryTime.Stop()
 	}

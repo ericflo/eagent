@@ -506,3 +506,120 @@ func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) 
 		t.Fatalf("resumed on more room for the conversation: %d restarts, and the user was told their message waits; one restart there makes room", r6Dossiers(s2))
 	}
 }
+
+// k1DownOnThePhone runs a session with no terminal that asks on the phone
+// and stops its agent, and whose model then fails twice running (the user
+// is told it cannot be reached): the question keeps the session open.
+// stall, when set, is what the second failed call waits on before it
+// fails (second says it is out). The model answers again from the moment
+// healthy is set; answered says a call has been shown the user's answer.
+func k1DownOnThePhone(t *testing.T, stall <-chan struct{}) (g *phoneRig, fp *phoneFake, healthy, answered *atomic.Bool, second chan struct{}) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+	fp = newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	healthy, answered = new(atomic.Bool), new(atomic.Bool)
+	second = make(chan struct{}, 1)
+	var asked atomic.Bool
+	var failed atomic.Int32
+	g = phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
+		all, tail := allText(msgs), lastUserText(msgs)
+		if asked.Load() && !healthy.Load() {
+			if failed.Add(1) == 2 && stall != nil {
+				second <- struct{}{}
+				return reply{block: stall, status: k1BadRequest.status, body: k1BadRequest.body}
+			}
+			return k1BadRequest
+		}
+		switch {
+		case phoneLastIsTool(msgs):
+			return hold()
+		case phoneEnding(msgs):
+			if strings.Contains(all, "Blue it is") {
+				return hold()
+			}
+			return say("Blue it is; done.")
+		case strings.Contains(tail, "The user answered your question"):
+			answered.Store(true)
+			return say("Blue it is.")
+		case strings.Contains(tail, "finished a turn") && !strings.Contains(all, "Which colour?"):
+			asked.Store(true)
+			return phoneAskAndStop("Which colour?", "red", "blue")
+		}
+		return hold()
+	}, nil)
+	return g, fp, healthy, answered, second
+}
+
+// After the model has failed twice running, it answers again, and the
+// user answers the question on the phone. The answer clears the question,
+// so nothing else keeps the session open, and the loop waits out the
+// settle window before it looks: the session stays open for that look,
+// the model is shown the answer, and the session ends with its closing
+// word (exit 0), not in eagent's own closing words as one whose model is
+// down (exit 2), with the answer read by nobody.
+func TestK1AnAnswerAfterTheModelWasDownIsLookedAtBeforeTheEnd(t *testing.T) {
+	setFor(t, &wakeSettle, 100*time.Millisecond)
+	g, fp, healthy, answered, _ := k1DownOnThePhone(t, nil)
+	waitFor(t, "the user told the model cannot be reached", func() bool {
+		for _, m := range g.ui.said() {
+			if strings.HasPrefix(m, "I can't reach my own model") {
+				return true
+			}
+		}
+		return false
+	})
+	g.agentStopped()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	healthy.Store(true)
+	if !fp.answer("blue", "") {
+		t.Fatal("no pending question to answer")
+	}
+	code := g.exit(15 * time.Second)
+	if !answered.Load() {
+		t.Fatalf("the model was never shown the answer (exit %d); said %q", code, g.ui.said())
+	}
+	if code != 0 {
+		t.Fatalf("exit %d after the answer was taken up, want 0; said %q", code, g.ui.said())
+	}
+}
+
+// The same with no settle window, the answer arriving while the second
+// failing call is out: it came after what that call was shown, so it is
+// not held back by the wait after the failure, and is looked at first.
+func TestK1AnAnswerThatArrivesDuringAFailingCallIsNotHeldBehindItsWait(t *testing.T) {
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	g, fp, healthy, answered, second := k1DownOnThePhone(t, gate)
+	select {
+	case <-second:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second failing call never went out")
+	}
+	g.agentStopped()
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	if !fp.answer("blue", "") {
+		t.Fatal("no pending question to answer")
+	}
+	waitFor(t, "the answer on the record", func() bool {
+		n := 0
+		g.rt.sync(func() {
+			for _, ev := range g.rt.st.Events {
+				if ev.Type == event.UserAnswer {
+					n++
+				}
+			}
+		})
+		return n > 0
+	})
+	healthy.Store(true)
+	release()
+	code := g.exit(15 * time.Second)
+	if !answered.Load() {
+		t.Fatalf("the model was never shown the answer (exit %d); said %q", code, g.ui.said())
+	}
+	if code != 0 {
+		t.Fatalf("exit %d after the answer was taken up, want 0; said %q", code, g.ui.said())
+	}
+}
