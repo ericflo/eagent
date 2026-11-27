@@ -665,9 +665,9 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 }
 
 // turnEnded reports that a turn of the conversation in the current file
-// ran to its end: one on the record that ended "done", or a look that
-// left no record but its batch (event.Checks with a SeenSeq; a reply sent
-// back for another try sets none). Loop goroutine only.
+// ran to its end: one on the record that ended "done". A look that left
+// no record but its batch (event.Checks) is not one: it added nothing to
+// the conversation. Loop goroutine only.
 func (r *Runtime) turnEnded() bool {
 	cur := r.st.Current()
 	if cur == nil {
@@ -679,11 +679,7 @@ func (r *Runtime) turnEnded() bool {
 			continue
 		}
 		var turn event.TurnData
-		var looks event.ChecksData
-		switch {
-		case ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done":
-			return true
-		case ev.Type == event.Checks && ev.Decode(&looks) == nil && looks.SeenSeq > 0:
+		if ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done" {
 			return true
 		}
 	}
