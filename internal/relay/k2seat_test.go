@@ -349,3 +349,42 @@ func TestK2APiMoveToAWrittenSessionIsRecordedOnce(t *testing.T) {
 		}
 	}
 }
+
+// A10: the record says the agent was starting, or blocked, and the history
+// shows no turn begun or ended (no transcript yet, a login screen): the
+// reattached seat is starting, as a launched one is. A send waits while
+// the screen shows something else (nothing typed into a login), and goes
+// as soon as the screen check has seen the agent's prompt; it is not
+// refused (17dffc0 kept blocked, which refused it).
+func TestK2AReattachToAStartingOrBlockedAgentWaitsForItsPrompt(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	const prompt = "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	for _, record := range []string{"starting", "blocked"} {
+		h := &fakeHost{alive: true, screen: "Select login method:\n❯ 1. Claude account with subscription\n  2. Anthropic Console account"}
+		s := attachSeat(Spec{State: record}, claudeAgent{}, h, "k2-a10-"+record, "", "", time.Now().Add(-time.Minute))
+		s.caughtUp(time.Now())
+		if st := s.Snapshot().State; st != "starting" {
+			t.Fatalf("record %s: the reattached seat is %s; want starting (typed %q)", record, st, k1Typed(h))
+		}
+		done := make(chan error, 1)
+		go func() { _, err := s.Send("r1", "run the tests", "queue"); done <- err }()
+		now := time.Now()
+		s.checkScreen(now) // the login: not ready
+		h.mu.Lock()
+		typed := len(h.typed)
+		h.screen = prompt
+		h.mu.Unlock()
+		s.checkScreen(now.Add(2 * time.Second))
+		s.checkScreen(now.Add(4 * time.Second))
+		select {
+		case err := <-done:
+			if err != nil || typed != 0 || !slices.Equal(k1Typed(h), []string{"run the tests"}) {
+				t.Fatalf("record %s: Send %v; typed %q (%d before the prompt showed)", record, err, k1Typed(h), typed)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("record %s: the send never went (seat %s)", record, s.Snapshot().State)
+		}
+	}
+}

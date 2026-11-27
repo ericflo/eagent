@@ -337,6 +337,15 @@ func (s *Seat) caughtUp(now time.Time) {
 	if st, err := os.Stat(s.transcript); !kept && state == "working" && err == nil && now.Sub(st.ModTime()) > 10*time.Minute {
 		s.state, s.stateAt, s.hung, quiet = "blocked", now, true, true
 	}
+	// No turn begun or ended in the history (none read, or no transcript
+	// yet): a record that said starting or blocked is starting again, as a
+	// launched seat is, and the screen check says idle once the agent's
+	// prompt shows. A send waits for that rather than going into a login or
+	// other startup screen, and is not refused (17dffc0 kept blocked). The
+	// record keeps what it says until then.
+	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
+		s.state, s.stateAt, s.readySince = "starting", now, time.Time{}
+	}
 	s.mu.Unlock()
 	if quiet {
 		screen, _ := s.host.Capture(s.target, 0)
