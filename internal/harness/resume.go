@@ -1,7 +1,10 @@
 package harness
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -31,6 +34,13 @@ func (r *Runtime) closeInterrupted() {
 				if rel, held := r.routeUserMessage(d); held == "" {
 					r.forwardUserMessage(rel, opened, d)
 				}
+			}
+			// The run before stopped right after taking a command from
+			// the inbox (inbox.taken), before anything it did was
+			// recorded: it is not carried out again (it may have run), and
+			// the resume says it may not have.
+			if ev.Type == inboxTakenEvent {
+				closed = append(closed, inboxCommandCut(r.sess.Path, ev))
 			}
 			break
 		}
@@ -81,6 +91,27 @@ func (r *Runtime) closeInterrupted() {
 		// conversation never has to render events it has no words for.
 		r.turns.adopt = true
 	}
+}
+
+// inboxCommandCut says that the command an inbox.taken names may not have
+// run, naming it from the event, or else from its inbox file when that is
+// still there (the stop came before its removal).
+func inboxCommandCut(sessionPath string, ev event.Event) string {
+	var d struct {
+		Inbox string `json:"inbox"`
+		Text  string `json:"text"`
+	}
+	_ = ev.Decode(&d)
+	if d.Text == "" && d.Inbox != "" {
+		var msg InboxMessage
+		if raw, err := os.ReadFile(filepath.Join(InboxDir(sessionPath), d.Inbox+".json")); err == nil && json.Unmarshal(raw, &msg) == nil {
+			d.Text = strings.TrimSpace(msg.Text)
+		}
+	}
+	if d.Text == "" {
+		return "a command that came in through the inbox just before eagent stopped may not have run"
+	}
+	return fmt.Sprintf("the command %q that came in through the inbox just before eagent stopped may not have run", clipLabel(d.Text, 80))
 }
 
 // lastTurnCutOff reports that eagent's last turn of the run that just
