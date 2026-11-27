@@ -41,6 +41,7 @@ func TestK2APiDialogAfterATurnEndKeepsThatTurnEnd(t *testing.T) {
 	if !lost {
 		t.Fatalf("the held message whose file is gone is not lost (pending %v, spool had %v)", s.Snapshot().Pending, names)
 	}
+	s.checkScreen(now.Add(time.Hour)) // the look before: nothing is decided on one
 	s.checkScreen(now.Add(time.Hour))
 	var got []string
 	for _, ev := range deliveries(drain(s.events)) {

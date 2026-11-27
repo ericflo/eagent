@@ -188,8 +188,8 @@ type Seat struct {
 	// saw is the settled verdict of the agent's own evidence (sawWork,
 	// sawRest, sawOther; "" not settled), which every screen-based decision
 	// reads; sawLast is the last look's. saw changes only when two looks in
-	// a row agree, and is unsettled again after the agent writes or a Send
-	// begins (settle).
+	// a row agree, and is unsettled again after the agent writes, a Send
+	// begins or a dialog is answered (settle).
 	saw, sawLast string
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
@@ -629,6 +629,11 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	if strings.TrimSpace(text) == "" {
 		return "", errors.New("nothing to send")
 	}
+	if cr, ok := s.agent.(commandRefuser); ok && isAgentCommand(text) {
+		if why := cr.refuses(strings.Fields(text)[0]); why != "" {
+			return "", errors.New(why)
+		}
+	}
 	if !s.host.Alive(s.target) {
 		return "", errors.New("the agent is not running")
 	}
@@ -1040,6 +1045,12 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 // name (letters, digits, "_", "-", ":" for a plugin's namespace), then a
 // space or the end. "/home/eric/plan.md has it" is a message.
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
+
+// commandRefuser is an agent with commands of its own that eagent does not
+// type: refuses gives the reason for one ("/new"), "" for any other.
+type commandRefuser interface {
+	refuses(command string) string
+}
 
 // IsAgentCommand is isAgentCommand for the harness, which words what holds a
 // waiting change from it: typed into the agent's prompt, such a command runs
@@ -2105,7 +2116,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Unlock()
 	if s.answerDialog(screen, now) {
 		s.mu.Lock()
-		s.sawLast = "" // a dialog was up: the looks before and after do not agree
+		s.saw, s.sawLast = "", "" // a dialog was up: the agent is looked at again after it
 		s.mu.Unlock()
 		return
 	}
@@ -2151,8 +2162,9 @@ func (s *Seat) checkScreen(now time.Time) {
 		// An agent whose screen or status says it works (a quiet turn, pi
 		// compacting) reads the send at its next step, as a working one
 		// does; so does a run a dialog holds (pi's), once it is answered.
+		// Nothing is decided on a look that has not settled.
 		working := state == "working" || saw == sawWork || s.dialogUp != "" && s.dialogPrev == "working"
-		if !working && now.Sub(s.stateAt) > 15*time.Second {
+		if !working && saw != "" && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)

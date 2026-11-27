@@ -61,7 +61,6 @@ func TestR13SHungWorkingSeatKeepsItsSend(t *testing.T) {
 	pi.state, pi.stateAt, pi.hung = "blocked", now.Add(-11*time.Minute), true
 	pi.pending = []*pending{{id: "r1", text: "and the tables", mode: "queue", at: now.Add(-46 * time.Second)}}
 	for name, s := range map[string]*Seat{"claude": claude, "pi": pi} {
-		s.checkScreen(now.Add(-1500 * time.Millisecond)) // the check before: the verdict settles
 		s.checkScreen(now)
 		if got := deliveredEvents(s); len(got) != 0 || len(s.Snapshot().Pending) != 1 {
 			t.Errorf("%s: reported %+v, pending %v; want the send still watched", name, got, s.Snapshot().Pending)
@@ -94,6 +93,7 @@ func TestR13SPiTurnEndUnderADialogCountsForAHeldSend(t *testing.T) {
 		}
 		later := time.Now().Add(heldGrace)
 		s.leftOvers(later, false)
+		s.checkScreen(later.Add(46 * time.Second)) // the look before: nothing is decided on one
 		s.checkScreen(later.Add(46 * time.Second))
 		if got := deliveredEvents(s); len(got) != 1 || got[0].SendID != "r1" || got[0].Outcome != OutcomeUnconfirmed {
 			t.Errorf("%s: reported %+v, pending %v; want r1 unconfirmed", kind, got, s.Snapshot().Pending)

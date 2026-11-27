@@ -231,6 +231,7 @@ func TestK4ARestoredAgentCommandIsNotCalledLostForNotShowing(t *testing.T) {
 	w.s.mu.Lock()
 	w.s.stateAt = start.Add(-time.Minute)
 	w.s.mu.Unlock()
+	w.s.checkScreen(start.Add(time.Hour)) // the look before: nothing is decided on one
 	w.s.checkScreen(start.Add(time.Hour))
 	if !eventually(func() bool { _, failed := w.delivered(); return len(failed) > 0 }) {
 		t.Fatal("never reported")

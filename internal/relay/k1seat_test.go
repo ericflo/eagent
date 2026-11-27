@@ -429,6 +429,7 @@ func TestK1AnAfterTurnSendTheAgentsQueueDroppedIsReported(t *testing.T) {
 			s.stateAt = time.Now().Add(-time.Hour)
 			s.mu.Unlock()
 			later := time.Now().Add(time.Hour)
+			s.checkScreen(later) // the look before: nothing is decided on one
 			s.checkScreen(later)
 			var got []string
 			for _, ev := range deliveries(drain(s.events)) {
