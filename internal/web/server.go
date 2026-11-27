@@ -575,13 +575,17 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // second waits for the first's resume and then goes to the inbox of the
 // run it started, where it used to fail on the session's lock. A run here
 // that is ending reads its inbox no more: they wait for it to stop (its
-// shutdown is bounded) and resume the session then.
+// shutdown is bounded) and resume the session then, and wait again when
+// the run another request resumed it with meanwhile is ending too.
 func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
 	s.resuming.Lock()
-	s.mu.Lock()
-	h := s.running[info.ID]
-	s.mu.Unlock()
-	if h != nil && h.rt != nil && h.rt.Ending() {
+	for {
+		s.mu.Lock()
+		h := s.running[info.ID]
+		s.mu.Unlock()
+		if h == nil || h.rt == nil || !h.rt.Ending() {
+			break
+		}
 		s.resuming.Unlock()
 		<-h.done
 		s.resuming.Lock()
@@ -793,6 +797,26 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
+		// Words deliver put in its inbox after the run's last look there
+		// would wait for a run nobody brings: the session is resumed with
+		// them, as for words to a session nobody runs, unless this server
+		// stopped the run (it is shutting down). Looked at under deliver's
+		// lock, so words it is putting there now are seen.
+		if ctx.Err() != nil {
+			return
+		}
+		s.resuming.Lock()
+		defer s.resuming.Unlock()
+		if !rt.InboxWordsLeft() {
+			return
+		}
+		info, err := s.resolve(rt.SessionID())
+		if err == nil && !alive(info.Path) && !s.isHosted(info.ID) {
+			err = s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true)
+		}
+		if err != nil {
+			s.logf("web: session %s stopped with words in its inbox and could not be resumed: %v", rt.SessionID(), err)
+		}
 	}()
 }
 
