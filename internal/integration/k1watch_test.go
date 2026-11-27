@@ -271,8 +271,9 @@ func TestK1AFileWhoseDownloadFailedOnceIsTriedAgain(t *testing.T) {
 }
 
 // B12, its bound: a file whose download always fails with a 502 is tried
-// three times, as the client tries a post, and then refused: the sender is
-// told, and the session comes back with the words.
+// three times, as the client tries a post, and then refused: the session
+// comes back with the words, the file refused on the resume for the
+// resumed session to tell the sender.
 func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
 	_, _, f, _, host, w := r9Stopped(t, "see the screenshot", r9Shot())
 	fr := newK1Files(t, f, 1000)
@@ -284,8 +285,8 @@ func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
 	if n := fr.downloads.Load(); n != 3 {
 		t.Fatalf("%d downloads, want three", n)
 	}
-	if notes := fr.posted(); len(notes) != 1 || !strings.Contains(notes[0], "shot.png") {
-		t.Fatalf("the sender was not told once: %q", notes)
+	if r := host.resumed[0].Refused; len(r) != 1 || !strings.Contains(r[0].Text, "shot.png") || len(fr.posted()) != 0 {
+		t.Fatalf("refused %#v, posted %q; want shot.png refused once and nothing posted", r, fr.posted())
 	}
 }
 
@@ -294,7 +295,8 @@ func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
 // restore takes nothing, and eagent's notice is the thread's latest
 // message, which the sweep passes over. The reply watcher, started after
 // the restore as the serve starts it, resumes the session with the words,
-// the sender told about each file.
+// both files refused on the resume for the resumed session to tell (its
+// mirror posts under the keys the restore's notice used).
 func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.T) {
 	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	project, sid, f, fr, stopped, _ := r11Restore(t, big2)
@@ -311,11 +313,8 @@ func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.
 	defer stop()
 	defer cancel()
 	m, ok := k1Next(t, host)
-	if !ok || m.ID != "m1" || m.Text != "please look at both" || len(m.Attachments) != 0 {
-		t.Fatalf("resumed %#v (%v), want the words", m, ok)
-	}
-	if n := r11Told(fr, "clip2.mov"); n != 1 {
-		t.Fatalf("%d notices about clip2.mov: %q", n, fr.posted())
+	if !ok || m.ID != "m1" || m.Text != "please look at both" || len(m.Attachments) != 0 || !k3Refused(m, "clip.mov") || !k3Refused(m, "clip2.mov") {
+		t.Fatalf("resumed %#v (%v), want the words with both files refused", m, ok)
 	}
 }
 
@@ -363,8 +362,8 @@ func TestK1AStalledFileHoldsTheStreamForOneDownloadAtMost(t *testing.T) {
 		t.Fatal("a stalled file held the stream past the time of one download")
 	}
 	close(release)
-	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 || notes.Load() != 1 {
-		t.Fatalf("resumed %#v with %d notes, want the words and the sender told", host.resumed, notes.Load())
+	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 || !k3Refused(host.resumed[0], "shot.png") || notes.Load() != 0 {
+		t.Fatalf("resumed %#v with %d notes, want the words and shot.png refused on the resume", host.resumed, notes.Load())
 	}
 }
 

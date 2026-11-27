@@ -28,6 +28,17 @@ type PhoneMessage struct {
 	// route and delivery and the client's capabilities; the session that
 	// takes the message reads them there, as it does when it is running.
 	Meta map[string]any
+	// Refused are the message's files that could not be fetched: the
+	// session that takes the message records them refused (phone.refused),
+	// and its mirror tells the sender, as when it is running.
+	Refused []RefusedFile
+}
+
+// RefusedFile is a file of a phone message that was not passed on, and the
+// note owed to its sender.
+type RefusedFile struct {
+	AttachmentID string
+	Text         string
 }
 
 // ResumeHost is a long-lived process that can reopen finished sessions.
@@ -361,37 +372,21 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
-	told := false
 	for i, err := range failed {
 		if err == nil {
 			continue
 		}
-		// As the running mirror does: the sender is told, and the
-		// session comes back with the rest of the message. The note
-		// gets its own time, as the fetch may have used up the
-		// sweep's. Notices come only from the step that takes the
-		// reply: when the first cannot be posted nobody would know, so
-		// the reply is not taken in, and is kept, quietly, for the
-		// sweeps, with nothing said; once one went, this step takes the
-		// reply, and a file whose notice cannot go is left out with the
-		// terminal told.
-		if nerr := tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err); nerr != nil {
-			if told {
-				w.logf("finalechat: %s was left out of the reply to session %s, and its sender could not be told: %v", m.Attachments[i].Filename, sid, nerr)
-				continue
-			}
-			w.retries.mu.Lock()
-			if _, kept := w.retries.replies[m.ID]; !kept {
-				w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
-			}
-			w.retries.mu.Unlock()
-			return
-		}
-		told = true
+		// As the running mirror does: the session comes back with the
+		// rest of the message, and the sender is told, by the session
+		// that takes it: it records the file refused (phone.refused) in
+		// the step that takes the message, and its mirror posts the note
+		// it owes until it goes out. The watcher says nothing itself, so
+		// no notice is posted for a reply not taken.
+		msg.Refused = append(msg.Refused, RefusedFile{AttachmentID: m.Attachments[i].ID, Text: finalechat.RefusedNote(m.Attachments[i].Filename, err)})
 	}
-	// A message whose files were all refused (the person was told) still
-	// resumes the session: it takes the message in, so the ones after it
-	// are read in order instead of waiting behind it for ever.
+	// A message whose files were all refused still resumes the session:
+	// it takes the message in, so the ones after it are read in order
+	// instead of waiting behind it for ever.
 	err = w.host.Resume(sid, msg)
 	if err != nil && (store.Alive(info.Path) || w.host.Hosted(sid)) {
 		// It was resumed first from elsewhere (the browser; the serve

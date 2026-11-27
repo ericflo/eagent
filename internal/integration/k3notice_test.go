@@ -41,3 +41,13 @@ func TestSR5WatchAFileSaidNotPassedOnIsResumedWith(t *testing.T) {
 		t.Fatalf("the session was resumed with one.png and two.png, yet the thread was told %q", told)
 	}
 }
+
+// k3Refused reports whether the resume carries a file named name refused.
+func k3Refused(m PhoneMessage, name string) bool {
+	for _, f := range m.Refused {
+		if strings.Contains(f.Text, name) {
+			return true
+		}
+	}
+	return false
+}

@@ -102,9 +102,14 @@ func TestReplyWatcherTellsThePhoneAFileWasTooLarge(t *testing.T) {
 	if host.calls() != 1 || host.resumed[0].Text != "here it is" || len(host.resumed[0].Attachments) != 0 {
 		t.Fatalf("resumed %#v", host.resumed)
 	}
+	// The resumed session tells the sender (phone.refused); the watcher
+	// passes the note along with the words and posts nothing itself.
+	if r := host.resumed[0].Refused; len(r) != 1 || r[0].AttachmentID != big.ID || !strings.Contains(r[0].Text, "clip.mov") || !strings.Contains(r[0].Text, "10 MB") {
+		t.Fatalf("refused %#v", r)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(notes) != 1 || !strings.Contains(notes[0], "clip.mov") || !strings.Contains(notes[0], "10 MB") {
+	if len(notes) != 0 {
 		t.Fatalf("notes = %q", notes)
 	}
 }

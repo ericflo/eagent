@@ -197,7 +197,7 @@ var ErrRunning = errors.New("the session is running; its own mirror reads the th
 func (s *Server) phoneResumeOptions(msg integration.PhoneMessage) harness.Options {
 	route, delivery, client := harness.FromPhone(msg.Meta)
 	return harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments,
-		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery, PromptAnswers: harness.AnsweredCard(msg.Meta)}
+		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery, PromptAnswers: harness.AnsweredCard(msg.Meta), PromptRefused: msg.Refused}
 }
 
 // ---- sessions ---------------------------------------------------------------

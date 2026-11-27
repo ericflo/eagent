@@ -65,3 +65,15 @@ func TestK1ARestoreWhoseHandOverFailsSaysSo(t *testing.T) {
 		t.Fatalf("said %q", said)
 	}
 }
+
+// A reply from the phone whose files the reply watcher could not fetch
+// resumes the session with them refused: the resumed session records them
+// (phone.refused) and its mirror tells the sender.
+func TestK1APhoneResumeCarriesTheRefusedFiles(t *testing.T) {
+	s, _ := newTestServer(t)
+	refused := []integration.RefusedFile{{AttachmentID: "att-1", Text: "eagent could not fetch shot.png from the phone"}}
+	o := s.phoneResumeOptions(integration.PhoneMessage{ID: "m1", Text: "see the screenshot", Refused: refused})
+	if len(o.PromptRefused) != 1 || o.PromptRefused[0] != refused[0] || o.PromptPhoneID != "m1" {
+		t.Fatalf("resumed with refused %#v", o.PromptRefused)
+	}
+}

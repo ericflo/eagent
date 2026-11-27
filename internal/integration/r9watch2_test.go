@@ -55,8 +55,9 @@ func newRv9Hang(t *testing.T, f *r6Thread) *rv9Hang {
 // download off. Reply m1 reached the session while it was stopping, was kept,
 // and the session stopped without taking it; its closing note is the
 // thread's latest. The first sweep after the stop is cut off mid-download;
-// the reply is not lost: as the running mirror does, the sender is told
-// about the file and the session comes back with the words, once.
+// the reply is not lost: as the running mirror does, the session comes
+// back with the words, once, the file refused on the resume for the
+// resumed session to tell the sender.
 func TestRv9AKeptReplyCutOffMidDownloadStillResumesLater(t *testing.T) {
 	_, sid, sess, f, host, w := r9Running(t, true)
 	at := time.Now()
@@ -83,7 +84,7 @@ func TestRv9AKeptReplyCutOffMidDownloadStillResumesLater(t *testing.T) {
 	front.hang.Store(false)
 	w.sweep(context.Background())
 	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || front.posts.Load() == 0 {
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || !k3Refused(host.resumed[0], "shot.png") {
 		t.Fatalf("reply m1 lost after one cut-off download: resumed %#v, kept %#v, posts %d", host.resumed, w.retries.replies, front.posts.Load())
 	}
 }

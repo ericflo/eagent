@@ -101,7 +101,7 @@ func r11Told(fr *r10Front, name string) int {
 // fetched yet is not taken, and nothing is posted (the thread's latest
 // message is still the reply), so the watcher's sweep finds it: once all
 // is well again it resumes the session with it, once, with the second
-// file, the sender told once about the first.
+// file, the first refused on the resume for the resumed session to tell.
 func TestR11ARestoreThatCannotFetchALaterFileLeavesTheReplyForTheSweep(t *testing.T) {
 	project, sid, f, fr, host, w := r11Restore(t, r10File("att-2", "shot.png"))
 	fr.files.Store(http.StatusBadGateway)
@@ -113,11 +113,11 @@ func TestR11ARestoreThatCannotFetchALaterFileLeavesTheReplyForTheSweep(t *testin
 	}
 	fr.files.Store(0)
 	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please look at both" || len(host.resumed[0].Attachments) != 1 {
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please look at both" || len(host.resumed[0].Attachments) != 1 || !k3Refused(host.resumed[0], "clip.mov") {
 		t.Fatalf("after all is well again: resumed %#v", host.resumed)
 	}
-	if n := r11Told(fr, "clip.mov"); n != 1 {
-		t.Fatalf("%d notices about clip.mov: %q", n, fr.posted())
+	if n := r11Told(fr, "clip.mov"); n != 0 {
+		t.Fatalf("the watcher posted %d notices about clip.mov: %q", n, fr.posted())
 	}
 }
 

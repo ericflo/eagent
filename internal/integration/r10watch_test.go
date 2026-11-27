@@ -100,13 +100,12 @@ func r10File(id, name string) map[string]any {
 	return map[string]any{"id": id, "kind": "image", "content_type": "image/png", "filename": name, "size": 3, "url": "/files/" + id}
 }
 
-// Finding 12A, under the rule that notices come only from the step that
+// Finding 12A, under the rule that notices come only from the session that
 // takes the reply (a later review proved that keeping the reply here made
-// the notice about one.png false once the files came): a reply with two
-// files, neither of which can be fetched. The notice about the first goes,
-// the notice about the second cannot: the step that posted the first takes
-// the reply, without either file (the terminal says two.png's sender could
-// not be told), once.
+// a notice false once the files came): a reply with two files, neither of
+// which can be fetched, while the service refuses a post. The session is
+// resumed with the words once, both files refused on the resume, for the
+// resumed session to tell the sender; the watcher posts nothing.
 func TestR10AReplyWhoseSecondNoticeFailedIsTakenWithoutItsFiles(t *testing.T) {
 	project, sid, f, _, host, w := r9Stopped(t, "please fix the login crash", r9Shot())
 	f.mu.Lock()
@@ -124,8 +123,8 @@ func TestR10AReplyWhoseSecondNoticeFailedIsTakenWithoutItsFiles(t *testing.T) {
 	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please fix the login crash" || len(host.resumed[0].Attachments) != 0 || !r9Taken(t, project, sid, "m1") {
 		t.Fatalf("resumed %#v, kept %#v; want the words once, without the files", host.resumed, w.retries.replies)
 	}
-	if n := r11Told(fr, "one.png"); n != 1 {
-		t.Fatalf("%d notices about one.png: %q", n, fr.posted())
+	if !k3Refused(host.resumed[0], "one.png") || !k3Refused(host.resumed[0], "two.png") || len(fr.posted()) != 0 {
+		t.Fatalf("refused %#v, posted %q; want both refused on the resume and nothing posted", host.resumed[0].Refused, fr.posted())
 	}
 	// One quiet entry stays, for when the session stops again; the thread
 	// is told nothing more.
@@ -136,9 +135,10 @@ func TestR10AReplyWhoseSecondNoticeFailedIsTakenWithoutItsFiles(t *testing.T) {
 
 // Finding 12B: m2 is kept after a resume that failed (the thread told, its
 // latest message eagent's). The retry finds m1, earlier and not taken in,
-// whose file cannot be fetched and whose notice cannot be posted: neither
-// is dropped. Once all is well again the session comes back with m1 (its
-// poll reads m2 after it), once.
+// whose file cannot be fetched while the service refuses posts: the
+// session comes back with m1 once, its file refused on the resume (the
+// resumed session tells the sender), and its poll reads m2 after it.
+// Neither is dropped.
 func TestR10AnEarlierReplyBehindAKeptOneLosesNeither(t *testing.T) {
 	project, sid, f, _, host, w := r9Stopped(t, "first task", r9Shot())
 	at := time.Now()
@@ -153,18 +153,15 @@ func TestR10AnEarlierReplyBehindAKeptOneLosesNeither(t *testing.T) {
 	fr.files.Store(http.StatusBadGateway)
 	fr.failPosts(http.StatusForbidden)
 	w.sweep(context.Background())
-	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
-		t.Fatalf("taken in while nobody could be told about shot.png: %#v", host.resumed)
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "first task" || len(host.resumed[0].Attachments) != 0 || !k3Refused(host.resumed[0], "shot.png") || !r9Taken(t, project, sid, "m1") {
+		t.Fatalf("resumed %#v, kept %#v; want m1 once, shot.png refused", host.resumed, w.retries.replies)
 	}
-	if _, kept := w.retries.replies["m2"]; !kept {
-		t.Errorf("m2 dropped before the session was resumed: kept %#v", w.retries.replies)
+	if _, kept := w.retries.replies["m2"]; kept {
+		t.Errorf("m2 still kept, though the session's poll reads it after m1: %#v", w.retries.replies)
 	}
-	fr.files.Store(0)
-	for i := 0; i < 3; i++ {
-		w.sweep(context.Background())
-	}
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "first task" || len(host.resumed[0].Attachments) != 1 {
-		t.Fatalf("after all is well again: resumed %#v, kept %#v", host.resumed, w.retries.replies)
+	if posts := fr.posted(); len(posts) != 0 {
+		t.Fatalf("the watcher posted %q", posts)
 	}
 }
 
