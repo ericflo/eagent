@@ -48,8 +48,8 @@ func (s r14HeldSeat) Send(id, text, mode string) (string, error) {
 	return "held for Codex to read when its turn ends", nil
 }
 
-// r14Until polls cond for at most two seconds and says whether it held.
-func r14Until(cond func() bool) bool {
+// r14RelayUntil polls cond for at most two seconds and says whether it held.
+func r14RelayUntil(cond func() bool) bool {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
@@ -99,7 +99,7 @@ func TestR14AnArrivalInTheBatchThatEndsATurnSurvivesAWaitingModelChange(t *testi
 	}
 	// The arrival is read while the new agent launches; without it the
 	// restart below settles the send as it finds it.
-	r14Until(func() bool { return outcome() == state.SendArrived })
+	r14RelayUntil(func() bool { return outcome() == state.SendArrived })
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	if o := outcome(); o != state.SendArrived {
