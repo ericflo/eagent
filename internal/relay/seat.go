@@ -439,6 +439,13 @@ func (s *Seat) emit(ev Event) {
 	if ev.Read == 0 {
 		ev.Read = s.readTo.Load()
 	}
+	s.emitAside(ev)
+}
+
+// emitAside is emit for an event no line of the transcript gave, from a
+// goroutine other than the watcher's (Send): it never carries how far the
+// watcher has read, which is that goroutine's own business.
+func (s *Seat) emitAside(ev Event) {
 	select {
 	case s.events <- ev:
 	case <-s.stop:
@@ -601,7 +608,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// rather than recording a message, so handed over is
 				// delivered, as typed is below. (A spool hands one over
 				// as text, which arrives as a held message does.)
-				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
 				// Handed over, or already confirmed (by an entry written
@@ -643,7 +650,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
-		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+		s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
 	switch {
