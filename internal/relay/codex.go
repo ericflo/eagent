@@ -190,6 +190,10 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	return nil
 }
 
+// poll notes a message handed to Codex's queue that a turn's end left
+// there (Codex dropped it): see reportLeftOvers.
+func (codexAgent) poll(s *Seat, now time.Time) { s.reportLeftOvers(now) }
+
 // codexQueueArgs is the codex queue command for a message. The values go
 // joined to their flags: codex's parser takes a separate "-x ..." for an
 // unknown flag and refuses the command, and "--" does not help there.

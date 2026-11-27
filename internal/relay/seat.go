@@ -3,6 +3,7 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,6 +144,12 @@ type pending struct {
 	// typed send is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
+	// after is how far the transcript afterIn was written when the seat
+	// began to watch for the send: an entry of it that starts before that
+	// was written before, and is not the send's arrival. afterIn is ""
+	// when the seat followed no transcript then.
+	afterIn string
+	after   int64
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -342,9 +349,10 @@ func spoolHolds(names []string, id string) bool {
 // never arrives. A message held for the end of a turn is not until it is
 // lost: restored with nothing holding it any more, or its turn over and its
 // spool file gone (reportLeftOvers). One handed to an agent's own queue
-// (Codex, Antigravity) is never timed: that queue runs one message a turn,
-// so the end of a turn does not say a queued message is due. Nor is a
-// restored send before the catch-up has ended.
+// (Codex, Antigravity) is not timed while turns follow each other: that
+// queue runs one message a turn, so the end of a turn does not say a queued
+// message is due; once a turn ends and no other starts, it is lost
+// (reportLeftOvers). Nor is a restored send before the catch-up has ended.
 func (p *pending) timed() bool {
 	return !p.dormant && (p.mode != "after_turn" || p.lost)
 }
@@ -511,12 +519,21 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			// An agent with a spool holds it there; one without hands it to
 			// its own queue. Either way it is tracked for its arrival before
 			// it is handed over (so an arrival or a sweep of the spool right
-			// after finds it), and, as every after-turn send, never pressed
-			// again, nor reported lost on a timer before its turn is over
-			// (see pending.lost). Only Claude's and pi's hand-overs go
-			// through the spool.
+			// after finds it; an entry already written is not its arrival),
+			// and, as every after-turn send, never pressed again, nor
+			// reported lost on a timer before its turn is over (see
+			// pending.lost). Only Claude's and pi's hand-overs go through
+			// the spool.
 			s.trackHeld(id, text, mode, s.spec.Spool != "")
 			err := s.agent.afterTurn(s, id, text)
+			s.mu.Lock()
+			closed = s.closed
+			s.mu.Unlock()
+			if err == nil && closed && s.spec.Spool != "" && unspool(s.spec.Spool, id) && s.untrack(id) {
+				// Stopped during the hand-over, before a hook took it
+				// from the spool: taken back, so nothing is held.
+				return "", ErrClosed
+			}
 			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
 				// The agent's own command in its own queue: it runs it
 				// rather than recording a message, so handed over is
@@ -525,7 +542,8 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
-				// Handed over, or already confirmed or reported by the seat.
+				// Handed over, or already confirmed (by an entry written
+				// after it was tracked) or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
 				// It was being typed when it failed: typing it again
@@ -545,24 +563,27 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// Stopped during the last look or the interrupt's pause: nothing typed.
 		return "", ErrClosed
 	}
-	if err := s.typeText(text); err != nil {
-		// Not tracked: the caller reports it.
+	command := isAgentCommand(text)
+	if !command {
+		// Tracked before it is typed, so an arrival read while Enter goes
+		// is found; an entry already written is not its arrival. An
+		// after-turn send typed here (the agent idle, or the hand-over
+		// failed) is held by nothing: it is timed from the start, never
+		// pressed.
+		s.trackSend(&pending{id: id, text: text, mode: mode, lost: mode == "after_turn"})
+	}
+	if err := s.typeText(text); err != nil && (command || s.untrack(id)) {
+		// Not tracked any more: the caller reports it. (One the
+		// transcript already showed arriving is reported delivered.)
 		return "", &TypingError{err}
 	}
-	if isAgentCommand(text) {
+	if command {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
-	// Tracked once typed, as on main: no entry read before it went in is
-	// its arrival. An after-turn send typed here (the agent idle, or the
-	// hand-over failed) is held by nothing: it is timed from the start,
-	// never pressed.
-	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
-	s.mu.Unlock()
 	switch {
 	case mode == "interrupt" && state == "working":
 		return fmt.Sprintf("interrupted %s and typed the message", label), nil
@@ -668,8 +689,18 @@ func (s *Seat) typeText(text string) error {
 func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
 
 func (s *Seat) trackHeld(id, text, mode string, held bool) {
+	s.trackSend(&pending{id: id, text: text, mode: mode, held: held})
+}
+
+// trackSend watches for send p's arrival from now on: no entry already
+// written to the transcript is it (see pending.after).
+func (s *Seat) trackSend(p *pending) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
+	p.at = time.Now()
+	if st, err := os.Stat(s.transcript); err == nil {
+		p.afterIn, p.after = s.transcript, st.Size()
+	}
+	s.pending = append(s.pending, p)
 	s.mu.Unlock()
 }
 
@@ -701,7 +732,10 @@ var heldGrace = 5 * time.Second
 // still claimed (.taken) now, is lost from now: the hook claimed it and may
 // have died before handing it over. It is confirmed if the transcript shows
 // it, reported unconfirmed after the usual wait otherwise; a claimed file
-// left behind is removed.
+// left behind is removed. An agent with no spool (Codex, Antigravity) holds
+// an after-turn send in its own queue, which starts the next turn as soon
+// as one ends: one tracked before that turn ended is lost from now in the
+// same way (the agent dropped its queue).
 func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
 
 // leftOvers is reportLeftOvers; with sweep false, for an agent whose own
@@ -709,9 +743,6 @@ func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
 // nothing is taken from the spool, and a claimed file is the hook's
 // hand-over under way: only a held message whose file is gone is lost.
 func (s *Seat) leftOvers(now time.Time, sweep bool) {
-	if s.spec.Spool == "" {
-		return
-	}
 	s.mu.Lock()
 	end := s.turnEndAt
 	over := s.state == "idle" && !end.IsZero() && now.Sub(end) >= heldGrace
@@ -721,7 +752,7 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 	}
 	var taken []string
 	holds := spoolHolds
-	if sweep {
+	if sweep && s.spec.Spool != "" {
 		taken, _ = takeSpool(s.spec.Spool)
 		holds = spoolWaits
 	}
@@ -743,7 +774,8 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
+		queued := s.spec.Spool == "" && p.mode == "after_turn"
+		if same && (p.held || queued) && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
 			p.lost, p.at = true, now
 			for _, n := range names {
 				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {
@@ -788,20 +820,28 @@ func (s *Seat) Screen(lines int) (string, error) { return s.host.Capture(s.targe
 
 func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// matchPending confirms the sends one user entry of the transcript shows
-// arriving (see arrivals) and returns their ids, oldest first.
-func (s *Seat) matchPending(text string) []string { return s.matchSends(text, time.Time{}) }
+// matchPending confirms the sends one user entry just written to the
+// transcript shows arriving (see arrivals) and returns their ids, oldest
+// first.
+func (s *Seat) matchPending(text string) []string {
+	return s.matchSends(text, time.Time{}, math.MaxInt64)
+}
 
-// matchSends is matchPending for an entry the transcript stamped at. An
-// entry from before the reattach (history, at set) is the arrival only of
-// a restored send recorded no later than the entry: it may have arrived
+// matchSends is matchPending for an entry that starts at pos in the
+// transcript the seat follows, which the transcript stamped at. An entry
+// written before a send was tracked is not its arrival (pending.after).
+// An entry from before the reattach (history, at set) is the arrival only
+// of a restored send recorded no later than the entry: it may have arrived
 // just before the record's last event, but a send of the same words
 // confirmed earlier, or sent after the reattach, is not it.
-func (s *Seat) matchSends(text string, at time.Time) []string {
+func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cands []int
 	for i, p := range s.pending {
+		if p.afterIn != "" && p.afterIn == s.transcript && pos < p.after {
+			continue
+		}
 		// Antigravity stamps to the whole second, so its entry for a send
 		// can carry a time up to a second before the send's own; Claude and
 		// pi stamp to the millisecond, so theirs up to a millisecond. An
@@ -871,6 +911,20 @@ func spoolNames(spool string) []string {
 func spoolWaits(names []string, id string) bool {
 	for _, n := range names {
 		if strings.HasSuffix(n, "-"+id+".txt") {
+			return true
+		}
+	}
+	return false
+}
+
+// unspool takes held message id back from the spool, with the rename a hook
+// claims it with, and says whether it could: false once a hook or a sweep
+// has claimed it.
+func unspool(spool, id string) bool {
+	for _, n := range spoolNames(spool) {
+		path := filepath.Join(spool, n)
+		if !strings.HasPrefix(n, ".") && strings.HasSuffix(n, "-"+id+".txt") && os.Rename(path, path+".taken") == nil {
+			_ = os.Remove(path + ".taken")
 			return true
 		}
 	}
@@ -1150,13 +1204,14 @@ func (s *Seat) watch() {
 		}
 		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
-			lines, err := tail.next()
+			lines, starts, err := tail.next()
 			if err == nil && len(lines) > 0 {
 				s.mu.Lock()
 				s.lastLine = now
 				s.mu.Unlock()
-				for _, line := range lines {
+				for i, line := range lines {
 					for _, o := range p.line(line) {
+						o.pos = starts[i]
 						s.fold(o)
 					}
 				}
@@ -1220,8 +1275,8 @@ func (s *Seat) fold(o obs) {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
-		if o.kind == "user" {
-			for _, id := range s.matchSends(o.text, o.at) {
+		if o.kind == "user" && !o.again {
+			for _, id := range s.matchSends(o.text, o.at, o.pos) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 		}
@@ -1244,7 +1299,10 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		for _, id := range s.matchPending(o.text) {
+		if o.again {
+			break
+		}
+		for _, id := range s.matchSends(o.text, time.Time{}, o.pos) {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		}
 	case "working":

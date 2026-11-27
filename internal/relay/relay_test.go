@@ -256,19 +256,19 @@ func TestTailerPartialLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.jsonl")
 	os.WriteFile(path, []byte("{\"a\":1}\n{\"b\":"), 0o644)
 	tl := &tailer{path: path}
-	lines, _ := tl.next()
+	lines, _, _ := tl.next()
 	if len(lines) != 1 || string(lines[0]) != `{"a":1}` {
 		t.Fatalf("first read %q", lines)
 	}
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString("2}\n")
 	f.Close()
-	lines, _ = tl.next()
+	lines, _, _ = tl.next()
 	if len(lines) != 1 || string(lines[0]) != `{"b":2}` {
 		t.Fatalf("second read %q", lines)
 	}
 	mid := &tailer{path: path, offset: 3, skipPartial: true}
-	lines, _ = mid.next()
+	lines, _, _ = mid.next()
 	if len(lines) != 1 || string(lines[0]) != `{"b":2}` {
 		t.Fatalf("mid-file read %q", lines)
 	}

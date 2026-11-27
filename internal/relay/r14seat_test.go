@@ -55,7 +55,8 @@ func okDeliveries(evs []Event) []string {
 }
 
 // Round 14, finding 7: a send whose hand-over or paste failed is never
-// confirmed by an entry the watcher reads meanwhile, and its failure goes
+// confirmed by an entry written before it that the watcher reads
+// meanwhile, and its failure goes
 // where it went on main: a failed hand-over is typed instead, a failed
 // paste is returned to the caller.
 func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
@@ -72,10 +73,13 @@ func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
 		{"claude_without_its_hook", claudeAgent{}, Spec{Spool: filepath.Join(t.TempDir(), "after_turn")}},
 	} {
 		t.Run("after_turn/"+c.name, func(t *testing.T) {
-			t.Skip("known, not fixed: an entry read during a hand-over that then fails confirms the send (finding 7 of the fourteenth review, after-turn half); a staging mark kept the arrival out but typed a hand-over that went through twice and left one read as it returned pending for ever (r14handover_test.go)")
 			h := &fakeHost{alive: true}
 			s := newSeat(c.spec, handOverFails{Agent: c.agent, entry: entry}, h, "r14s-"+c.name, "thread-1")
 			s.state = "working"
+			// The earlier entry is the first line (at 0) of the transcript
+			// the seat follows, written before the send.
+			s.transcript = filepath.Join(t.TempDir(), "transcript.jsonl")
+			writeLines(t, s.transcript, claudeUser(time.Now(), entry))
 			if _, err := s.Send("r2", text, "after_turn"); err != nil {
 				t.Fatal(err)
 			}
@@ -104,6 +108,9 @@ func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
 		s := newSeat(Spec{}, claudeAgent{}, h, "r14s-paste", "")
 		h.seat = s
 		s.state = "idle"
+		// As above: the earlier entry is the transcript's first line.
+		s.transcript = filepath.Join(t.TempDir(), "transcript.jsonl")
+		writeLines(t, s.transcript, claudeUser(time.Now(), entry))
 		msg, err := s.Send("r2", text, "queue")
 		if err == nil {
 			t.Fatalf("Send said %q; the paste failed", msg)

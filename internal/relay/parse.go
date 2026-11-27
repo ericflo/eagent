@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +22,13 @@ type obs struct {
 	resets     string
 	exhausted  bool
 	tool       bool // activity/image: counts as a tool call
+	// pos is where the line it was read from starts in the transcript
+	// (the watcher sets it).
+	pos int64
+	// again: a user line that records once more a message that arrived at
+	// an earlier line (Claude's prompt for a message it had queued). It
+	// confirms nothing.
+	again bool
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -215,6 +223,11 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
+	// queued are the words of the messages Claude queued while it worked
+	// (enqueue lines, the latest 64); dequeued says the line before this
+	// one took the front of the queue to run as a prompt of its own.
+	queued   []string
+	dequeued bool
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -237,12 +250,16 @@ func (p *claudeParser) line(raw []byte) []obs {
 	if json.Unmarshal(raw, &ev) != nil || ev.IsSidechain {
 		return nil
 	}
+	defer func() { p.dequeued = ev.Type == "queue-operation" && ev.Operation == "dequeue" }()
 	at := parseTime(ev.Timestamp)
 	switch ev.Type {
 	case "queue-operation":
 		if ev.Operation == "enqueue" {
 			var s string
 			if json.Unmarshal(ev.Content, &s) == nil && s != "" {
+				if p.queued = append(p.queued, s); len(p.queued) > 64 {
+					p.queued = p.queued[1:]
+				}
 				return []obs{{kind: "user", text: s, at: at}}
 			}
 		}
@@ -354,7 +371,30 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		return nil // the TUI's own bookkeeping
 	}
 	p.held, p.inTurn = "", true
-	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
+	// Right after a dequeue the prompt is what Claude took off its queue:
+	// when its words are a queued message's (or a run of them, joined),
+	// they arrived at their enqueue lines, and this line records them again.
+	again := false
+	if p.dequeued {
+		if i, n := queuedRun(p.queued, normalize(s)); n > 0 {
+			p.queued, again = slices.Delete(p.queued, i, i+n), true
+		}
+	}
+	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
+}
+
+// queuedRun finds the queued messages, one or a run of them joined, whose
+// words are got (normalized): where they start and how many, n 0 if none.
+func queuedRun(queued []string, got string) (i, n int) {
+	for i = range queued {
+		run := ""
+		for n = 1; i+n <= len(queued) && len(run) < len(got); n++ {
+			if run = strings.TrimSpace(run + " " + normalize(queued[i+n-1])); run == got {
+				return i, n
+			}
+		}
+	}
+	return 0, 0
 }
 
 func claudeTool(name string, in map[string]any, at time.Time) []obs {
