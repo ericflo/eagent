@@ -152,7 +152,7 @@ Starting an agent, starting it again and handing over to another one can take a 
 
 | Key | Default | |
 |---|---|---|
-| `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. `context_tokens` follows the model: a file or bundle that names another model, or another address for it, without a window of its own gets that model's there, from the catalog or the provider's cached list. So does an environment variable that names another model, and one that gives another address where neither the file nor a bundle names the window for the route. |
+| `model` | GLM-5.3 on Together | The one model: `protocol`, `base_url`, `model`, `api_key_env`, `reasoning_effort`, `max_tokens`, `context_tokens`, `fallback`. `context_tokens` follows the model: a file or bundle that names another model, or another address for it, without a window of its own gets that model's there, from the catalog or the provider's cached list. So does an environment variable that names another model, and one that gives another address where neither the file nor a bundle names the window for the route; that window stays editable, and one entered is written to the file and holds. |
 | `summarizer` | `{"mode": "inline"}` | Or `dedicated`, with its own `model`. |
 | `rollover_tokens` | 0 | Prompt size at which the conversation restarts from a dossier. 0 follows the model in use: half its context window, in whole thousands (less on a small window, see the dossier), and it moves if the model changes mid-session. A number fixes it. |
 | `tick_seconds` | 30 | How often to check for something new while the agent works. |

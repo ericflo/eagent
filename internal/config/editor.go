@@ -39,7 +39,9 @@ type Resolution struct {
 	Layered Config `json:"-"`
 	// Sources maps a JSON pointer ("/model/model") to the layer that
 	// set the effective value: "default", "preset:NAME", "file",
-	// "bundle:NAME", or "env:VAR".
+	// "bundle:NAME", "env:VAR", or "env" for a value the environment
+	// changed that no variable pins (the window of the server an address
+	// variable moves the route to).
 	Sources map[string]string `json:"sources"`
 	Active  Active            `json:"active"`
 	Preset  string            `json:"preset"` // the preset in force before the file, if any
@@ -207,8 +209,13 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	for k := range changed {
+		_, summarizerModel := envVars["/summarizer/model/model"]
 		if name, ok := envVars[k]; ok {
 			res.Sources[k] = "env:" + name
+		} else if k == "/summarizer/model/context_tokens" && res.Layered.Summarizer.Model != nil && !summarizerModel {
+			// The window of the server an address variable moves the
+			// layers' route to (applyEnv), as for the main route below.
+			res.Sources[k] = "env"
 		} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
 			// The rest of a summarizer route the environment created is
 			// copied from the main model because of that variable.
@@ -216,10 +223,11 @@ func Resolve(project, preset, bundle string) Resolution {
 		} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
 			// The window follows the model the variable names.
 			res.Sources[k] = "env:" + name
-		} else if name, ok := envVars["/model/base_url"]; ok && k == "/model/context_tokens" {
-			// Or the server the variable moves the route to.
-			res.Sources[k] = "env:" + name
 		} else {
+			// Among them the window of the server an address variable moves
+			// the route to: the environment's doing, but no variable's, as
+			// a window the file names holds over it (applyEnv). So it is
+			// not shown as pinned, and stays editable.
 			res.Sources[k] = "env"
 		}
 	}
