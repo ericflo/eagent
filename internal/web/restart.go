@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
@@ -102,11 +103,18 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
-		// What it was typed and had not shown arriving is unconfirmed, as
-		// stopSession's settleExited reports it.
-		for _, id := range waiting {
-			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryUnconfirmed,
-				Detail: "the agent was stopped before its arrival showed in its transcript, so whether it arrived cannot be confirmed"})); err != nil {
+		// What it was sent and had not shown arriving is settled as
+		// stopSession's settleExited settles it: a message still unclaimed
+		// in its spool is taken back and did not go; the rest is
+		// unconfirmed.
+		spool := relaySpool(path, rel)
+		for _, d := range waiting {
+			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
+				Detail: "the agent was stopped before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
+			if d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
+				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent was stopped"
+			}
+			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
 				return stopped, failed, err
 			}
 		}
@@ -117,20 +125,38 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 	return stopped, failed, nil
 }
 
-// unsettled lists the sends the record still waits on for rel (typed, no
-// outcome), in the order they were sent, as the harness's unresolvedSends.
-func unsettled(evs []event.Event, rel *state.Relay) []string {
-	var ids []string
+// unsettled lists the sends the record still waits on for rel (sent, no
+// outcome), in the order they were sent, each as its latest relay.send or
+// relay.moved has it, as the harness's unresolvedSends.
+func unsettled(evs []event.Event, rel *state.Relay) []event.RelaySendData {
+	var out []event.RelaySendData
+	at := map[string]int{}
 	for _, ev := range evs {
 		var d event.RelaySendData
 		if ev.Type != event.RelaySend && ev.Type != event.RelayMoved || ev.Decode(&d) != nil || d.Name != rel.Name {
 			continue
 		}
-		if _, waiting := rel.Undelivered[d.ID]; waiting && !slices.Contains(ids, d.ID) {
-			ids = append(ids, d.ID)
+		if _, waiting := rel.Undelivered[d.ID]; !waiting {
+			continue
 		}
+		if i, seen := at[d.ID]; seen {
+			out[i] = d
+			continue
+		}
+		at[d.ID] = len(out)
+		out = append(out, d)
 	}
-	return ids
+	return out
+}
+
+// relaySpool is where a message held for the end of rel's turn waits, as
+// the harness's relaySpec has it; "" for an agent with none.
+func relaySpool(path string, rel *state.Relay) string {
+	spec := relay.Spec{Profile: config.RelayProfile{Agent: rel.Agent}}
+	if relay.Prepare(&spec, filepath.Join(path, "relays", rel.Name)) != nil {
+		return ""
+	}
+	return spec.Spool
 }
 
 // writeHosted writes the list of sessions to bring back.
