@@ -34,7 +34,49 @@ func Deliver(ctx context.Context, project, session string, request Request, reco
 	} else if !os.IsNotExist(err) {
 		return Outcome{}, err
 	}
+	// wait waits for the runtime's acknowledgement of a request in its
+	// pending directory until the request's own deadline.
+	wait := func(request Request, pending *os.Root) (Outcome, error) {
+		timer := time.NewTimer(max(time.Until(request.Expires), time.Millisecond))
+		defer timer.Stop()
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
+		for {
+			if result, err := readResult(); err == nil {
+				return result, nil
+			} else if !os.IsNotExist(err) {
+				return Outcome{}, err
+			}
+			select {
+			case <-ctx.Done():
+				_ = pending.Remove(request.ID + ".ready")
+				_ = pending.Remove(request.ID + ".json")
+				return Outcome{}, ctx.Err()
+			case <-timer.C:
+				return unknown("The runtime did not acknowledge before the local deadline. An expired request cannot apply later.")
+			case <-poll.C:
+			}
+		}
+	}
 	if reconcileOnly {
+		// The earlier delivery's request may still be waiting for the
+		// runtime, which can apply it until it expires: that is waited
+		// for, as the earlier delivery would have.
+		if pending, err := openDirectory(project, session, false, "generations", request.Proposal.Generation, "pending"); err == nil {
+			defer pending.Close()
+			var existing Request
+			if readCommitted(pending, request.ID, &existing) == nil {
+				if existing.Digest != request.Digest || existing.UserID != request.UserID || existing.Grant.Key != request.Grant.Key {
+					return Outcome{}, fmt.Errorf("runtime request identity changed")
+				}
+				return wait(existing, pending)
+			}
+		}
+		// The runtime takes a request out of its pending directory once
+		// it has acknowledged it.
+		if result, err := readResult(); err == nil {
+			return result, nil
+		}
 		return unknown("No durable runtime acknowledgement is available for the previous claim. It will not be applied again.")
 	}
 	status, err := ReadStatus(project, session)
@@ -75,24 +117,5 @@ func Deliver(ctx context.Context, project, session string, request Request, reco
 			return Outcome{}, err
 		}
 	}
-	timer := time.NewTimer(max(time.Until(request.Expires), time.Millisecond))
-	defer timer.Stop()
-	poll := time.NewTicker(50 * time.Millisecond)
-	defer poll.Stop()
-	for {
-		if result, err := readResult(); err == nil {
-			return result, nil
-		} else if !os.IsNotExist(err) {
-			return Outcome{}, err
-		}
-		select {
-		case <-ctx.Done():
-			_ = pending.Remove(request.ID + ".ready")
-			_ = pending.Remove(request.ID + ".json")
-			return Outcome{}, ctx.Err()
-		case <-timer.C:
-			return unknown("The runtime did not acknowledge before the local deadline. An expired request cannot apply later.")
-		case <-poll.C:
-		}
-	}
+	return wait(request, pending)
 }

@@ -184,30 +184,86 @@ func TestK1AQuestionPostedAsAMessageIsNotPostedAgainOnResume(t *testing.T) {
 	}
 }
 
+// k1Settled is how many notes the thread got that a question is settled.
+func k1Settled(fp *phoneFake) int { return len(fp.postsWhere(k1Kind("question_settled"))) }
+
 // B5, the other half: a question that went to the thread as a message is
-// answered at the terminal, with the mirror off. A card would be
-// withdrawn; the message stays as it was, and nothing in the thread says
-// the question is settled.
+// answered or dismissed elsewhere. A card would be withdrawn; a message
+// cannot be, so the thread gets a note that the question is settled,
+// once. A question on a card gets none.
 func TestK1AQuestionPostedAsAMessageAndAnsweredElsewhereIsSettledInTheThread(t *testing.T) {
-	t.Skip("known, not fixed: a question posted as a message cannot be withdrawn when it is answered elsewhere; FinaleChat gives a token no call to withdraw or settle a message, and eagent posts no note in its place")
-	fp := newPhoneFake(true)
-	t.Cleanup(fp.srv.Close)
-	choices := r8Choices(21)
-	off := false
-	g := phoneStart(t, fp, "pick the branch to ship", true, func(_ string, msgs []map[string]any) reply {
-		if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "Which branch?") {
-			args, _ := json.Marshal(map[string]any{"text": "Which branch?", "options": choices})
-			return reply{calls: []event.ToolCall{tc("ask_user", string(args))}}
-		}
-		return hold()
-	}, func(c *config.Config) { c.Finalechat.MirrorInput = &off })
-	waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
-	before := fp.postCount()
-	g.ui.input <- "3"
-	waitFor(t, "the answer", func() bool { return len(r14Answers(g)) == 1 })
-	r14Drained(t, g)
-	if fp.postCount() == before {
-		t.Fatal("the question was answered at the terminal; the thread still shows it as asked, with nothing after it")
+	for _, k := range []struct {
+		name    string
+		choices int
+		input   string
+		mirror  bool
+		notes   int
+	}{
+		{"answered, mirror off", 21, "3", false, 1},
+		{"dismissed, mirror on", 21, "/dismiss", true, 1},
+		{"on a card", 3, "3", false, 0},
+	} {
+		t.Run(k.name, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			choices := r8Choices(k.choices)
+			mirror := k.mirror
+			g := phoneStart(t, fp, "pick the branch to ship", true, func(_ string, msgs []map[string]any) reply {
+				if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "Which branch?") {
+					args, _ := json.Marshal(map[string]any{"text": "Which branch?", "options": choices})
+					return reply{calls: []event.ToolCall{tc("ask_user", string(args))}}
+				}
+				return hold()
+			}, func(c *config.Config) { c.Finalechat.MirrorInput = &mirror })
+			waitFor(t, "the question on the phone", func() bool {
+				return k1AskedAsMessage(fp, "Which branch?") == 1 || fp.pendingQuestions() == 1
+			})
+			r14Drained(t, g)
+			g.ui.input <- k.input
+			waitFor(t, "the question to be settled", func() bool {
+				return len(r14Answers(g))+len(g.events(event.UserDismiss)) == 1
+			})
+			r14Drained(t, g)
+			if n := k1Settled(fp); n != k.notes {
+				t.Fatalf("%d notes that the question is settled, want %d", n, k.notes)
+			}
+		})
+	}
+}
+
+// B5, at a resume: the question went to the thread as a message in the
+// run before, and the resume answers it (--answer) before the phone is
+// up. The thread is told, once, on a service with client keys and on one
+// without.
+func TestK1AQuestionPostedAsAMessageAndAnsweredAtTheResumeIsSettled(t *testing.T) {
+	for _, k := range []struct {
+		name string
+		keys bool
+		opts Options
+	}{
+		{"keys, an answer", true, Options{Interactive: true, Answer: "branch-03"}},
+		{"no keys, an answer", false, Options{Interactive: true, Answer: "branch-03"}},
+		{"no keys, words", false, Options{Interactive: true, Prompt: "branch-03"}},
+	} {
+		t.Run(k.name, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			if !k.keys {
+				fp.features = []string{"activity", "dismiss", "attachments"}
+			}
+			g := r8AskSession(t, fp, "Which branch?", r8Choices(21))
+			waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
+			g.agentStopped()
+			r14Drained(t, g)
+			g.rt.sync(func() {})
+			g.interrupt()
+			g.resume(k.opts)
+			waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) == 2 })
+			r14Drained(t, g)
+			if n := k1Settled(fp); n != 1 {
+				t.Fatalf("%d notes that the question is settled, want 1", n)
+			}
+		})
 	}
 }
 
@@ -237,10 +293,11 @@ func TestK1AQuestionPostedAsAMessageIsPostedAgainInARecreatedThread(t *testing.T
 
 // B2: a session last run without the ledger is resumed at the terminal
 // while two app messages wait, and the read that finds them fails for
-// good (the service answers 400) the first time. A message the person
-// writes after the resume is not taken past them: they are taken first,
-// in order, once the thread can be read.
-func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T) {
+// good (the service answers 400). The catch-up is given up, as a read
+// that fails for good is: what the person writes after the resume is
+// taken, and the session's log and the thread both say that what was sent
+// while it was stopped was not read.
+func TestK1AReadThatFailsForGoodAtResumeIsGivenUpAndSaid(t *testing.T) {
 	setFor(t, &phoneRetryStep, 10*time.Millisecond)
 	cfg, project, path, fp := stoppedRelaySession(t)
 	bphoneOlder(t, path)
@@ -263,30 +320,39 @@ func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T)
 	}))
 	t.Cleanup(srv.Close)
 	cfg.Finalechat.BaseURL = srv.URL
+	ui := &fakeUI{input: make(chan string, 4)}
 	rt, stop := bphoneRun(t, func() *Runtime {
 		useFakeRelays(t, newFakeSeat("Done."))
-		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, ui, path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return rt
 	})
-	waitFor(t, "the resumed session's first post", func() bool {
+	notice := func() int {
 		fp.mu.Lock()
 		defer fp.mu.Unlock()
+		n := 0
 		for _, p := range fp.posts {
-			if p["body"] == "eagent session resumed here." {
-				return true
+			if meta, _ := p["meta"].(map[string]any); meta["kind"] == "unread" {
+				n++
 			}
 		}
-		return false
-	})
+		return n
+	}
+	waitFor(t, "the thread to be told", func() bool { return notice() > 0 })
 	later := fp.userSays("run the tests", nil)
 	waitFor(t, "the later message in the record", func() bool { return slices.Contains(r6PhoneIDs(path), later) })
 	rt.sync(func() {})
 	stop()
-	if got := r6PhoneIDs(path); !slices.Equal(got, []string{first, second, later}) {
-		t.Fatalf("recorded %v, want %v", got, []string{first, second, later})
+	if got := r6PhoneIDs(path); !slices.Equal(got, []string{later}) {
+		t.Fatalf("recorded %v, want only %v (the catch-up past %v given up)", got, later, []string{first, second})
+	}
+	if n := notice(); n != 1 {
+		t.Fatalf("the thread was told %d times", n)
+	}
+	if !strings.Contains(strings.Join(ui.logged(), "\n"), "could not read what was sent to the thread while the session was stopped") {
+		t.Fatalf("the session's log does not say it: %q", ui.logged())
 	}
 }
 

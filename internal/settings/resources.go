@@ -34,21 +34,37 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		var named struct {
 			Preset string `json:"preset"`
 		}
+		layer := false
 		if json.Unmarshal(b.Config, &named) == nil {
 			if canon, ok := config.ResolvePreset(named.Preset); ok {
 				config.Presets[canon](&cfg)
+				layer = true
 			}
 		}
 		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&cfg); err != nil {
+		into := &cfg
+		if layer {
+			into = new(config.Config) // checked here, laid below
+		}
+		if err := dec.Decode(into); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
 		}
-		// A field the editor left empty is written as null, which the
-		// decode above leaves at the default's value.
 		var m map[string]json.RawMessage
 		if json.Unmarshal(b.Config, &m) == nil {
-			config.ClearNulls(&cfg, m)
+			if layer {
+				// Over the preset it names, laid as the loader lays it: a
+				// route it moves to another model or address takes the
+				// window there unless it names one (followModel).
+				if err := config.Layer(s.Project, &cfg, m, "bundle "+b.Name); err != nil {
+					return cfg, &Error{Status: 400, Message: err.Error()}
+				}
+			} else {
+				// A whole configuration (the editor's) over the defaults:
+				// a field the editor left empty is written as null, which
+				// the decode above leaves at the default's value.
+				config.ClearNulls(&cfg, m)
+			}
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {

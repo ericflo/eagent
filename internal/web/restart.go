@@ -3,8 +3,10 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -31,20 +33,41 @@ type hostedList struct {
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
+// One the user stops after that is taken off again (forgetHosted): the
+// list is written under mu, as a run's end is recorded.
 func (s *Server) rememberHosted() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	ids := make([]string, 0, len(s.running))
 	for id := range s.running {
 		ids = append(ids, id)
 	}
-	s.mu.Unlock()
+	sort.Strings(ids)
+	s.writeHosted(ids, time.Now().UTC())
+}
+
+// forgetHosted takes a session the user stopped off the list, so the next
+// server does not bring it back. Under mu.
+func (s *Server) forgetHosted(id string) {
+	raw, err := os.ReadFile(hostedFile(s.Project))
+	if err != nil {
+		return
+	}
+	var list hostedList
+	if json.Unmarshal(raw, &list) != nil || !slices.Contains(list.Sessions, id) {
+		return
+	}
+	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
+}
+
+// writeHosted writes the list of sessions to bring back.
+func (s *Server) writeHosted(ids []string, at time.Time) {
 	path := hostedFile(s.Project)
 	if len(ids) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	sort.Strings(ids)
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: time.Now().UTC()}, "", "  ")
+	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at}, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)
@@ -61,6 +84,10 @@ var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) 
 
 // pendingReply finds that reply; tests substitute it.
 var pendingReply = integration.PendingReply
+
+// releaseReply gives it back to the reply watcher when the session could
+// not come back with it; tests substitute it.
+var releaseReply = integration.ReleaseReply
 
 // restoreHosted brings back the sessions the previous server was hosting
 // when it stopped. The list is used once: a session that cannot come back
@@ -98,12 +125,20 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			// can be waiting in one: it comes back as it was.
 			reply, err = integration.PhoneMessage{}, nil
 		}
+		if errors.Is(err, integration.ErrHandOver) {
+			// Its thread was read: the reply stays there, untaken.
+			s.logf("session %s: not brought back (%v); the reply stays in its thread", id, err)
+			continue
+		}
 		if err != nil {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)
 			continue
 		}
 		if err := restoreSession(s, id, reply); err != nil {
 			s.logf("session %s could not be brought back: %v", id, err)
+			if err := releaseReply(s.Project, info, reply); err != nil {
+				s.logf("session %s: its reply waits for your next message (%v)", id, err)
+			}
 			continue
 		}
 		back++
