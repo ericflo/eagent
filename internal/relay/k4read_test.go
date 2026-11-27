@@ -152,6 +152,10 @@ func TestSrSeatRestoredSendIsNotConfirmedByALineWrittenBeforeIt(t *testing.T) {
 // record's read mark (history) is said with how far that line was read,
 // behind the mark; the record would take that as its mark, and a second
 // reattach would report again the turns after it. The mark never moves back.
+// (Since the sixteenth review's third pass a line before the mark confirms
+// no restored send at all: the seat that read it had the send tracked, or
+// the line was written before the send was typed. So nothing here is
+// confirmed, and no event says less than the mark.)
 func TestK4AHistoryConfirmationDoesNotMoveTheReadMarkBack(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
@@ -166,8 +170,9 @@ func TestK4AHistoryConfirmationDoesNotMoveTheReadMarkBack(t *testing.T) {
 	restore := Restored{ID: "r1", Text: "run the tests", Mode: "queue", At: typed.Add(-100 * time.Millisecond)}
 	w := reattach(t, claudeAgent{}, Spec{Dir: dir, Read: mark}, path, time.Now(), restore)
 	w.caughtUp(t)
-	if !eventually(func() bool { ok, _ := w.delivered(); return slices.Contains(ok, "r1") }) {
-		t.Fatal("the restored send's arrival in history was not confirmed")
+	w.settle()
+	if ok, _ := w.delivered(); slices.Contains(ok, "r1") {
+		t.Fatal("a line before the record's read mark confirmed the restored send")
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()

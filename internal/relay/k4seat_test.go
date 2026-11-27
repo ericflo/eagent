@@ -4,6 +4,7 @@ package relay
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -27,6 +28,36 @@ func (h *sr3MoveHost) Alive(target string) bool {
 		h.ran = true
 	}
 	return h.fakeHost.Alive(target)
+}
+
+// A restored send is confirmed by a line before the record's read mark
+// (history) when the line is stamped no earlier than the send was
+// recorded. That line was read before eagent stopped, and the record has
+// its outcome: it confirmed the earlier send of the same words. Two
+// replies of the same words a moment apart ("yes", "yes"): the second is
+// recorded while the first is being typed, so the first's arrival is
+// stamped after the second's record. The second's Enter does not go (its
+// words are left in the input box) and eagent restarts before the seat
+// presses it again. The reattach confirms the second from the first's
+// arrival: the record says it arrived, and nothing presses or reports it.
+func TestSr3SeatHistoryLineAlreadyReadConfirmsALaterRestoredSendOfTheSameWords(t *testing.T) {
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "sess.jsonl")
+	r1 := time.Now().Add(-30 * time.Second) // the first "yes" recorded
+	r2 := r1.Add(100 * time.Millisecond)    // the second, while the first is typed
+	lines := claudeTurnLines("start", "Shall I deploy?", r1.Add(-time.Minute))
+	lines = append(lines, claudeTurnLines("yes", "Deployed.", r1.Add(400*time.Millisecond))...)
+	writeLines(t, transcript, lines...)
+	st, _ := os.Stat(transcript)
+	// The record: the first confirmed at its arrival (the mark is the end
+	// of what was read, past the turn it started), the second waiting.
+	w := reattach(t, claudeAgent{}, Spec{Dir: dir, State: "idle", Read: st.Size()}, transcript, r1.Add(2*time.Second),
+		Restored{ID: "r2", Text: "yes", Mode: "queue", At: r2})
+	w.caughtUp(t)
+	w.settle()
+	if ok, _ := w.delivered(); len(ok) > 0 {
+		t.Errorf("confirmed %v from a line the record had read and used for the first \"yes\"; want r2 left to be pressed or reported", ok)
+	}
 }
 
 // e8fd70f reads a session to its end before following pi to another, but

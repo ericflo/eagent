@@ -1491,20 +1491,26 @@ func (s *Seat) fold(o obs) {
 	s.mu.Lock()
 	since := s.since
 	history := !since.IsZero() && !o.at.IsZero() && !o.at.After(since)
+	byMark := false
 	if s.readFrom > 0 && s.transcript == s.readIn && s.readTo.Load() != 0 {
 		// The record says how far this transcript was read: what starts
 		// before that is history, whenever it was written. Only for what a
 		// line of it gave (readTail is folding one: readTo is its end); what
 		// the agent's status file says (Antigravity's turn end and quota)
 		// is judged by time, as on main.
-		history = o.pos < s.readFrom
+		history, byMark = o.pos < s.readFrom, true
 	}
 	s.mu.Unlock()
 	if history && o.kind != "meta" {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the
-		// record still waits on arrived just before the record ends.
-		if o.kind == "user" && !o.again {
+		// record still waits on arrived just before the record ends. A line
+		// before the record's read mark says neither of a send: the seat
+		// that read it had each send the record still waits on tracked
+		// then, and would have confirmed it were the line its arrival, or
+		// not typed yet (the line was written before it). Only a record
+		// with no mark, cut by time, looks there for one.
+		if o.kind == "user" && !o.again && !byMark {
 			for _, id := range s.matchSends(o.text, o.at, o.pos, false) {
 				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
