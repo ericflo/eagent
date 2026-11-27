@@ -19,7 +19,7 @@ import (
 // <session>/inbox/ and the runtime folds them into the log. Files are
 // processed in name order. One that gives its own name as its id, as
 // PostInbox's do, is deleted once it is recorded and is never taken twice;
-// any other is deleted and then taken (see pollInbox).
+// any other is first given a name and an id of its own (claimInbox).
 
 // InboxDir is where messages for a session are dropped.
 func InboxDir(sessionPath string) string { return filepath.Join(sessionPath, "inbox") }
@@ -54,11 +54,25 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	// this submission's and no other's (see inboxFileID). The time orders
 	// the files; the random part keeps two posts in the same instant
 	// apart, and so does a temporary file of each post's own.
-	var salt [4]byte
-	if _, err := rand.Read(salt[:]); err != nil {
+	stamp, err := inboxStamp()
+	if err != nil {
 		return err
 	}
-	stamp := time.Now().UTC().Format("20060102T150405.000000000") + "-" + hex.EncodeToString(salt[:])
+	return writeInbox(dir, stamp, msg)
+}
+
+// inboxStamp is a new name for an inbox file: the time, and a random part.
+func inboxStamp() (string, error) {
+	var salt [4]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return "", err
+	}
+	return time.Now().UTC().Format("20060102T150405.000000000") + "-" + hex.EncodeToString(salt[:]), nil
+}
+
+// writeInbox writes msg to dir as the file stamp.json, which gives stamp as
+// its id, in place of any file of that name.
+func writeInbox(dir, stamp string, msg InboxMessage) error {
 	raw, err := json.Marshal(struct {
 		InboxMessage
 		ID string `json:"inbox_id"`
@@ -87,6 +101,24 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	return err
 }
 
+// Take writes msg into the session's inbox and reads the inbox at once, on
+// the run's loop, unless the run has begun to end: then nothing is
+// written, and Take reports false. Handed over this way, words are taken
+// before Take returns or not at all; a file left from outside can come
+// after an ending run's last look.
+func (r *Runtime) Take(msg InboxMessage) (took bool, err error) {
+	r.sync(func() {
+		if r.ending {
+			return
+		}
+		if err = PostInbox(r.sess.Path, msg); err == nil {
+			took = true
+			r.pollInbox()
+		}
+	})
+	return took, err
+}
+
 // pollInbox drains pending inbox files. Loop goroutine only.
 func (r *Runtime) pollInbox() {
 	dir := InboxDir(r.sess.Path)
@@ -110,14 +142,20 @@ func (r *Runtime) pollInbox() {
 		id := inboxFileID(raw, name)
 		var msg InboxMessage
 		bad := json.Unmarshal(raw, &msg) != nil
-		// A file with no id is handled as every inbox file was before
-		// files had ids: removed, then taken, and nothing is remembered of
-		// it. With an id, a command, a stop or a dismissal still has its
-		// file removed first (it leaves no event to know it by, so a cut in
-		// between loses it and never repeats it), and words are recorded,
-		// with the id, before their file is removed: a file still here
-		// whose id this run handled, or that an earlier run left and the
-		// record holds, is not taken again.
+		if id == "" && !bad {
+			path, id = claimInbox(dir, path, msg)
+		}
+		// A file with no id (one written by hand that could not be given
+		// one) is handled as every inbox file was before files had ids:
+		// removed, then taken, and nothing is remembered of it. With an
+		// id, a stop or a dismissal still has its file removed
+		// first (it leaves no event to know it by, so a cut in between
+		// loses it and never repeats it); a command is recorded as taken
+		// (inbox.taken) before that, as a command from the phone is, so a
+		// cut after the record loses it and never repeats it; and words
+		// are recorded, with the id, before their file is removed: a file
+		// still here whose id this run handled, or that an earlier run
+		// left and the record holds, is not taken again.
 		switch {
 		case bad:
 			_ = os.Remove(path)
@@ -130,6 +168,9 @@ func (r *Runtime) pollInbox() {
 			_ = os.Remove(path)
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
 		case id == "" || !inboxWords(msg, r.ownCommand):
+			if id != "" && (msg.Type == "message" || msg.Type == "") {
+				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id}))
+			}
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
 		default:
@@ -143,6 +184,29 @@ func (r *Runtime) pollInbox() {
 			r.inboxTaken[id] = true
 		}
 	}
+}
+
+// claimInbox gives an inbox file with no id of its own (one written by
+// hand, under a name its writer may use again) a new name, and writes it
+// again under that name with the name as its id, so that it is taken as
+// PostInbox's files are: recorded before it is removed, and once. It is
+// moved first, so a cut leaves one file: one with no id under the new
+// name is given an id by the next look. It returns the file's path and id:
+// the old path and none when it could not be moved, the new path and none
+// when it could not be written again.
+func claimInbox(dir, path string, msg InboxMessage) (string, string) {
+	stamp, err := inboxStamp()
+	if err != nil {
+		return path, ""
+	}
+	to := filepath.Join(dir, stamp+".json")
+	if os.Rename(path, to) != nil {
+		return path, ""
+	}
+	if writeInbox(dir, stamp, msg) != nil {
+		return to, ""
+	}
+	return to, stamp
 }
 
 // inboxFileID is the id of the submission in an inbox file: the file's
@@ -173,14 +237,19 @@ func inboxWords(msg InboxMessage, command func(line, source string) bool) bool {
 	return false
 }
 
+// inboxTakenEvent records an eagent command from an inbox file as taken,
+// before it is carried out.
+const inboxTakenEvent = "inbox.taken"
+
 // inboxRecorded reports whether the record holds the user.message or
-// user.answer that the inbox submission id became. Loop goroutine only.
+// user.answer that the inbox submission id became, or its inbox.taken.
+// Loop goroutine only.
 func (r *Runtime) inboxRecorded(id string) bool {
 	for _, ev := range r.st.Events {
 		var d struct {
 			Inbox string `json:"inbox"`
 		}
-		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil && d.Inbox == id {
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer || ev.Type == inboxTakenEvent) && ev.Decode(&d) == nil && d.Inbox == id {
 			return true
 		}
 	}

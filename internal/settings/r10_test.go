@@ -38,12 +38,12 @@ func TestR10UndoKeepsANullClearedField(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before)
+			inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before, string(desired))
 			if err != nil {
 				t.Fatal(err)
 			}
 			inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, after.Snapshot.Version
-			raw, _, _, err := s.PrepareUndo(inverse, string(desired), s.Grant())
+			raw, _, _, err := s.PrepareUndo(inverse, before, string(desired), s.Grant())
 			if err != nil {
 				t.Fatalf("undo: %v (inverse %+v)", err, inverse.Edits)
 			}

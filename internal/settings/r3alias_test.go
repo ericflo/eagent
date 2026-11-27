@@ -43,7 +43,7 @@ func TestAnOlderPresetNameIsEditableAndUndoableRemotely(t *testing.T) {
 		t.Fatalf("preset choices = %v", presetField.Shape.Enum)
 	}
 	edit := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: []control.Edit{{Op: "set", Key: "/preset", Value: "anthropic-high"}}}
-	inverse, err := ConfigInverse(edit, before)
+	inverse, err := ConfigInverse(edit, before, "")
 	if err != nil {
 		t.Fatal(err)
 	}

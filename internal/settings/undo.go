@@ -14,7 +14,8 @@ import (
 
 // ConfigInverse contains only the known fields the original command touched.
 // Unknown local values and unrelated edits never enter the reversal or result.
-func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposal, error) {
+// desiredRaw is the file the command wrote (a journal's desired).
+func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (control.Proposal, error) {
 	inverse := control.Proposal{Operation: "settings.apply"}
 	if original.Operation != "settings.apply" || len(original.Edits) == 0 {
 		return inverse, fmt.Errorf("this command has no reversible settings edits")
@@ -29,8 +30,9 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	}
 	// Applying a pick of a route's model also set the fields that go with it
 	// (routePicks), and an edit of a dedicated summarizer with no route of
-	// its own (none, or null) wrote it one: those are put back too.
-	for _, route := range []string{"/model", "/model/fallback", "/summarizer/model", "/summarizer/model/fallback"} {
+	// its own (none, or null) wrote it one: those are put back too. The
+	// routes are the ones routePicks walks, each fallback's own included.
+	for _, route := range []string{"/model", "/model/fallback", "/model/fallback/fallback", "/model/fallback/fallback/fallback", "/summarizer/model", "/summarizer/model/fallback", "/summarizer/model/fallback/fallback", "/summarizer/model/fallback/fallback/fallback"} {
 		picked := slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == route+"/model" || e.Key == route+"/base_url" })
 		extra := []string{}
 		if picked {
@@ -38,6 +40,22 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 		}
 		if v, had := pointerValue(before, route); (!had || v == nil) && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
 			extra = routeLeaves
+		}
+		// A preset chosen or unset alone is a pick of the main route, which
+		// can give it fields or take its model out (routePicks): the ones
+		// the command wrote are put back, and no other.
+		if !picked && route == "/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == "/preset" }) {
+			desired, err := fileValues(desiredRaw)
+			if err != nil {
+				return inverse, err
+			}
+			for _, leaf := range append(slices.Clone(routePickFields), "model") {
+				b, hadB := pointerValue(before, route+"/"+leaf)
+				d, hadD := pointerValue(desired, route+"/"+leaf)
+				if hadB != hadD || !reflect.DeepEqual(b, d) {
+					extra = append(extra, leaf)
+				}
+			}
 		}
 		for _, leaf := range extra {
 			if !slices.Contains(keys, route+"/"+leaf) {
@@ -69,7 +87,8 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 // PrepareUndo compares the affected fields against the original saved result
 // under the caller's project lock, then uses today's ordinary typed writer.
 // Unrelated local edits are preserved; changed affected fields cause conflict.
-func (s *Service) PrepareUndo(inverse control.Proposal, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
+// beforeRaw is the file before the original command (a journal's before_raw).
+func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
 	var desired map[string]any
 	if err := json.Unmarshal([]byte(desiredRaw), &desired); err != nil {
 		return "", "", RemoteView{}, err
@@ -79,14 +98,52 @@ func (s *Service) PrepareUndo(inverse control.Proposal, desiredRaw string, grant
 	if err != nil {
 		return "", "", RemoteView{}, err
 	}
+	before, err := fileValues(beforeRaw)
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	// A fallback the file had turned off with null, which the command wrote
+	// into, is turned off again: no edit can write the null (no field is a
+	// whole route), and taking the route out would bring a preset's
+	// fallback back on. The route is then affected as a whole.
+	keys := []string{}
 	for _, edit := range inverse.Edits {
-		want, wantExists := pointerValue(desired, edit.Key)
-		got, gotExists := pointerValue(current, edit.Key)
+		keys = append(keys, edit.Key)
+	}
+	// A route's model put back goes to the address the route has then: a
+	// change of that address since the command is a change of what the
+	// reversal restores.
+	for _, edit := range inverse.Edits {
+		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && !slices.Contains(keys, route+"/base_url") {
+			keys = append(keys, route+"/base_url")
+		}
+	}
+	v, had := pointerValue(before, "/model/fallback")
+	off := had && v == nil && slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, "/model/fallback/") })
+	if off {
+		keys = append(keys, "/model/fallback")
+	}
+	for _, key := range keys {
+		want, wantExists := pointerValue(desired, key)
+		got, gotExists := pointerValue(current, key)
 		if wantExists != gotExists || !reflect.DeepEqual(want, got) {
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	return s.Prepare(inverse, grant)
+	raw, etag, view, err := s.prepare(inverse, grant, before)
+	if err != nil || !off {
+		return raw, etag, view, err
+	}
+	values, err := fileValues(raw)
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	setPointer(values, "/model/fallback", nil, false)
+	out, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	return string(out) + "\n", etag, view, nil
 }
 
 func (change ResourceChange) Inverse() (control.Proposal, error) {

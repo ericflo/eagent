@@ -20,7 +20,7 @@ func journalInverse(j commandJournal) (control.Proposal, error) {
 	if j.Applied == nil || j.BeforeRaw == nil {
 		return control.Proposal{}, fmt.Errorf("this command has no undo metadata")
 	}
-	return settings.ConfigInverse(*j.Applied, *j.BeforeRaw)
+	return settings.ConfigInverse(*j.Applied, *j.BeforeRaw, j.Desired)
 }
 
 func inverseDigest(p control.Proposal) string {
@@ -109,7 +109,7 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		journal.Resource = &change
 		return nil
 	}
-	desired, etag, _, err := s.PrepareUndo(inverse, original.Desired, grant)
+	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant)
 	if err != nil {
 		return err
 	}

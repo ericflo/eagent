@@ -284,6 +284,43 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 			}
 		}
 	}
+	// The window of the server an address variable moves a route to, where
+	// no layer names one, stays the user's to set: one entered is written,
+	// and holds as a window the file names. A save that leaves it and the
+	// route's model as they are in force writes none, as a value the preset
+	// gives is not written: in the file it would be the window of the
+	// file's own server once the variable is unset.
+	var res *config.Resolution
+	route := func(c *config.Config, ptr string) *config.ModelRoute {
+		if ptr == "/model" {
+			return &c.Model
+		}
+		return c.Summarizer.Model
+	}
+	for _, ptr := range []string{"/model", "/summarizer/model"} {
+		_, model := env[ptr+"/model"]
+		if _, set := env[ptr+"/base_url"]; model || !set {
+			continue
+		}
+		if res == nil {
+			r := config.Resolve(s.Project, s.Preset, s.Bundle)
+			res = &r
+		}
+		want, now := route(&cfg, ptr), route(&res.Effective, ptr)
+		if res.Sources[ptr+"/context_tokens"] != "env" || want == nil || now == nil || want.Model != now.Model || want.ContextTokens != now.ContextTokens {
+			continue
+		}
+		segs := strings.Split(strings.TrimPrefix(ptr, "/"), "/")
+		var obj map[string]json.RawMessage
+		_ = json.Unmarshal(edits[segs[0]], &obj)
+		if obj != nil && replaceIn(obj, append(segs[1:], "context_tokens"), nil, false) {
+			if len(obj) == 0 {
+				edits[segs[0]] = nil
+			} else {
+				edits[segs[0]], _ = json.Marshal(obj)
+			}
+		}
+	}
 	if len(env) > 0 && !b.AllowShadow {
 		onDisk := map[string]json.RawMessage{}
 		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
