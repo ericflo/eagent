@@ -80,7 +80,7 @@ func (r *Runtime) closeInterrupted() {
 		// A turn was cut off by the restart. Whatever it had decided and
 		// not yet done (stop the agent, send it something, answer the
 		// user) is dropped unless eagent takes it up again, so it is woken.
-		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] You were restarted in the middle of a turn. Calls marked interrupted above did not run. Take the turn up where it stopped: make again the calls that are still needed, and do not repeat anything the record shows was done."}))
+		r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] You were restarted in the middle of a turn. Calls marked interrupted above may or may not have run before the restart: look at what the record shows of them (a message sent, an agent's reply). Take the turn up where it stopped: make again only the calls that are still needed, and do not repeat anything the record shows was done."}))
 	}
 	if legacy {
 		// A session written when eagent ran three models (an orchestrator,

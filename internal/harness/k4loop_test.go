@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 var sr2TooLong = reply{status: 400, body: `{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum","type":"invalid_request_error"}}`}
@@ -66,6 +67,44 @@ func TestSR2LoopAnEndingSessionSaysItRestartedWhenItDidNot(t *testing.T) {
 	for _, m := range ui.said() {
 		if strings.Contains(m, "even after I restarted it from my notes") {
 			t.Fatalf("told %q after %d refused calls and no restart at all (exit %d)", m, refused.Load(), code)
+		}
+	}
+}
+
+// The review's suspicion: a run stopped between running a call (here a
+// send_message, whose message is on the record) and writing its result.
+// The resumed run marks the call interrupted and tells eagent so; what it
+// says must hold for a call that may have run: not that it did not run.
+func TestK4AnInterruptedCallIsNotSaidToHaveNotRun(t *testing.T) {
+	s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+	s.settled()
+	path, project := s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	sess, _, err := store.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := tc("send_message", `{"text":"The build is green."}`)
+	for _, ev := range []event.Event{
+		event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: "the user wrote"}),
+		event.New(event.Assistant, event.ActorEagent, event.AssistantData{ToolCalls: []event.ToolCall{call}}),
+		event.New(event.Message, event.ActorEagent, event.MessageData{Text: "The build is green."}),
+	} {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sess.Close()
+	s2, _ := coreResume(t, path, project, s.model, newFakeSeat("ok"))
+	s2.settled()
+	for _, ev := range s2.events(event.HarnessMessage, event.ToolResult) {
+		var d struct {
+			Text   string `json:"text"`
+			Output string `json:"output"`
+		}
+		_ = ev.Decode(&d)
+		if text := d.Text + d.Output; strings.Contains(text, "did not run") {
+			t.Fatalf("a call whose message is on the record is said not to have run: %q", text)
 		}
 	}
 }
