@@ -51,11 +51,12 @@ type Server struct {
 	// stops are the stops the shutdown overtook, by session, under way or
 	// done (stopForShutdown). Under mu.
 	stops map[string]*stopAnswer
-	// ran is the configuration the last run here of each session was
-	// built with, kept after the run ends: a stop the shutdown overtakes
-	// tells the session's phone by it, and its mark names it for the next
-	// server (stopAgentsOf, markStop). Under mu.
-	ran map[string]ranOn
+	// ran names, by session, the configuration its last run known here was
+	// built with: a run here (kept after it ends), or one the list the
+	// previous server left names (restoreHosted). The session's next run
+	// here, a stop this server finishes, and the list and marks it writes
+	// take it (runConfig, writeHostedList, markStop). Under mu.
+	ran map[string]runPick
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -987,20 +988,11 @@ func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
 func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	s.mu.Lock()
 	s.markStop(info.ID)
-	on, ranHere := s.ran[info.ID]
-	list, _ := s.readHosted()
 	s.mu.Unlock()
-	// The phone is told by the configuration the session's run here was
-	// built with, or, for one not run here, the one its mark names.
-	cfg := &on.cfg
-	if !ranHere {
-		m, _ := list.mark(info.ID)
-		cfg = s.markConfig(info, m)
-	}
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path, cfg)
+	stopped, failed, err := stopAgents(info.Path, s.stopConfig(info))
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
@@ -1109,7 +1101,7 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config, pick runPic
 	if err != nil {
 		return "", err
 	}
-	s.noteRan(rt.SessionID(), cfg, pick)
+	s.noteRan(rt.SessionID(), pick)
 	s.run(rt, ui)
 	return rt.SessionID(), nil
 }
@@ -1140,12 +1132,22 @@ func (s *Server) RegisterSessionStarter() func() {
 }
 
 // host resumes an existing session in this process; its caller holds
-// resuming. Once the server's shutdown has begun it resumes nothing.
+// resuming. Once the server's shutdown has begun it resumes nothing. It
+// runs on the configuration bundle and preset name, or, with none named
+// (every resume but one picked in the browser), on the session's own
+// (runConfig).
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
 	if s.stopping {
 		return errStopping
 	}
-	cfg, err := s.loadConfig(bundle, preset)
+	pick := s.pickOf(bundle, preset)
+	var cfg config.Config
+	var err error
+	if pick.Default {
+		cfg, pick, err = s.runConfig(store.Info{ID: filepath.Base(path), Path: path})
+	} else {
+		cfg, err = s.loadConfig(bundle, preset)
+	}
 	if err != nil {
 		return err
 	}
@@ -1154,7 +1156,7 @@ func (s *Server) host(path string, opts harness.Options, bundle, preset string, 
 	if err != nil {
 		return err
 	}
-	s.noteRan(rt.SessionID(), cfg, s.pickOf(bundle, preset))
+	s.noteRan(rt.SessionID(), pick)
 	s.run(rt, ui)
 	return nil
 }
