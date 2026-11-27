@@ -272,14 +272,14 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 				req.ClientKey = p.key("rt", keys[i])
 				act := p.attach()
 				req.Activity = act
-				msg, _, err := p.client.Post(ctx, p.ref, req)
+				msg, thread, err := p.client.Post(ctx, p.ref, req)
 				if err != nil {
 					if len(reqs) > 1 {
 						p.say("finalechat: %s's report (event %d) reached the phone in %d of %d parts: %v; the whole report is in the session's record", agent, ev.Seq, i, len(reqs), shortErr(err))
 					}
 					return
 				}
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -421,8 +421,8 @@ func (p *phone) postRelayScreen(name, screen string) {
 		// Without a status the post would clear the thread's line, which
 		// may be saying the agent needs the user.
 		act := p.attach()
-		if msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}, Activity: act}); err == nil {
-			p.remember(msg.ID)
+		if msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}, Activity: act}); err == nil {
+			p.rememberIn(msg, thread)
 			p.markSent(act)
 		}
 	})

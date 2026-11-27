@@ -339,3 +339,28 @@ func TestK2AFileWhoseDownloadFailsOnceIsTakenByTheMirror(t *testing.T) {
 		t.Fatalf("the file was refused: %v", got)
 	}
 }
+
+// B16's siblings: an agent's report and a snapshot of its terminal take
+// the thread the service names, as every other post does.
+func TestK2RelayPostsTakeTheThreadTheyName(t *testing.T) {
+	held := func(string, []map[string]any) reply { return hold() }
+	t.Run("the agent's report", func(t *testing.T) {
+		fp := newPhoneFake(true)
+		t.Cleanup(fp.srv.Close)
+		match := k1Kind("relay_report")
+		srv := k1Recreating(t, fp, match)
+		g := phoneStart(t, fp, "start work", true, held, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+		k1ThreadAfter(t, g, match)
+	})
+	t.Run("the agent's screen", func(t *testing.T) {
+		fp := newPhoneFake(true)
+		t.Cleanup(fp.srv.Close)
+		match := k1Kind("relay_screen")
+		srv := k1Recreating(t, fp, match)
+		g := phoneStart(t, fp, "start work", true, held, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+		waitFor(t, "the agent's report", func() bool { return len(fp.postsWhere(k1Kind("relay_report"))) > 0 })
+		r14Drained(t, g)
+		g.ui.input <- "/screen"
+		k1ThreadAfter(t, g, match)
+	})
+}
