@@ -1233,6 +1233,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
+	held := map[string]int{} // reads each message was held back for (its refusal note could not be posted)
 	for p.ctx.Err() == nil {
 		p.mu.Lock()
 		after := p.lastID
@@ -1313,8 +1314,10 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			continue
 		}
 		backoff = time.Second
+		heldBack := 0 // how many times the message held back has been, once one is
 		for _, m := range msgs {
 			p.mu.Lock()
+			prevID := p.lastID
 			p.lastID = m.ID
 			mine := p.posted[m.ID]
 			p.mu.Unlock()
@@ -1330,7 +1333,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			p.remember(m.ID)
 			body := strings.TrimSpace(m.Body)
 			var atts []event.Attachment
-			var notes []func(context.Context)
+			var notes []func(ctx context.Context, taken bool) error
 			for _, a := range m.Attachments {
 				saved, err := r.downloadAttachment(p.client, a)
 				// A download that may work later (the service could not be
@@ -1359,26 +1362,56 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// is ending (a /quit before it in the page, say) does
 					// not take it, and says nothing.
 					note, key, name := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}, a.Filename
-					notes = append(notes, func(ctx context.Context) {
+					notes = append(notes, func(ctx context.Context, taken bool) error {
 						act := p.attach()
 						msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
 							p.rememberIn(msg, thread)
 							p.markSent(act)
-						} else if ctx.Err() == nil {
+						} else if ctx.Err() == nil && taken {
 							// The words went on without the file; the person
 							// who sent it is not told on the phone, so the
 							// log says so.
 							p.say("finalechat: %s was dropped and its sender could not be told on the phone: %v", name, shortErr(err))
 						}
+						return err
 					})
 					continue
 				}
 				atts = append(atts, saved)
 			}
+			if len(notes) > 0 && held[m.ID] < phoneRefusalTries {
+				// The person is told the file is not taken before its
+				// message is: unless the session is ending (then the step
+				// below leaves it, and says nothing), the notes go out now,
+				// and one that cannot leaves the message untaken, read
+				// again after a pause, as the reply watcher leaves it. After
+				// phoneRefusalTries such reads it is taken without the file,
+				// and the notes are queued as any post is.
+				ending := true
+				r.sync(func() { ending = r.ending })
+				if !ending {
+					var nerr error
+					for _, n := range notes {
+						if nerr = n(p.ctx, false); nerr != nil {
+							break
+						}
+					}
+					if nerr != nil {
+						held[m.ID]++
+						p.mu.Lock()
+						delete(p.posted, m.ID)
+						p.lastID = prevID
+						p.mu.Unlock()
+						heldBack = held[m.ID]
+						break
+					}
+					notes = nil
+				}
+			}
 			tell := func() {
 				for _, n := range notes {
-					p.enqueue(n)
+					p.enqueue(func(ctx context.Context) { _ = n(ctx, true) })
 				}
 			}
 			// Every message the poll takes in is recorded in the loop step
@@ -1482,8 +1515,23 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				r.tookPhoneMessage(phoneID, from)
 			})
 		}
+		if heldBack > 0 {
+			// A refusal note could not be posted: its message, and those
+			// after it, wait for the next read, after a pause that grows
+			// as the first call's retries do.
+			select {
+			case <-time.After(time.Duration(heldBack) * phoneRetryStep):
+			case <-p.ctx.Done():
+				return
+			}
+		}
 	}
 }
+
+// phoneRefusalTries bounds how many reads of a message a refusal note that
+// cannot be posted holds it back for (each after the pause a failed read
+// gets); after them the message is taken without the file.
+const phoneRefusalTries = 3
 
 // FromPhone reads what the app says about a message the user sent from the
 // phone, in its meta: the composer's route and delivery, and the client's
