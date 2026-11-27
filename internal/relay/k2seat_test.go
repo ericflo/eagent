@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -168,5 +169,65 @@ func TestK2AClaudesAPIErrorEndsItsTurn(t *testing.T) {
 	}
 	if !slices.Equal(got, []string{"r1:" + OutcomeNotSent}) || !slices.Equal(turns, []string{"true:API Error: 529 Overloaded"}) || s.Snapshot().State != "idle" {
 		t.Fatalf("turns %v, reported %v, state %s; want the turn ended on the error, r1 not sent, idle (spool %v)", turns, got, s.Snapshot().State, spoolNames(spool))
+	}
+}
+
+// A6, the agent's exit: a message still waiting unclaimed in the spool
+// when the agent's pane is gone certainly did not go in, and is reported
+// not sent before the seat says exited (so the exit does not call it a
+// send that may have gone). One a hook had claimed is left as it was.
+func TestK2AHeldMessageInTheSpoolAtAnExitIsNotSent(t *testing.T) {
+	saved := aliveEvery
+	aliveEvery = time.Millisecond
+	t.Cleanup(func() { aliveEvery = saved })
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	h := &fakeHost{alive: true}
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "k2-a6x", "")
+	s.state = "working"
+	for _, id := range []string{"r1", "r2"} {
+		if _, err := s.Send(id, "then "+id, "after_turn"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range spoolNames(spool) {
+		if strings.HasSuffix(n, "-r2.txt") { // a hook claimed r2
+			if err := os.Rename(filepath.Join(spool, n), filepath.Join(spool, n+".taken")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	s.poll = time.Millisecond
+	h.mu.Lock()
+	h.alive = false
+	h.mu.Unlock()
+	go s.watch()
+	t.Cleanup(s.Close)
+	var got []string
+	for ev := range s.events {
+		if ev.Kind == KindDelivered {
+			got = append(got, ev.SendID+":"+ev.Outcome)
+		}
+		if ev.Kind == KindState && ev.State == "exited" {
+			break
+		}
+	}
+	if !slices.Equal(got, []string{"r1:" + OutcomeNotSent}) {
+		t.Fatalf("before the exit: %v; want r1 not sent", got)
+	}
+}
+
+// A6, a restored send: its arrival may lie anywhere after it was recorded,
+// so a reattach with sends the record still waits on reads the whole
+// transcript, not only its end, and finds one whose prompt is older than
+// that end.
+func TestK2ARestoredSendOlderThanTheTailIsConfirmed(t *testing.T) {
+	lowTail(t)
+	since := time.Now().Add(-time.Minute)
+	first := "label the jars on the top shelf"
+	path := longHistory(t, since, first)
+	w := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since, Restored{ID: "r1", Text: first, Mode: "queue", At: since.Add(-time.Hour - time.Second)})
+	w.caughtUp(t)
+	if ok, failed := w.delivered(); !slices.Equal(ok, []string{"r1"}) || len(failed) != 0 {
+		t.Fatalf("confirmed %v, not confirmed %v; want r1 confirmed", ok, failed)
 	}
 }

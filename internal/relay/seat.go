@@ -731,6 +731,28 @@ func (s *Seat) untrack(id string) bool {
 // Tests shorten it.
 var heldGrace = 5 * time.Second
 
+// aliveEvery is how often the watcher checks that the agent's pane is still
+// there. Tests shorten it.
+var aliveEvery = 3 * time.Second
+
+// sweepSpool takes every message still waiting unclaimed in the spool, with
+// the rename a hook claims one with, and reports each not sent with detail:
+// the agent that would have taken it is gone. One a hook claimed may have
+// gone in, and is left to be reported as a send that may have.
+func (s *Seat) sweepSpool(detail string) {
+	if s.spec.Spool == "" {
+		return
+	}
+	taken, _ := takeSpool(s.spec.Spool)
+	for _, path := range taken {
+		_ = os.Remove(path)
+		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok {
+			s.untrack(id)
+			s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Outcome: OutcomeNotSent, Detail: detail})
+		}
+	}
+}
+
 // reportLeftOvers reports undelivered every message still in the spool
 // heldGrace after the transcript showed the agent's turn over: the Stop
 // hook runs only at a turn's end, so nothing will hand them over now (an
@@ -1201,10 +1223,13 @@ func (s *Seat) watch() {
 					}
 				}
 				since := s.since
+				restoring := slices.ContainsFunc(s.pending, func(p *pending) bool { return p.dormant })
 				s.mu.Unlock()
-				if !since.IsZero() && !exact {
+				if !since.IsZero() && !exact && !restoring {
 					// Reattached or resumed: the history is already on the
-					// record; read only the end of a long transcript.
+					// record; read only the end of a long transcript. With
+					// sends the record still waits on, all of it: their
+					// arrival may lie anywhere after they were recorded.
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
 						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
 					}
@@ -1221,12 +1246,16 @@ func (s *Seat) watch() {
 			// what the transcript did not show of the restored sends did
 			// not arrive while eagent was down.
 			caught = err != nil || tail.atEnd
+			// A catch-up reads on at once, not a chunk a look.
+			s.mu.Lock()
+			wait = caught || !s.catchingUp
+			s.mu.Unlock()
 		}
 		dr, reports := s.agent.(dialogReporter)
 		if caught && !reports {
 			s.caughtUp(time.Now())
 		}
-		if now.Sub(lastAlive) >= 3*time.Second {
+		if now.Sub(lastAlive) >= aliveEvery {
 			lastAlive = now
 			// One failed check can be a slow or busy tmux; two in a row,
 			// three seconds apart, mean the pane is gone. Marked exited by
@@ -1235,6 +1264,7 @@ func (s *Seat) watch() {
 				missed = 0
 			} else if missed++; missed >= 2 {
 				screen, _ := s.host.Capture(s.target, 15)
+				s.sweepSpool(s.agent.Label() + " exited before it took this message, so it was not delivered; send it again if it is still wanted")
 				s.setState("exited", lastLines(screen, 6))
 				return
 			}
