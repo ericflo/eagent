@@ -281,3 +281,108 @@ func TestK1AnArrivalReadWhileEnterGoesIsConfirmed(t *testing.T) {
 		}
 	})
 }
+
+// k1Queue is Claude's record of its queue: op is enqueue, dequeue or remove.
+func k1Queue(op, content string) string {
+	ts := stamp(time.Now())
+	if content == "" {
+		return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":"%s"}`, op, ts)
+	}
+	return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":"%s","content":%q}`, op, ts, content)
+}
+
+func k1TurnEnd() string {
+	return fmt.Sprintf(`{"type":"system","subtype":"turn_duration","timestamp":"%s","durationMs":1000}`, stamp(time.Now()))
+}
+
+// k1Case feeds Claude transcript lines to a working seat: sends tracked
+// first, then lines, then later sends, then the last line.
+type k1Case struct {
+	name  string
+	sends [][2]string // id, text
+	lines []string
+	later [][2]string
+	last  string
+	want  []string // the sends confirmed
+}
+
+func (c k1Case) run(t *testing.T) {
+	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "x", "")
+	s.state = "working"
+	for _, p := range c.sends {
+		s.track(p[0], p[1], "queue")
+	}
+	p := &claudeParser{}
+	feed := func(l string) {
+		for _, o := range p.line([]byte(l)) {
+			s.fold(o)
+		}
+	}
+	for _, l := range c.lines {
+		feed(l)
+	}
+	for _, p := range c.later {
+		s.track(p[0], p[1], "queue")
+	}
+	feed(c.last)
+	if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, c.want) {
+		t.Fatalf("confirmed %v; want %v", ok, c.want)
+	}
+}
+
+// A16: Claude records a message typed while it works twice, as it queues
+// it (an enqueue line) and as the prompt it runs once it takes it off the
+// queue (the user line right after a dequeue). That is one arrival: with
+// two waiting sends of the same words, it confirms one, live or in the
+// history a reattached seat re-reads; and two queued messages run one
+// after the other confirm their own two sends and not a third.
+func TestK1ClaudesQueuedMessageConfirmsOneSend(t *testing.T) {
+	for _, c := range []k1Case{
+		{"one_queued_two_waiting",
+			[][2]string{{"r1", "continue"}, {"r2", "continue"}}, []string{k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", "")},
+			nil, claudeUser(time.Now(), "continue"), []string{"r1"}},
+		{"two_queued_run_one_by_one",
+			[][2]string{{"r1", "continue"}, {"r2", "continue"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", ""), claudeUser(time.Now(), "continue"), k1TurnEnd(), k1Queue("dequeue", "")},
+			[][2]string{{"r3", "continue"}}, claudeUser(time.Now(), "continue"), []string{"r1", "r2"}},
+		{"two_queued_run_joined",
+			[][2]string{{"r1", "continue"}, {"r2", "continue"}, {"r3", "check the logs"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "check the logs"), k1TurnEnd(), k1Queue("dequeue", "")},
+			nil, claudeUser(time.Now(), "continue\n\ncheck the logs"), []string{"r1", "r3"}},
+	} {
+		t.Run(c.name, c.run)
+	}
+	t.Run("history", func(t *testing.T) {
+		since := time.Now()
+		sent := since.Add(-time.Minute)
+		s := attachSeat(Spec{Restore: []Restored{{ID: "r1", Text: "continue", Mode: "queue", At: sent}, {ID: "r2", Text: "continue", Mode: "queue", At: sent}}}, claudeAgent{}, &fakeHost{alive: true}, "x", "", "", since)
+		at := sent.Add(time.Second)
+		history := []string{
+			fmt.Sprintf(`{"type":"queue-operation","operation":"enqueue","timestamp":"%s","content":"continue"}`, stamp(at)),
+			fmt.Sprintf(`{"type":"queue-operation","operation":"dequeue","timestamp":"%s"}`, stamp(at)),
+			claudeUser(at, "continue"),
+		}
+		if ok := claudeLines(s, history...); !slices.Equal(ok, []string{"r1"}) {
+			t.Fatalf("confirmed %v; want r1 only", ok)
+		}
+	})
+}
+
+// What stays an arrival: a prompt typed again after its queued copy was
+// taken into the running turn (no dequeue before it), a prompt run off the
+// queue whose enqueue line showed other words (so the prompt is the first
+// record of the send), and a prompt one line further than the dequeue.
+func TestK1ClaudePromptsThatStayArrivals(t *testing.T) {
+	long := "check the migration plan\nagainst the schema"
+	for _, c := range []k1Case{
+		{"typed_again_after_its_copy_ran_in_the_turn",
+			[][2]string{{"r1", "continue"}}, []string{k1Queue("enqueue", "continue"), k1Queue("remove", "continue"), k1TurnEnd()},
+			[][2]string{{"r2", "continue"}}, claudeUser(time.Now(), "continue"), []string{"r1", "r2"}},
+		{"queued_as_other_words",
+			[][2]string{{"r1", long}}, []string{k1Queue("enqueue", "[Pasted text #1 +1 lines]"), k1TurnEnd(), k1Queue("dequeue", "")},
+			nil, claudeUser(time.Now(), long), []string{"r1"}},
+		{"a_line_after_the_dequeue",
+			[][2]string{{"r1", "continue"}}, []string{k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", ""), `{"type":"user","isMeta":true,"timestamp":"` + stamp(time.Now()) + `","message":{"content":"continue"}}`},
+			[][2]string{{"r2", "continue"}}, claudeUser(time.Now(), "continue"), []string{"r1", "r2"}},
+	} {
+		t.Run(c.name, c.run)
+	}
+}
