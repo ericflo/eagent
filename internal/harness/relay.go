@@ -341,6 +341,10 @@ type relayLaunch struct {
 	// seats' lock, as finish reads them for a start it no longer waits for.
 	spooled, takenBack []string
 	seats              *relaySeats
+	// tookBack has the loop record what run took back, and waits for it
+	// (bounded, and not past the loop's end) before the launch goes on: a
+	// cut during the launch would leave nothing to say they never went.
+	tookBack func(ids []string)
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -758,6 +762,17 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 					job.spooled = append(job.spooled, s.ID)
 				}
 			}
+			job.tookBack = func(ids []string) {
+				done := make(chan struct{})
+				if !r.enqueue(func() { r.recordTakenBack(replaces, ids); close(done) }) {
+					return // the loop has ended: finish records them (untyped)
+				}
+				select {
+				case <-done:
+				case <-r.closed:
+				case <-time.After(oldSendSettle):
+				}
+			}
 		}
 	}
 	// Waited for at the session's end (finish), which must not exit while
@@ -848,12 +863,26 @@ func (job *relayLaunch) run() {
 	// The session to open, now that what the old seat saw is in: a move it
 	// reported counts (watchSeat).
 	innerID := job.innerID
+	taken := slices.Clone(job.takenBack)
 	job.seats.mu.Unlock()
 	if late {
 		job.err = errEnding
 		return
 	}
+	if len(taken) > 0 && job.tookBack != nil {
+		job.tookBack(taken)
+	}
 	job.seat, job.started, job.err = job.launch(job.spec, innerID, job.resume && innerID != "")
+}
+
+// recordTakenBack records the messages a restart of the relay took back
+// unread from the spool as not sent, each once. Loop goroutine.
+func (r *Runtime) recordTakenBack(name string, ids []string) {
+	for _, id := range ids {
+		if !r.hasOutcome(id) {
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, name), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
+		}
+	}
 }
 
 // oldSendSettle bounds how long a start waits for the send the agent it
@@ -882,11 +911,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if job.undrained {
 		r.ui.Log("relay %s: the agent it replaces had not said all it saw after %s; what it said after that is not recorded", firstNonEmpty(job.replaces, job.name), oldSendSettle)
 	}
-	for _, id := range job.takenBack {
-		if !r.hasOutcome(id) {
-			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, job.replaces), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
-		}
-	}
+	r.recordTakenBack(job.replaces, job.takenBack) // those run's own record did not reach
 	err = job.err
 	if err == nil {
 		rel := r.st.Relays[job.replaces]
@@ -1331,7 +1356,15 @@ func (r *Runtime) retiredNews(name string, seat relaySeat, rel *state.Relay, ev 
 // onRelayEvent records what a seat saw. Loop goroutine only.
 func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 	if r.ending {
-		return // (a seat taken out of use says its last: retiredNews)
+		// (A seat taken out of use says its last: retiredNews.) A seat
+		// still in use (a quit stops no agent) says how a send of its own
+		// went, and that is recorded: nothing else will say it (a message
+		// it took back from the spool is gone from there, and a resume
+		// would call it unconfirmed). Nothing more is decided on it.
+		if ev.Kind == relay.KindDelivered && !r.hasOutcome(ev.SendID) {
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+		}
+		return
 	}
 	switch ev.Kind {
 	case relay.KindInner:

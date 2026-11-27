@@ -65,6 +65,12 @@ func TestK3AHeldMessageStillInTheSpoolAtARestartIsNotSent(t *testing.T) {
 	})
 	seat.waitGone(t)
 	seat.end()
+	// Recorded before the launch goes on: a cut while the agent comes up
+	// would leave the message out of the spool with nothing to say so.
+	waitFor(t, "not sent on the record before the launch", func() bool {
+		got := deliveredFor(rt, id)
+		return len(got) == 1 && got[0].Outcome == event.DeliveryNotSent
+	})
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	if got := deliveredFor(rt, id); len(got) != 1 || got[0].Outcome != event.DeliveryNotSent {
