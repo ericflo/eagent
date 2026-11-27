@@ -176,9 +176,8 @@ func (r *Runtime) startPhone() {
 	cards := map[string]string{}
 	var closedCards []string
 	for _, ev := range r.st.Events {
-		if ev.Type == event.PhoneQuestion {
-			var d event.PhoneQuestionData
-			_ = ev.Decode(&d)
+		var d event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.CardID != "" {
 			cards[d.QuestionID] = d.CardID
 		}
 	}
@@ -1557,7 +1556,7 @@ func liveCards(st *state.State, qid string) []string {
 	}
 	for i := len(st.Events) - 1; i >= 0; i-- {
 		var d event.PhoneQuestionData
-		if ev := st.Events[i]; ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.ThreadID != "" && best[d.ThreadID].CardID == d.CardID && !seen[d.CardID] {
+		if ev := st.Events[i]; ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.CardID != "" && d.ThreadID != "" && best[d.ThreadID].CardID == d.CardID && !seen[d.CardID] {
 			seen[d.CardID] = true
 			out = append(out, d.CardID)
 		}
