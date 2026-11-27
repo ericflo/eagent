@@ -231,8 +231,8 @@ func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
 
 // B10: a file from the phone cannot be fetched, and the service refuses
 // the note that would tell the sender. The words are taken once, as
-// before; the session's log says the file was dropped and that the
-// sender could not be told.
+// before; the session's log says the note could not go out yet (it is
+// tried again until it does: TestK14…).
 func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
@@ -255,11 +255,10 @@ func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
 	gone := map[string]any{"id": "att-9", "kind": "image", "content_type": "image/png", "filename": "IMG_9.png", "size": 3, "url": "/api/v1/attachments/att-9"}
 	id := r10Says(fp, r10Msg("and this one", gone))[0]
 	waitFor(t, "the words to be taken", func() bool { return r14Taken(g, id) == 1 })
-	r14Drained(t, g)
-	logs := strings.Join(g.ui.logged(), "\n")
-	if !strings.Contains(logs, "IMG_9.png") || !strings.Contains(logs, "could not be told") {
-		t.Fatalf("the session's log does not say the sender was not told: %q", g.ui.logged())
-	}
+	waitFor(t, "the log to say the note could not go out yet", func() bool {
+		logs := strings.Join(g.ui.logged(), "\n")
+		return strings.Contains(logs, "IMG_9.png") && strings.Contains(logs, "could not tell the phone yet")
+	})
 }
 
 // B12, in the running mirror: a file from the phone whose first download
