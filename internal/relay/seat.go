@@ -178,7 +178,10 @@ type Seat struct {
 	ended, closeLater bool
 	// queueHolds: the agent's own queue holds a message it has not taken,
 	// as the transcript's parser last said (queueHolder; watcher writes).
+	// restLooks: looks in a row, since the agent last wrote to its
+	// transcript or a Send began, that found it at rest (sayQuiet).
 	queueHolds bool
+	restLooks  int
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -561,7 +564,9 @@ type Status struct {
 	// the seat waits to confirm no send, holds no command's delivered, and
 	// none of the agent's own commands is pending (until a move to another
 	// session is seen, or quietMoveLooks looks after the agent is idle),
-	// and no move it has seen is still to be said (refollow).
+	// and no move it has seen is still to be said (refollow). And the agent
+	// itself shows it is at rest (atRest) at quietRestLooks looks in a row
+	// since it last wrote to its transcript or a Send began.
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 }
@@ -592,6 +597,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	// tracked while it is typed. Quiet is said again once it holds.
 	s.mu.Lock()
 	s.sending++
+	s.restLooks = 0 // the agent is looked at again after it
 	s.quietSaid.Store(false)
 	s.mu.Unlock()
 	defer func() {
@@ -677,7 +683,12 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// The agent's own command in its own queue: it runs it
 				// rather than recording a message, so handed over is
 				// delivered, as typed is below. (A spool hands one over
-				// as text, which arrives as a held message does.)
+				// as text, which arrives as a held message does.) It holds
+				// quiet as a typed command does, from the idle after the
+				// turn, when the agent takes it.
+				s.mu.Lock()
+				s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
+				s.mu.Unlock()
 				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
@@ -1566,15 +1577,48 @@ type sessionMover interface {
 // move to another session shows (Status.Quiet).
 const quietMoveLooks = 5
 
-// quietLocked is Status.Quiet. The caller holds s.mu.
+// quietRestLooks is how many looks in a row, since the agent last wrote to
+// its transcript, must find it at rest (atRest) before the seat is quiet.
+// quietQueueLooks is how many end a hold from the agent's own queue as the
+// transcript shows it (queueHolder): an agent at rest that long has taken
+// what it queued, whatever the lines said. Tests shorten quietQueueLooks.
+const quietRestLooks = 2
+
+var quietQueueLooks = 30
+
+// settledLocked: nothing the seat keeps waits on the agent (Status.Quiet
+// but for the agent's own word). The caller holds s.mu.
+func (s *Seat) settledLocked() bool {
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && !s.refollow && s.sending == 0 && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+}
+
+// quietLocked is Status.Quiet: settled, and the agent seen at rest at
+// quietRestLooks looks in a row (quietQueueLooks while the transcript
+// shows its own queue holding a message). The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
-	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && !s.refollow && s.sending == 0 && !s.queueHolds && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+	return s.settledLocked() && s.restLooks >= quietRestLooks && (!s.queueHolds || s.restLooks >= quietQueueLooks)
+}
+
+// atRest says whether the agent itself shows it is at rest, from the most
+// direct source it has: pi's status file (idle, no dialog of its own);
+// otherwise its screen, at its own prompt with no busy line (Claude: its
+// footer and no spinner; Codex: its composer and no working line;
+// Antigravity: the relay status line saying idle).
+func (s *Seat) atRest() bool {
+	if rr, ok := s.agent.(readyReporter); ok {
+		if ready, known := rr.reportedReady(s); known {
+			return ready
+		}
+	}
+	screen, err := s.host.Capture(s.target, 0)
+	return err == nil && s.agent.ready(screen) && !s.busy(screen)
 }
 
 // queueHolder is a parser that follows the agent's own queue of messages
 // typed while it works (Claude's queue lines).
 type queueHolder interface {
-	holding() bool // it holds one the agent has not taken yet
+	holding() bool  // it holds one, read as news, the agent has not run yet
+	readAsHistory() // what it holds now was read as history
 }
 
 // sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
@@ -1582,7 +1626,8 @@ type queueHolder interface {
 // move a command started is seen once the seat is on another session and
 // has said so; one that does not show is given up quietMoveLooks after the
 // first look that finds the agent idle (a command queued while it works
-// runs after the turn).
+// runs after the turn). The agent is looked at (atRest) only while the
+// seat is settled and not yet quiet: one look at it a look, while waiting.
 func (s *Seat) sayQuiet() {
 	s.mu.Lock()
 	if s.moveLook > 0 {
@@ -1593,9 +1638,29 @@ func (s *Seat) sayQuiet() {
 			s.moveFrom, s.moveLook, s.moveIdle = "", 0, 0
 		}
 	}
+	if !s.settledLocked() {
+		s.restLooks = 0
+	}
+	look := s.settledLocked() && !s.quietLocked()
+	s.mu.Unlock()
+	if look {
+		rest := s.atRest()
+		s.mu.Lock()
+		if rest && s.settledLocked() {
+			s.restLooks++
+		} else {
+			s.restLooks = 0
+		}
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	q := s.quietLocked()
+	if !q {
+		s.quietSaid.Store(false) // said again once it holds again
+	}
 	// Marked said before it goes out, under the lock Send's start clears
 	// the mark under: a clear made while it goes out is never overwritten.
-	say := s.quietLocked() && s.quietSaid.CompareAndSwap(false, true)
+	say := q && s.quietSaid.CompareAndSwap(false, true)
 	s.mu.Unlock()
 	if say {
 		s.emitAside(Event{Kind: KindQuiet})
@@ -1696,7 +1761,9 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 	if err == nil && len(lines) > 0 {
 		s.mu.Lock()
 		s.lastLine = now
+		s.restLooks = 0 // the agent wrote: rest is looked for again after it
 		s.mu.Unlock()
+		qh, queues := p.(queueHolder)
 		var newest time.Time
 		// The end of the last whole line read: the tailer has also read
 		// the start of a line still being written (rest), which is not read.
@@ -1710,16 +1777,25 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 			}
 			s.readTo.Store(end)
 			got := p.line(line)
-			if qh, ok := p.(queueHolder); ok && qh.holding() != s.queueHolds {
-				s.mu.Lock()
-				s.queueHolds = qh.holding()
-				s.mu.Unlock()
-			}
+			old := queues && len(got) > 0
 			for _, o := range got {
 				o.pos = starts[i]
+				if old {
+					old, _ = s.isHistory(o)
+				}
 				s.fold(o)
 				if o.at.After(newest) {
 					newest = o.at
+				}
+			}
+			if queues {
+				if old {
+					qh.readAsHistory() // a hold never comes from history
+				}
+				if h := qh.holding(); h != s.queueHolds {
+					s.mu.Lock()
+					s.queueHolds = h
+					s.mu.Unlock()
 				}
 			}
 		}
@@ -1741,21 +1817,25 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 	return err
 }
 
-// fold applies one observation.
-func (s *Seat) fold(o obs) {
+// isHistory says whether o is already on the record (fold), and whether
+// that is by the record's read mark rather than by time.
+func (s *Seat) isHistory(o obs) (history, byMark bool) {
 	s.mu.Lock()
-	since := s.since
-	history := !since.IsZero() && !o.at.IsZero() && !o.at.After(since)
-	byMark := false
+	defer s.mu.Unlock()
 	if s.readFrom > 0 && s.transcript == s.readIn && s.readTo.Load() != 0 {
 		// The record says how far this transcript was read: what starts
 		// before that is history, whenever it was written. Only for what a
 		// line of it gave (readTail is folding one: readTo is its end); what
 		// the agent's status file says (Antigravity's turn end and quota)
 		// is judged by time, as on main.
-		history, byMark = o.pos < s.readFrom, true
+		return o.pos < s.readFrom, true
 	}
-	s.mu.Unlock()
+	return !s.since.IsZero() && !o.at.IsZero() && !o.at.After(s.since), false
+}
+
+// fold applies one observation.
+func (s *Seat) fold(o obs) {
+	history, byMark := s.isHistory(o)
 	if history && o.kind != "meta" {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the

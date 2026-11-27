@@ -32,6 +32,7 @@ func TestSR5SeatIsQuietWhileItTypesOneOfTheAgentsOwnCommands(t *testing.T) {
 	}
 	s := newSeat(Spec{StatusFile: filepath.Join(dir, "pi-status.json"), Dir: dir}, piAgent{name: "pi", label: "Pi", binary: "pi"}, h, "sr5-cmd-"+filepath.Base(dir), "first")
 	s.state = "idle"
+	s.restLooks = quietRestLooks // no watcher: two looks that found pi at rest
 	if !s.Snapshot().Quiet {
 		t.Fatal("an idle seat with nothing sent is not quiet")
 	}
@@ -80,7 +81,7 @@ func TestK6QuietIsSaidAfterASendThatFailed(t *testing.T) {
 	saved := typeSettle
 	typeSettle = 0
 	t.Cleanup(func() { typeSettle = saved })
-	h := &k1Host{fakeHost: &fakeHost{alive: true}, paste: func() error { return errors.New("no such pane") }}
+	h := &k1Host{fakeHost: &fakeHost{alive: true, screen: claudePromptScreen}, paste: func() error { return errors.New("no such pane") }}
 	s := newSeat(Spec{}, claudeAgent{}, h, "k6-fail", "id")
 	s.state, s.poll = "idle", piLook
 	go s.watch()

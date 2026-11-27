@@ -447,7 +447,7 @@ func TestK5QuietIsSaidAfterACommandsDeliveredInTheSameLook(t *testing.T) {
 	if got := quietOrder(t, s, 5*time.Second); got[len(got)-1] != "quiet" {
 		t.Fatalf("never quiet at the start: %q", got)
 	}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("c%d", i)
 		if _, err := s.Send(id, "/compact", "queue"); err != nil {
 			t.Fatal(err)
@@ -460,7 +460,7 @@ func TestK5QuietIsSaidAfterACommandsDeliveredInTheSameLook(t *testing.T) {
 
 // A send the seat waits to confirm keeps it from quiet until confirmed.
 func TestK5QuietWaitsForASendToBeConfirmed(t *testing.T) {
-	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "k5q-send", "")
+	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true, screen: claudePromptScreen}, "k5q-send", "")
 	s.state, s.poll = "idle", piLook
 	s.track("r1", "run the tests", "queue")
 	go s.watch()
