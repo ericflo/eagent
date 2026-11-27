@@ -193,6 +193,7 @@ type Runtime struct {
 	autopilotTimers map[string]*time.Timer // relay name -> autopilot deadline; loop-owned
 	autopilotChecks map[string]*time.Timer // relay name -> idle check while on autopilot; loop-owned
 	relayNotifyDone map[string]bool        // relay name -> buzz when its current turn ends (/notify-done)
+	commands        int                    // commands whose work is under way in a session with no terminal (relayCommand); loop-owned
 	// startFailed: the last attempt to start an agent failed (startRelay).
 	startFailed bool
 	// inboxTaken: the ids of the inbox submissions this run handled (pollInbox). Loop goroutine.
@@ -1191,6 +1192,9 @@ func (r *Runtime) maybeEnd() {
 		// They closed the question to say something else; wait for it.
 		return
 	}
+	if r.commands > 0 {
+		return // a command's work is done and told first (relayCommand)
+	}
 	switch {
 	case t.finalAsked:
 	case down:
@@ -1254,9 +1258,7 @@ drain:
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			// r.wg holds the turn in flight and, in a session with no
-			// terminal, a command's work (relayCommand).
-			r.ui.Log("a model call or a command did not finish in time")
+			r.ui.Log("a model call did not stop in time")
 			break drain
 		}
 	}
@@ -1278,6 +1280,20 @@ drain:
 	// user, attached) picks up where they are. Only stop watching them.
 	r.closeRelays()
 	r.stopTimers()
+	// A send being typed ends now that its terminal is closed, in the
+	// seat's own bounded steps, as the close does: one that was never
+	// typed is back in its queue (drainSends), read below.
+	var typing []chan struct{}
+	r.relays.mu.Lock()
+	for _, q := range r.relays.queues {
+		if q.running {
+			typing = append(typing, q.idle)
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, idle := range typing {
+		<-idle
+	}
 	// Direct writes: the loop is no longer running.
 	// A send held for a start the session's end gave up (abandonLaunch),
 	// or still in a seat's queue (nothing is taken from one now), was never
@@ -1315,6 +1331,9 @@ drain:
 		}
 		r.st.Apply(out)
 		r.noteWake(out) // the look it is owed, as a resume reads it from the record
+		if r.phone != nil {
+			r.phone.observe(r, out) // its receipt turns to failed, before the closing note
+		}
 		r.ui.Trace(out)
 	}
 	if r.turns.silent.Count > 0 {

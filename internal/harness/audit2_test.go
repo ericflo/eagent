@@ -928,7 +928,7 @@ func TestAudit2ShutdownGivesTheClosingWordItsGrace(t *testing.T) {
 		if d := time.Since(at); d > 2500*time.Millisecond {
 			t.Fatalf("shutdown took %s with a %s grace", d, finalReportGrace)
 		}
-		if !audit2Logged(s.ui, "a model call or a command did not finish in time") {
+		if !audit2Logged(s.ui, "a model call did not stop in time") {
 			t.Fatalf("logs %q", s.ui.logged())
 		}
 	})

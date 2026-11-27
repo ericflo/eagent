@@ -46,8 +46,9 @@ func TestResumingAFinishedSessionWithRestartKeepsTheRestartedAgent(t *testing.T)
 	}
 	t.Cleanup(func() { launchRelay = old })
 
-	// The closing look the resumed session asks for is answered once the
-	// start is under way, as a model slower than the command's first steps.
+	// A look the resumed session asks for is answered once the start is
+	// under way, as a model slower than the command's first steps. None
+	// is asked for while the command's work is under way (relayCommand).
 	var calls atomic.Int32
 	looked, answer := make(chan struct{}, 1), make(chan struct{})
 	model := newScripted(func(string, []map[string]any) reply {
@@ -74,12 +75,10 @@ func TestResumingAFinishedSessionWithRestartKeepsTheRestartedAgent(t *testing.T)
 		case <-time.After(10 * time.Second):
 		}
 	})
-	for _, ch := range []chan struct{}{entered, looked} {
-		select {
-		case <-ch:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the start or the closing look never began")
-		}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the start never began")
 	}
 	close(answer)
 	// Whatever the loop does once the look is answered, it has done.

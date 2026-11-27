@@ -34,25 +34,17 @@ func rv10Logged(ui *fakeUI, part string) bool {
 }
 
 // A finished batch session resumed with /upgrade: the upgrade takes
-// minutes. The session ends under it (as at 59a2069). Time how long the
-// end now waits, and what it says about it.
+// minutes. The session does not end under it (at 59a2069 it did, and
+// nobody was told): it waits until the upgrade is done and told.
 func TestRV10UpgradeOnResumedFinishedSession(t *testing.T) {
 	path, project := rv10Finished(t)
+	useRelayFactory(t, "Back on it.")
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	old := upgradeAgent
 	entered := make(chan struct{}, 1)
 	upgradeAgent = func(string) (string, error) { entered <- struct{}{}; <-gate; return "upgraded", nil }
-	t.Cleanup(func() {
-		// The upgrade's goroutine is not waited for by the session's end:
-		// it read the stub before entering it, so it is put back after.
-		release()
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-		}
-		upgradeAgent = old
-	})
+	t.Cleanup(func() { release(); upgradeAgent = old })
 
 	model := newScripted(func(string, []map[string]any) reply { return hold() })
 	t.Cleanup(model.srv.Close)
@@ -62,36 +54,31 @@ func TestRV10UpgradeOnResumedFinishedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := contextWithCancel()
-	defer cancel()
 	done := make(chan int, 1)
-	start := time.Now()
 	go func() { done <- rt2.Run(ctx) }()
-	var endingAt time.Time
-	waitFor(t, "the session to begin ending", func() bool {
-		e := false
-		rt2.sync(func() { e = rt2.ending })
+	t.Cleanup(func() {
+		release()
+		cancel()
 		select {
-		case <-rt2.closed:
-			e = true
-		default:
+		case <-done:
+		case <-time.After(10 * time.Second):
 		}
-		if e && endingAt.IsZero() {
-			endingAt = time.Now()
-		}
-		return e
 	})
 	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the session did not end")
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upgrade never began")
 	}
-	end := time.Now()
-	t.Logf("Run took %v; from ending to Run's return %v; said %q; logs %q", end.Sub(start), end.Sub(endingAt), ui2.said(), ui2.logged())
-	if rv10Logged(ui2, "did not finish in time") {
-		t.Errorf("finish logged %q, waiting for an upgrade it does not wait for; finish waited %v", "did not finish in time", end.Sub(endingAt))
+	var ending, asked bool
+	rt2.sync(func() { ending, asked = rt2.ending, rt2.turns.finalAsked })
+	if ending || asked || len(done) > 0 {
+		t.Fatalf("while the upgrade runs: ending %v, closing look asked %v, ended %v", ending, asked, len(done) > 0)
 	}
-	// Nothing is told about the upgrade in a session that ends under it,
-	// as at 59a2069 (listed as a known limit).
+	release()
+	waitFor(t, "the upgrade's outcome", func() bool { return saidWith(ui2, "Upgraded") || len(done) > 0 })
+	if !saidWith(ui2, "Upgraded") || len(done) > 0 {
+		t.Fatalf("said %q, ended %v", ui2.said(), len(done) > 0)
+	}
 }
 
 // A finished batch session resumed with /restart whose start fails: the
@@ -150,33 +137,19 @@ func TestRV10FailedRestartOnResumedSessionIsTold(t *testing.T) {
 	}
 }
 
-// The session is interrupted while its closing look is being written and
-// a command's work is under way. The look ends at once; how long does the
-// end wait now?
-func TestRV10InterruptDuringClosingLookWithSlowCommand(t *testing.T) {
+// The session is interrupted while a command's work is under way (an
+// upgrade, which takes minutes; no closing look is asked for meanwhile).
+// The end does not wait for it.
+func TestRV10InterruptDuringSlowCommandEndsAtOnce(t *testing.T) {
 	path, project := rv10Finished(t)
 	gate := make(chan struct{})
 	release := sync.OnceFunc(func() { close(gate) })
 	old := upgradeAgent
 	entered := make(chan struct{}, 1)
 	upgradeAgent = func(string) (string, error) { entered <- struct{}{}; <-gate; return "upgraded", nil }
-	t.Cleanup(func() {
-		// The upgrade's goroutine is not waited for by the session's end:
-		// it read the stub before entering it, so it is put back after.
-		release()
-		select {
-		case <-entered:
-		case <-time.After(time.Second):
-		}
-		upgradeAgent = old
-	})
+	t.Cleanup(func() { release(); upgradeAgent = old })
 
-	looked, answer := make(chan struct{}, 1), make(chan struct{})
-	first := sync.OnceFunc(func() { looked <- struct{}{} })
-	model := newScripted(func(string, []map[string]any) reply {
-		first()
-		return reply{block: answer, calls: hold().calls}
-	})
+	model := newScripted(func(string, []map[string]any) reply { return hold() })
 	t.Cleanup(model.srv.Close)
 	ui2 := &fakeUI{}
 	rt2, err := Resume(testConfig(model.srv.URL), Options{Project: project, Prompt: "/upgrade"}, ui2, path)
@@ -188,21 +161,20 @@ func TestRV10InterruptDuringClosingLookWithSlowCommand(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- rt2.Run(ctx) }()
 	select {
-	case <-looked:
+	case <-entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no closing look")
+		t.Fatal("the upgrade never began")
 	}
 	at := time.Now()
 	rt2.post(func() { rt2.beginShutdown("interrupted", 130) })
-	close(answer)
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the session did not end")
 	}
 	took := time.Since(at)
-	t.Logf("ended %v after the interrupt (finalReportGrace %v); logs %q", took, finalReportGrace, ui2.logged())
-	if took > 2*time.Second {
-		t.Errorf("the closing look was answered at once, but the end waited %v (the full finalReportGrace, 75 s in production) for /upgrade's goroutine", took)
+	t.Logf("ended %v after the interrupt; logs %q", took, ui2.logged())
+	if took > 2*time.Second || rv10Logged(ui2, "did not stop in time") {
+		t.Errorf("the end waited %v for /upgrade's goroutine; logs %q", took, ui2.logged())
 	}
 }
