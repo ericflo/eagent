@@ -1045,6 +1045,11 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		}
 	case relay.KindDelivered:
 		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
+		if rel := r.st.Relays[name]; !ev.OK && rel != nil && rel.State == "idle" {
+			// A send a change waited for ended without arriving, and no
+			// turn started with it: the change applies now.
+			r.applyWaitingRepick(name)
+		}
 	case relay.KindProgress:
 		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
 	case relay.KindTurn:

@@ -63,10 +63,10 @@ func r14RelayUntil(cond func() bool) bool {
 // Finding 6. A model change waits for the agent's turn to end. The turn
 // ends and the next one starts in one batch of news (Claude's Stop hook
 // handing over the message held for it): the turn, idle, the held
-// message's arrival, working. The turn's end starts the agent again with
-// the new model; the arrival in the same batch, read from the agent being
-// replaced before the new one is up, is recorded, and the restart does not
-// then call the message unconfirmed.
+// message's arrival, working. The arrival is recorded, and the restart
+// does not call the message unconfirmed. (Review 15, finding 8: the turn's
+// end does not start the agent again, which cut off the turn the message
+// began; the change applies when that turn ends.)
 func TestR14AnArrivalInTheBatchThatEndsATurnSurvivesAWaitingModelChange(t *testing.T) {
 	old := r14HeldSeat{&lingerSeat{newFakeSeat("one")}}
 	next := newFakeSeat("two")
@@ -92,14 +92,18 @@ func TestR14AnArrivalInTheBatchThatEndsATurnSurvivesAWaitingModelChange(t *testi
 		relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true},
 		relay.Event{Kind: relay.KindState, State: "working"},
 	)
-	g.waitEntered(t) // the turn's end started the agent again
 	outcome := func() (o state.SendOutcome) {
 		rt.sync(func() { o = rt.st.SendOutcome(id) })
 		return o
 	}
-	// The arrival is read while the new agent launches; without it the
-	// restart below settles the send as it finds it.
-	r14RelayUntil(func() bool { return outcome() == state.SendArrived })
+	waitFor(t, "the arrival recorded", func() bool { return outcome() == state.SendArrived })
+	rt.sync(func() {
+		if rt.relays.launch("codex") != nil {
+			t.Error("the change started the agent again in the turn the message began")
+		}
+	})
+	old.emit(relay.Event{Kind: relay.KindTurn, Text: "ran the tests", DurationMS: 1000})
+	g.waitEntered(t) // that turn's end starts the agent again
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	if o := outcome(); o != state.SendArrived {

@@ -243,6 +243,76 @@ func TestK2ALiveModelChangeDuringASwitchIsRefused(t *testing.T) {
 	waitRelayStarts(t, rt)
 }
 
+// Review 15, finding 8. A model change waits for the agent's turn to end;
+// a message is held for the end of that turn. The turn ends and the hook
+// hands the message over in the same batch: turn, idle, its arrival,
+// working. The change does not start the agent again at that turn's end,
+// which would cut off the turn the message began; it applies when that
+// turn ends.
+func TestK2AWaitingChangeDoesNotCutOffTheTurnAHeldMessageStarts(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	// The marker comes after the batch: once the watcher takes it, every
+	// event before it is posted, and the sync after runs behind them.
+	marker := relay.Event{Kind: relay.KindActivity, Text: "…"}
+	seat.say(relay.Event{Kind: relay.KindState, State: "working"}, marker)
+	rt.sync(func() {})
+	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
+		t.Fatalf("repick in a turn: %q", msg)
+	}
+	_, id := k2Forward(t, rt, seat, "then run the linter", "after_turn")
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Built it."}, relay.Event{Kind: relay.KindState, State: "idle"},
+		relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}, relay.Event{Kind: relay.KindState, State: "working"}, marker)
+	rt.sync(func() {})
+	select {
+	case <-seat.gone:
+		t.Fatal("the change stopped the agent in the turn the held message began")
+	default:
+	}
+	if k1Restarting(rt) {
+		t.Fatal("the change started the agent again in the turn the held message began")
+	}
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran the linter."})
+	seat.waitGone(t)
+	seat.end()
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	k1Relay(t, rt, "the new model after the second turn", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" && rel.Turns == 2 })
+	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK {
+		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
+	}
+}
+
+// Review 15, finding 8, its bound: the held message is not handed over at
+// the turn's end (taken back unread, as the seat reports a held message
+// still in the spool when the turn is over). No turn starts with it: the
+// change waits no longer and applies then.
+func TestK2AWaitingChangeAppliesWhenTheHeldMessageDidNotGo(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	marker := relay.Event{Kind: relay.KindActivity, Text: "…"}
+	seat.say(relay.Event{Kind: relay.KindState, State: "working"}, marker)
+	rt.sync(func() {})
+	k1Repick(t, rt)
+	_, id := k2Forward(t, rt, seat, "then run the linter", "after_turn")
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Built it."}, relay.Event{Kind: relay.KindState, State: "idle"}, marker)
+	rt.sync(func() {})
+	if k1Restarting(rt) {
+		t.Fatal("the change started the agent again with a message on its way to it")
+	}
+	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: false, Outcome: relay.OutcomeNotSent, Detail: "taken back unread"})
+	seat.waitGone(t)
+	seat.end()
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
+	if got := deliveredFor(rt, id); len(got) != 1 || got[0].Outcome != event.DeliveryNotSent {
+		t.Fatalf("%s: %+v; want its one outcome, not_sent", id, got)
+	}
+}
+
 // A reader's suspicion on briefedBy (A18): the model stops Codex with a
 // reason of its own that reads like a switch's ("handed over to claude"),
 // starts Claude and sends it something. Claude was handed nothing by a

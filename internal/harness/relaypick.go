@@ -235,6 +235,13 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	if r.dialogHolds(rel) {
 		return // applied when its seat says it is idle
 	}
+	if rel.Awaited() > 0 {
+		// Something sent to it is still on its way (a message held for
+		// this turn's end, one in its own queue): it reads it next and
+		// starts a turn. Applied when that turn ends, or when the send
+		// ends without arriving (onRelayEvent).
+		return
+	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
 		r.ui.Log("relay %s: %v", name, err)
