@@ -88,16 +88,20 @@ type relaySeats struct {
 // retiredSeat is a seat taken out of use (relaySeats.retiring).
 type retiredSeat struct {
 	name string
+	// rel is the record the seat was the agent of, as it stood when taken
+	// out of use: its news and its sends' ends apply to that record only.
+	rel *state.Relay
 	// settle settles what the agent was typed and not shown to read; nil
-	// when a start under way does (finishLaunch, after its own wait).
+	// until a start under way says how (finishLaunch: settleOld).
 	settle  func()
 	drained bool // its watcher has ended: all it said is recorded
 	settled bool
 }
 
-// retire puts seat, the relay name's, among those taken out of use, with
-// how its sends are settled once it has drained. Loop goroutine.
-func (r *Runtime) retire(name string, seat relaySeat, settle func()) {
+// retire puts seat, the agent of record rel (named name), among those
+// taken out of use, with how its sends are settled once it has drained.
+// Loop goroutine.
+func (r *Runtime) retire(name string, seat relaySeat, rel *state.Relay, settle func()) {
 	r.relays.mu.Lock()
 	defer r.relays.mu.Unlock()
 	if e := r.relays.retiring[seat]; e != nil {
@@ -109,15 +113,50 @@ func (r *Runtime) retire(name string, seat relaySeat, settle func()) {
 	if r.relays.retiring == nil {
 		r.relays.retiring = map[relaySeat]*retiredSeat{}
 	}
-	r.relays.retiring[seat] = &retiredSeat{name: name, settle: settle}
+	r.relays.retiring[seat] = &retiredSeat{name: name, rel: rel, settle: settle}
+}
+
+// settleOld settles, for a start that knows how it went, the sends of the
+// record it replaces (rel): once that record's agent has said all it saw.
+// Its seat is the one this start took out of use (job.old), or, when the
+// start replaces a stopped relay, the one its stop did. While that seat
+// still drains and no bound has passed (the session's end cut this start's
+// wait short), settle is left with it, if it has none of its own, and runs
+// when it has drained or at the next bound (settleRetired). In every other
+// case the seat's own settle runs now, then this one: a second settle of
+// a record finds nothing left. Loop goroutine (or finish's).
+func (r *Runtime) settleOld(job *relayLaunch, rel *state.Relay, settle func()) {
+	r.relays.mu.Lock()
+	seat, e := job.old, r.relays.retiring[job.old]
+	if job.old == nil {
+		for other, oe := range r.relays.retiring {
+			if oe.rel == rel && !oe.settled {
+				seat, e = other, oe
+				break
+			}
+		}
+	}
+	wait := e != nil && !e.settled && !e.drained && !job.undrained
+	if wait && e.settle == nil {
+		e.settle = settle
+	}
+	r.relays.mu.Unlock()
+	if wait {
+		return
+	}
+	if e != nil {
+		r.settleRetired(seat)
+	}
+	settle()
 }
 
 // settleRetired runs a retired seat's settle, once; from then on what the
 // seat says is logged, not recorded. Called once it has drained
-// (watchSeat), by a start under way when it ends (finishLaunch), or past a
-// bound (relay_control stop, finish). A start under the name waits for it
-// (relay_control stop's stopping entry, closed after the drain or the
-// bound). Loop goroutine, or finish's once the loop has stopped.
+// (watchSeat), by a start that replaced it once it has drained or past
+// run's bound (settleOld), or past a bound (relay_control stop's,
+// finish's). A start under the name waits for it (relay_control stop's
+// stopping entry, closed after the drain or the bound). Loop goroutine, or
+// finish's once the loop has stopped.
 func (r *Runtime) settleRetired(seat relaySeat) {
 	r.relays.mu.Lock()
 	e := r.relays.retiring[seat]
@@ -471,8 +510,10 @@ type sendQueue struct {
 	idle chan struct{}
 	// typing is the send being typed, until the loop has its outcome
 	// (settleSend). gone is how settleExited found the agent's process
-	// gone meanwhile (it leaves that send to its typing's end).
+	// gone meanwhile (it leaves that send to its typing's end), for the
+	// record it settled (goneRel), which that end applies to.
 	typing, gone string
+	goneRel      *state.Relay
 }
 
 // enqueueSend queues a send for a seat and makes sure something types it.
@@ -522,7 +563,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		h := q.items[0]
 		q.items = q.items[1:]
-		q.typing, q.gone = h.id, ""
+		q.typing, q.gone, q.goneRel = h.id, "", nil
 		current := r.relays.seats[q.name] == seat
 		r.relays.mu.Unlock()
 		var res sendResult
@@ -596,8 +637,8 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
 	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
-		gone := q.gone
-		q.typing, q.gone = "", ""
+		gone, goneRel := q.gone, q.goneRel
+		q.typing, q.gone, q.goneRel = "", "", nil
 		r.relays.mu.Unlock()
 		switch {
 		case h.barrier:
@@ -606,8 +647,10 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 			// meanwhile passed it on to the new agent.
 			r.typingFailed(sendHolder(r.st, h.id, q.name), h.id, res.err)
 		case gone != "" && !r.hasOutcome(h.id):
-			if !r.takeBack(r.st.Relays[q.name], h.id, h.mode, gone) {
-				r.appendOutcome(goneUnconfirmed(q.name, h.id, gone))
+			// For the record that was settled, not whatever holds the name
+			// now (a start under it since).
+			if !r.takeBack(goneRel, h.id, h.mode, gone) {
+				r.appendOutcome(goneUnconfirmed(goneRel.Name, h.id, gone))
 			}
 		}
 	})
@@ -755,7 +798,7 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	if job.old != nil {
 		// Taken out of use: what it says of its sends and its session is
 		// still this relay's until this start settles them (finishLaunch).
-		r.retire(replaces, job.old, nil)
+		r.retire(replaces, job.old, r.st.Relays[replaces], nil)
 	}
 }
 
@@ -836,11 +879,6 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	held, job.held = job.held, nil
 	stopped := job.stopped
 	r.relays.mu.Unlock()
-	if job.old != nil {
-		// Its sends are settled below: what the old seat says from now on
-		// (past run's bound) is logged, not recorded.
-		r.settleRetired(job.old)
-	}
 	if job.undrained {
 		r.ui.Log("relay %s: the agent it replaces had not said all it saw after %s; what it said after that is not recorded", firstNonEmpty(job.replaces, job.name), oldSendSettle)
 	}
@@ -907,18 +945,18 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// Its agent was stopped for a switch that did not happen: no
 			// brief carries what it was typed, as at a stop.
 			r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld + ", which could not start: " + err.Error()}))
-			r.settleExited(rel, waiting...)
+			r.settleOld(job, rel, func() { r.settleExited(rel, waiting...) })
 		case job.endOld == "" && rel != nil && rel.Active() && rel.State != "exited":
 			// Its agent was stopped and no other runs in its place: it is
 			// on the record as exited, so eagent is told and can start it
 			// again or stop it.
 			r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: job.replaces, State: "exited", Detail: clipRunes("it was stopped to start again and could not start: "+err.Error(), 2000)}))
-			r.settleExited(rel, waiting...)
+			r.settleOld(job, rel, func() { r.settleExited(rel, waiting...) })
 		case rel != nil && rel.Ended && job.wasActive:
 			// The relay this start replaced was stopped while it ran: the
-			// stop left what its agent was typed to be settled here, once
-			// no news of that agent is taken (watchSeat).
-			r.settleExited(rel, waiting...)
+			// stop left what its agent was typed to its seat taken out of
+			// use, settled once no news of that agent is taken.
+			r.settleOld(job, rel, func() { r.settleExited(rel, waiting...) })
 		}
 		for _, h := range held {
 			if h.done != nil {
@@ -964,14 +1002,13 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if rel := r.st.Relays[job.replaces]; job.replaces != "" && job.endOld == "" && rel != nil {
 		// A restart (of a running relay or of a stopped one): what was
 		// typed into the process that was stopped and not yet confirmed
-		// has nobody to confirm it, and the new start begins with nothing
-		// waited on. What is held for this start is typed below, by the
-		// new seat.
+		// has nobody to confirm it once its seat has said all it saw.
+		// What is held for this start is typed below, by the new seat.
 		var waiting []string
 		for _, h := range held {
 			waiting = append(waiting, h.id)
 		}
-		r.settleExited(rel, waiting...)
+		r.settleOld(job, rel, func() { r.settleExited(rel, waiting...) })
 	}
 	// A session with an agent started is not ending: its closing word is
 	// asked again once this agent's work is done.
@@ -1003,13 +1040,15 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		for _, h := range held {
 			skip[h.id] = true
 		}
-		var except []string
-		for _, s := range unresolvedSends(r.st, rel) {
-			if d, ok := sendRecord(r.st, s.ID); skip[s.ID] || !ok || d.From != "eagent" {
-				except = append(except, s.ID)
+		r.settleOld(job, rel, func() {
+			var except []string
+			for _, s := range unresolvedSends(r.st, rel) {
+				if d, ok := sendRecord(r.st, s.ID); skip[s.ID] || !ok || d.From != "eagent" {
+					except = append(except, s.ID)
+				}
 			}
-		}
-		r.settleExited(rel, except...)
+			r.settleExited(rel, except...)
+		})
 	}
 	for _, h := range held {
 		if h.brief && job.brief != "" {
@@ -1226,13 +1265,17 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				r.relays.mu.Lock()
 				e := r.relays.retiring[seat]
 				settled := e != nil && e.settled
+				var rel *state.Relay
+				if e != nil {
+					rel = e.rel
+				}
 				r.relays.mu.Unlock()
 				switch {
 				case e == nil:
 				case settled:
 					r.ui.Log("relay %s: the stopped agent said %s %s after its sends were settled; not recorded", name, ev.Kind, firstNonEmpty(ev.SendID, ev.InnerID))
 				default:
-					r.retiredNews(name, seat, ev)
+					r.retiredNews(name, seat, rel, ev)
 				}
 			})
 		}
@@ -1263,11 +1306,19 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 // and session (watchSeat), also while the session ends. A move it says is
 // the session a later start of the relay opens; a restart under way opens
 // it now (run takes it after the drain). Loop goroutine, or finish's.
-func (r *Runtime) retiredNews(name string, seat relaySeat, ev relay.Event) {
+func (r *Runtime) retiredNews(name string, seat relaySeat, rel *state.Relay, ev relay.Event) {
 	switch ev.Kind {
 	case relay.KindDelivered:
+		// Its word on its own send: one outcome, by the send's id.
 		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
 	case relay.KindInner:
+		if r.st.Relays[name] != rel {
+			// A start under the name has been recorded since: the move is
+			// the stopped agent's, not the new one's (the record of a name
+			// is its newest).
+			r.ui.Log("relay %s: the stopped agent moved to session %s after a new agent took the name; not recorded", name, ev.InnerID)
+			return
+		}
 		if job := r.relays.launch(name); job != nil && job.old == seat && job.replaces == job.name {
 			r.relays.mu.Lock()
 			job.innerID = ev.InnerID
@@ -1361,6 +1412,20 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 // resume, before the loop starts.
 func (r *Runtime) reattachRelays() []string {
 	var lost []string
+	var ended []string
+	for name, rel := range r.st.Relays {
+		if rel.Ended && len(rel.Undelivered) > 0 {
+			ended = append(ended, name)
+		}
+	}
+	slices.Sort(ended)
+	for _, name := range ended {
+		// Stopped, and eagent ended before the stop's settle (its wait for
+		// the stopped agent's last word): nothing will say how those sends
+		// went now, as for an agent that is gone. Settled once, here, so a
+		// fresh start under the name inherits none of them.
+		r.settleExited(r.st.Relays[name])
+	}
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "exited" {
 			// Exited before eagent stopped: what it still waited on was
@@ -1418,15 +1483,18 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		how = "was restarted"
 	}
 	r.relays.mu.Lock()
-	for _, q := range r.relays.queues {
-		if q.name != rel.Name {
+	// The queues of rel's agents: once a start under the name has been
+	// recorded, the current seat is the new agent's, not rel's.
+	current := r.st.Relays[rel.Name] == rel
+	for seat, q := range r.relays.queues {
+		if q.name != rel.Name || !current && r.relays.seats[q.name] == seat {
 			continue
 		}
 		for _, h := range q.items {
 			queued[h.id] = true
 		}
 		if q.typing != "" {
-			queued[q.typing], q.gone = true, how
+			queued[q.typing], q.gone, q.goneRel = true, how, rel
 		}
 	}
 	r.relays.mu.Unlock()
@@ -1636,7 +1704,7 @@ func (r *Runtime) stopSession(reason string) {
 				stopped := rel // the record as it stood: this settle's, only
 				after = func() { r.settleExited(stopped) }
 			}
-			r.retire(rel.Name, seat, after)
+			r.retire(rel.Name, seat, rel, after)
 		}
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: reason}))
 		if settle && seat == nil {
@@ -2287,7 +2355,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 							r.settleExited(cur, held...)
 						}
 					}
-					r.retire(rel.Name, current, after)
+					r.retire(rel.Name, current, cur, after)
 				}
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
