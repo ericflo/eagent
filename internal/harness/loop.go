@@ -442,11 +442,6 @@ func (r *Runtime) maybeTurn() {
 	if t.busy || r.ending {
 		return
 	}
-	if r.closingRefused && !r.stillClosing() {
-		// The session stopped ending: the refusal was final for that
-		// closing, not for one that comes later (refusedWhileClosing).
-		r.closingRefused = false
-	}
 	if r.refusedWhileClosing() {
 		// Final for an ending session: only the last title and summary,
 		// if the end waits on it, is still asked for (one attempt).
@@ -1550,7 +1545,7 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	// still out when the model changed counted the old one's (promptOf). A
 	// resumed session reads it the same from the record (turnState.init).
 	r.called(r.promptOf(resp))
-	t.overflowed, r.closingRefused = false, false
+	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
 	}
@@ -1662,7 +1657,8 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endP
 		// rate limit, a timeout: Retryable) is no refusal: it is tried
 		// again after its wait, and a session whose calls all fail ends
 		// as one whose model could not be reached (maybeEnd).
-		r.closingRefused = true
+		r.noteClosing()
+		r.refusedIn = r.closings
 		if ae.ContextOverflow() {
 			// Should the session stop ending, the next look restarts
 			// the conversation first (needsDossier), from the size the
@@ -1675,11 +1671,6 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endP
 		r.ui.Log("eagent: the model refused the call (%s); the session is ending, and ends without this look", shortErr(err))
 		return r.sessionPlan(w, true)
 	}
-	// The last call was not refused while the session was ending: a
-	// refusal kept from a closing that stopped since (with no tick to see
-	// it stop, the stop and the return to ending both inside this turn)
-	// is not final for the one to come (refusedWhileClosing).
-	r.closingRefused = false
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
 		// The prompt no longer fits: restart the conversation from a
 		// dossier before anything else. If it does not fit even then, the
@@ -1750,15 +1741,29 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endP
 	return p
 }
 
-// refusedWhileClosing reports that the last call was refused (a 4xx that
-// is not transient: too long, or any other refusal) while the session is
-// ending (stillClosing; turnFailed): that is final for it. No restart is
-// made (noRestartNow), the look is not made again (maybeTurn), no notice
-// is given, and the session ends (maybeEnd) in its closing path's own
-// words, as done: its closing word was asked for, and what was refused
-// came after it. Loop goroutine.
+// refusedWhileClosing reports that a call was refused (a 4xx that is not
+// transient: too long, or any other refusal) in the closing the session
+// is in now (refusedIn, closings; turnFailed): that is final for this
+// closing. No restart is made (noRestartNow), the look is not made again
+// (maybeTurn), no notice is given, and the session ends (maybeEnd) in its
+// closing path's own words, as done: its closing word was asked for, and
+// what was refused came after it. A closing that starts later (the
+// session stopped ending, then ended again) has had no refusal. Loop
+// goroutine.
 func (r *Runtime) refusedWhileClosing() bool {
-	return r.closingRefused && r.stillClosing()
+	r.noteClosing()
+	return r.wasClosing && r.refusedIn != 0 && r.refusedIn == r.closings
+}
+
+// noteClosing counts a closing that starts: the session is ending
+// (stillClosing) and was not when last seen. It is seen at every step of
+// the loop (tick), and by whoever asks about a refusal. Loop goroutine.
+func (r *Runtime) noteClosing() {
+	now := r.stillClosing()
+	if now && !r.wasClosing {
+		r.closings++
+	}
+	r.wasClosing = now
 }
 
 // failingNotice opens what the user is told after two failed calls in a

@@ -203,11 +203,15 @@ type Runtime struct {
 	relayNext map[string]nextPick
 
 	ending bool
-	// closingRefused: the provider refused a call (4xx) while the session
-	// was ending, and no call has come back since (refusedWhileClosing).
-	// Per run, as the closing it belongs to is (finalAsked, summary.final).
-	// Loop goroutine.
-	closingRefused bool
+	// closings counts the times this run started ending (stillClosing
+	// turning true, as noteClosing sees it at each loop step), and
+	// wasClosing says whether it was ending when last seen. refusedIn is
+	// the closing in which the provider refused a call (4xx), 0 for none:
+	// the refusal is final for that closing alone (refusedWhileClosing).
+	// Per run, as the closing is (finalAsked, summary.final). Loop
+	// goroutine.
+	closings, refusedIn int
+	wasClosing          bool
 	// recordFailed: an event could not be written to the record (append).
 	// The run ends on it, and takes nothing more off the inbox. Loop
 	// goroutine.
@@ -1179,6 +1183,7 @@ func (r *Runtime) tick() {
 		r.later = r.later[1:]
 		fn()
 	}
+	r.noteClosing()
 	if r.ending {
 		return
 	}
