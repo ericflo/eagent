@@ -688,6 +688,10 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		delete(r.relayRepick, job.name)
 	}
 	if err != nil {
+		var waiting []string // held for the start: reported below
+		for _, h := range held {
+			waiting = append(waiting, h.id)
+		}
 		switch rel := r.st.Relays[job.replaces]; {
 		case job.endOld != "" && rel != nil && rel.Active():
 			r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld + ", which could not start: " + err.Error()}))
@@ -696,10 +700,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// on the record as exited, so eagent is told and can start it
 			// again or stop it.
 			r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: job.replaces, State: "exited", Detail: clipRunes("it was stopped to start again and could not start: "+err.Error(), 2000)}))
-			var waiting []string // held for the start: reported below
-			for _, h := range held {
-				waiting = append(waiting, h.id)
-			}
+			r.settleExited(rel, waiting...)
+		case rel != nil && rel.Ended && job.wasActive:
+			// The relay this start replaced was stopped while it ran: the
+			// stop left what its agent was typed to be settled here, once
+			// no news of that agent is taken (watchSeat).
 			r.settleExited(rel, waiting...)
 		}
 		for _, h := range held {
@@ -1050,19 +1055,19 @@ func (r *Runtime) reattachRelays() []string {
 }
 
 // settleExited reports, once, each send rel still waited on as not
-// confirmed: the process it was typed into is gone (it exited or was
-// restarted), and nothing watches for its arrival any more. A send still
-// waiting in the seat's queue to be typed is left out: typing it fails,
-// and that is reported where it fails; so is one the caller names in
-// except. One being typed now is left out too: how it ends is known only
+// confirmed: the process it was typed into is gone (it exited, was
+// restarted or was stopped), and nothing watches for its arrival any more.
+// A send still waiting in the seat's queue to be typed is left out: typing
+// it fails, and that is reported where it fails; so is one the caller names
+// in except. One being typed now is left out too: how it ends is known only
 // when its typing ends, and settleSend reports it then (not sent, typed in
 // part, or typed into the process that is gone). Called where an agent's
-// process ends and its conversation does not: an exit seen live or found at a resume, a restart that cannot
-// start, and a restart that does (before the new start is recorded; also
-// of a relay stopped before). A stop is not one of them (the agent and its
-// work are ended on purpose),
-// nor is a switch to another agent: its hand-over brief carries what the
-// old agent was sent. Loop goroutine (or before the loop starts).
+// process ends: an exit seen live or found at a resume, a restart that
+// cannot start, a restart that does (before the new start is recorded; also
+// of a relay stopped before), and a stop (with the end, or where a start
+// the stop cut short ends). A switch to another agent is not one of them:
+// its hand-over brief carries what the old agent was sent. Loop goroutine
+// (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
 	for _, id := range except {
@@ -1256,7 +1261,11 @@ func (r *Runtime) stopSession(reason string) {
 			}
 			r.relays.drop(rel.Name, seat)
 		}
+		settle := r.relays.launch(rel.Name) == nil
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: reason}))
+		if settle {
+			r.settleExited(rel)
+		}
 	}
 	r.beginShutdown("quit", 0)
 }
@@ -1867,8 +1876,16 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 					r.relays.stopping[rel.Name] = killed
 					r.relays.mu.Unlock()
 				}
+				// What the stopped agent was typed and not yet shown to
+				// read is settled with the end (settleExited); with a start
+				// under way for the name, where that start ends.
+				cur := r.st.Relays[rel.Name]
+				settle := cur.Active() && r.relays.launch(rel.Name) == nil
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
+				if settle {
+					r.settleExited(cur)
+				}
 				r.armAutopilots()
 			}) {
 				return errEnding.Error(), true
