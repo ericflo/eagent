@@ -55,8 +55,9 @@ type Server struct {
 	// built with: a run here (kept after it ends), or one the list the
 	// previous server left names (restoreHosted). The session's next run
 	// here, a stop this server finishes, and the list and marks it writes
-	// take it (runConfig, writeHostedList, markStop). Under mu.
-	ran map[string]runPick
+	// take it (runConfig, writeHostedList, markStop), unless the record
+	// shows a run begun after it. Under mu.
+	ran map[string]ranEntry
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -588,14 +589,14 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Nobody running it: resume here with the message as the prompt, from
 	// the web as the inbox message would be.
-	how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
+	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, s.deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how, inbox))
 }
 
 // deliver hands words from the browser to a session: to its inbox when
@@ -609,7 +610,19 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // again when the run another request resumed it with meanwhile is ending
 // too. Once the server's shutdown has begun they resume nothing (the exit
 // would kill the run): that is errStopping, and the page keeps the words.
+// Words for a session another process runs wait in its inbox ("queued"):
+// it reads them while it runs, and, if it has ended first, they wait for
+// its next run; the server does not resume a session another process ran
+// for them, as it cannot tell from that run's record whether the user
+// stopped it after writing them.
 func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
+	how, _, err := s.deliverTo(info, msg, resume)
+	return how, err
+}
+
+// deliverTo is deliver, which also returns the inbox id of words left
+// "queued", by which the page knows them on the record.
+func (s *Server) deliverTo(info store.Info, msg harness.InboxMessage, resume func() error) (how, inbox string, err error) {
 	s.resuming.Lock()
 	for {
 		s.mu.Lock()
@@ -621,7 +634,7 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 		s.resuming.Unlock()
 		if !h.rt.Ending() {
 			if took, err := h.rt.Take(msg); took || err != nil {
-				return "inbox", err
+				return "inbox", "", err
 			}
 		}
 		<-h.done
@@ -635,150 +648,34 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 		stopped := s.stops[info.ID] != nil
 		s.mu.Unlock()
 		if stopped {
-			return "", errStopping
+			return "", "", errStopping
 		}
 		if s.isHosted(info.ID) {
-			return "inbox", harness.PostInbox(info.Path, msg)
+			return "inbox", "", harness.PostInbox(info.Path, msg)
 		}
-		// Another process runs it, which may be past its last look at the
-		// inbox: they wait there, watched, until it takes them or lets go
-		// of the session (watchInbox).
-		posted := time.Now()
+		// Another process runs it: they wait in its inbox (deliver).
 		file, err := harness.PostInboxFile(info.Path, msg)
-		if err == nil {
-			go s.watchInbox(info, file, posted)
-		}
-		return "queued", err
+		return "queued", strings.TrimSuffix(filepath.Base(file), ".json"), err
 	}
 	if s.stopping {
-		return "", errStopping
+		return "", "", errStopping
 	}
-	return "resumed", resume()
+	return "resumed", "", resume()
 }
 
-// inboxWatchEvery is how often watchInbox looks; tests shorten it.
-var inboxWatchEvery = 200 * time.Millisecond
-
-// watchInbox follows words deliver left (posted then) in the inbox of a
-// session another process runs. Once a run has taken them as a turn it is
-// done. Otherwise, when that run lets go of the session, one decision is
-// made, from the record and the inbox (wordsWait): words that wait for the
-// next run (kept on the record by a run that was ending, or still a file)
-// get the session resumed here, as words for a run here that is ending
-// do, and its run takes them up; unless the user stopped the session after
-// writing them, when the session stays stopped and they wait for the
-// user's next resume. Once this server's shutdown has begun, they wait for
-// the session's next run.
-func (s *Server) watchInbox(info store.Info, file string, posted time.Time) {
-	id := strings.TrimSuffix(filepath.Base(file), ".json")
-	tick := time.NewTicker(inboxWatchEvery)
-	defer tick.Stop()
-	gone := false
-	for range tick.C {
-		if !gone {
-			if _, err := os.Stat(file); err != nil {
-				gone = true
-				if answered, _ := inboxTaken(info.Path, id); answered {
-					return
-				}
-			}
-		}
-		if alive(info.Path) {
-			continue
-		}
-		s.resuming.Lock()
-		if !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) && wordsWait(info.Path, id, posted) {
-			if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true); err != nil {
-				s.logf("web: session %s stopped with words waiting for it, and could not be resumed for them: %v", info.ID, err)
-			}
-		}
-		s.resuming.Unlock()
-		return
-	}
-}
-
-// inboxTaken reads the record for the words of inbox submission id:
-// answered when a run took them as a turn (a user.answer, or a
-// user.message not kept for the next run), and the seq of a user.message
-// a run that was ending kept for the next run (0 for none).
-func inboxTaken(path, id string) (answered bool, kept int64) {
-	evs, err := store.Read(path)
-	if err != nil {
-		return false, 0
-	}
-	for _, ev := range evs {
-		var d struct {
-			Inbox string `json:"inbox"`
-			Held  string `json:"held"`
-		}
-		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer || ev.Decode(&d) != nil || d.Inbox != id {
-			continue
-		}
-		if ev.Type == event.UserAnswer || d.Held != harness.HeldWhileEnding {
-			return true, 0
-		}
-		kept = ev.Seq
-	}
-	return false, kept
-}
-
-// wordsWait decides, once the run that had the session has let go of it,
-// whether the words of inbox submission id (posted then) get the session
-// resumed for them: they wait for a run (not answered), and the user did
-// not stop the session after writing them: no stop posted after them is
-// still in the inbox, and the record shows no stop of the user's taken
-// after them (a relay.end it made) nor, for words it does not hold, an end
-// on a quit after they were posted. Words a run kept were kept because it
-// was ending: what ended it came before them, and a stop after them stays
-// in the inbox.
-func wordsWait(path, id string, posted time.Time) bool {
-	answered, kept := inboxTaken(path, id)
-	if answered {
-		return false
-	}
-	dir := harness.InboxDir(path)
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if e.Name() <= id+".json" || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		var msg harness.InboxMessage
-		if err == nil && json.Unmarshal(raw, &msg) == nil && msg.Type == "stop" {
-			return false
-		}
-	}
-	evs, err := store.Read(path)
-	if err != nil {
-		return false
-	}
-	for _, ev := range evs {
-		var d struct {
-			Reason string `json:"reason"`
-		}
-		if ev.Type != event.RelayEnd && ev.Type != event.SessionEnd || ev.Decode(&d) != nil {
-			continue
-		}
-		stop := ev.Type == event.RelayEnd && d.Reason == "the user stopped the session"
-		quit := ev.Type == event.SessionEnd && d.Reason == "quit"
-		if kept > 0 && stop && ev.Seq > kept || kept == 0 && (stop || quit) && ev.Time.After(posted) {
-			return false
-		}
-	}
-	return true
-}
-
-// deliveredAnswer is the answer to words deliver took as how; words left
-// "queued" are said to wait, not to be delivered, and, once this server's
-// shutdown has begun (it resumes nothing for them then), to wait for the
-// session's next run.
-func (s *Server) deliveredAnswer(how string) map[string]any {
+// deliveredAnswer is the answer to words deliverTo took as how; words left
+// "queued" are said to wait, not to be delivered, with their inbox id, and
+// what is true of them: the session reads them while it runs and, if it
+// has ended, when it is next resumed; once this server's shutdown has
+// begun, when it next runs.
+func (s *Server) deliveredAnswer(how, inbox string) map[string]any {
 	out := map[string]any{"delivered": how}
 	if how == "queued" {
 		s.resuming.Lock()
 		stopping := s.stopping
 		s.resuming.Unlock()
-		out["message"] = "They wait in the session's inbox: it takes them when it next reads it, or when it is resumed for them."
+		out["inbox"] = inbox
+		out["message"] = "They wait in the session's inbox: the session reads them while it runs and, if it has ended, when it is next resumed (Resume does it here)."
 		if stopping {
 			out["message"] = "They wait in the session's inbox until it next runs."
 		}
@@ -807,14 +704,14 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	how, err := s.deliver(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
+	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, s.deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how, inbox))
 }
 
 // postDismiss closes the session's open question with no answer. Nothing
@@ -1134,21 +1031,27 @@ func (s *Server) RegisterSessionStarter() func() {
 // resuming. Once the server's shutdown has begun it resumes nothing. It
 // runs on the configuration bundle and preset name, or, with none named
 // (every resume but one picked in the browser), on the session's own
-// (runConfig).
+// (runConfig); a resume for a reply from the phone, with the mirror on, on
+// the account of the session's thread (phoneOn).
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
 	if s.stopping {
 		return errStopping
 	}
+	info := store.Info{ID: filepath.Base(path), Path: path}
 	pick := s.pickOf(bundle, preset)
 	var cfg config.Config
 	var err error
 	if pick.Default {
-		cfg, pick, err = s.runConfig(store.Info{ID: filepath.Base(path), Path: path})
+		cfg, pick, err = s.runConfig(info)
 	} else {
 		cfg, err = s.loadConfig(bundle, preset)
 	}
 	if err != nil {
 		return err
+	}
+	if opts.PromptPhoneID != "" {
+		// For a reply from the phone: answered in its thread (phoneOn).
+		cfg = s.phoneOn(info, cfg)
 	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.Resume(cfg, opts, ui, path)

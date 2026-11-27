@@ -124,15 +124,23 @@ func (s *Server) loadPick(p runPick) (config.Config, error) {
 	return s.loadConfig(p.Config, p.Preset)
 }
 
+// ranEntry is what ran knows of a session: the configuration of its last
+// run known here, and when that was known (the run began here, or the
+// list naming it was written).
+type ranEntry struct {
+	pick runPick
+	at   time.Time
+}
+
 // noteRan notes the configuration a run of the session here is built
-// with (ran).
+// with (ran), once it has begun.
 func (s *Server) noteRan(id string, pick runPick) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ran == nil {
-		s.ran = map[string]runPick{}
+		s.ran = map[string]ranEntry{}
 	}
-	s.ran[id] = pick
+	s.ran[id] = ranEntry{pick: pick, at: time.Now().UTC()}
 }
 
 // runConfig is the configuration the session runs on, wherever this
@@ -144,38 +152,69 @@ func (s *Server) noteRan(id string, pick runPick) {
 // names (its session.start); else this server's own. The log says which,
 // past the first, and why a named one was passed over.
 func (s *Server) runConfig(info store.Info) (config.Config, runPick, error) {
+	return s.configFor(info, nil)
+}
+
+// configFor is runConfig's walk over those sources, taking the first that
+// loads and that accept, if given, takes (passing over, logged, one it
+// does not); an error when none is taken.
+func (s *Server) configFor(info store.Info, accept func(config.Config) (bool, string)) (config.Config, runPick, error) {
+	type source struct {
+		pick runPick
+		from string    // "": the last run known here
+		at   time.Time // when this server, or the list, knew it (ran's and the list's)
+	}
+	var sources []source
 	s.mu.Lock()
-	pick, known := s.ran[info.ID]
-	from := ""
-	if !known {
+	if e, known := s.ran[info.ID]; known {
+		sources = append(sources, source{e.pick, "", e.at})
+	} else {
 		list, _ := s.readHosted()
 		if m, ok := list.mark(info.ID); ok && m.runPick != (runPick{}) {
-			pick, known, from = m.runPick, true, "its stop's mark on the list of sessions to bring back"
+			sources = append(sources, source{m.runPick, "its stop's mark on the list of sessions to bring back", m.At})
 		} else if p, ok := list.Configs[info.ID]; ok && p != (runPick{}) {
-			pick, known, from = p, true, "the list of sessions to bring back"
+			sources = append(sources, source{p, "the list of sessions to bring back", list.At})
 		}
 	}
 	s.mu.Unlock()
-	if known {
-		cfg, err := s.loadPick(pick)
-		if err == nil {
-			if from != "" {
-				s.logf("session %s runs on %s, as %s names it", info.ID, pick, from)
+	if p, ok := recordedPick(info.Path); ok {
+		sources = append(sources, source{p, "record", time.Time{}})
+	}
+	sources = append(sources, source{runPick{Default: true}, "own", time.Time{}})
+	var last error
+	for _, src := range sources {
+		if !src.at.IsZero() && ranSince(info.Path, src.at) {
+			// A run elsewhere since: the record's word is newer.
+			s.logf("session %s: passing over %s, which it ran on here: it has run elsewhere since", info.ID, src.pick)
+			continue
+		}
+		cfg, err := s.loadPick(src.pick)
+		if err != nil {
+			if src.from != "record" {
+				s.logf("session %s: %s, which it last ran on, does not load (%v)", info.ID, src.pick, err)
 			}
-			return cfg, pick, nil
+			last = err
+			continue
 		}
-		s.logf("session %s: %s, which it last ran on, does not load (%v)", info.ID, pick, err)
-	}
-	if name := recordedConfig(info.Path); name != "" {
-		p := runPick{Config: name, Preset: "-"}
-		if cfg, err := s.loadPick(p); err == nil {
-			s.logf("session %s runs on %s, the one its record names", info.ID, p)
-			return cfg, p, nil
+		if accept != nil {
+			if ok, why := accept(cfg); !ok {
+				s.logf("session %s: passing over %s: %s", info.ID, src.pick, why)
+				last = errors.New(why)
+				continue
+			}
 		}
+		switch src.from {
+		case "":
+		case "record":
+			s.logf("session %s runs on %s, the one its record names", info.ID, src.pick)
+		case "own":
+			s.logf("session %s runs on this server's own configuration: no other is known for it", info.ID)
+		default:
+			s.logf("session %s runs on %s, as %s names it", info.ID, src.pick, src.from)
+		}
+		return cfg, src.pick, nil
 	}
-	s.logf("session %s runs on this server's own configuration: no other is known for it", info.ID)
-	cfg, err := s.loadConfig("", "")
-	return cfg, runPick{Default: true}, err
+	return config.Config{}, runPick{}, last
 }
 
 // mark is the list's mark for the session, if it has one.
@@ -237,8 +276,8 @@ func (s *Server) markStop(id string) {
 	if p, ok := list.Configs[id]; ok {
 		m.runPick = p
 	}
-	if p, ranHere := s.ran[id]; ranHere {
-		m.runPick = p
+	if e, ranHere := s.ran[id]; ranHere {
+		m.runPick = e.pick
 	}
 	marks := append(slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id }), m)
 	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, marks)
@@ -354,13 +393,90 @@ func (s *Server) sessionConfig() *config.Config {
 }
 
 // stopConfig is the configuration a stop this server finishes tells the
-// session's phone by (runConfig), or nil when none loads: nothing is told.
+// session's phone by: the first of runConfig's that has an account on the
+// phone service the record shows the session's thread on (its latest
+// phone.thread; any, for a record that names none), or nil when none
+// does: nothing is told, and the log says why.
 func (s *Server) stopConfig(info store.Info) *config.Config {
-	cfg, _, err := s.runConfig(info)
+	var accept func(config.Config) (bool, string)
+	if base := threadBase(info.Path); base != "" {
+		accept = accountAt(base)
+	}
+	cfg, _, err := s.configFor(info, accept)
 	if err != nil {
+		s.logf("session %s: its phone is not told of the stop: no configuration known for it has an account where its thread is (%v)", info.ID, err)
 		return nil
 	}
 	return &cfg
+}
+
+// accountAt takes a configuration whose phone account is on the service
+// at base.
+func accountAt(base string) func(config.Config) (bool, string) {
+	return func(cfg config.Config) (bool, string) {
+		c, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL)
+		if !ok {
+			return false, "it has no phone account (no token)"
+		}
+		if strings.TrimRight(c.BaseURL, "/") != strings.TrimRight(base, "/") {
+			return false, "its phone account is at " + c.BaseURL + ", and the session's thread at " + base
+		}
+		return true, ""
+	}
+}
+
+// phoneOn is cfg, the configuration a session runs on, for a resume for a
+// reply from the phone: the mirror on, on the account the record shows
+// the session's thread on (the phone section of the first configuration
+// runConfig's walk finds with an account there; cfg's own when the record
+// names no address; this server's own, which the reply watcher read the
+// reply on, when none has one there), so the reply is answered in its
+// thread. The model and the rest stay cfg's.
+func (s *Server) phoneOn(info store.Info, cfg config.Config) config.Config {
+	if base := threadBase(info.Path); base != "" {
+		if acc, _, err := s.configFor(info, accountAt(base)); err == nil {
+			cfg.Finalechat = acc.Finalechat
+		} else if own := s.sessionConfig(); own != nil {
+			s.logf("session %s: no configuration known for it has an account where its thread is (%v); the reply is answered on this server's own account", info.ID, err)
+			cfg.Finalechat = own.Finalechat
+		}
+	}
+	on := true
+	cfg.Finalechat.Enabled = &on
+	return cfg
+}
+
+// threadBase is the address of the phone service the session's record
+// shows its thread on (its latest phone.thread), "" for none recorded.
+func threadBase(path string) string {
+	evs, err := store.Read(path)
+	if err != nil {
+		return ""
+	}
+	base := ""
+	for _, ev := range evs {
+		var d event.PhoneThreadData
+		if ev.Type == event.PhoneThread && ev.Decode(&d) == nil && d.BaseURL != "" {
+			base = d.BaseURL
+		}
+	}
+	return base
+}
+
+// recordedPick is the configuration the session's record names in its
+// session.start, kept apart as a bundle (the run's bundle) or a preset
+// (with no bundle, its preset): a name that is a built-in preset is the
+// preset, as a bundle never is one (a bundle named as a preset loads as
+// that preset, and names none).
+func recordedPick(path string) (runPick, bool) {
+	name := recordedConfig(path)
+	if name == "" {
+		return runPick{}, false
+	}
+	if _, isPreset := config.ResolvePreset(name); isPreset {
+		return runPick{Config: "-", Preset: name}, true
+	}
+	return runPick{Config: name, Preset: "-"}, true
 }
 
 // recordedConfig is the configuration (bundle or preset) the session's
@@ -428,7 +544,8 @@ func (s *Server) writeHostedList(ids []string, at time.Time, stop []stopMark) {
 	prev, _ := s.readHosted()
 	var configs map[string]runPick
 	for _, id := range ids {
-		p, ok := s.ran[id]
+		e, ok := s.ran[id]
+		p := e.pick
 		if !ok {
 			p, ok = prev.Configs[id]
 		}
@@ -501,9 +618,9 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	for id, p := range list.Configs {
 		if _, known := s.ran[id]; !known && slices.Contains(list.Sessions, id) {
 			if s.ran == nil {
-				s.ran = map[string]runPick{}
+				s.ran = map[string]ranEntry{}
 			}
-			s.ran[id] = p
+			s.ran[id] = ranEntry{pick: p, at: list.At}
 		}
 	}
 	s.writeHostedList(nil, list.At, list.Stop)

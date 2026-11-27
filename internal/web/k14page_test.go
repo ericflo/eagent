@@ -67,13 +67,13 @@ Promise.resolve(send()).then(() => { ` + after + ` });
 // used to drop the answer: the words left the composer and showed
 // nowhere.
 func TestK14TheChatShowsWordsThatWaitWithTheAnswersLine(t *testing.T) {
-	answer := `{delivered: 'queued', message: 'They wait in the session\'s inbox until it next runs.'}`
+	answer := `{delivered: 'queued', inbox: 'i1', message: 'They wait in the session\'s inbox until it next runs.'}`
 	got := k14Send(t, answer, `console.log(shown());`)
 	if !strings.Contains(got, "and add the retry test") || !strings.Contains(got, "They wait in the session's inbox until it next runs.") {
 		t.Fatalf("the chat shows %q for words that wait", got)
 	}
 	// The record then shows them (a run took them): the waiting copy goes.
-	got = k14Send(t, answer, `takeQueued({seq: 5, type: 'user.message', data: {text: 'and add the retry test'}}); console.log(JSON.stringify([shown(), S.queued.length]));`)
+	got = k14Send(t, answer, `takeQueued({seq: 5, type: 'user.message', data: {text: 'and add the retry test', inbox: 'i0'}}); takeQueued({seq: 6, type: 'user.message', data: {text: 'and add the retry test', inbox: 'i1'}}); console.log(JSON.stringify([shown(), S.queued.length]));`)
 	if got != `["",0]` {
 		t.Fatalf("once the record shows the words, the chat still shows the waiting copy: %s", got)
 	}
