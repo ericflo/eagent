@@ -83,3 +83,51 @@ func TestK2AnEndingBatchSessionPaysForNoDossier(t *testing.T) {
 		t.Fatalf("%d dossier passes paid for by a session that was ending", n)
 	}
 }
+
+// C6: a dossier pass looks something up, and the call with what it read
+// back is refused as too long. The results are taken out again and the
+// writer is told to write without them: in the request that follows, that
+// note is added to the request for the briefing (withNote), as the pass's
+// other notes are, not a user message of its own right after it. (The
+// conversation before the request is the record as rendered, which has
+// user messages in a row of its own.)
+func TestK2ADossierPassThatDropsItsLookupsSendsNoTwoUserMessagesInARow(t *testing.T) {
+	var ready, written atomic.Bool
+	var roles atomic.Value // the roles of the request after the drop
+	brain := func(_ string, m []map[string]any) reply {
+		if dossierRequest(m) != "" {
+			last := m[len(m)-1]
+			text, _ := last["content"].(string)
+			switch {
+			case last["role"] == "tool":
+				return r7TooLong
+			case strings.Contains(text, "did not fit in the model's context window") || written.Load():
+				var rs []string
+				for _, msg := range m {
+					r, _ := msg["role"].(string)
+					rs = append(rs, r)
+				}
+				roles.Store(rs)
+				written.Store(true)
+				p := places(dossierRequest(m))
+				return reply{text: briefing(p[max(0, len(p)-3):])}
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"build"}`)}}
+		}
+		r := hold()
+		if ready.Load() {
+			r.prompt = 30000 // past the 20,000 restart size of testConfig
+		}
+		return r
+	}
+	s := startSession(t, "", brain, nil)
+	r5LogOnFailure(s)
+	s.settled()
+	ready.Store(true)
+	r14AgentTurn(s, "The build is green.")
+	r6Until(t, "the briefing written after the drop", written.Load)
+	rs, _ := roles.Load().([]string)
+	if n := len(rs); n < 2 || rs[n-1] == "user" && rs[n-2] == "user" {
+		t.Fatalf("the note after the drop is a user message of its own after the request: %v", rs)
+	}
+}

@@ -1395,7 +1395,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 					// What it just read back was too much: those results
 					// go, and it writes with what it had before them.
 					dropped, last = true, true
-					msgs = append(msgs[:lookedAt:lookedAt], llm.Message{Role: "user", Text: "[eagent] What you looked up last did not fit in the model's context window with the rest, so those results were taken out again. Do not look anything else up. Write the briefing now from what is above, as your whole reply, with no tool call."})
+					msgs = withNote(msgs[:lookedAt:lookedAt], "[eagent] What you looked up last did not fit in the model's context window with the rest, so those results were taken out again. Do not look anything else up. Write the briefing now from what is above, as your whole reply, with no tool call.")
 					r.ui.Log("dossier: the last lookups did not fit; asking for the briefing without them")
 					continue
 				case !job.fresh:
