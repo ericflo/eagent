@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -517,10 +518,12 @@ func (s *Service) PrepareSavePreset(editor *config.Editor, p control.Proposal, g
 	if err != nil {
 		return change, err
 	}
-	cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle)
-	if err != nil {
-		return change, err
+	// What the files and bundle say, never a value only a variable gives.
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	if res.LoadError != "" {
+		return change, errors.New(res.LoadError)
 	}
+	cfg := res.Layered
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
 	if err := cfg.Validate(); err != nil {
 		return change, err
@@ -560,10 +563,12 @@ func (s *Service) SaveEffectiveAsPreset(editor *config.Editor, name string) (str
 	if err != nil {
 		return "", err
 	}
-	cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle)
-	if err != nil {
-		return "", err
+	// What the files and bundle say, never a value only a variable gives.
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	if res.LoadError != "" {
+		return "", errors.New(res.LoadError)
 	}
+	cfg := res.Layered
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
 	if err := cfg.Validate(); err != nil {
 		return "", err

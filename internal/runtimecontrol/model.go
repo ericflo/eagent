@@ -598,10 +598,19 @@ func SavePresetName(p control.Proposal) string {
 // Routes) is looked up in the project's own configuration, else picked
 // from the catalog.
 func ConfigFromRoutes(project string, values Values, running map[string]config.ModelRoute) (config.Config, error) {
-	cfg, err := config.LoadBundle(project, "", "")
-	if err != nil {
+	// What the session runs with from its files and bundle: the layers of
+	// the configuration its routes were set from, below the environment,
+	// whose values are the session process's own, not the preset's.
+	preset, bundle := values.Config, ""
+	if name, ok := strings.CutPrefix(values.Config, "bundle:"); ok {
+		preset, bundle = "", name
+	}
+	res := config.Resolve(project, preset, bundle)
+	cfg := res.Layered
+	if res.LoadError != "" {
 		cfg = config.Defaults()
 	}
+	var err error
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
 	if values.TickSeconds > 0 {
 		cfg.TickSeconds = values.TickSeconds
