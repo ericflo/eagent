@@ -2163,6 +2163,17 @@ func (s *Seat) follow(id string, idle bool) {
 	}
 }
 
+// followNew is follow for a session the agent has just started (Claude's
+// /clear): it holds no history, so what it holds is news from where news
+// began before the move, also a message the agent wrote there before the
+// seat learned of the move (Claude's hook can say it late).
+func (s *Seat) followNew(id string) {
+	s.follow(id, false)
+	s.mu.Lock()
+	s.since = s.sinceKept
+	s.mu.Unlock()
+}
+
 // moveCut is where news begins in a transcript the agent moved to, when the
 // agent cannot say: just before it was last seen on the session it left,
 // never earlier than sinceKept or the newest stamp read so far, "now"

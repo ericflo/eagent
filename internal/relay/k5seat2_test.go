@@ -202,6 +202,58 @@ func TestSr4SeatClaudeResumedBackToTheMarkedTranscriptReportsItsTurnsAgain(t *te
 	}
 }
 
+// The reader's suspicion: Claude records the message typed right after
+// /clear in the new session before its SessionStart hook says where it is
+// (the hook is a process of its own, and Claude can defer it): the looks
+// in between still find Claude on the old session, so a cut by time at
+// the last such look takes that message for history. A session /clear
+// started holds no history: all of it is news.
+func TestK5ClaudeMessageRightAfterClearBeforeItsHookIsNews(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	project := filepath.Join(cfg, "projects", "-work")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, b := filepath.Join(project, "a-id.jsonl"), filepath.Join(project, "b-id.jsonl")
+	writeLines(t, a, claudeTurnLines("sort the shelves", "Sorted.", time.Now().Add(-time.Minute))...)
+	state := t.TempDir()
+	spool := filepath.Join(state, "after_turn")
+	sr4ClaudeHook(t, spool, "a-id", a, "startup")
+	s := newSeat(Spec{Spool: spool, StatusFile: filepath.Join(state, "claude-session.json"), Hook: "eagent relay-hook"}, claudeAgent{}, &fakeHost{alive: true}, "k5-early-"+filepath.Base(state), "a-id")
+	s.state, s.poll = "idle", piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	var turns []string
+	deadline := time.After(5 * time.Second)
+	confirmed := false
+	until := func(match func(Event) bool) bool {
+		for {
+			select {
+			case ev := <-s.events:
+				if ev.Kind == KindTurn {
+					turns = append(turns, ev.Text)
+				}
+				confirmed = confirmed || ev.Kind == KindDelivered && ev.OK && ev.SendID == "r1"
+				if match(ev) {
+					return true
+				}
+			case <-deadline:
+				return false
+			}
+		}
+	}
+	until(func(ev Event) bool { return ev.Kind == KindInner && ev.Transcript == a })
+	s.track("r1", "run the tests", "queue")
+	// /clear, then the message; looks that still find a-id; then the hook.
+	writeLines(t, b, claudeTurnLines("run the tests", "Ran them.", time.Now())...)
+	within(looks(4), func() bool { return false })
+	sr4ClaudeHook(t, spool, "b-id", b, "clear")
+	if !until(func(ev Event) bool { return ev.Kind == KindTurn && ev.Text == "Ran them." }) || !confirmed {
+		t.Fatalf("turns %q, r1 confirmed %v; want the message after /clear confirmed and its turn reported", turns, confirmed)
+	}
+}
+
 // SR4-3. A typed command's delivered event waits for the watcher's next
 // look (9888cae) and is dropped when the seat closes first: a restart, a
 // stop or eagent's own shutdown within a poll of the typing. The record

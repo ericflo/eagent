@@ -69,6 +69,7 @@ func claudeSessionFile(spool string) string {
 type claudeSession struct {
 	ID         string `json:"session_id"`
 	Transcript string `json:"transcript_path"`
+	Source     string `json:"source"` // startup, resume, clear, compact
 }
 
 func readClaudeSession(file string) (claudeSession, bool) {
@@ -140,6 +141,8 @@ func (claudeAgent) poll(s *Seat, now time.Time) {
 	switch inner := s.innerID(); {
 	case inner == st.ID:
 		s.onSession(now)
+	case inner != "" && st.Source == "clear":
+		s.followNew(st.ID) // a session /clear started holds no history
 	case inner != "":
 		s.follow(st.ID, false)
 	}
