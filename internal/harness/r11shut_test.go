@@ -95,6 +95,49 @@ func TestR11AQueuedPhoneSendNotSentAtTheEndFailsOnThePhone(t *testing.T) {
 	}
 }
 
+// r11StartingSeat is an agent still on its startup screens: a send waits
+// for it to be ready, and once its terminal is closed returns
+// relay.ErrClosed with nothing typed, as relay.Seat's waitReady does.
+type r11StartingSeat struct {
+	*fakeSeat
+	entered chan string
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func (s *r11StartingSeat) Send(id, text, mode string) (string, error) {
+	s.entered <- id
+	<-s.closed
+	return "", relay.ErrClosed
+}
+
+func (s *r11StartingSeat) Close() {
+	s.once.Do(func() { close(s.closed) })
+	s.fakeSeat.Close()
+}
+
+// Finding 5. A send is waiting for the agent to be ready when the session
+// quits, and another waits behind it. Closing the agent's terminal at the
+// end returns the first with nothing typed: both are not_sent on the
+// record, before session.end, once each.
+func TestR11ASendWaitingForTheAgentAtAQuitIsNotSent(t *testing.T) {
+	seat := &r11StartingSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), closed: make(chan struct{})}
+	rt, _, done := r10Session(t, seat)
+	r10Send(rt, "check the version")
+	var typing string
+	select {
+	case typing = <-seat.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first send was never begun")
+	}
+	r10Send(rt, "then run the tests")
+	waitFor(t, "the second send queued", func() bool { return lastSendID(rt) != typing })
+	queued := lastSendID(rt)
+	evs := r10Quit(t, rt, nil, 0, done)
+	r10NotSentBeforeEnd(t, evs, typing)
+	r10NotSentBeforeEnd(t, evs, queued)
+}
+
 // r11Unanswerable is a batch session that stopped on a question nobody
 // could answer, its agent still running.
 func r11Unanswerable(t *testing.T) (string, string) {

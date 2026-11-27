@@ -412,6 +412,18 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		if res.err != nil && !errors.As(res.err, &half) && r.passOn(q, h) {
 			continue
 		}
+		if res.err != nil && sendErrOutcome(res.err) == event.DeliveryNotSent {
+			r.relays.mu.Lock()
+			select {
+			case <-r.closed:
+				// Nothing settles it now (the loop has closed): never typed,
+				// it is back at the head of the queue, which finish records
+				// not sent.
+				q.items = append([]heldSend{h}, q.items...)
+			default:
+			}
+			r.relays.mu.Unlock()
+		}
 		if errors.Is(res.err, relay.ErrClosed) {
 			// Its terminal was closed under it and no agent took over: the
 			// relay was stopped.

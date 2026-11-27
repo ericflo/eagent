@@ -152,8 +152,10 @@ func TestR10ASendQueuedBehindOneBeingTypedAtAQuitIsNotSent(t *testing.T) {
 	r10Send(rt, "then run the tests")
 	waitFor(t, "the second send queued", func() bool { return lastSendID(rt) != typing })
 	queued := lastSendID(rt)
+	// Its typing ends after the loop has closed (the end waits for it,
+	// as a terminal's typing is bounded).
+	go func() { <-rt.closed; seat.result <- nil }()
 	evs := r10Quit(t, rt, nil, 0, done)
-	seat.result <- nil
 	r10NotSentBeforeEnd(t, evs, queued)
 	if o := state.Replay(evs).SendOutcome(typing); o != state.SendWaiting {
 		t.Errorf("the send being typed reads %q, want it still awaited", o)

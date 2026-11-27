@@ -1280,6 +1280,20 @@ drain:
 	// user, attached) picks up where they are. Only stop watching them.
 	r.closeRelays()
 	r.stopTimers()
+	// A send being typed ends now that its terminal is closed, in the
+	// seat's own bounded steps, as the close does: one that was never
+	// typed is back in its queue (drainSends), read below.
+	var typing []chan struct{}
+	r.relays.mu.Lock()
+	for _, q := range r.relays.queues {
+		if q.running {
+			typing = append(typing, q.idle)
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, idle := range typing {
+		<-idle
+	}
 	// Direct writes: the loop is no longer running.
 	// A send held for a start the session's end gave up (abandonLaunch),
 	// or still in a seat's queue (nothing is taken from one now), was never
