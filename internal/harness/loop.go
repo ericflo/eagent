@@ -801,9 +801,9 @@ func (r *Runtime) turn(w wake) {
 	end := "done"
 	closedOut := false // a closing turn whose call failed: it owes nothing
 	// answers: a call of this turn came back (looked) and no call failed
-	// after it (turnFailed). Only then does the turn's end clear the
-	// model's failures: one whose next call failed after one went through
-	// is a failure more, so the waits between such turns grow.
+	// after it (turnFailed counted none). Only then does the turn's end
+	// clear the model's failures: one whose next call failed after one
+	// went through is a failure more, so the waits between such turns grow.
 	answers := false
 	// stoppedClosing: a check in this turn found the session no longer
 	// ending (stillClosing). The turn's end goes by that, not by a check of
@@ -984,8 +984,12 @@ func (r *Runtime) turn(w wake) {
 					closedOut = true
 					return
 				}
+				// A refusal as too long that restarts the conversation is
+				// no failed call (turnFailed counts none): a call of this
+				// turn that came back still ends the failures before it.
+				counted := r.turns.failures
 				r.turnFailed(err, covered, answers)
-				answers = false
+				answers = answers && r.turns.failures == counted
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				// The closing turn of a session still ending has had its word
 				// (the model's, or eagent's own here): nothing is owed after it.

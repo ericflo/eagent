@@ -171,3 +171,51 @@ func TestK2ABatchSessionWhoseModelAnswersEachTurnIsNotEndedAsDown(t *testing.T) 
 		}
 	}
 }
+
+// A session with no terminal fails its first two calls (the user is told
+// the model cannot be reached). The model then answers: it stops the
+// agent, and the call after that is refused as too long, which restarts
+// the conversation from a dossier and counts no failure. The model
+// answered, so the two failures before are over: the first call after the
+// restart fails, is tried again at once as a first failure is, and the
+// session ends with its closing word (exit 0), not as one whose model is
+// down after a wait of an hour.
+func TestK2ARestartAfterAnAnsweredCallEndsTheFailuresBeforeIt(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, 0, time.Hour})
+	setFor(t, &wakeSettle, 100*time.Millisecond)
+	var calls atomic.Int32
+	_, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch n := calls.Add(1); {
+		case n <= 2, n == 5:
+			return k1BadRequest
+		case n == 3:
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
+		case n == 4:
+			return r7TooLong
+		case m[len(m)-1]["role"] == "tool", !strings.Contains(lastUserText(m), "The session is ending now"):
+			return hold()
+		}
+		return say("The build is green.")
+	})
+	var code int
+	select {
+	case code = <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q; logs %q", ui.said(), ui.logged())
+	}
+	logged := strings.Join(ui.logged(), "\n")
+	if !strings.Contains(logged, "begins with a dossier") {
+		t.Fatalf("setup: no restart was made; logs %q", ui.logged())
+	}
+	if strings.Contains(logged, "trying again in") {
+		t.Fatalf("a failure after the restart waited as the third in a row: %q", ui.logged())
+	}
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; said %q", code, ui.said())
+	}
+}
