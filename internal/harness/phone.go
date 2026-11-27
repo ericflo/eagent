@@ -69,7 +69,7 @@ type phone struct {
 	posted     map[string]bool   // message ids we created (skipped on poll)
 	questions  map[string]string // eagent question id -> finalechat question id
 	fromPhone  map[string]string // finalechat question id -> eagent question id
-	open       map[string]string // cards being watched: finalechat question id -> eagent question id
+	open       map[string]string // cards that may be open (watched, or an earlier run's): finalechat question id -> eagent question id
 	lastID     string            // newest message id seen, for the poll
 	mirrored   map[int64]string  // user message seq -> the thread message mirroring it
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
@@ -158,6 +158,13 @@ func (r *Runtime) startPhone() {
 		// a session with no terminal does not end before the card is up.
 		p.mu.Lock()
 		p.reask, p.reaskBy = q.ID, time.Now().Add(phoneReaskWait)
+		// Its cards that earlier runs put up and that may still be open
+		// are checked before a plain message is taken, as a watched card
+		// is: none is watched until it is asked again, and on a service
+		// without client keys none ever is (settleDismissals).
+		for _, fid := range liveCards(r.st, q.ID) {
+			p.open[fid] = q.ID
+		}
 		p.mu.Unlock()
 	}
 	// The message the session was started or resumed with. It was appended
@@ -343,13 +350,13 @@ func (r *Runtime) startPhone() {
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
-			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
+			m2, t2, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
 			if err == nil {
 				// The poll still reads on after the anchor above: a reply
 				// written between that post and this one comes before this
 				// one, which the poll skips as its own.
+				p.rememberIn(m2, t2)
 				p.mu.Lock()
-				p.posted[m2.ID] = true
 				if promptSeq > 0 {
 					p.mirror1(promptSeq, m2.ID)
 				}
@@ -383,7 +390,7 @@ func (r *Runtime) startPhone() {
 			})
 		}
 		p.wg.Add(2)
-		go p.poll(r, started)
+		go p.poll(r, started, unread)
 		go p.keeper(r)
 	})
 	// The message the session was started or resumed with is passed to
@@ -475,18 +482,23 @@ func (p *phone) mirror1(seq int64, id string) {
 // enqueue schedules an outbound call and reports whether it was queued.
 // A full queue means the service has been unreachable for a while; losing
 // a mirror call is better than blocking the loop, but it is said, once
-// per stretch of drops, so it is never silent.
+// per stretch of drops, so it is never silent: in the session's log when
+// it begins, and in the thread, ahead of what comes next, once it is over.
 func (p *phone) enqueue(fn func(context.Context)) bool {
+	// A stretch of drops is over when the queue has really drained, not
+	// when a slow phone took one post and left room for one more: that
+	// would say the same thing again for every post it takes.
+	p.mu.Lock()
+	over := p.dropping && len(p.queue) < cap(p.queue)/2
+	if over {
+		p.dropping = false
+	}
+	p.mu.Unlock()
+	if over {
+		p.enqueue(p.saidDropped)
+	}
 	select {
 	case p.queue <- fn:
-		// A stretch of drops is over when the queue has really drained,
-		// not when a slow phone took one post and left room for one more:
-		// that would say the same thing again for every post it takes.
-		if len(p.queue) <= cap(p.queue)/2 {
-			p.mu.Lock()
-			p.dropping = false
-			p.mu.Unlock()
-		}
 		return true
 	default:
 		p.mu.Lock()
@@ -497,6 +509,16 @@ func (p *phone) enqueue(fn func(context.Context)) bool {
 			p.say("finalechat: the phone has not taken what was sent for a while; updates to the thread are being dropped until it does")
 		}
 		return false
+	}
+}
+
+// saidDropped tells the thread that updates to it were dropped (enqueue).
+func (p *phone) saidDropped(ctx context.Context) {
+	act := p.attach()
+	msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: "eagent could not reach this thread for a while and dropped some of its updates to it; the session's log in eagent has them all.", Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "updates_dropped"}, ClientKey: p.key("dropped", strconv.FormatInt(time.Now().UnixNano(), 10)), Activity: act})
+	if err == nil {
+		p.rememberIn(msg, thread)
+		p.markSent(act)
 	}
 }
 
@@ -673,9 +695,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				_ = p.client.Cancel(ctx, fid)
 			}
 			if d.Source != "finalechat" && p.mirror {
-				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
+				msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
 				if err == nil {
-					p.remember(msg.ID)
+					p.rememberIn(msg, thread)
 				}
 			}
 		})
@@ -723,9 +745,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			// An agent's post without a status clears the thread's line;
 			// the agent is still at work, so the line rides along.
 			act := p.attach()
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
+			msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
 			if err == nil {
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -737,9 +759,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		text := d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
+			msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
 			if err == nil {
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.mu.Lock()
 				if p.mirrored == nil {
 					p.mirrored = map[int64]string{}
@@ -772,7 +794,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// dead ones to the card still open (reused, not doubled) or to the
 	// first free key. A resume costs one call, or two when the newest card
 	// died, plus one for each card the record lost.
-	newest, earlier := latestKeys(r.st, qid), liveCards(r.st, qid)
+	newest, earlier, asMessage := latestKeys(r.st, qid), liveCards(r.st, qid), postedAsMessage(r.st, qid)
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -830,10 +852,29 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			for i, o := range options {
 				body += fmt.Sprintf("\n%d. %s", i+1, o)
 			}
+			// A message stays in its thread: on a service that keeps no
+			// client keys, one an earlier run posted in this thread is not
+			// posted again, and the record says where each went.
+			p.mu.Lock()
+			here := p.threadID
+			p.mu.Unlock()
+			if key == "" && asMessage[here] {
+				return
+			}
 			// It carries the waiting line, as the card would have.
 			if m, thread, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text"), Activity: act}); perr == nil {
 				p.rememberIn(m, thread)
 				p.markSent(act)
+				if key == "" {
+					p.mu.Lock()
+					in := p.threadID
+					p.mu.Unlock()
+					r.post(func() {
+						if !r.ending {
+							r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, ThreadID: in}))
+						}
+					})
+				}
 				return
 			}
 		}
@@ -871,8 +912,14 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// dismissed before this is their dismissal.
 			for _, fid := range earlier {
 				_ = p.client.Cancel(ctx, fid)
-				if c, err := p.client.Question(ctx, fid, 0); err == nil && c.Status == "dismissed" {
+				c, err := p.client.Question(ctx, fid, 0)
+				if err == nil && c.Status == "dismissed" {
 					p.dismissed(r, qid)
+				}
+				if err == nil && c.Status != "pending" {
+					p.mu.Lock()
+					delete(p.open, fid) // closed for good: nothing to check
+					p.mu.Unlock()
 				}
 			}
 		}
@@ -1030,8 +1077,9 @@ var (
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
-// started is the ledger as this run's first write starts it (startPhone).
-func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
+// started is the ledger as this run's first write starts it (startPhone);
+// unread says its read of the messages that waited failed for good.
+func (p *phone) poll(r *Runtime, started integration.PhoneLedger, unread bool) {
 	defer p.wg.Done()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
@@ -1044,7 +1092,24 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 		var msgs []finalechat.Message
 		var anchorUnknown bool
 		var err error
-		if after == "" {
+		if unread {
+			// Nothing is taken before it is known where the messages that
+			// waited begin: the read is made again, backing off as a failed
+			// read of the thread does, and the poll then reads on as the
+			// start does after it (from just before the earliest; after the
+			// session's own post, here after, when none waited).
+			var prev string
+			var found bool
+			if _, prev, found, err = started.Waiting(p.ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); err == nil {
+				unread = false
+				if found {
+					p.mu.Lock()
+					p.lastID, p.resumedBy, p.fallback = prev, prev, after
+					p.mu.Unlock()
+				}
+				continue
+			}
+		} else if after == "" {
 			// No message to read on from: the thread from its start, oldest
 			// first. (Asked with no cursor the service lists its newest
 			// page, which passes over what is older.)
@@ -1154,9 +1219,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
 					notes = append(notes, func(ctx context.Context) {
 						act := p.attach()
-						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
+						msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
-							p.remember(msg.ID)
+							p.rememberIn(msg, thread)
 							p.markSent(act)
 						}
 					})
@@ -1454,6 +1519,20 @@ func latestKeys(st *state.State, qid string) map[string]int {
 		var d event.PhoneQuestionData
 		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.ThreadID != "" && d.Key > out[d.ThreadID] {
 			out[d.ThreadID] = d.Key
+		}
+	}
+	return out
+}
+
+// postedAsMessage is each thread the record says question qid went to as
+// a message, the service having refused it as a card, on a service that
+// keeps no client keys: a phone.question with no card.
+func postedAsMessage(st *state.State, qid string) map[string]bool {
+	out := map[string]bool{}
+	for _, ev := range st.Events {
+		var d event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.CardID == "" {
+			out[d.ThreadID] = true
 		}
 	}
 	return out
