@@ -1,7 +1,10 @@
 package harness
 
 import (
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
@@ -41,5 +44,42 @@ func TestK2AnAddressWithATrailingSlashIsNoMove(t *testing.T) {
 	}
 	if !on {
 		t.Fatalf("a reply from %q is not taken for the route in use, now written %q", old, eps[0].BaseURL)
+	}
+}
+
+// C5: a session with no terminal stops its agent and reports; its closing
+// look puts the conversation past the restart size. The session is ending,
+// and nothing will be asked of that conversation again: no dossier pass is
+// paid for before it ends.
+func TestK2AnEndingBatchSessionPaysForNoDossier(t *testing.T) {
+	var passes atomic.Int32
+	_, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			passes.Add(1)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			r := hold()
+			r.prompt = 30000 // past the 20,000 restart size of testConfig
+			return r
+		}
+		return stopsAndReports("The build is green; stopping Codex.")
+	})
+	var code int
+	select {
+	case code = <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q", ui.said())
+	}
+	if code != 0 {
+		t.Fatalf("exit %d; said %q", code, ui.said())
+	}
+	if n := passes.Load(); n != 0 {
+		t.Fatalf("%d dossier passes paid for by a session that was ending", n)
 	}
 }

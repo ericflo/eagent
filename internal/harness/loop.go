@@ -459,10 +459,11 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if r.needsDossier() {
+	if !r.stillClosing() && r.needsDossier() {
 		// Restart at the first quiet moment: the prompt is still in the
 		// provider's cache, so the dossier is cheap to write now, and the
-		// user's next message does not have to wait for it.
+		// user's next message does not have to wait for it. Not in a
+		// session that is ending: nothing will be asked of it again.
 		r.startDossier()
 		return
 	}
