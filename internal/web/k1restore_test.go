@@ -84,10 +84,10 @@ func TestK1APhoneResumeCarriesTheRefusedFiles(t *testing.T) {
 	}
 }
 
-// With the phone off for the sessions the server resumes (the project's
-// finalechat.enabled false), a restart brings a session back as it was:
-// no reply is taken from its thread, as the reply watcher takes none.
-func TestK4ARestoreWithThePhoneOffTakesNoReply(t *testing.T) {
+// With the phone off in the project's file (finalechat.enabled false), a
+// restart still brings a session back with the reply that waited in its
+// thread, as on main and as the reply watcher takes one.
+func TestK4ARestoreWithThePhoneOffStillTakesTheReply(t *testing.T) {
 	s, project := newTestServer(t)
 	t.Setenv("EAGENT_FINALECHAT", "") // the configuration, not the kill switch, turns the phone off
 	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
@@ -104,8 +104,8 @@ func TestK4ARestoreWithThePhoneOffTakesNoReply(t *testing.T) {
 	s.rememberHosted()
 	replies := k4Restores(t)
 	New(project, nil).restoreHosted(context.Background())
-	if len(*replies) != 1 || (*replies)[0] != "" {
-		t.Fatalf("brought back with %q, want the session with no reply", *replies)
+	if len(*replies) != 1 || (*replies)[0] != "are you still there?" {
+		t.Fatalf("brought back with %q, want the reply that waited", *replies)
 	}
 }
 
