@@ -1386,6 +1386,14 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					continue
 				}
 				if !known {
+					// A card the record holds for the question open when
+					// this run started (startPhone): its question is known,
+					// whether or not the service can be asked.
+					p.mu.Lock()
+					qid, known = p.open[fid]
+					p.mu.Unlock()
+				}
+				if !known {
 					// A card from before this run (the thread outlives the
 					// session id) or from an ask whose reply was lost. Recover
 					// the eagent question id from the question's own meta; if
