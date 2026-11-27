@@ -136,6 +136,11 @@ type Seat struct {
 	activityAt time.Time
 	lastLine   time.Time
 	pending    []*pending
+	// inQueue are the sends that arrived in the agent's own queue
+	// (Claude's enqueue line), until a prompt shows them or the queue
+	// gives them back into the input box (requeue): then each is watched
+	// again as a send typed and not yet shown.
+	inQueue    []queuedSend
 	turnStart  time.Time
 	turnTools  int
 	turnImages []string
@@ -225,6 +230,13 @@ type pending struct {
 	// started again from the top since (readTail).
 	afterIn string
 	after   int64
+}
+
+// queuedSend is a send in the agent's own queue (Seat.inQueue): as is the
+// queue entry it arrived in, normalized.
+type queuedSend struct {
+	p  *pending
+	as string
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -1106,6 +1118,15 @@ func (s *Seat) matchPending(text string) []string {
 // recorded: the record's read mark makes such an entry news, and it was
 // written before the send.
 func (s *Seat) matchSends(text string, at time.Time, pos int64, news bool) []string {
+	var ids []string
+	for _, p := range s.takeSends(text, at, pos, news) {
+		ids = append(ids, p.id)
+	}
+	return ids
+}
+
+// takeSends is matchSends, returning the sends themselves.
+func (s *Seat) takeSends(text string, at time.Time, pos int64, news bool) []*pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cands []int
@@ -1154,17 +1175,61 @@ func (s *Seat) matchSends(text string, at time.Time, pos int64, news bool) []str
 	for _, k := range got {
 		drop[cands[k]] = true
 	}
-	var ids []string
+	var taken []*pending
 	keep := s.pending[:0]
 	for i, p := range s.pending {
 		if drop[i] {
-			ids = append(ids, p.id)
+			taken = append(taken, p)
 			continue
 		}
 		keep = append(keep, p)
 	}
 	s.pending = keep
-	return ids
+	return taken
+}
+
+// noteQueued keeps the sends that arrived in the agent's own queue as the
+// entry it wrote for them (inQueue).
+func (s *Seat) noteQueued(got []*pending, entry string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range got {
+		s.inQueue = append(s.inQueue, queuedSend{p, normalize(entry)})
+	}
+	if n := len(s.inQueue) - 64; n > 0 {
+		s.inQueue = s.inQueue[n:]
+	}
+}
+
+// shownQueued forgets the queued sends a prompt has shown running.
+func (s *Seat) shownQueued(prompt string) {
+	got := normalize(prompt)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inQueue = slices.DeleteFunc(s.inQueue, func(q queuedSend) bool { return strings.Contains(got, q.as) })
+}
+
+// requeue: the agent's queue gave the entry back into its input box,
+// unread (Claude's popAll, at an interrupt). The sends that arrived as it
+// are watched again as typed and not yet shown: the check of the screen
+// presses Enter on one whose words sit in the box once the agent is idle,
+// a prompt that shows it confirms it, and one that never shows is reported
+// as any typed send is. (It stayed "arrived" on the record while it sat in
+// the box for good.)
+func (s *Seat) requeue(entry string) {
+	as := normalize(entry)
+	var back []*pending
+	s.mu.Lock()
+	s.inQueue = slices.DeleteFunc(s.inQueue, func(q queuedSend) bool {
+		if q.as == as {
+			back = append(back, q.p)
+		}
+		return q.as == as
+	})
+	s.mu.Unlock()
+	for _, p := range back {
+		s.trackSend(&pending{id: p.id, text: p.text, mode: p.mode})
+	}
 }
 
 // spoolNames lists a spool's file names; [] (not nil) when it has none.
@@ -1958,16 +2023,24 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		var ids []string
+		var got []*pending
 		if !o.again {
-			ids = s.matchSends(o.text, o.at, o.pos, true)
+			got = s.takeSends(o.text, o.at, o.pos, true)
 		}
-		for _, id := range ids {
-			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+		switch {
+		case o.queued:
+			s.noteQueued(got, o.text)
+		case o.again:
+			s.shownQueued(o.text)
 		}
-		if len(ids) == 0 {
+		for _, p := range got {
+			s.emit(Event{Kind: KindDelivered, SendID: p.id, OK: true})
+		}
+		if len(got) == 0 {
 			s.silentUser = true // readTail says how far it was read
 		}
+	case "unqueued":
+		s.requeue(o.text)
 	case "working":
 		s.mu.Lock()
 		fresh := s.state != "working" && !s.heldByDialog("working")

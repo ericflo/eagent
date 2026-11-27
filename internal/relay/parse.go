@@ -29,6 +29,11 @@ type obs struct {
 	// an earlier line (Claude's prompt for a message it had queued). It
 	// confirms nothing.
 	again bool
+	// queued: a user line that is the agent's own queue taking the message
+	// (Claude's enqueue): it has arrived, and no prompt has shown it yet.
+	// The kind "unqueued" says the queue gave such a message back into
+	// the input box, unread.
+	queued bool
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -269,7 +274,7 @@ func (p *claudeParser) line(raw []byte) []obs {
 			if p.queued = append(p.queued, s); len(p.queued) > 64 {
 				p.queued, p.old = p.queued[1:], max(p.old-1, 0)
 			}
-			return []obs{{kind: "user", text: s, at: at}}
+			return []obs{{kind: "user", text: s, at: at, queued: true}}
 		case op == "dequeue":
 			p.taken++
 		case s != "" && (op == "remove" || op == "popOne"):
@@ -280,9 +285,18 @@ func (p *claudeParser) line(raw []byte) []obs {
 			} else {
 				p.clearQueue()
 			}
+		case op == "popAll":
+			// All of them, back into the input box (an interrupt does
+			// it), unread. Each that was read as news is said, so that a
+			// send among them is watched again (Seat.fold).
+			var back []obs
+			for _, q := range p.queued[min(p.old, len(p.queued)):] {
+				back = append(back, obs{kind: "unqueued", text: q, at: at})
+			}
+			p.clearQueue()
+			return back
 		default:
-			// popAll takes them all (back into the input box); any other
-			// line's effect is not known.
+			// Any other line's effect is not known.
 			p.clearQueue()
 		}
 		return nil
