@@ -216,11 +216,11 @@ type Runtime struct {
 	shutdownOnce sync.Once
 	exitCode     int
 	closed       chan struct{} // closed when the loop has fully stopped
-	// late takes, once the loop has stopped (loopDone: finish began), a
-	// seat's news and a send's end for finish (postNews), until lateEnd:
-	// finish has settled every seat taken out of use.
-	late              chan func()
-	loopDone, lateEnd chan struct{}
+	// loopDone is closed as finish begins (the loop has stopped); finish
+	// reads the loop's queue until it ends it (queueEnded, endQueue).
+	loopDone   chan struct{}
+	queueMu    sync.RWMutex
+	queueEnded bool
 }
 
 // New creates a new session in the project directory.
@@ -459,8 +459,8 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		models:         map[string]*modelRoute{},
 		loop:           make(chan func(), 1024),
 		ctx:            ctx, stop: cancel,
-		closed: make(chan struct{}),
-		late:   make(chan func()), loopDone: make(chan struct{}), lateEnd: make(chan struct{}),
+		closed:   make(chan struct{}),
+		loopDone: make(chan struct{}),
 	}
 	if cfg.ReportMaxChars > 0 {
 		r.view.ReportChars = cfg.ReportMaxChars
@@ -1020,67 +1020,59 @@ func (r *Runtime) SessionID() string { return r.sess.ID }
 
 // ---- loop plumbing --------------------------------------------------------
 
-// sync runs fn on the loop goroutine and waits for it. During shutdown the
-// loop keeps serving closures until the turn in flight has stopped, so late
-// events (a last message, a tool result) are still recorded.
+// enqueue hands fn to the loop's one queue, which the loop reads while it
+// runs and finish reads from its first step to the end of its retiring
+// drain: every fn it takes is run. False once finish has stopped reading
+// it (endQueue): fn is not run, and the caller is told.
+func (r *Runtime) enqueue(fn func()) bool {
+	r.queueMu.RLock()
+	defer r.queueMu.RUnlock()
+	if r.queueEnded {
+		return false
+	}
+	r.loop <- fn // finish keeps reading while it waits to end the queue
+	return true
+}
+
+// endQueue stops the queue taking work, reading it meanwhile so a caller
+// waiting to hand work over is not stuck, then runs what it took. Finish's
+// goroutine.
+func (r *Runtime) endQueue() {
+	for !r.queueMu.TryLock() {
+		select {
+		case fn := <-r.loop:
+			fn()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	r.queueEnded = true
+	r.queueMu.Unlock()
+	for {
+		select {
+		case fn := <-r.loop:
+			fn()
+		default:
+			return
+		}
+	}
+}
+
+// sync runs fn on the loop goroutine and waits for it. During shutdown
+// finish keeps running what the queue took (enqueue), so late events (a
+// last message, a tool result, a send's end) are still recorded; once it
+// has ended the queue, fn is not run and sync returns at once.
 func (r *Runtime) sync(fn func()) {
 	done := make(chan struct{})
-	select {
-	case r.loop <- func() { fn(); close(done) }:
-	case <-r.closed:
-		return
-	}
-	select {
-	case <-done:
-	case <-r.closed:
+	if r.enqueue(func() { fn(); close(done) }) {
+		<-done
 	}
 }
 
-// post runs fn on the loop goroutine without waiting.
+// post runs fn on the loop goroutine without waiting; once finish has ended
+// the queue it is not run, and the log says so.
 func (r *Runtime) post(fn func()) {
-	select {
-	case r.loop <- fn:
-	case <-r.closed:
-	}
-}
-
-// postNews is post for a seat's news and the end of a send typed into it:
-// once the loop has stopped, finish runs fn (late), until it has settled
-// every seat taken out of use (lateEnd); after that fn is dropped.
-func (r *Runtime) postNews(fn func()) {
-	late := func() {
-		select {
-		case r.late <- fn:
-		case <-r.lateEnd:
-		}
-	}
-	select {
-	case <-r.loopDone:
-		late()
-		return
-	default:
-	}
-	select {
-	case r.loop <- fn:
-	case <-r.loopDone:
-		late()
-	}
-}
-
-// syncNews is postNews that waits for fn to run, and says whether it ran.
-func (r *Runtime) syncNews(fn func()) bool {
-	done := make(chan struct{})
-	r.postNews(func() { fn(); close(done) })
-	select {
-	case <-done:
-		return true
-	case <-r.lateEnd:
-		select {
-		case <-done:
-			return true
-		default:
-			return false
-		}
+	if !r.enqueue(fn) {
+		r.ui.Log("loop work after the session's end was not run")
 	}
 }
 
@@ -1415,7 +1407,7 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
-	close(r.loopDone) // a seat's news comes to finish from now on (postNews)
+	close(r.loopDone) // finish reads the loop's queue from here (endQueue)
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
 	grace := 5 * time.Second
@@ -1458,8 +1450,8 @@ queued:
 	r.pollInbox()
 	// Every seat taken out of use (a stop, a restart, a switch, Stop
 	// session) has drained and its sends are settled before the end: what
-	// it says, and how a send typed into it ended, come here now
-	// (postNews), and each is settled once it has drained and no send is
+	// it says, and how a send typed into it ended, come through the queue
+	// read here, and each is settled once it has drained and no send is
 	// being typed into it, within one bound for all; past it, the rest are
 	// settled as they stand. A start under way settles its own (below).
 	r.settleDueRetired()
@@ -1473,7 +1465,7 @@ retired:
 			break
 		}
 		select {
-		case fn := <-r.late:
+		case fn := <-r.loop:
 			fn()
 		case <-limit.C:
 			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
@@ -1493,7 +1485,10 @@ retired:
 	for _, seat := range rest {
 		r.settleRetired(seat)
 	}
-	close(r.lateEnd) // later news of a stopped agent is not recorded
+	// The queue's end: what it took is run; from here a post is refused
+	// (its caller is told), and a start that ends later is recorded below
+	// (abandonLaunch).
+	r.endQueue()
 	// A start still under way is waited for: one whose agent comes up is
 	// recorded below (abandonLaunch). Nothing is under way in an ordinary
 	// shutdown, so this costs nothing then.

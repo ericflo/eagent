@@ -166,7 +166,12 @@ func TestRelayToolsSayTheSessionIsEndingOnceItHasEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { rt.sess.Close() })
-	close(rt.closed) // the loop has stopped; nothing serves r.sync
+	// The loop has stopped, and finish has ended its queue: nothing serves
+	// r.sync (enqueue refuses).
+	close(rt.closed)
+	rt.queueMu.Lock()
+	rt.queueEnded = true
+	rt.queueMu.Unlock()
 	for _, c := range []struct {
 		tool string
 		args map[string]any

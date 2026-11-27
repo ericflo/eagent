@@ -598,7 +598,7 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 // the head of its queue, which finish records not sent. Then its waiter,
 // if any, is told. Not on the loop goroutine.
 func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
-	ran := r.syncNews(func() {
+	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
 		gone := q.gone
 		q.typing, q.gone = "", ""
@@ -1220,7 +1220,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 	go func() {
 		for ev := range seat.Events() {
 			ev := ev
-			r.postNews(func() {
+			r.post(func() {
 				if r.relays.get(name) == seat {
 					r.onRelayEvent(name, ev)
 					return
@@ -1249,7 +1249,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				}
 			})
 		}
-		r.postNews(func() {
+		r.post(func() {
 			r.relays.drop(name, seat)
 			r.relays.mu.Lock()
 			if r.relays.drained[seat] == drained {
