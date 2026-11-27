@@ -55,6 +55,9 @@ type Event struct {
 	// Dialog, on a state event blocked by a dialog the agent reports (pi's
 	// extension), is its title; "" on every other event.
 	Dialog string
+	// Stuck, on a blocked state event, is Status.Stuck as it is said: a
+	// blocked seat says blocked again whenever it changes.
+	Stuck bool
 	// Read, on an event a line of the transcript gave and on KindRead, is
 	// how far the transcript was read: the end of that line. 0 otherwise.
 	Read int64
@@ -520,8 +523,9 @@ func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	if state == "working" {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
+	stuck := state == "blocked" && s.stuck
 	s.mu.Unlock()
-	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
+	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog, Stuck: stuck})
 }
 
 // Close stops watching. The agent keeps running.
@@ -877,6 +881,10 @@ var typeSettle = 350 * time.Millisecond
 // dialogPause is how long Send's last look waits after answering a dialog
 // before it looks again. Tests shorten it.
 var dialogPause = time.Second
+
+// screenEvery is how often the watcher reads the screen while it is worth
+// reading (wantsDialogCheck). Tests shorten it.
+var screenEvery = 1500 * time.Millisecond
 
 func (s *Seat) typeText(text string) error {
 	s.typing.Lock()
@@ -1563,7 +1571,7 @@ func (s *Seat) watch() {
 				s.caughtUp(time.Now())
 			}
 		}
-		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
+		if now.Sub(lastDialog) >= screenEvery && s.wantsDialogCheck(now) {
 			lastDialog = now
 			s.checkScreen(now)
 		}
@@ -2164,10 +2172,20 @@ func (s *Seat) checkScreen(now time.Time) {
 		// (Status.Stuck).
 		work := s.atWork(screen)
 		s.mu.Lock()
-		if s.hung && s.state == "blocked" {
+		changed := s.hung && s.state == "blocked" && s.stuck == work
+		if changed {
 			s.stuck = !work
 		}
 		s.mu.Unlock()
+		if changed {
+			// Said (blocked again, with what changed): a change waiting on
+			// the agent is looked at again only when the seat says something.
+			detail := "still no transcript activity, and it no longer shows it is at work; the screen ends:\n" + lastLines(screen, 10)
+			if work {
+				detail = "still no transcript activity; it shows it is at work again"
+			}
+			s.emit(Event{Kind: KindState, State: "blocked", Detail: detail, Stuck: !work})
+		}
 	}
 }
 

@@ -35,3 +35,63 @@ func TestSr7SeatPiAtWorkInALongToolIsNotStuck(t *testing.T) {
 	}
 	_ = drain(s.events)
 }
+
+// SR7-3. The fifth review's "waited for good", for a block that turns
+// stuck after it began. A model change asked while Codex works waits; the
+// harness looks at it again only when the seat says blocked or exited
+// (KindState), quiet (KindQuiet), or a send failed. Codex goes quiet for
+// ten minutes with its spinner still up (a long build): blocked, not stuck,
+// so the change keeps waiting, as it should. Then the spinner stops and the
+// prompt does not come back: checkScreen sets stuck at that look
+// (TestK9SeatSaysWhenABlockedAgentIsStuck), but says nothing. No event goes
+// out, so applyWaitingRepick never runs again and the change waits for
+// good on an agent the seat knows is stuck, though one asked now would
+// restart it at once (heldBack).
+func TestSr7SeatABlockThatTurnsStuckSaysSo(t *testing.T) {
+	saved := screenEvery
+	screenEvery = 2 * piLook
+	t.Cleanup(func() { screenEvery = saved })
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	writeLines(t, path)
+	busy := "• Running go test ./... (12m 03s • esc to interrupt)\n› "
+	h := &fakeHost{alive: true, screen: busy}
+	s := newSeat(Spec{}, codexAgent{}, h, "sr7-later-stuck", "thread-1")
+	long := time.Now().Add(-11 * time.Minute)
+	s.transcript, s.state, s.stateAt, s.lastLine, s.poll = path, "working", long, long, piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	blocked := false
+	deadline := time.After(5 * time.Second)
+	for !blocked {
+		select {
+		case ev := <-s.events:
+			blocked = ev.Kind == KindState && ev.State == "blocked"
+		case <-deadline:
+			t.Fatal("never blocked")
+		}
+	}
+	if st := s.Snapshot(); st.Stuck {
+		t.Fatal("stuck with its spinner up")
+	}
+	h.mu.Lock()
+	h.screen = "$ "
+	h.mu.Unlock()
+	if !within(5*time.Second, func() bool { return s.Snapshot().Stuck }) {
+		t.Fatal("never stuck after the spinner stopped")
+	}
+	var said []string
+	wait := time.After(looks(40))
+	for {
+		select {
+		case ev := <-s.events:
+			said = append(said, ev.Kind)
+			if ev.Kind == KindState || ev.Kind == KindQuiet {
+				return
+			}
+			continue
+		case <-wait:
+		}
+		break
+	}
+	t.Fatalf("the seat is stuck now (Status.Stuck) and said nothing a waiting change looks at (events %v): a model change that waited for the turn waits for good", said)
+}
