@@ -162,13 +162,23 @@ type Seat struct {
 	// typing has read the agent's status and transcript (releaseHeld).
 	looks int
 	held  []heldEvent
-	// moveFrom, moveLook: a command that moves the agent to another
-	// session (sessionMover) was typed at look moveLook (0: none) on
-	// session moveFrom. quietSaid: KindQuiet was sent, and no other event
-	// since (emitAside clears it).
+	// moveFrom, moveLook, moveIdle: one of the agent's own commands (any:
+	// which move it to another session is not kept) was typed on session
+	// moveFrom before look moveLook (0: none), and moveIdle is the first
+	// look from then that found the agent idle (0: none yet). quietSaid:
+	// KindQuiet was sent, and no other event since (emitAside clears it).
 	moveFrom  string
 	moveLook  int
+	moveIdle  int
 	quietSaid atomic.Bool
+	sending   int // Sends under way (Send, until it returns)
+	// ended: the watcher released what was held for the last time at a
+	// close (a command typed after says its delivered itself). closeLater: watching
+	// ended with a Send under way; the last to return closes events.
+	ended, closeLater bool
+	// queueHolds: the agent's own queue holds a message it has not taken,
+	// as the transcript's parser last said (queueHolder; watcher writes).
+	queueHolds bool
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -443,7 +453,8 @@ func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
 		state: "starting", stateAt: time.Now(), handled: map[string]time.Time{}}
 }
 
-// Events delivers what the seat observes. It is closed when watching stops.
+// Events delivers what the seat observes. It is closed when watching stops
+// and no Send is under way.
 func (s *Seat) Events() <-chan Event { return s.events }
 
 // Target is the terminal session name.
@@ -548,8 +559,9 @@ type Status struct {
 	Dialog string
 	// Quiet: nothing waits on the agent. It is idle, no dialog holds it,
 	// the seat waits to confirm no send, holds no command's delivered, and
-	// no move a command started is pending (a command that moves the
-	// session: pending until the move is seen, or quietMoveLooks looks).
+	// none of the agent's own commands is pending (until a move to another
+	// session is seen, or quietMoveLooks looks after the agent is idle),
+	// and no move it has seen is still to be said (refollow).
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 }
@@ -575,6 +587,22 @@ func (s *Seat) Snapshot() Status {
 // after_turn (hold it until the current turn ends). Delivery is confirmed
 // later, from the transcript, as a KindDelivered event.
 func (s *Seat) Send(id, text, mode string) (string, error) {
+	// Not quiet from here until the send's outcome is settled in the seat
+	// (tracked, its delivered held, or returned failed): a command is not
+	// tracked while it is typed. Quiet is said again once it holds.
+	s.mu.Lock()
+	s.sending++
+	s.quietSaid.Store(false)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.sending--
+		last := s.sending == 0 && s.closeLater
+		s.mu.Unlock()
+		if last {
+			s.closeEvents() // watching ended while this send was under way
+		}
+	}()
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return "", errors.New("nothing to send")
@@ -694,12 +722,20 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// delivered. Said once the watcher's next look has read what the
 		// agent did with it (pi's move to the session /new opens goes out
 		// first), so the record does not take it as acted on before then.
+		ev := Event{Kind: KindDelivered, SendID: id, OK: true}
 		s.mu.Lock()
-		s.held = append(s.held, heldEvent{Event{Kind: KindDelivered, SendID: id, OK: true}, s.looks})
-		if m, ok := s.agent.(sessionMover); ok && m.movesSession(text) {
-			s.moveFrom, s.moveLook = s.inner, s.looks+1
+		ended := s.ended
+		if !ended {
+			s.held = append(s.held, heldEvent{ev, s.looks})
 		}
+		s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
 		s.mu.Unlock()
+		if ended {
+			// Watching ended as it was typed (a close): nothing releases
+			// held any more, so it goes out now. Events stay open until
+			// this Send returns (closeLater).
+			s.emitHeld(ev)
+		}
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
 	switch {
@@ -974,8 +1010,9 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 // space or the end. "/home/eric/plan.md has it" is a message.
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
 
-// IsAgentCommand is isAgentCommand for the harness: typed into the agent's
-// prompt, such a command runs at once and starts no turn.
+// IsAgentCommand is isAgentCommand for the harness, which words what holds a
+// waiting change from it: typed into the agent's prompt, such a command runs
+// at once and starts no turn.
 func IsAgentCommand(text string) bool { return isAgentCommand(text) }
 
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
@@ -1277,12 +1314,15 @@ var tailBackfill int64 = 4 << 20
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer func() {
-		// Under the lock every event goes out under: a send that comes
-		// after (Send's, from its own goroutine) finds it closed.
-		s.emitMu.Lock()
-		s.eventsClosed = true
-		close(s.events)
-		s.emitMu.Unlock()
+		// A Send under way may still say how it ended (a command typed as
+		// the seat closed): the last one to return closes events then.
+		s.mu.Lock()
+		s.closeLater = s.sending > 0
+		later := s.closeLater
+		s.mu.Unlock()
+		if !later {
+			s.closeEvents()
+		}
 	}()
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
@@ -1379,6 +1419,7 @@ func (s *Seat) watch() {
 			if path != "" {
 				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
+				s.queueHolds = false // a new parser knows of no queue yet
 				first := s.transcript == ""
 				if _, ok := s.agent.(sessionStarter); ok && first && !s.followed && s.inner != "" && inner != s.inner {
 					// The agent left the session it was started on before
@@ -1514,43 +1555,50 @@ func (s *Seat) watch() {
 }
 
 // sessionMover is an agent with commands of its own that move it to
-// another session (pi's /new, Claude's /clear): until the move is seen,
-// nothing that waits on the agent being quiet goes ahead.
+// another session (pi's /new, Claude's /clear): it is polled at every
+// look, so a move is seen.
 type sessionMover interface {
-	movesSession(command string) bool
+	movesSessions()
 }
 
-// commandName is a command's first word ("/resume" of "/resume abc").
-func commandName(text string) string {
-	if f := strings.Fields(text); len(f) > 0 {
-		return f[0]
-	}
-	return ""
-}
-
-// quietMoveLooks is how many looks a command that moves the session is
-// waited for when no move shows (Status.Quiet).
+// quietMoveLooks is how many looks, from the first that finds the agent
+// idle after one of its own commands, the command is waited on when no
+// move to another session shows (Status.Quiet).
 const quietMoveLooks = 5
 
 // quietLocked is Status.Quiet. The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
-	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && !s.refollow && s.sending == 0 && !s.queueHolds && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+}
+
+// queueHolder is a parser that follows the agent's own queue of messages
+// typed while it works (Claude's queue lines).
+type queueHolder interface {
+	holding() bool // it holds one the agent has not taken yet
 }
 
 // sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
 // look: after what the look read, and the moves and deliveries it sent. A
 // move a command started is seen once the seat is on another session and
-// has said so; one that does not show is given up after quietMoveLooks.
+// has said so; one that does not show is given up quietMoveLooks after the
+// first look that finds the agent idle (a command queued while it works
+// runs after the turn).
 func (s *Seat) sayQuiet() {
 	s.mu.Lock()
-	if s.moveLook > 0 && (s.inner != s.moveFrom && !s.refollow || s.looks-s.moveLook >= quietMoveLooks) {
-		s.moveFrom, s.moveLook = "", 0
+	if s.moveLook > 0 {
+		if s.moveIdle == 0 && s.state == "idle" && s.looks >= s.moveLook {
+			s.moveIdle = s.looks
+		}
+		if s.inner != s.moveFrom && !s.refollow || s.moveIdle > 0 && s.looks-s.moveIdle >= quietMoveLooks {
+			s.moveFrom, s.moveLook, s.moveIdle = "", 0, 0
+		}
 	}
-	q := s.quietLocked()
+	// Marked said before it goes out, under the lock Send's start clears
+	// the mark under: a clear made while it goes out is never overwritten.
+	say := s.quietLocked() && s.quietSaid.CompareAndSwap(false, true)
 	s.mu.Unlock()
-	if q && !s.quietSaid.Load() {
+	if say {
 		s.emitAside(Event{Kind: KindQuiet})
-		s.quietSaid.Store(true)
 	}
 }
 
@@ -1568,6 +1616,15 @@ type heldEvent struct {
 func (s *Seat) releaseHeld(look int) {
 	s.mu.Lock()
 	var due []Event
+	// The last release at a close: a command typed after says its own
+	// delivered. (After an exit the record settles a send being typed as
+	// gone, and nothing says it again.)
+	s.ended = s.ended || look == math.MaxInt && s.closed
+	if look == math.MaxInt && s.refollow {
+		// Watching ends before the look that would say the move seen:
+		// said now, ahead of the deliveries, as that look would.
+		due = append(due, Event{Kind: KindInner, InnerID: s.inner})
+	}
 	if !s.refollow || look == math.MaxInt {
 		keep := s.held[:0]
 		for _, h := range s.held {
@@ -1586,6 +1643,17 @@ func (s *Seat) releaseHeld(look int) {
 		} else {
 			s.emitAside(ev)
 		}
+	}
+}
+
+// closeEvents closes events, under the lock every event goes out under: a
+// send that comes after (Send's, from its own goroutine) finds it closed.
+func (s *Seat) closeEvents() {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if !s.eventsClosed {
+		s.eventsClosed = true
+		close(s.events)
 	}
 }
 
@@ -1641,7 +1709,13 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 				end = starts[i+1]
 			}
 			s.readTo.Store(end)
-			for _, o := range p.line(line) {
+			got := p.line(line)
+			if qh, ok := p.(queueHolder); ok && qh.holding() != s.queueHolds {
+				s.mu.Lock()
+				s.queueHolds = qh.holding()
+				s.mu.Unlock()
+			}
+			for _, o := range got {
 				o.pos = starts[i]
 				s.fold(o)
 				if o.at.After(newest) {

@@ -344,14 +344,8 @@ func (a piAgent) command(p config.RelayProfile, innerID string, _ bool, hook str
 	return append(argv, p.Args...)
 }
 
-// movesSession: /new and /fork start another session, /resume opens one.
-func (piAgent) movesSession(command string) bool {
-	switch commandName(command) {
-	case "/new", "/resume", "/fork":
-		return true
-	}
-	return false
-}
+// movesSessions: /new and /fork start another session, /resume opens one.
+func (piAgent) movesSessions() {}
 
 // afterTurn leaves the text in the spool; the extension sends it as the
 // next message once pi has settled.
