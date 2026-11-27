@@ -55,3 +55,23 @@ func TestK7AKeptReplyStillInTheThreadIsTriedAgain(t *testing.T) {
 		t.Fatalf("resumed %#v, kept %#v; want the kept reply", host.resumed, w.retries.replies)
 	}
 }
+
+// Two replies wait while the session is stopped. The resume with the first
+// fails: the watcher keeps it and tells the thread it keeps trying, and
+// that note is now the thread's newest message, so the sweep's list of
+// threads passes the thread over. The user takes the first reply back.
+// The second still waits untaken: the sweep that lets the first go reads
+// the thread and resumes the session with the second.
+func TestK7TakingBackTheKeptReplyLeavesTheReplyAfterItToBeTaken(t *testing.T) {
+	f, w, host, _, sid := k7Kept(t, "drop the staging database")
+	f.say(sid, "m2", "and then run the tests", time.Now(), nil)
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "note", "sender": "system", "origin": "token", "body": "eagent could not resume this session for your reply yet. It keeps trying every minute.", "created_at": time.Now(), "meta": map[string]any{}})
+	f.threads[sid][1]["deleted"] = true
+	f.threads[sid][1]["body"] = ""
+	f.mu.Unlock()
+	w.sweep(context.Background())
+	if _, kept := w.retries.replies["m1"]; host.calls() != 1 || host.resumed[0].ID != "m2" || kept {
+		t.Fatalf("resumed %#v, m1 still kept: %v; want m1 let go and the session resumed with m2, the reply after it", host.resumed, kept)
+	}
+}

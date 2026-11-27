@@ -587,15 +587,19 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		}
 		// Told that it keeps trying: the copy is tried again while the
 		// thread still has the message. One the user took back since is
-		// let go, wherever the session's cursor stands by now. A thread
-		// that cannot be read leaves it to consider, as before.
+		// let go, wherever the session's cursor stands by now, and the
+		// thread is read as a sweep reads it: a reply after it may wait
+		// there, and the sweep's list passes over a thread whose newest
+		// message is the watcher's own note. A thread that cannot be read
+		// leaves the copy to consider, as before.
+		msg := p.msg
 		if gone, err := takenBack(ctx, w.client, p.thread.ExternalID, p.msg); err == nil && gone {
 			w.retries.mu.Lock()
 			delete(w.retries.replies, p.msg.ID)
 			w.retries.mu.Unlock()
-			continue
+			msg = finalechat.Message{}
 		}
-		w.consider(ctx, p.thread, p.msg)
+		w.consider(ctx, p.thread, msg)
 	}
 }
 
