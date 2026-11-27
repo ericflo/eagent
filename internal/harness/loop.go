@@ -1500,7 +1500,7 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	// still out when the model changed counted the old one's (promptOf). A
 	// resumed session reads it the same from the record (turnState.init).
 	r.called(r.promptOf(resp))
-	t.overflowed = false
+	t.overflowed, r.closingRefused = false, false
 	if w.look {
 		t.lookSteps = w.steps
 	}
@@ -1602,12 +1602,19 @@ var (
 func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
-	if errors.As(err, &ae) && ae.ContextOverflow() && r.stillClosing() {
-		// The session is ending: the refusal is final for it
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && r.stillClosing() {
+		// The session is ending: a refusal is final for it
 		// (refusedWhileClosing). No restart, no try again, no notice: it
 		// ends in its closing path's own words.
-		t.overflowed = true
-		r.ui.Log("eagent: the model refused the prompt as too long (%s); the session is ending, and ends without this look", shortErr(err))
+		r.closingRefused = true
+		if ae.ContextOverflow() {
+			// Should the session stop ending, the next look restarts
+			// the conversation first (needsDossier).
+			t.overflowed = true
+			r.ui.Log("eagent: the model refused the prompt as too long (%s); the session is ending, and ends without this look", shortErr(err))
+			return
+		}
+		r.ui.Log("eagent: the model refused the call (%s); the session is ending, and ends without this look", shortErr(err))
 		return
 	}
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
@@ -1672,14 +1679,15 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	}
 }
 
-// refusedWhileClosing reports that the last call was refused as too long
-// while the session is ending (stillClosing; turnFailed): that is final
-// for it. No restart is made (noRestartNow), the look is not made again
-// (maybeTurn), no notice is given, and the session ends (maybeEnd) in its
-// closing path's own words, as done: its closing word was asked for, and
-// what was refused came after it. Loop goroutine.
+// refusedWhileClosing reports that the last call was refused (4xx: too
+// long, or any other refusal) while the session is ending (stillClosing;
+// turnFailed): that is final for it. No restart is made (noRestartNow),
+// the look is not made again (maybeTurn), no notice is given, and the
+// session ends (maybeEnd) in its closing path's own words, as done: its
+// closing word was asked for, and what was refused came after it. Loop
+// goroutine.
 func (r *Runtime) refusedWhileClosing() bool {
-	return r.turns.overflowed && r.stillClosing()
+	return r.closingRefused && r.stillClosing()
 }
 
 // failingNotice opens what the user is told after two failed calls in a
