@@ -1464,7 +1464,6 @@ func (r *Runtime) awaitRetired(limit <-chan time.Time) {
 				fn := <-r.loop // finish alone reads the queue now
 				fn()
 			}
-			r.settleDueRetired()
 			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
 			return
 		}
