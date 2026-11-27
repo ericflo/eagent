@@ -129,8 +129,10 @@ func TestR10AReplyWhoseSecondNoticeFailedIsKeptForTheSweeps(t *testing.T) {
 	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please fix the login crash" || len(host.resumed[0].Attachments) != 2 {
 		t.Fatalf("after all is well again: resumed %#v, kept %#v", host.resumed, w.retries.replies)
 	}
-	if n := len(w.retries.replies); n != 0 {
-		t.Fatalf("%d replies still kept after the session was resumed: %#v", n, w.retries.replies)
+	// One quiet entry stays, for when the session stops again; the thread
+	// is told nothing more.
+	if p := w.retries.replies["m1"]; len(w.retries.replies) != 1 || p.msg.ID != "m1" || p.told {
+		t.Fatalf("kept after the session was resumed: %#v", w.retries.replies)
 	}
 }
 

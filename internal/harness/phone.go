@@ -612,7 +612,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				msg, thread, err = p.client.Post(ctx, p.ref, req)
 			}
 			if err == nil {
-				p.rememberIn(r, msg, thread)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -773,9 +773,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.mu.Lock()
 		start := max(1, newest[p.threadID])
 		p.mu.Unlock()
-		n := start
+		n, key := start, ""
 		for ; ; n++ {
-			key := p.key("q", qid)
+			key = p.key("q", qid)
 			if n > 1 && key != "" {
 				key = p.key("q", qid, strconv.Itoa(n))
 			}
@@ -833,6 +833,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.open[q.ID] = qid
 		p.mu.Unlock()
 		cardID, cardThread, cardKey := q.ID, thread.ID, n
+		if key == "" {
+			cardKey = 0 // asked with no client key: a later ask makes a new card beside it
+		}
 		if cardThread == "" {
 			p.mu.Lock()
 			cardThread = p.threadID
@@ -891,18 +894,16 @@ func (p *phone) remember(id string) {
 }
 
 // rememberIn records a post and, when the thread that answered is not the
-// one we knew (the user deleted it from the app and this post recreated it
-// under the same id), moves the reply anchor to this post so the poll does
-// not wait forever on an id the new thread never had.
-func (p *phone) rememberIn(r *Runtime, msg finalechat.Message, thread finalechat.Thread) {
+// one we knew (the user deleted it from the app and a post recreated it
+// under the same id), takes the new thread's id, as ask does. The reply
+// anchor stays where it is: the poll's next read says the anchor is
+// unknown and reads the new thread from its first message, so what the
+// user wrote there before this post is taken too.
+func (p *phone) rememberIn(msg finalechat.Message, thread finalechat.Thread) {
 	p.mu.Lock()
 	p.posted[msg.ID] = true
 	if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
 		p.threadID = thread.ID
-		p.lastID = msg.ID
-		p.mu.Unlock()
-		r.ui.Log("finalechat: the thread was recreated; replies are read from here on")
-		return
 	}
 	p.mu.Unlock()
 }
@@ -1422,7 +1423,9 @@ func latestKeys(st *state.State, qid string) map[string]int {
 // liveCards are the recorded cards of question qid that may still be open
 // on the service, newest first: in each thread only the card with the
 // highest key can be (every key before it was dead when it was made, and
-// a card never reopens), and every card recorded without its thread.
+// a card never reopens), and every card recorded without its thread or
+// without a key (made with no client key, which any later ask stands
+// beside).
 func liveCards(st *state.State, qid string) []string {
 	best := map[string]event.PhoneQuestionData{}
 	var out []string
@@ -1432,7 +1435,7 @@ func liveCards(st *state.State, qid string) []string {
 		if ev := st.Events[i]; ev.Type != event.PhoneQuestion || ev.Decode(&d) != nil || d.QuestionID != qid || d.CardID == "" {
 			continue
 		}
-		if d.ThreadID == "" {
+		if d.ThreadID == "" || d.Key == 0 {
 			if !seen[d.CardID] {
 				seen[d.CardID] = true
 				out = append(out, d.CardID)
