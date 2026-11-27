@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -27,19 +28,21 @@ import (
 // and never stopped. A hard kill writes nothing: those sessions come back on
 // the user's next message, as before.
 //
-// The list is serve-hosted.json: {"sessions": [...], "at": ..., "stop":
-// [{"session": ..., "at": ..., "config": ..., "preset": ...}]}. "stop"
-// marks the sessions the user stopped while a server was stopping, whose
-// stop had not been finished (its agents stopped and recorded) when the
-// list was last written, each with when the mark was last made and the
-// configuration the session last ran on there (runPick; a mark from before
-// these has none); a marked session is not among "sessions". The next
-// server finishes such a stop, telling the session's phone by that
-// configuration, and does not bring the session back; a mark the
-// session's record shows a run begun after is just dropped. A mark stays
-// on the list, through the next servers' starts and shutdowns, until its
-// stop is finished or no longer holds. A list written before "stop"
-// existed has none.
+// The list is serve-hosted.json: {"sessions": [...], "at": ..., "configs":
+// {session: {"config", "preset", "default"}}, "stop": [{"session": ...,
+// "at": ..., "config": ..., "preset": ..., "default": ...}]}. "configs"
+// names the configuration each session listed last ran on (runPick), which
+// the next server brings it back on (runConfig). "stop" marks the sessions
+// the user stopped while a server was stopping, whose stop had not been
+// finished (its agents stopped and recorded) when the list was last
+// written, each with when the mark was last made and the configuration the
+// session last ran on (a mark or list from before these has none); a
+// marked session is not among "sessions". The next server finishes such a
+// stop, telling the session's phone by that configuration, and does not
+// bring the session back; a mark the session's record shows a run begun
+// after is just dropped. A mark stays on the list, through the next
+// servers' starts and shutdowns, until its stop is finished or no longer
+// holds. A list written before "stop" existed has none.
 
 // hostedFile is where a stopping server lists the sessions it was hosting.
 func hostedFile(project string) string {
@@ -50,6 +53,9 @@ type hostedList struct {
 	Sessions []string   `json:"sessions"`
 	At       time.Time  `json:"at"`
 	Stop     []stopMark `json:"stop,omitempty"`
+	// Configs names, by session, the configuration each of Sessions last
+	// ran on (runPick).
+	Configs map[string]runPick `json:"configs,omitempty"`
 }
 
 // stopMark is a stop the user asked for a listed session (hostedList).
@@ -61,22 +67,40 @@ type stopMark struct {
 	runPick
 }
 
-// runPick names the configuration a run here was built with, as
-// loadConfig took it, this server's defaults applied and "-" for none, so
-// that another server loads the same one.
+// runPick names the configuration a run was built with, as loadConfig
+// took it, this server's defaults applied and "-" for none, so that
+// another server loads the same one; or, for a run started with none
+// picked, says it ran on the server's own (Default), which a later run
+// takes as that server's own. The zero value names none (not known).
 type runPick struct {
-	Config string `json:"config,omitempty"`
-	Preset string `json:"preset,omitempty"`
+	Config  string `json:"config,omitempty"`
+	Preset  string `json:"preset,omitempty"`
+	Default bool   `json:"default,omitempty"`
 }
 
-// ranOn is the configuration a run here was built with, and its names.
-type ranOn struct {
-	cfg  config.Config
-	pick runPick
+func (p runPick) String() string {
+	if p.Default {
+		return "the server's own configuration"
+	}
+	var parts []string
+	if p.Config != "-" {
+		parts = append(parts, "configuration "+p.Config)
+	}
+	if p.Preset != "-" {
+		parts = append(parts, "preset "+p.Preset)
+	}
+	if len(parts) == 0 {
+		return "the project's own configuration"
+	}
+	return strings.Join(parts, " with ")
 }
 
-// pickOf names the configuration loadConfig(bundle, preset) loads.
+// pickOf names the configuration loadConfig(bundle, preset) loads; with
+// none picked, the server's own (Default).
 func (s *Server) pickOf(bundle, preset string) runPick {
+	if bundle == "" && preset == "" {
+		return runPick{Default: true}
+	}
 	if bundle == "" {
 		bundle = s.Bundle
 	}
@@ -92,15 +116,66 @@ func (s *Server) pickOf(bundle, preset string) runPick {
 	return runPick{Config: bundle, Preset: preset}
 }
 
+// loadPick loads the configuration p names.
+func (s *Server) loadPick(p runPick) (config.Config, error) {
+	if p.Default {
+		return s.loadConfig("", "")
+	}
+	return s.loadConfig(p.Config, p.Preset)
+}
+
 // noteRan notes the configuration a run of the session here is built
 // with (ran).
-func (s *Server) noteRan(id string, cfg config.Config, pick runPick) {
+func (s *Server) noteRan(id string, pick runPick) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ran == nil {
-		s.ran = map[string]ranOn{}
+		s.ran = map[string]runPick{}
 	}
-	s.ran[id] = ranOn{cfg: cfg, pick: pick}
+	s.ran[id] = pick
+}
+
+// runConfig is the configuration the session runs on, wherever this
+// server starts or speaks for it (host, for every resume with no
+// configuration picked; a stop it finishes), and its names: the one its
+// last run known here was built with (ran: a run here, or the list the
+// previous server left); else the one the list of sessions to bring back
+// names for it (its stop's mark, or its entry); else the one its record
+// names (its session.start); else this server's own. The log says which,
+// past the first, and why a named one was passed over.
+func (s *Server) runConfig(info store.Info) (config.Config, runPick, error) {
+	s.mu.Lock()
+	pick, known := s.ran[info.ID]
+	from := ""
+	if !known {
+		list, _ := s.readHosted()
+		if m, ok := list.mark(info.ID); ok && m.runPick != (runPick{}) {
+			pick, known, from = m.runPick, true, "its stop's mark on the list of sessions to bring back"
+		} else if p, ok := list.Configs[info.ID]; ok && p != (runPick{}) {
+			pick, known, from = p, true, "the list of sessions to bring back"
+		}
+	}
+	s.mu.Unlock()
+	if known {
+		cfg, err := s.loadPick(pick)
+		if err == nil {
+			if from != "" {
+				s.logf("session %s runs on %s, as %s names it", info.ID, pick, from)
+			}
+			return cfg, pick, nil
+		}
+		s.logf("session %s: %s, which it last ran on, does not load (%v)", info.ID, pick, err)
+	}
+	if name := recordedConfig(info.Path); name != "" {
+		p := runPick{Config: name, Preset: "-"}
+		if cfg, err := s.loadPick(p); err == nil {
+			s.logf("session %s runs on %s, the one its record names", info.ID, p)
+			return cfg, p, nil
+		}
+	}
+	s.logf("session %s runs on this server's own configuration: no other is known for it", info.ID)
+	cfg, err := s.loadConfig("", "")
+	return cfg, runPick{Default: true}, err
 }
 
 // mark is the list's mark for the session, if it has one.
@@ -149,8 +224,8 @@ func (s *Server) forgetHosted(id string) {
 // session, so that the next server finishes the stop rather than bring it
 // back, should this one exit before it has: the session moves from the
 // sessions to bring back to the marks, its mark made now (a mark it had
-// is made again), naming the configuration its last run here was built
-// with (or, for one not run here, the one the mark it had names). Under
+// is made again), naming the configuration its last run known here was
+// built with (or, for one not known, the one the list names for it). Under
 // mu.
 func (s *Server) markStop(id string) {
 	list, ok := s.readHosted()
@@ -159,8 +234,11 @@ func (s *Server) markStop(id string) {
 		return
 	}
 	m := stopMark{Session: id, At: time.Now().UTC(), runPick: old.runPick}
-	if on, ranHere := s.ran[id]; ranHere {
-		m.runPick = on.pick
+	if p, ok := list.Configs[id]; ok {
+		m.runPick = p
+	}
+	if p, ranHere := s.ran[id]; ranHere {
+		m.runPick = p
 	}
 	marks := append(slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id }), m)
 	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, marks)
@@ -249,9 +327,8 @@ func stopAgents(path string, cfg *config.Config) (stopped, failed []string, err 
 	return stopped, failed, nil
 }
 
-// sessionConfig is the configuration this server runs a session it hosts
-// on (host's, with no bundle or preset of the request's), or nil when it
-// cannot be loaded.
+// sessionConfig is this server's own configuration, or nil when it cannot
+// be loaded.
 func (s *Server) sessionConfig() *config.Config {
 	cfg, err := s.loadConfig("", "")
 	if err != nil {
@@ -260,28 +337,14 @@ func (s *Server) sessionConfig() *config.Config {
 	return &cfg
 }
 
-// markConfig is the configuration the phone of a session whose stop is
-// marked (m) is told by: the one the mark names, the one the session last
-// ran on (nil, nothing told, when it no longer loads). With none named (a
-// mark an older eagent made), the one the session's record names (its
-// session.start), else this server's own, the log saying which.
-func (s *Server) markConfig(info store.Info, m stopMark) *config.Config {
-	if m.runPick != (runPick{}) {
-		cfg, err := s.loadConfig(m.Config, m.Preset)
-		if err != nil {
-			s.logf("session %s: could not load the configuration it ran on (%v); its phone is not told of the stop", info.ID, err)
-			return nil
-		}
-		return &cfg
+// stopConfig is the configuration a stop this server finishes tells the
+// session's phone by (runConfig), or nil when none loads: nothing is told.
+func (s *Server) stopConfig(info store.Info) *config.Config {
+	cfg, _, err := s.runConfig(info)
+	if err != nil {
+		return nil
 	}
-	if name := recordedConfig(info.Path); name != "" {
-		if cfg, err := s.loadConfig(name, "-"); err == nil {
-			s.logf("session %s: no configuration is known for its last run (its stop was marked by an older eagent); its phone is told of the stop by the one its record names, %s", info.ID, name)
-			return &cfg
-		}
-	}
-	s.logf("session %s: no configuration is known for its last run (its stop was marked by an older eagent), and its record names none that loads; its phone is told of the stop by this server's own", info.ID)
-	return s.sessionConfig()
+	return &cfg
 }
 
 // recordedConfig is the configuration (bundle or preset) the session's
@@ -337,14 +400,30 @@ func relaySpool(path string, rel *state.Relay) string {
 // writeHosted writes the list of sessions to bring back.
 func (s *Server) writeHosted(ids []string, at time.Time) { s.writeHostedList(ids, at, nil) }
 
-// writeHostedList writes the list with the sessions whose stop is asked.
+// writeHostedList writes the list with the sessions whose stop is asked,
+// naming for each session listed the configuration it last ran on: the
+// one known here (ran), else the one the list it replaces named. Under mu.
 func (s *Server) writeHostedList(ids []string, at time.Time, stop []stopMark) {
 	path := hostedFile(s.Project)
 	if len(ids) == 0 && len(stop) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at, Stop: stop}, "", "  ")
+	prev, _ := s.readHosted()
+	var configs map[string]runPick
+	for _, id := range ids {
+		p, ok := s.ran[id]
+		if !ok {
+			p, ok = prev.Configs[id]
+		}
+		if ok {
+			if configs == nil {
+				configs = map[string]runPick{}
+			}
+			configs[id] = p
+		}
+	}
+	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at, Stop: stop, Configs: configs}, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)
@@ -399,8 +478,18 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	}
 	// The list is used once, but a marked stop stays on it until it is
 	// finished or no longer holds (forgetHosted below): one that fails, or
-	// a cut partway, leaves it for the next start.
+	// a cut partway, leaves it for the next start. The configuration each
+	// session listed last ran on is known here from now (ran): it comes
+	// back on it (runConfig).
 	s.mu.Lock()
+	for id, p := range list.Configs {
+		if _, known := s.ran[id]; !known && slices.Contains(list.Sessions, id) {
+			if s.ran == nil {
+				s.ran = map[string]runPick{}
+			}
+			s.ran[id] = p
+		}
+	}
 	s.writeHostedList(nil, list.At, list.Stop)
 	s.mu.Unlock()
 	forget := func(id string) {
@@ -431,7 +520,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 		if alive(info.Path) || s.isHosted(id) {
 			continue
 		}
-		if stopped, failed, err := stopAgents(info.Path, s.markConfig(info, m)); err != nil {
+		if stopped, failed, err := stopAgents(info.Path, s.stopConfig(info)); err != nil {
 			s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 		} else {
 			s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
