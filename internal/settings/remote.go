@@ -935,17 +935,22 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		// by the rule `eagent presets use` and a session's pick have
 		// (config.DropModelChoice): left in the file it would run under
 		// the preset in part (the file's address with the preset's model
-		// or protocol). The route's effort and reply ceiling stay, and so
-		// does its fallback, a route of its own, as for every pick here.
-		// A field the connector may not write is one a variable or a
-		// saved preset sets here, and stays as it is.
+		// or protocol). Unsetting the preset chooses the defaults, and
+		// goes by the same rule. The route's effort and reply ceiling
+		// stay, and so does its fallback, a route of its own, as for
+		// every pick here. A field the proposal names keeps the
+		// proposal's value. A field the connector may not write is one a
+		// variable or a saved preset sets here, and stays as it is.
 		rest, _ := config.DropModelChoice(file)
 		var was, left map[string]json.RawMessage
 		_ = json.Unmarshal(file["model"], &was)
 		_ = json.Unmarshal(rest["model"], &left)
+		named := func(leaf string) bool {
+			return slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == "/model/"+leaf })
+		}
 		dropped := false
 		for leaf := range was {
-			if _, kept := left[leaf]; !kept && leaf != "fallback" && writable["/model/"+leaf] {
+			if _, kept := left[leaf]; !kept && leaf != "fallback" && !named(leaf) && writable["/model/"+leaf] {
 				setPointer(values, "/model/"+leaf, nil, true)
 				dropped = true
 			}

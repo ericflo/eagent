@@ -85,3 +85,55 @@ func TestK15APresetChosenWithAModelKeepsTheModel(t *testing.T) {
 		t.Fatalf("runs %s @ %s (%v); want the model the proposal named, at the preset's address", got.Model.Model, got.Model.BaseURL, err)
 	}
 }
+
+// A field of the route that the proposal names beside the preset keeps
+// the proposal's value: the file's own address goes, the protocol the
+// proposal set stays.
+func TestK15APresetChosenWithAProtocolKeepsTheProtocol(t *testing.T) {
+	relay.OfflineCatalogs()
+	clearRouteEnv(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("OPENAI_API_KEY", "x")
+	t.Setenv("DEEPINFRA_API_KEY", "x")
+	project := t.TempDir()
+	writeProjectFile(t, project, `{"model":{"base_url":"https://api.deepinfra.com/v1/openai","api_key_env":"DEEPINFRA_API_KEY"}}`)
+	if err := tryApply(t, &Service{Project: project}, control.Edit{Op: "set", Key: "/preset", Value: "openai-high"}, control.Edit{Op: "set", Key: "/model/protocol", Value: "openai-chat"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(project, "")
+	if err != nil || got.Model.Protocol != "openai-chat" || got.Model.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("runs %s @ %s (%s; %v); want the preset's address with the protocol the proposal named", got.Model.Model, got.Model.BaseURL, got.Model.Protocol, err)
+	}
+}
+
+// Unsetting the preset chooses the defaults, by the same rule: the file's
+// own choice of model goes with it, and the undo loads as before.
+func TestK15UnsettingThePresetRunsTheDefaultsWholeRoute(t *testing.T) {
+	relay.OfflineCatalogs()
+	clearRouteEnv(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	for _, key := range []string{"OPENAI_API_KEY", "DEEPINFRA_API_KEY", "TOGETHER_API_KEY"} {
+		t.Setenv(key, "x")
+	}
+	file := `{"preset":"openai-high","model":{"base_url":"https://api.together.xyz/v1","api_key_env":"TOGETHER_API_KEY","max_tokens":4096}}`
+	project := t.TempDir()
+	writeProjectFile(t, project, file)
+	before, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	undone := r11Undo(t, project, file, []control.Edit{{Op: "unset", Key: "/preset"}})
+	got, err := config.Load(project, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.Defaults()
+	if got.Model.Model != want.Model.Model || got.Model.BaseURL != want.Model.BaseURL || got.Model.Protocol != want.Model.Protocol || got.Model.APIKeyEnv != want.Model.APIKeyEnv || got.Model.MaxTokens != 4096 {
+		t.Fatalf("runs %s @ %s (%s, $%s, %d); want the defaults' %s @ %s (%s, $%s) with the file's reply ceiling", got.Model.Model, got.Model.BaseURL, got.Model.Protocol, got.Model.APIKeyEnv, got.Model.MaxTokens, want.Model.Model, want.Model.BaseURL, want.Model.Protocol, want.Model.APIKeyEnv)
+	}
+	writeProjectFile(t, project, undone)
+	again, err := config.Load(project, "")
+	if err != nil || again.Preset != before.Preset || again.Model.Model != before.Model.Model || again.Model.BaseURL != before.Model.BaseURL || again.Model.APIKeyEnv != before.Model.APIKeyEnv {
+		t.Fatalf("after the undo: %s @ %s (%v); before: %s @ %s\nundo wrote: %s", again.Model.Model, again.Model.BaseURL, err, before.Model.Model, before.Model.BaseURL, undone)
+	}
+}
