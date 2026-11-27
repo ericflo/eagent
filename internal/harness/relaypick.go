@@ -222,11 +222,19 @@ func (r *Runtime) dialogHolds(rel *state.Relay) bool {
 // asked now (repickRelay, where a turn the record shows holds it too) and
 // one that waited (applyWaitingRepick). Loop goroutine.
 func (r *Runtime) heldBack(rel *state.Relay) string {
-	switch {
-	case r.dialogHolds(rel):
+	if r.dialogHolds(rel) {
 		return "dialog"
-	case rel.Awaited() > 0:
-		return "on its way"
+	}
+	if rel.Awaited() == 0 {
+		return ""
+	}
+	for id, text := range rel.Undelivered {
+		// The agent's own command typed into its prompt (/clear, /status)
+		// runs at once and starts no turn: it holds nothing back. One held
+		// for its turn's end is handed over as words, as any message.
+		if !relay.IsAgentCommand(text) || r.st.SendOutcome(id) == state.SendHeld {
+			return "on its way"
+		}
 	}
 	return ""
 }
