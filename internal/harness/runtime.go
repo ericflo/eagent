@@ -17,6 +17,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1413,13 +1414,41 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 	})
 }
 
+// turnStopGrace is how long finish waits for the turn in flight to stop (a
+// closing report gets finalReportGrace). A variable so tests can shorten it.
+var turnStopGrace = 5 * time.Second
+
+// turnHeldBy says, for the log, what the turn finish waited on had not
+// finished when its grace ran out: a send being typed into an agent (its
+// tool waits for the typing, which waits for the agent's prompt), else a
+// model call.
+func (r *Runtime) turnHeldBy() string {
+	r.relays.mu.Lock()
+	var typing []string
+	for _, q := range r.relays.queues {
+		if q.typing != "" {
+			who := q.name
+			if rel := r.st.Relays[q.name]; rel != nil {
+				who = rel.Who()
+			}
+			typing = append(typing, fmt.Sprintf("%s (%s)", who, q.typing))
+		}
+	}
+	r.relays.mu.Unlock()
+	if len(typing) > 0 {
+		sort.Strings(typing)
+		return "the turn did not stop in time: it waits on a send being typed into " + strings.Join(typing, ", ")
+	}
+	return "a model call did not stop in time"
+}
+
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
 	close(r.loopDone) // finish reads the loop's queue from here (endQueue)
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
-	grace := 5 * time.Second
+	grace := turnStopGrace
 	if r.turns.busy && r.turns.finalBusy {
 		// The closing word is being written: it gets its time even when
 		// the session was told to stop.
@@ -1435,7 +1464,7 @@ drain:
 		case <-waitDone:
 			break drain
 		case <-deadline.C:
-			r.ui.Log("a model call did not stop in time")
+			r.ui.Log("%s", r.turnHeldBy())
 			break drain
 		}
 	}
