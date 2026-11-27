@@ -1176,12 +1176,6 @@ func (s *Seat) watch() {
 			s.refollow, s.transcript, tail = false, "", nil
 		}
 		s.mu.Unlock()
-		if moved {
-			// Recorded now: pi writes no file for a new session until its
-			// first prompt, and a restart meanwhile must open this session,
-			// not the one left. The path follows when the file is found.
-			s.emit(Event{Kind: KindInner, InnerID: movedTo})
-		}
 		if tail == nil {
 			s.mu.Lock()
 			path, inner := s.transcript, s.inner
@@ -1239,6 +1233,14 @@ func (s *Seat) watch() {
 					s.emit(Event{Kind: KindInner, InnerID: inner, Transcript: path})
 				}
 			}
+		}
+		if moved && tail == nil {
+			// Recorded now, when its file is not there yet: pi writes none
+			// for a new session until its first prompt, and a restart
+			// meanwhile must open this session, not the one left. The path
+			// follows when the file is found. One found at once is recorded
+			// once, with its path, above.
+			s.emit(Event{Kind: KindInner, InnerID: movedTo})
 		}
 		caught := tail == nil // no transcript to catch up on
 		if tail != nil {

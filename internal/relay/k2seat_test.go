@@ -310,3 +310,42 @@ func TestK2APiTurnJustBeforeAForkIsReportedOnce(t *testing.T) {
 		t.Fatalf("turns %q; want Labelled. once, then Dusted.", turns)
 	}
 }
+
+// A7: pi moves to a session whose file it has written already: the seat
+// records the move once, with the session and its log, so no record ends
+// between a move without its log and the log. A move to a session pi has
+// not written yet is recorded at once, without the log, and the log
+// follows once the file appears.
+func TestK2APiMoveToAWrittenSessionIsRecordedOnce(t *testing.T) {
+	isolatePi(t)
+	for _, written := range []bool{true, false} {
+		w := newPiSwitchSeat(t, time.Time{}, []string{piHeaderLine("first", time.Now())}, entries(0))
+		w.until(5*time.Second, innerIs(w.first))
+		second := filepath.Join(w.dir, "second.jsonl")
+		if written {
+			writeLines(t, second, piHeaderLine("second", time.Now()))
+		}
+		writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: second, SessionID: "second", SessionEntries: entries(0)})
+		var moves []string
+		record := func(evs []Event) {
+			for _, ev := range evs {
+				if ev.Kind == KindInner {
+					moves = append(moves, ev.InnerID+" "+filepath.Base(ev.Transcript))
+				}
+			}
+		}
+		if !written {
+			record(w.until(5*time.Second, func(ev Event) bool { return ev.Kind == KindInner }))
+			writeLines(t, second, piHeaderLine("second", time.Now()))
+		}
+		record(w.until(5*time.Second, innerIs(second)))
+		record(w.quiet(looks(4)))
+		want := []string{"second second.jsonl"}
+		if !written {
+			want = []string{"second .", "second second.jsonl"}
+		}
+		if !slices.Equal(moves, want) {
+			t.Fatalf("written %v: recorded %q; want %q", written, moves, want)
+		}
+	}
+}
