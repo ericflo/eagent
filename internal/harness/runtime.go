@@ -1061,15 +1061,19 @@ func (r *Runtime) endQueue() {
 	}
 }
 
-// sync runs fn on the loop goroutine and waits for it. During shutdown
-// finish keeps running what the queue took (enqueue), so late events (a
-// last message, a tool result, a send's end) are still recorded; once it
-// has ended the queue, fn is not run and sync returns at once.
-func (r *Runtime) sync(fn func()) {
+// sync runs fn on the loop goroutine and waits for it, and reports that it
+// ran. During shutdown finish keeps running what the queue took
+// (enqueue), so late events (a last message, a tool result, a send's end)
+// are still recorded; once it has ended the queue, fn is not run and sync
+// returns false at once: the session has ended, and a turn does nothing
+// more (turn).
+func (r *Runtime) sync(fn func()) bool {
 	done := make(chan struct{})
 	if r.enqueue(func() { fn(); close(done) }) {
 		<-done
+		return true
 	}
+	return false
 }
 
 // post runs fn on the loop goroutine without waiting; once finish has ended

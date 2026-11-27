@@ -899,7 +899,7 @@ func (r *Runtime) turn(w wake) {
 			break
 		}
 		var msgs []llm.Message
-		r.sync(func() {
+		ran := r.sync(func() {
 			defer func() { r.turns.callAt = time.Now() }()
 			if tail == "" && (w.final || w.wait > 0) && !r.stillClosing() {
 				// The session stopped ending before the closing turn's
@@ -975,6 +975,12 @@ func (r *Runtime) turn(w wake) {
 				msgs = state.WithTail(base, tail)
 			}
 		})
+		if !ran {
+			// The session has ended (endQueue): no call is made, with no
+			// conversation to give it, nor anything run.
+			end = stopped()
+			break
+		}
 		if end == "not closing" {
 			break
 		}
@@ -1126,8 +1132,9 @@ func (r *Runtime) turn(w wake) {
 			continue
 		}
 		// It acts, so this turn goes on the record: the lines it was given,
-		// then its reply.
-		r.sync(func() {
+		// then its reply. Not once the session has ended (endQueue): what it
+		// asks is not run either.
+		if !r.sync(func() {
 			r.flushSilent()
 			if !recorded {
 				r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
@@ -1142,7 +1149,10 @@ func (r *Runtime) turn(w wake) {
 			}))
 			r.looked(covered, resp, w)
 			answers = true
-		})
+		}) {
+			end = stopped()
+			break
+		}
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
 		tc.said, tc.stamped, tc.own, tc.view = false, false, nil, covered
@@ -1158,9 +1168,14 @@ func (r *Runtime) turn(w wake) {
 			}
 			images := tc.images
 			tc.images = nil
-			r.sync(func() {
+			if !r.sync(func() {
 				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr, Images: images}))
-			})
+			}) {
+				// The session ended under the turn (endQueue): the tools
+				// after this one are not run.
+				end = stopped()
+				break
+			}
 			again = again || more
 		}
 		if tc.stamped && len(tc.own) > 0 {
