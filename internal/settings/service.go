@@ -275,12 +275,15 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// once the variable is unset, and a save of something else must not lose it.
 	var shadowed, skipped, kept []EnvField
 	env := config.EnvOverrides()
-	// A route's window follows the model a variable names, so it is that
-	// variable's too: the window of the environment's model is not written.
+	// A route's window follows the model a variable names, or the address
+	// one names, so it is that variable's too: the window of the
+	// environment's model is not written.
 	for _, route := range []string{"/model", "/summarizer/model"} {
-		if name, ok := env[route+"/model"]; ok {
-			if _, has := env[route+"/context_tokens"]; !has {
-				env[route+"/context_tokens"] = name
+		for _, field := range []string{"/model", "/base_url"} {
+			if name, ok := env[route+field]; ok {
+				if _, has := env[route+"/context_tokens"]; !has {
+					env[route+"/context_tokens"] = name
+				}
 			}
 		}
 	}

@@ -201,7 +201,7 @@ func (c *Controller) process(q Request) error {
 	if q.Proposal.Generation != c.Generation || q.Proposal.ExpectedVersion != view.Snapshot.Version {
 		return finish("conflicted", map[string]any{"message": "The runtime generation or settings version changed."})
 	}
-	values, err := ApplyValues(c.Project, c.Values, q.Proposal, view, q.Grant)
+	values, err := applyValues(c.Project, c.Values, q.Proposal, view, q.Grant, c.Routes)
 	if err != nil {
 		return finish("rejected", map[string]any{"message": err.Error()})
 	}

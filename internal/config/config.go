@@ -967,7 +967,7 @@ func overlay(project string, cfg *Config, m map[string]json.RawMessage, source s
 	for _, n := range notes {
 		cfg.Migrated = append(cfg.Migrated, filepath.Base(source)+": "+n)
 	}
-	mainBefore, summarizerBefore := chainModels(&cfg.Model), chainModels(cfg.Summarizer.Model)
+	mainBefore, summarizerBefore := chainRoutes(&cfg.Model), chainRoutes(cfg.Summarizer.Model)
 	raw, _ := json.Marshal(m)
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		return fmt.Errorf("%s: %w", source, err)
@@ -977,34 +977,42 @@ func overlay(project string, cfg *Config, m map[string]json.RawMessage, source s
 	return nil
 }
 
-// chainModels lists the model of a route and of each of its fallbacks.
-func chainModels(a *ModelRoute) []string {
-	var out []string
+// chainRoutes copies a route and each of its fallbacks.
+func chainRoutes(a *ModelRoute) []ModelRoute {
+	var out []ModelRoute
 	for cur := a; cur != nil; cur = cur.Fallback {
-		out = append(out, cur.Model)
+		out = append(out, *cur)
 	}
 	return out
 }
 
-// followModel gives each route of a chain whose model changed from before
-// the new model's context window (0 when it is not known), unless layer,
-// the route object that changed it, names a context window itself. A
-// window is the model's: one kept from the model before would be wrong.
+// moved says whether a route names another model than it did before, or
+// reaches it at another address (with or without a trailing slash, the
+// same address): its window is no longer the one it had.
+func moved(before, now ModelRoute) bool {
+	return now.Model != before.Model || strings.TrimRight(now.BaseURL, "/") != strings.TrimRight(before.BaseURL, "/")
+}
+
+// followModel gives each route of a chain whose model or address changed
+// from before the window of the model where it is now reached (0 when it
+// is not known), unless layer, the route object that changed it, names a
+// context window itself. A window is the model's at its server: one kept
+// from the model before, or from another server, would be wrong.
 //
 // A null in layer clears what the layers below set: the editor writes one
 // where it leaves a field empty that the preset sets, such as an effort of
 // "" (send none, the provider's default) under a preset's "high".
-func followModel(project string, a *ModelRoute, before []string, layer json.RawMessage) {
+func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.RawMessage) {
 	obj := object(layer)
 	null := func(k string) bool { v, ok := obj[k]; return ok && string(v) == "null" }
 	for i, cur := 0, a; cur != nil; i, cur = i+1, cur.Fallback {
-		prev := ""
+		var prev ModelRoute
 		if i < len(before) {
 			prev = before[i]
 		}
 		_, window := obj["context_tokens"]
 		switch {
-		case cur.Model != prev && (!window || null("context_tokens")):
+		case moved(prev, *cur) && (!window || null("context_tokens")):
 			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
 		case null("context_tokens"):
 			cur.ContextTokens = 0
@@ -1090,9 +1098,9 @@ func applyEnv(project string, cfg *Config) {
 	// does its effort: the one model does the orchestrator's work. The
 	// narrator's and the task worker's variables are not read; each one set
 	// gets a note.
-	prev := cfg.Model.Model
+	prev := cfg.Model
 	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
-	if cfg.Model.Model != prev {
+	if moved(prev, cfg.Model) {
 		cfg.Model.ContextTokens = KnownContext(project, cfg.Model.BaseURL, cfg.Model.Model)
 	}
 	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
@@ -1110,9 +1118,9 @@ func applyEnv(project string, cfg *Config) {
 		if cfg.Summarizer.Model != nil {
 			route = *cfg.Summarizer.Model
 		}
-		prev := route.Model
+		prev := route
 		applyRouteEnv(&route, "SUMMARIZER_")
-		if route.Model != prev {
+		if moved(prev, route) {
 			route.ContextTokens = KnownContext(project, route.BaseURL, route.Model)
 		}
 		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
