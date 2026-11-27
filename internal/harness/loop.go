@@ -449,7 +449,9 @@ func (r *Runtime) maybeTurn() {
 		if time.Now().Before(t.retryAt) && t.wakes[wakeUser] <= t.failSeq {
 			return // the model was failing a moment ago; a message from the user does not wait
 		}
-		if r.needsDossier() {
+		// Not in a session that is ending (a notice of its own asks for
+		// the look): nothing will be asked of a new conversation.
+		if !r.stillClosing() && r.needsDossier() {
 			r.startDossier()
 			return
 		}

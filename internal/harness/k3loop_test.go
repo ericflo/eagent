@@ -94,3 +94,52 @@ func TestSRLoopARestartWhoseFileCannotBeMadePaysForAPassAgainAndAgain(t *testing
 		t.Fatalf("%d paid dossier passes for a restart whose file cannot be made (%d briefings thrown away so far)", n, r4Logged(s, "the conversation continues as it is for now"))
 	}
 }
+
+// The reader's suspicion on cd6c922: a session with no terminal is
+// ending, its closing look puts the conversation past the restart size,
+// and a notice of eagent's own (as a timer of the harness's leaves one)
+// asks for a look meanwhile. The look a wake asks for still restarted
+// the conversation first: a paid pass nothing would read.
+func TestK3AnEndingBatchSessionPaysForNoDossierForAWake(t *testing.T) {
+	var passes atomic.Int32
+	var rt atomic.Pointer[Runtime]
+	var injected, stopped atomic.Bool
+	r0, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			passes.Add(1)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			if r := rt.Load(); r != nil && !injected.Load() {
+				injected.Store(true)
+				r.sync(func() {
+					r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] A note of your own came due."}))
+				})
+			}
+			r := hold()
+			r.prompt = 30000 // past the 20,000 restart size of testConfig
+			return r
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	rt.Store(r0)
+	var code int
+	select {
+	case code = <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q", ui.said())
+	}
+	if !injected.Load() {
+		t.Fatalf("setup: no notice came during the closing look (exit %d)", code)
+	}
+	if n := passes.Load(); n != 0 {
+		t.Fatalf("%d dossier passes paid for by a session that was ending (exit %d)", n, code)
+	}
+}
