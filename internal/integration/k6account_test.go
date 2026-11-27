@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -87,6 +88,9 @@ func TestK6AKeptReplyIsRetriedOnItsOwnAccount(t *testing.T) {
 	wb := fb.watcher(project, host, t)
 	wb.client = &finalechat.Client{BaseURL: urlB, Token: "fc_fixture"}
 	wb.retries = wa.retries // one watcher, a connection per account
+	wb.secondary = true
+	wa.live = []string{accountOf(urlA), accountOf(urlB)}
+	wb.live = wa.live
 	wa.sweep(context.Background())
 	wb.sweep(context.Background())
 	if host.calls() != 2 {
@@ -96,5 +100,71 @@ func TestK6AKeptReplyIsRetriedOnItsOwnAccount(t *testing.T) {
 		if len(m.Attachments) != 1 || len(m.Refused) != 0 {
 			t.Fatalf("resume %d (%s of %s): %d files, %d refused; want its file from its own service", i, m.ID, host.ids[i], len(m.Attachments), len(m.Refused))
 		}
+	}
+}
+
+// k7Kept writes the kept file: one told reply, recorded under account.
+func k7Kept(t *testing.T, project, sid string, msg map[string]any, account string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{fmt.Sprint(msg["id"]): map[string]any{"thread": "eagent:" + sid, "message": msg, "since": time.Now(), "told": true, "account": account}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir(project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keptFile(project), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A reply kept on service B is recorded under another spelling of B's
+// address (upper case, localhost for 127.0.0.1, the default port spelled
+// out is not possible here, a trailing slash). B's connection retries it,
+// with its file from B.
+func TestK7AKeptReplyUnderAnotherSpellingIsItsServicesStill(t *testing.T) {
+	project := t.TempDir()
+	fa, fb := newR6Thread(t), newR6Thread(t)
+	sb, mb := k6Session(t, project, fb, "mb", "att-b")
+	urlA, urlB := k6Service(t, fa, "att-a"), k6Service(t, fb, "att-b")
+	t.Setenv("FINALECHAT_URL", urlA)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	spelled := strings.Replace(strings.ToUpper(urlB), "127.0.0.1", "LOCALHOST", 1) + "/"
+	k7Kept(t, project, sb, mb, spelled)
+	k1Hide(fb, sb) // eagent's note is the thread's latest: only the kept reply leads back to it
+	host := &r9Host{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, t: t, project: project}
+	wa := fa.watcher(project, host, t)
+	wa.client = &finalechat.Client{BaseURL: urlA, Token: "fc_fixture"}
+	wb := fb.watcher(project, host, t)
+	wb.client = &finalechat.Client{BaseURL: urlB, Token: "fc_fixture"}
+	wb.retries = wa.retries
+	wb.secondary = true
+	wa.live = []string{accountOf(urlA), accountOf(urlB)}
+	wb.live = wa.live
+	wa.sweep(context.Background())
+	wb.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "mb" || len(host.resumed[0].Attachments) != 1 {
+		t.Fatalf("resumed %#v, want mb once with its file from B", host.resumed)
+	}
+}
+
+// A reply kept under an account no connection watches any more (the
+// serve's bundle changed its server since): the project file's connection
+// retries it rather than leave it for good.
+func TestK7AKeptReplyOfNoWatchedAccountIsRetried(t *testing.T) {
+	project := t.TempDir()
+	fa := newR6Thread(t)
+	sa, ma := k6Session(t, project, fa, "ma", "att-a")
+	urlA := k6Service(t, fa, "att-a")
+	t.Setenv("FINALECHAT_URL", urlA)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	k7Kept(t, project, sa, ma, "http://127.0.0.1:1")
+	k1Hide(fa, sa) // eagent's note is the thread's latest: only the kept reply leads back to it
+	host := &r9Host{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, t: t, project: project}
+	wa := fa.watcher(project, host, t)
+	wa.client = &finalechat.Client{BaseURL: urlA, Token: "fc_fixture"}
+	wa.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "ma" {
+		t.Fatalf("resumed %#v, want ma once", host.resumed)
 	}
 }
