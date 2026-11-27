@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -120,4 +121,89 @@ func TestK1DequeuedWordsLeaveTheQueue(t *testing.T) {
 		"",
 		[]string{"r1"},
 	}.runRV15(t, []string{k1Queue("enqueue", "[Pasted text #1 +1 lines]"), k1TurnEnd(), k1Queue("dequeue", "")}, claudeUser(time.Now(), long))
+}
+
+// Suspicions checked (round 15 reader), none failing.
+
+// aa4b82b: a queued send's next turn starts late, after the grace: the
+// send is lost by then, and its arrival in that turn still confirms it;
+// no report goes while the 45 s wait from the loss runs.
+func TestK1AQueuedSendWhoseTurnStartsLateIsConfirmed(t *testing.T) {
+	s := newSeat(Spec{}, handOverWorks{}, &fakeHost{alive: true}, "x", "thread-1")
+	s.state = "working"
+	if _, err := s.Send("r1", "then commit the fix", "after_turn"); err != nil {
+		t.Fatal(err)
+	}
+	s.fold(obs{kind: "turn", text: "Done."})
+	now := time.Now()
+	s.agent.(poller).poll(s, now.Add(heldGrace))
+	s.checkScreen(now.Add(40 * time.Second))
+	s.fold(obs{kind: "working"})
+	s.fold(obs{kind: "user", text: "then commit the fix"})
+	var got []string
+	for _, ev := range deliveries(drain(s.events)) {
+		got = append(got, fmt.Sprintf("%s:%v", ev.SendID, ev.OK))
+	}
+	if !slices.Equal(got, []string{"r1:true"}) {
+		t.Fatalf("reported %v; want r1 confirmed", got)
+	}
+}
+
+// aa4b82b with Antigravity's own turn end from its status file: a quiet
+// stretch while agy's status says it runs is no turn end, so a send held
+// in agy's queue stays held; one agy says it is idle at (an interrupt) is,
+// and the queued message's turn then confirms it.
+func TestK1AntigravityQueuedSendAndItsStatusTurnEnd(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	const id = "11111111-2222-3333-4444-555555555555"
+	for _, c := range []struct {
+		state string
+		lost  bool
+	}{{"running", false}, {"idle", true}} {
+		status := filepath.Join(t.TempDir(), "agy-status.json")
+		if err := os.WriteFile(status, []byte(`{"conversation_id":"`+id+`","agent_state":"`+c.state+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s := newSeat(Spec{StatusFile: status}, antigravityAgent{}, &fakeHost{alive: true}, "x", id)
+		s.state = "working"
+		if _, err := s.Send("r1", "then commit the fix", "after_turn"); err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		s.lastLine = time.Now().Add(-time.Minute)
+		s.mu.Unlock()
+		now := time.Now()
+		antigravityAgent{}.poll(s, now)
+		antigravityAgent{}.poll(s, now.Add(heldGrace+time.Second))
+		s.mu.Lock()
+		lost := len(s.pending) == 1 && s.pending[0].lost
+		s.mu.Unlock()
+		if lost != c.lost {
+			t.Fatalf("status %s: lost %v, want %v", c.state, lost, c.lost)
+		}
+		s.fold(obs{kind: "user", text: "then commit the fix"})
+		if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, []string{"r1"}) {
+			t.Fatalf("status %s: confirmed %v; want r1", c.state, ok)
+		}
+	}
+}
+
+// 235bbde with pi: a hand-over pi's extension claimed during the seat's
+// close is left to it (Send says held); one it gave back as refused (a
+// .txt again) is no message pi has, and is taken back. The give-back
+// comes 5 s or more after the claim (GIVE_BACK_MS), never within one
+// Send, so a file the take-back finds is one pi never took.
+func TestK1PiHandOverClaimedDuringTheCloseIsLeftToIt(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	s := newSeat(Spec{Name: "x", Spool: spool}, k1ClosedDuringHandOver{Agent: piAgent{name: "pi", label: "Pi", binary: "pi"}, take: true}, &fakeHost{alive: true}, "x", "")
+	s.state = "working"
+	close(s.done)
+	if _, err := s.Send("r1", "then run the tests", "after_turn"); err != nil {
+		t.Fatalf("Send: %v; want held (pi's extension has it)", err)
+	}
+	if names := spoolNames(spool); len(names) != 1 || !strings.HasSuffix(names[0], ".txt.taken") {
+		t.Fatalf("spool %v; want the extension's claimed file", names)
+	}
 }
