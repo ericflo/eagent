@@ -88,10 +88,10 @@ func (w *reattachedSeat) settle() {
 }
 
 // A reattach with restored sends records the same events as one with
-// nothing restored, apart from the confirmations: restored sends are only
-// matched against what the catch-up reads anyway. One whose prompt is in
-// the part re-read is confirmed; one whose prompt is older than that part,
-// and one never sent, are not.
+// nothing restored, apart from the confirmations. One whose prompt is in
+// the part a reattach re-reads is confirmed, and so is one whose prompt is
+// older than that part (a reattach with restored sends reads the whole
+// transcript); one never sent is not.
 func TestAReattachWithRestoredSendsRecordsTheSameEventsAsOneWithout(t *testing.T) {
 	lowTail(t)
 	since := time.Now().Add(-time.Minute)
@@ -101,7 +101,7 @@ func TestAReattachWithRestoredSendsRecordsTheSameEventsAsOneWithout(t *testing.T
 		text string
 		want []string
 		w    *reattachedSeat
-	}{{text: "next shelf 99", want: []string{"r1"}}, {text: first}, {text: "words it was never sent"}}
+	}{{text: "next shelf 99", want: []string{"r1"}}, {text: first, want: []string{"r1"}}, {text: "words it was never sent"}}
 	// The seats watch copies, all at once: one transcript is followed by
 	// one seat at a time.
 	copyOf := func() string {
@@ -134,18 +134,17 @@ func TestAReattachWithRestoredSendsRecordsTheSameEventsAsOneWithout(t *testing.T
 	}
 }
 
-// A known limit: a restored send whose prompt lies before the part of the
-// transcript a reattach re-reads is not found. After the wait a live send
-// gets it is reported unconfirmed, once, and it is never typed or pressed.
-func TestARestoredSendOlderThanTheTailEndsUnconfirmedOnceAndIsNotTyped(t *testing.T) {
+// A restored send the transcript never shows arriving (here its words sit
+// in the box) is reported unconfirmed after the wait a live send gets,
+// once, and it is never typed or pressed.
+func TestARestoredSendNeverShownEndsUnconfirmedOnceAndIsNotTyped(t *testing.T) {
 	lowTail(t)
 	since := time.Now().Add(-time.Minute)
-	first := "label the jars on the top shelf"
-	path := longHistory(t, since, first)
-	w := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since, Restored{ID: "r1", Text: first, Mode: "queue", At: since.Add(-time.Hour - time.Second)})
+	path := longHistory(t, since, "label the jars on the top shelf")
+	w := reattach(t, claudeAgent{}, Spec{Dir: filepath.Dir(path)}, path, since, Restored{ID: "r1", Text: "dust the jars on the low shelf", Mode: "queue", At: since.Add(-time.Hour - time.Second)})
 	w.caughtUp(t)
 	w.h.mu.Lock()
-	w.h.screen = "> label the jars on the top shelf\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	w.h.screen = "> dust the jars on the low shelf\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
 	w.h.mu.Unlock()
 	start := time.Now()
 	w.s.mu.Lock()
