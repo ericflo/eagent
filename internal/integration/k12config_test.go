@@ -29,6 +29,37 @@ func TestK12ThePhoneCannotDeleteTheBundleItsHostRuns(t *testing.T) {
 	}
 }
 
+// A bundle.delete journaled as prepared, and not applied, that runs again
+// once its bundle has become the default never deletes it, whether the
+// claim is reconciled or delivered again.
+func TestK12AJournaledDeleteIsNotReplayedOntoTheDefault(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "")
+	for _, reconcile := range []bool{true, false} {
+		s, g, path := handmadeBundle(t)
+		q := reviewedCommand(t, s, g, control.Proposal{Operation: "bundle.delete", Parameters: map[string]any{"name": "handmade"}})
+		editor, err := config.LockEditor(context.Background(), s.Project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		change, err := s.PrepareResource(editor, q.Proposal, g)
+		editor.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal := commandJournal{CommandID: q.ID, Digest: q.Digest, ResourceKey: g.Key, Status: "prepared", Resource: &change}
+		if err := writeJSONAtomic(filepath.Join(stateDir(s.Project), "commands", q.ID+".json"), journal); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.SaveRaw(s.Project, `{"default_config":"handmade"}`, "", true); err != nil {
+			t.Fatal(err)
+		}
+		j, err := executeCommand(context.Background(), s, g, q, reconcile)
+		if bundleBytes(path) != handmade {
+			t.Fatalf("reconcile %t: the prepared delete removed the default's bundle: %s %v (%v)", reconcile, j.Status, j.Result, err)
+		}
+	}
+}
+
 // An eagent server started with --config work runs phone-started sessions
 // on bundle work, and since fe74da8 the phone's agent picker
 // (relay_profiles) lists that bundle's agents. The session.start action

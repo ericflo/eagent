@@ -905,6 +905,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			if reconcile {
 				return finish("unknown", map[string]any{"message": "The prepared resource write cannot be confirmed. It was not repeated."})
 			}
+			if err := s.CheckResource(*journal.Resource); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
+			}
 			if err := journal.Resource.Apply(editor); err != nil {
 				return journal, err
 			}

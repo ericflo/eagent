@@ -179,6 +179,16 @@ func (change ResourceChange) State(editor *config.Editor) (before, after bool, e
 	return exists == change.BeforeExists && digest == artifact.Digest(change.Before), exists == change.AfterExists && digest == artifact.Digest(change.After), nil
 }
 
+// CheckResource holds a prepared change to the guards again when it is
+// written: deleting the saved preset sessions start on is refused, also
+// when the command was prepared before that preset became the default.
+func (s *Service) CheckResource(change ResourceChange) error {
+	if change.Kind == "bundle" && !change.AfterExists && s.inForce(change.Name) {
+		return fmt.Errorf("select a different default before deleting its bundle")
+	}
+	return nil
+}
+
 func (change ResourceChange) Apply(editor *config.Editor) error {
 	before, after, err := change.State(editor)
 	if err != nil || after {
