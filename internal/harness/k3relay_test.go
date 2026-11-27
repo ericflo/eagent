@@ -8,6 +8,28 @@ import (
 	"github.com/ericflo/eagent/internal/state"
 )
 
+// The dialog check (ef3d293) reads the seat's own word that a dialog holds
+// it, not the blocked state's text: an agent quiet for ten minutes whose
+// screen, quoted in that text, happens to show the words a dialog's notice
+// uses is no dialog, and a model change starts it again at once.
+func TestK3AQuietAgentWhoseScreenReadsLikeADialogIsNotHeldBack(t *testing.T) {
+	seat := newK1HeldSeat()
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	seat.set("working")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
+	seat.set("blocked")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n$ tail eagent.log\nPi is waiting on a dialog: Allow?"})
+	k1Relay(t, rt, "blocked recorded", func(rel *state.Relay) bool { return rel.State == "blocked" })
+	if msg := k1Repick(t, rt); !k1Restarting(rt) {
+		t.Fatalf("the change was not applied to the quiet agent: %q", msg)
+	}
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+}
+
 // Item 3. A message is typed into Codex while it is idle, its arrival not
 // yet shown, and a model change is asked: Codex reads that message next
 // and starts a turn with it. The change waits for that turn's end, as a

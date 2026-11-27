@@ -1067,7 +1067,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			}
 			return
 		}
-		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000)}))
+		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog}))
 		if ev.State == "idle" {
 			r.applyWaitingRepick(name)
 		}

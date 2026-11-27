@@ -3,7 +3,6 @@ package harness
 import (
 	"fmt"
 	"maps"
-	"strings"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
@@ -202,21 +201,16 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...hel
 	return nil
 }
 
-// dialogMark is how a seat names a dialog the agent itself reports in the
-// detail of the blocked state it records (relay's reportDialog: "Pi is
-// waiting on a dialog: …"). It blocks the seat for no other reason.
-const dialogMark = " is waiting on a dialog: "
-
 // dialogHolds says whether a dialog the agent reports holds it now: its
-// terminal says it is blocked, and the last state the record has from it
-// was that dialog (a turn the agent ends under it leaves the record idle,
-// with that detail). No change starts it again then: the record's state
-// alone cannot say so. An agent blocked for a slow start or for going
-// quiet in a turn is not held: a change starts it again at once, as a
-// stuck agent may need. Loop goroutine.
+// seat says so (relay.Status.Dialog, set only while that dialog holds it
+// blocked). No change starts it again then: the record's state alone
+// cannot say so (a turn the agent ends under it leaves the record idle).
+// An agent blocked for a slow start or for going quiet in a turn is not
+// held: a change starts it again at once, as a stuck agent may need. Loop
+// goroutine.
 func (r *Runtime) dialogHolds(rel *state.Relay) bool {
 	seat := r.relays.get(rel.Name)
-	return seat != nil && strings.Contains(rel.Detail, dialogMark) && seat.Snapshot().State == "blocked"
+	return seat != nil && seat.Snapshot().Dialog != ""
 }
 
 // heldBack says what holds a model change back from starting the agent

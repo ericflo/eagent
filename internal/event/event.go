@@ -636,6 +636,9 @@ type RelayStateData struct {
 	Name   string `json:"name"`
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
+	// Dialog, on blocked, is the title of the dialog the agent reports
+	// holding it (pi's extension); "" otherwise, and in older records.
+	Dialog string `json:"dialog,omitempty"`
 }
 
 // RelayProgressData is something the agent said before its turn ended.

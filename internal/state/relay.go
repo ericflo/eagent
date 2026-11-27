@@ -23,8 +23,12 @@ type Relay struct {
 	InnerID, Transcript string
 	State               string // starting | working | idle | blocked | exited | stopped
 	Detail              string
-	StateSince          time.Time
-	StartSeq            int64
+	// Dialog is the title of the dialog the agent reports holding it
+	// blocked, from its last relay.state ("" for any other state, and in
+	// records written before relay.state said it).
+	Dialog     string
+	StateSince time.Time
+	StartSeq   int64
 	// PrevEnded is when the agent that held this name before stopped, zero
 	// for the name's first agent: what the harness saw before then was
 	// that agent's, not this one's.
@@ -253,7 +257,7 @@ func (s *State) applyRelay(ev event.Event) {
 	case event.RelayState:
 		var d event.RelayStateData
 		_ = ev.Decode(&d)
-		r.State, r.Detail, r.StateSince = d.State, d.Detail, ev.Time
+		r.State, r.Detail, r.Dialog, r.StateSince = d.State, d.Detail, d.Dialog, ev.Time
 	case event.RelayProgress:
 		var d event.RelayProgressData
 		_ = ev.Decode(&d)
