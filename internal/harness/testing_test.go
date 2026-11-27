@@ -420,6 +420,9 @@ type fakeSeat struct {
 	// lag is how long the agent takes over a turn: its answer comes that
 	// long after it took the message, not in the same instant.
 	lag time.Duration
+	// closed: its events have ended (Close), as a real seat's do once its
+	// watcher stops; what it would say after that is lost.
+	closed bool
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -439,21 +442,19 @@ func (f *fakeSeat) Send(id, text, mode string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	f.events <- relay.Event{Kind: relay.KindState, State: "working"}
-	f.events <- relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}
+	f.emit(relay.Event{Kind: relay.KindState, State: "working"}, relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
 	if waiting {
-		f.events <- relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 1000}
-		f.events <- relay.Event{Kind: relay.KindState, State: "idle"}
+		f.emit(relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 1000}, relay.Event{Kind: relay.KindState, State: "idle"})
 		return "typed into Codex", nil
 	}
 	if hang {
 		return "typed into Codex", nil
 	}
 	turn := func() {
-		f.events <- relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."}
-		f.events <- relay.Event{Kind: relay.KindActivity, Text: "running gh pr list"}
-		f.events <- relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}}
-		f.events <- relay.Event{Kind: relay.KindState, State: "idle"}
+		f.emit(relay.Event{Kind: relay.KindProgress, Text: "Listing the open PRs."},
+			relay.Event{Kind: relay.KindActivity, Text: "running gh pr list"},
+			relay.Event{Kind: relay.KindTurn, Text: reply, DurationMS: 4000, Tools: 3, Images: []string{"/w/shot.png"}},
+			relay.Event{Kind: relay.KindState, State: "idle"})
 	}
 	if lag > 0 {
 		time.AfterFunc(lag, turn)
@@ -479,8 +480,10 @@ func (f *fakeSeat) Screen(int) (string, error) {
 	defer f.mu.Unlock()
 	return f.screen, nil
 }
-func (f *fakeSeat) Kill() error            { f.mu.Lock(); f.killed = true; f.mu.Unlock(); f.Close(); return nil }
-func (f *fakeSeat) Close()                 { f.once.Do(func() { close(f.events) }) }
+func (f *fakeSeat) Kill() error { f.mu.Lock(); f.killed = true; f.mu.Unlock(); f.Close(); return nil }
+func (f *fakeSeat) Close() {
+	f.once.Do(func() { f.mu.Lock(); f.closed = true; close(f.events); f.mu.Unlock() })
+}
 func (f *fakeSeat) Snapshot() relay.Status { return relay.Status{State: "idle", Since: time.Now()} }
 func (f *fakeSeat) sentTexts() []string {
 	f.mu.Lock()
@@ -494,9 +497,15 @@ func (f *fakeSeat) sentModes() []string {
 }
 func (f *fakeSeat) wasKilled() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.killed }
 
-// emit makes the agent report something on its own.
+// emit makes the agent report something on its own; once its events have
+// ended (Close, Kill), nothing more is heard.
 func (f *fakeSeat) emit(evs ...relay.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, ev := range evs {
+		if f.closed {
+			return
+		}
 		f.events <- ev
 	}
 }

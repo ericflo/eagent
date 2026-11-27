@@ -151,7 +151,6 @@ func TestK2ANotSentFromTheSeatARestartReplacesIsKept(t *testing.T) {
 // up. The restart waits for the old seat's news: the message arrived, and
 // it is not also reported unconfirmed.
 func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
-	t.Skip("known, not fixed: finding 6, fixed in the next commit")
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := newLaunchRuntime(t)
