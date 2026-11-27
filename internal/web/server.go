@@ -797,6 +797,26 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
+		// Words deliver put in its inbox after the run's last look there
+		// would wait for a run nobody brings: the session is resumed with
+		// them, as for words to a session nobody runs, unless this server
+		// stopped the run (it is shutting down). Looked at under deliver's
+		// lock, so words it is putting there now are seen.
+		if ctx.Err() != nil {
+			return
+		}
+		s.resuming.Lock()
+		defer s.resuming.Unlock()
+		if !rt.InboxWordsLeft() {
+			return
+		}
+		info, err := s.resolve(rt.SessionID())
+		if err == nil && !alive(info.Path) && !s.isHosted(info.ID) {
+			err = s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true)
+		}
+		if err != nil {
+			s.logf("web: session %s stopped with words in its inbox and could not be resumed: %v", rt.SessionID(), err)
+		}
 	}()
 }
 
