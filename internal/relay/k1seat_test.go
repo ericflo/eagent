@@ -459,3 +459,67 @@ func TestK1AnAfterTurnSendTheAgentsQueueDroppedIsReported(t *testing.T) {
 		})
 	}
 }
+
+// k1ClosedDuringHandOver is an agent whose seat is closed (a restart, a
+// switch, a stop) while its after-turn hand-over runs: after it held the
+// message, and, with take, after the agent's hook claimed it too.
+type k1ClosedDuringHandOver struct {
+	Agent
+	take bool
+}
+
+func (a k1ClosedDuringHandOver) afterTurn(s *Seat, id, text string) error {
+	err := a.Agent.afterTurn(s, id, text)
+	if a.take {
+		takeSpool(s.spec.Spool)
+	}
+	s.Close()
+	return err
+}
+
+// A8: a seat closed during the after-turn hand-over holds nothing, as one
+// closed before it does (5a66cbd): a message the hand-over left in the
+// spool, which no hook has claimed, is taken back and Send says ErrClosed,
+// so the harness hands it to the agent that took over. One a hook claimed
+// meanwhile may be in the agent: it is left to it, and Send says held, as
+// it does for a message handed to Codex's own queue (nothing to take back).
+func TestK1AnAfterTurnSendToASeatClosedDuringItsHandOverHoldsNothing(t *testing.T) {
+	pi := piAgent{name: "pi", label: "Pi", binary: "pi"}
+	for _, c := range []struct {
+		name  string
+		agent Agent
+		spool bool
+		take  bool
+		want  error // nil: held
+	}{
+		{"claude", claudeAgent{}, true, false, ErrClosed},
+		{"pi", pi, true, false, ErrClosed},
+		{"claude_hook_claimed_it", claudeAgent{}, true, true, nil},
+		{"codex_queue", handOverWorks{}, false, false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			spec := Spec{Name: "x"}
+			if c.spool {
+				spec.Spool, spec.Hook = filepath.Join(t.TempDir(), "after_turn"), "eagent relay-hook"
+			}
+			h := &fakeHost{alive: true}
+			s := newSeat(spec, k1ClosedDuringHandOver{Agent: c.agent, take: c.take}, h, "k1c-"+c.name, "thread-1")
+			s.state = "working"
+			close(s.done)
+			msg, err := s.Send("r1", "then run the tests", "after_turn")
+			if !errors.Is(err, c.want) || c.want == nil && err != nil {
+				t.Fatalf("Send returned %q, %v; want %v", msg, err, c.want)
+			}
+			names := spoolNames(spec.Spool)
+			switch {
+			case c.want != nil && (len(names) != 0 || len(s.Snapshot().Pending) != 0):
+				t.Fatalf("spool %v, pending %v; want the message taken back", names, s.Snapshot().Pending)
+			case c.take && len(names) != 1:
+				t.Fatalf("spool %v; want the hook's claimed file left to it", names)
+			}
+			if typed := k1Typed(h); len(typed) != 0 {
+				t.Fatalf("typed %q", typed)
+			}
+		})
+	}
+}

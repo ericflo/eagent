@@ -526,6 +526,14 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			// the spool.
 			s.trackHeld(id, text, mode, s.spec.Spool != "")
 			err := s.agent.afterTurn(s, id, text)
+			s.mu.Lock()
+			closed = s.closed
+			s.mu.Unlock()
+			if err == nil && closed && s.spec.Spool != "" && unspool(s.spec.Spool, id) && s.untrack(id) {
+				// Stopped during the hand-over, before a hook took it
+				// from the spool: taken back, so nothing is held.
+				return "", ErrClosed
+			}
 			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
 				// The agent's own command in its own queue: it runs it
 				// rather than recording a message, so handed over is
@@ -903,6 +911,20 @@ func spoolNames(spool string) []string {
 func spoolWaits(names []string, id string) bool {
 	for _, n := range names {
 		if strings.HasSuffix(n, "-"+id+".txt") {
+			return true
+		}
+	}
+	return false
+}
+
+// unspool takes held message id back from the spool, with the rename a hook
+// claims it with, and says whether it could: false once a hook or a sweep
+// has claimed it.
+func unspool(spool, id string) bool {
+	for _, n := range spoolNames(spool) {
+		path := filepath.Join(spool, n)
+		if !strings.HasPrefix(n, ".") && strings.HasSuffix(n, "-"+id+".txt") && os.Rename(path, path+".taken") == nil {
+			_ = os.Remove(path + ".taken")
 			return true
 		}
 	}
