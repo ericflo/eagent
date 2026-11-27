@@ -11,6 +11,7 @@ import (
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // k2FeedSeat is an agent whose seat's news the test hands over one event
@@ -240,6 +241,73 @@ func TestK2ALiveModelChangeDuringASwitchIsRefused(t *testing.T) {
 	g.release <- struct{}{}
 	recv(t, switched, "switch")
 	waitRelayStarts(t, rt)
+}
+
+// A reader's suspicion on briefedBy (A18): the model stops Codex with a
+// reason of its own that reads like a switch's ("handed over to claude"),
+// starts Claude and sends it something. Claude was handed nothing by a
+// brief: a switch away from it hands over from Claude itself, not from
+// Codex. The model's calls are recorded each with its result after it, so
+// its stop and start are not the neighbours a switch writes.
+func TestK2AStopWithASwitchsReasonDoesNotBriefLikeASwitch(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	relayAgentHomes(t)
+	claude := newFakeSeat("x")
+	claude.hang = true // takes the message and stays in its first turn
+	seats := []*fakeSeat{newFakeSeat("Parsed the config files."), claude}
+	var mu sync.Mutex
+	launched := 0
+	old := launchRelay
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		mu.Lock()
+		s := seats[min(launched, len(seats)-1)]
+		launched++
+		mu.Unlock()
+		return s, relay.Started{Host: "tmux", Target: relay.Target(spec.Session, spec.Name), InnerID: innerID, Command: []string{spec.Profile.Agent}}, nil
+	}
+	t.Cleanup(func() { launchRelay = old })
+	model := newScripted(func(_ string, msgs []map[string]any) reply {
+		all, tail := allText(msgs), lastUserText(msgs)
+		switch {
+		case strings.Contains(tail, "The session is ending now"):
+			return say("Done.")
+		case !strings.Contains(all, "finished a turn"):
+			return hold()
+		case !strings.Contains(all, "Started."):
+			return reply{calls: []event.ToolCall{
+				tc("relay_control", `{"action":"stop","reason":"handed over to claude"}`),
+				tc("relay_start", `{"profile":"claude"}`),
+				tc("relay_send", `{"relay":"claude","text":"look at the parser"}`),
+			}}
+		case !strings.Contains(all, "Stopped Claude"):
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","relay":"claude"}`)}}
+		}
+		return hold()
+	})
+	defer model.srv.Close()
+	rt, _ := relayRunBatch(t, testConfig(model.srv.URL), Options{Project: t.TempDir(), Prompt: "Build the config parser.", Relay: "codex"})
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	for _, ev := range evs {
+		var d event.RelayEndData
+		if ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Name == "codex" && d.Reason == "handed over to claude" {
+			stopped = true
+		}
+	}
+	if got := claude.sentTexts(); !stopped || len(got) != 1 || got[0] != "look at the parser" {
+		t.Fatalf("the model's stop recorded %v; Claude was sent %q", stopped, got)
+	}
+	fresh := &Runtime{st: state.Replay(evs)}
+	rel := fresh.st.Relays["claude"]
+	if rel == nil || rel.Turns != 0 {
+		t.Fatalf("claude on the record: %+v", rel)
+	}
+	if brief := fresh.writeBrief(fresh.handoverFor(rel), nil); !strings.HasPrefix(brief, "You are taking over this work from Claude") {
+		t.Errorf("a switch away from Claude would brief:\n%s", brief)
+	}
 }
 
 // Review 15, finding 9. A model change restarts Codex; while it comes up a
