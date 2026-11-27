@@ -92,3 +92,26 @@ func TestSR8AJournaledDefaultIsNotWrittenOverADeletedBundle(t *testing.T) {
 		t.Fatalf("the replay refused finishes %s, saying %q; want rejected, naming the missing preset", j.Status, msg)
 	}
 }
+
+// Under `serve --config handmade` with default_config handmade too, the
+// phone's refusal names both: selecting a different default alone would
+// not free it.
+func TestK13TheRefusalNamesEveryReasonAtOnce(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("EAGENT_PRESET", "")
+	t.Setenv("EAGENT_CONFIG", "")
+	s, g, path := handmadeBundle(t)
+	if _, err := config.SaveRaw(s.Project, `{"default_config":"handmade"}`, "", true); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetSessionStarter(func(context.Context, string, SessionRequest) (SessionStart, error) {
+		return SessionStart{}, nil
+	}, func(project string) (config.Config, error) { return config.LoadBundle(project, "", "handmade") })
+	defer restore()
+	q := reviewedCommand(t, s, g, control.Proposal{Operation: "bundle.delete", Parameters: map[string]any{"name": "handmade"}})
+	j, err := executeCommand(context.Background(), s, g, q, false)
+	msg, _ := j.Result["message"].(string)
+	if bundleBytes(path) != handmade || !strings.Contains(msg, "default_config") || !strings.Contains(msg, "--config") {
+		t.Fatalf("the refusal (%s, %v) says %q; it should name default_config and the server's --config", j.Status, err, msg)
+	}
+}

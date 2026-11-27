@@ -38,13 +38,8 @@ func SetHost(fn func(project string) (config.Config, error)) func(project string
 // bundle). What the phone is offered to start, and the saved preset it may
 // not delete, follow it.
 func (s *Service) Runs() config.Config {
-	hostMu.Lock()
-	fn := host
-	hostMu.Unlock()
-	if fn != nil {
-		if cfg, err := fn(s.Project); err == nil {
-			return cfg
-		}
+	if cfg, ok := s.hostRuns(); ok {
+		return cfg
 	}
 	if cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err == nil {
 		return cfg
@@ -52,16 +47,32 @@ func (s *Service) Runs() config.Config {
 	return config.Defaults()
 }
 
+// hostRuns is the configuration the registered host starts sessions on,
+// when there is one and it gives it.
+func (s *Service) hostRuns() (config.Config, bool) {
+	hostMu.Lock()
+	fn := host
+	hostMu.Unlock()
+	if fn == nil {
+		return config.Config{}, false
+	}
+	cfg, err := fn(s.Project)
+	return cfg, err == nil
+}
+
+// hostKeeps is why a saved preset the eagent server runs its sessions on is
+// in force, and what frees it.
+const hostKeeps = "the eagent server runs its sessions on it (by its --config or --preset, or its default); it can be deleted once the server runs on another"
+
 // inForce refuses to delete the saved preset name while sessions start on
-// it, saying what keeps it and what would free it: the loader's rule
-// (config.KeptBy), or the host's bundle where this service's own loading
-// lays another (the server's --config or --preset).
+// it, saying everything that keeps it and what would free it: the loader's
+// rule (config.KeptBy), and the host's bundle (the server's --config or
+// --preset, which no default chosen changes) unless this service's own
+// flags already said so.
 func (s *Service) inForce(name string) error {
 	why := config.KeptBy(config.Resolve(s.Project, s.Preset, s.Bundle), s.Preset, s.Bundle, name)
-	if name != "" && s.Runs().Name == name {
-		if own, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err != nil || own.Name != name {
-			why = append(why, config.FlagKeeps)
-		}
+	if cfg, ok := s.hostRuns(); ok && name != "" && cfg.Name == name && !slices.Contains(why, config.FlagKeeps) {
+		why = append(why, hostKeeps)
 	}
 	if len(why) == 0 {
 		return nil
