@@ -375,6 +375,15 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	// resumes the session: it takes the message in, so the ones after it
 	// are read in order instead of waiting behind it for ever.
 	err = w.host.Resume(sid, msg)
+	if err != nil && (store.Alive(info.Path) || w.host.Hosted(sid)) {
+		// It was resumed first from elsewhere (the browser; the serve
+		// answers web.ErrRunning): as for a session found running before
+		// the resume, the reply is that run's mirror's, kept quietly for
+		// when it stops, and nobody is told it could not be resumed.
+		w.logf("finalechat: reply to session %s left to its running mirror", sid)
+		w.keepUntilStopped(info, thread, m)
+		return
+	}
 	if trigger.ID != "" && trigger.ID != m.ID {
 		// The trigger is read by the session's poll, after m; when the
 		// resume failed, m is kept in its stead (retryLater).

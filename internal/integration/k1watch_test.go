@@ -570,3 +570,48 @@ func TestK1AWatcherElsewhereLeavesARestoredReplyToTheRestore(t *testing.T) {
 		t.Fatalf("resumed %v, want the /quit once and then the message after it", got)
 	}
 }
+
+// k1BrowserFirst is the serve when the browser resumed the session first:
+// by the time the watcher's resume comes, the session is hosted, and the
+// serve answers that it is running (web.ErrRunning).
+type k1BrowserFirst struct{ fakeResumeHost }
+
+func (h *k1BrowserFirst) Resume(id string, msg PhoneMessage) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hosted[id] = true
+	return errors.New("the session is running; its own mirror reads the thread")
+}
+
+// Batch 2, the browser first: a reply reaches a stopped session's thread
+// as the browser resumes the session. The watcher's resume finds it
+// running: as when its own check finds a session running, the reply is
+// left to that run's mirror and kept quietly for when it stops; the thread
+// is not told eagent could not resume the session, and the reply is not
+// claimed.
+func TestK1AReplyToASessionTheBrowserResumedFirstIsLeftToItsMirror(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	fr := newR10Front(t, f)
+	host := &k1BrowserFirst{fakeResumeHost{hosted: map[string]bool{}}}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "please deploy the fix", CreatedAt: time.Now()})
+	if notes := fr.posted(); len(notes) != 0 {
+		t.Fatalf("posted %q", notes)
+	}
+	if p, kept := w.retries.replies["m1"]; !kept || p.told {
+		t.Fatalf("kept %#v, want the reply kept quietly", w.retries.replies)
+	}
+	if _, claimed := w.handled["m1"]; claimed {
+		t.Fatal("the reply is claimed")
+	}
+}
