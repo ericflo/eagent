@@ -94,6 +94,7 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 	for _, rel := range state.Replay(evs).ActiveRelays() {
 		// One the record shows exited has no terminal to kill: its
 		// relay.end is recorded, and nothing is said of it.
+		waiting := unsettled(evs, rel)
 		exited := rel.State == "exited"
 		if rel.Target != "" && !exited {
 			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
@@ -103,11 +104,35 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
+		// What it was typed and had not shown arriving is unconfirmed, as
+		// stopSession's settleExited reports it.
+		for _, id := range waiting {
+			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryUnconfirmed,
+				Detail: "the agent was stopped before its arrival showed in its transcript, so whether it arrived cannot be confirmed"})); err != nil {
+				return stopped, failed, err
+			}
+		}
 		if !exited {
 			stopped = append(stopped, rel.Who())
 		}
 	}
 	return stopped, failed, nil
+}
+
+// unsettled lists the sends the record still waits on for rel (typed, no
+// outcome), in the order they were sent, as the harness's unresolvedSends.
+func unsettled(evs []event.Event, rel *state.Relay) []string {
+	var ids []string
+	for _, ev := range evs {
+		var d event.RelaySendData
+		if ev.Type != event.RelaySend && ev.Type != event.RelayMoved || ev.Decode(&d) != nil || d.Name != rel.Name {
+			continue
+		}
+		if _, waiting := rel.Undelivered[d.ID]; waiting && !slices.Contains(ids, d.ID) {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids
 }
 
 // writeHosted writes the list of sessions to bring back.
