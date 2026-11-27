@@ -145,4 +145,36 @@ func TestK8AWaitingChangeIsToldWhatHoldsTheAgent(t *testing.T) {
 	}
 }
 
-var _ = time.Second
+// The fifth review's suspicion: a change waits for Codex's turn to end;
+// the seat then says it is stuck (blocked, no dialog) or that Codex
+// exited. Asked then, the change would start it again at once (heldBack
+// holds nothing for either), but the waiting one saw no quiet and waited
+// for good. It applies then, once.
+func TestK8AWaitingChangeAppliesWhenTheAgentIsStuckOrExits(t *testing.T) {
+	for _, now := range []relay.Event{
+		{Kind: relay.KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n…"},
+		{Kind: relay.KindState, State: "exited", Detail: "$"},
+	} {
+		seat := newFakeSeat("one")
+		g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+		rt := newLaunchRuntime(t)
+		seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+		k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
+		if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
+			t.Fatalf("repick in a turn: %q", msg)
+		}
+		seat.emit(now)
+		if !k2Until(5*time.Second, func() bool { return k1Restarting(rt) }) {
+			t.Fatalf("%s: the waiting change was never applied", now.State)
+		}
+		g.waitEntered(t)
+		g.release <- struct{}{}
+		waitRelayStarts(t, rt)
+		k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
+		rt.sync(func() {
+			if _, waiting := rt.relayRepick["codex"]; waiting {
+				t.Errorf("%s: the change still waits after it was applied", now.State)
+			}
+		})
+	}
+}

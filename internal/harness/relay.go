@@ -1182,6 +1182,12 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
 			r.settleExited(rel)
 		}
+		if ev.State == "blocked" || ev.State == "exited" {
+			// Stuck or gone: no quiet comes, and nothing holds a change
+			// then unless a dialog the agent reports does (heldBack). A
+			// change that waited applies now, as one asked now would.
+			r.applyWaitingRepick(name)
+		}
 	case relay.KindDelivered:
 		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
 	case relay.KindQuiet:

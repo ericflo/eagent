@@ -384,12 +384,12 @@ func TestK1AModelChangeAskedUnderADialogWaits(t *testing.T) {
 }
 
 // A11, its bound: an agent on autopilot blocked for going quiet in a turn
-// ends that turn, and its seat says idle just after (here while the turn
-// is being recorded). A change that waited applies then, and the autopilot
-// idle check is armed at the turn as before.
-func TestK1AQuietAgentsTurnStillAppliesTheChangeAndArmsTheIdleCheck(t *testing.T) {
+// ends that turn: the autopilot idle check is armed at the turn as before.
+// (A change that waits through such a block applies at the block itself,
+// as one asked then does: TestK8AWaitingChangeAppliesWhenTheAgentIsStuckOrExits.)
+func TestK1AQuietAgentsTurnArmsTheIdleCheck(t *testing.T) {
 	seat := newK1HeldSeat()
-	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := newLaunchRuntime(t)
 	rt.sync(func() {
 		rt.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: "codex", Instruction: "keep going", Decide: true}))
@@ -397,7 +397,6 @@ func TestK1AQuietAgentsTurnStillAppliesTheChangeAndArmsTheIdleCheck(t *testing.T
 	seat.set("working")
 	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
 	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
-	k1Repick(t, rt)
 	seat.set("blocked")
 	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n…"}, relay.Event{Kind: relay.KindTurn, Text: "Built it."})
 	k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 && rel.State == "idle" })
@@ -406,7 +405,6 @@ func TestK1AQuietAgentsTurnStillAppliesTheChangeAndArmsTheIdleCheck(t *testing.T
 			t.Error("the autopilot idle check was not armed at the quiet agent's turn")
 		}
 	})
-	k1Applied(t, rt, g, seat)
 }
 
 // A5, a switch whose new agent cannot start: the old agent was stopped for
