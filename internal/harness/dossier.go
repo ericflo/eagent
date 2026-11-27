@@ -114,7 +114,8 @@ func (r *Runtime) dossierBudget(promptTokens provTokens, fresh bool) int {
 // window is the context window of the model eagent's calls go to right now,
 // and the reply ceiling of those calls: the configured model's, the one a
 // runtime setting picked, or a fallback's once the route has moved to it.
-// Loop goroutine only.
+// A route that sets no window takes the one the catalog or the project's
+// live list gives its model (config.KnownContext). Loop goroutine only.
 func (r *Runtime) window() (tokens, reply provTokens) {
 	tokens, reply = provTokens(r.cfg.Model.ContextTokens), provTokens(r.cfg.Model.MaxTokens)
 	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
@@ -123,9 +124,7 @@ func (r *Runtime) window() (tokens, reply provTokens) {
 			tokens, reply = provTokens(cur.ContextTokens), provTokens(cur.MaxTokens)
 		}
 		if tokens <= 0 {
-			if known, ok := config.Lookup(ep.BaseURL, ep.Model); ok {
-				tokens = provTokens(known.Context)
-			}
+			tokens = provTokens(config.KnownContext(r.opts.Project, ep.BaseURL, ep.Model))
 		}
 	}
 	if tokens <= 0 {
