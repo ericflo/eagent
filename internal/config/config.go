@@ -797,6 +797,13 @@ func defaultBundle(fileCfg map[string]json.RawMessage) (string, string) {
 // preset instead, and no bundle is laid. It also returns the preset and
 // the explicit preset still to apply.
 func chooseBundle(project, preset, bundle string, fileCfg map[string]json.RawMessage) (string, string, string, string) {
+	preset, bundle, explicit, from, _ := chooseBundleFrom(project, preset, bundle, fileCfg)
+	return preset, bundle, explicit, from
+}
+
+// chooseBundleFrom is chooseBundle, with the layer that named the preset
+// it returns (presetFrom, as layers has it; "" when it returns none).
+func chooseBundleFrom(project, preset, bundle string, fileCfg map[string]json.RawMessage) (_, _, _, _, presetFrom string) {
 	named, flagged := bundle != "", preset != ""
 	preset, bundle, explicit := explicitChoice(project, preset, bundle)
 	from := ""
@@ -808,13 +815,92 @@ func chooseBundle(project, preset, bundle string, fileCfg map[string]json.RawMes
 	default:
 		bundle, from = defaultBundle(fileCfg)
 	}
+	if preset != "" {
+		presetFrom = "flag"
+	}
 	if canon, isPreset := ResolvePreset(bundle); bundle == "" || isPreset {
 		if isPreset && preset == "" {
-			preset = canon
+			preset, presetFrom = canon, from
 		}
 		bundle, from = "", ""
 	}
-	return preset, bundle, explicit, from
+	return preset, bundle, explicit, from, presetFrom
+}
+
+// layers is what loading lays under and over the project file: the preset
+// (as named, "" for none) with the layer that named it in place of the
+// file's own "preset" key (presetFrom: "flag", "EAGENT_PRESET",
+// "EAGENT_CONFIG", "default_config", or "bundle" when the saved preset
+// laid names it; "" for the file's own, or none), and the saved preset
+// (bundle, with from as Config.NameFrom) and its contents.
+type layers struct {
+	preset, presetFrom string
+	bundle, from       string
+	bundleCfg          map[string]json.RawMessage
+}
+
+// chooseLayers is loading's choice of layers for the project with fileCfg
+// as its file: the one place that makes it (LoadBundleWithFile lays them).
+func chooseLayers(project, preset, bundle string, fileCfg map[string]json.RawMessage) (l layers, err error) {
+	var explicitPreset string
+	l.preset, l.bundle, explicitPreset, l.from, l.presetFrom = chooseBundleFrom(project, preset, bundle, fileCfg)
+	if l.bundle != "" {
+		if !validName(l.bundle) {
+			return l, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+		}
+		l.bundleCfg, err = readJSONMap(BundlePath(project, l.bundle))
+		if err != nil {
+			return l, err
+		}
+		if l.bundleCfg == nil {
+			names, _ := ListBundles(project)
+			return l, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", l.bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
+		}
+	}
+	// Preset precedence: flag > env > bundle > file. (The flag's own came
+	// back as the preset; an explicit one still to apply is the
+	// variable's.)
+	if l.preset == "" && explicitPreset != "" {
+		l.preset, l.presetFrom = explicitPreset, "EAGENT_PRESET"
+	}
+	if l.preset == "" {
+		if raw, ok := l.bundleCfg["preset"]; ok {
+			_ = json.Unmarshal(raw, &l.preset)
+		}
+		if l.preset != "" {
+			l.presetFrom = "bundle"
+		}
+	}
+	if l.preset == "" {
+		if raw, ok := fileCfg["preset"]; ok {
+			_ = json.Unmarshal(raw, &l.preset)
+		}
+	}
+	return l, nil
+}
+
+// LaidPreset says which built-in preset loading lays for the project, by
+// its canonical name ("" for none, or one loading does not know), and the
+// layer that names it in place of the project file's own "preset" key:
+// "EAGENT_PRESET", "EAGENT_CONFIG", "default_config", or "bundle" when the
+// saved preset laid over the file names it (Config.Name, NameFrom); ""
+// when it is the file's own, or none. fileCfg is the file as proposed; nil
+// reads the project's file.
+func LaidPreset(project string, fileCfg map[string]json.RawMessage) (preset, from string, err error) {
+	if fileCfg == nil {
+		if fileCfg, err = readJSONMap(File(project)); err != nil {
+			return "", "", err
+		}
+	}
+	l, err := chooseLayers(project, "", "", fileCfg)
+	if err != nil {
+		return "", "", err
+	}
+	canon, ok := ResolvePreset(l.preset)
+	if !ok {
+		return "", "", nil
+	}
+	return canon, l.presetFrom, nil
 }
 
 // explicitChoice is the one place an explicit preset (the caller's, else
@@ -886,36 +972,11 @@ func Keeps(defaultConfig, laid, from, name string) []string {
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
 	cfg := Defaults()
-	var err error
-	preset, bundle, explicitPreset, from := chooseBundle(project, preset, bundle, fileCfg)
-	var bundleCfg map[string]json.RawMessage
-	if bundle != "" {
-		if !validName(bundle) {
-			return cfg, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
-		}
-		bundleCfg, err = readJSONMap(BundlePath(project, bundle))
-		if err != nil {
-			return cfg, err
-		}
-		if bundleCfg == nil {
-			names, _ := ListBundles(project)
-			return cfg, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
-		}
+	l, err := chooseLayers(project, preset, bundle, fileCfg)
+	if err != nil {
+		return cfg, err
 	}
-	// Preset precedence: flag > env > bundle > file.
-	if preset == "" {
-		preset = explicitPreset
-	}
-	if preset == "" {
-		if raw, ok := bundleCfg["preset"]; ok {
-			_ = json.Unmarshal(raw, &preset)
-		}
-	}
-	if preset == "" {
-		if raw, ok := fileCfg["preset"]; ok {
-			_ = json.Unmarshal(raw, &preset)
-		}
-	}
+	preset, bundle, from, bundleCfg := l.preset, l.bundle, l.from, l.bundleCfg
 	if preset != "" {
 		canon, ok := ResolvePreset(preset)
 		if note := PresetNote(preset); note != "" {

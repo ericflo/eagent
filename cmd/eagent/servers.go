@@ -240,12 +240,15 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		}
 	}
 	// The save writes the route as its difference from the preset the file
-	// names. Where a variable (or a built-in named as the file's default)
-	// lays another preset in its place, that difference would be laid over
-	// the wrong preset and run as neither. Nothing is written instead.
+	// names. Where loading lays another preset in its place (a variable,
+	// the file's default_config or a saved preset names it), that
+	// difference would be laid over the wrong preset and run as neither.
+	// Nothing is written instead. Loading says which it laid, and why.
 	own, _ := config.ResolvePreset(res.File.Preset)
-	if laid, who := presetAbove(project, res.File.DefaultConfig); laid != "" && presetsDiffer(laid, own) {
-		return fail(fmt.Errorf("%s names the preset %s here, in place of the file's own, so a model written to the file would not run as written; unset it first", who, laid))
+	if laid, from, err := config.LaidPreset(project, nil); err == nil && from != "" && presetsDiffer(laid, own) {
+		cur, _ := config.Load(project, "") // (names the saved preset laid, and what lays it)
+		why, undo := laidAbove(cur, laid, from)
+		return fail(fmt.Errorf("%s, in place of the file's own, so a model written to the file would not run as written; nothing was changed. %s", why, undo))
 	}
 	cfg := res.Effective
 	a := &cfg.Model
@@ -421,30 +424,26 @@ func presetsDiffer(a, b string) bool {
 	return !bytes.Equal(lay(a), lay(b))
 }
 
-// presetAbove is the built-in preset that something above the file's own
-// "preset" key lays here, and what names it: a variable, or the file's
-// default_config (defaultConfig) when that names a built-in. Both "" when
-// nothing does, or when what is laid is a saved preset's own. Loading says
-// which preset that is: a file that names none of its own is loaded, and
-// the preset it comes back with is the one laid in its place. (A loaded
-// configuration's Preset is the file's own key where the file has one,
-// whatever was laid.)
-func presetAbove(project, defaultConfig string) (laid, who string) {
-	probe := map[string]json.RawMessage{}
-	if defaultConfig != "" {
-		probe["default_config"], _ = json.Marshal(defaultConfig)
+// laidAbove says what named the preset laid in place of the project
+// file's own "preset" key, and how that is undone. laid and from are
+// config.LaidPreset's; cfg, loaded beside them, names the saved preset
+// when that is what names it.
+func laidAbove(cfg config.Config, laid, from string) (why, undo string) {
+	why = fmt.Sprintf("%s names the preset %s here", from, laid)
+	if from == "default_config" {
+		why = fmt.Sprintf("the file's default_config names the preset %s here", laid)
 	}
-	cfg, err := config.LoadBundleWithFile(project, "", "", probe)
-	if err != nil || cfg.Preset == "" {
-		return "", ""
-	}
-	for _, v := range []string{"EAGENT_CONFIG", "EAGENT_PRESET"} {
-		if canon, ok := config.ResolvePreset(os.Getenv(v)); ok && canon == cfg.Preset {
-			return cfg.Preset, v
+	if from == "bundle" {
+		from = cfg.NameFrom
+		lays := from
+		if from == "default_config" {
+			lays = "the file's default_config"
 		}
+		why = fmt.Sprintf("the saved preset %q, which %s lays over the project file here, names the preset %s", cfg.Name, lays, laid)
 	}
-	if canon, ok := config.ResolvePreset(defaultConfig); ok && canon == cfg.Preset {
-		return cfg.Preset, "the file's default_config"
+	undo = "Unset " + from + " first"
+	if from == "default_config" {
+		undo = "`eagent presets use default` clears the file's default_config"
 	}
-	return "", ""
+	return why, undo
 }
