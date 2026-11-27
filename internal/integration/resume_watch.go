@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -374,6 +375,15 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	// resumes the session: it takes the message in, so the ones after it
 	// are read in order instead of waiting behind it for ever.
 	err = w.host.Resume(sid, msg)
+	if err != nil && (store.Alive(info.Path) || w.host.Hosted(sid)) {
+		// It was resumed first from elsewhere (the browser; the serve
+		// answers web.ErrRunning): as for a session found running before
+		// the resume, the reply is that run's mirror's, kept quietly for
+		// when it stops, and nobody is told it could not be resumed.
+		w.logf("finalechat: reply to session %s left to its running mirror", sid)
+		w.keepUntilStopped(info, thread, m)
+		return
+	}
 	if trigger.ID != "" && trigger.ID != m.ID {
 		// The trigger is read by the session's poll, after m; when the
 		// resume failed, m is kept in its stead (retryLater).
@@ -490,7 +500,7 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if p.restored && !w.holds(p) {
+		if p.restored && w.restoring(p) {
 			// The restore that left it has not resumed the session with
 			// it yet: resumed from here too, the message would be taken
 			// twice.
@@ -507,15 +517,17 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 	}
 }
 
-// holds reports whether p's session's record holds p's message (its
-// ledger has taken it in).
-func (w *resumeWatcher) holds(p pendingReply) bool {
+// restoring reports whether the restore that left p is still to resume its
+// session with p's message: the record neither holds the message nor was
+// written since p was kept. A run that came and went without taking it
+// ends the hold, as a restore that failed does (ReleaseReply).
+func (w *resumeWatcher) restoring(p pendingReply) bool {
 	info, ok := w.session(strings.TrimPrefix(p.thread.ExternalID, "eagent:"))
-	if !ok {
+	if !ok || info.Modified.After(p.since) {
 		return false
 	}
 	evs, err := store.Read(info.Path)
-	return err == nil && ReadPhoneLedger(evs).Taken[p.msg.ID]
+	return err == nil && !ReadPhoneLedger(evs).Taken[p.msg.ID]
 }
 
 func (w *resumeWatcher) session(id string) (store.Info, bool) {
@@ -654,11 +666,27 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// that takes it up before the restore has started the session leaves
 	// the session to the restore (retryPending).
 	if err := leaveWithWatcher(project, info, last, true); err != nil {
-		return PhoneMessage{}, false, err
+		return PhoneMessage{}, false, fmt.Errorf("%w: %v", ErrHandOver, err)
 	}
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
+}
+
+// ErrHandOver is PendingReply's error when it found the reply but could
+// not leave it for the project's reply watcher: its thread was read, and
+// nothing was taken.
+var ErrHandOver = errors.New("could not leave the reply for the reply watcher")
+
+// ReleaseReply gives up the hold a restore's hand-over (PendingReply) put
+// on msg, when the restore could not resume the session with it: the
+// project's reply watcher then looks at the thread for it, as for any
+// reply it keeps quietly.
+func ReleaseReply(project string, info store.Info, msg PhoneMessage) error {
+	if msg.ID == "" {
+		return nil
+	}
+	return leaveWithWatcher(project, info, finalechat.Message{ID: msg.ID}, false)
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not

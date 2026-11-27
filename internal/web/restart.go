@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -84,6 +85,10 @@ var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) 
 // pendingReply finds that reply; tests substitute it.
 var pendingReply = integration.PendingReply
 
+// releaseReply gives it back to the reply watcher when the session could
+// not come back with it; tests substitute it.
+var releaseReply = integration.ReleaseReply
+
 // restoreHosted brings back the sessions the previous server was hosting
 // when it stopped. The list is used once: a session that cannot come back
 // is not tried again at every start.
@@ -120,12 +125,20 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			// can be waiting in one: it comes back as it was.
 			reply, err = integration.PhoneMessage{}, nil
 		}
+		if errors.Is(err, integration.ErrHandOver) {
+			// Its thread was read: the reply stays there, untaken.
+			s.logf("session %s: not brought back (%v); the reply stays in its thread", id, err)
+			continue
+		}
 		if err != nil {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)
 			continue
 		}
 		if err := restoreSession(s, id, reply); err != nil {
 			s.logf("session %s could not be brought back: %v", id, err)
+			if err := releaseReply(s.Project, info, reply); err != nil {
+				s.logf("session %s: its reply waits for your next message (%v)", id, err)
+			}
 			continue
 		}
 		back++
