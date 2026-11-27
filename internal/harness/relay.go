@@ -504,7 +504,9 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 			// meanwhile passed it on to the new agent.
 			r.typingFailed(sendHolder(r.st, h.id, q.name), h.id, res.err)
 		case gone != "" && !r.hasOutcome(h.id):
-			r.appendOutcome(goneUnconfirmed(q.name, h.id, gone))
+			if !r.takeBack(r.st.Relays[q.name], h.id, h.mode, gone) {
+				r.appendOutcome(goneUnconfirmed(q.name, h.id, gone))
+			}
 		}
 	})
 	if !ran && untyped {
@@ -1265,27 +1267,36 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 	}
 	r.relays.mu.Unlock()
-	spool := "" // where a message held for the end of its turn waits
-	if spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort}); err == nil {
-		spool = spec.Spool
-	}
 	var rest []string
 	for _, s := range unresolvedSends(r.st, rel) {
-		switch {
-		case queued[s.ID]:
-		case s.Mode == "after_turn" && spool != "" && relay.Unspool(spool, s.ID):
-			// Still unclaimed in the spool: no hook took it, and taken back
-			// none will (nor hand it to an agent started under this name).
-			// It certainly did not go. (A restart takes its own back before
-			// its launch clears the spool: relayLaunch.takenBack.)
-			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
-		default:
+		if !queued[s.ID] && !r.takeBack(rel, s.ID, s.Mode, how) {
 			rest = append(rest, s.ID)
 		}
 	}
 	for _, id := range rest {
 		r.appendOutcome(goneUnconfirmed(rel.Name, id, how))
 	}
+}
+
+// takeBack settles a message held for the end of the turn of rel's agent,
+// which is gone (how), if it is still unclaimed in the spool: no hook took
+// it, and taken back none will (nor hand it to an agent started under this
+// name), so it certainly did not go: not_sent. False when it was not held
+// there (or a hook claimed it first), for the caller to report it
+// unconfirmed. The one take-back for an agent that ended: settleExited, and
+// settleSend for the hand-over being typed as it ended. (A restart takes its
+// own back before its launch clears the spool: relayLaunch.takenBack.)
+// Loop goroutine.
+func (r *Runtime) takeBack(rel *state.Relay, id, mode, how string) bool {
+	if mode != "after_turn" || rel == nil {
+		return false
+	}
+	spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort})
+	if err != nil || spec.Spool == "" || !relay.Unspool(spec.Spool, id) {
+		return false
+	}
+	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
+	return true
 }
 
 // unresolvedSends are the sends the record still waits on for rel, oldest
