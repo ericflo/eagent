@@ -147,7 +147,8 @@ type pending struct {
 	// after is how far the transcript afterIn was written when the seat
 	// began to watch for the send: an entry of it that starts before that
 	// was written before, and is not the send's arrival. afterIn is ""
-	// when the seat followed no transcript then.
+	// when the seat followed no transcript then, or the file has been
+	// started again from the top since (readTail).
 	afterIn string
 	after   int64
 }
@@ -1204,18 +1205,7 @@ func (s *Seat) watch() {
 		}
 		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
-			lines, starts, err := tail.next()
-			if err == nil && len(lines) > 0 {
-				s.mu.Lock()
-				s.lastLine = now
-				s.mu.Unlock()
-				for i, line := range lines {
-					for _, o := range p.line(line) {
-						o.pos = starts[i]
-						s.fold(o)
-					}
-				}
-			}
+			err := s.readTail(tail, p, now)
 			// Read to the end as it stood (or there is nothing to read):
 			// what the transcript did not show of the restored sends did
 			// not arrive while eagent was down.
@@ -1264,6 +1254,36 @@ func (s *Seat) watch() {
 			s.checkScreen(now)
 		}
 	}
+}
+
+// readTail folds what the transcript gained since the last read, each
+// observation with where its line starts. When the tailer starts the file
+// again from the top (truncated or replaced), what it holds now is new: no
+// mark taken on what it held before applies to it (pending.after).
+func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
+	start := tail.offset
+	lines, starts, err := tail.next()
+	if tail.offset < start {
+		s.mu.Lock()
+		for _, q := range s.pending {
+			if q.afterIn == tail.path {
+				q.afterIn = ""
+			}
+		}
+		s.mu.Unlock()
+	}
+	if err == nil && len(lines) > 0 {
+		s.mu.Lock()
+		s.lastLine = now
+		s.mu.Unlock()
+		for i, line := range lines {
+			for _, o := range p.line(line) {
+				o.pos = starts[i]
+				s.fold(o)
+			}
+		}
+	}
+	return err
 }
 
 // fold applies one observation.
