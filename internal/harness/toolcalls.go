@@ -254,6 +254,10 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			id = r.st.NextScheduleID()
 			r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: id, Kind: s.Kind, Spec: spec, Note: note, Next: next}))
 			r.armSchedule(id, next)
+			// As for an agent started: a session with a timer set is not
+			// ending, and its closing word is asked again once the timer's
+			// work is done.
+			r.summary.final, r.turns.finalAsked = false, false
 		})
 		tc.handle()
 		// The timer's id and the time it comes due are in the result, and
