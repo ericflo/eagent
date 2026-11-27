@@ -46,6 +46,9 @@ type Event struct {
 	Window      string
 	ResetsAt    string
 	Exhausted   bool
+	// Dialog, on a state event blocked by a dialog the agent reports (pi's
+	// extension), is its title; "" on every other event.
+	Dialog string
 }
 
 // Spec describes one relay.
@@ -415,7 +418,11 @@ func (s *Seat) emit(ev Event) {
 	}
 }
 
-func (s *Seat) setState(state, detail string) {
+func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "") }
+
+// setDialogState is setState for blocked by a dialog the agent reports
+// (reportDialog), whose title goes with the event (Event.Dialog).
+func (s *Seat) setDialogState(state, detail, dialog string) {
 	s.mu.Lock()
 	if s.state == state && detail == "" {
 		s.mu.Unlock()
@@ -429,7 +436,7 @@ func (s *Seat) setState(state, detail string) {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
 	s.mu.Unlock()
-	s.emit(Event{Kind: KindState, State: state, Detail: detail})
+	s.emit(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
 }
 
 // Close stops watching. The agent keeps running.
@@ -466,6 +473,9 @@ type Status struct {
 	Transcript string
 	Target     string
 	Pending    []string
+	// Dialog is the title of the dialog the agent reports holding it
+	// blocked (pi's extension), "" when none does.
+	Dialog string
 }
 
 // Snapshot describes the seat now.
@@ -473,6 +483,9 @@ func (s *Seat) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target}
+	if s.state == "blocked" {
+		st.Dialog = s.dialogUp
+	}
 	for _, p := range s.pending {
 		st.Pending = append(st.Pending, fmt.Sprintf("%s (%s, %s ago): %s", p.id, p.mode, time.Since(p.at).Round(time.Second), oneLine(p.text, 80)))
 	}
@@ -1681,7 +1694,7 @@ func (s *Seat) reportDialog(title string) {
 		}
 		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
-		s.setState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys")
+		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title)
 		return
 	}
 	back := s.dialogPrev

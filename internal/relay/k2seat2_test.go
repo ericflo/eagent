@@ -101,3 +101,33 @@ func TestK2ACatchUpStopsWhenTheSeatCloses(t *testing.T) {
 		t.Fatalf("the watcher looked %d times after the seat was closed at its first look; want 1", n)
 	}
 }
+
+// The seat says when a dialog the agent reports holds it blocked: its
+// status and the blocked state event carry the dialog's title, and
+// nothing else does (blocked for a slow start or a quiet turn, or the
+// state after the dialog ends).
+func TestK2ASeatSaysWhenADialogHoldsIt(t *testing.T) {
+	s := newSeat(Spec{}, piAgent{name: "pi", label: "Pi", binary: "pi"}, &fakeHost{alive: true}, "k2-dialog", "")
+	s.state = "working"
+	next := func() Event {
+		for _, ev := range drain(s.events) {
+			if ev.Kind == KindState {
+				return ev
+			}
+		}
+		t.Fatal("no state event")
+		return Event{}
+	}
+	s.reportDialog("Allow rm -rf build?")
+	if ev, st := next(), s.Snapshot(); ev.State != "blocked" || ev.Dialog != "Allow rm -rf build?" || st.Dialog != "Allow rm -rf build?" {
+		t.Fatalf("under the dialog: event %+v, status dialog %q", ev, st.Dialog)
+	}
+	s.reportDialog("")
+	if ev, st := next(), s.Snapshot(); ev.State != "working" || ev.Dialog != "" || st.Dialog != "" {
+		t.Fatalf("after the dialog: event %+v, status dialog %q", ev, st.Dialog)
+	}
+	s.setState("blocked", "no transcript activity for 10m; the screen ends:\nbuilding")
+	if ev, st := next(), s.Snapshot(); ev.Dialog != "" || st.Dialog != "" {
+		t.Fatalf("blocked for a quiet turn: event %+v, status dialog %q", ev, st.Dialog)
+	}
+}
