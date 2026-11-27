@@ -1267,6 +1267,21 @@ func (s *Seat) watch() {
 		now := time.Now()
 		s.mu.Lock()
 		moved, movedTo := s.refollow, s.inner
+		if cut := s.since; moved && tail != nil {
+			// Read the session left to its end once more first: pi may
+			// have written the end of a run there (an arrival, the reply,
+			// its settled mark) between the last read and its move. It is
+			// read as before the move (sinceKept), and what it adds is no
+			// news in the session moved to (readAt, as moveCut).
+			s.since = s.sinceKept
+			s.mu.Unlock()
+			for err := s.readTail(tail, p, now); err == nil && !tail.atEnd; err = s.readTail(tail, p, now) {
+			}
+			s.mu.Lock()
+			if s.since = cut; s.since.Before(s.readAt) {
+				s.since = s.readAt
+			}
+		}
 		if s.refollow {
 			// The agent moved to another transcript of its own (pi's /new):
 			// let the old one go and find the new one.
