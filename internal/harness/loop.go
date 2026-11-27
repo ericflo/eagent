@@ -1604,10 +1604,13 @@ var (
 func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
-	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && r.stillClosing() {
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
 		// The session is ending: a refusal is final for it
 		// (refusedWhileClosing). No restart, no try again, no notice: it
-		// ends in its closing path's own words.
+		// ends in its closing path's own words. A transient status (a
+		// rate limit, a timeout: Retryable) is no refusal: it is tried
+		// again after its wait, and a session whose calls all fail ends
+		// as one whose model could not be reached (maybeEnd).
 		r.closingRefused = true
 		if ae.ContextOverflow() {
 			// Should the session stop ending, the next look restarts
@@ -1683,13 +1686,13 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	}
 }
 
-// refusedWhileClosing reports that the last call was refused (4xx: too
-// long, or any other refusal) while the session is ending (stillClosing;
-// turnFailed): that is final for it. No restart is made (noRestartNow),
-// the look is not made again (maybeTurn), no notice is given, and the
-// session ends (maybeEnd) in its closing path's own words, as done: its
-// closing word was asked for, and what was refused came after it. Loop
-// goroutine.
+// refusedWhileClosing reports that the last call was refused (a 4xx that
+// is not transient: too long, or any other refusal) while the session is
+// ending (stillClosing; turnFailed): that is final for it. No restart is
+// made (noRestartNow), the look is not made again (maybeTurn), no notice
+// is given, and the session ends (maybeEnd) in its closing path's own
+// words, as done: its closing word was asked for, and what was refused
+// came after it. Loop goroutine.
 func (r *Runtime) refusedWhileClosing() bool {
 	return r.closingRefused && r.stillClosing()
 }
