@@ -829,6 +829,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	if err := overlay(project, &cfg, fileCfg, File(project), &n); err != nil {
 		return cfg, err
 	}
+	cfg.Name = "" // the project file is no bundle, whatever "name" it carries
 	if bundle != "" {
 		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle), &n); err != nil {
 			return cfg, err
