@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,8 +125,24 @@ type keptReply struct {
 	Account string `json:"account,omitempty"`
 }
 
-// accountOf is the account a base URL names, as kept replies record it.
-func accountOf(baseURL string) string { return strings.TrimRight(baseURL, "/") }
+// accountOf is the account a base URL names, as kept replies are compared
+// by it: the scheme and host lower-cased, localhost as 127.0.0.1, the
+// default port filled in, no trailing slash. Two spellings of one service
+// are one account.
+func accountOf(baseURL string) string {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return strings.ToLower(strings.TrimRight(baseURL, "/"))
+	}
+	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+	if host == "localhost" {
+		host = "127.0.0.1"
+	}
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[scheme]
+	}
+	return scheme + "://" + net.JoinHostPort(host, port) + strings.TrimRight(u.EscapedPath(), "/")
+}
 
 // lockKept holds the kept file for one process's read and write of it: two
 // watchers (the serve's and `connector run`'s) may stop, or sweep, at once.
@@ -212,15 +230,20 @@ type resumeWatcher struct {
 	// before kept replies recorded one) belong to: the project file's, or
 	// the only one.
 	secondary bool
+	// live are the accounts the watcher's connections watch (accountOf).
+	live []string
 }
 
 // mine reports whether p is this connection's to retry: it came from this
-// connection's account.
+// connection's account; or, for the project file's connection, it has no
+// account or one no connection watches, so that no kept reply is left
+// with nobody to retry it.
 func (w *resumeWatcher) mine(p pendingReply) bool {
-	if p.account == "" {
-		return !w.secondary
+	account := accountOf(p.account)
+	if p.account != "" && account == accountOf(w.client.BaseURL) {
+		return true
 	}
-	return p.account == accountOf(w.client.BaseURL)
+	return !w.secondary && (p.account == "" || !slices.Contains(w.live, account))
 }
 
 // pendingReply is a reply whose session could not be resumed yet, or one
@@ -301,8 +324,12 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	errs := make(chan error, len(clients))
+	var live []string
+	for _, c := range clients {
+		live = append(live, accountOf(c.BaseURL))
+	}
 	for i, c := range clients {
-		go func() { errs <- watchAccount(ctx, project, host, c, i > 0, retries, logf) }()
+		go func() { errs <- watchAccount(ctx, project, host, c, i > 0, live, retries, logf) }()
 	}
 	err := <-errs
 	cancel()
@@ -314,15 +341,15 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 
 // sameAccount reports whether two clients reach the same account.
 func sameAccount(a, b *finalechat.Client) bool {
-	return strings.TrimRight(a.BaseURL, "/") == strings.TrimRight(b.BaseURL, "/") && a.Token == b.Token
+	return accountOf(a.BaseURL) == accountOf(b.BaseURL) && a.Token == b.Token
 }
 
 // watchAccount runs one connection to an account's event stream, sweeping
 // it first and then every minute while it lasts. secondary: see
 // resumeWatcher.
-func watchAccount(ctx context.Context, project string, host ResumeHost, client *finalechat.Client, secondary bool, retries *replyRetries, logf func(string, ...any)) error {
+func watchAccount(ctx context.Context, project string, host ResumeHost, client *finalechat.Client, secondary bool, live []string, retries *replyRetries, logf func(string, ...any)) error {
 	client.UserAgent = "eagent-resume/1"
-	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}, secondary: secondary}
+	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}, secondary: secondary, live: live}
 	w.sweep(ctx)
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	defer stopSweeps()
