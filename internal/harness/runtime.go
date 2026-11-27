@@ -201,6 +201,11 @@ type Runtime struct {
 	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
 	ending bool
+	// closingRefused: the provider refused a call (4xx) while the session
+	// was ending, and no call has come back since (refusedWhileClosing).
+	// Per run, as the closing it belongs to is (finalAsked, summary.final).
+	// Loop goroutine.
+	closingRefused bool
 	// recordFailed: an event could not be written to the record (append).
 	// The run ends on it, and takes nothing more off the inbox. Loop
 	// goroutine.
@@ -1175,7 +1180,7 @@ func (r *Runtime) maybeEnd() {
 	// last failed call was shown: that is looked at first, without the
 	// wait (maybeTurn).
 	down := t.failures >= 2 && !r.lastFailedAnswered()
-	// A look refused as too long while the session is ending is final for
+	// A look refused (4xx) while the session is ending is final for
 	// it: what asked for that look is left, and the session ends.
 	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) && !r.refusedWhileClosing() {
 		return
