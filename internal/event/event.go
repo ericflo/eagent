@@ -487,9 +487,23 @@ type DossierData struct {
 	Host    string       `json:"host,omitempty"`
 	Asked   string       `json:"asked,omitempty"`
 	Earlier []RouteUsage `json:"earlier,omitempty"`
+	// Restart is how the restart this dossier opens stands in a run of
+	// restarts. A dossier from before it was written leaves it out.
+	Restart *DossierRestart `json:"restart,omitempty"`
 	// TaskID names the task worker that wrote it, in logs from before
 	// eagent wrote its own.
 	TaskID string `json:"task_id,omitempty"`
+}
+
+// DossierRestart is a dossier's `restart`: whether the restart carried
+// whole what no look had taken in, whether it was the one more try after a
+// restart that carried nothing and was refused, and how many restarts in
+// a row, this one included, were made for conversations too long from
+// their start.
+type DossierRestart struct {
+	Carried bool `json:"carried,omitempty"`
+	Retried bool `json:"retried,omitempty"`
+	Rescues int  `json:"rescues,omitempty"`
 }
 
 // RouteUsage is what some calls served by one route used.

@@ -508,28 +508,12 @@ const (
 	carriedNothing
 )
 
-// dossierRecord is the dossier event as finishDossier writes it: with how
-// the restart stands in the run of restarts (restartFacts), so that a
-// resumed run counts on where the stopped one was (restartOf).
-type dossierRecord struct {
-	event.DossierData
-	Restart *restartRecord `json:"restart,omitempty"`
-}
-
-// restartRecord is the dossier event's `restart`: what the restart carried
-// whole, whether it was the one more try, and how many restarts in a row,
-// this one included, were rescues (dossierJob).
-type restartRecord struct {
-	Carried bool `json:"carried,omitempty"`
-	Retried bool `json:"retried,omitempty"`
-	Rescues int  `json:"rescues,omitempty"`
-}
-
-// restartOf reads, from the dossier that opens the conversation in use,
-// what the restart that began it carried, whether it was the one more try,
-// and the restarts in a row up to it. A move to another model since then
-// starts the count again (newModel), and a dossier that does not say (or
-// none) leaves them unknown. Loop goroutine only.
+// restartOf reads, from the dossier that opens the conversation in use
+// (its `restart`, which finishDossier writes), what the restart that began
+// it carried, whether it was the one more try, and the restarts in a row
+// up to it, so that a resumed run counts on where the stopped one was. A
+// move to another model since then starts the count again, and a dossier
+// that does not say (or none) leaves them unknown. Loop goroutine only.
 func (r *Runtime) restartOf() (carried, bool, int) {
 	cur := r.st.Current()
 	for i := len(r.st.Events) - 1; cur != nil && i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
@@ -537,7 +521,7 @@ func (r *Runtime) restartOf() (carried, bool, int) {
 		if ev.Type != event.Dossier {
 			continue
 		}
-		var d dossierRecord
+		var d event.DossierData
 		if ev.Decode(&d) != nil || d.Restart == nil {
 			break
 		}
@@ -797,7 +781,7 @@ func (r *Runtime) toldFull() bool {
 // toldFullHere is toldFull for the decision it records, which stands on
 // the model it was found on and on no other: one picked after it (in the
 // thread's settings, a fallback, or the model a resumed run is configured
-// with) has its own one more try and restarts in a row (newModel), and
+// with) has its own one more try and restarts in a row (restartOf), and
 // is asked afresh. Loop goroutine only.
 func (r *Runtime) toldFullHere() bool {
 	ev, told := r.fullNoticeSaid()
@@ -1608,14 +1592,14 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	if res.usage != (event.Usage{}) || len(res.earlier) > 0 {
 		d.Usage, d.Host, d.Asked, d.Earlier = &res.usage, res.host, res.asked, res.earlier
 	}
-	rec := dossierRecord{DossierData: d, Restart: &restartRecord{Carried: job.carry}}
+	d.Restart = &event.DossierRestart{Carried: job.carry}
 	if r.st.Moved() == job.moved {
 		// Unless eagent moved to another model during the pass: the
 		// restarts in a row were the old model's, and the new one
-		// started with none (newModel).
-		rec.Restart.Retried, rec.Restart.Rescues = job.retry, job.rescues
+		// starts with none.
+		d.Restart.Retried, d.Restart.Rescues = job.retry, job.rescues
 	}
-	r.append(event.New(event.Dossier, event.ActorHarness, rec))
+	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
 	// A new conversation: if this one turns out too long from its first
 	// call as well, the user is told again.

@@ -155,7 +155,7 @@ func k1Swap(t *testing.T, s *session, window, ceiling int, brain func(string, []
 // The burst of pictures keeps coming during both passes on the first
 // model, so the one more try is spent and no restart can make room there.
 // The person then picks a model with the same room: the restarts in a row
-// and the one more try were the old model's (newModel), so the new one
+// and the one more try were the old model's (restartOf), so the new one
 // gets its own restart, which sets the burst aside by place, and the
 // person's message is answered. The decision found on the old model does
 // not stand on it, as one found on the opening alone would.

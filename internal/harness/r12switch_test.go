@@ -15,7 +15,7 @@ import (
 // A model is picked in the thread's settings while the dossier of a
 // restart made for a conversation too long from its start is written. The
 // new model starts with no restarts in a row counted against it
-// (newModel), and the pass that lands after the move does not write the
+// (restartOf), and the pass that lands after the move does not write the
 // old model's count back over that.
 func TestAMoveDuringAPassKeepsTheNewModelsCleanCount(t *testing.T) {
 	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
