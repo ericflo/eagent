@@ -361,6 +361,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
+	told := false
 	for i, err := range failed {
 		if err == nil {
 			continue
@@ -368,11 +369,17 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		// As the running mirror does: the sender is told, and the
 		// session comes back with the rest of the message. The note
 		// gets its own time, as the fetch may have used up the
-		// sweep's. When it cannot be posted nobody would know: the
-		// reply is not taken in, and is kept, quietly, for the sweeps
-		// to read the thread for (an earlier notice may have made
-		// eagent's the thread's latest message).
-		if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err) != nil {
+		// sweep's. Notices come only from the step that takes the
+		// reply: when the first cannot be posted nobody would know, so
+		// the reply is not taken in, and is kept, quietly, for the
+		// sweeps, with nothing said; once one went, this step takes the
+		// reply, and a file whose notice cannot go is left out with the
+		// terminal told.
+		if nerr := tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err); nerr != nil {
+			if told {
+				w.logf("finalechat: %s was left out of the reply to session %s, and its sender could not be told: %v", m.Attachments[i].Filename, sid, nerr)
+				continue
+			}
 			w.retries.mu.Lock()
 			if _, kept := w.retries.replies[m.ID]; !kept {
 				w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
@@ -380,6 +387,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			w.retries.mu.Unlock()
 			return
 		}
+		told = true
 	}
 	// A message whose files were all refused (the person was told) still
 	// resumes the session: it takes the message in, so the ones after it
