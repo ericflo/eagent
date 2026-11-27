@@ -490,6 +490,15 @@ func (r *Runtime) noticeTail() string {
 		if ev.Seq <= r.turns.seen {
 			break
 		}
+		if ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent {
+			// The wake of a turn that ended owing its next call ("error",
+			// "not closing"; wakeFor): no notice is above, the turn's own
+			// results are.
+			var d event.TurnData
+			if ev.Decode(&d) == nil && (d.Reason == "error" || d.Reason == "not closing") {
+				return "Your last turn ended before it was done; carry on from what its calls returned above, and if a notice is above as well, do what it calls for."
+			}
+		}
 		if ev.Type == event.ScheduleFire && ev.Actor == event.ActorHarness {
 			return "A timer you set came due; the note you left yourself is above. Do what it says, and cancel the timer with cancel_schedule if it has done its job."
 		}
