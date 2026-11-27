@@ -77,6 +77,7 @@ type phone struct {
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
 	taken      map[string]bool   // cards whose answer has been taken (handOver, markAnswerTaken, the record)
 	asMessage  map[string]bool   // eagent question ids this run's ask found sent to the thread as a message
+	left       bool              // the poll left a message for the next run, the session ending (loop goroutine only)
 	threadID   string
 	threadSeen bool
 	dropping   bool // the last enqueue found the queue full
@@ -545,6 +546,18 @@ func (p *phone) enqueue(fn func(context.Context)) bool {
 			p.say("finalechat: the phone has not taken what was sent for a while; updates to the thread are being dropped until it does")
 		}
 		return false
+	}
+}
+
+// notRun tells the thread that a command from it was not run, the session
+// having been ending when it came (poll).
+func (p *phone) notRun(ctx context.Context, phoneID, command string) {
+	act := p.attach()
+	body := fmt.Sprintf("eagent did not run %q: the session was already ending.", clipLabel(command, 80))
+	msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "command_not_run"}, ClientKey: p.key("not-run", phoneID), Activity: act})
+	if err == nil {
+		p.rememberIn(msg, thread)
+		p.markSent(act)
 	}
 }
 
@@ -1350,6 +1363,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					if !r.ending {
 						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
+					} else {
+						p.left = true
 					}
 				})
 				continue
@@ -1364,6 +1379,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 						if !r.ending {
 							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
+						} else {
+							p.left = true
 						}
 					})
 					continue
@@ -1384,6 +1401,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				caps := capsFromMeta(m.Meta)
 				r.post(func() {
 					if r.ending {
+						p.left = true
 						return
 					}
 					tell()
@@ -1398,6 +1416,18 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			route, delivery := routeFromMeta(m.Meta)
 			r.post(func() {
 				if r.ending {
+					// A command is not run by a session that is ending, and
+					// left for the next run it would have the reply watcher
+					// start one only to run it: it is taken, and the sender
+					// told. Not past a message left for the next run, which
+					// the cursor would then pass.
+					if !p.left && r.ownCommand(body, "finalechat") {
+						tell()
+						r.tookPhoneMessage(phoneID, len(r.st.Events))
+						p.enqueue(func(ctx context.Context) { p.notRun(ctx, phoneID, body) })
+						return
+					}
+					p.left = true
 					return
 				}
 				tell()

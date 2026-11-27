@@ -16,6 +16,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/relay"
 )
 
@@ -362,5 +363,64 @@ func TestK2RelayPostsTakeTheThreadTheyName(t *testing.T) {
 		r14Drained(t, g)
 		g.ui.input <- "/screen"
 		k1ThreadAfter(t, g, match)
+	})
+}
+
+// k2BehindAQuit is r10BehindAQuit without its check that the /quit is the
+// last message taken: the person sends /quit and then msgs in one page,
+// read while the loop is held, and the session ends.
+func k2BehindAQuit(t *testing.T, fp *phoneFake, msgs ...map[string]any) (*phoneRig, []string) {
+	t.Helper()
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the agent", func() bool {
+		n := 0
+		g.rt.sync(func() { n = len(g.rt.st.ActiveRelays()) })
+		return n == 1
+	})
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	blocked, release := make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	go g.rt.sync(func() { close(blocked); <-release })
+	<-blocked
+	ids := r10Says(fp, append([]map[string]any{r10Msg("/quit")}, msgs...)...)
+	waitFor(t, "the poll to read the page", func() bool {
+		fp.mu.Lock()
+		defer fp.mu.Unlock()
+		return fp.after == ids[len(ids)-1]
+	})
+	released.Do(func() { close(release) })
+	if code := g.exit(10 * time.Second); code != 0 {
+		t.Fatalf("exit code %d", code)
+	}
+	return g, ids
+}
+
+// C9: a command from the phone reaches a session that is ending (a /quit
+// before it in the page). It is not run, and not left for the next run
+// either, which the reply watcher would start only to run it: it is taken,
+// and the thread says it was not run. Words after a message left for the
+// next run are left too, so the cursor never passes them.
+func TestK2ACommandToAnEndingSessionIsTakenAndSaidNotRun(t *testing.T) {
+	t.Run("a command", func(t *testing.T) {
+		fp := newPhoneFake(true)
+		t.Cleanup(fp.srv.Close)
+		g, ids := k2BehindAQuit(t, fp, r10Msg("/kill"))
+		l := integration.ReadPhoneLedger(g.log())
+		if !l.Taken[ids[1]] || l.Cursor != ids[1] {
+			t.Fatalf("the command was left for the next run: taken %v, cursor %q", l.Taken, l.Cursor)
+		}
+		if got := fp.postsWhere(k1Kind("command_not_run")); len(got) != 1 {
+			t.Fatalf("the thread was told %d times that the command was not run", len(got))
+		}
+	})
+	t.Run("a command after words left for the next run", func(t *testing.T) {
+		fp := newPhoneFake(true)
+		t.Cleanup(fp.srv.Close)
+		g, ids := r10BehindAQuit(t, fp, r10Msg("one more thing"), r10Msg("/kill"))
+		r10Untaken(t, g, ids[1], "one more thing")
+		if l := integration.ReadPhoneLedger(g.log()); l.Taken[ids[2]] {
+			t.Fatalf("the command after words left for the next run was taken: cursor %q", l.Cursor)
+		}
 	})
 }
