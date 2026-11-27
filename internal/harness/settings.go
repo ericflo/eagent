@@ -81,6 +81,9 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 		if rel == nil || !rel.Active() {
 			return fmt.Errorf("relay %s is no longer running", name)
 		}
+		if err := r.beingReplaced(rel); err != nil {
+			return err
+		}
 		if err := r.checkRelayPick(rel.Profile, pick); err != nil {
 			return err
 		}

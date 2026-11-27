@@ -103,10 +103,8 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
 	}
-	if job := r.relays.launch(name); job != nil {
-		// The start under way is another agent's, which this relay hands
-		// over to: it does not start again, so nothing is kept for it.
-		return "", fmt.Errorf("%s is being replaced by %s; change the model once that is up", rel.Who(), relay.AgentLabel(job.spec.Profile.Agent))
+	if err := r.beingReplaced(rel); err != nil {
+		return "", err
 	}
 	if pick == (relayPick{rel.Model, rel.Effort}) {
 		delete(r.relayRepick, name)
@@ -130,6 +128,16 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		return "", err
 	}
 	return rel.Who() + " is starting again with " + r.pickText(rel, pick) + ", continuing its own conversation.", nil
+}
+
+// beingReplaced refuses a change for a relay that a switch under way hands
+// over from: the start is another agent's, rel does not start again, so
+// nothing is kept for it. Loop goroutine.
+func (r *Runtime) beingReplaced(rel *state.Relay) error {
+	if job := r.relays.launch(rel.Name); job != nil && job.name != rel.Name {
+		return fmt.Errorf("%s is being replaced by %s; change the model once that is up", rel.Who(), relay.AgentLabel(job.spec.Profile.Agent))
+	}
+	return nil
 }
 
 // pickText says what a relay runs with a pick: "sonnet at high".

@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"github.com/ericflo/eagent/internal/state"
 )
 
@@ -175,6 +177,69 @@ func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
 	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK || k2Outcome(rt, id) != state.SendArrived {
 		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
 	}
+}
+
+// k2LiveModel applies a live-settings change of the relay's model as the
+// controller does, on the loop, and returns applyRuntimeSettings' answer.
+func k2LiveModel(t *testing.T, rt *Runtime, name, model string) error {
+	t.Helper()
+	var err error
+	rt.sync(func() {
+		c := rt.runtimeControl
+		view, verr := runtimecontrol.View(rt.opts.Project, rt.sess.ID, c.Generation, c.Values, true)
+		if verr != nil {
+			err = verr
+			return
+		}
+		grant, _ := runtimecontrol.Grant(rt.opts.Project, rt.sess.ID)
+		proposal := control.Proposal{Operation: "settings.apply", SchemaVersion: runtimecontrol.Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation,
+			Edits: []control.Edit{{Op: "set", Key: "/relays/" + name + "/model", Value: model}}}
+		values, verr := runtimecontrol.ApplyValues(rt.opts.Project, c.Values, proposal, view, grant)
+		if verr != nil {
+			err = verr
+			return
+		}
+		q := runtimecontrol.Request{ID: "c1", Expires: time.Now().Add(time.Minute), Grant: grant, Proposal: proposal}
+		err = rt.applyRuntimeSettings(q, values, map[string]any{})
+	})
+	return err
+}
+
+func k2SettingsRecorded(rt *Runtime) (n int) {
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			if ev.Type == runtimecontrol.EventType {
+				n++
+			}
+		}
+	})
+	return n
+}
+
+// Review 15, finding 7. A switch from Codex to Claude is under way when
+// the user changes Codex's model in the app's settings. No change can be
+// made to Codex now: the settings change is refused with the reason, and
+// nothing is recorded or published as applied.
+func TestK2ALiveModelChangeDuringASwitchIsRefused(t *testing.T) {
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rt.startRuntimeSettings()
+		rt.syncRelaySettings()
+	})
+	t.Cleanup(func() { rt.sync(rt.stopRuntimeSettings) })
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	err := k2LiveModel(t, rt, "codex", "gpt-6.2-astra")
+	if err == nil || !strings.Contains(err.Error(), "being replaced") {
+		t.Errorf("the change during the switch: %v, want it refused as being replaced", err)
+	}
+	if n := k2SettingsRecorded(rt); n != 0 {
+		t.Errorf("%d settings changes recorded as applied", n)
+	}
+	g.release <- struct{}{}
+	recv(t, switched, "switch")
+	waitRelayStarts(t, rt)
 }
 
 // Review 15, finding 9. A model change restarts Codex; while it comes up a
