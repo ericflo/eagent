@@ -37,7 +37,7 @@ func TestAMessageAfterACutOlderRunAndBeforeACutLedgerRunIsFound(t *testing.T) {
 	f := newR6Thread(t)
 	f.say(sid, "m0", "old", base.Add(-time.Minute), nil)
 	f.say(sid, "m1", "go on", base.Add(30*time.Minute), nil)
-	m, found, err := nextPhoneMessage(context.Background(), f.watcher(project, &fakeResumeHost{hosted: map[string]bool{}}, t).client, r6Info(t, project, sid), nil)
+	m, found, err := nextPhoneMessage(context.Background(), f.watcher(project, &fakeResumeHost{hosted: map[string]bool{}}, t).client, r6Info(t, project, sid), nil, false)
 	if err != nil || !found || m.ID != "m1" {
 		t.Fatalf("next message %q found=%v err=%v, want m1", m.ID, found, err)
 	}

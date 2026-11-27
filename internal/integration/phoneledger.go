@@ -138,11 +138,15 @@ func (l PhoneLedger) Takeable(m finalechat.Message) bool {
 // message after the cursor; without it (or when the thread no longer has
 // the cursor's message), the first one written after the session's last
 // log write, as the sweep always judged. trigger is a message the caller
-// already holds (the event stream just brought it, or it is a kept reply
-// the thread still has: takenBack), taken when the thread cannot be read
-// or lists nothing newer. Both entry points (the sweep and the restore of
-// hosted sessions) ask this.
-func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store.Info, trigger *finalechat.Message) (finalechat.Message, bool, error) {
+// already holds, taken when the thread lists nothing newer, or cannot be
+// read and the record has no ledger. kept says it is a copy the caller
+// kept from an earlier look, not one the event stream just brought: with
+// the ledger such a copy is never taken, only what the thread lists as
+// waiting. What the thread does not list by then, the user took back, or
+// a run read past (it took the message, or said that it goes on without
+// it). Both entry points (the sweep and the restore of hosted sessions)
+// ask this.
+func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store.Info, trigger *finalechat.Message, kept bool) (finalechat.Message, bool, error) {
 	evs, err := store.Read(info.Path)
 	if err != nil {
 		return finalechat.Message{}, false, err
@@ -157,9 +161,10 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 			// session in order.
 			return finalechat.Message{}, false, err
 		}
-		if trigger != nil && l.Takeable(*trigger) {
+		if trigger != nil && l.Takeable(*trigger) && !(kept && l.Keeps) {
 			// The thread lists nothing newer (its listing can lag the
-			// stream), or a record without the ledger, as before.
+			// stream, which a copy kept from an earlier look is not
+			// ahead of), or a record without the ledger, as before.
 			return *trigger, true, nil
 		}
 		return finalechat.Message{}, false, err
@@ -183,23 +188,6 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		return fallback(err)
 	}
 	return m, true, nil
-}
-
-// takenBack says whether the thread, read now, no longer has m, a message
-// the caller holds a copy of: the user deleted it since the copy was made.
-// (The service lists a user's messages without the deleted ones, after a
-// cursor too, so reading on from the session's cursor does not say.) A
-// copy that does not say when it was written cannot be looked up, and is
-// not called taken back.
-func takenBack(ctx context.Context, client *finalechat.Client, ext string, m finalechat.Message) (bool, error) {
-	if m.CreatedAt.IsZero() {
-		return false, nil
-	}
-	got, _, found, _, err := firstInThread(ctx, client, ext, "", m.CreatedAt.Add(-time.Millisecond), func(got finalechat.Message) bool { return got.ID == m.ID })
-	if err != nil {
-		return false, err
-	}
-	return !found || got.Deleted, nil
 }
 
 // Waiting is the earliest app message in the thread that waited for the

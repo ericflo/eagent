@@ -311,6 +311,13 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 // is resumed with the earliest message it has not taken in, whatever
 // triggered it (nextPhoneMessage); its poll then takes the rest in order.
 func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message) {
+	w.considerHeld(ctx, thread, trigger, false)
+}
+
+// considerHeld is consider, with kept saying that trigger is a copy the
+// watcher kept from an earlier look (a reply it told the thread it keeps
+// trying), not one the event stream just brought.
+func (w *resumeWatcher) considerHeld(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message, kept bool) {
 	if trigger.ID != "" && (trigger.Sender != "user" || trigger.Origin == "token" || trigger.Deleted) {
 		return
 	}
@@ -335,7 +342,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	if trigger.ID != "" {
 		held = &trigger
 	}
-	m, found, err := nextPhoneMessage(ctx, w.client, info, held)
+	m, found, err := nextPhoneMessage(ctx, w.client, info, held, kept)
 	if err != nil {
 		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
 		return // a reply kept for retry stays kept
@@ -398,9 +405,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			if errors.Is(ctx.Err(), context.Canceled) {
 				// The watcher is stopping (the serve is), which cut the
 				// fetch off: nobody is told anything, about this file or
-				// one before it, and nothing is taken, so the reply is
-				// still the thread's latest message; the next sweep, or
-				// the next serve, reads it.
+				// one before it, and nothing is taken. A reply kept for a
+				// retry stays kept; any other is still the thread's
+				// latest message. The next sweep, or the next serve,
+				// reads it.
 				return
 			}
 			failed[i] = err
@@ -578,37 +586,17 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 			// twice.
 			continue
 		}
-		told := p.told
-		if told {
-			// Told that it keeps trying: the copy is tried again while
-			// the thread still has the message (takenBack; a thread that
-			// cannot be read leaves the copy to consider, as before). One
-			// the user took back since is tried no more, wherever the
-			// session's cursor stands by now. Its entry stays, quiet: a
-			// reply after it may wait in the thread, which the sweep's
-			// list passes over (its newest message is the watcher's own
-			// note), so the thread is read from here until a read has
-			// said what waits there.
-			if gone, err := takenBack(ctx, w.client, p.thread.ExternalID, p.msg); err == nil && gone {
-				w.retries.mu.Lock()
-				if q, ok := w.retries.replies[p.msg.ID]; ok {
-					q.told = false
-					w.retries.replies[p.msg.ID] = q
-				}
-				w.retries.mu.Unlock()
-				told = false
-			}
-		}
-		if !told {
-			// Kept quietly (while its session ran, or as above): the
-			// thread is read as a sweep reads it, not from the copy kept,
-			// which knows nothing of a deletion since. The entry goes
-			// once a read finds nothing waiting (dropKept), or with the
-			// session's next reply kept in its place (keepQuietly).
+		if !p.told {
+			// Kept while its session ran: the thread is read as a sweep
+			// reads it, not from the copy kept, which knows nothing of a
+			// deletion since.
 			w.consider(ctx, p.thread, finalechat.Message{})
 			continue
 		}
-		w.consider(ctx, p.thread, p.msg)
+		// Told that it keeps trying: tried again, as a copy kept (the
+		// thread says whether it still waits, where the session keeps the
+		// ledger).
+		w.considerHeld(ctx, p.thread, p.msg, true)
 	}
 }
 
@@ -711,7 +699,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	if err != nil {
 		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
 	}
-	last, ok, err := nextPhoneMessage(ctx, client, info, nil)
+	last, ok, err := nextPhoneMessage(ctx, client, info, nil, false)
 	if err != nil {
 		return PhoneMessage{}, false, err
 	}

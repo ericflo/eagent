@@ -86,9 +86,9 @@ func TestK7TakingBackTheKeptReplyLeavesTheReplyAfterItToBeTaken(t *testing.T) {
 // the sweep that finds the first reply taken back (a 503 on each read
 // after the cursor). The watcher's note hides the thread from the sweep's
 // list, so the entry of the reply taken back is what brings the thread up
-// again: it stays, quiet, until a read has said what waits there, and the
-// next sweep resumes the session with the second reply. The copy of the
-// first is not tried again.
+// again: it stays until a read has said what waits there, and the next
+// sweep resumes the session with the second reply. The copy of the first
+// is never taken.
 func TestK7AFailedReadAfterTheTakeBackStillLeavesTheNextReplyToBeTaken(t *testing.T) {
 	f, w, host, _, sid := k7Kept(t, "drop the staging database")
 	f.say(sid, "m2", "and then run the tests", time.Now(), nil)
@@ -119,13 +119,34 @@ func TestK7AFailedReadAfterTheTakeBackStillLeavesTheNextReplyToBeTaken(t *testin
 	if failed.Load() == 0 {
 		t.Fatal("the fixture failed no read")
 	}
-	if p, kept := w.retries.replies["m1"]; host.calls() != 0 || !kept || p.told {
-		t.Fatalf("after the read failed: resumed %#v, kept %#v; want nothing resumed and the thread still kept for a look, quietly", host.resumed, w.retries.replies)
+	if _, kept := w.retries.replies["m1"]; host.calls() != 0 || !kept {
+		t.Fatalf("after the read failed: resumed %#v, m1 kept: %v; want nothing resumed and the thread still kept for a look", host.resumed, kept)
 	}
 	failing.Store(false)
 	w.sweep(context.Background())
 	w.sweep(context.Background())
 	if _, kept := w.retries.replies["m1"]; host.calls() != 1 || host.resumed[0].ID != "m2" || kept {
 		t.Fatalf("once the service answers: resumed %#v, m1 still kept: %v; want the session resumed once, with m2", host.resumed, kept)
+	}
+}
+
+// A reply is kept for a retry. The session is then run from the terminal,
+// and that run cannot read what waited in the thread: it says so there
+// ("goes on from here without it. Send again anything it should still
+// see"), and its cursor stands past the reply. The user sends the words
+// again, and the run takes those. The kept copy is not taken after that:
+// the thread, read on from the cursor, lists nothing waiting, and resumed
+// from the copy the session would have the words twice.
+func TestK7AKeptReplyARunReadPastIsNotResumedFromItsCopy(t *testing.T) {
+	f, w, host, project, sid := k7Kept(t, "please deploy the fix")
+	now := time.Now()
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "own", "sender": "user", "origin": "token", "body": "resumed from the terminal", "created_at": now, "meta": map[string]any{"eagent": "mirror"}})
+	f.mu.Unlock()
+	f.say(sid, "again", "please deploy the fix", now.Add(time.Second), nil)
+	r6Record(t, project, sid, r6Run(), r6Read("start"), r6Run(), r6Read("own"), r6Took("again", "please deploy the fix"))
+	w.sweep(context.Background())
+	if host.calls() != 0 || len(w.retries.replies) != 0 {
+		t.Fatalf("resumed %#v, kept %#v; want the copy let go and nothing resumed", host.resumed, w.retries.replies)
 	}
 }

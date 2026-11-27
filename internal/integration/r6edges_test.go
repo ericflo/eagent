@@ -142,7 +142,7 @@ func TestAnAnswerRecordedJustBeforeAHardStopIsNotTakenAgain(t *testing.T) {
 			stop := r6Info(t, project, sid).Modified
 			f.say(sid, "a1", "blue", stop.Add(-time.Second), map[string]any{"kind": "answer", "question_id": "card-1"})
 			w := f.watcher(project, &fakeResumeHost{hosted: map[string]bool{}}, t)
-			m, found, err := nextPhoneMessage(context.Background(), w.client, r6Info(t, project, sid), nil)
+			m, found, err := nextPhoneMessage(context.Background(), w.client, r6Info(t, project, sid), nil, false)
 			if err != nil || found == c.taken || (found && m.ID != "a1") {
 				t.Fatalf("next message %q found=%v err=%v; want found=%v", m.ID, found, err, !c.taken)
 			}
