@@ -1260,11 +1260,26 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 	}
 	r.relays.mu.Unlock()
+	spool := "" // where a message held for the end of its turn waits
+	if spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort}); err == nil {
+		spool = spec.Spool
+	}
+	var rest []string
 	for _, s := range unresolvedSends(r.st, rel) {
-		if queued[s.ID] {
-			continue
+		switch {
+		case queued[s.ID]:
+		case s.Mode == "after_turn" && spool != "" && relay.Unspool(spool, s.ID):
+			// Still unclaimed in the spool: no hook took it, and taken back
+			// none will (nor hand it to an agent started under this name).
+			// It certainly did not go. (A restart takes its own back before
+			// its launch clears the spool: relayLaunch.takenBack.)
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
+		default:
+			rest = append(rest, s.ID)
 		}
-		r.appendOutcome(goneUnconfirmed(rel.Name, s.ID, how))
+	}
+	for _, id := range rest {
+		r.appendOutcome(goneUnconfirmed(rel.Name, id, how))
 	}
 }
 

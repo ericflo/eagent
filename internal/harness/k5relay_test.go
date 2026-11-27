@@ -49,7 +49,6 @@ func TestSR2ASendDuringASwitchSaysWhichAgentGetsIt(t *testing.T) {
 // refuses to send it to the agent when it is restarted, though nothing of
 // it ever reached the agent.
 func TestSR2AHeldMessageStillInTheSpoolAtAStopIsNotSent(t *testing.T) {
-	t.Skip("known, not fixed: SR2-2, fixed in the next commit")
 	seat := newK2FeedSeat(t)
 	useGatedLaunches(t, []relaySeat{seat}, nil)
 	rt := k3ClaudeRuntime(t)
@@ -84,8 +83,10 @@ func TestSR2AHeldMessageStillInTheSpoolAtAStopIsNotSent(t *testing.T) {
 	seat.waitGone(t)
 	seat.end()
 	recv(t, stopped, "stop")
-	if _, err := os.Stat(file); err != nil {
-		t.Fatalf("the spool file is gone after the stop: %v", err)
+	// (The review's check that the stop left the file in the spool showed
+	// the fault; now it is taken back, so no hook hands it over later.)
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("the spool file is still there after the stop (%v): a hook could hand it to the next agent", err)
 	}
 	if got := deliveredFor(rt, id); len(got) != 1 || got[0].Outcome != event.DeliveryNotSent {
 		t.Errorf("%s, still unclaimed in the spool when Claude was stopped: %+v; want its one outcome, not_sent", id, got)
