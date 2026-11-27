@@ -36,14 +36,6 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 		if picked {
 			extra = routePickFields
 		}
-		// A preset chosen or unset alone is a pick of a main route the
-		// file writes, which can also take its model out.
-		own, _ := pointerValue(before, route)
-		leaves, _ := own.(map[string]any)
-		if !picked && route == "/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == "/preset" }) &&
-			(len(leaves) > 0 || slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return strings.HasPrefix(e.Key, route+"/") })) {
-			extra = append(slices.Clone(routePickFields), "model")
-		}
 		if v, had := pointerValue(before, route); (!had || v == nil) && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
 			extra = routeLeaves
 		}
