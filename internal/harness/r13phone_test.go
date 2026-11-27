@@ -175,3 +175,46 @@ func TestR13APhoneMessageInARecreatedThreadIsNotPassedOver(t *testing.T) {
 		t.Fatalf("the message written in the recreated thread before eagent's was passed over; logs %v", g.ui.logged())
 	}
 }
+
+// r13Logged is the session's record on disk, of type ty.
+func r13Logged(g *phoneRig, ty string) []event.Event {
+	var out []event.Event
+	for _, ev := range g.log() {
+		if ev.Type == ty {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// Finding 19: on a service that keeps no client keys, each run asks the
+// open question on a new card in the same thread, and the earlier card
+// stays open. The person dismisses the first card while the session is
+// stopped and writes a plain message, which resumes it: the dismissal is
+// found on that card, and the words are not taken as the answer.
+func TestR13EveryOpenCardIsCheckedWhenTheServiceKeepsNoKeys(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r5AskedAndStopped(t, fp)
+	g.resume(Options{})
+	waitFor(t, "the question on a second card", func() bool { return fp.pendingQuestions() == 2 })
+	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	g.interrupt()
+	var first event.PhoneQuestionData
+	_ = r13Logged(g, event.PhoneQuestion)[0].Decode(&first)
+	fp.mu.Lock()
+	q := fp.questions[first.CardID]
+	q["status"], q["answered_at"] = "dismissed", time.Now().UTC().Format(time.RFC3339Nano)
+	fp.mu.Unlock()
+	g.resume(Options{Prompt: "hold off and check the tests first", PromptSource: "finalechat"})
+	waitFor(t, "the resume to record what the words are", func() bool {
+		return len(r13Logged(g, event.UserMessage))+len(r13Logged(g, event.UserAnswer)) > 1
+	})
+	if len(r13Logged(g, event.UserDismiss)) != 1 {
+		t.Errorf("the dismissal on the first card was not found")
+	}
+	for _, ev := range r13Logged(g, event.UserAnswer) {
+		t.Errorf("the words were taken as the answer: %s", ev.Data)
+	}
+}

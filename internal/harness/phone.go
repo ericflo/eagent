@@ -773,9 +773,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.mu.Lock()
 		start := max(1, newest[p.threadID])
 		p.mu.Unlock()
-		n := start
+		n, key := start, ""
 		for ; ; n++ {
-			key := p.key("q", qid)
+			key = p.key("q", qid)
 			if n > 1 && key != "" {
 				key = p.key("q", qid, strconv.Itoa(n))
 			}
@@ -833,6 +833,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 		p.open[q.ID] = qid
 		p.mu.Unlock()
 		cardID, cardThread, cardKey := q.ID, thread.ID, n
+		if key == "" {
+			cardKey = 0 // asked with no client key: a later ask makes a new card beside it
+		}
 		if cardThread == "" {
 			p.mu.Lock()
 			cardThread = p.threadID
@@ -1420,7 +1423,9 @@ func latestKeys(st *state.State, qid string) map[string]int {
 // liveCards are the recorded cards of question qid that may still be open
 // on the service, newest first: in each thread only the card with the
 // highest key can be (every key before it was dead when it was made, and
-// a card never reopens), and every card recorded without its thread.
+// a card never reopens), and every card recorded without its thread or
+// without a key (made with no client key, which any later ask stands
+// beside).
 func liveCards(st *state.State, qid string) []string {
 	best := map[string]event.PhoneQuestionData{}
 	var out []string
@@ -1430,7 +1435,7 @@ func liveCards(st *state.State, qid string) []string {
 		if ev := st.Events[i]; ev.Type != event.PhoneQuestion || ev.Decode(&d) != nil || d.QuestionID != qid || d.CardID == "" {
 			continue
 		}
-		if d.ThreadID == "" {
+		if d.ThreadID == "" || d.Key == 0 {
 			if !seen[d.CardID] {
 				seen[d.CardID] = true
 				out = append(out, d.CardID)
