@@ -113,10 +113,11 @@ func (r *Runtime) retire(name string, seat relaySeat, settle func()) {
 }
 
 // settleRetired runs a retired seat's settle, once; from then on what the
-// seat says is logged, not recorded. Called once it has drained and no
-// send is being typed into it (watchSeat, settleSend), by a start under
-// way when it ends (finishLaunch), or past a bound (relay_control stop,
-// finish). Loop goroutine, or finish's once the loop has closed.
+// seat says is logged, not recorded. Called once it has drained
+// (watchSeat), by a start under way when it ends (finishLaunch), or past a
+// bound (relay_control stop, finish). A start under the name waits for it
+// (relay_control stop's stopping entry, closed after the drain or the
+// bound). Loop goroutine, or finish's once the loop has stopped.
 func (r *Runtime) settleRetired(seat relaySeat) {
 	r.relays.mu.Lock()
 	e := r.relays.retiring[seat]
@@ -136,23 +137,12 @@ func (r *Runtime) settleRetired(seat relaySeat) {
 }
 
 // retiredDue says whether retired seat is to be settled now: it has
-// drained, has a settle of its own, and no send is being typed into it or
-// waits to be (settleSend says how that one ended first; once the loop has
-// closed nothing more is typed, and what waits is finish's to record). The
-// caller holds r.relays.mu.
+// drained and has a settle of its own. A send still being typed into it is
+// left to settleSend (settleExited marks it gone), which finish waits for
+// (retiringPending). The caller holds r.relays.mu.
 func (r *Runtime) retiredDueLocked(seat relaySeat) bool {
 	e := r.relays.retiring[seat]
-	if e == nil || e.settled || !e.drained || e.settle == nil {
-		return false
-	}
-	closed := false
-	select {
-	case <-r.closed:
-		closed = true
-	default:
-	}
-	q := r.relays.queues[seat]
-	return q == nil || q.typing == "" && (len(q.items) == 0 || closed)
+	return e != nil && !e.settled && e.drained && e.settle != nil
 }
 
 // settleDueRetired settles every retired seat that is due (finish, once
@@ -172,11 +162,17 @@ func (r *Runtime) settleDueRetired() {
 }
 
 // retiringPending says whether finish still waits on a seat taken out of
-// use: one with a settle of its own not yet run, or one whose start under
-// way settles it that has not drained. The caller holds r.relays.mu.
+// use: one with a settle of its own not yet run, one whose start under way
+// settles it that has not drained, or one a send is still being typed
+// into (settleSend says how it ended). The caller holds r.relays.mu.
 func (r *Runtime) retiringPendingLocked() bool {
 	for _, e := range r.relays.retiring {
 		if !e.settled && (e.settle != nil || !e.drained) {
+			return true
+		}
+	}
+	for seat, q := range r.relays.queues {
+		if q.typing != "" && r.relays.seats[q.name] != seat {
 			return true
 		}
 	}
@@ -598,20 +594,11 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 // the head of its queue, which finish records not sent. Then its waiter,
 // if any, is told. Not on the loop goroutine.
 func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
-	ran := r.syncNews(func() {
+	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
 		gone := q.gone
 		q.typing, q.gone = "", ""
-		var due relaySeat // a seat taken out of use whose last send this was
-		for seat, sq := range r.relays.queues {
-			if sq == q && r.retiredDueLocked(seat) {
-				due = seat
-			}
-		}
 		r.relays.mu.Unlock()
-		if due != nil {
-			defer r.settleRetired(due) // after this send's outcome, below
-		}
 		switch {
 		case h.barrier:
 		case res.err != nil:
@@ -1220,7 +1207,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 	go func() {
 		for ev := range seat.Events() {
 			ev := ev
-			r.postNews(func() {
+			r.post(func() {
 				if r.relays.get(name) == seat {
 					r.onRelayEvent(name, ev)
 					return
@@ -1249,7 +1236,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				}
 			})
 		}
-		r.postNews(func() {
+		r.post(func() {
 			r.relays.drop(name, seat)
 			r.relays.mu.Lock()
 			if r.relays.drained[seat] == drained {
@@ -1445,7 +1432,9 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	r.relays.mu.Unlock()
 	var rest []string
 	for _, s := range unresolvedSends(r.st, rel) {
-		if !queued[s.ID] && !r.takeBack(rel, s.ID, s.Mode, how) {
+		// (One with an outcome already, from a record of the name after
+		// rel, is not settled again: a send has one outcome.)
+		if !queued[s.ID] && !r.hasOutcome(s.ID) && !r.takeBack(rel, s.ID, s.Mode, how) {
 			rest = append(rest, s.ID)
 		}
 	}
@@ -1642,13 +1631,10 @@ func (r *Runtime) stopSession(reason string) {
 				r.ui.Log("relay %s: %v", rel.Name, err)
 			}
 			r.relays.drop(rel.Name, seat)
-			name, after := rel.Name, func() {}
+			after := func() {}
 			if settle {
-				after = func() {
-					if rel := r.st.Relays[name]; rel != nil {
-						r.settleExited(rel)
-					}
-				}
+				stopped := rel // the record as it stood: this settle's, only
+				after = func() { r.settleExited(stopped) }
 			}
 			r.retire(rel.Name, seat, after)
 		}
@@ -2281,8 +2267,10 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 					after := func() {}
 					if settle {
 						after = func() {
-							// A start asked for meanwhile waits for this stop
-							// (stopping): what it holds is its to type.
+							// What this stop took out of use (cur, the record
+							// as it stood), and only that: a start under the
+							// name waits for this stop (stopping), and what it
+							// holds is its to type.
 							var held []string
 							r.relays.mu.Lock()
 							if job := r.relays.launching[name]; job != nil {
@@ -2291,7 +2279,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 								}
 							}
 							r.relays.mu.Unlock()
-							r.settleExited(r.st.Relays[name], held...)
+							r.settleExited(cur, held...)
 						}
 					}
 					r.retire(rel.Name, current, after)
