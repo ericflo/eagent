@@ -30,8 +30,9 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 	}
 	// Applying a pick of a route's model also set the fields that go with it
 	// (routePicks), and an edit of a dedicated summarizer with no route of
-	// its own (none, or null) wrote it one: those are put back too.
-	for _, route := range []string{"/model", "/model/fallback", "/summarizer/model", "/summarizer/model/fallback"} {
+	// its own (none, or null) wrote it one: those are put back too. The
+	// routes are the ones routePicks walks, each fallback's own included.
+	for _, route := range []string{"/model", "/model/fallback", "/model/fallback/fallback", "/model/fallback/fallback/fallback", "/summarizer/model", "/summarizer/model/fallback", "/summarizer/model/fallback/fallback", "/summarizer/model/fallback/fallback/fallback"} {
 		picked := slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == route+"/model" || e.Key == route+"/base_url" })
 		extra := []string{}
 		if picked {

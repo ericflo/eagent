@@ -122,6 +122,30 @@ func TestK1UndoOfAPresetChangeJournaledBeforeThePick(t *testing.T) {
 	}
 }
 
+// E4: the undo of a pick of a fallback's own fallback puts back the fields
+// the pick gave that route. Only a route no load checks can hold one (an
+// inline summarizer's): on the main route and a dedicated summarizer's, a
+// second fallback is refused as too deep.
+func TestK1E4UndoWalksAFallbacksOwnFallback(t *testing.T) {
+	clearRouteEnv(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	project := t.TempDir()
+	before := `{"summarizer":{"mode":"inline","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3-Flash","api_key_env":"TOGETHER_API_KEY","fallback":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3","api_key_env":"TOGETHER_API_KEY"}}}}`
+	edits := []control.Edit{
+		{Op: "set", Key: "/summarizer/model/fallback/fallback/base_url", Value: "https://api.anthropic.com/v1"},
+		{Op: "set", Key: "/summarizer/model/fallback/fallback/model", Value: "claude-opus-5-5"},
+	}
+	raw := r11Undo(t, project, before, edits)
+	var want, got map[string]any
+	_ = json.Unmarshal([]byte(before), &want)
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("undo wrote\n%s\nwant\n%s", raw, before)
+	}
+}
+
 // E1, the reader's case against 0b1c7df's undo: the undo of a preset change
 // that wrote no field of the route goes through after a local edit of the
 // route's effort, and keeps that edit.
