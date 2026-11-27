@@ -114,7 +114,8 @@ func (r *Runtime) dossierBudget(promptTokens provTokens, fresh bool) int {
 // window is the context window of the model eagent's calls go to right now,
 // and the reply ceiling of those calls: the configured model's, the one a
 // runtime setting picked, or a fallback's once the route has moved to it.
-// Loop goroutine only.
+// A route that sets no window takes the one the catalog or the project's
+// live list gives its model (config.KnownContext). Loop goroutine only.
 func (r *Runtime) window() (tokens, reply provTokens) {
 	tokens, reply = provTokens(r.cfg.Model.ContextTokens), provTokens(r.cfg.Model.MaxTokens)
 	if m := r.models[event.ActorEagent]; m != nil && m.client != nil {
@@ -123,9 +124,7 @@ func (r *Runtime) window() (tokens, reply provTokens) {
 			tokens, reply = provTokens(cur.ContextTokens), provTokens(cur.MaxTokens)
 		}
 		if tokens <= 0 {
-			if known, ok := config.Lookup(ep.BaseURL, ep.Model); ok {
-				tokens = provTokens(known.Context)
-			}
+			tokens = provTokens(config.KnownContext(r.opts.Project, ep.BaseURL, ep.Model))
 		}
 	}
 	if tokens <= 0 {
@@ -364,8 +363,11 @@ func (r *Runtime) needsDossier() bool {
 		return false
 	}
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || t.overflowed) && r.restartFull(limit) {
-		// What was too large, for the words below (causeOf).
-		cause := causeOf(r.restartFactsNow(limit))
+		// What was too large, for the words below (causeOf), and whether
+		// the provider refused it: then no call goes through, and a
+		// restart size is not what to change.
+		facts := r.restartFactsNow(limit)
+		cause := causeOf(facts)
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
 		// Restarting again would only rebuild the same prompt. A session
@@ -389,6 +391,8 @@ func (r *Runtime) needsDossier() bool {
 				r.ui.Log("the conversation reached the window again after %d restarts in a row; stopping the restarts", r.restartRescues)
 			} else if cause == fullAgain {
 				r.ui.Log("the conversation was past the restart size on its first call after %d restarts in a row; stopping the restarts", restartRescueMax+1)
+			} else if facts.refused {
+				r.ui.Log("the model refuses the conversation as too long right after a restart, so restarting again cannot shrink it; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md")
 			} else {
 				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			}
@@ -403,6 +407,10 @@ func (r *Runtime) needsDossier() bool {
 					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
 				case fullGrew:
 					text = fullNotice + ": after several restarts in a row, the newest conversation reached my model's window too, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now."
+				case fullOpening:
+					if facts.refused {
+						text = fullNotice + " from my notes: my model refuses the notes and this project's standing instructions alone as too long, so another restart cannot make room. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now. Shortening .agents/eagent/INSTRUCTIONS.md would help too."
+					}
 				case fullAgain:
 					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting for that. I carry on with a conversation longer than it should be, which makes each answer slower and dearer, and restart it from my notes when it reaches my model's window. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
 				}
@@ -531,9 +539,10 @@ type restartFacts struct {
 //     through, so its opening fits the window, and a restart shrinks it
 //     back to an opening; so it gets one restart past the bound on the
 //     others. A restart made this way counts in the row unless the
-//     conversation took in something new before it reached the window
-//     (startDossier): calls that went through are not growth (a reply sent
-//     back, a read that fills the window, made again after every restart).
+//     conversation took in something new and a turn of it ended before it
+//     reached the window (startDossier): calls that went through are not
+//     growth (a reply sent back, a read that fills the window, made again
+//     after every restart).
 //
 //   - Two rescues in a row already (rescues): the restart that began this
 //     conversation and the one before it were each made because the
@@ -655,6 +664,32 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 	return false
 }
 
+// turnEnded reports that a turn of the conversation in the current file
+// ran to its end: one on the record that ended "done", or a look that
+// left no record but its batch (event.Checks with a SeenSeq; a reply sent
+// back for another try sets none). Loop goroutine only.
+func (r *Runtime) turnEnded() bool {
+	cur := r.st.Current()
+	if cur == nil {
+		return false
+	}
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
+		ev := r.st.Events[i]
+		if ev.Actor != event.ActorEagent || ev.Task != "" {
+			continue
+		}
+		var turn event.TurnData
+		var looks event.ChecksData
+		switch {
+		case ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done":
+			return true
+		case ev.Type == event.Checks && ev.Decode(&looks) == nil && looks.SeenSeq > 0:
+			return true
+		}
+	}
+	return false
+}
+
 // restartDecided reports that, for a conversation a restart began, no
 // restart can make room was found and said (this run, or by the record's
 // full notice), and no call has gone through since. That stands across a
@@ -768,11 +803,13 @@ func (r *Runtime) startDossier() {
 	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt, moved: r.st.Moved()}
 	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
-	// It grew to the window: refused after its calls went through, and its
-	// looks took in something that arrived after its briefing. Calls alone
-	// are not growth: a reply sent back, or a read that fills the window,
-	// is made again after every restart.
-	grew := t.overflowed && t.subCalls > 0 && r.recordedSinceOpening(t.seen)
+	// It grew to the window: refused after its calls went through, its
+	// looks took in something that arrived after its briefing, and a turn
+	// of it ended. Calls alone are not growth: a reply sent back, or a read
+	// that fills the window, is made again after every restart, and so is
+	// a first turn that reads what a working agent recorded during the
+	// pass and is refused before it ends.
+	grew := t.overflowed && t.subCalls > 0 && r.recordedSinceOpening(t.seen) && r.turnEnded()
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.overflowed || t.firstPrompt >= r.rolloverTokens()) && !grew {
 		// A rescue: the conversation being replaced was too long from
 		// its start, or refused without growing (restartHelps counts
