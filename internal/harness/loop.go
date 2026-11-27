@@ -1804,10 +1804,15 @@ func (r *Runtime) lastFailedAnswered() bool {
 // goroutine.
 func (r *Runtime) unreachableNotice(err error) event.MessageData {
 	// Out of reach only when nothing answered (no connection, no answer in
-	// time, a server error); a provider that answers 4xx refuses the calls.
+	// time, a server error); a provider that answers 4xx refuses the calls,
+	// unless the status is a transient one (a rate limit, a timeout:
+	// Retryable), which turns them away for now.
 	lead := "I can't reach my own model right now"
 	var ae *llm.APIError
-	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
+	switch {
+	case errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && ae.Retryable():
+		lead = "My model is turning my calls away for now"
+	case errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500:
 		lead = "My model refuses my calls"
 	}
 	return event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", lead, shortErr(err), r.whileDown())}
