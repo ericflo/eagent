@@ -5,6 +5,7 @@ package relay
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -178,5 +179,33 @@ func TestSr5SeatCommandTypedWhileTheSeatClosesHasNoDelivered(t *testing.T) {
 	}
 	if !delivered {
 		t.Fatalf("Send said %q (typed %q), and the seat closed with no delivered for it; want typed to be delivered", res, k1Typed(h.fakeHost))
+	}
+}
+
+// SR5-4. A message typed while Claude works is confirmed by its enqueue
+// line, and runs only once Claude takes it off its queue after the turn
+// ends (dequeue, then the prompt). The seat says quiet at a look that read
+// the turn end and not yet the dequeue: idle, nothing pending. A model
+// change waiting for quiet then kills Claude with the message still in its
+// queue (memory only): it never runs, and the record says delivered. The
+// parser knows the queue still holds it (claudeParser.queued). On main the
+// waiting change applied at the turn end itself (relay.turn), which loses
+// it the same way.
+func TestSr5SeatClaudeQuietWhileItsQueueHoldsAMessage(t *testing.T) {
+	s, _, a, _ := sr5ClaudeSeat(t, &fakeHost{alive: true, screen: claudePromptScreen}, "sr5-queue", claudeUser(time.Now().Add(-time.Second), "sort the shelves"))
+	go s.watch()
+	t.Cleanup(s.Close)
+	if !eventually(func() bool { return s.Snapshot().State == "working" }) {
+		t.Fatal("never working")
+	}
+	s.track("r1", "also update the docs", "queue") // typed while Claude works
+	appendLines(t, a, k1Queue("enqueue", "also update the docs"))
+	if got := quietOrder(t, s, looks(8)); !slices.Contains(got, "delivered r1") {
+		t.Fatalf("events %q; want r1 confirmed by its enqueue line", got)
+	}
+	appendLines(t, a, `{"type":"assistant","timestamp":"`+stamp(time.Now())+`","message":{"content":[{"type":"text","text":"Sorted."}]}}`, k1TurnEnd())
+	got := quietOrder(t, s, looks(12))
+	if got[len(got)-1] == "quiet" {
+		t.Fatalf("events %q: quiet with r1 still in Claude's queue (no dequeue yet); want not quiet until Claude has taken it", got)
 	}
 }

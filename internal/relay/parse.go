@@ -419,6 +419,10 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
 }
 
+// holding: Claude's queue holds a message it has not taken (no dequeue
+// line for it yet). Status.Quiet waits for it.
+func (p *claudeParser) holding() bool { return len(p.queued) > p.taken }
+
 // unqueue takes off the list the queued messages, no more than the dequeue
 // lines took, whose words joined are those of s, and says whether there
 // were such.

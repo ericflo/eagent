@@ -176,6 +176,9 @@ type Seat struct {
 	// close (a command typed after says its delivered itself). closeLater: watching
 	// ended with a Send under way; the last to return closes events.
 	ended, closeLater bool
+	// queueHolds: the agent's own queue holds a message it has not taken,
+	// as the transcript's parser last said (queueHolder; watcher writes).
+	queueHolds bool
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -1410,6 +1413,7 @@ func (s *Seat) watch() {
 			if path != "" {
 				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
+				s.queueHolds = false // a new parser knows of no queue yet
 				first := s.transcript == ""
 				if _, ok := s.agent.(sessionStarter); ok && first && !s.followed && s.inner != "" && inner != s.inner {
 					// The agent left the session it was started on before
@@ -1558,7 +1562,13 @@ const quietMoveLooks = 5
 
 // quietLocked is Status.Quiet. The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
-	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && s.sending == 0 && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && s.sending == 0 && !s.queueHolds && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+}
+
+// queueHolder is a parser that follows the agent's own queue of messages
+// typed while it works (Claude's queue lines).
+type queueHolder interface {
+	holding() bool // it holds one the agent has not taken yet
 }
 
 // sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
@@ -1687,7 +1697,13 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 				end = starts[i+1]
 			}
 			s.readTo.Store(end)
-			for _, o := range p.line(line) {
+			got := p.line(line)
+			if qh, ok := p.(queueHolder); ok && qh.holding() != s.queueHolds {
+				s.mu.Lock()
+				s.queueHolds = qh.holding()
+				s.mu.Unlock()
+			}
+			for _, o := range got {
 				o.pos = starts[i]
 				s.fold(o)
 				if o.at.After(newest) {

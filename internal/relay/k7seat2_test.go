@@ -38,3 +38,30 @@ func TestK7ACommandQueuedMidTurnIsWaitedOnFromTheIdleAfterIt(t *testing.T) {
 		t.Fatalf("events %q; want the move to b-id the queued /clear made said before quiet", got)
 	}
 }
+
+// The other half of SR5-4: once Claude has taken the queued message (its
+// dequeue line, then the prompt with its words) and ended the turn it
+// ran, the seat is quiet again.
+func TestK7QuietOnceClaudeHasTakenItsQueuedMessage(t *testing.T) {
+	s, _, a, _ := sr5ClaudeSeat(t, &fakeHost{alive: true, screen: claudePromptScreen}, "k7-queue", claudeUser(time.Now().Add(-time.Second), "sort the shelves"))
+	go s.watch()
+	t.Cleanup(s.Close)
+	if !eventually(func() bool { return s.Snapshot().State == "working" }) {
+		t.Fatal("never working")
+	}
+	s.track("r1", "also update the docs", "queue")
+	reply := func(text string) string {
+		return `{"type":"assistant","timestamp":"` + stamp(time.Now()) + `","message":{"content":[{"type":"text","text":"` + text + `"}]}}`
+	}
+	appendLines(t, a, k1Queue("enqueue", "also update the docs"), reply("Sorted."), k1TurnEnd())
+	if !within(5*time.Second, func() bool { st := s.Snapshot(); return st.State == "idle" && len(st.Pending) == 0 }) {
+		t.Fatal("never idle with r1 confirmed")
+	}
+	if s.Snapshot().Quiet {
+		t.Fatal("quiet with r1 in Claude's queue")
+	}
+	appendLines(t, a, k1Queue("dequeue", ""), claudeUser(time.Now(), "also update the docs"), reply("Updated."), k1TurnEnd())
+	if got := quietOrder(t, s, 5*time.Second); got[len(got)-1] != "quiet" {
+		t.Fatalf("events %q; want quiet once Claude took r1 and ended its turn", got)
+	}
+}
