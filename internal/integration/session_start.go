@@ -68,28 +68,27 @@ const AnnounceEnv = "EAGENT_ANNOUNCE_SESSION"
 var (
 	starterMu sync.Mutex
 	starter   SessionStarter = spawnDetachedSession
-	// starterConfig is the configuration the starter starts a project's
-	// sessions on, when its host says (an eagent server's own: its bundle
-	// and preset over the project's); nil, or an error, is the project's.
-	starterConfig func(project string) (config.Config, error)
 )
 
 // SetSessionStarter makes phone-initiated sessions run through fn (an eagent
-// server hosts them in-process), and on cfg's configuration when given (what
-// the phone is offered follows it). It returns a function that restores the
-// previous starter.
+// server hosts them in-process), and on cfg's configuration when given (an
+// eagent server's own: its bundle and preset over the project's), which
+// settings.Service.Runs then gives every reader of what the phone may start
+// or delete. It returns a function that restores the previous starter.
 func SetSessionStarter(fn SessionStarter, cfg ...func(project string) (config.Config, error)) func() {
 	starterMu.Lock()
 	defer starterMu.Unlock()
-	previous, previousConfig := starter, starterConfig
-	starter, starterConfig = fn, nil
+	var hostConfig func(project string) (config.Config, error)
 	if len(cfg) > 0 {
-		starterConfig = cfg[0]
+		hostConfig = cfg[0]
 	}
+	previous, previousConfig := starter, settings.SetHost(hostConfig)
+	starter = fn
 	return func() {
 		starterMu.Lock()
 		defer starterMu.Unlock()
-		starter, starterConfig = previous, previousConfig
+		starter = previous
+		settings.SetHost(previousConfig)
 	}
 }
 
@@ -218,20 +217,7 @@ var agentInstalled = relay.Installed
 func relayProfiles(project string) []map[string]any {
 	// The configuration a phone-started session runs on: its host's, else
 	// the project's.
-	starterMu.Lock()
-	hostConfig := starterConfig
-	starterMu.Unlock()
-	var cfg config.Config
-	err := fmt.Errorf("no host configuration")
-	if hostConfig != nil {
-		cfg, err = hostConfig(project)
-	}
-	if err != nil {
-		cfg, err = config.Load(project, "")
-	}
-	if err != nil {
-		cfg = config.Defaults()
-	}
+	cfg := (&settings.Service{Project: project}).Runs()
 	out := []map[string]any{}
 	profiles := cfg.Relay.RelayProfiles()
 	// The built-in agents in the order a session prefers them, then the

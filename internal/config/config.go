@@ -746,36 +746,50 @@ func DefaultBundle(fileCfg map[string]json.RawMessage) string {
 	return bundle
 }
 
+// explicitChoice is the one place an explicit preset (the caller's, else
+// EAGENT_PRESET) is taken as loading takes it: a saved preset it names is
+// the bundle, unless the caller names a bundle, which outranks the
+// variable; anything else it names stays a preset. It returns the preset
+// and bundle to lay, and the explicit preset still to apply.
+func explicitChoice(project, preset, bundle string) (string, string, string) {
+	explicit, fromEnv := preset, preset == ""
+	if fromEnv {
+		explicit = os.Getenv("EAGENT_PRESET")
+	}
+	if _, isBuiltIn := ResolvePreset(explicit); explicit == "" || isBuiltIn || !validName(explicit) {
+		return preset, bundle, explicit
+	}
+	if _, err := os.Stat(BundlePath(project, explicit)); err != nil {
+		return preset, bundle, explicit
+	}
+	switch {
+	case bundle == "":
+		return "", explicit, ""
+	case fromEnv:
+		return preset, bundle, "" // the bundle named outranks the variable
+	}
+	return preset, bundle, explicit
+}
+
 // IsDefaultBundle says whether the saved bundle name is in force, so it is
-// not to be deleted: the bundle res laid (the one a caller names, or the one
-// an explicit preset names), EAGENT_PRESET or EAGENT_CONFIG naming it (the
-// loader takes a saved preset EAGENT_PRESET names as the bundle), or the
-// file's default_config.
+// not to be deleted: the bundle loading lays, which is the one res laid (a
+// caller's, else a saved preset an explicit preset or EAGENT_PRESET names:
+// explicitChoice), else EAGENT_CONFIG's; or the file's default_config,
+// which every start naming none takes.
 func IsDefaultBundle(res Resolution, name string) bool {
 	if name == "" {
 		return false
 	}
-	return res.Active.Kind == "bundle" && res.Active.Name == name || os.Getenv("EAGENT_PRESET") == name || os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
+	if res.Active.Kind == "bundle" {
+		return res.Active.Name == name || res.Effective.DefaultConfig == name
+	}
+	return os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
 }
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
 	cfg := Defaults()
 	var err error
-	// Explicit --preset / EAGENT_PRESET may name either a built-in preset or a
-	// saved preset in .agents/eagent/configs/<name>.json.
-	explicitPreset := preset
-	if explicitPreset == "" {
-		explicitPreset = os.Getenv("EAGENT_PRESET")
-	}
-	if bundle == "" && explicitPreset != "" {
-		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
-			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
-				bundle = explicitPreset
-				preset = ""
-				explicitPreset = ""
-			}
-		}
-	}
+	preset, bundle, explicitPreset := explicitChoice(project, preset, bundle)
 	if bundle == "" {
 		bundle = DefaultBundle(fileCfg)
 	}

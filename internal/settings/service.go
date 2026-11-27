@@ -11,9 +11,53 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type Service struct{ Project, Preset, Bundle string }
+
+// host gives the configuration this process's host starts and resumes
+// sessions on (web.Server's loadConfig), once it registered one.
+var (
+	hostMu sync.Mutex
+	host   func(project string) (config.Config, error)
+)
+
+// SetHost registers the configuration the host starts sessions on and
+// returns the one it replaces (nil for none).
+func SetHost(fn func(project string) (config.Config, error)) func(project string) (config.Config, error) {
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	previous := host
+	host = fn
+	return previous
+}
+
+// Runs is the configuration a session started for the project runs on:
+// its host's, else the project's own (with this service's preset and
+// bundle). What the phone is offered to start, and the saved preset it may
+// not delete, follow it.
+func (s *Service) Runs() config.Config {
+	hostMu.Lock()
+	fn := host
+	hostMu.Unlock()
+	if fn != nil {
+		if cfg, err := fn(s.Project); err == nil {
+			return cfg
+		}
+	}
+	if cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err == nil {
+		return cfg
+	}
+	return config.Defaults()
+}
+
+// inForce says whether sessions start on the saved preset name, so it is
+// not to be deleted: by the loader's rule, or as the host's bundle.
+func (s *Service) inForce(name string) bool {
+	return config.IsDefaultBundle(config.Resolve(s.Project, s.Preset, s.Bundle), name) || name != "" && s.Runs().Name == name
+}
+
 type Error struct {
 	Status   int
 	Message  string
