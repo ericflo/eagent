@@ -724,9 +724,12 @@ func inboxTaken(path, id string) (answered bool, kept int64) {
 // wordsWait decides, once the run that had the session has let go of it,
 // whether the words of inbox submission id (posted then) get the session
 // resumed for them: they wait for a run (not answered), and the user did
-// not stop the session after writing them (a stop posted after them and
-// still in the inbox, or a stop the record shows taken after their message
-// or, for words it does not hold, after they were posted).
+// not stop the session after writing them: no stop posted after them is
+// still in the inbox, and the record shows no stop of the user's taken
+// after them (a relay.end it made) nor, for words it does not hold, an end
+// on a quit after they were posted. Words a run kept were kept because it
+// was ending: what ended it came before them, and a stop after them stays
+// in the inbox.
 func wordsWait(path, id string, posted time.Time) bool {
 	answered, kept := inboxTaken(path, id)
 	if answered {
@@ -749,9 +752,15 @@ func wordsWait(path, id string, posted time.Time) bool {
 		return false
 	}
 	for _, ev := range evs {
-		var d event.RelayEndData
-		stop := ev.Type == "session.stop_requested" || ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Reason == "the user stopped the session"
-		if stop && (kept > 0 && ev.Seq > kept || kept == 0 && ev.Time.After(posted)) {
+		var d struct {
+			Reason string `json:"reason"`
+		}
+		if ev.Type != event.RelayEnd && ev.Type != event.SessionEnd || ev.Decode(&d) != nil {
+			continue
+		}
+		stop := ev.Type == event.RelayEnd && d.Reason == "the user stopped the session"
+		quit := ev.Type == event.SessionEnd && d.Reason == "quit"
+		if kept > 0 && stop && ev.Seq > kept || kept == 0 && (stop || quit) && ev.Time.After(posted) {
 			return false
 		}
 	}

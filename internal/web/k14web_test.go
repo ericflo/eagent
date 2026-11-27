@@ -306,6 +306,38 @@ func TestSR7WebAStopAfterQueuedWordsIsDroppedByTheWatchersResume(t *testing.T) {
 	}
 }
 
+// A session a terminal runs, past its last look at the inbox. The user
+// writes to it from the page (the words wait, "queued"), and the run then
+// ends on a quit (/quit at the terminal, or a stop from the phone), after
+// the words were written. The session stays stopped, as on main, and the
+// words wait in its inbox for the user's next resume.
+func TestK14AQuitAfterQueuedWordsKeepsTheSessionStopped(t *testing.T) {
+	s, project := newTestServer(t)
+	k1Model(t, s, project)
+	old := inboxWatchEvery
+	inboxWatchEvery = time.Millisecond
+	t.Cleanup(func() { inboxWatchEvery = old })
+	info := r11Session(t, project)
+	sess, _, err := store.Open(info.Path, time.Now()) // the terminal's run, past its last look
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/message", map[string]any{"text": "and add the retry test"}, nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued"`) {
+		_ = sess.Close()
+		t.Fatalf("send: %d %s", w.Code, w.Body)
+	}
+	if _, err := sess.Append(event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: "quit"})); err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Close() // the terminal's run lets go
+	if sr7WatcherGone(t, s, info.ID) {
+		t.Fatal("the run ended on a quit after the words were written, and the server resumed the session the user quit")
+	}
+	if left, _ := os.ReadDir(harness.InboxDir(info.Path)); len(left) != 1 {
+		t.Fatalf("the inbox holds %d file(s), want the words", len(left))
+	}
+}
+
 // Words for a session another process runs, sent once this server's
 // shutdown has begun, are answered with what is true: they wait in the
 // session's inbox until it next runs (this server resumes nothing now).
