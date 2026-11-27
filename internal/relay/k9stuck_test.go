@@ -38,6 +38,7 @@ func TestK9SeatSaysWhenABlockedAgentIsStuck(t *testing.T) {
 	h.screen = "$ "
 	h.mu.Unlock()
 	s.checkScreen(time.Now())
+	s.checkScreen(time.Now()) // held two checks in a row
 	if st := s.Snapshot(); st.State != "blocked" || !st.Stuck {
 		t.Errorf("after the spinner stopped: %s, stuck %v; want blocked and stuck", st.State, st.Stuck)
 	}

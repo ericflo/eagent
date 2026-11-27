@@ -18,6 +18,7 @@ func TestK9AReattachedBlockFoundStuckIsSaid(t *testing.T) {
 	s := newSeat(Spec{}, codexAgent{}, h, "k9-reattach-stuck", "thread-1")
 	s.state, s.hung = "blocked", true // as attachSeat leaves a quiet turn
 	s.checkScreen(s.stateAt)
+	s.checkScreen(s.stateAt) // held two checks in a row
 	if !s.Snapshot().Stuck {
 		t.Fatal("not stuck at a shell prompt")
 	}
@@ -117,6 +118,46 @@ func TestK9AHookThatClaimsFirstWinsOverTheScreenTakeBack(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "h1 ok=true " {
 		t.Fatalf("outcomes %q; want h1 delivered by its arrival, and nothing else", got)
+	}
+}
+
+// Each change of Stuck is said (blocked again, which wakes eagent), so it
+// is said only once the new value has held at two screen checks in a row:
+// a busy line that flickers says nothing. And a state event never says
+// stuck while a dialog is up, as Status.Stuck never does.
+func TestK9AFlickeringBusyLineSaysNothing(t *testing.T) {
+	busy := "• Running go test ./... (12m 03s • esc to interrupt)\n› "
+	h := &fakeHost{alive: true, screen: busy}
+	s := newSeat(Spec{}, codexAgent{}, h, "k9-flicker", "thread-1")
+	s.state, s.stateAt = "working", time.Now().Add(-11*time.Minute)
+	s.checkScreen(time.Now()) // blocked at work, not stuck
+	_ = drain(s.events)
+	look := func(screen string) {
+		h.mu.Lock()
+		h.screen = screen
+		h.mu.Unlock()
+		s.checkScreen(time.Now())
+	}
+	for i := 0; i < 6; i++ {
+		look("$ ")
+		look(busy)
+	}
+	if evs := drain(s.events); len(evs) != 0 || s.Snapshot().Stuck {
+		t.Fatalf("a flickering busy line said %+v, stuck %v; want nothing", evs, s.Snapshot().Stuck)
+	}
+	look("$ ")
+	look("$ ")
+	look("$ ")
+	evs := drain(s.events)
+	if len(evs) != 1 || !evs[0].Stuck || !s.Snapshot().Stuck {
+		t.Fatalf("held stuck three checks: said %+v; want it said once", evs)
+	}
+	s.mu.Lock()
+	s.dialogUp = "Allow the edit?"
+	s.mu.Unlock()
+	s.setDialogState("blocked", "a dialog", "Allow the edit?", s.emit)
+	if evs := drain(s.events); len(evs) != 1 || evs[0].Stuck {
+		t.Fatalf("under a dialog: %+v; want a state event that does not say stuck", evs)
 	}
 }
 

@@ -153,6 +153,7 @@ type Seat struct {
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	stuck      bool                 // blocked, and known not to be working (Status.Stuck)
+	stuckNext  bool                 // the last screen check found stuck should change (checkScreen)
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	ownScreen  bool                 // reattached, and a send has once found the agent's own screen (waitReady)
 	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
@@ -518,12 +519,12 @@ func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	}
 	s.state, s.stateAt = state, time.Now()
 	if state != "blocked" {
-		s.hung, s.stuck = false, false
+		s.hung, s.stuck, s.stuckNext = false, false, false
 	}
 	if state == "working" {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
-	stuck := state == "blocked" && s.stuck
+	stuck := state == "blocked" && s.stuck && s.dialogUp == "" && dialog == ""
 	s.mu.Unlock()
 	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog, Stuck: stuck})
 }
@@ -2182,10 +2183,15 @@ func (s *Seat) checkScreen(now time.Time) {
 		// (Status.Stuck).
 		work := s.atWork(screen)
 		s.mu.Lock()
-		changed := s.hung && s.state == "blocked" && s.stuck == work
+		// Changed, and said once, only when two screen checks in a row
+		// find it: a screen that flickers says nothing new.
+		differs := s.hung && s.state == "blocked" && s.stuck == work
+		changed := differs && s.stuckNext
+		s.stuckNext = differs && !changed
 		if changed {
 			s.stuck = !work
 		}
+		dialog := s.dialogUp != ""
 		s.mu.Unlock()
 		if changed {
 			// Said (blocked again, with what changed): a change waiting on
@@ -2194,7 +2200,7 @@ func (s *Seat) checkScreen(now time.Time) {
 			if work {
 				detail = "still no transcript activity; it shows it is at work again"
 			}
-			s.emit(Event{Kind: KindState, State: "blocked", Detail: detail, Stuck: !work})
+			s.emit(Event{Kind: KindState, State: "blocked", Detail: detail, Stuck: !work && !dialog})
 		}
 	}
 }
