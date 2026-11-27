@@ -132,3 +132,41 @@ func TestK2ASendIsNotTypedIntoPisOwnPicker(t *testing.T) {
 		t.Fatalf("typed %q into pi's model picker", k1Typed(h))
 	}
 }
+
+// A3: Claude gives a turn up on an API error by writing its synthetic error
+// answer, and no turn_duration (Claude Code writes one only for a turn that
+// completed), and its Stop hook does not run. That answer is the turn's
+// end, as pi's and Antigravity's errors are: the seat says the turn ended
+// (interrupted, with the error) and is idle, and a message held for the
+// end of the turn, which nothing will hand over now, is reported not sent
+// after the usual grace rather than held until some later turn completes.
+func TestK2AClaudesAPIErrorEndsItsTurn(t *testing.T) {
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, &fakeHost{alive: true}, "k2-a3", "")
+	s.state = "working"
+	if _, err := s.Send("r1", "then commit the fix", "after_turn"); err != nil {
+		t.Fatal(err)
+	}
+	p := &claudeParser{}
+	for _, l := range []string{
+		claudeUser(time.Now(), "run the build"),
+		fmt.Sprintf(`{"type":"assistant","timestamp":"%s","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 529 Overloaded"}]}}`, stamp(time.Now())),
+	} {
+		for _, o := range p.line([]byte(l)) {
+			s.fold(o)
+		}
+	}
+	s.reportLeftOvers(time.Now().Add(heldGrace))
+	var turns, got []string
+	for _, ev := range drain(s.events) {
+		switch {
+		case ev.Kind == KindTurn:
+			turns = append(turns, fmt.Sprintf("%v:%s", ev.Interrupted, ev.Text))
+		case ev.Kind == KindDelivered:
+			got = append(got, ev.SendID+":"+ev.Outcome)
+		}
+	}
+	if !slices.Equal(got, []string{"r1:" + OutcomeNotSent}) || !slices.Equal(turns, []string{"true:API Error: 529 Overloaded"}) || s.Snapshot().State != "idle" {
+		t.Fatalf("turns %v, reported %v, state %s; want the turn ended on the error, r1 not sent, idle (spool %v)", turns, got, s.Snapshot().State, spoolNames(spool))
+	}
+}

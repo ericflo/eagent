@@ -364,6 +364,15 @@ func (p *claudeParser) line(raw []byte) []obs {
 				out = append(out, claudeTool(part.Name, part.Input, at)...)
 			}
 		}
+		if ev.APIError {
+			// Claude gave the turn up on this error: it writes no
+			// turn_duration for a turn that did not complete, and no Stop
+			// hook runs. The turn is over, as pi's and agy's errors end
+			// theirs.
+			text := p.held
+			p.held, p.inTurn = "", false
+			out = append(out, obs{kind: "aborted", text: text, at: at})
+		}
 		return out
 	}
 	return nil
