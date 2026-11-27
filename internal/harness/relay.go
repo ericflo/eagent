@@ -1591,17 +1591,12 @@ func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
 	for _, name := range names {
 		rel := st.Relays[name]
 		rels = append(rels, rel)
-		to, switched := handed[holder{rel.Name, rel.StartSeq}]
-		if next := st.RelayAt(to.name, to.start); switched && next != nil {
-			// The switch left the user's messages to its brief, which
-			// quotes them. A brief that certainly did not go carried
-			// nothing: they are settled as at a stop.
-			if _, brief := briefedBy(st, next); brief != "" && st.SendOutcome(brief) == state.SendNotSent {
-				switched = false
-			}
-		}
+		// A switch left the user's messages to a brief that quotes them.
+		// Where none that does can have gone, they are settled as at a
+		// stop.
+		carried := briefCarried(st, handed, holder{rel.Name, rel.StartSeq})
 		for _, s := range unresolvedSends(st, rel) {
-			if d, ok := sendRecord(st, s.ID); switched && (!ok || d.From != "eagent") {
+			if d, ok := sendRecord(st, s.ID); carried && (!ok || d.From != "eagent") {
 				keep = append(keep, s.ID)
 			}
 		}
@@ -2752,6 +2747,34 @@ func (r *Runtime) writeBrief(ho *handover, pending map[string]bool) string {
 type holder struct {
 	name  string
 	start int64
+}
+
+// briefCarried reports whether a handoff brief that quotes the user's
+// messages typed into the agent h may have gone: the brief of the switch
+// that replaced h, or, where that one certainly did not go and the agent
+// it was for was replaced by a switch in its turn before it did any work,
+// the brief of that switch, which hands over from h as well (handoverFor);
+// and so on down the chain. False for an agent no switch replaced.
+func briefCarried(st *state.State, handed map[holder]holder, h holder) bool {
+	for seen := map[holder]bool{}; !seen[h]; {
+		seen[h] = true
+		to, ok := handed[h]
+		if !ok {
+			return false
+		}
+		next := st.RelayAt(to.name, to.start)
+		if next == nil {
+			return true
+		}
+		if _, brief := briefedBy(st, next); brief == "" || st.SendOutcome(brief) != state.SendNotSent {
+			return true
+		}
+		if next.Turns != 0 {
+			return false
+		}
+		h = to
+	}
+	return false
 }
 
 // handedOver maps each agent that a switch replaced to the agent that took

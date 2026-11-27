@@ -59,6 +59,64 @@ func TestK25ASwitchWhoseBriefWasNotSentSettlesTheUsersMessage(t *testing.T) {
 	}
 }
 
+// The same start, and a second switch (to pi) before Claude was typed its
+// brief: Claude's brief is recorded not sent, and pi's brief hands over
+// from Codex through Claude, quoting the user's message. That brief
+// carried it: a later settle leaves it as the switch left it, with no
+// outcome of its own to answer by sending it again.
+func TestK25AQuickSecondSwitchsBriefCarriesTheUsersMessage(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	stuck, final := newClosingSeat("stuck"), newFakeSeat("done")
+	g := useGatedLaunches(t, []relaySeat{seat, stuck, final}, nil)
+	rt := newLaunchRuntime(t)
+	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
+	first := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	seat.waitGone(t)
+	seat.end()
+	g.release <- struct{}{}
+	stuck.waitEntered(t, "You are taking over") // Claude is on its startup screens: its brief is never typed
+	second := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "pi", "relay": "claude"})
+	g.release <- struct{}{}
+	if text := recv(t, first, "switch"); !strings.Contains(text, "could not be typed") {
+		t.Fatalf("the first switch: %q; want its brief not typed", text)
+	}
+	if text := recv(t, second, "switch"); !strings.Contains(text, "Handed over") {
+		t.Fatalf("the second switch: %q", text)
+	}
+	waitFor(t, "pi typed its brief", func() bool { return len(final.sentTexts()) >= 1 })
+	k1QueuesIdle(t, rt)
+	if brief := final.sentTexts()[0]; !strings.Contains(brief, "run the tests") {
+		t.Fatalf("pi's brief does not quote the user's message:\n%s", brief)
+	}
+	var briefs []string
+	var keep []string
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			var d event.RelaySendData
+			if ev.Type == event.RelaySend && ev.Decode(&d) == nil && d.From == "eagent" && strings.HasPrefix(d.Text, "You are taking over") {
+				briefs = append(briefs, d.ID)
+			}
+		}
+		_, keep = EndedWaiting(rt.st)
+	})
+	if len(briefs) != 2 {
+		t.Fatalf("briefs on the record: %v; want Claude's and pi's", briefs)
+	}
+	if got := deliveredFor(rt, briefs[0]); len(got) != 1 || got[0].Outcome != event.DeliveryNotSent {
+		t.Fatalf("Claude's brief %s: %+v; want not_sent", briefs[0], got)
+	}
+	if got := deliveredFor(rt, briefs[1]); len(got) == 1 && got[0].Outcome == event.DeliveryNotSent {
+		t.Fatalf("pi's brief %s: %+v; want it typed", briefs[1], got)
+	}
+	if !slices.Contains(keep, id) {
+		t.Fatalf("the user's message %s, which pi's brief quotes, is not kept as the switch left it (keep %v)", id, keep)
+	}
+	rt.sync(func() { rt.settleEnded() })
+	if got := deliveredFor(rt, id); len(got) != 0 {
+		t.Fatalf("the user's message %s after the settle: %+v; want no outcome (pi's brief carried it)", id, got)
+	}
+}
+
 // The user's message is held for the end of Codex's turn (in the spool).
 // The user quits while a start or stop of another agent is still under
 // way, so finish waits for it after it has ended the loop's queue and
