@@ -668,14 +668,19 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return "", err
 	}
 	// Last look before typing: text typed into a dialog is lost (or worse).
-	for i := 0; i < 3; i++ {
+	// One that still shows after it was answered and waited on three times
+	// is not typed into: the send is refused, with nothing typed.
+	label := s.agent.Label()
+	for i := 0; ; i++ {
 		screen, err := s.host.Capture(s.target, 0)
 		if err != nil || !s.answerDialog(screen, time.Now()) {
 			break
 		}
+		if i == 3 {
+			return "", fmt.Errorf("%s still shows a dialog of its own after it was answered; the message was not typed. Check relay_screen", label)
+		}
 		time.Sleep(dialogPause)
 	}
-	label := s.agent.Label()
 	switch mode {
 	case "", "queue":
 		mode = "queue"

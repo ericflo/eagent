@@ -108,3 +108,30 @@ func TestK14ThePromptsWordsInTheOutputAreNotThePrompt(t *testing.T) {
 		}
 	}
 }
+
+// A send looks at the screen once more before it types, and answers a
+// dialog of the agent's own that shows (one that goes away when answered
+// is typed after: k3seat_test.go). One that still shows after it was
+// answered and waited on three times is not typed into: the send is
+// refused, and nothing is typed. (After three looks the text was typed
+// whatever the screen showed, into the dialog; main does the same.)
+func TestK14ASendIsNotTypedIntoADialogThatStays(t *testing.T) {
+	savedSettle, savedPause := typeSettle, dialogPause
+	typeSettle, dialogPause = 0, 0
+	t.Cleanup(func() { typeSettle, dialogPause = savedSettle, savedPause })
+	h := &fakeHost{alive: true, screen: claudeTrustScreen}
+	s := newSeat(Spec{}, claudeAgent{}, h, "k14", "id")
+	s.mu.Lock()
+	s.state, s.stateAt = "idle", time.Now()
+	s.mu.Unlock()
+	_, err := s.Send("m1", "deploy it after lunch", "queue")
+	h.mu.Lock()
+	typed, keys := append([]string{}, h.typed...), strings.Join(h.keys, " ")
+	h.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "still shows a dialog") || len(typed) != 0 {
+		t.Errorf("send err %v, typed %q; want the send refused and nothing typed", err, typed)
+	}
+	if keys != "Down Enter" {
+		t.Errorf("pressed %q; want the dialog answered once", keys)
+	}
+}
