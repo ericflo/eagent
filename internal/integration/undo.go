@@ -109,15 +109,17 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		journal.Resource = &change
 		return nil
 	}
-	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant)
+	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant, original.InForce...)
 	if err != nil {
 		return err
 	}
 	journal.Desired, journal.BeforeETag, journal.DesiredETag = desired, etag, artifact.Digest([]byte(desired))
-	before := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	before := res.File.Raw
 	if before == "" {
 		before = "{}\n"
 	}
 	journal.BeforeRaw = &before
+	journal.InForce = settings.RoutePairs(res.Effective)
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 // rv15Step runs one undo the way the connector does: the reversal of a
 // journal (applied, beforeRaw, desiredRaw) is computed and written through
 // PrepareUndo against the file on disk now.
-func rv15Step(t *testing.T, s *Service, applied control.Proposal, beforeRaw, desiredRaw string) (control.Proposal, string) {
+func rv15Step(t *testing.T, s *Service, applied control.Proposal, beforeRaw, desiredRaw string, inForce [][2]string) (control.Proposal, string) {
 	t.Helper()
 	inverse, err := ConfigInverse(applied, beforeRaw, desiredRaw)
 	if err != nil {
@@ -24,11 +24,17 @@ func rv15Step(t *testing.T, s *Service, applied control.Proposal, beforeRaw, des
 		t.Fatal(err)
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, now.Snapshot.Version
-	raw, _, _, err := s.PrepareUndo(inverse, beforeRaw, desiredRaw, s.Grant())
+	raw, _, _, err := s.PrepareUndo(inverse, beforeRaw, desiredRaw, s.Grant(), inForce...)
 	if err != nil {
 		t.Fatalf("undo refused: %v (reversal %+v)", err, inverse.Edits)
 	}
 	return inverse, raw
+}
+
+// k1InForce is what a connector records in a command's journal as in force
+// when it applies the command: read before the command writes.
+func k1InForce(s *Service) [][2]string {
+	return RoutePairs(config.Resolve(s.Project, s.Preset, s.Bundle).Effective)
 }
 
 func rv15Load(t *testing.T, project string) config.Config {
@@ -45,7 +51,6 @@ func rv15Load(t *testing.T, project string) config.Config {
 // undo with nothing changed locally. At f36e19c the change left the key
 // variable and the undo (/preset alone) went through.
 func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
-	t.Skip("known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)")
 	for _, fc := range []string{"", "off"} {
 		t.Run("finalechat="+fc, func(t *testing.T) {
 			clearRouteEnv(t)
@@ -55,6 +60,7 @@ func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
 			edits := []control.Edit{{Op: "set", Key: "/preset", Value: "anthropic-med"}}
 			writeProjectFile(t, project, before)
 			s := &Service{Project: project}
+			inForce := k1InForce(s)
 			view := apply(t, s, edits...)
 			wrote, _ := os.ReadFile(config.File(project))
 			cmd := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}
@@ -64,7 +70,7 @@ func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
 			}
 			now, _ := s.RemoteSnapshot(s.Grant())
 			inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, now.Snapshot.Version
-			if _, _, _, err := s.PrepareUndo(inverse, before, string(wrote), s.Grant()); err != nil {
+			if _, _, _, err := s.PrepareUndo(inverse, before, string(wrote), s.Grant(), inForce...); err != nil {
 				t.Fatalf("undo refused: %v\nreversal offered: %+v\ncommand wrote:\n%s", err, inverse.Edits, wrote)
 			}
 		})
@@ -75,9 +81,6 @@ func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
 // rules: the undo loads as the file before the command, and the redo loads
 // as the file the command wrote.
 func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
-	skips := map[string]string{
-		"preset unset, key var": "known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)",
-	}
 	for _, tc := range []struct {
 		name, before string
 		edits        []control.Edit
@@ -93,20 +96,19 @@ func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
 	} {
 		for _, fc := range []string{"", "off"} {
 			t.Run(tc.name+"/finalechat="+fc, func(t *testing.T) {
-				if why := skips[tc.name]; why != "" {
-					t.Skip(why)
-				}
 				clearRouteEnv(t)
 				t.Setenv("EAGENT_FINALECHAT", fc)
 				project := t.TempDir()
 				writeProjectFile(t, project, tc.before)
 				want := rv15Load(t, project)
 				s := &Service{Project: project}
+				atCommand := k1InForce(s)
 				view := apply(t, s, tc.edits...)
 				wrote, _ := os.ReadFile(config.File(project))
 				afterCmd := rv15Load(t, project)
+				atUndo := k1InForce(s)
 				cmd := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: tc.edits}
-				undo, undoRaw := rv15Step(t, s, cmd, tc.before, string(wrote))
+				undo, undoRaw := rv15Step(t, s, cmd, tc.before, string(wrote), atCommand)
 				writeProjectFile(t, project, undoRaw)
 				got := rv15Load(t, project)
 				if !reflect.DeepEqual(got.Model, want.Model) || got.Preset != want.Preset || !reflect.DeepEqual(got.Summarizer, want.Summarizer) {
@@ -114,7 +116,7 @@ func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
 				}
 				// The undo's journal: applied is the reversal, before_raw
 				// the file the command wrote, desired the undo's file.
-				_, redoRaw := rv15Step(t, s, undo, string(wrote), undoRaw)
+				_, redoRaw := rv15Step(t, s, undo, string(wrote), undoRaw, atUndo)
 				writeProjectFile(t, project, redoRaw)
 				redone := rv15Load(t, project)
 				if !reflect.DeepEqual(redone.Model, afterCmd.Model) || redone.Preset != afterCmd.Preset || !reflect.DeepEqual(redone.Summarizer, afterCmd.Summarizer) {
@@ -130,7 +132,6 @@ func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
 // that variable back: the file before the command paired it with its
 // address. Its redo loads as the command left the file.
 func TestK1UndoOfAModelPickWithOwnKeyVar(t *testing.T) {
-	t.Skip("known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)")
 	for _, fc := range []string{"", "off"} {
 		t.Run("finalechat="+fc, func(t *testing.T) {
 			clearRouteEnv(t)
@@ -141,16 +142,18 @@ func TestK1UndoOfAModelPickWithOwnKeyVar(t *testing.T) {
 			writeProjectFile(t, project, before)
 			want := rv15Load(t, project)
 			s := &Service{Project: project}
+			atCommand := k1InForce(s)
 			view := apply(t, s, edits...)
 			wrote, _ := os.ReadFile(config.File(project))
 			afterCmd := rv15Load(t, project)
+			atUndo := k1InForce(s)
 			cmd := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}
-			undo, undoRaw := rv15Step(t, s, cmd, before, string(wrote))
+			undo, undoRaw := rv15Step(t, s, cmd, before, string(wrote), atCommand)
 			writeProjectFile(t, project, undoRaw)
 			if got := rv15Load(t, project); !reflect.DeepEqual(got.Model, want.Model) {
 				t.Fatalf("after undo %+v, want %+v\nundo wrote:\n%s", got.Model, want.Model, undoRaw)
 			}
-			_, redoRaw := rv15Step(t, s, undo, string(wrote), undoRaw)
+			_, redoRaw := rv15Step(t, s, undo, string(wrote), undoRaw, atUndo)
 			writeProjectFile(t, project, redoRaw)
 			if got := rv15Load(t, project); !reflect.DeepEqual(got.Model, afterCmd.Model) {
 				t.Fatalf("after redo %+v, want %+v\nredo wrote:\n%s", got.Model, afterCmd.Model, redoRaw)
@@ -171,6 +174,7 @@ func TestK1UndoDoesNotPairAnOldKeyWithANewAddress(t *testing.T) {
 	edits := []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}}
 	writeProjectFile(t, project, before)
 	s := &Service{Project: project}
+	inForce := k1InForce(s)
 	view := apply(t, s, edits...)
 	wrote, _ := os.ReadFile(config.File(project))
 	writeProjectFile(t, project, `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY","base_url":"https://openrouter.ai/api/v1","model":"openai/gpt-6-astra","protocol":"openai-chat"}}`)
@@ -181,7 +185,7 @@ func TestK1UndoDoesNotPairAnOldKeyWithANewAddress(t *testing.T) {
 	}
 	now, _ := s.RemoteSnapshot(s.Grant())
 	inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, now.Snapshot.Version
-	raw, _, _, err := s.PrepareUndo(inverse, before, string(wrote), s.Grant())
+	raw, _, _, err := s.PrepareUndo(inverse, before, string(wrote), s.Grant(), inForce...)
 	var conflict *config.ErrConflict
 	if err == nil || errors.As(err, &conflict) {
 		t.Fatalf("undo: %v, want it refused (reversal %+v)\nwrote:\n%s", err, inverse.Edits, raw)

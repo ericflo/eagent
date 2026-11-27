@@ -1,13 +1,67 @@
 package integration
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
+
+// A command's journal records the (address, key variable) pairs in force
+// when it is applied, so the undo of a remote /preset change over a route
+// with a key variable of its own puts that variable back, which today's
+// choices no longer offer. A journal without the record (written by an
+// earlier eagent) is refused plainly, and nothing is written.
+func TestK1UndoUsesThePairsInForceAtTheCommand(t *testing.T) {
+	for _, recorded := range []bool{true, false} {
+		name := "recorded"
+		if !recorded {
+			name = "earlier journal"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, g, _ := fixtureCommand(t)
+			before := `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY_WORK"}}`
+			if _, err := config.SaveRaw(s.Project, before, "", true); err != nil {
+				t.Fatal(err)
+			}
+			q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/preset", Value: "anthropic-med"}}})
+			first := executeExpected(t, s, g, q, "succeeded")
+			path := filepath.Join(stateDir(s.Project), "commands", first.CommandID+".json")
+			raw, _ := os.ReadFile(path)
+			var j commandJournal
+			if err := json.Unmarshal(raw, &j); err != nil || len(j.InForce) == 0 {
+				t.Fatalf("journal records nothing in force: %v\n%s", err, raw)
+			}
+			if !recorded {
+				j.InForce = nil
+				raw, _ = json.Marshal(j)
+				if err := os.WriteFile(path, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wrote, _ := os.ReadFile(config.File(s.Project))
+			if !recorded {
+				res := executeExpected(t, s, g, reviewedUndo(t, s, g, first), "rejected")
+				if msg, _ := res.Result["message"].(string); !strings.Contains(msg, "nothing was changed") || !strings.Contains(msg, "by hand") {
+					t.Fatalf("refusal %q", msg)
+				}
+				if now, _ := os.ReadFile(config.File(s.Project)); string(now) != string(wrote) {
+					t.Fatalf("a refused undo wrote the file:\n%s", now)
+				}
+				return
+			}
+			executeExpected(t, s, g, reviewedUndo(t, s, g, first), "succeeded")
+			got := config.Resolve(s.Project, "", "").Effective
+			if got.Preset != "openai-high" || got.Model.APIKeyEnv != "OPENAI_API_KEY_WORK" {
+				t.Fatalf("after undo %s %+v", got.Preset, got.Model)
+			}
+		})
+	}
+}
 
 // An undo reviewed before eagent computed reversals from what a command
 // changed (one offered for a model pick put back every pick field) no

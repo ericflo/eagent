@@ -698,21 +698,38 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
-	return s.prepare(p, grant, false, nil)
+	return s.prepare(p, grant, false, nil, nil)
 }
 
 // prepare is Prepare. A person's pick of a route's model, address or preset
 // brings the rest of the route with it (the summarizer's seed and
 // routePicks); an undo's reversal (undo) writes the fields it names and the
 // routes it puts back to null (nulls), and no other. Either file is checked
-// as a person's save of it is.
-func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nulls []string) (raw string, etag string, before RemoteView, err error) {
+// as a person's save of it is, except that for a reversal a route pairing
+// an address and a key variable as a route in force at the command did
+// (inForce, RoutePairs) passes the key-choice and pairing checks.
+func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nulls []string, inForce [][2]string) (raw string, etag string, before RemoteView, err error) {
 	picks := !undo
 	before, err = s.RemoteSnapshot(grant)
 	if err != nil {
 		return
 	}
-	if err = p.Validate(before.Descriptor, grant); err != nil {
+	d := before.Descriptor
+	if undo && len(inForce) > 0 {
+		d.Fields = slices.Clone(d.Fields)
+		for i, f := range d.Fields {
+			if strings.HasSuffix(f.Key, "/api_key_env") {
+				enum := slices.Clone(f.Shape.Enum)
+				for _, pair := range inForce {
+					if pair[1] != "" && !slices.Contains(enum, any(pair[1])) {
+						enum = append(enum, pair[1])
+					}
+				}
+				d.Fields[i].Shape.Enum = enum
+			}
+		}
+	}
+	if err = p.Validate(d, grant); err != nil {
 		return
 	}
 	if p.ExpectedVersion != before.Snapshot.Version || p.Generation != "" {
@@ -786,7 +803,26 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nu
 	if err != nil {
 		return
 	}
-	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil {
+	// The route checks see a recorded pair's route without its key variable:
+	// its address is still checked, and every other route as it is.
+	checked := cfg
+	if undo && len(inForce) > 0 {
+		var strip func(a *config.ModelRoute) *config.ModelRoute
+		strip = func(a *config.ModelRoute) *config.ModelRoute {
+			if a == nil {
+				return nil
+			}
+			c := *a
+			if slices.Contains(inForce, [2]string{strings.TrimRight(c.BaseURL, "/"), c.APIKeyEnv}) {
+				c.APIKeyEnv = ""
+			}
+			c.Fallback = strip(a.Fallback)
+			return &c
+		}
+		checked.Model = *strip(&cfg.Model)
+		checked.Summarizer.Model = strip(cfg.Summarizer.Model)
+	}
+	if err = s.CheckRemoteRoutes(checked, res.Effective); err != nil {
 		return
 	}
 	for _, problem := range cfg.Problems() {

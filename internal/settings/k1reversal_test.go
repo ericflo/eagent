@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -29,6 +30,7 @@ func TestK1ReversalRules(t *testing.T) {
 		before  string
 		edits   []control.Edit
 		local   func(map[string]any) // a local edit after the command
+		record  bool                 // the journal records the pairs in force at the command
 		want    string               // ok, conflict, refused, or none (no undo)
 		check   func(*testing.T, config.Config)
 	}{
@@ -73,8 +75,11 @@ func TestK1ReversalRules(t *testing.T) {
 			}
 		}},
 		// Rule 3: a key variable the command replaced, which nothing saved
-		// today names, is not a choice a person has here now.
-		{name: "3: a key variable no longer offered is refused", before: `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY_WORK"}}`, edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}}, want: "refused"},
+		// today names, is not a choice a person has here now, unless the
+		// journal recorded its route's pair as in force at the command (a
+		// journal of an earlier eagent records none).
+		{name: "3: a key variable no longer offered, pair recorded at the command", record: true, before: `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY_WORK"}}`, edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}}, want: "ok"},
+		{name: "3: a key variable no longer offered, no record (an earlier journal)", before: `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY_WORK"}}`, edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}}, want: "refused"},
 	} {
 		for _, fc := range []string{"", "off"} {
 			t.Run(row.name+"/finalechat="+fc, func(t *testing.T) {
@@ -99,6 +104,10 @@ func TestK1ReversalRules(t *testing.T) {
 					t.Fatal(err)
 				}
 				cmd := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: row.edits}
+				var inForce [][2]string
+				if row.record {
+					inForce = RoutePairs(config.Resolve(project, s.Preset, s.Bundle).Effective)
+				}
 				if _, _, err := s.Apply(context.Background(), cmd, g); err != nil {
 					t.Fatalf("apply: %v", err)
 				}
@@ -134,13 +143,13 @@ func TestK1ReversalRules(t *testing.T) {
 					t.Fatal(err)
 				}
 				inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, now.Snapshot.Version
-				raw, _, _, err := s.PrepareUndo(inverse, row.before, string(desired), g)
+				raw, _, _, err := s.PrepareUndo(inverse, row.before, string(desired), g, inForce...)
 				var conflict *config.ErrConflict
 				switch {
 				case row.want == "conflict" && !errors.As(err, &conflict):
 					t.Fatalf("undo: %v, want a conflict (reversal %+v)", err, inverse.Edits)
-				case row.want == "refused" && (err == nil || errors.As(err, &conflict)):
-					t.Fatalf("undo: %v, want it refused (reversal %+v)\nwrote:\n%s", err, inverse.Edits, raw)
+				case row.want == "refused" && (err == nil || errors.As(err, &conflict) || !strings.Contains(err.Error(), "nothing was changed")):
+					t.Fatalf("undo: %v, want it refused saying nothing was changed (reversal %+v)\nwrote:\n%s", err, inverse.Edits, raw)
 				case row.want == "ok" && err != nil:
 					t.Fatalf("undo: %v (reversal %+v)\ncommand wrote:\n%s", err, inverse.Edits, desired)
 				}

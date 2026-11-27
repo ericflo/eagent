@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -110,9 +111,11 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 // conflict when any key of the reversal now differs from the file the
 // command wrote, or the address of a route the reversal sets a model back
 // on does, and nothing else is; the file it writes is checked as a
-// person's save of it would be. beforeRaw and desiredRaw are the journal's
-// before_raw and desired.
-func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
+// person's save of it would be, except that a route pairing an address and
+// a key variable as a route in force at the command did (inForce, the
+// journal's in_force) passes the key-choice and pairing checks. beforeRaw
+// and desiredRaw are the journal's before_raw and desired.
+func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant, inForce ...[2]string) (string, string, RemoteView, error) {
 	desired, err := fileValues(desiredRaw)
 	if err != nil {
 		return "", "", RemoteView{}, err
@@ -144,7 +147,28 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	return s.prepare(inverse, grant, true, nulls)
+	raw, etag, view, err := s.prepare(inverse, grant, true, nulls, inForce)
+	var conflict *config.ErrConflict
+	if err != nil && !errors.As(err, &conflict) {
+		err = fmt.Errorf("this undo would write settings that cannot be saved from here now (%v); nothing was changed, so put those settings back by hand instead", err)
+	}
+	return raw, etag, view, err
+}
+
+// RoutePairs are the (address, key variable) pairs of a configuration's
+// routes and their fallbacks, in order: what a command's journal records as
+// in force when the command is applied.
+func RoutePairs(cfg config.Config) [][2]string {
+	var out [][2]string
+	for _, a := range configRoutes(cfg) {
+		for cur := &a; cur != nil; cur = cur.Fallback {
+			if pair := [2]string{strings.TrimRight(cur.BaseURL, "/"), cur.APIKeyEnv}; !slices.Contains(out, pair) {
+				out = append(out, pair)
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b [2]string) int { return strings.Compare(a[0]+"\x00"+a[1], b[0]+"\x00"+b[1]) })
+	return out
 }
 
 func (change ResourceChange) Inverse() (control.Proposal, error) {

@@ -12,7 +12,7 @@ import (
 
 // rv15c3Undo computes and prepares the undo of a command journaled as
 // (edits, before, desired) with s, against the file on disk now.
-func rv15c3Undo(t *testing.T, s *Service, edits []control.Edit, before, desired string) (string, []control.Edit, error) {
+func rv15c3Undo(t *testing.T, s *Service, edits []control.Edit, before, desired string, inForce [][2]string) (string, []control.Edit, error) {
 	t.Helper()
 	inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: "earlier", Edits: edits}, before, desired)
 	if err != nil {
@@ -23,7 +23,7 @@ func rv15c3Undo(t *testing.T, s *Service, edits []control.Edit, before, desired 
 		t.Fatal(err)
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, now.Snapshot.Version
-	raw, _, _, err := s.PrepareUndo(inverse, before, desired, s.Grant())
+	raw, _, _, err := s.PrepareUndo(inverse, before, desired, s.Grant(), inForce...)
 	return raw, inverse.Edits, err
 }
 
@@ -46,6 +46,8 @@ func TestRV15C3UndoAfterALayerChangeSendsAnOldKeyToANewAddress(t *testing.T) {
 			if cfg := config.Resolve(project, s.Preset, s.Bundle).Effective; !strings.Contains(cfg.Model.BaseURL, "openai.com") {
 				t.Fatalf("setup: the layer is not OpenAI's: %+v", cfg.Model)
 			}
+			// What the journal records as in force at the command.
+			inForce := RoutePairs(config.Resolve(project, s.Preset, s.Bundle).Effective)
 			apply(t, s, edits...)
 			wrote, _ := os.ReadFile(config.File(project))
 			// The same file, now over another provider's preset.
@@ -55,7 +57,7 @@ func TestRV15C3UndoAfterALayerChangeSendsAnOldKeyToANewAddress(t *testing.T) {
 				t.Fatalf("setup: a person's proposal pairing OPENAI_API_KEY_WORK with Anthropic was accepted")
 			}
 			writeProjectFile(t, project, string(wrote))
-			raw, inv, err := rv15c3Undo(t, s2, edits, before, string(wrote))
+			raw, inv, err := rv15c3Undo(t, s2, edits, before, string(wrote), inForce)
 			if err != nil {
 				t.Logf("undo refused: %v (acceptable)", err)
 				return
@@ -86,10 +88,12 @@ func TestRV15C3UndoAfterAnEnvPresetChange(t *testing.T) {
 			if cfg := config.Resolve(project, "", "").Effective; !strings.Contains(cfg.Model.BaseURL, "openai.com") {
 				t.Fatalf("setup: the layer is not OpenAI's: %+v", cfg.Model)
 			}
+			// What the journal records as in force at the command.
+			inForce := RoutePairs(config.Resolve(project, "", "").Effective)
 			apply(t, s, edits...)
 			wrote, _ := os.ReadFile(config.File(project))
 			t.Setenv("EAGENT_PRESET", "anthropic-med")
-			raw, inv, err := rv15c3Undo(t, s, edits, before, string(wrote))
+			raw, inv, err := rv15c3Undo(t, s, edits, before, string(wrote), inForce)
 			if err != nil {
 				t.Logf("undo refused: %v (acceptable)", err)
 				return
@@ -116,6 +120,7 @@ func TestRV15C3UndoUnsettingAModelAfterALocalAddressEdit(t *testing.T) {
 			edits := []control.Edit{{Op: "set", Key: "/model/model", Value: "gpt-6.1-sol"}}
 			writeProjectFile(t, project, before)
 			s := &Service{Project: project}
+			inForce := RoutePairs(config.Resolve(project, s.Preset, s.Bundle).Effective)
 			apply(t, s, edits...)
 			wrote, _ := os.ReadFile(config.File(project))
 			local := strings.Replace(string(wrote), `"model": {`, `"model": {"base_url":"https://api.openai.com/v1/",`, 1)
@@ -123,7 +128,7 @@ func TestRV15C3UndoUnsettingAModelAfterALocalAddressEdit(t *testing.T) {
 				t.Fatalf("setup:\n%s", wrote)
 			}
 			writeProjectFile(t, project, local)
-			raw, inv, err := rv15c3Undo(t, s, edits, before, string(wrote))
+			raw, inv, err := rv15c3Undo(t, s, edits, before, string(wrote), inForce)
 			var conflict *config.ErrConflict
 			if errors.As(err, &conflict) {
 				t.Fatalf("undo conflicts on a local address edit though it puts no model back\nreversal: %+v\ncommand wrote:\n%s\nlocal:\n%s", inv, wrote, local)

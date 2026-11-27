@@ -75,6 +75,10 @@ type commandJournal struct {
 	ConfigEdits    []control.Edit      `json:"config_edits,omitempty"`
 	ServersStarted bool                `json:"servers_started,omitempty"`
 	SavePreset     string              `json:"save_preset,omitempty"`
+	// InForce are the (address, key variable) pairs of the routes in force
+	// when a configuration command was applied, read with BeforeRaw; its
+	// undo may put such a pair back (settings.PrepareUndo).
+	InForce [][2]string `json:"in_force,omitempty"`
 }
 
 type sessionStartIntent struct {
@@ -776,11 +780,13 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 				if hasSavePreset {
 					journal.SavePreset = savePreset
 				}
-				raw := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+				res := config.Resolve(s.Project, s.Preset, s.Bundle)
+				raw := res.File.Raw
 				if raw == "" {
 					raw = "{}\n"
 				}
 				journal.BeforeRaw = &raw
+				journal.InForce = settings.RoutePairs(res.Effective)
 			}
 		}
 		if prepareErr != nil {
