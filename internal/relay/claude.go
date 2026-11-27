@@ -40,8 +40,8 @@ func (claudeAgent) busy(screen string) bool { return claudeSpinner.MatchString(s
 func (claudeAgent) dialogs() []dialog {
 	return []dialog{
 		// Claude Code: the default choice is "No, exit".
-		{name: "claude-trust", match: []string{"Yes, I trust this folder"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's folder-trust prompt"},
-		{name: "claude-bypass", match: []string{"Bypass Permissions mode", "Yes, I accept"}, keys: []string{"Down", "Enter"}, what: "accepted Claude Code's bypass-permissions warning"},
+		{name: "claude-trust", match: []string{"Yes, I trust this folder"}, end: "Enter to confirm", keys: []string{"Down", "Enter"}, what: "accepted Claude Code's folder-trust prompt"},
+		{name: "claude-bypass", match: []string{"Bypass Permissions mode", "Yes, I accept"}, end: "Enter to confirm", keys: []string{"Down", "Enter"}, what: "accepted Claude Code's bypass-permissions warning"},
 	}
 }
 

@@ -235,7 +235,7 @@ func TestPiCommandAndPrepare(t *testing.T) {
 	if !a.ready("x\n0.4%/1.0M (auto)            (anthropic) claude-haiku-5-5 • low\n") || a.ready("Working...") {
 		t.Fatal("pi footer not recognised")
 	}
-	if !containsAll(" Trust project folder?\n → Trust\n   Trust (this session only)\n", piAgent{}.dialogs()[0].match) {
+	if !(piAgent{}).dialogs()[0].shows(piTrustScreen) {
 		t.Fatal("trust dialog not recognised")
 	}
 }

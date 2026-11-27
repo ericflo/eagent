@@ -43,12 +43,12 @@ func (codexAgent) busy(screen string) bool { return codexSpinner.MatchString(scr
 func (codexAgent) dialogs() []dialog {
 	return []dialog{
 		// Codex: the default choice is "Trust and continue".
-		{name: "codex-trust", match: []string{"Trust this folder?", "Trust and continue"}, keys: []string{"Enter"}, what: "accepted Codex's folder-trust prompt"},
+		{name: "codex-trust", match: []string{"Trust this folder?", "Trust and continue"}, end: "enter continue", keys: []string{"Enter"}, what: "accepted Codex's folder-trust prompt"},
 		// Codex's update prompt: choose "2. Skip" explicitly (never Escape,
 		// which quits on the trust prompt). Upgrading is the user's call; the
 		// notice says one is available. Without the menu, the "Update
 		// available" box is only a notice above a working prompt.
-		{name: "codex-update", match: []string{"Update now", "Skip until next version"}, keys: []string{"Down", "Enter"}, what: "skipped Codex's update prompt for now (a newer Codex is available; upgrade with `codex update` and a restart)"},
+		{name: "codex-update", match: []string{"Update now", "Skip until next version"}, end: "enter continue", keys: []string{"Down", "Enter"}, what: "skipped Codex's update prompt for now (a newer Codex is available; upgrade with `codex update` and a restart)"},
 	}
 }
 

@@ -413,7 +413,7 @@ func (piAgent) reportedReady(s *Seat) (ready, known bool) {
 func (piAgent) dialogs() []dialog {
 	return []dialog{
 		// Only shown without --approve: trust the folder for this run only.
-		{name: "pi-trust", match: []string{"Trust project folder?", "→ Trust", "Trust (this session only)"}, keys: []string{"Down", "Down", "Enter"}, what: "trusted the folder for this pi session"},
+		{name: "pi-trust", match: []string{"Trust project folder?", "→ Trust", "Trust (this session only)"}, end: "enter select", under: 1, keys: []string{"Down", "Down", "Enter"}, what: "trusted the folder for this pi session"},
 	}
 }
 

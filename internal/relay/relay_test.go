@@ -210,7 +210,7 @@ func TestSeatSkipsHistoryOnAttach(t *testing.T) {
 }
 
 func TestSeatAnswersStartupDialogs(t *testing.T) {
-	h := &fakeHost{alive: true, screen: " Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n"}
+	h := &fakeHost{alive: true, screen: claudeTrustScreen}
 	s := newSeat(Spec{}, claudeAgent{}, h, "x", "")
 	s.checkScreen(time.Now())
 	if strings.Join(h.keys, " ") != "Down Enter" {

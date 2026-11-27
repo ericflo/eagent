@@ -136,7 +136,7 @@ func TestASeatAnswersOnlyItsOwnAgentsDialogs(t *testing.T) {
 	}
 	// Its own trust prompt is still answered.
 	h.mu.Lock()
-	h.screen = "Trust this folder?\n› 1. Trust and continue"
+	h.screen = codexTrustScreen
 	h.mu.Unlock()
 	s.checkScreen(start.Add(5 * time.Second))
 	if strings.Join(h.keys, " ") != "Enter" {

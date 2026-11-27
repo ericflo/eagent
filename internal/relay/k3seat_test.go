@@ -149,7 +149,7 @@ func (h *sr2DialogOnce) Capture(string, int) (string, error) {
 	defer h.mu.Unlock()
 	h.looks++
 	if h.looks == 1 {
-		return "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No, exit", nil
+		return claudeTrustScreen, nil
 	}
 	return "> \n  ? for shortcuts", nil
 }

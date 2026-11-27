@@ -35,7 +35,7 @@ func TestSR11SeatStartReadyAt25sIsCalledStuck(t *testing.T) {
 	// bypass-permissions warning on a slow start): the answered check clears
 	// what the seat saw, so the first check after it, at the prompt, has no
 	// verdict, and the start is called stuck.
-	h2 := &fakeHost{alive: true, screen: "Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n"}
+	h2 := &fakeHost{alive: true, screen: claudeBypassScreen}
 	s2 := newSeat(Spec{}, claudeAgent{}, h2, "sr11-slow2", "")
 	s2.state, s2.stateAt = "starting", now.Add(-26*time.Second)
 	s2.checkScreen(now) // the warning: answered

@@ -57,7 +57,7 @@ func (antigravityAgent) busy(screen string) bool {
 
 func (antigravityAgent) dialogs() []dialog {
 	return []dialog{
-		{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
+		{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, end: "enter Confirm", under: 1, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
 	}
 }
 

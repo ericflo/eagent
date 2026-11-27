@@ -2214,10 +2214,55 @@ func (s *Seat) wantsDialogCheck(now time.Time) bool {
 // dialog is a screen the agent shows before (or instead of) working, and the
 // keys that answer it the way the relay's user always wants.
 type dialog struct {
-	name  string
-	match []string // all must appear
+	name string
+	// match: all must appear; the last is on a line of the dialog's
+	// choices.
+	match []string
+	// end is on the dialog's closing line (its hint of the keys), and
+	// under is how many lines the agent draws below that line while the
+	// dialog shows: Antigravity its status line, pi the rule that closes
+	// the dialog's box.
+	end   string
+	under int
 	keys  []string
 	what  string
+}
+
+// dialogReach is how many lines above its closing line a dialog's choices
+// begin, at most.
+const dialogReach = 5
+
+// shows reports whether the screen ends with the dialog, as the agent draws
+// it: its words are on the screen, its closing line is where the screen
+// ends (under lines from the last), and a line of its choices stands just
+// above that. The dialog's words alone do not say so: an agent at work on
+// eagent's own source, or shown a capture of the dialog, has them in its
+// output, and its keys must not be pressed at that. Output is never where
+// the screen ends: each agent draws its prompt and its footer below it
+// (Antigravity a rule and its status line, so the line above its status
+// line is a rule there). Each dialog's lines are as the real program drew
+// them (dialog_test.go).
+func (d dialog) shows(screen string) bool {
+	if !containsAll(screen, d.match) {
+		return false
+	}
+	var lines []string
+	for _, line := range strings.Split(screen, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	last := len(lines) - 1 - d.under
+	if last < 0 || !strings.Contains(lines[last], d.end) {
+		return false
+	}
+	choice := d.match[len(d.match)-1]
+	for _, line := range lines[max(0, last-dialogReach):last] {
+		if strings.Contains(line, choice) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Seat) checkScreen(now time.Time) {
@@ -2418,10 +2463,11 @@ func (s *Seat) reportDialog(title string) {
 // answerDialog presses the answer to one of the agent's own dialogs on
 // screen, at most once per dialog every few seconds, and reports whether
 // one was showing. Another agent's dialog text on this screen is output
-// (a file, a log), never a dialog this agent shows.
+// (a file, a log), never a dialog this agent shows, and so is this
+// agent's own dialog text anywhere but where the screen ends (shows).
 func (s *Seat) answerDialog(screen string, now time.Time) bool {
 	for _, d := range s.agent.dialogs() {
-		if !containsAll(screen, d.match) {
+		if !d.shows(screen) {
 			continue
 		}
 		s.mu.Lock()
