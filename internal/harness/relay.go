@@ -946,7 +946,16 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 			r.post(func() {
 				// News from a seat that is no longer the relay's (stopped
 				// for a restart, a switch or a stop) is not the new one's.
-				if r.relays.get(name) == seat {
+				ours := r.relays.get(name) == seat
+				if !ours && ev.Kind == relay.KindDelivered && ev.OK {
+					// Except an arrival read from an agent a restart is
+					// replacing, before the new one is up (finishLaunch):
+					// it is this relay's, and the restart then finds the
+					// send settled instead of calling it unconfirmed.
+					job := r.relays.launch(name)
+					ours = job != nil && job.name == name && job.old == seat
+				}
+				if ours {
 					r.onRelayEvent(name, ev)
 				}
 			})
@@ -2389,8 +2398,12 @@ func userSends(st *state.State, name string, n int) []string {
 }
 
 // sendOutcomeFor is a send's outcome as the relay it is listed under sees
-// it: a send a switch passed on went to the agent that took over (to).
+// it: a send a switch passed on went to the agent that took over (to),
+// unless it certainly did not go there, when it went nowhere.
 func sendOutcomeFor(st *state.State, id string, movedOn map[string]string) (o state.SendOutcome, to string) {
+	if o := st.SendOutcome(id); o == state.SendNotSent {
+		return o, ""
+	}
 	if to, ok := movedOn[id]; ok {
 		if t := st.Relays[to]; t != nil {
 			to = t.Who()
