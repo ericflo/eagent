@@ -1439,8 +1439,9 @@ drain:
 			break drain
 		}
 	}
-	// What the loop was handed before it stopped (a seat's news among it)
-	// runs, once; nothing handed to it after the close does.
+	// What the loop has been handed so far (a seat's news among it) runs
+	// now. The queue stays open: what is handed to it later runs in the
+	// reads below, up to its end (endQueue).
 queued:
 	for {
 		select {
