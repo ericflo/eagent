@@ -187,12 +187,21 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	cmd, cancel := bounded(time.Minute, argv[0], argv[1:]...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
-	// (ErrWaitDelay: the command exited with success, and something it
-	// started still holds its output. The message is queued.)
-	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+	if err != nil && !exitedWithSuccess(cmd) {
 		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// exitedWithSuccess says whether a command that was waited for exited on
+// its own with status 0. That is the judge of whether it did its work,
+// whatever error the wait gave beside it: something the command started
+// still holds its output (exec.ErrWaitDelay), or its time bound passed in
+// the instant it exited (the kill finds a process that has ended and not
+// yet been collected, and the wait reports the bound). A command the kill
+// ended has no exit status of its own.
+func exitedWithSuccess(cmd *exec.Cmd) bool {
+	return cmd.ProcessState != nil && cmd.ProcessState.Success()
 }
 
 // poll notes a message handed to Codex's queue that a turn's end left
