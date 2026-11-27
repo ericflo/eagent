@@ -342,20 +342,24 @@ func routeText(m config.ModelRoute) string {
 // routeParts names the parts in which two routes differ, "" for one route.
 func routeParts(a, b config.ModelRoute) string {
 	var parts []string
-	for _, p := range []struct {
-		name  string
-		other bool
-	}{
-		{"model", a.Model != b.Model},
-		{"address", strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/")},
-		{"protocol", a.Protocol != b.Protocol},
-		{"key variable", a.APIKeyEnv != b.APIKeyEnv},
-	} {
-		if p.other {
-			parts = append(parts, p.name)
+	for _, f := range routeFields {
+		if f.get(a) != f.get(b) {
+			parts = append(parts, f.name)
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// routeFields are the parts of a route two routes are compared by: key is
+// the part's name in the configuration, name what the commands call it.
+var routeFields = []struct {
+	key, name string
+	get       func(config.ModelRoute) string
+}{
+	{"model", "model", func(m config.ModelRoute) string { return m.Model }},
+	{"base_url", "address", func(m config.ModelRoute) string { return strings.TrimRight(m.BaseURL, "/") }},
+	{"protocol", "protocol", func(m config.ModelRoute) string { return m.Protocol }},
+	{"api_key_env", "key variable", func(m config.ModelRoute) string { return m.APIKeyEnv }},
 }
 
 func printProbeResult(res config.ProbeResult, asJSON, saved bool) {

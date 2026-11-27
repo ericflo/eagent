@@ -1323,14 +1323,9 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 							// over the file, and another preset that a
 							// variable names.
 							var why []string
-							for field, d := range map[string]bool{
-								"model":       now.Model.Model != want.Model.Model,
-								"base_url":    strings.TrimRight(now.Model.BaseURL, "/") != strings.TrimRight(want.Model.BaseURL, "/"),
-								"protocol":    now.Model.Protocol != want.Model.Protocol,
-								"api_key_env": now.Model.APIKeyEnv != want.Model.APIKeyEnv,
-							} {
-								if name, ok := config.EnvOverrides()["/model/"+field]; ok && d {
-									why = append(why, fmt.Sprintf("%s sets eagent's %s here", name, field))
+							for _, f := range routeFields {
+								if name, ok := config.EnvOverrides()["/model/"+f.key]; ok && f.get(now.Model) != f.get(want.Model) {
+									why = append(why, fmt.Sprintf("%s sets eagent's %s here", name, f.key))
 								}
 							}
 							slices.Sort(why)
@@ -1344,7 +1339,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 							if len(why) == 0 {
 								why = []string{"something outside the project file sets eagent's route here"}
 							}
-							return fail(fmt.Errorf("%s, so %s would not run as the preset has it (%s at %s with $%s would); nothing was changed. Unset that first", strings.Join(why, ", and "), target, now.Model.Model, now.Model.BaseURL, now.Model.APIKeyEnv))
+							return fail(fmt.Errorf("%s, so %s would not run as the preset has it: %s would, which differs from the preset's (%s) in its %s; nothing was changed. Unset that first", strings.Join(why, ", and "), target, routeText(now.Model), routeText(want.Model), routeParts(now.Model, want.Model)))
 						}
 					}
 					// An effort the preset's model does not offer moves
