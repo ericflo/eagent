@@ -153,6 +153,12 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 			p.receipts = p.receipts[len(p.receipts)-maxReceipts:]
 		}
 	}
+	p.publishReceipts(r)
+}
+
+// publishReceipts sends the receipts to the thread, as they stand. Called
+// with p.mu held; it lets go of it.
+func (p *phone) publishReceipts(r *Runtime) {
 	// Of the "sent" ones, those typed and never confirmed, none still on
 	// its way: they may not have arrived. Their receipt stays "sent" (the
 	// app's Retry would type them again); relay_unconfirmed says which.

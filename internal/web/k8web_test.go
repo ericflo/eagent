@@ -75,7 +75,7 @@ func TestK8AStopWaitingOnASlowRunMarksTheStopFirst(t *testing.T) {
 	if code := <-stopped; code != http.StatusOK {
 		t.Fatalf("stop: %d", code)
 	}
-	if slices.Contains(during.Sessions, info.ID) && !slices.Contains(during.Stop, info.ID) {
+	if _, marked := during.mark(info.ID); slices.Contains(during.Sessions, info.ID) && !marked {
 		t.Fatalf("while the Stop waited for the run, the next server would have brought the session back: %+v", during)
 	}
 	if got := k3Listed(t, project); len(got) != 0 {

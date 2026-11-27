@@ -839,6 +839,7 @@ func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
+	tellPhoneStopped(s.Project, info.Path)
 	s.mu.Lock()
 	s.forgetHosted(info.ID)
 	s.mu.Unlock()

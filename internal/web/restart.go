@@ -13,6 +13,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
@@ -27,11 +28,14 @@ import (
 // the user's next message, as before.
 //
 // The list is serve-hosted.json: {"sessions": [...], "at": ..., "stop":
-// [...]}. "stop" names the listed sessions the user stopped while the
-// server was stopping, whose stop had not been finished (its agents
-// stopped and recorded) when the list was last written: the next server
-// finishes it (finishStop) and does not bring the session back. A list
-// written before "stop" existed has none.
+// [{"session": ..., "at": ...}]}. "stop" marks the listed sessions the
+// user stopped while a server was stopping, whose stop had not been
+// finished (its agents stopped and recorded) when the list was last
+// written, each with when the mark was made: the next server finishes it
+// and does not bring the session back, unless the session's record shows
+// a run begun after the mark. A mark stays on the list, through the next
+// servers' starts and shutdowns, until its stop is finished or no longer
+// holds. A list written before "stop" existed has none.
 
 // hostedFile is where a stopping server lists the sessions it was hosting.
 func hostedFile(project string) string {
@@ -39,12 +43,29 @@ func hostedFile(project string) string {
 }
 
 type hostedList struct {
-	Sessions []string  `json:"sessions"`
-	At       time.Time `json:"at"`
-	Stop     []string  `json:"stop,omitempty"`
+	Sessions []string   `json:"sessions"`
+	At       time.Time  `json:"at"`
+	Stop     []stopMark `json:"stop,omitempty"`
 }
 
-// rememberHosted lists the sessions this server hosts, before they stop.
+// stopMark is a stop the user asked for a listed session (hostedList).
+type stopMark struct {
+	Session string    `json:"session"`
+	At      time.Time `json:"at"`
+}
+
+// mark is the list's mark for the session, if it has one.
+func (l hostedList) mark(id string) (stopMark, bool) {
+	for _, m := range l.Stop {
+		if m.Session == id {
+			return m, true
+		}
+	}
+	return stopMark{}, false
+}
+
+// rememberHosted lists the sessions this server hosts, before they stop,
+// beside the marks already on the list (a stop a start could not finish).
 // It sets the shutdown mark first, under the lock every start holds, so no
 // run starts after the list is taken (host, hostNewCfg). One the user
 // stops after that is taken off again (forgetHosted): the list is written
@@ -55,12 +76,18 @@ func (s *Server) rememberHosted() {
 	s.stopping = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := make([]string, 0, len(s.running))
+	prev, _ := s.readHosted()
+	ids := make([]string, 0, len(s.running)+len(prev.Stop))
 	for id := range s.running {
 		ids = append(ids, id)
 	}
+	for _, m := range prev.Stop {
+		if !slices.Contains(ids, m.Session) {
+			ids = append(ids, m.Session)
+		}
+	}
 	sort.Strings(ids)
-	s.writeHosted(ids, time.Now().UTC())
+	s.writeHostedList(ids, time.Now().UTC(), prev.Stop)
 }
 
 // forgetHosted takes a session the user stopped off the list, so the next
@@ -70,7 +97,7 @@ func (s *Server) forgetHosted(id string) {
 	if !ok || !slices.Contains(list.Sessions, id) {
 		return
 	}
-	list.Stop = slices.DeleteFunc(list.Stop, func(x string) bool { return x == id })
+	list.Stop = slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id })
 	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, list.Stop)
 }
 
@@ -79,10 +106,10 @@ func (s *Server) forgetHosted(id string) {
 // this one exit before it has. Under mu.
 func (s *Server) markStop(id string) {
 	list, ok := s.readHosted()
-	if !ok || !slices.Contains(list.Sessions, id) || slices.Contains(list.Stop, id) {
+	if _, marked := list.mark(id); !ok || !slices.Contains(list.Sessions, id) || marked {
 		return
 	}
-	s.writeHostedList(list.Sessions, list.At, append(list.Stop, id))
+	s.writeHostedList(list.Sessions, list.At, append(list.Stop, stopMark{Session: id, At: time.Now().UTC()}))
 }
 
 // readHosted reads the list. Under mu.
@@ -97,6 +124,10 @@ func (s *Server) listed(id string) bool {
 	list, ok := s.readHosted()
 	return ok && slices.Contains(list.Sessions, id)
 }
+
+// tellPhoneStopped tells the session's phone thread of a stop stopAgents
+// recorded: its receipts, and the closing note (harness.TellPhoneStopped).
+var tellPhoneStopped = harness.TellPhoneStopped
 
 // killAgent stops an agent's terminal; tests replace it.
 var killAgent = func(host, target string) error { return relay.HostByName(host).Kill(target) }
@@ -192,7 +223,7 @@ func relaySpool(path string, rel *state.Relay) string {
 func (s *Server) writeHosted(ids []string, at time.Time) { s.writeHostedList(ids, at, nil) }
 
 // writeHostedList writes the list with the sessions whose stop is asked.
-func (s *Server) writeHostedList(ids []string, at time.Time, stop []string) {
+func (s *Server) writeHostedList(ids []string, at time.Time, stop []stopMark) {
 	path := hostedFile(s.Project)
 	if len(ids) == 0 {
 		_ = os.Remove(path)
@@ -253,8 +284,12 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	// The list is used once, but a marked stop stays on it until it is
 	// finished or no longer holds (forgetHosted below): one that fails, or
 	// a cut partway, leaves it for the next start.
+	keep := make([]string, 0, len(list.Stop))
+	for _, m := range list.Stop {
+		keep = append(keep, m.Session)
+	}
 	s.mu.Lock()
-	s.writeHostedList(list.Stop, list.At, list.Stop)
+	s.writeHostedList(keep, list.At, list.Stop)
 	s.mu.Unlock()
 	forget := func(id string) {
 		s.mu.Lock()
@@ -274,10 +309,10 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			forget(id)
 			continue
 		}
-		marked := slices.Contains(list.Stop, id)
-		if marked && ranSince(info.Path, list.At) {
+		mark, marked := list.mark(id)
+		if marked && ranSince(info.Path, mark.At) {
 			// The mark was for a run before one since (the session was
-			// resumed elsewhere after the list was written): it no longer
+			// resumed elsewhere after the mark was made): it no longer
 			// says what the user wants of the session as it is now.
 			s.logf("session %s: the stop asked before the restart no longer holds: the session has run since", id)
 			forget(id)
@@ -294,6 +329,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 				s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 			} else {
 				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
+				tellPhoneStopped(s.Project, info.Path)
 				forget(id)
 			}
 			continue

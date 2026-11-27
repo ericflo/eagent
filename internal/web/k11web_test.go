@@ -41,7 +41,7 @@ func TestSR5WebAStaleStopMarkKillsTheAgentOfALaterRun(t *testing.T) {
 	info := srAgentSession(t, project)
 	// The list the exiting server left, the stop marked.
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now().Add(-time.Hour).UTC(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now().Add(-time.Hour).UTC(), k12Marks(time.Now().Add(-time.Hour).UTC(), info.ID))
 	s.mu.Unlock()
 	// The later run, at the terminal: resumed, the agent picked up, a
 	// message typed to it, and Ctrl+C (the agent keeps working).
@@ -99,7 +99,7 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	k5Kills(t)
 	info := srAgentSession(t, project)
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now().UTC(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now().UTC(), k12Marks(time.Now().UTC(), info.ID))
 	s.mu.Unlock()
 	files, _ := filepath.Glob(filepath.Join(info.Path, "*.jsonl"))
 	for _, f := range files {
@@ -113,7 +113,7 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	next.mu.Lock()
 	list, ok := next.readHosted()
 	next.mu.Unlock()
-	if !ok || !slices.Contains(list.Stop, info.ID) {
+	if _, marked := list.mark(info.ID); !ok || !marked {
 		t.Fatalf("the stop could not be finished and its mark is gone: %+v (%v)", list, ok)
 	}
 	for _, f := range files {
@@ -126,6 +126,25 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	}
 	if got := k3Listed(t, project); len(got) != 0 {
 		t.Fatalf("the finished stop is still listed: %q", got)
+	}
+}
+
+// The next server finishing a marked stop tells the session's phone, as
+// the Stop itself does.
+func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
+	s, project := newTestServer(t)
+	k5Kills(t)
+	var told []string
+	old := tellPhoneStopped
+	tellPhoneStopped = func(_, path string) { told = append(told, filepath.Base(path)) }
+	t.Cleanup(func() { tellPhoneStopped = old })
+	info := srAgentSession(t, project)
+	s.mu.Lock()
+	s.writeHostedList([]string{info.ID}, time.Now().UTC(), k12Marks(time.Now().UTC(), info.ID))
+	s.mu.Unlock()
+	New(project, nil).restoreHosted(context.Background())
+	if !slices.Equal(told, []string{info.ID}) {
+		t.Fatalf("the phone was told of %q, want the session once", told)
 	}
 }
 
@@ -176,7 +195,6 @@ func TestK11ASendOfAnExitedAgentIsSettledAsExited(t *testing.T) {
 // tell the phone for each send it records not sent ("its receipt turns to
 // failed, before the closing note", harness runtime.go finish).
 func TestSR5WebAPhoneMessageTheShutdownStopTakesBackStaysHeldOnThePhone(t *testing.T) {
-	t.Skip("known, not fixed: the phone's receipts and closing note are written only by a run's phone mirror (harness phone.go, relay_phone.go); see the k-inbox report")
 	s, project := newTestServer(t)
 	var mu sync.Mutex
 	var bodies []string
@@ -249,5 +267,15 @@ func TestSR5WebAPhoneMessageTheShutdownStopTakesBackStaysHeldOnThePhone(t *testi
 	}
 	if !told {
 		t.Fatalf("the record says the phone message did not go (taken back unread from the spool), but the phone was never told: its receipt still says it is held for the agent (requests to FinaleChat: %q)", bodies)
+	}
+	// And the closing note of a stop, after the receipts.
+	note := -1
+	for i, b := range bodies {
+		if strings.Contains(b, "eagent stopped this session") {
+			note = i
+		}
+	}
+	if note < 0 || !strings.Contains(strings.Join(bodies[:note], "\n"), "pm1") {
+		t.Fatalf("no stop's closing note after the receipts: %q", bodies)
 	}
 }
