@@ -94,7 +94,7 @@ func TestK2AnEndingBatchSessionPaysForNoDossier(t *testing.T) {
 // user messages in a row of its own.)
 func TestK2ADossierPassThatDropsItsLookupsSendsNoTwoUserMessagesInARow(t *testing.T) {
 	var ready, written atomic.Bool
-	var roles atomic.Value // the roles of the request after the drop
+	var after atomic.Value // the last message of the request after the drop
 	brain := func(_ string, m []map[string]any) reply {
 		if dossierRequest(m) != "" {
 			last := m[len(m)-1]
@@ -102,13 +102,10 @@ func TestK2ADossierPassThatDropsItsLookupsSendsNoTwoUserMessagesInARow(t *testin
 			switch {
 			case last["role"] == "tool":
 				return r7TooLong
-			case strings.Contains(text, "did not fit in the model's context window") || written.Load():
-				var rs []string
-				for _, msg := range m {
-					r, _ := msg["role"].(string)
-					rs = append(rs, r)
+			case strings.Contains(allText(m), "did not fit in the model's context window") || written.Load():
+				if !written.Load() {
+					after.Store(text)
 				}
-				roles.Store(rs)
 				written.Store(true)
 				p := places(dossierRequest(m))
 				return reply{text: briefing(p[max(0, len(p)-3):])}
@@ -127,9 +124,9 @@ func TestK2ADossierPassThatDropsItsLookupsSendsNoTwoUserMessagesInARow(t *testin
 	ready.Store(true)
 	r14AgentTurn(s, "The build is green.")
 	r6Until(t, "the briefing written after the drop", written.Load)
-	rs, _ := roles.Load().([]string)
-	if n := len(rs); n < 2 || rs[n-1] == "user" && rs[n-2] == "user" {
-		t.Fatalf("the note after the drop is a user message of its own after the request: %v", rs)
+	last, _ := after.Load().(string)
+	if !strings.Contains(last, dossierAsk) || !strings.Contains(last, "did not fit in the model's context window") {
+		t.Fatalf("the note after the drop is not in the request for the briefing; the request's last message is %.300q", last)
 	}
 }
 
