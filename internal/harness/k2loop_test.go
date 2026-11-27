@@ -3,6 +3,7 @@ package harness
 import (
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -302,5 +303,62 @@ func TestK2EachOutcomeSaysWhichMessageItMeans(t *testing.T) {
 	}
 	if !strings.Contains(both, "typed into") || !strings.Contains(both, "did not go") {
 		t.Fatalf("setup: %q", both)
+	}
+}
+
+// A call is out on the model eagent is on when the person picks another;
+// the old one then refuses it, as too long or with a failure of its own.
+// That is the old model's answer: it counts no failure against the new
+// one and decides nothing about restarting the conversation on it. (The
+// call is made again on the new model, complete's own rule for a route
+// that moved while a call was out; its answer is what counts.)
+func TestK2AFailureFromTheModelMovedOffCountsNothingOnTheNewOne(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rep  reply
+	}{{"too long", r7TooLong}, {"a failure", k1BadRequest}} {
+		t.Run(c.name, func(t *testing.T) {
+			gate := make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(gate) }) }
+			t.Cleanup(release)
+			var ready atomic.Bool
+			out := make(chan struct{}, 1)
+			s := startSession(t, "", func(_ string, m []map[string]any) reply {
+				if ready.Load() && m[len(m)-1]["role"] != "tool" {
+					select {
+					case out <- struct{}{}:
+					default:
+					}
+					r := c.rep
+					r.block = gate
+					return r
+				}
+				return hold()
+			}, nil)
+			r5LogOnFailure(s)
+			s.settled()
+			ready.Store(true)
+			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e status?", Route: "eagent"}) })
+			<-out
+			var newCalls atomic.Int32
+			k1Swap(t, s, 200_000, 2048, func(string, []map[string]any) reply { newCalls.Add(1); return hold() })
+			release()
+			r6Until(t, "the turn to end", func() bool {
+				busy := true
+				s.rt.sync(func() { busy = s.rt.turns.busy })
+				return !busy && newCalls.Load() > 0 || r4Logged(s, "model call failed") > 0 || r4Logged(s, "refused the prompt") > 0
+			})
+			s.settled()
+			var failures int
+			var overflowed bool
+			s.rt.sync(func() { failures, overflowed = s.rt.turns.failures, s.rt.turns.overflowed })
+			if failures != 0 || overflowed || r6Dossiers(s) != 0 {
+				t.Fatalf("the old model's answer counted on the new one: %d failures, refused %v, %d restarts; logs %q", failures, overflowed, r6Dossiers(s), s.ui.logged())
+			}
+			if newCalls.Load() == 0 {
+				t.Fatal("the call was not made again on the new model")
+			}
+		})
 	}
 }
