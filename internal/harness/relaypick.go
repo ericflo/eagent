@@ -243,7 +243,13 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		return
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
-		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
-		r.ui.Log("relay %s: %v", name, err)
+		r.repickFailed(rel, pick, err)
 	}
+}
+
+// repickFailed says that a change that waited could not start the agent
+// again: the change is dropped. Loop goroutine.
+func (r *Runtime) repickFailed(rel *state.Relay, pick relayPick, err error) {
+	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))
+	r.ui.Log("relay %s: %v", rel.Name, err)
 }
