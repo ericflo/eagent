@@ -681,6 +681,13 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// Stopped during the last look: nothing held or typed.
 				return "", ErrClosed
 			}
+			if s.spec.Spool != "" && isAgentCommand(text) {
+				// A spool's hand-over gives its text to the agent's model
+				// (Claude's Stop hook as feedback, pi's extension as a
+				// user message): the command would not run, and the model
+				// would read its name as a message.
+				return "", fmt.Errorf("%s was not sent: held for the end of %s's turn, it would reach %s as plain text and not run as its command. Send it once the turn has ended", strings.Fields(text)[0], label, label)
+			}
 			// An agent with a spool holds it there; one without hands it to
 			// its own queue. Either way it is tracked for its arrival before
 			// it is handed over (so an arrival or a sweep of the spool right
@@ -702,10 +709,9 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
 				// The agent's own command in its own queue: it runs it
 				// rather than recording a message, so handed over is
-				// delivered, as typed is below. (A spool hands one over
-				// as text, which arrives as a held message does.) It holds
-				// quiet as a typed command does, from the idle after the
-				// turn, when the agent takes it.
+				// delivered, as typed is below. (With a spool it was
+				// refused above.) It holds quiet as a typed command does,
+				// from the idle after the turn, when the agent takes it.
 				s.mu.Lock()
 				s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
 				s.mu.Unlock()

@@ -98,8 +98,8 @@ func TestTheHookAndTheSeatNeverBothTakeOneMessage(t *testing.T) {
 	}
 }
 
-// Nothing after-turn is pressed on a timer: a held message and a held
-// command in Claude's spool, and one typed into an idle Codex, all old,
+// Nothing after-turn is pressed on a timer: a held message in Claude's
+// spool, and one typed into an idle Codex, all old,
 // their text on screen, the agent idle. The held ones are not reported
 // either; the one typed into the idle Codex, which nothing holds, is
 // reported unconfirmed when it never arrives (finding 6 of round 7).
@@ -108,13 +108,11 @@ func TestAfterTurnSendsAreNeverNudgedOrReported(t *testing.T) {
 	heldGrace, typeSettle = time.Hour, time.Millisecond
 	t.Cleanup(func() { heldGrace, typeSettle = saved, savedSettle })
 	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true, screen: claudeIdleAfter("> then commit\n> /compact")}
+	h := &fakeHost{alive: true, screen: claudeIdleAfter("> then commit")}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
 	s.state = "working"
-	for id, text := range map[string]string{"m1": "then commit", "c1": "/compact"} {
-		if _, err := s.Send(id, text, "after_turn"); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := s.Send("m1", "then commit", "after_turn"); err != nil {
+		t.Fatal(err)
 	}
 	hc := &fakeHost{alive: true, screen: "› then push\n\n› Ask Codex to do anything"}
 	c := newSeat(Spec{Name: "codex"}, codexAgent{}, hc, "y", "")

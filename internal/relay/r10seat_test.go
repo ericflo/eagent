@@ -62,59 +62,6 @@ func TestR10AnAfterTurnCommandHandedToAnAgentsQueueIsDelivered(t *testing.T) {
 	}
 }
 
-// Finding 10, agents with a spool: Claude's Stop hook hands a held
-// "/compact" over as text, so its arrival shows as a held message's does.
-// One the hook took and never handed over is reported unconfirmed after
-// the usual wait, as such a message is, once; never typed or pressed.
-func TestR10AHeldCommandTheHookLostIsReportedUnconfirmed(t *testing.T) {
-	saved := heldGrace
-	heldGrace = 0
-	t.Cleanup(func() { heldGrace = saved })
-	s, h, spool := heldClaudeSeat(t, "/compact")
-	killedHook(spool)
-	s.fold(obs{kind: "turn", text: "Done."})
-	drain(s.events)
-	seen := time.Now().Add(20 * time.Second)
-	for _, after := range []time.Duration{0, 46, 120} {
-		s.reportLeftOvers(seen.Add(after * time.Second))
-		s.checkScreen(seen.Add(after * time.Second))
-	}
-	got := deliveries(drain(s.events))
-	if len(got) != 1 || got[0].SendID != "r1" || got[0].OK || got[0].Outcome != OutcomeUnconfirmed {
-		t.Fatalf("deliveries %+v, want r1 unconfirmed once", got)
-	}
-	if len(h.typed) != 0 || len(h.keys) != 0 || len(s.Snapshot().Pending) != 0 {
-		t.Fatalf("typed %q, pressed %q, pending %v", h.typed, h.keys, s.Snapshot().Pending)
-	}
-}
-
-// Finding 10, the hand-over that works: a held "/compact" the Stop hook
-// hands over is confirmed by its arrival, and nothing more is reported.
-func TestR10AHeldCommandTheHookHandsOverIsConfirmedByItsArrival(t *testing.T) {
-	saved := heldGrace
-	heldGrace = 0
-	t.Cleanup(func() { heldGrace = saved })
-	s, _, spool := heldClaudeSeat(t, "/compact")
-	var out strings.Builder
-	RunStopHook(spool, strings.NewReader("{}"), &out)
-	if !strings.Contains(out.String(), `"reason":"/compact"`) {
-		t.Fatalf("hook said %q", out.String())
-	}
-	at := time.Now()
-	feedback := fmt.Sprintf(`{"type":"user","isMeta":true,"timestamp":"%s","message":{"content":"Stop hook feedback:\n/compact"}}`, stamp(at))
-	if ok := claudeLines(s, feedback, fmt.Sprintf(`{"type":"system","subtype":"turn_duration","timestamp":"%s","durationMs":2}`, stamp(at.Add(time.Second)))); !slices.Equal(ok, []string{"r1"}) {
-		t.Fatalf("the hand-over confirmed %v, want r1", ok)
-	}
-	later := time.Now().Add(20 * time.Second)
-	for _, after := range []time.Duration{0, 46, 120} {
-		s.reportLeftOvers(later.Add(after * time.Second))
-		s.checkScreen(later.Add(after * time.Second))
-	}
-	if got := deliveries(drain(s.events)); len(got) != 0 {
-		t.Fatalf("reported again: %+v", got)
-	}
-}
-
 // Finding 8: eagent stopped while a message waited in Claude's spool. On
 // the reattach the history shows the turn it waited for over, and the Stop
 // hook has claimed the file (.taken) but not yet removed it, so the message

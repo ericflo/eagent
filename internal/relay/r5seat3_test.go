@@ -68,9 +68,10 @@ func TestAQuietPiInALongToolCallStillTakesMessages(t *testing.T) {
 	}
 }
 
-// A held "/compact" and a held message left over after an interrupt are
-// both reported undelivered; neither is typed, so the message is never
-// taken for the command's arguments.
+// A "/compact" for the end of the turn is refused (it would be handed over
+// as text), and a held message left over after an interrupt is reported
+// undelivered; neither is typed, so the message is never taken for the
+// command's arguments.
 func TestLeftOverHeldCommandAndMessageAreReportedNotTyped(t *testing.T) {
 	saved := heldGrace
 	heldGrace = 0
@@ -79,10 +80,9 @@ func TestLeftOverHeldCommandAndMessageAreReportedNotTyped(t *testing.T) {
 	h := &fakeHost{alive: true, screen: "> \n  ⏵⏵ bypass permissions on"}
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
 	s.state = "working"
-	if _, err := s.Send("c1", "/compact", "after_turn"); err != nil {
-		t.Fatal(err)
+	if _, err := s.Send("c1", "/compact", "after_turn"); err == nil {
+		t.Fatal("the command was held")
 	}
-	time.Sleep(time.Millisecond) // spool names are ordered by time
 	if _, err := s.Send("m1", "then run the tests", "after_turn"); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestLeftOverHeldCommandAndMessageAreReportedNotTyped(t *testing.T) {
 			lost = append(lost, ev.SendID)
 		}
 	}
-	if strings.Join(lost, ",") != "c1,m1" || len(h.typed) != 0 {
+	if strings.Join(lost, ",") != "m1" || len(h.typed) != 0 {
 		t.Fatalf("lost %v, typed %q", lost, h.typed)
 	}
 }

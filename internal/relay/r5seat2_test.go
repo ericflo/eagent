@@ -156,32 +156,6 @@ func (h *orderHost) Keys(target string, keys ...string) error {
 	return nil
 }
 
-// A held command left over is reported undelivered like any message: the
-// seat types nothing by itself.
-func TestALeftOverHeldCommandIsReportedNotTyped(t *testing.T) {
-	saved := heldGrace
-	heldGrace = 0
-	t.Cleanup(func() { heldGrace = saved })
-	spool := filepath.Join(t.TempDir(), "after_turn")
-	h := &fakeHost{alive: true, screen: "> /compact\n  ⏵⏵ bypass permissions on"}
-	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
-	s.state = "working"
-	if _, err := s.Send("c1", "/compact", "after_turn"); err != nil {
-		t.Fatal(err)
-	}
-	s.fold(obs{kind: "aborted"})
-	s.reportLeftOvers(time.Now().Add(time.Second))
-	var lost int
-	for _, ev := range drain(s.events) {
-		if ev.Kind == KindDelivered && !ev.OK && ev.SendID == "c1" {
-			lost++
-		}
-	}
-	if lost != 1 || len(h.typed) != 0 {
-		t.Fatalf("lost %d, typed %q", lost, h.typed)
-	}
-}
-
 // An after-turn message typed in because the agent has no hand-over of its
 // own, and left in the input box when the turn was interrupted, never gets
 // an Enter from the seat, as at 80f4746.
