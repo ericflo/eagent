@@ -287,3 +287,45 @@ func TestR12ClosingTurnTheUserWritesDuringIsNotRemindedOfTheEnd(t *testing.T) {
 		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
 	}
 }
+
+// ---- 4. a question on the phone -------------------------------------------
+
+// The closing turn of a session with a phone asks the user a question and
+// looks something up, and the call after the lookup fails. The session
+// waits for the answer, so it is not ending: the failed call is owed and
+// made again.
+func TestR12ClosingTurnThatAsksOnThePhoneIsTriedAgain(t *testing.T) {
+	var phase atomic.Int32
+	g := phoneStart(t, newPhoneFake(false), brief, false, func(_ string, msgs []map[string]any) reply {
+		tail, last := lastUserText(msgs), msgs[len(msgs)-1]["role"]
+		switch {
+		case phase.CompareAndSwap(2, 3):
+			return r10Bad // the call after the lookup
+		case phase.CompareAndSwap(3, 4):
+			return say("While you decide: #42 and #44 are merged.")
+		case phoneEnding(msgs) && last != "tool" && phase.CompareAndSwap(1, 2):
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Ship the release now?","options":["yes","no"]}`), tc("session_search", `{"query":"merged"}`)}}
+		case strings.Contains(tail, "finished a turn") && last != "tool" && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	}, nil)
+	closedOut := func() bool {
+		n := 0
+		g.rt.sync(func() {
+			for _, ev := range g.rt.st.Events {
+				var d event.TurnData
+				if ev.Type == event.TurnEnd && ev.Decode(&d) == nil && d.Reason == "error, closing" {
+					n++
+				}
+			}
+		})
+		return n > 0
+	}
+	waitFor(t, "the failed call made again, or the closing turn ended owing nothing", func() bool {
+		return phase.Load() >= 4 || closedOut()
+	})
+	if phase.Load() < 4 {
+		t.Fatalf("the closing turn ended %q with the question open, and the failed call is never made again", "error, closing")
+	}
+}

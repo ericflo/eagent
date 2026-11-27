@@ -1372,13 +1372,15 @@ func (r *Runtime) afterCallLimit(maxCalls int) {
 }
 
 // stillClosing reports whether the session a closing turn (the closing word,
-// or the last title and summary) was made for is still ending. Loop goroutine.
+// or the last title and summary) was made for is still ending: no agent, no
+// timer, no question on the phone, no word from the user keeps it going.
+// Loop goroutine.
 func (r *Runtime) stillClosing() bool {
 	r.relays.mu.Lock()
 	starting := len(r.relays.launching) > 0
 	r.relays.mu.Unlock()
 	return (r.turns.finalAsked || r.summary.final) && len(r.st.ActiveRelays()) == 0 && !starting &&
-		len(r.st.ActiveSchedules()) == 0 && r.turns.wakes[wakeUser] <= r.turns.seen
+		len(r.st.ActiveSchedules()) == 0 && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
 // fallbackFinal makes sure a session with no terminal does not end in
