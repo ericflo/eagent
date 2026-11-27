@@ -2389,8 +2389,12 @@ func userSends(st *state.State, name string, n int) []string {
 }
 
 // sendOutcomeFor is a send's outcome as the relay it is listed under sees
-// it: a send a switch passed on went to the agent that took over (to).
+// it: a send a switch passed on went to the agent that took over (to),
+// unless it certainly did not go there, when it went nowhere.
 func sendOutcomeFor(st *state.State, id string, movedOn map[string]string) (o state.SendOutcome, to string) {
+	if o := st.SendOutcome(id); o == state.SendNotSent {
+		return o, ""
+	}
 	if to, ok := movedOn[id]; ok {
 		if t := st.Relays[to]; t != nil {
 			to = t.Who()

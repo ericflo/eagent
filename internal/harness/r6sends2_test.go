@@ -146,9 +146,8 @@ func TestForwardingAgainIsDecidedPerAgentFromTheRecord(t *testing.T) {
 }
 
 // A send that waited for a switch and went to the agent that took over is
-// that agent's: the old agent's list says where it went and refuses it
-// there; the new agent's says how it ended there, and its outcome there
-// decides.
+// that agent's: its outcome there decides. One that certainly did not go
+// there went nowhere, and both lists say so (review 14, finding 10).
 func TestAMovedSendIsJudgedByWhereItWent(t *testing.T) {
 	rec := &relayRecord{t: time.Now()}
 	rec.start("codex", "codex")
@@ -159,14 +158,14 @@ func TestAMovedSendIsJudgedByWhereItWent(t *testing.T) {
 	rec.add(event.RelayMoved, event.RelayMovedData{RelaySendData: event.RelaySendData{Name: "claude", ID: "r1", From: "user", Seq: seq, Mode: "queue", Text: "check the version"}, Prev: "codex"})
 	rec.failed("claude", "r1", event.DeliveryNotSent)
 	st := state.Replay(rec.evs)
-	if s := strings.Join(userSends(st, "codex", 8), "\n"); !strings.Contains(s, "went to Claude") {
+	if s := strings.Join(userSends(st, "codex", 8), "\n"); !strings.Contains(s, "did not go") {
 		t.Errorf("codex's list: %q", s)
 	}
 	if s := strings.Join(userSends(st, "claude", 8), "\n"); !strings.Contains(s, "did not go") {
 		t.Errorf("claude's list: %q", s)
 	}
-	if id, why := forwardedAs(st, "codex", seq, ""); id != "r1" || !strings.Contains(why, "went to Claude instead") {
-		t.Errorf("codex: %s %q", id, why)
+	if id, why := forwardedAs(st, "codex", seq, ""); id != "" {
+		t.Errorf("codex, where it waited and did not go: %s %q", id, why)
 	}
 	if id, why := forwardedAs(st, "claude", seq, ""); id != "" {
 		t.Errorf("claude, where it did not go: %s %q", id, why)
