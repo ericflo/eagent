@@ -3,12 +3,15 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 )
 
 // r14AskedAsMessage reports whether the question went to the thread as a
@@ -142,4 +145,52 @@ func TestR14AnAnswerTypedInThePhoneThreadWithdrawsTheCard(t *testing.T) {
 	g.phoneWeighed(fp.lastMessageID())
 	waitFor(t, "the agent to be sent the tap", func() bool { return strings.Count(strings.Join(g.seat.sentTexts(), "\n"), "blue") > 0 })
 	t.Fatalf("the card stayed open after the typed answer; tapping it sent the agent %q", g.seat.sentTexts())
+}
+
+// Finding 15 of the fourteenth review: a phone message carries a file the
+// session cannot take, then one whose fetch is still running when the
+// session stops. The stop cuts that fetch off and the message is left for
+// the next run, so the ending session tells the sender nothing about the
+// first file: the next run may well take it.
+func TestR14NoFileIsRefusedBeforeEveryFetchHasFinished(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file map[string]any
+	}{
+		{"fetch fails", map[string]any{"id": "att-9", "kind": "image", "content_type": "image/png", "filename": "IMG_9.png", "size": 3, "url": "/api/v1/attachments/att-9"}},
+		{"too large", map[string]any{"id": "big-9", "kind": "file", "content_type": "video/quicktime", "filename": "clip.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/api/v1/attachments/big-9"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			held := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/attachments/slow-1" {
+					// A fetch still running when the session stops.
+					select {
+					case held <- struct{}{}:
+					default:
+					}
+					<-r.Context().Done()
+					return
+				}
+				fp.handle(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+			waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+			slow := map[string]any{"id": "slow-1", "kind": "image", "content_type": "image/png", "filename": "shot.png", "size": 3, "url": "/api/v1/attachments/slow-1"}
+			id := r10Says(fp, r10Msg("and these", tc.file, slow))[0]
+			select {
+			case <-held:
+			case <-time.After(15 * time.Second):
+				t.Fatal("the second file was never fetched")
+			}
+			g.interrupt()
+			if refused := r11Refusals(fp); len(refused) > 0 {
+				t.Fatalf("the ending session told the phone a file was refused: %v", refused)
+			}
+			r10Untaken(t, g, id, "and these")
+		})
+	}
 }

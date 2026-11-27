@@ -1110,29 +1110,26 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			}
 			body := strings.TrimSpace(m.Body)
 			var atts []event.Attachment
+			var notes []func(context.Context)
 			for _, a := range m.Attachments {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
 					if r.ctx.Err() != nil {
 						// The session is shutting down, which failed the
-						// fetch: the message is left for the next run.
-						return
-					}
-					// Nor is the sender told anything by a session that is
-					// ending (a /quit before it in the page, say): its step
-					// would not take the message, which is left for the
-					// next run.
-					ending := true
-					r.sync(func() { ending = r.ending })
-					if ending {
+						// fetch: the message is left for the next run, and
+						// nobody is told anything, about this file or one
+						// before it.
 						return
 					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
-					// without a word.
+					// without a word. Only once every fetch has finished,
+					// in the step that takes the message: a session that
+					// is ending (a /quit before it in the page, say) does
+					// not take it, and says nothing.
 					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
-					p.enqueue(func(ctx context.Context) {
+					notes = append(notes, func(ctx context.Context) {
 						act := p.attach()
 						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
@@ -1144,6 +1141,11 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				}
 				atts = append(atts, saved)
 			}
+			tell := func() {
+				for _, n := range notes {
+					p.enqueue(n)
+				}
+			}
 			// Every message the poll takes in is recorded in the loop step
 			// that takes it (tookPhoneMessage), so a resume after any stop
 			// goes on after the last one, neither taking one twice nor
@@ -1153,6 +1155,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			if body == "" && len(atts) == 0 {
 				r.post(func() {
 					if !r.ending {
+						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
 					}
 				})
@@ -1166,6 +1169,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// Its answer was taken already (handOver claims it).
 					r.post(func() {
 						if !r.ending {
+							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
 						}
 					})
@@ -1189,6 +1193,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					if r.ending {
 						return
 					}
+					tell()
 					from := len(r.st.Events)
 					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts, PhoneID: phoneID, CardID: fid})
 					r.tookPhoneMessage(phoneID, from)
@@ -1202,6 +1207,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				if r.ending {
 					return
 				}
+				tell()
 				from := len(r.st.Events)
 				if r.ownCommand(body, "finalechat") {
 					// A command is recorded as taken before it runs: lost
