@@ -219,6 +219,12 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				// The watcher is stopping (the serve is), which cut the
+				// fetch off: nobody is told anything and nothing is
+				// taken; the next sweep, or the next serve, reads it.
+				return
+			}
 			// As the running mirror does: the sender is told, and the
 			// session comes back with the rest of the message. The note
 			// gets its own time, as the fetch may have used up the
