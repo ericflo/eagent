@@ -124,6 +124,9 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) erro
 	}
 	r.mu.Lock()
 	for id, p := range r.replies {
+		if old, ok := kept[id]; ok && p.restored && !old.Restored && !old.Told {
+			continue // given back by its restore (ReleaseReply): the hold is over
+		}
 		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored}
 	}
 	r.mu.Unlock()
@@ -158,7 +161,7 @@ func (r *replyRetries) takeUp(project string) {
 	for id, k := range kept {
 		thread := finalechat.Thread{ExternalID: k.Thread}
 		if !k.Told {
-			if !k.Restored && r.held(k.Thread) {
+			if !k.Restored && r.held(k.Thread, id) {
 				continue // a restore's hold on the thread stays; its entry looks at the thread too
 			}
 			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored})
@@ -442,12 +445,14 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	w.retries.keepQuietly(pendingReply{thread: thread, msg: m, since: time.Now()})
 }
 
-// held reports whether the thread's quiet entry is a restore's (restored).
-func (r *replyRetries) held(ext string) bool {
+// held reports whether the thread's quiet entry is a restore's (restored)
+// for another message than id: for the same one, an entry not marked is
+// the restore giving it back (ReleaseReply), which ends the hold.
+func (r *replyRetries) held(ext, id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, p := range r.replies {
-		if p.restored && !p.told && p.thread.ExternalID == ext {
+	for pid, p := range r.replies {
+		if p.restored && !p.told && p.thread.ExternalID == ext && pid != id {
 			return true
 		}
 	}
@@ -494,7 +499,16 @@ func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread
 	if tell {
 		postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 		defer stop()
-		_, _, _ = w.client.Post(postCtx, finalechat.Ref(thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-failed-" + m.ID})
+		if _, _, err := w.client.Post(postCtx, finalechat.Ref(thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-failed-" + m.ID}); err != nil {
+			// Not told after all: the next try that fails tells (the key
+			// makes it once).
+			w.retries.mu.Lock()
+			if q, ok := w.retries.replies[m.ID]; ok {
+				q.told = false
+				w.retries.replies[m.ID] = q
+			}
+			w.retries.mu.Unlock()
+		}
 	}
 }
 
