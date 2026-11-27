@@ -1342,7 +1342,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 								why = append(why, named)
 							}
 							if len(why) == 0 {
-								why = []string{"another setting names eagent's model here"}
+								why = []string{"something outside the project file sets eagent's route here"}
 							}
 							return fail(fmt.Errorf("%s, so %s would not run as the preset has it (%s at %s with $%s would); nothing was changed. Unset that first", strings.Join(why, ", and "), target, now.Model.Model, now.Model.BaseURL, now.Model.APIKeyEnv))
 						}

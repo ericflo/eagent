@@ -315,17 +315,47 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 	case !otherRoute(now.Model, cfg.Model):
 		fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
 	case now.Name != "":
-		// A saved preset laid over the file names its own model: what
-		// was written runs where none is laid over it.
+		// A saved preset laid over the file sets part of the route: what
+		// was written runs where none is laid over it. Both routes in
+		// full, and the parts in which they differ.
 		how := now.NameFrom + " lays it here: unset it"
 		if now.NameFrom == "default_config" {
 			how = "the project's default_config lays it here: `eagent presets use default` clears that"
 		}
-		fmt.Printf("  the saved preset %q is laid over the project file here and names its own model, so eagent still runs %s @ %s. What was written (%s @ %s) runs where no saved preset is laid over the file; %s.\n", now.Name, now.Model.Model, now.Model.BaseURL, cfg.Model.Model, cfg.Model.BaseURL, how)
+		fmt.Printf("  the saved preset %q is laid over the project file here, so eagent runs %s. That differs from what was written (%s) in its %s. What was written runs where no saved preset is laid over the file; %s.\n", now.Name, routeText(now.Model), routeText(cfg.Model), routeParts(now.Model, cfg.Model), how)
 	default:
-		fmt.Printf("  eagent still runs %s @ %s here: a setting outside the project file names its model. What was written (%s @ %s) runs where none does.\n", now.Model.Model, now.Model.BaseURL, cfg.Model.Model, cfg.Model.BaseURL)
+		fmt.Printf("  eagent runs %s here. That differs from what was written (%s) in its %s: something outside the project file sets it here.\n", routeText(now.Model), routeText(cfg.Model), routeParts(now.Model, cfg.Model))
 	}
 	return 0
+}
+
+// routeText is a route in full: its model, address, protocol and the
+// variable its key is read from.
+func routeText(m config.ModelRoute) string {
+	key := "no key variable"
+	if m.APIKeyEnv != "" {
+		key = "key $" + m.APIKeyEnv
+	}
+	return fmt.Sprintf("%s @ %s (%s, %s)", m.Model, m.BaseURL, m.Protocol, key)
+}
+
+// routeParts names the parts in which two routes differ, "" for one route.
+func routeParts(a, b config.ModelRoute) string {
+	var parts []string
+	for _, p := range []struct {
+		name  string
+		other bool
+	}{
+		{"model", a.Model != b.Model},
+		{"address", strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/")},
+		{"protocol", a.Protocol != b.Protocol},
+		{"key variable", a.APIKeyEnv != b.APIKeyEnv},
+	} {
+		if p.other {
+			parts = append(parts, p.name)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func printProbeResult(res config.ProbeResult, asJSON, saved bool) {
@@ -406,9 +436,7 @@ func modelMetaLine(m config.Model) string {
 // otherRoute says whether b is another route than a: another model, or the
 // same one reached at another address, by another protocol or with another
 // key variable.
-func otherRoute(a, b config.ModelRoute) bool {
-	return a.Model != b.Model || strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/") || a.Protocol != b.Protocol || a.APIKeyEnv != b.APIKeyEnv
-}
+func otherRoute(a, b config.ModelRoute) bool { return routeParts(a, b) != "" }
 
 // presetsDiffer says whether two built-in presets give different settings.
 // The empty name is the defaults, which a preset can be too.
