@@ -354,13 +354,15 @@ func (r *Runtime) startPhone() {
 		// The cursor: the poll reads on after anchor, and everything it
 		// takes in is recorded. (That this run keeps the ledger was said in
 		// its first write, on session.start or session.resume.)
-		if !unread {
+		if !unread || ctx.Err() == nil {
 			r.post(func() {
 				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
 			})
-		} else if ctx.Err() == nil {
+		}
+		if unread && ctx.Err() == nil {
 			// Given up for good: the poll reads on from the session's own
-			// post, past anything sent while it was stopped. Said in the
+			// post, past anything sent while it was stopped, and the
+			// cursor above (that post) passes it for good. Said in the
 			// session's log and in the thread, so it is not passed silently.
 			r.ui.Log("finalechat: could not read what was sent to the thread while the session was stopped (%v); it is not taken", shortErr(unreadErr))
 			if m, th, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: "eagent could not read what was sent here while the session was stopped, and goes on from here without it. Send again anything it should still see.", Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "unread"}, ClientKey: p.key("unread", strconv.Itoa(p.resumes))}); err == nil {
@@ -1218,7 +1220,11 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	// left its message. So what may have waited is looked for by the reply
 	// watcher once the session has stopped; it takes only what the record
 	// shows untaken, so nothing is taken twice.
-	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, r.ui.Log)
+	// Nothing may have been left at all, so a note that cannot be written
+	// is said as what it may mean, not as a message left.
+	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, func(_ string, args ...any) {
+		r.ui.Log("finalechat: the thread could not be noted for the reply watcher (%s), so a message sent from the phone as the session stopped may wait unread until the next one", fmt.Sprint(args...))
+	})
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false

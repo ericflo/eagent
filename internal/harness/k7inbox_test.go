@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -65,4 +66,40 @@ func sr2Types(evs []event.Event) []string {
 		out = append(out, ev.Type)
 	}
 	return out
+}
+
+// The sibling in the loop's own looks: a stop and a /restart in the same
+// look. The /restart is not taken by the run the stop ends (its work would
+// fail on the ending session, or its reply be dropped once the loop has
+// closed): it is not recorded as taken, its file stays, and the next run
+// takes it.
+func TestK7ACommandAfterAStopInTheSameLookIsLeftForTheNextRun(t *testing.T) {
+	rt := r8cNew(t, &fakeUI{})
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "stop", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := PostInbox(rt.sess.Path, InboxMessage{Type: "message", Text: "/restart", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	rt.pollInbox()
+	takenBy := func(rt *Runtime) bool {
+		for _, ev := range rt.st.Events {
+			var d map[string]string
+			if ev.Type == inboxTakenEvent && ev.Decode(&d) == nil && d["text"] == "/restart" {
+				return true
+			}
+		}
+		return false
+	}
+	if !rt.ending || takenBy(rt) {
+		t.Fatalf("ending %v, /restart taken %v; want the stop, and /restart left", rt.ending, takenBy(rt))
+	}
+	if entries, _ := os.ReadDir(InboxDir(rt.sess.Path)); len(entries) != 1 {
+		t.Fatalf("files left: %v, want the /restart", entries)
+	}
+	rt2 := k1Next(t, rt, &fakeUI{})
+	rt2.pollInbox()
+	if !takenBy(rt2) {
+		t.Fatal("the next run did not take the /restart")
+	}
 }
