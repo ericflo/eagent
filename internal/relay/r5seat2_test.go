@@ -207,9 +207,8 @@ func TestAnAfterTurnMessageInTheInputBoxIsNotPressedAgain(t *testing.T) {
 	}
 }
 
-// A seat that has seen no turn end in the transcript (restarted before its
-// first message, or idle only by its screen) reports nothing and leaves the
-// spool to the Stop hook.
+// A seat that has seen no turn end at all (reattached before its first
+// message) reports nothing and leaves the spool to the Stop hook.
 func TestASeatWithoutATurnEndLeavesTheSpoolToTheHook(t *testing.T) {
 	t.Parallel()
 	spool := filepath.Join(t.TempDir(), "after_turn")
@@ -220,14 +219,6 @@ func TestASeatWithoutATurnEndLeavesTheSpoolToTheHook(t *testing.T) {
 	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
 	s.state = "idle"
 	s.reportLeftOvers(time.Now().Add(time.Hour))
-	// Quiet for ten minutes, then idle by its screen: still no turn end.
-	s.state, s.stateAt, s.lastLine = "working", time.Now().Add(-11*time.Minute), time.Now().Add(-11*time.Minute)
-	s.checkScreen(time.Now())
-	s.checkScreen(time.Now().Add(2 * time.Second))
-	if st := s.Snapshot().State; st != "idle" {
-		t.Fatalf("seat is %s", st)
-	}
-	s.reportLeftOvers(time.Now().Add(time.Hour))
 	if names, _ := filepath.Glob(filepath.Join(spool, "*.txt")); len(names) != 1 || len(h.typed) != 0 {
 		t.Fatalf("spool %v, typed %q", names, h.typed)
 	}
@@ -235,5 +226,38 @@ func TestASeatWithoutATurnEndLeavesTheSpoolToTheHook(t *testing.T) {
 		if ev.Kind == KindDelivered {
 			t.Fatalf("reported %+v", ev)
 		}
+	}
+}
+
+// A turn the seat saw end on its screen (quiet ten minutes while working,
+// then the prompt back with no busy line) is over, though no line said so
+// and no Stop hook ran: what is still in the spool once heldGrace has
+// passed is taken back, not sent (the phone shows it failed, with Retry).
+func TestASeatThatSawATurnEndOnItsScreenTakesTheSpoolBack(t *testing.T) {
+	t.Parallel()
+	spool := filepath.Join(t.TempDir(), "after_turn")
+	if err := spoolMessage(spool, "r1", "kept over the turn"); err != nil {
+		t.Fatal(err)
+	}
+	h := &fakeHost{alive: true, screen: claudePromptScreen}
+	s := newSeat(Spec{Name: "claude", Spool: spool, Hook: "eagent relay-hook"}, claudeAgent{}, h, "x", "")
+	s.state, s.stateAt, s.lastLine = "working", time.Now().Add(-11*time.Minute), time.Now().Add(-11*time.Minute)
+	s.checkScreen(time.Now())
+	s.checkScreen(time.Now().Add(2 * time.Second))
+	if st := s.Snapshot().State; st != "idle" {
+		t.Fatalf("seat is %s", st)
+	}
+	s.reportLeftOvers(time.Now().Add(time.Hour))
+	if names, _ := filepath.Glob(filepath.Join(spool, "*.txt")); len(names) != 0 || len(h.typed) != 0 {
+		t.Fatalf("spool %v, typed %q", names, h.typed)
+	}
+	var got []Event
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindDelivered {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 || got[0].SendID != "r1" || got[0].OK || got[0].Outcome != OutcomeNotSent {
+		t.Fatalf("reported %+v; want r1 not sent", got)
 	}
 }

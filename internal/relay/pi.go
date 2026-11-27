@@ -74,7 +74,7 @@ const AFTER_ABORT_MS = 5000; // after an interrupted run, held messages wait thi
 export default function (pi: any) {
 	const statusFile = process.env.EAGENT_PI_STATUS || "";
 	const spool = process.env.EAGENT_PI_SPOOL || "";
-	const status: any = { state: "starting", aborted: false, prompt: "", session_file: "", session_id: "", settled: 0, at: "" };
+	const status: any = { state: "starting", aborted: false, prompt: "", compacting: false, session_file: "", session_id: "", settled: 0, at: "" };
 	let timer: any;
 	let prompting = false;
 
@@ -202,7 +202,7 @@ export default function (pi: any) {
 		try {
 			entries = ctx.sessionManager.getEntries().length;
 		} catch {}
-		save({ state: "idle", session_file: ctx.sessionManager.getSessionFile() || "", session_id: ctx.sessionManager.getSessionId() || "", session_entries: entries });
+		save({ state: "idle", compacting: false, session_file: ctx.sessionManager.getSessionFile() || "", session_id: ctx.sessionManager.getSessionId() || "", session_entries: entries });
 		// A message held just as a run ended waits here until pi is idle.
 		clearInterval(timer);
 		timer = setInterval(() => {
@@ -292,9 +292,24 @@ export default function (pi: any) {
 		try {
 			pi.appendEntry("` + piSettledEntry + `", { aborted });
 		} catch {}
-		save({ state: "idle", aborted, settled: status.settled + 1 });
+		// No compaction runs after a run has settled (pi's own word).
+		save({ state: "idle", aborted, compacting: false, settled: status.settled + 1 });
 		abortedAt = aborted ? Date.now() : 0;
 		if (!aborted) deliver();
+	});
+	// A compaction (pi's /compact, or one pi starts itself) runs no agent
+	// run, and pi reports idle through it: it is at work all the same.
+	// Every compaction that passes this hook ends in one of the two after
+	// it, also one a later extension cancels. Nothing is returned: the
+	// compaction goes on as it is.
+	pi.on("session_before_compact", () => {
+		save({ compacting: true });
+	});
+	pi.on("session_compact", () => {
+		save({ compacting: false });
+	});
+	pi.on("session_compact_failed", () => {
+		save({ compacting: false });
 	});
 	pi.on("ui_prompt_start", (event: any) => {
 		prompting = true;
@@ -371,11 +386,11 @@ func (piAgent) ready(screen string) bool {
 	return piFooter.MatchString(screen) || strings.Contains(screen, "escape interrupt · ctrl+c/ctrl+d clear/exit")
 }
 
-// reportedWorking: the extension's status file says pi is in a turn. pi
-// reports its dialogs there too, so a working pi shows none.
+// reportedWorking: the extension's status file says pi is in a turn, or
+// compacting. pi reports its dialogs there too, so a working pi shows none.
 func (piAgent) reportedWorking(s *Seat) bool {
 	st, ok := readPiStatus(s.spec.StatusFile)
-	return ok && st.State == "working" && strings.TrimSpace(st.Prompt) == ""
+	return ok && (st.State == "working" || st.Compacting) && strings.TrimSpace(st.Prompt) == ""
 }
 
 // reportedReady is what the extension's status file says: idle with no
@@ -388,7 +403,7 @@ func (piAgent) reportedReady(s *Seat) (ready, known bool) {
 	}
 	switch st.State {
 	case "idle":
-		return strings.TrimSpace(st.Prompt) == "", true
+		return strings.TrimSpace(st.Prompt) == "" && !st.Compacting, true
 	case "working":
 		return false, true
 	}
@@ -425,6 +440,9 @@ type piStatus struct {
 	SessionEntries *int   `json:"session_entries,omitempty"`
 	Settled        int    `json:"settled"`
 	At             string `json:"at"`
+	// Compacting: pi compacts its context (it says idle through that).
+	// Absent from the status of an older extension.
+	Compacting bool `json:"compacting"`
 }
 
 func readPiStatus(file string) (piStatus, bool) {

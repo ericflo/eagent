@@ -55,6 +55,9 @@ type Event struct {
 	// Dialog, on a state event blocked by a dialog the agent reports (pi's
 	// extension), is its title; "" on every other event.
 	Dialog string
+	// Stuck, on a blocked state event, is Status.Stuck as it is said: a
+	// blocked seat says blocked again whenever it changes.
+	Stuck bool
 	// Read, on an event a line of the transcript gave and on KindRead, is
 	// how far the transcript was read: the end of that line. 0 otherwise.
 	Read int64
@@ -520,8 +523,9 @@ func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	if state == "working" {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
+	stuck := state == "blocked" && s.stuck
 	s.mu.Unlock()
-	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
+	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog, Stuck: stuck})
 }
 
 // Close stops watching. The agent keeps running.
@@ -571,10 +575,10 @@ type Status struct {
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 	// Stuck: blocked with no dialog, and the seat knows the agent is not
-	// working: a start that never got ready, or a turn gone quiet whose
-	// screen does not show it busy (as last looked). A quiet agent whose
-	// screen shows it at work (a long build, a subagent) is not stuck, nor
-	// is a block the seat cannot tell about (kept from before a reattach).
+	// working: a start that never got ready, or a turn gone quiet that the
+	// agent's own evidence (atWork, as last looked) does not show at work.
+	// A quiet agent at work (a long build, a subagent) is not stuck. A
+	// block from before a reattach is judged at the screen check after it.
 	Stuck bool
 }
 
@@ -877,6 +881,10 @@ var typeSettle = 350 * time.Millisecond
 // dialogPause is how long Send's last look waits after answering a dialog
 // before it looks again. Tests shorten it.
 var dialogPause = time.Second
+
+// screenEvery is how often the watcher reads the screen while it is worth
+// reading (wantsDialogCheck). Tests shorten it.
+var screenEvery = 1500 * time.Millisecond
 
 func (s *Seat) typeText(text string) error {
 	s.typing.Lock()
@@ -1563,7 +1571,7 @@ func (s *Seat) watch() {
 				s.caughtUp(time.Now())
 			}
 		}
-		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
+		if now.Sub(lastDialog) >= screenEvery && s.wantsDialogCheck(now) {
 			lastDialog = now
 			s.checkScreen(now)
 		}
@@ -1612,13 +1620,19 @@ func (s *Seat) quietLocked() bool {
 // footer and no spinner; Codex: its composer and no working line;
 // Antigravity: the relay status line saying idle).
 func (s *Seat) atRest() bool {
-	if rr, ok := s.agent.(readyReporter); ok {
-		if ready, known := rr.reportedReady(s); known {
-			return ready
-		}
-	}
 	screen, err := s.host.Capture(s.target, 0)
-	return err == nil && s.agent.ready(screen) && !s.busy(screen)
+	return err == nil && s.ready(screen) && !s.atWork(screen)
+}
+
+// atWork is the one judgement of whether the agent's own evidence says it
+// is at work (atRest, Status.Stuck): pi's status file says it works;
+// Claude's spinner line, Codex's working line, or Antigravity's status
+// line naming a state other than idle is on its screen.
+func (s *Seat) atWork(screen string) bool {
+	if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
+		return true
+	}
+	return s.busy(screen)
 }
 
 // queueHolder is a parser that follows the agent's own queue of messages
@@ -2140,27 +2154,48 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.mu.Unlock()
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
-		busy := s.busy(screen)
+		work := s.atWork(screen)
 		s.mu.Lock()
-		s.stuck = !busy
+		s.stuck = !work
 		s.mu.Unlock()
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
 		s.mu.Lock()
 		s.hung = s.state == "blocked"
 		s.mu.Unlock()
-	} else if state == "blocked" && ready && !(s.hung && s.busy(screen)) && !s.dialogShowing() {
+	} else if state == "blocked" && ready && !(s.hung && s.atWork(screen)) && !s.dialogShowing() {
 		// A quiet agent's prompt or status line shows while it works, so
 		// it is idle only if its screen does not also say it is busy. A
-		// slow start is over as soon as the prompt shows.
-		s.setState("idle", "")
-	} else if state == "blocked" {
-		// Still quiet: stuck as its screen says now (Status.Stuck).
-		busy := s.busy(screen)
+		// slow start is over as soon as the prompt shows. A quiet turn
+		// (hung) is over too, though no line said so: what was held for
+		// its end is looked at as after a turn end (leftOvers).
 		s.mu.Lock()
-		if s.hung && s.state == "blocked" {
-			s.stuck = !busy
+		turn := s.hung
+		s.mu.Unlock()
+		s.setState("idle", "")
+		s.mu.Lock()
+		if turn && s.state == "idle" && s.turnEndAt.IsZero() {
+			s.turnEndAt = now
 		}
 		s.mu.Unlock()
+	} else if state == "blocked" {
+		// Still quiet: stuck as the agent's own evidence says now
+		// (Status.Stuck).
+		work := s.atWork(screen)
+		s.mu.Lock()
+		changed := s.hung && s.state == "blocked" && s.stuck == work
+		if changed {
+			s.stuck = !work
+		}
+		s.mu.Unlock()
+		if changed {
+			// Said (blocked again, with what changed): a change waiting on
+			// the agent is looked at again only when the seat says something.
+			detail := "still no transcript activity, and it no longer shows it is at work; the screen ends:\n" + lastLines(screen, 10)
+			if work {
+				detail = "still no transcript activity; it shows it is at work again"
+			}
+			s.emit(Event{Kind: KindState, State: "blocked", Detail: detail, Stuck: !work})
+		}
 	}
 }
 
@@ -2267,10 +2302,11 @@ func (s *Seat) ready(screen string) bool {
 // spinnerLine matches the line Claude and Codex draw while they work: one of
 // the agent's own spinner glyphs, a few words, and at the end of the line a
 // parenthesis that says how to interrupt ("✻ Thinking… (12s · esc to
-// interrupt)", "• Working (3s • esc to interrupt)"). A markdown bullet ("-",
-// "1.") or a sentence that quotes the words is not it.
+// interrupt)", "• Working (3s • esc to interrupt)"); its words may hold
+// parentheses of their own (Claude shows the active task's words there). A
+// markdown bullet ("-", "1.") or a sentence that quotes the words is not it.
 func spinnerLine(glyphs string) *regexp.Regexp {
-	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^()\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
 }
 
 // The spinner glyphs each agent draws: Claude cycles through these frames,
