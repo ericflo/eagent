@@ -729,6 +729,18 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	return s.prepare(p, grant, false, nil)
 }
 
+// CheckWrite holds a prepared configuration file to the check a fresh
+// write of it meets, when it is written: what it makes must load (a saved
+// preset its default_config names may have been deleted since).
+func (s *Service) CheckWrite(raw string) error {
+	var file map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &file); err != nil {
+		return err
+	}
+	_, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
+	return err
+}
+
 // prepare is Prepare. A person's pick of a route's model, address or preset
 // brings the rest of the route with it (the summarizer's seed and
 // routePicks); an undo's reversal (undo) writes what it names and no other,

@@ -144,8 +144,8 @@ func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, gra
 				change.After = restored // as it was, byte for byte
 			}
 			change.AfterExists = true
-		} else if s.inForce(name) {
-			return change, fmt.Errorf("select a different default before deleting its bundle")
+		} else if err := s.inForce(name); err != nil {
+			return change, err
 		}
 	default:
 		return change, fmt.Errorf("operation does not target a prompt or bundle")
@@ -183,8 +183,8 @@ func (change ResourceChange) State(editor *config.Editor) (before, after bool, e
 // written: deleting the saved preset sessions start on is refused, also
 // when the command was prepared before that preset became the default.
 func (s *Service) CheckResource(change ResourceChange) error {
-	if change.Kind == "bundle" && !change.AfterExists && s.inForce(change.Name) {
-		return fmt.Errorf("select a different default before deleting its bundle")
+	if change.Kind == "bundle" && !change.AfterExists {
+		return s.inForce(change.Name)
 	}
 	return nil
 }

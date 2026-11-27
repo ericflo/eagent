@@ -925,6 +925,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		if reconcile {
 			return finish("unknown", map[string]any{"reason": "prepared_but_unconfirmed", "message": "The prepared write has no confirmed outcome. No edit was repeated."})
 		}
+		if err := s.CheckWrite(journal.Desired); err != nil {
+			return finish("rejected", map[string]any{"message": err.Error()})
+		}
 		if _, err := editor.SaveRaw(journal.Desired, journal.BeforeETag, true); err != nil {
 			return journal, err
 		}
