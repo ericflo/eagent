@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -200,6 +201,31 @@ func TestSR6WebWordsLeftInATerminalRunsInboxAreTakenTwice(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("the session took the user's words %d times, want once", n)
+	}
+}
+
+// A serve that cannot listen (the port is taken) brings nothing back and
+// leaves the list for the next one. It used to bring the sessions back
+// first, in runs the exit then killed, and consume the list.
+func TestK13AServeThatCannotListenLeavesTheListAlone(t *testing.T) {
+	s, project := newTestServer(t)
+	sess := newSession(t, project)
+	_ = sess.Close()
+	s.writeHosted([]string{sess.ID}, time.Now().UTC())
+	got := stubRestore(t, nil, nil)
+	taken, err := net.Listen("tcp", "127.0.0.1:0") // another program has the port
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	if err := ListenAndServe(context.Background(), taken.Addr().String(), New(project, nil)); err == nil {
+		t.Fatal("served on a port that was taken")
+	}
+	if len(*got) != 0 {
+		t.Fatalf("brought back %+v in a serve that could not listen", *got)
+	}
+	if listed := k3Listed(t, project); len(listed) != 1 || listed[0] != sess.ID {
+		t.Fatalf("the list the next serve reads holds %q, want the session", listed)
 	}
 }
 

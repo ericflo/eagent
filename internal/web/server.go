@@ -1200,6 +1200,16 @@ func (u *webUI) status() harness.Status {
 
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
+	// The address first: a serve that cannot listen (the port is taken)
+	// brings nothing back and leaves the list for the next one.
+	listenAt := addr
+	if listenAt == "" {
+		listenAt = ":http" // as http.Server.ListenAndServe has it
+	}
+	ln, err := net.Listen("tcp", listenAt)
+	if err != nil {
+		return err
+	}
 	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
 	restoreStarter := s.RegisterSessionStarter()
 	defer restoreStarter()
@@ -1214,8 +1224,7 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	var err error
+	go func() { errc <- srv.Serve(ln) }()
 	var start time.Time
 	var sessions time.Duration
 	select {
