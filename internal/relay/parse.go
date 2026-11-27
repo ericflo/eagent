@@ -231,6 +231,9 @@ type claudeParser struct {
 	// the list: nothing is marked until the queue is known again.
 	queued []string
 	taken  int
+	// erred: an API error answer ended the last turn, and Claude has
+	// answered nothing since; a turn_duration now is that turn's.
+	erred bool
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -279,6 +282,10 @@ func (p *claudeParser) line(raw []byte) []obs {
 	case "system":
 		switch ev.Subtype {
 		case "turn_duration":
+			if p.erred {
+				p.erred = false
+				return nil // the API error answer ended this turn already
+			}
 			text := p.held
 			p.held, p.inTurn = "", false
 			return []obs{{kind: "turn", text: text, at: at, durationMS: ev.DurationMS}}
@@ -330,6 +337,7 @@ func (p *claudeParser) line(raw []byte) []obs {
 		if ev.Message == nil {
 			return nil
 		}
+		p.erred = ev.APIError
 		var parts []struct {
 			Type  string         `json:"type"`
 			Text  string         `json:"text"`
