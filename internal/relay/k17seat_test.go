@@ -82,7 +82,8 @@ func k17Watched(s *Seat) []string {
 // interrupt (relay_control's Escape) then empties Claude's queue back into
 // the input box (popAll), unread. The send is watched again: once Claude
 // is idle and its words sit in the box the seat presses Enter, as for any
-// send left there, and the prompt that follows confirms it. (It stayed
+// send left there, and the prompt that follows ends the watch. The record
+// keeps the arrival said at the queue: the seat says it once. (It stayed
 // recorded as arrived while it sat in the box for good; main the same.)
 func TestK17AQueuedSendPutBackInTheBoxByAnInterruptIsSubmitted(t *testing.T) {
 	const text = "also update the changelog"
@@ -112,8 +113,17 @@ func TestK17AQueuedSendPutBackInTheBoxByAnInterruptIsSubmitted(t *testing.T) {
 		t.Fatalf("keys %q; want Enter pressed on the message left in the box", keys)
 	}
 	feed(k17Prompt(text))
-	if ok, failed := k17Arrivals(s, "r1"); ok != 1 || failed != 0 || len(k17Watched(s)) != 0 {
-		t.Fatalf("after the prompt showed it: %d arrivals, %d failures, watched %v; want it confirmed", ok, failed, k17Watched(s))
+	s.mu.Lock()
+	silent := s.silentUser
+	s.mu.Unlock()
+	if ok, failed := k17Arrivals(s, "r1"); ok != 0 || failed != 0 || len(k17Watched(s)) != 0 || !silent {
+		t.Fatalf("after the prompt showed it: %d more arrivals, %d failures, watched %v, read mark due %v; want it watched no more, with nothing new said of it (it arrived at the queue) but how far the transcript was read", ok, failed, k17Watched(s), silent)
+	}
+	for _, after := range []time.Duration{60, 120} {
+		s.checkScreen(now.Add(after * time.Second))
+	}
+	if ok, failed := k17Arrivals(s, "r1"); ok != 0 || failed != 0 {
+		t.Fatalf("later: %d arrivals, %d failures; want nothing more said of it", ok, failed)
 	}
 }
 
@@ -284,5 +294,60 @@ func TestK17AQueuedSendTheTurnTookIsNotWatchedAgainByTheSameWordsLater(t *testin
 	feed(k17Line("enqueue", text, ""), k17Line("popAll", text, ""))
 	if ok, failed := k17Arrivals(s, "r1"); ok != 0 || failed != 0 || len(k17Watched(s)) != 0 {
 		t.Fatalf("%d more arrivals, %d failures, watched %v; want nothing more of r1", ok, failed, k17Watched(s))
+	}
+}
+
+// Two sends typed into the box together arrive at one queue line; an
+// interrupt gives the queue back, the seat presses Enter, and one prompt
+// shows both. Neither is watched after that, and nothing more is said of
+// either: no second arrival, no failure later.
+func TestK17TwoSendsInOneQueuedMessageGivenBack(t *testing.T) {
+	const a, b = "also update the changelog", "and bump the version"
+	s, h, feed := k17Seat(t, a)
+	s.track("r2", b, "queue")
+	feed(k17Line("enqueue", a+"\n"+b, ""))
+	if evs := deliveries(drain(s.Events())); len(evs) != 2 || !evs[0].OK || !evs[1].OK {
+		t.Fatalf("at the queue line: %+v; want both arrived", evs)
+	}
+	feed(k17Line("popAll", a+"\n"+b, ""), k17Prompt("[Request interrupted by user]"))
+	if got := k17Watched(s); !slices.Equal(got, []string{"r1", "r2"}) {
+		t.Fatalf("watched %v; want r1 and r2", got)
+	}
+	now := k17Idle(s, h, fmt.Sprintf(k17Box, a))
+	for _, after := range []time.Duration{1, 4, 7} {
+		s.checkScreen(now.Add(after * time.Second))
+	}
+	feed(k17Prompt(a + "\n" + b))
+	if got := k17Watched(s); len(got) != 0 {
+		t.Fatalf("still watched %v after the prompt showed both", got)
+	}
+	for _, after := range []time.Duration{50, 100, 200} {
+		s.checkScreen(now.Add(after * time.Second))
+	}
+	if evs := deliveries(drain(s.Events())); len(evs) != 0 {
+		t.Fatalf("said after the prompt showed both: %+v; want nothing", evs)
+	}
+}
+
+// An interrupting send while a queued one waits: the Escape gives the
+// queued one back into the box, the new one is typed after it, and one
+// prompt shows both. The new one arrives there; the queued one arrived at
+// the queue, and that is said once.
+func TestK17AnInterruptingSendAfterAQueuedSend(t *testing.T) {
+	const a, b = "also update the changelog", "stop and fix the build"
+	s, _, feed := k17Seat(t, a)
+	feed(k17Line("enqueue", a, ""))
+	if ok, _ := k17Arrivals(s, "r1"); ok != 1 {
+		t.Fatalf("%d arrivals of r1 at the queue line; want 1", ok)
+	}
+	feed(k17Line("popAll", a, ""), k17Prompt("[Request interrupted by user]"))
+	s.track("r2", b, "interrupt")
+	feed(k17Prompt(a + "\n" + b))
+	if got := k17Watched(s); len(got) != 0 {
+		t.Fatalf("still watched %v", got)
+	}
+	evs := deliveries(drain(s.Events()))
+	if len(evs) != 1 || evs[0].SendID != "r2" || !evs[0].OK {
+		t.Fatalf("said at the prompt: %+v; want r2 arrived and nothing else", evs)
 	}
 }

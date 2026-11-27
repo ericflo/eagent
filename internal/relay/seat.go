@@ -2043,10 +2043,17 @@ func (s *Seat) fold(o obs) {
 		if o.queue != 0 && len(got) > 0 {
 			s.noteQueued(o.queue, got)
 		}
+		quiet := len(got) == 0
 		for _, p := range got {
+			if p.requeued {
+				// Its arrival was said when the agent's queue took it;
+				// the line that shows it now says the same again.
+				quiet = true
+				continue
+			}
 			s.emit(Event{Kind: KindDelivered, SendID: p.id, OK: true})
 		}
-		if len(got) == 0 {
+		if quiet {
 			s.silentUser = true // readTail says how far it was read
 		}
 	case "dequeued":
