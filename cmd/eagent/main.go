@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1294,6 +1295,28 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 					}
 					var rest map[string]json.RawMessage
 					rest, dropped = config.DropModelChoice(m)
+					if dropped != "" {
+						// The file's model goes so that the preset's runs.
+						// Where it would not run even so, nothing is
+						// written: loading the file as it would be left
+						// says which model runs here.
+						after := maps.Clone(rest)
+						after["preset"] = edits["preset"]
+						delete(after, "default_config")
+						want := config.Defaults()
+						config.Presets[canon](&want)
+						if now, err := config.LoadBundleWithFile(project, "", "", after); err == nil && now.Model.Model != want.Model.Model {
+							why := "another setting names eagent's model here"
+							if name, ok := config.EnvOverrides()["/model/model"]; ok {
+								why = name + " sets eagent's model here"
+							} else if now.Name != "" {
+								why = fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name)
+							} else if os.Getenv("EAGENT_PRESET") != "" {
+								why = "EAGENT_PRESET names the preset here"
+							}
+							return fail(fmt.Errorf("%s, so %s's model would not run (%s would); nothing was changed. Unset it first", why, target, now.Model.Model))
+						}
+					}
 					// An effort the preset's model does not offer moves
 					// to the nearest it does, as choosing the preset in a
 					// session moves it.

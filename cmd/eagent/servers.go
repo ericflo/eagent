@@ -294,6 +294,12 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return 0
 	}
 	fmt.Printf("updated %s\n", saveRes.Saved.Path)
+	if now, err := config.Load(project, ""); err == nil && now.Name != "" && now.Model.Model != cfg.Model.Model {
+		// A saved preset in force lays its own model over the file's:
+		// what was written runs once another is chosen.
+		fmt.Printf("  the saved preset %q is in force here (%s) and names its own model, so eagent still runs %s; %s runs once another preset is chosen (eagent presets use NAME|default)\n", now.Name, now.NameFrom, now.Model.Model, cfg.Model.Model)
+		return 0
+	}
 	fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
 	return 0
 }
