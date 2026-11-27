@@ -501,7 +501,7 @@ func (piAgent) poll(s *Seat, now time.Time) {
 	case inner == st.SessionID:
 		s.onSession(now)
 	case inner != "":
-		s.follow(st.SessionID)
+		s.follow(st.SessionID, st.State == "idle" && strings.TrimSpace(st.Prompt) == "")
 	}
 }
 
@@ -591,14 +591,24 @@ func (a piAgent) models(string) []ModelChoice {
 }
 
 // parsePiModels reads the table --list-models prints: a header, then
-// "provider model context max-out thinking images" per line.
+// "provider model context max-out thinking images" per line, up to a
+// blank line. Output without the header (pi's "No models available"
+// sentence) has no models.
 func parsePiModels(table, defProvider string) []ModelChoice {
 	type row struct{ provider, model, detail string }
 	var rows []row
 	count := map[string]int{}
+	header := false
 	for _, line := range strings.Split(table, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 2 || f[0] == "provider" && f[1] == "model" {
+		if !header {
+			header = len(f) >= 2 && f[0] == "provider" && f[1] == "model"
+			continue
+		}
+		if len(f) == 0 {
+			break
+		}
+		if len(f) < 2 {
 			continue
 		}
 		detail := ""
