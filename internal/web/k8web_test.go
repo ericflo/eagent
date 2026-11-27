@@ -9,8 +9,31 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/store"
 )
+
+// A Dismiss sent while a Stop during the shutdown is stopping the session's
+// agents is refused: the session is locked by that stop, not run. It used
+// to be put in its inbox and answered "delivered".
+func TestK8ADismissDuringAStopInTheShutdownIsRefused(t *testing.T) {
+	s, project := newTestServer(t)
+	info := srAgentSession(t, project)
+	entered, gate := make(chan struct{}), make(chan struct{})
+	old := killAgent
+	killAgent = func(host, target string) error { close(entered); <-gate; return nil }
+	t.Cleanup(func() { killAgent = old })
+	k7Shutdown(t, s, info)
+	stopped := make(chan struct{})
+	go func() { do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil); close(stopped) }()
+	<-entered // the stop holds the session's lock
+	w := do(s, "POST", "/api/sessions/"+info.ID+"/dismiss", map[string]any{"question_id": "q1"}, nil)
+	close(gate)
+	<-stopped
+	if left, _ := os.ReadDir(harness.InboxDir(info.Path)); w.Code != http.StatusConflict || len(left) != 0 {
+		t.Fatalf("answered %d %s, %d file(s) left in the inbox of a session nothing will run", w.Code, w.Body, len(left))
+	}
+}
 
 // A message held for the end of the agent's turn waits in the agent's
 // spool (its Stop hook hands it over) when the server's shutdown ends the

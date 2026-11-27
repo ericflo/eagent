@@ -679,6 +679,15 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
 		return
 	}
+	// Locked by a stop of this server's that the shutdown overtook, not by
+	// a run: nothing will read its inbox.
+	s.mu.Lock()
+	stopped := s.stops[info.ID] != nil
+	s.mu.Unlock()
+	if stopped {
+		writeErr(w, handCode(errEnding), errEnding)
+		return
+	}
 	if err := s.hand(info, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
 		writeErr(w, handCode(err), err)
 		return
