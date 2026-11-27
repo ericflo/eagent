@@ -187,7 +187,7 @@ func (r *Runtime) pollInbox() {
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			if id != "" && (msg.Type == "message" || msg.Type == "") {
-				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id}))
+				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id, "text": strings.TrimSpace(msg.Text)}))
 			}
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
