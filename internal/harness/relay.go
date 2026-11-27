@@ -1415,7 +1415,7 @@ func (r *Runtime) reattachRelays() []string {
 	// What the record shows was held for a start that never came up was
 	// never typed, whatever became of its agent.
 	for _, d := range state.NeverTyped(r.st.Events) {
-		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: d.Name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: state.HeldNeverTyped}))
+		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, state.NotTyped(d)))
 	}
 	r.settleEnded()
 	for _, rel := range r.st.ActiveRelays() {
@@ -1449,34 +1449,44 @@ func (r *Runtime) reattachRelays() []string {
 }
 
 // settleEnded settles, at a resume, what each stopped agent is still waited
-// on for: eagent ended before the stop's settle (its wait for the stopped
-// agent's last word), and nothing will say how those sends went now. Each
-// as the settle that was cut would have settled it, so a fresh start under
-// the name inherits none of them: after a switch, the user's messages stay
-// as the switch left them, since its brief carried them (finishLaunch);
-// the rest are settled as for an agent that is gone (settleExited). (What
+// on for (EndedWaiting), as for an agent that is gone (settleExited). (What
 // was held for a start that never came up is settled before this:
 // reattachRelays.) Called from resume, before the loop starts.
 func (r *Runtime) settleEnded() {
+	rels, keep := EndedWaiting(r.st)
+	for _, rel := range rels {
+		r.settleExited(rel, keep...)
+	}
+}
+
+// EndedWaiting lists, in name order, the stopped agents a record with no
+// run behind it is still waited on for: eagent ended before a stop's settle
+// (its wait for the stopped agent's last word), and nothing will say how
+// those sends went now. Each is settled as the settle that was cut would
+// have settled it, so a fresh start under the name inherits none of them,
+// but for keep: after a switch, the user's messages stay as the switch left
+// them, since its brief carried them (finishLaunch). One rule for a resume
+// (settleEnded) and for a stop from outside a run (web stopAgents).
+func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
 	var names []string
-	for name, rel := range r.st.Relays {
+	for name, rel := range st.Relays {
 		if rel.Ended && len(rel.Undelivered) > 0 {
 			names = append(names, name)
 		}
 	}
 	slices.Sort(names)
-	handed := handedOver(r.st)
+	handed := handedOver(st)
 	for _, name := range names {
-		rel := r.st.Relays[name]
+		rel := st.Relays[name]
+		rels = append(rels, rel)
 		_, switched := handed[holder{rel.Name, rel.StartSeq}]
-		var except []string
-		for _, s := range unresolvedSends(r.st, rel) {
-			if d, ok := sendRecord(r.st, s.ID); switched && (!ok || d.From != "eagent") {
-				except = append(except, s.ID)
+		for _, s := range unresolvedSends(st, rel) {
+			if d, ok := sendRecord(st, s.ID); switched && (!ok || d.From != "eagent") {
+				keep = append(keep, s.ID)
 			}
 		}
-		r.settleExited(rel, except...)
 	}
+	return rels, keep
 }
 
 // sentAfter are the ids of the sends recorded to a relay's name after the

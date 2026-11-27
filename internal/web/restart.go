@@ -143,17 +143,21 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // go), its terminal is killed (not that of one the record shows exited:
 // it is gone, and nothing is said of it), its relay.end is recorded (one
 // that could not be killed too, as stopSession does), and its sends are
-// settled: not sent for one taken back or held for a start that never
-// came up (state.NeverTyped), unconfirmed for the rest. Then,
+// settled: not sent for one taken back, unconfirmed for the rest. Before
+// that, what the record still waits on with no agent behind it is settled
+// as a resume settles it, by the same rules: not sent for a send held for
+// a start that never came up (state.NeverTyped), and the sends of an agent
+// stopped before (harness.EndedWaiting). Then,
 // with the lock still held (no run of the session can come in between),
 // the phone is told, if the record shows the session mirrored to it
 // (mirrored), on the account of cfgs that has the session's thread
 // (stopConfigs; none: nothing is told); logf says why nothing was told.
-// A thread that was told is left with project's reply watcher, as a run's
-// own mirror leaves it when it stops (integration.LeftForNextRun): the
-// closing note hides the thread from the watcher's sweep, and a reply
-// sent before it while nothing watched (eagent serve was down, and this
-// is the next one finishing the stop) is still to be found.
+// Told or not, the thread is left with project's reply watcher, as a
+// run's own mirror leaves it when it stops (integration.LeftForNextRun):
+// the closing note hides the thread from the watcher's sweep, this stop's
+// writes make the record newer than a reply sent while nothing watched
+// (eagent serve was down, and this is the next one finishing the stop),
+// and that reply is still to be found.
 // It returns who it stopped, and who it could not kill.
 func stopAgents(project, path string, cfgs []config.Config, logf func(string, ...any)) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
@@ -161,21 +165,63 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		return nil, nil, err
 	}
 	defer sess.Close()
-	// What the record shows was held for a start that never came up was
-	// never typed (as a resume settles it: harness reattachRelays).
-	never := map[string]bool{}
-	for _, d := range state.NeverTyped(evs) {
-		never[d.ID] = true
-	}
-	for _, rel := range state.Replay(evs).ActiveRelays() {
-		waiting := unsettled(evs, rel)
-		spool := relaySpool(path, rel)
-		takenBack := map[string]bool{}
+	st := state.Replay(evs)
+	// What is settled here, or is to stay as it is.
+	done := map[string]bool{}
+	// settle records how the sends the record still waits on for rel went,
+	// its agent being gone (how): one held for the end of its turn and
+	// still unread in the spool was taken back (takenBack) and did not go;
+	// of the rest nothing can be confirmed.
+	settle := func(rel *state.Relay, waiting []event.RelaySendData, takenBack map[string]bool, how string) error {
 		for _, d := range waiting {
-			if d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
-				takenBack[d.ID] = true
+			if done[d.ID] {
+				continue
+			}
+			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
+				Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
+			if takenBack[d.ID] {
+				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent "+how
+			}
+			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
+				return err
 			}
 		}
+		return nil
+	}
+	takeBack := func(rel *state.Relay, waiting []event.RelaySendData) map[string]bool {
+		spool := relaySpool(path, rel)
+		taken := map[string]bool{}
+		for _, d := range waiting {
+			if !done[d.ID] && d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
+				taken[d.ID] = true
+			}
+		}
+		return taken
+	}
+	// As a resume settles a record with no run behind it (harness
+	// reattachRelays), whatever became of each agent: what was held for a
+	// start that never came up was never typed, and what a stopped agent
+	// is still waited on for (its stop's settle was cut) is settled as
+	// that stop would have settled it.
+	for _, d := range state.NeverTyped(evs) {
+		if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, state.NotTyped(d))); err != nil {
+			return nil, nil, err
+		}
+		done[d.ID] = true
+	}
+	ended, keep := harness.EndedWaiting(st)
+	for _, id := range keep {
+		done[id] = true
+	}
+	for _, rel := range ended {
+		waiting := unsettled(evs, rel)
+		if err := settle(rel, waiting, takeBack(rel, waiting), "was stopped"); err != nil {
+			return nil, nil, err
+		}
+	}
+	for _, rel := range st.ActiveRelays() {
+		waiting := unsettled(evs, rel)
+		takenBack := takeBack(rel, waiting)
 		if rel.State != "exited" {
 			if rel.Target != "" {
 				if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
@@ -191,18 +237,8 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		if rel.State == "exited" {
 			how = "exited" // as settleExited says it of an agent that exited
 		}
-		for _, d := range waiting {
-			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
-				Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
-			switch {
-			case never[d.ID]:
-				out.Outcome, out.Detail = event.DeliveryNotSent, state.HeldNeverTyped
-			case takenBack[d.ID]:
-				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent "+how
-			}
-			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
-				return stopped, failed, err
-			}
+		if err := settle(rel, waiting, takenBack, how); err != nil {
+			return stopped, failed, err
 		}
 	}
 	if len(cfgs) > 0 && mirrored(evs) {
@@ -213,9 +249,11 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		}
 		if err := tellPhoneStopped(cfgs, path, func(ev event.Event) { _, _ = sess.Append(ev) }); err != nil {
 			logf("session %s: its phone is not told of the stop: %v", filepath.Base(path), err)
-		} else {
-			integration.LeftForNextRun(project, filepath.Base(path), true, logf)
 		}
+		// Told or not: this stop's own writes make the record newer than
+		// a reply that waits in the thread, and the sweep passes over a
+		// thread no newer than its record.
+		integration.LeftForNextRun(project, filepath.Base(path), true, logf)
 	}
 	return stopped, failed, nil
 }

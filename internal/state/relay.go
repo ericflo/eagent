@@ -186,6 +186,11 @@ func NeverTyped(evs []event.Event) []event.RelaySendData {
 	return held
 }
 
+// NotTyped is the outcome of a send NeverTyped lists.
+func NotTyped(d event.RelaySendData) event.RelayDeliveredData {
+	return event.RelayDeliveredData{Name: d.Name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: HeldNeverTyped}
+}
+
 // NextRelaySendID allocates a send id that continues after replay.
 func (s *State) NextRelaySendID() string {
 	s.relaySendSeq++
