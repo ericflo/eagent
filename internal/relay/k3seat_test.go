@@ -77,6 +77,66 @@ func TestSr2SeatAgyStatusTurnEndAndQuotaAfterAReattachWithAReadMark(t *testing.T
 	}
 }
 
+// A reattach with a send the record still waits on reads pi's session
+// from the top (restoring), 8 MB a look, and polls pi's status file after
+// each look. pi moved to another session while eagent was down (/new at
+// its terminal): the first look's poll follows it, and the next look drops
+// the session left, which was read only to 8 MB. The send's arrival and
+// the turn it started, written after that, are never read: the turn's
+// report is lost, and the send, which arrived, is left to be reported
+// unconfirmed ("not typed again, so send it again").
+func TestSr2SeatPiMoveDuringTheCatchUpOfALongSessionLosesItsEnd(t *testing.T) {
+	isolatePi(t)
+	for _, mb := range []int{1, 9} { // 1 MB: read in one look, passes
+		t.Run(string(rune('0'+mb))+"MB", func(t *testing.T) { sr2PiMoveCatchUp(t, mb) })
+	}
+}
+
+func sr2PiMoveCatchUp(t *testing.T, mb int) {
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "second.jsonl")
+	status := filepath.Join(dir, "pi-status.json")
+	sentAt := time.Now().Add(-time.Minute)
+	lines := []string{piHeaderLine("first", sentAt.Add(-2*time.Hour))}
+	for i := 0; i < mb; i++ { // older turns, 1 MB each
+		lines = append(lines, piTurnLines("old"+string(rune('a'+i)), strings.Repeat("x", 1<<20), "ok", sentAt.Add(-time.Hour+time.Duration(i)*time.Second))...)
+	}
+	lines = append(lines, piTurnLines("new", "run the tests", "All green.", sentAt.Add(time.Second))...)
+	writeLines(t, first, lines...)
+	writeLines(t, second, piHeaderLine("second", sentAt.Add(30*time.Second)))
+	writePiStatus(t, status, piStatus{State: "idle", SessionFile: second, SessionID: "second", SessionEntries: entries(0)})
+	spec := Spec{Dir: dir, StatusFile: status, Restore: []Restored{{ID: "r1", Text: "run the tests", Mode: "queue", At: sentAt}}}
+	w := &reattachedSeat{h: &fakeHost{alive: true}, done: make(chan struct{})}
+	w.s = attachSeat(spec, piAgent{name: "pi", label: "Pi", binary: "pi"}, w.h, "sr2pi", "first", first, sentAt)
+	w.s.poll = piLook
+	go w.s.watch()
+	go func() {
+		defer close(w.done)
+		for ev := range w.s.Events() {
+			if ev.Kind == KindActivity {
+				continue
+			}
+			w.mu.Lock()
+			w.events = append(w.events, ev)
+			w.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() { w.s.Close(); <-w.done })
+	// Reading 9 MB to its end takes longer than eventually's 2 s under
+	// the race detector.
+	if !within(10*time.Second, func() bool { w.s.mu.Lock(); defer w.s.mu.Unlock(); return !w.s.catchingUp }) {
+		t.Fatal("the seat never caught up on the transcript")
+	}
+	w.settle()
+	ok, _ := w.delivered()
+	if len(ok) != 1 || ok[0] != "r1" {
+		t.Errorf("confirmed %v; want r1, whose arrival is in the session pi left", ok)
+	}
+	if turns := w.turns(); len(turns) != 1 || turns[0] != "All green." {
+		t.Errorf("turns reported %q; want the turn the send started", turns)
+	}
+}
+
 // sr2DialogOnce shows Claude's folder-trust dialog at the first look only.
 type sr2DialogOnce struct {
 	fakeHost

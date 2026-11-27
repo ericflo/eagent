@@ -1378,11 +1378,13 @@ func (s *Seat) watch() {
 			}
 		}
 		_, starter := s.agent.(sessionStarter)
-		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) && caught {
 			// An agent that moves between sessions of its own (pi) is
 			// polled before any transcript is found too: a sighting on the
 			// session it was started on dates a move made before its first
-			// message.
+			// message. Not while a transcript has more to read than one
+			// look reads (a long catch-up): the session is read to its end
+			// before the seat follows pi to another.
 			pl.poll(s, now)
 		}
 		if reports {
