@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // An agent's own command sent for the end of the turn of a working Claude
@@ -48,6 +49,9 @@ func TestK14ACommandForTheEndOfAWorkingTurnIsRefusedWhereItWouldArriveAsText(t *
 // The agent at rest: the command is typed into its prompt, where it runs,
 // whatever the mode.
 func TestK14ACommandForAnIdleClaudeIsTyped(t *testing.T) {
+	saved := typeSettle
+	typeSettle = time.Millisecond
+	t.Cleanup(func() { typeSettle = saved })
 	spool := filepath.Join(t.TempDir(), "after_turn")
 	h := &fakeHost{alive: true, screen: claudePromptScreen}
 	s := newSeat(Spec{Spool: spool, Hook: "eagent relay-hook " + spool}, claudeAgent{}, h, "k14", "")
