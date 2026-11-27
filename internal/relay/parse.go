@@ -228,8 +228,11 @@ type claudeParser struct {
 	// counts the dequeue lines whose messages no prompt has shown yet.
 	// Claude takes the most urgent first, so the prompt after a dequeue
 	// says which it took. A queue line whose effect is not known clears
-	// the list: nothing is marked until the queue is known again.
+	// the list: nothing is marked until the queue is known again. The
+	// first old of queued were read as history (readAsHistory): they still
+	// mark a copy, and hold nothing (holding).
 	queued []string
+	old    int
 	taken  int
 	// erred: an API error answer ended the last turn, and Claude has
 	// answered nothing since; a turn_duration now is that turn's.
@@ -264,19 +267,23 @@ func (p *claudeParser) line(raw []byte) []obs {
 		switch op := ev.Operation; {
 		case op == "enqueue" && s != "":
 			if p.queued = append(p.queued, s); len(p.queued) > 64 {
-				p.queued = p.queued[1:]
+				p.queued, p.old = p.queued[1:], max(p.old-1, 0)
 			}
 			return []obs{{kind: "user", text: s, at: at}}
 		case op == "dequeue":
 			p.taken++
-		case s != "" && (op == "remove" || op == "popAll" || op == "popOne"):
+		case s != "" && (op == "remove" || op == "popOne"):
 			// Taken off the queue: into the running turn, dropped, or back
-			// into the input box.
+			// into the input box. Words that are none of them: not known.
 			if i := slices.IndexFunc(p.queued, func(q string) bool { return normalize(q) == normalize(s) }); i >= 0 {
-				p.queued = slices.Delete(p.queued, i, i+1)
+				p.drop(i, 1)
+			} else {
+				p.clearQueue()
 			}
 		default:
-			p.queued, p.taken = nil, 0
+			// popAll takes them all (back into the input box); any other
+			// line's effect is not known.
+			p.clearQueue()
 		}
 		return nil
 	case "system":
@@ -332,7 +339,7 @@ func (p *claudeParser) line(raw []byte) []obs {
 		return p.userText(strings.Join(texts, "\n"), at)
 	case "assistant":
 		if p.taken > 0 {
-			p.queued, p.taken = nil, 0 // what the dequeue took never showed
+			p.clearQueue() // what the dequeue took never showed
 		}
 		if ev.Message == nil {
 			return nil
@@ -403,7 +410,12 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		p.held, p.inTurn = "", true
 		return append(out, obs{kind: "user", text: strings.TrimPrefix(s, stopHookPrefix), at: at}, obs{kind: "working", at: at})
 	case strings.HasPrefix(s, "<local-command") || strings.HasPrefix(s, "<command-name>") || strings.HasPrefix(s, "<bash-"):
-		return nil // the TUI's own bookkeeping
+		// The TUI's own bookkeeping. After a dequeue it is what Claude
+		// took (one of its commands), not as its words were queued.
+		if p.taken > 0 {
+			p.clearQueue()
+		}
+		return nil
 	}
 	p.held, p.inTurn = "", true
 	// After a dequeue the prompt is what Claude took off its queue: when
@@ -413,15 +425,28 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 	again := false
 	if p.taken > 0 {
 		if again = p.unqueue(s); !again {
-			p.queued, p.taken = nil, 0
+			p.clearQueue()
 		}
 	}
 	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
 }
 
-// holding: Claude's queue holds a message it has not taken (no dequeue
-// line for it yet). Status.Quiet waits for it.
-func (p *claudeParser) holding() bool { return len(p.queued) > p.taken }
+// holding: Claude's queue holds a message read as news that no prompt
+// has shown running yet (a dequeue alone is not that: Claude records the
+// prompt after its prompt hooks). Status.Quiet waits for it.
+func (p *claudeParser) holding() bool { return len(p.queued) > p.old }
+
+// readAsHistory: what the queue holds now was read as history. It holds
+// nothing: the agent that queued it may be gone (a restart).
+func (p *claudeParser) readAsHistory() { p.old = len(p.queued) }
+
+func (p *claudeParser) clearQueue() { p.queued, p.old, p.taken = nil, 0, 0 }
+
+// drop takes n queued messages from i off the list.
+func (p *claudeParser) drop(i, n int) {
+	p.old -= min(p.old, i+n) - min(p.old, i)
+	p.queued = slices.Delete(p.queued, i, i+n)
+}
 
 // unqueue takes off the list the queued messages, no more than the dequeue
 // lines took, whose words joined are those of s, and says whether there
@@ -432,7 +457,8 @@ func (p *claudeParser) unqueue(s string) bool {
 		run := ""
 		for n := 1; n <= p.taken && i+n <= len(p.queued) && len(run) < len(got); n++ {
 			if run = strings.TrimSpace(run + " " + normalize(p.queued[i+n-1])); run == got {
-				p.queued, p.taken = slices.Delete(p.queued, i, i+n), p.taken-n
+				p.drop(i, n)
+				p.taken -= n
 				return true
 			}
 		}

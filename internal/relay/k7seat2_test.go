@@ -48,7 +48,7 @@ func TestK7QuietIsSaidAgainAfterASendBegunAsItWasSaid(t *testing.T) {
 	saved := typeSettle
 	typeSettle = 0
 	t.Cleanup(func() { typeSettle = saved })
-	h := &k1Host{fakeHost: &fakeHost{alive: true}, paste: func() error { return errors.New("no such pane") }}
+	h := &k1Host{fakeHost: &fakeHost{alive: true, screen: claudePromptScreen}, paste: func() error { return errors.New("no such pane") }}
 	s := newSeat(Spec{}, claudeAgent{}, h, "k7-said", "id")
 	s.state, s.poll = "idle", piLook
 	s.events = make(chan Event) // each event waits until it is read
