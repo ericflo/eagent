@@ -56,14 +56,19 @@ type Controller struct {
 	// ChosenRoutes is Routes for a preset saved in a change that chooses a
 	// configuration (/config, named by chosen): a pick that names that
 	// configuration's route is the route as it defines it. Nil uses Routes.
-	ChosenRoutes                       func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
+	ChosenRoutes func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
+	// base is the configuration the session started from (its first
+	// Values.Config): a choice in the session changes only its routes, so a
+	// preset saved from it takes its other settings from this one, never
+	// from the name being saved.
+	base                               string
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
 }
 
 func New(project, session string, values Values, apply func(Request, Values, map[string]any) error) (*Controller, error) {
-	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply}
+	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply, base: values.Config}
 	var err error
 	c.status, err = openDirectory(project, session, true, "status")
 	if err != nil {
@@ -246,7 +251,9 @@ func (c *Controller) process(q Request) error {
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
-		presetCfg, err = ConfigFromRoutes(c.Project, values, running)
+		layers := values
+		layers.Config = c.base
+		presetCfg, err = ConfigFromRoutes(c.Project, layers, running)
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
