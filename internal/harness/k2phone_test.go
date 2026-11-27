@@ -470,3 +470,33 @@ func TestK2AMessageTypedAndNeverConfirmedIsSaidSoOnThePhone(t *testing.T) {
 		t.Fatalf("the meta does not say the message may not have arrived (said %v)", said)
 	}
 }
+
+// Two resumes race on one phone reply: another process's watcher resumes
+// the stopped session with it, that run ends (a /quit, here a stop), and
+// this serve's restore then resumes the session with the same reply. The
+// reply is taken once.
+func TestK2TwoResumesWithOnePhoneReplyTakeItOnce(t *testing.T) {
+	t.Skip("known, not fixed: the resuming words are taken in Resume (runtime.go), not in this fixer's files; a resume must refuse a phone message the record already holds (integration.ReadPhoneLedger(...).Taken)")
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "start work", true, func(_ string, msgs []map[string]any) reply {
+		if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "the work is done") {
+			return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
+		}
+		return hold()
+	}, nil)
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	g.agentStopped()
+	g.interrupt()
+	id := r10Says(fp, r10Msg("run the tests"))[0]
+	opts := Options{Interactive: true, Prompt: "run the tests", PromptSource: "finalechat", PromptPhoneID: id}
+	g.resume(opts)
+	waitFor(t, "the first resume to take the reply", func() bool { return r14Taken(g, id) == 1 })
+	g.interrupt()
+	g.resume(opts)
+	waitFor(t, "the second resume's phone", func() bool { return len(g.events(event.PhoneThread)) == 3 })
+	g.rt.sync(func() {})
+	if n := r14Taken(g, id); n != 1 {
+		t.Fatalf("the reply was taken %d times", n)
+	}
+}
