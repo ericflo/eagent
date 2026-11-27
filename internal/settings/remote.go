@@ -557,21 +557,22 @@ func (s *Service) PrepareSavePreset(editor *config.Editor, p control.Proposal, g
 // SaveEffectiveAsPreset writes the project's current effective configuration
 // as a standalone named preset while the caller holds editor's lock.
 // CurrentLayers is the configuration in force as every save of it keeps
-// it: the bundle loading takes (bundle, else an explicit preset naming a
-// saved one, EAGENT_CONFIG, then the file's default_config) with the
-// layers below it, never a value only an environment variable gives (a
-// bundle EAGENT_CONFIG chooses is a file, and its values count).
+// it, with the layers below the environment: never a value only an
+// environment variable gives (a bundle EAGENT_CONFIG chooses is a file,
+// and its values count). Resolve lays a preset and a bundle as loading
+// does (a saved bundle an explicit preset names, a built-in named as the
+// bundle being the preset), but leaves the bundle loading takes by
+// default to its callers: that is config.DefaultBundle, the loader's own.
 func CurrentLayers(project, preset, bundle string) (config.Config, error) {
+	if _, err := config.LoadBundle(project, preset, bundle); err != nil {
+		return config.Config{}, err // what is in force must load, as on main
+	}
 	res := config.Resolve(project, preset, bundle)
-	if bundle == "" && res.LoadError == "" {
-		// Resolve leaves EAGENT_CONFIG and default_config to its callers;
-		// loading follows them, so the bundle in force is the loader's.
-		loaded, err := config.LoadBundle(project, preset, "")
-		if err != nil {
-			return config.Config{}, err
-		}
-		if loaded.Name != "" && loaded.Name != res.Layered.Name {
-			res = config.Resolve(project, preset, loaded.Name)
+	if bundle == "" && res.LoadError == "" && res.Layered.Name == "" {
+		var file map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(res.File.Raw), &file)
+		if b := config.DefaultBundle(file); b != "" {
+			res = config.Resolve(project, preset, b)
 		}
 	}
 	if res.LoadError != "" {

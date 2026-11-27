@@ -733,6 +733,20 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 
 // LoadBundleWithFile resolves proposed file contents through the actual
 // resolver without writing them or changing process environment variables.
+// DefaultBundle is the bundle loading takes when none is named and no
+// explicit preset names a saved one: EAGENT_CONFIG, else the file's
+// default_config. It may name a built-in preset, which is then the preset.
+func DefaultBundle(fileCfg map[string]json.RawMessage) string {
+	if bundle := os.Getenv("EAGENT_CONFIG"); bundle != "" {
+		return bundle
+	}
+	var bundle string
+	if raw, ok := fileCfg["default_config"]; ok {
+		_ = json.Unmarshal(raw, &bundle)
+	}
+	return bundle
+}
+
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
 	cfg := Defaults()
 	var err error
@@ -752,12 +766,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		}
 	}
 	if bundle == "" {
-		bundle = os.Getenv("EAGENT_CONFIG")
-	}
-	if bundle == "" {
-		if raw, ok := fileCfg["default_config"]; ok {
-			_ = json.Unmarshal(raw, &bundle)
-		}
+		bundle = DefaultBundle(fileCfg)
 	}
 	var bundleCfg map[string]json.RawMessage
 	if bundle != "" {
