@@ -172,9 +172,8 @@ func alive(sessionPath string) bool { return store.Alive(sessionPath) }
 func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 
 // PhoneConfig is the phone section of this server's own configuration (its
-// bundle and preset over the project's): the account the reply watcher
-// watches besides the project file's, and the one the restore reads a
-// waiting reply on first.
+// bundle and preset over the project's). The reply watcher and the restore
+// do not use it: they watch the project file's account, as on main.
 func (s *Server) PhoneConfig() (config.Finalechat, error) {
 	cfg, err := s.loadConfig("", "")
 	return cfg.Finalechat, err
