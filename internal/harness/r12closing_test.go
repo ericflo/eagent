@@ -329,3 +329,31 @@ func TestR12ClosingTurnThatAsksOnThePhoneIsTriedAgain(t *testing.T) {
 		t.Fatalf("the closing turn ended %q with the question open, and the failed call is never made again", "error, closing")
 	}
 }
+
+// ---- 5. a timer and a question nobody can answer --------------------------
+
+// A batch session with no phone asks a question and sets a timer. ask_user
+// tells the model that the session ends now: it does, awaiting the answer,
+// and does not stay up for the timer.
+func TestR12UnanswerableQuestionWithATimerEndsTheSession(t *testing.T) {
+	var phase atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; #45 conflicts."), func(_ *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		if strings.Contains(lastUserText(msgs), "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" && phase.CompareAndSwap(0, 1) {
+			return reply{calls: []event.ToolCall{
+				tc("ask_user", `{"text":"Rebase #45 or leave it?","options":["rebase","leave"]}`),
+				tc("schedule", `{"spec":"1h","note":"Check on #45."}`),
+				tc("relay_control", `{"action":"stop","reason":"waiting on the user"}`),
+			}}
+		}
+		return hold()
+	})
+	select {
+	case code := <-s.done:
+		s.done <- code
+		if code != 2 {
+			t.Fatalf("exit %d, want 2 (the question is open)", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the session is still running with a question nobody can answer (phase %d); said %q", phase.Load(), s.ui.said())
+	}
+}
