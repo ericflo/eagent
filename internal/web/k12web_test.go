@@ -37,7 +37,9 @@ func TestK12AMarkOnTheListSurvivesACleanShutdown(t *testing.T) {
 	list, ok := s.readHosted()
 	s.mu.Unlock()
 	mark, kept := list.mark(marked.ID)
-	if !ok || !slices.Contains(list.Sessions, marked.ID) || !slices.Contains(list.Sessions, "other") || !kept || !mark.At.Equal(at) {
+	// (Changed with the sixth review: a marked session is only on the
+	// marks, never among the sessions to bring back.)
+	if !ok || slices.Contains(list.Sessions, marked.ID) || !slices.Contains(list.Sessions, "other") || !kept || !mark.At.Equal(at) {
 		t.Fatalf("the list the shutdown wrote: %+v (%v), want the mark kept, as made at %s, beside the hosted session", list, ok, at)
 	}
 }

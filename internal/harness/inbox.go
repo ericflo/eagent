@@ -47,9 +47,16 @@ type InboxMessage struct {
 
 // PostInbox writes a message for the session at sessionPath.
 func PostInbox(sessionPath string, msg InboxMessage) error {
+	_, err := PostInboxFile(sessionPath, msg)
+	return err
+}
+
+// PostInboxFile is PostInbox, and says which file it wrote: the run that
+// takes the message removes that file once it is recorded.
+func PostInboxFile(sessionPath string, msg InboxMessage) (string, error) {
 	dir := InboxDir(sessionPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return "", err
 	}
 	// The file says its own name ("inbox_id"), which marks that name as
 	// this submission's and no other's (see inboxFileID). The time orders
@@ -57,9 +64,9 @@ func PostInbox(sessionPath string, msg InboxMessage) error {
 	// apart, and so does a temporary file of each post's own.
 	stamp, err := inboxStamp()
 	if err != nil {
-		return err
+		return "", err
 	}
-	return writeInbox(dir, stamp, msg)
+	return filepath.Join(dir, stamp+".json"), writeInbox(dir, stamp, msg)
 }
 
 // inboxStamp is a new name for an inbox file: the time, and a random part.
