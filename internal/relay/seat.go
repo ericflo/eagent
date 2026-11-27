@@ -1285,10 +1285,12 @@ func (s *Seat) fold(o obs) {
 		s.mu.Unlock()
 		if !held {
 			s.setState("idle", "")
-			s.mu.Lock()
-			s.turnEndAt = time.Now() // the transcript says the turn is over
-			s.mu.Unlock()
 		}
+		// The transcript says the turn is over, also under a dialog: the
+		// seat goes back to idle when it ends, unless a turn begins first.
+		s.mu.Lock()
+		s.turnEndAt = time.Now()
+		s.mu.Unlock()
 	case "limit":
 		if o.exhausted {
 			s.emit(Event{Kind: KindLimit, Text: o.text, Exhausted: true})

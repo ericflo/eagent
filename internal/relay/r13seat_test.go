@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -62,6 +63,38 @@ func TestR13SHungWorkingSeatKeepsItsSend(t *testing.T) {
 		s.checkScreen(now)
 		if got := deliveredEvents(s); len(got) != 0 || len(s.Snapshot().Pending) != 1 {
 			t.Errorf("%s: reported %+v, pending %v; want the send still watched", name, got, s.Snapshot().Pending)
+		}
+	}
+}
+
+// Finding 12: pi's turn ends (or is interrupted) while its extension
+// reports a dialog, and the dialog then ends (in the same look, for an
+// interrupt). A message held for the end of the turn whose spool file is
+// gone (an interrupt put it back in pi's editor) is lost once that turn is
+// over, and reported unconfirmed after the usual wait.
+func TestR13SPiTurnEndUnderADialogCountsForAHeldSend(t *testing.T) {
+	t.Parallel()
+	pi := piAgent{label: "Pi"}
+	for _, kind := range []string{"turn", "aborted"} {
+		dir := t.TempDir()
+		status := filepath.Join(dir, "pi-status.json")
+		writePiStatus(t, status, piStatus{State: "working", Prompt: "Allow rm -rf build?", SessionFile: "/x.jsonl", SessionID: "id"})
+		spec := Spec{StatusFile: status, Dir: dir, Spool: filepath.Join(dir, "after_turn"), Hook: filepath.Join(dir, "eagent-relay.ts")}
+		s := newSeat(spec, pi, &fakeHost{alive: true, screen: piFooterScreen}, "r13s-pi", "id")
+		s.state = "working"
+		s.pending = []*pending{{id: "r1", text: "then run the tests", mode: "after_turn", at: time.Now().Add(-time.Second), held: true}}
+		s.reportDialog(pi.reportedDialog(s))
+		s.fold(obs{kind: kind, at: time.Now()})
+		writePiStatus(t, status, piStatus{State: "idle", SessionFile: "/x.jsonl", SessionID: "id", Settled: 1})
+		s.reportDialog(pi.reportedDialog(s))
+		if st := s.Snapshot().State; st != "idle" {
+			t.Fatalf("%s: the seat is %s after the dialog; want idle", kind, st)
+		}
+		later := time.Now().Add(heldGrace)
+		s.leftOvers(later, false)
+		s.checkScreen(later.Add(46 * time.Second))
+		if got := deliveredEvents(s); len(got) != 1 || got[0].SendID != "r1" || got[0].Outcome != OutcomeUnconfirmed {
+			t.Errorf("%s: reported %+v, pending %v; want r1 unconfirmed", kind, got, s.Snapshot().Pending)
 		}
 	}
 }
