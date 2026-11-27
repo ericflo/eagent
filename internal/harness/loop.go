@@ -475,14 +475,7 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if r.needsDossier() && !r.endsAtQuiet() {
-		// Restart at the first quiet moment: the prompt is still in the
-		// provider's cache, so the dossier is cheap to write now, and the
-		// user's next message does not have to wait for it. Not in a
-		// session that is ending: nothing will be asked of it again
-		// (noRestartNow). Nor in one that ends at this quiet moment
-		// (endsAtQuiet): maybeEnd, next in this tick, asks its closing
-		// word on the conversation that still fits, or ends it.
+	if r.restartAtQuiet() {
 		r.startDossier()
 		return
 	}
@@ -497,6 +490,19 @@ func (r *Runtime) maybeTurn() {
 	if t.threadDue {
 		r.startTurn(wake{thread: true})
 	}
+}
+
+// restartAtQuiet reports that the conversation is restarted at this quiet
+// moment: the prompt is still in the provider's cache, so the dossier is
+// cheap to write now, and the user's next message does not have to wait
+// for it. Not in a session that is ending: nothing will be asked of it
+// again (noRestartNow). Nor in one that ends at this quiet moment
+// (endsAtQuiet), whose conversation still fits: maybeEnd, next in this
+// tick, asks its closing word on it, or ends it. One the provider refused
+// as too long (overflowed) no longer fits, and is restarted. Loop
+// goroutine.
+func (r *Runtime) restartAtQuiet() bool {
+	return r.needsDossier() && (r.turns.overflowed || !r.endsAtQuiet())
 }
 
 // ---- a message for eagent is answered -------------------------------------
