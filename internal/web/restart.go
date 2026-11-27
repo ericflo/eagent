@@ -168,8 +168,8 @@ func (s *Server) configFor(info store.Info, accept func(config.Config) (bool, st
 		}
 	}
 	s.mu.Unlock()
-	if name := recordedConfig(info.Path); name != "" {
-		sources = append(sources, source{runPick{Config: name, Preset: "-"}, "record"})
+	if p, ok := recordedPick(info.Path); ok {
+		sources = append(sources, source{p, "record"})
 	}
 	sources = append(sources, source{runPick{Default: true}, "own"})
 	var last error
@@ -447,6 +447,22 @@ func threadBase(path string) string {
 		}
 	}
 	return base
+}
+
+// recordedPick is the configuration the session's record names in its
+// session.start, kept apart as a bundle (the run's bundle) or a preset
+// (with no bundle, its preset): a name that is a built-in preset is the
+// preset, as a bundle never is one (a bundle named as a preset loads as
+// that preset, and names none).
+func recordedPick(path string) (runPick, bool) {
+	name := recordedConfig(path)
+	if name == "" {
+		return runPick{}, false
+	}
+	if _, isPreset := config.ResolvePreset(name); isPreset {
+		return runPick{Config: "-", Preset: name}, true
+	}
+	return runPick{Config: name, Preset: "-"}, true
 }
 
 // recordedConfig is the configuration (bundle or preset) the session's
