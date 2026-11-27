@@ -1031,21 +1031,27 @@ func (s *Server) RegisterSessionStarter() func() {
 // resuming. Once the server's shutdown has begun it resumes nothing. It
 // runs on the configuration bundle and preset name, or, with none named
 // (every resume but one picked in the browser), on the session's own
-// (runConfig).
+// (runConfig); a resume for a reply from the phone, with the mirror on, on
+// the account of the session's thread (phoneOn).
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
 	if s.stopping {
 		return errStopping
 	}
+	info := store.Info{ID: filepath.Base(path), Path: path}
 	pick := s.pickOf(bundle, preset)
 	var cfg config.Config
 	var err error
 	if pick.Default {
-		cfg, pick, err = s.runConfig(store.Info{ID: filepath.Base(path), Path: path})
+		cfg, pick, err = s.runConfig(info)
 	} else {
 		cfg, err = s.loadConfig(bundle, preset)
 	}
 	if err != nil {
 		return err
+	}
+	if opts.PromptPhoneID != "" {
+		// For a reply from the phone: answered in its thread (phoneOn).
+		cfg = s.phoneOn(info, cfg)
 	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.Resume(cfg, opts, ui, path)

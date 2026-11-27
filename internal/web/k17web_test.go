@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -187,6 +191,116 @@ func TestSR8WebACommandFromThePageIsShownWaitingForEverAndResumesTheSession(t *t
 	}
 	if len(faults) > 0 {
 		t.Fatal(strings.Join(faults, "; "))
+	}
+}
+
+// A session mirrored to the phone (its thread is on the record) was
+// resumed from the page on a saved configuration with the phone off
+// ("nophone"), and stopped. The user replies in its thread on the phone;
+// the reply watcher, which acts because the server's own configuration
+// has the phone on, resumes the session with the reply (Resume). On main
+// that resume ran on the server's own configuration: the phone on, so the
+// run mirrored and the reply's answer went to the thread. Here host takes
+// the session's own (runConfig: the page's pick, phone off): the run takes
+// the reply from the phone and tells the phone nothing, ever: no answer,
+// no closing note; the watcher counts the reply handled.
+func TestSR8WebAPhoneReplyResumesTheSessionWithThePhoneOff(t *testing.T) {
+	s, project := newTestServer(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	f := &sr6Phone{keys: map[string]bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(srv.Close)
+	t.Setenv("FINALECHAT_TOKEN", "fc_test")
+	t.Setenv("FINALECHAT_URL", srv.URL)
+	cfg := r11Model(t)
+	cfg.Finalechat.Enabled = nil // the project's file: the phone on
+	if _, err := config.Write(project, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.BundlePath(project, "nophone"), []byte(`{"finalechat":{"enabled":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
+	if fc, err := s.PhoneConfig(); err != nil || !fc.Wanted() {
+		t.Fatalf("setup: the server's phone is off (%v): the reply watcher would not act", err)
+	}
+	info := r11Session(t, project)
+	k16Mirrored(t, info) // an earlier run mirrored: its thread is on the record
+	stop := func(what string) {
+		t.Helper()
+		s.mu.Lock()
+		h := s.running[info.ID]
+		s.mu.Unlock()
+		if h == nil {
+			t.Fatalf("setup: %s: the session is not hosted", what)
+		}
+		h.cancel()
+		<-h.done
+	}
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != 200 {
+		t.Fatalf("resume: %d %s", w.Code, w.Body)
+	}
+	stop("the page's resume")
+	notes := func() int {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.notes)
+	}
+	before := notes()
+	// The user's reply in the thread: the reply watcher resumes it.
+	if err := s.Resume(info.ID, integration.PhoneMessage{ID: "reply-1", Text: "what is the status?"}); err != nil {
+		t.Fatal(err)
+	}
+	stop("the phone's resume")
+	if n := k1Recorded(t, info, "what is the status?"); n != 1 {
+		t.Fatalf("setup: the reply is on the record %d time(s)", n)
+	}
+	got := notes() - before
+	// Control: the same resume on the server's own configuration (as on
+	// main: no configuration known for the session) tells the phone.
+	s.mu.Lock()
+	delete(s.ran, info.ID)
+	s.mu.Unlock()
+	mark := notes()
+	if err := s.Resume(info.ID, integration.PhoneMessage{ID: "reply-2", Text: "and now?"}); err != nil {
+		t.Fatal(err)
+	}
+	stop("the control's resume")
+	if notes() == mark {
+		t.Fatal("setup: a run on the server's own configuration told the phone nothing either")
+	}
+	if got == 0 {
+		t.Fatal("the session was resumed for a reply from the phone, on the configuration the page picked last (the phone off): the run took the reply and told the phone nothing (no closing note; its answers would not go either); on main the phone's resume ran on the server's own configuration, the phone on")
+	}
+}
+
+// A resume for a reply from the phone runs with the mirror on, on the
+// account of the configuration whose account is where the record shows
+// the session's thread (work, at a), not on the one the session runs on
+// (the server's own, at b), whose model and the rest it keeps; with no
+// configuration there, on the server's own account.
+func TestK17APhoneReplyIsAnsweredOnTheAccountOfTheSessionsThread(t *testing.T) {
+	const a, b = "https://phone-a.invalid", "https://phone-b.invalid"
+	for _, work := range []bool{true, false} {
+		s, project := newTestServer(t)
+		info := k16Work(t, project, a, b, work)
+		s.noteRan(info.ID, runPick{Default: true})
+		own, _, err := s.runConfig(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own.Model.Model = "the session's model"
+		got := s.phoneOn(info, own)
+		want := b
+		if work {
+			want = a + "/"
+		}
+		if got.Finalechat.BaseURL != want || !got.Finalechat.Wanted() || got.Model.Model != "the session's model" {
+			t.Fatalf("work %v: the reply's resume runs on phone %q (on %v), model %q; want %q, on, the session's model", work, got.Finalechat.BaseURL, got.Finalechat.Wanted(), got.Model.Model, want)
+		}
 	}
 }
 

@@ -386,16 +386,7 @@ func (s *Server) sessionConfig() *config.Config {
 func (s *Server) stopConfig(info store.Info) *config.Config {
 	var accept func(config.Config) (bool, string)
 	if base := threadBase(info.Path); base != "" {
-		accept = func(cfg config.Config) (bool, string) {
-			c, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL)
-			if !ok {
-				return false, "it has no phone account (no token)"
-			}
-			if strings.TrimRight(c.BaseURL, "/") != strings.TrimRight(base, "/") {
-				return false, "its phone account is at " + c.BaseURL + ", and the session's thread at " + base
-			}
-			return true, ""
-		}
+		accept = accountAt(base)
 	}
 	cfg, _, err := s.configFor(info, accept)
 	if err != nil {
@@ -403,6 +394,42 @@ func (s *Server) stopConfig(info store.Info) *config.Config {
 		return nil
 	}
 	return &cfg
+}
+
+// accountAt takes a configuration whose phone account is on the service
+// at base.
+func accountAt(base string) func(config.Config) (bool, string) {
+	return func(cfg config.Config) (bool, string) {
+		c, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL)
+		if !ok {
+			return false, "it has no phone account (no token)"
+		}
+		if strings.TrimRight(c.BaseURL, "/") != strings.TrimRight(base, "/") {
+			return false, "its phone account is at " + c.BaseURL + ", and the session's thread at " + base
+		}
+		return true, ""
+	}
+}
+
+// phoneOn is cfg, the configuration a session runs on, for a resume for a
+// reply from the phone: the mirror on, on the account the record shows
+// the session's thread on (the phone section of the first configuration
+// runConfig's walk finds with an account there; cfg's own when the record
+// names no address; this server's own, which the reply watcher read the
+// reply on, when none has one there), so the reply is answered in its
+// thread. The model and the rest stay cfg's.
+func (s *Server) phoneOn(info store.Info, cfg config.Config) config.Config {
+	if base := threadBase(info.Path); base != "" {
+		if acc, _, err := s.configFor(info, accountAt(base)); err == nil {
+			cfg.Finalechat = acc.Finalechat
+		} else if own := s.sessionConfig(); own != nil {
+			s.logf("session %s: no configuration known for it has an account where its thread is (%v); the reply is answered on this server's own account", info.ID, err)
+			cfg.Finalechat = own.Finalechat
+		}
+	}
+	on := true
+	cfg.Finalechat.Enabled = &on
+	return cfg
 }
 
 // threadBase is the address of the phone service the session's record
