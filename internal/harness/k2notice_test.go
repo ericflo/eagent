@@ -33,7 +33,8 @@ func TestRV15UnreachableNoticeWhileTheModelAnswersEachTurn(t *testing.T) {
 	ready.Store(true)
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
 	r6Until(t, "a wait of an hour", func() bool {
-		return r4Logged(s, "trying again in") > 0 || r4Logged(s, "model call failed") > 30
+		// The wait is logged before the notice is written: wait for both.
+		return r4Logged(s, "trying again in") > 0 && s.ui.messageCount() > 0 || r4Logged(s, "model call failed") > 30
 	})
 	var told []string
 	s.rt.sync(func() {
@@ -86,7 +87,10 @@ func TestK2TheFailingNoticeGoesByTheTurnThatFailedSecond(t *testing.T) {
 			s.settled()
 			ready.Store(true)
 			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
-			r6Until(t, "a wait of an hour", func() bool { return r4Logged(s, "trying again in") > 0 })
+			// The wait is logged before the notice is written: wait for both.
+			r6Until(t, "a wait of an hour and the notice", func() bool {
+				return r4Logged(s, "trying again in") > 0 && s.ui.messageCount() > 0
+			})
 			told := 0
 			for _, m := range s.ui.said() {
 				if strings.Contains(m, "keep failing") || strings.Contains(m, "can't reach my own model") || strings.Contains(m, "refuses my calls") {
