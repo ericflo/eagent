@@ -215,6 +215,9 @@ func Resolve(project, preset, bundle string) Resolution {
 		} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
 			// The window follows the model the variable names.
 			res.Sources[k] = "env:" + name
+		} else if name, ok := envVars["/model/base_url"]; ok && k == "/model/context_tokens" {
+			// And the address: it is the window of the model there.
+			res.Sources[k] = "env:" + name
 		} else {
 			res.Sources[k] = "env"
 		}
