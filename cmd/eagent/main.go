@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -1310,16 +1311,33 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 						delete(after, "default_config")
 						want := config.Defaults()
 						config.Presets[canon](&want)
-						if now, err := config.LoadBundleWithFile(project, "", "", after); err == nil && now.Model.Model != want.Model.Model {
+						if now, err := config.LoadBundleWithFile(project, "", "", after); err == nil && otherRoute(now.Model, want.Model) {
+							// What stands in the way: a variable that sets
+							// a part of the route that differs, else the
+							// saved preset laid over the file, else the
+							// preset the environment names.
 							why := "another setting names eagent's model here"
-							if name, ok := config.EnvOverrides()["/model/model"]; ok {
-								why = name + " sets eagent's model here"
-							} else if now.Name != "" {
+							var differs []string
+							for field, d := range map[string]bool{
+								"model":       now.Model.Model != want.Model.Model,
+								"base_url":    strings.TrimRight(now.Model.BaseURL, "/") != strings.TrimRight(want.Model.BaseURL, "/"),
+								"protocol":    now.Model.Protocol != want.Model.Protocol,
+								"api_key_env": now.Model.APIKeyEnv != want.Model.APIKeyEnv,
+							} {
+								if name, ok := config.EnvOverrides()["/model/"+field]; ok && d {
+									differs = append(differs, fmt.Sprintf("%s sets eagent's %s here", name, field))
+								}
+							}
+							slices.Sort(differs)
+							switch {
+							case len(differs) > 0:
+								why = strings.Join(differs, ", and ")
+							case now.Name != "":
 								why = fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name)
-							} else if os.Getenv("EAGENT_PRESET") != "" {
+							case os.Getenv("EAGENT_PRESET") != "":
 								why = "EAGENT_PRESET names the preset here"
 							}
-							return fail(fmt.Errorf("%s, so %s's model would not run (%s would); nothing was changed. Unset it first", why, target, now.Model.Model))
+							return fail(fmt.Errorf("%s, so %s would not run as the preset has it (%s at %s with $%s would); nothing was changed. Unset it first", why, target, now.Model.Model, now.Model.BaseURL, now.Model.APIKeyEnv))
 						}
 					}
 					// An effort the preset's model does not offer moves

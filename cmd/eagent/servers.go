@@ -294,10 +294,14 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return 0
 	}
 	fmt.Printf("updated %s\n", saveRes.Saved.Path)
-	if now, err := config.Load(project, ""); err == nil && now.Name != "" && now.Model.Model != cfg.Model.Model {
-		// A saved preset in force lays its own model over the file's:
-		// what was written runs once another is chosen.
-		fmt.Printf("  the saved preset %q is in force here (%s) and names its own model, so eagent still runs %s; %s runs once another preset is chosen (eagent presets use NAME|default)\n", now.Name, now.NameFrom, now.Model.Model, cfg.Model.Model)
+	if now, err := config.Load(project, ""); err == nil && now.Name != "" && otherRoute(now.Model, cfg.Model) {
+		// A saved preset laid over the file names its own model: what
+		// was written runs where none is laid over it.
+		how := now.NameFrom + " lays it here: unset it"
+		if now.NameFrom == "default_config" {
+			how = "the project's default_config lays it here: `eagent presets use default` clears that"
+		}
+		fmt.Printf("  the saved preset %q is laid over the project file here and names its own model, so eagent still runs %s @ %s. What was written (%s @ %s) runs where no saved preset is laid over the file; %s.\n", now.Name, now.Model.Model, now.Model.BaseURL, cfg.Model.Model, cfg.Model.BaseURL, how)
 		return 0
 	}
 	fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
@@ -377,4 +381,11 @@ func modelMetaLine(m config.Model) string {
 		return ""
 	}
 	return " (" + strings.Join(parts, " · ") + ")"
+}
+
+// otherRoute says whether b is another route than a: another model, or the
+// same one reached at another address, by another protocol or with another
+// key variable.
+func otherRoute(a, b config.ModelRoute) bool {
+	return a.Model != b.Model || strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/") || a.Protocol != b.Protocol || a.APIKeyEnv != b.APIKeyEnv
 }

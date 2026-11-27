@@ -138,7 +138,7 @@ func TestSR11ServersUseUnderASavedPresetInForceSaysWhatRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "eagent -> ") || !strings.Contains(out, `the saved preset "mine" is in force here (default_config)`) || !strings.Contains(out, "eagent still runs "+cfg.Model.Model) {
+	if strings.Contains(out, "eagent -> ") || !strings.Contains(out, `the saved preset "mine" is laid over the project file here`) || !strings.Contains(out, "the project's default_config lays it here") || !strings.Contains(out, "eagent still runs "+cfg.Model.Model) {
 		file, _ := os.ReadFile(config.File(project))
 		t.Fatalf("servers use said %q (exit %d); a session now runs %s @ %s\nfile: %s", out, code, cfg.Model.Model, cfg.Model.BaseURL, file)
 	}
