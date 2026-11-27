@@ -41,7 +41,7 @@ func TestSR5WebAStaleStopMarkKillsTheAgentOfALaterRun(t *testing.T) {
 	info := srAgentSession(t, project)
 	// The list the exiting server left, the stop marked.
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now().Add(-time.Hour).UTC(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now().Add(-time.Hour).UTC(), k12Marks(time.Now().Add(-time.Hour).UTC(), info.ID))
 	s.mu.Unlock()
 	// The later run, at the terminal: resumed, the agent picked up, a
 	// message typed to it, and Ctrl+C (the agent keeps working).
@@ -99,7 +99,7 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	k5Kills(t)
 	info := srAgentSession(t, project)
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now().UTC(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now().UTC(), k12Marks(time.Now().UTC(), info.ID))
 	s.mu.Unlock()
 	files, _ := filepath.Glob(filepath.Join(info.Path, "*.jsonl"))
 	for _, f := range files {
@@ -113,7 +113,7 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	next.mu.Lock()
 	list, ok := next.readHosted()
 	next.mu.Unlock()
-	if !ok || !slices.Contains(list.Stop, info.ID) {
+	if _, marked := list.mark(info.ID); !ok || !marked {
 		t.Fatalf("the stop could not be finished and its mark is gone: %+v (%v)", list, ok)
 	}
 	for _, f := range files {
@@ -140,7 +140,7 @@ func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := srAgentSession(t, project)
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now().UTC(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now().UTC(), k12Marks(time.Now().UTC(), info.ID))
 	s.mu.Unlock()
 	New(project, nil).restoreHosted(context.Background())
 	if !slices.Equal(told, []string{info.ID}) {

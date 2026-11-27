@@ -77,7 +77,7 @@ func TestK9TheNextServerFinishesAStopTheLastOneLeft(t *testing.T) {
 	t.Cleanup(func() { killAgent = old })
 	info := srAgentSession(t, project)
 	s.mu.Lock()
-	s.writeHostedList([]string{info.ID}, time.Now(), []string{info.ID})
+	s.writeHostedList([]string{info.ID}, time.Now(), k12Marks(time.Now(), info.ID))
 	s.mu.Unlock()
 	var resumed []string
 	oldRestore := restoreSession
