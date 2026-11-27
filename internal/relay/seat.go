@@ -172,6 +172,10 @@ type Seat struct {
 	moveIdle  int
 	quietSaid atomic.Bool
 	sending   int // Sends under way (Send, until it returns)
+	// ended: the watcher released what was held for the last time at a
+	// close (a command typed after says its delivered itself). closeLater: watching
+	// ended with a Send under way; the last to return closes events.
+	ended, closeLater bool
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -446,7 +450,8 @@ func newSeat(spec Spec, a Agent, host Host, target, innerID string) *Seat {
 		state: "starting", stateAt: time.Now(), handled: map[string]time.Time{}}
 }
 
-// Events delivers what the seat observes. It is closed when watching stops.
+// Events delivers what the seat observes. It is closed when watching stops
+// and no Send is under way.
 func (s *Seat) Events() <-chan Event { return s.events }
 
 // Target is the terminal session name.
@@ -588,7 +593,11 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	defer func() {
 		s.mu.Lock()
 		s.sending--
+		last := s.sending == 0 && s.closeLater
 		s.mu.Unlock()
+		if last {
+			s.closeEvents() // watching ended while this send was under way
+		}
 	}()
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
@@ -709,10 +718,20 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// delivered. Said once the watcher's next look has read what the
 		// agent did with it (pi's move to the session /new opens goes out
 		// first), so the record does not take it as acted on before then.
+		ev := Event{Kind: KindDelivered, SendID: id, OK: true}
 		s.mu.Lock()
-		s.held = append(s.held, heldEvent{Event{Kind: KindDelivered, SendID: id, OK: true}, s.looks})
+		ended := s.ended
+		if !ended {
+			s.held = append(s.held, heldEvent{ev, s.looks})
+		}
 		s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
 		s.mu.Unlock()
+		if ended {
+			// Watching ended as it was typed (a close): nothing releases
+			// held any more, so it goes out now. Events stay open until
+			// this Send returns (closeLater).
+			s.emitHeld(ev)
+		}
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
 	switch {
@@ -1286,12 +1305,15 @@ var tailBackfill int64 = 4 << 20
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer func() {
-		// Under the lock every event goes out under: a send that comes
-		// after (Send's, from its own goroutine) finds it closed.
-		s.emitMu.Lock()
-		s.eventsClosed = true
-		close(s.events)
-		s.emitMu.Unlock()
+		// A Send under way may still say how it ended (a command typed as
+		// the seat closed): the last one to return closes events then.
+		s.mu.Lock()
+		s.closeLater = s.sending > 0
+		later := s.closeLater
+		s.mu.Unlock()
+		if !later {
+			s.closeEvents()
+		}
 	}()
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
@@ -1577,6 +1599,10 @@ type heldEvent struct {
 func (s *Seat) releaseHeld(look int) {
 	s.mu.Lock()
 	var due []Event
+	// The last release at a close: a command typed after says its own
+	// delivered. (After an exit the record settles a send being typed as
+	// gone, and nothing says it again.)
+	s.ended = s.ended || look == math.MaxInt && s.closed
 	if !s.refollow || look == math.MaxInt {
 		keep := s.held[:0]
 		for _, h := range s.held {
@@ -1595,6 +1621,17 @@ func (s *Seat) releaseHeld(look int) {
 		} else {
 			s.emitAside(ev)
 		}
+	}
+}
+
+// closeEvents closes events, under the lock every event goes out under: a
+// send that comes after (Send's, from its own goroutine) finds it closed.
+func (s *Seat) closeEvents() {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if !s.eventsClosed {
+		s.eventsClosed = true
+		close(s.events)
 	}
 }
 

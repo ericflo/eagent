@@ -145,3 +145,38 @@ func TestSr5SeatQuietWhileACommandIsBeingTyped(t *testing.T) {
 		t.Fatal("the seat said quiet while /clear was being typed into Claude; want not quiet until its delivered and its move are in place")
 	}
 }
+
+// SR5-3. The sibling of 691e5fa: a command whose Enter goes while the seat
+// is closing (a restart's Kill closes the seat, waits for the watcher, and
+// only then kills the pane) is typed, but Send puts its delivered in held
+// after the watcher has already released what was held and ended. Nothing
+// sends it: the record settles the command as a send that cannot be
+// confirmed, though Send typed it and typed is delivered.
+func TestSr5SeatCommandTypedWhileTheSeatClosesHasNoDelivered(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	h := &k1Host{fakeHost: &fakeHost{alive: true, screen: claudePromptScreen}}
+	var s *Seat
+	h.enter = func() error {
+		s.Close() // the close lands as the Enter goes; the pane is still up
+		return nil
+	}
+	s = newSeat(Spec{}, claudeAgent{}, h, "sr5-cmd-closing", "id")
+	s.state, s.poll = "idle", piLook
+	go s.watch()
+	if !eventually(func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.looks > 0 }) {
+		t.Fatal("never looked")
+	}
+	res, err := s.Send("c1", "/compact", "queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := false
+	for ev := range s.Events() {
+		delivered = delivered || ev.Kind == KindDelivered && ev.SendID == "c1" && ev.OK
+	}
+	if !delivered {
+		t.Fatalf("Send said %q (typed %q), and the seat closed with no delivered for it; want typed to be delivered", res, k1Typed(h.fakeHost))
+	}
+}
