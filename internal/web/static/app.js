@@ -362,11 +362,16 @@ function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
   pend.innerHTML = '';
   if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o)), ...(d.alive && !ARCHIVE ? [h('button', {class: 'ghost', title: 'Close the question without answering. Nothing is sent to the agent.', onclick: dismissQuestion}, 'Dismiss')] : []));
-  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer. Dismiss closes the question and sends nothing.' : 'Goes to the agent word for word. Start with @e to talk to eagent instead; /help lists the commands.') : 'The session is not running; sending a message resumes it here.';
+  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer. Dismiss closes the question and sends nothing.' : 'Goes to the agent word for word. Start with @e to talk to eagent instead; eagent itself takes /relay, /interrupt, /restart, /model and /stop-relay.') : 'The session is not running; sending a message resumes it here.';
 }
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
   ta.value = ''; ta.style.height = 'auto';
+  // /screen shows the agent's terminal here, as its Screen button does: the
+  // session itself shows it only at its own terminal and on the phone.
+  const d = S.detail;
+  const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
+  if (agent) { showScreen(agent.name); return; }
   try {
     if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
     else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});

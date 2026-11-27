@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -105,15 +106,32 @@ func writeInbox(dir, stamp string, msg InboxMessage) error {
 // the run's loop, unless the run has begun to end: then nothing is
 // written, and Take reports false. Handed over this way, words are taken
 // before Take returns or not at all; a file left from outside can come
-// after an ending run's last look.
+// after an ending run's last look. A file the poll could not take is taken
+// back, and that is the error; one that cannot be taken back is left for
+// a later look, and reported taken.
 func (r *Runtime) Take(msg InboxMessage) (took bool, err error) {
 	r.sync(func() {
 		if r.ending {
 			return
 		}
-		if err = PostInbox(r.sess.Path, msg); err == nil {
-			took = true
-			r.pollInbox()
+		dir := InboxDir(r.sess.Path)
+		stamp, serr := inboxStamp()
+		if err = serr; err == nil {
+			err = os.MkdirAll(dir, 0o755)
+		}
+		if err == nil {
+			err = writeInbox(dir, stamp, msg)
+		}
+		if err != nil {
+			return
+		}
+		r.pollInbox()
+		if took = r.inboxTaken[stamp]; !took {
+			if os.Remove(filepath.Join(dir, stamp+".json")) == nil {
+				err = errors.New("the session could not read it from its inbox")
+			} else {
+				took = true // left for a later look
+			}
 		}
 	})
 	return took, err
