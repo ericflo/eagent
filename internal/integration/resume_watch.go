@@ -75,7 +75,52 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 			}
 		}
 	}()
-	return func() { cancel(); <-done }
+	return func() { cancel(); <-done; retries.writeDown(project, logf) }
+}
+
+// keptFile is where a stopping reply watcher writes down the replies it
+// keeps quietly (keepUntilStopped), and the sweep of whoever holds the
+// watch next takes them up, once: a session that stops meanwhile hides its
+// thread from the sweep behind its closing note. A hard kill writes
+// nothing, as for the serve's list of hosted sessions.
+func keptFile(project string) string {
+	return filepath.Join(stateDir(project), "resume-watch-kept.json")
+}
+
+// writeDown adds the quiet entries, by thread, to those written down that
+// nobody has taken up yet.
+func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
+	kept := map[string]finalechat.Message{}
+	if raw, err := os.ReadFile(keptFile(project)); err == nil {
+		_ = json.Unmarshal(raw, &kept)
+	}
+	r.mu.Lock()
+	for _, p := range r.replies {
+		if !p.told {
+			kept[p.thread.ExternalID] = p.msg
+		}
+	}
+	r.mu.Unlock()
+	if len(kept) == 0 {
+		return
+	}
+	if err := writeJSONAtomic(keptFile(project), kept); err != nil {
+		logf("finalechat: could not note the replies kept for the next start: %v", err)
+	}
+}
+
+// takeUp keeps, quietly, what an earlier watcher wrote down.
+func (r *replyRetries) takeUp(project string) {
+	raw, err := os.ReadFile(keptFile(project))
+	if err != nil {
+		return
+	}
+	_ = os.Remove(keptFile(project))
+	var kept map[string]finalechat.Message
+	_ = json.Unmarshal(raw, &kept)
+	for ext, m := range kept {
+		r.keepQuietly(finalechat.Thread{ExternalID: ext}, m)
+	}
 }
 
 type resumeWatcher struct {
@@ -414,6 +459,7 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 	}
 	sweepCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
+	w.retries.takeUp(w.project)
 	w.retryPending(sweepCtx)
 	if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", url.Values{"limit": {"200"}}, nil, &page, 0); err != nil {
 		return

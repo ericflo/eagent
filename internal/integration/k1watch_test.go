@@ -2,20 +2,55 @@ package integration
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/finalechat"
 )
 
-// k1Host is r13QuitHost that hands over every message it resumes with.
+// k1Host is a host that hands over every message it resumes with.
 type k1Host struct {
-	*r13QuitHost
+	ResumeHost
 	next chan PhoneMessage
 }
 
 func (h *k1Host) Resume(id string, msg PhoneMessage) error {
-	err := h.r13QuitHost.Resume(id, msg)
+	err := h.ResumeHost.Resume(id, msg)
 	h.next <- msg
 	return err
+}
+
+// k1Stream stands in front of an r6Thread fixture with an event stream
+// whose first connection brings one message and then holds; the ones
+// after it bring nothing.
+func k1Stream(t *testing.T, f *r6Thread, thread finalechat.Thread, m map[string]any) string {
+	t.Helper()
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	var sent atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/events" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		sseEvent(w, "ready", map[string]any{})
+		if !sent.Swap(true) {
+			sseEvent(w, "message.created", map[string]any{"thread": thread, "message": m})
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
 // k1Next waits for the next resume, for at most two seconds.
@@ -36,7 +71,7 @@ func k1Next(t *testing.T, h *k1Host) (PhoneMessage, bool) {
 // it, resumes the session with the message after the /quit.
 func TestK1ARestoreWithAQuitFirstLeavesNothingBehind(t *testing.T) {
 	sid, f, quit, _ := r13QuitWaiting(t, "/quit", "actually fix the login bug")
-	host := &k1Host{r13QuitHost: quit, next: make(chan PhoneMessage, 4)}
+	host := &k1Host{ResumeHost: quit, next: make(chan PhoneMessage, 4)}
 	t.Setenv("FINALECHAT_URL", f.srv.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid))
@@ -81,5 +116,45 @@ func TestK1AReplyDeletedAfterItsResumeFailedIsNotResumed(t *testing.T) {
 	w.sweep(context.Background())
 	if host.calls() != 0 || len(w.retries.replies) != 0 {
 		t.Fatalf("after the reply was deleted: resumed %#v, kept %#v", host.resumed, w.retries.replies)
+	}
+}
+
+// B9: a reply reaches a session while it runs, and the reply watcher keeps
+// it for when the session stops. The serve restarts (a new process knows
+// nothing the last one held in memory), and then the session stops
+// without having taken the reply in, its closing note the thread's latest
+// message. The new serve's watcher resumes the session with the reply.
+func TestK1AReplyKeptWhileItsSessionRanOutlivesARestartOfTheServe(t *testing.T) {
+	project, sid, sess, f, running, _ := r9Running(t, true)
+	host := &k1Host{ResumeHost: running, next: make(chan PhoneMessage, 4)}
+	at := time.Now()
+	f.say(sid, "m1", "one more thing", at, nil)
+	thread := finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}
+	t.Setenv("FINALECHAT_URL", k1Stream(t, f, thread, map[string]any{"id": "m1", "sender": "user", "origin": "session", "body": "one more thing", "created_at": at}))
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	left := make(chan struct{}, 1)
+	logf := func(format string, args ...any) {
+		t.Logf(format, args...)
+		if strings.Contains(format, "left to its running mirror") {
+			select {
+			case left <- struct{}{}:
+			default:
+			}
+		}
+	}
+	stop := StartResumeWatcher(context.Background(), project, host, logf)
+	select {
+	case <-left:
+	case <-time.After(2 * time.Second):
+		stop()
+		t.Fatal("the reply never reached the first serve's watcher")
+	}
+	stop()
+	watchRetries.Delete(project) // the next serve is another process
+	r9Ends(t, sess, f, sid)
+	stop = StartResumeWatcher(context.Background(), project, host, t.Logf)
+	defer stop()
+	if m, ok := k1Next(t, host); !ok || m.ID != "m1" || m.Text != "one more thing" {
+		t.Fatalf("after the restart: resumed %#v (%v), want the reply kept before it", m, ok)
 	}
 }
