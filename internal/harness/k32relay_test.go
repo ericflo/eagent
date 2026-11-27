@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // The user's message is typed into Codex and not confirmed; eagent switches
@@ -57,4 +58,29 @@ func TestK32AMessageToAnAgentWhoseNameWasTakenAgainIsStillSettled(t *testing.T) 
 			t.Errorf("%d stopped agents are still waited on after the settle", len(rels))
 		}
 	})
+}
+
+// A seat taken out of use says how a send of its own went, and says it
+// once on the record: the same word again writes nothing, as for a seat
+// still in use while the session ends. A word that differs is its newer
+// one, and is written.
+func TestK32ARetiredSeatsWordIsWrittenOnce(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	useGatedLaunches(t, []relaySeat{seat}, nil)
+	rt := newLaunchRuntime(t)
+	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
+	word := func(ok bool, outcome string) {
+		rt.sync(func() {
+			rt.retiredNews("codex", seat, rt.st.Relays["codex"], relay.Event{Kind: relay.KindDelivered, SendID: id, OK: ok, Outcome: outcome, Detail: "as the seat saw it"})
+		})
+	}
+	word(false, relay.OutcomeUnconfirmed)
+	word(false, relay.OutcomeUnconfirmed)
+	if got := deliveredFor(rt, id); len(got) != 1 || got[0].Outcome != event.DeliveryUnconfirmed {
+		t.Fatalf("the same word twice is on the record as %+v; want it once", got)
+	}
+	word(true, "")
+	if got := deliveredFor(rt, id); len(got) != 2 || !got[1].OK {
+		t.Fatalf("the seat's newer word, that it arrived, is not on the record: %+v", got)
+	}
 }

@@ -1461,8 +1461,12 @@ func (r *Runtime) retiredNews(name string, seat relaySeat, rel *state.Relay, ev 
 	case relay.KindDelivered:
 		// Its word on its own send: one outcome, by the send's id. The
 		// rest of what it saw is not recorded, and the record of its name
-		// may be a new agent's by now, with a transcript of its own.
-		r.appendOutcome(r.outcomeAside(name, ev))
+		// may be a new agent's by now, with a transcript of its own. A
+		// word the record has already is not written again, as where a
+		// seat still in use says its last (onRelayEvent, writeLateNews).
+		if !r.sameWord(ev) {
+			r.appendOutcome(r.outcomeAside(name, ev))
+		}
 	case relay.KindInner:
 		if r.st.Relays[name] != rel {
 			// A start under the name has been recorded since: the move is
