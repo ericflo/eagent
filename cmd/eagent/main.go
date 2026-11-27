@@ -1003,7 +1003,7 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	} else {
 		fmt.Printf("finalechat: on (token from %s; --live checks it)\n", c.Source)
 	}
-	if n, how := cfg.RolloverChosen(); cfg.RolloverTokens > 0 {
+	if n, how := cfg.RolloverChosen(project); cfg.RolloverTokens > 0 {
 		fmt.Printf("conversation restarts at: %d prompt tokens, %s\n", n, how)
 	} else {
 		fmt.Printf("conversation restarts at: %d prompt tokens, %s (rollover_tokens fixes a number)\n", n, how)

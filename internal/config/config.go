@@ -395,20 +395,27 @@ const rolloverReserve = 8_000 + 25_000
 // Rollover is the prompt size at which this configuration's conversation
 // restarts: the number it sets, or AutoRollover for its model.
 func (c Config) Rollover() int {
-	n, _ := c.RolloverChosen()
+	n, _ := c.RolloverChosen("")
 	return n
 }
 
 // RolloverChosen is Rollover and how it was chosen, in words: the number
 // rollover_tokens sets, half of the model's context window, or the
-// small-window rule.
-func (c Config) RolloverChosen() (int, string) {
+// small-window rule. The window is the one a running session takes
+// (harness Runtime.window): the route's own, or, when it sets none (a
+// cleared context_tokens), the one the catalog or the project's live list
+// gives its model (KnownContext).
+func (c Config) RolloverChosen(project string) (int, string) {
 	if c.RolloverTokens > 0 {
 		return c.RolloverTokens, "set by rollover_tokens"
 	}
+	window := c.Model.ContextTokens
+	if window <= 0 {
+		window = KnownContext(project, c.Model.BaseURL, c.Model.Model)
+	}
 	// The system prompt is not known here; a running session takes it off
 	// too, so on a small window it restarts a little later than this says.
-	n, half := autoRolloverWithin(c.Model.ContextTokens, c.Model.MaxTokens, 0)
+	n, half := autoRolloverWithin(window, c.Model.MaxTokens, 0)
 	if half {
 		return n, "half of the model's context window"
 	}
