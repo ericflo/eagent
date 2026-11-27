@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,4 +64,89 @@ func TestSR6LoopABatchSessionAboutToEndWhoseLooksFailAfterALookupNeverEnds(t *te
 	r := rt.Load()
 	r.sync(func() { active, finalAsked = len(r.st.ActiveRelays()), r.turns.finalAsked })
 	t.Fatalf("a batch session with nothing to keep it open (%d agents running, closing word asked: %v) made %d calls after its agent was stopped, every other one rate-limited, and still runs; said %q", active, finalAsked, after.Load(), s.ui.said())
+}
+
+// A batch session's closing look is rate-limited (429, transient since
+// 95b3e69, so no longer the closing path's refusal). turnFailed logs
+// "trying again now" (the first failure's wait is 0), and the session
+// ends at once: the closing turn closed out (fallbackFinal), and nothing
+// is tried again.
+func TestSR6LoopAClosingLookRateLimitedSaysItTriesAgainAndEnds(t *testing.T) {
+	var closing, after atomic.Int32
+	var stopped atomic.Bool
+	model := audit2Model(t, func(_ string, m []map[string]any) reply {
+		switch {
+		case closing.Load() > 0:
+			after.Add(1)
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			closing.Add(1)
+			return k7RateLimited
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: "@e check the build"}, newFakeSeat("ok"), model, func(r *Runtime) {
+		r.models[event.ActorEagent].client.MaxAttempts = 1
+	})
+	code := coreExit(s)
+	if closing.Load() == 0 {
+		t.Fatalf("setup: no closing look; exit %d", code)
+	}
+	var promised bool
+	for _, l := range s.ui.logged() {
+		if strings.Contains(l, "trying again now") {
+			promised = true
+		}
+	}
+	if promised && after.Load() == 0 {
+		t.Fatalf("logged that it tries again now, then ended (exit %d) with no call after the closing look; logged %q", code, s.ui.logged())
+	}
+}
+
+// 85bd57d's own path: an ending batch session's notice look is
+// rate-limited twice. The second failure logs that it tries again in an
+// hour, and the session ends as down at once (exit 2), with no notice and
+// no retry.
+func TestSR6LoopAnEndingSessionDownLogsARetryItNeverMakes(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+	var after atomic.Int32
+	var rt atomic.Pointer[Runtime]
+	var injected, stopped atomic.Bool
+	model := audit2Model(t, func(_ string, m []map[string]any) reply {
+		switch {
+		case injected.Load():
+			after.Add(1)
+			return k7RateLimited
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			if r := rt.Load(); r != nil && !injected.Load() {
+				r.sync(func() {
+					r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] A note of your own came due."}))
+				})
+				injected.Store(true)
+			}
+			return hold()
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: "@e check the build"}, newFakeSeat("ok"), model, func(r *Runtime) {
+		r.models[event.ActorEagent].client.MaxAttempts = 1
+		rt.Store(r)
+	})
+	code := coreExit(s)
+	if code != 2 || after.Load() != 2 {
+		t.Fatalf("setup: exit %d after %d calls", code, after.Load())
+	}
+	for _, l := range s.ui.logged() {
+		if strings.Contains(l, "trying again in") {
+			t.Fatalf("logged %q, then ended as down (exit %d) without trying again; said %q", l, code, s.ui.said())
+		}
+	}
 }

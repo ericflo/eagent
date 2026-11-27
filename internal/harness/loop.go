@@ -992,7 +992,7 @@ func (r *Runtime) turn(w wake) {
 			r.sync(func() {
 				closing := r.stillClosing()
 				stoppedClosing = stoppedClosing || !closing
-				if w.wait > 0 && closing {
+				if w.wait > 0 && r.afterFailure(w) == failCloseOut {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
 					// (summary.go). Taken for an outage it would be tried
@@ -1008,12 +1008,14 @@ func (r *Runtime) turn(w wake) {
 				// no failed call (turnFailed counts none): a call of this
 				// turn that came back still ends the failures before it.
 				counted := r.turns.failures
-				r.turnFailed(err, covered, answers)
+				r.turnFailed(err, covered, answers, w)
 				answers = answers && r.turns.failures == counted
 				r.turns.threadDue = r.turns.threadDue || w.thread
-				// The closing turn of a session still ending has had its word
-				// (the model's, or eagent's own here): nothing is owed after it.
-				if closedOut = w.final && closing; closedOut && mustSpeak && !tc.spoke {
+				// The closing turn of a session still ending, or of one that
+				// ends as down, has had its word (the model's, or eagent's own
+				// here): nothing is owed after it (afterFailure, as
+				// turnFailed's log has it).
+				if closedOut = w.final && r.afterFailure(w) != failRetry; closedOut && mustSpeak && !tc.spoke {
 					r.fallbackFinal()
 				}
 			})
@@ -1477,7 +1479,7 @@ func (r *Runtime) downWhy() string {
 func (r *Runtime) fallbackFinal() {
 	var b strings.Builder
 	b.WriteString("This session is ending and I could not write a proper closing report.")
-	if r.turns.failures >= 2 && r.endsDown() {
+	if r.afterFailure(wake{}) == failDown {
 		// It ends as down (maybeEnd): it says why, in words true for it.
 		b.WriteString(" " + r.downWhy())
 	}
@@ -1623,12 +1625,50 @@ var (
 	finalReportGrace   = 75 * time.Second
 )
 
+// failNext is what follows eagent's failed calls (afterFailure).
+type failNext int
+
+const (
+	// failRetry: the look is made again after its wait (errorRetryDelays).
+	failRetry failNext = iota
+	// failCloseOut: the closing turn, or the last title and summary, of a
+	// session that is ending failed: nothing more is asked of it, and it
+	// ends.
+	failCloseOut
+	// failDown: two failed looks in a row, and nothing keeps a session
+	// with no terminal open (endsDown): it ends as one whose model fails
+	// (maybeEnd).
+	failDown
+)
+
+// afterFailure decides what follows eagent's failed calls as they stand
+// (failures counts the last one, if it counted), for a call of a turn
+// woken by w; maybeEnd and the closing words ask with the zero wake.
+// turnFailed's log and notice, the turn's close-out, maybeEnd's down and
+// fallbackFinal's words all ask it, so what is said of a failure is what
+// follows it. Loop goroutine.
+func (r *Runtime) afterFailure(w wake) failNext {
+	closing := r.stillClosing()
+	switch {
+	case w.wait > 0 && closing:
+		// The last title and summary of a session that is ending: one
+		// attempt, which counts no failure.
+		return failCloseOut
+	case r.turns.failures >= 2 && r.endsDown():
+		return failDown
+	case w.final && closing:
+		return failCloseOut
+	}
+	return failRetry
+}
+
 // turnFailed handles a model call that did not come back, which had been
-// shown the record up to shown; answered says a call of its turn came
-// back before it. What asked for the look is still owed one, so the loop
-// tries again later; a message from the user after shown (one written
-// while the call was out too) tries at once. Loop goroutine.
-func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
+// shown the record up to shown, in a turn woken by w; answered says a call
+// of its turn came back before it. What asked for the look is still owed
+// one, so the loop tries again later (unless afterFailure says otherwise);
+// a message from the user after shown (one written while the call was out
+// too) tries at once. Loop goroutine.
+func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) {
 	t := &r.turns
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
@@ -1667,9 +1707,15 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t.failures++
 	wait := errorRetryDelays[min(t.failures, len(errorRetryDelays))-1]
 	t.retryAt, t.failSeq = time.Now().Add(wait), shown
-	if wait <= 0 {
+	next := r.afterFailure(w)
+	switch {
+	case next == failDown:
+		r.ui.Log("eagent: model call failed: %s; %d failed looks in a row, and nothing keeps the session open: it ends as one whose model fails", shortErr(err), t.failures)
+	case next == failCloseOut:
+		r.ui.Log("eagent: model call failed: %s; the session is ending, and ends without this look", shortErr(err))
+	case wait <= 0:
 		r.ui.Log("eagent: model call failed: %s; trying again now", shortErr(err))
-	} else {
+	default:
 		r.ui.Log("eagent: model call failed: %s; trying again in %s", shortErr(err), roundDur(wait))
 	}
 	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: event.ActorEagent, Text: err.Error()}))
@@ -1681,12 +1727,12 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
-		if r.endsDown() {
-			// A session with no terminal that nothing keeps open ends on
-			// this as one whose model is down, whatever came back first,
-			// in its own words (maybeEnd, fallbackFinal): it does not keep
-			// trying, nor keep what is written for an answer, so it does
-			// not say so.
+		if next != failRetry {
+			// The session ends on this (afterFailure): as one whose model
+			// is down, whatever came back first, in its own words
+			// (maybeEnd, fallbackFinal), or on its closing path. It does
+			// not keep trying, nor keep what is written for an answer, so
+			// it does not say so.
 			return
 		}
 		// Unless the restart could not be made (its file could not be
