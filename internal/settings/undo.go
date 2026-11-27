@@ -27,7 +27,7 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 	// one, cannot be turned off again by a remote edit (no field says
 	// "none"): unsetting its keys would bring the preset's back while the
 	// undo said it worked. It is refused instead, with where to do it.
-	if v, had := pointerValue(before, "/model/fallback"); had && v == nil && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return strings.HasPrefix(e.Key, "/model/fallback/") }) {
+	if v, had := pointerValue(before, "/model/fallback"); had && v == nil && presetGivesFallback(before) && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return strings.HasPrefix(e.Key, "/model/fallback/") }) {
 		return inverse, fmt.Errorf("this undo would turn the preset's fallback model back on, which the project file had turned off (\"fallback\": null); put that back in %s by hand", config.File(""))
 	}
 	keys := []string{}
@@ -71,6 +71,20 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 		inverse.Edits = append(inverse.Edits, reverse)
 	}
 	return inverse, nil
+}
+
+// presetGivesFallback says whether the built-in preset the file names (or
+// the defaults, when it names none) gives the main route a fallback: only
+// then does a null there turn something off. A saved bundle as the default
+// is not looked at.
+func presetGivesFallback(file map[string]any) bool {
+	c := config.Defaults()
+	if name, _ := file["preset"].(string); name != "" {
+		if canon, ok := config.ResolvePreset(name); ok {
+			config.Presets[canon](&c)
+		}
+	}
+	return c.Model.Fallback != nil
 }
 
 // PrepareUndo compares the affected fields against the original saved result
