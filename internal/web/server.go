@@ -637,9 +637,10 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 		// Another process runs it, which may be past its last look at the
 		// inbox: they wait there, watched, until it takes them or lets go
 		// of the session (watchInbox).
+		posted := time.Now()
 		file, err := harness.PostInboxFile(info.Path, msg)
 		if err == nil {
-			go s.watchInbox(info, file)
+			go s.watchInbox(info, file, posted)
 		}
 		return "queued", err
 	}
@@ -652,32 +653,104 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 // inboxWatchEvery is how often watchInbox looks; tests shorten it.
 var inboxWatchEvery = 200 * time.Millisecond
 
-// watchInbox follows words deliver left in the inbox of a session another
-// process runs, until that run takes them (their file goes) or lets go of
-// the session. A run that lets go with the file still there (it was past
-// its last look) leaves them for the next run: the session is resumed here
-// at once, and its run takes the file, the words' only copy, as words left
-// for it. Once this server's shutdown has begun, they are left for the
-// session's next run.
-func (s *Server) watchInbox(info store.Info, file string) {
+// watchInbox follows words deliver left (posted then) in the inbox of a
+// session another process runs. Once a run has taken them as a turn it is
+// done. Otherwise, when that run lets go of the session, one decision is
+// made, from the record and the inbox (wordsWait): words that wait for the
+// next run (kept on the record by a run that was ending, or still a file)
+// get the session resumed here, as words for a run here that is ending
+// do, and its run takes them up; unless the user stopped the session after
+// writing them, when the session stays stopped and they wait for the
+// user's next resume. Once this server's shutdown has begun, they wait for
+// the session's next run.
+func (s *Server) watchInbox(info store.Info, file string, posted time.Time) {
+	id := strings.TrimSuffix(filepath.Base(file), ".json")
 	tick := time.NewTicker(inboxWatchEvery)
 	defer tick.Stop()
+	gone := false
 	for range tick.C {
-		if _, err := os.Stat(file); err != nil || alive(info.Path) {
-			if err != nil {
-				return // taken
+		if !gone {
+			if _, err := os.Stat(file); err != nil {
+				gone = true
+				if answered, _ := inboxTaken(info.Path, id); answered {
+					return
+				}
 			}
+		}
+		if alive(info.Path) {
 			continue
 		}
 		s.resuming.Lock()
-		if _, err := os.Stat(file); err == nil && !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) {
+		if !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) && wordsWait(info.Path, id, posted) {
 			if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true); err != nil {
-				s.logf("web: session %s stopped with words in its inbox, and could not be resumed for them: %v", info.ID, err)
+				s.logf("web: session %s stopped with words waiting for it, and could not be resumed for them: %v", info.ID, err)
 			}
 		}
 		s.resuming.Unlock()
 		return
 	}
+}
+
+// inboxTaken reads the record for the words of inbox submission id:
+// answered when a run took them as a turn (a user.answer, or a
+// user.message not kept for the next run), and the seq of a user.message
+// a run that was ending kept for the next run (0 for none).
+func inboxTaken(path, id string) (answered bool, kept int64) {
+	evs, err := store.Read(path)
+	if err != nil {
+		return false, 0
+	}
+	for _, ev := range evs {
+		var d struct {
+			Inbox string `json:"inbox"`
+			Held  string `json:"held"`
+		}
+		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer || ev.Decode(&d) != nil || d.Inbox != id {
+			continue
+		}
+		if ev.Type == event.UserAnswer || d.Held != harness.HeldWhileEnding {
+			return true, 0
+		}
+		kept = ev.Seq
+	}
+	return false, kept
+}
+
+// wordsWait decides, once the run that had the session has let go of it,
+// whether the words of inbox submission id (posted then) get the session
+// resumed for them: they wait for a run (not answered), and the user did
+// not stop the session after writing them (a stop posted after them and
+// still in the inbox, or a stop the record shows taken after their message
+// or, for words it does not hold, after they were posted).
+func wordsWait(path, id string, posted time.Time) bool {
+	answered, kept := inboxTaken(path, id)
+	if answered {
+		return false
+	}
+	dir := harness.InboxDir(path)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() <= id+".json" || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		var msg harness.InboxMessage
+		if err == nil && json.Unmarshal(raw, &msg) == nil && msg.Type == "stop" {
+			return false
+		}
+	}
+	evs, err := store.Read(path)
+	if err != nil {
+		return false
+	}
+	for _, ev := range evs {
+		var d event.RelayEndData
+		stop := ev.Type == "session.stop_requested" || ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Reason == "the user stopped the session"
+		if stop && (kept > 0 && ev.Seq > kept || kept == 0 && ev.Time.After(posted)) {
+			return false
+		}
+	}
+	return true
 }
 
 // deliveredAnswer is the answer to words deliver took as how; words left

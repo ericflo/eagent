@@ -45,6 +45,11 @@ type InboxMessage struct {
 	CardID string `json:"card_id,omitempty"`
 }
 
+// HeldWhileEnding is the held reason a user.message is recorded with when
+// a run that is ending takes it: kept for the next run, not answered
+// (routeUserMessage).
+const HeldWhileEnding = "the session was ending"
+
 // PostInbox writes a message for the session at sessionPath.
 func PostInbox(sessionPath string, msg InboxMessage) error {
 	_, err := PostInboxFile(sessionPath, msg)
