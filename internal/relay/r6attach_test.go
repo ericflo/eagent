@@ -107,6 +107,19 @@ func (w *reattachedSeat) caughtUp(t *testing.T) {
 	}
 }
 
+// reportedAt looks at the screen as at now until the seat has reported a
+// send not confirmed. One pair of looks may decide nothing: the seat's own
+// poll runs beside the test, and each time it wants no check of its own it
+// forgets the look before (settle), so a pair it falls between has no
+// verdict.
+func (w *reattachedSeat) reportedAt(now time.Time) bool {
+	return eventually(func() bool {
+		w.s.checkScreen(now)
+		_, failed := w.delivered()
+		return len(failed) > 0
+	})
+}
+
 // delivered lists the confirmations (id) and the reports of a send not
 // confirmed (id and detail).
 func (w *reattachedSeat) delivered() (ok, failed []string) {
@@ -265,8 +278,7 @@ func TestARestoredSendTheTranscriptNeverShowsIsReportedAfterTheLiveWait(t *testi
 	if _, failed := w.delivered(); len(failed) > 0 {
 		t.Fatalf("reported %v ten seconds after the catch-up: the wait counted from when it was sent", failed)
 	}
-	w.s.checkScreen(start.Add(50 * time.Second))
-	if !eventually(func() bool { _, failed := w.delivered(); return len(failed) == 1 }) {
+	if !w.reportedAt(start.Add(50 * time.Second)) {
 		t.Fatal("never reported")
 	}
 	ok, failed := w.delivered()
@@ -358,8 +370,7 @@ func TestRestoredHeldMessages(t *testing.T) {
 		if _, failed := w.delivered(); len(failed) > 0 {
 			t.Fatalf("reported %v before the wait", failed)
 		}
-		w.s.checkScreen(start.Add(50 * time.Second))
-		if !eventually(func() bool { _, failed := w.delivered(); return len(failed) == 1 }) {
+		if !w.reportedAt(start.Add(50 * time.Second)) {
 			t.Fatal("never reported")
 		}
 	})

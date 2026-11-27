@@ -151,10 +151,10 @@ func TestARestoredSendNeverShownEndsUnconfirmedOnceAndIsNotTyped(t *testing.T) {
 	w.s.mu.Lock()
 	w.s.stateAt = start.Add(-time.Minute)
 	w.s.mu.Unlock()
-	for _, after := range []time.Duration{10, 50, 100} {
+	for _, after := range []time.Duration{10, 50} {
 		w.s.checkScreen(start.Add(after * time.Second))
 	}
-	if !eventually(func() bool { _, failed := w.delivered(); return len(failed) > 0 }) {
+	if !w.reportedAt(start.Add(100 * time.Second)) {
 		t.Fatal("never reported")
 	}
 	w.settle()
