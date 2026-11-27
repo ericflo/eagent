@@ -252,18 +252,18 @@ func TestEachMessageAfterNoRestartCanMakeRoomIsToldItWaits(t *testing.T) {
 	}
 }
 
-// Right after a switch to a model with a smaller window, before any call
-// has gone to it, the conversation is past the new model's restart size.
-// That door leads to the same decision: no restart can make room. With a
-// larger window, the decision no longer stands and the size of the new
-// window is asked as usual.
+// Right after a switch to another model, before any call has gone to it,
+// the decision found on the old one does not stand, whatever the new
+// window: the size of the new window is asked as usual. On a smaller one
+// or the same, the conversation is past the new model's restart size, so
+// it gets its own restart; on a larger one it is not, and none is asked.
 func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
 	refuse := func(string, []map[string]any) reply {
 		return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
 	}
 	for _, c := range []struct {
-		window  int
-		decided bool
+		window int
+		past   bool // the conversation is past the new model's restart size
 	}{{30_000, true}, {60_000, true}, {200_000, false}} {
 		s, _ := r5FullSession(t)
 		// The refused calls are retried after an hour from here on (set on
@@ -291,14 +291,14 @@ func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
 			needs = s.rt.needsDossier()
 			prompt, size = int(s.rt.contextTokens()), int(s.rt.rolloverTokens())
 		})
-		if c.decided && prompt < size {
-			t.Fatalf("window %d: the prompt (%d) is under the new restart size (%d), so the size door is not tested", c.window, prompt, size)
+		if c.past != (prompt >= size) {
+			t.Fatalf("window %d: the prompt (%d) against the new restart size (%d) is not the case tested", c.window, prompt, size)
 		}
-		if decided != c.decided {
-			t.Errorf("window %d: decided %v, want %v", c.window, decided, c.decided)
+		if decided {
+			t.Errorf("window %d: the decision found on the old model stands on the new one", c.window)
 		}
-		if c.decided && needs {
-			t.Errorf("window %d: a restart is asked for right after the switch, and no restart can make room", c.window)
+		if needs != c.past {
+			t.Errorf("window %d: a restart asked for %v, want %v", c.window, needs, c.past)
 		}
 		s.stop()
 	}

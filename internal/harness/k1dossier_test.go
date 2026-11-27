@@ -465,7 +465,6 @@ func TestK1TheOneMoreTryIsTheLastAcrossAResume(t *testing.T) {
 // decision found on less room does not stand on it: one restart on it
 // makes room, and the message is answered.
 func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) {
-	t.Skip("known, not fixed: the record does not hold the room a decision that no restart can make room was found on, so a run resumed on a model with more room keeps it (C2)")
 	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
 	route := &r5PictureRoute{window: 60000, ceiling: 2048, picture: 80000}
 	var restarted atomic.Bool
