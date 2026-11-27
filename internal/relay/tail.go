@@ -19,6 +19,9 @@ type tailer struct {
 	atEnd bool
 }
 
+// tailChunk is the most one read takes. Tests shrink it.
+var tailChunk int64 = 8 << 20
+
 // next returns the complete lines appended since the last call, and the
 // offset in the file where each one starts.
 func (t *tailer) next() ([][]byte, []int64, error) {
@@ -44,8 +47,7 @@ func (t *tailer) next() ([][]byte, []int64, error) {
 		return nil, nil, err
 	}
 	// Bound one read so a huge backlog is consumed over several polls.
-	const chunk = 8 << 20
-	buf := make([]byte, min(st.Size()-t.offset, chunk))
+	buf := make([]byte, min(st.Size()-t.offset, tailChunk))
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.ErrUnexpectedEOF {
 		return nil, nil, err

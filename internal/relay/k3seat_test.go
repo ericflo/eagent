@@ -87,19 +87,24 @@ func TestSr2SeatAgyStatusTurnEndAndQuotaAfterAReattachWithAReadMark(t *testing.T
 // unconfirmed ("not typed again, so send it again").
 func TestSr2SeatPiMoveDuringTheCatchUpOfALongSessionLosesItsEnd(t *testing.T) {
 	isolatePi(t)
-	for _, mb := range []int{1, 9} { // 1 MB: read in one look, passes
-		t.Run(string(rune('0'+mb))+"MB", func(t *testing.T) { sr2PiMoveCatchUp(t, mb) })
+	// One look reads 8 KB here (8 MB in production): 1 KB of older turns
+	// is read in one look, 9 KB takes two.
+	saved := tailChunk
+	tailChunk = 8 << 10
+	t.Cleanup(func() { tailChunk = saved })
+	for _, kb := range []int{1, 9} { // 1 KB: read in one look, passes
+		t.Run(string(rune('0'+kb))+"KB", func(t *testing.T) { sr2PiMoveCatchUp(t, kb) })
 	}
 }
 
-func sr2PiMoveCatchUp(t *testing.T, mb int) {
+func sr2PiMoveCatchUp(t *testing.T, kb int) {
 	dir := t.TempDir()
 	first, second := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "second.jsonl")
 	status := filepath.Join(dir, "pi-status.json")
 	sentAt := time.Now().Add(-time.Minute)
 	lines := []string{piHeaderLine("first", sentAt.Add(-2*time.Hour))}
-	for i := 0; i < mb; i++ { // older turns, 1 MB each
-		lines = append(lines, piTurnLines("old"+string(rune('a'+i)), strings.Repeat("x", 1<<20), "ok", sentAt.Add(-time.Hour+time.Duration(i)*time.Second))...)
+	for i := 0; i < kb; i++ { // older turns, 1 KB each
+		lines = append(lines, piTurnLines("old"+string(rune('a'+i)), strings.Repeat("x", 1<<10), "ok", sentAt.Add(-time.Hour+time.Duration(i)*time.Second))...)
 	}
 	lines = append(lines, piTurnLines("new", "run the tests", "All green.", sentAt.Add(time.Second))...)
 	writeLines(t, first, lines...)
@@ -122,11 +127,7 @@ func sr2PiMoveCatchUp(t *testing.T, mb int) {
 		}
 	}()
 	t.Cleanup(func() { w.s.Close(); <-w.done })
-	// Reading 9 MB to its end takes longer than eventually's 2 s under
-	// the race detector.
-	if !within(10*time.Second, func() bool { w.s.mu.Lock(); defer w.s.mu.Unlock(); return !w.s.catchingUp }) {
-		t.Fatal("the seat never caught up on the transcript")
-	}
+	w.caughtUp(t)
 	w.settle()
 	ok, _ := w.delivered()
 	if len(ok) != 1 || ok[0] != "r1" {
@@ -161,9 +162,9 @@ func (h *sr2DialogOnce) Capture(string, int) (string, error) {
 // moves the mark back past lines whose events are already recorded (a
 // reattach reports them again).
 func TestSr2SeatSendsDialogAnswerCarriesNoReadPosition(t *testing.T) {
-	saved := typeSettle
-	typeSettle = 0
-	t.Cleanup(func() { typeSettle = saved })
+	saved, savedPause := typeSettle, dialogPause
+	typeSettle, dialogPause = 0, 0
+	t.Cleanup(func() { typeSettle, dialogPause = saved, savedPause })
 	h := &sr2DialogOnce{fakeHost: fakeHost{alive: true}}
 	s := newSeat(Spec{}, claudeAgent{}, h, "sr2dlg", "")
 	s.state = "idle"

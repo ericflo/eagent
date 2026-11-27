@@ -577,7 +577,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		if err != nil || !s.answerDialog(screen, time.Now()) {
 			break
 		}
-		time.Sleep(time.Second)
+		time.Sleep(dialogPause)
 	}
 	label := s.agent.Label()
 	switch mode {
@@ -758,6 +758,10 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 // typeSettle is the pause between pasting a message and pressing Enter.
 // Tests shorten it.
 var typeSettle = 350 * time.Millisecond
+
+// dialogPause is how long Send's last look waits after answering a dialog
+// before it looks again. Tests shorten it.
+var dialogPause = time.Second
 
 func (s *Seat) typeText(text string) error {
 	s.typing.Lock()
