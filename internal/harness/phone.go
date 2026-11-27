@@ -1425,7 +1425,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					if !r.ending {
 						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
-					} else {
+					} else if len(notes) > 0 {
+						// Left with files to refuse; one with nothing at all
+						// in it leaves nothing for the next run.
 						p.left = true
 					}
 				})
@@ -1441,8 +1443,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 						if !r.ending {
 							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
-						} else {
-							p.left = true
+						} else if len(notes) > 0 {
+							p.left = true // its answer is taken; only files to refuse are left
 						}
 					})
 					continue
