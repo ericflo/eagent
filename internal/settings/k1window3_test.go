@@ -102,9 +102,10 @@ func TestRV15BAClearedWindowFollowsAgain(t *testing.T) {
 	project, _ := rv15b(t)
 	k1WriteFile(t, project, `{"model":{"context_tokens":16000}}`)
 	cfg := config.Resolve(project, "", "").Effective
+	loaded, _ := json.Marshal(cfg) // as the editor sends it
 	cfg.Model.ContextTokens = 0
 	raw, _ := json.Marshal(cfg)
-	res := rv15bSave(t, project, Request{Config: raw})
+	res := rv15bSave(t, project, Request{Config: raw, Loaded: loaded})
 	if got := res.Resolution.Effective.Model.ContextTokens; got != 32_768 {
 		file, _ := os.ReadFile(config.File(project))
 		t.Fatalf("window after clearing = %d; file %s", got, file)

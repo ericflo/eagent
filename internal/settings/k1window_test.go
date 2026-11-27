@@ -49,7 +49,8 @@ func TestK1ASaveWritesTheWindowTheFileNamesUnderAMovingAddress(t *testing.T) {
 	cfg := before.Effective
 	cfg.Model.ContextTokens = 20_000
 	raw, _ := json.Marshal(cfg)
-	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw})
+	loaded, _ := json.Marshal(before.Effective) // as the editor sends it
+	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw, Loaded: loaded})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +106,10 @@ func TestK1ASummarizerWindowTheUserEntersUnderAMovingAddressHolds(t *testing.T) 
 	t.Setenv("EAGENT_SUMMARIZER_API_KEY_ENV", "")
 	k1WriteFile(t, project, `{"summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3","api_key_env":"TOGETHER_API_KEY"}}}`)
 	cfg := config.Resolve(project, "", "").Effective
+	loaded, _ := json.Marshal(cfg) // as the editor sends it
 	cfg.Summarizer.Model.ContextTokens = 16_000
 	raw, _ := json.Marshal(cfg)
-	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw})
+	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw, Loaded: loaded})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +133,8 @@ func TestK1AWindowForAnUnknownServerCanBeEntered(t *testing.T) {
 	cfg := before.Effective
 	cfg.Model.ContextTokens = 32_768
 	raw, _ := json.Marshal(cfg)
-	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw})
+	loaded, _ := json.Marshal(before.Effective) // as the editor sends it
+	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw, Loaded: loaded})
 	if err != nil {
 		t.Fatal(err)
 	}

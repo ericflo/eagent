@@ -210,7 +210,7 @@ type EnvField struct {
 type Result struct {
 	Saved      config.SaveResult `json:"saved"`
 	Shadowed   []EnvField        `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
-	Skipped    []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
+	Skipped    []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them; also a window following the server a variable moves its route to, which a request without loaded does not set
 	Kept       []EnvField        `json:"kept_from_file,omitempty"`  // pinned fields whose saved value was carried over unchanged
 	Resolution config.Resolution `json:"resolution"`
 }
@@ -320,7 +320,11 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// entered (it differs from the one the form was loaded with) is
 	// written, and holds as a window the file names; one left as loaded,
 	// with the route's model, is written as the file has it. A form that
-	// does not say what it was loaded with was loaded with what is in force.
+	// does not say what it was loaded with is compared with what is in
+	// force, except on a route an address variable moved: there a server's
+	// list may have changed since the form was read, so its window is
+	// taken as left as loaded, and one it carries that differs from the
+	// window in force is reported skipped as that variable's.
 	route := func(c *config.Config, ptr string) *config.ModelRoute {
 		if ptr == "/model" {
 			return &c.Model
@@ -340,12 +344,24 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 			was = &loaded
 		}
 		want, then := route(&cfg, ptr), route(was, ptr)
-		if want == nil || then == nil || want.Model != then.Model || want.ContextTokens != then.ContextTokens {
+		if want == nil || then == nil || want.Model != then.Model {
+			continue
+		}
+		unsaid, name := false, ""
+		if !haveLoaded {
+			res := resolved()
+			name, unsaid = strings.CutPrefix(res.Sources[ptr+"/base_url"], "env:")
+			unsaid = unsaid && route(&res.Layered, ptr) != nil
+		}
+		if want.ContextTokens != then.ContextTokens && !unsaid {
 			continue
 		}
 		segs := append(strings.Split(strings.TrimPrefix(ptr, "/"), "/"), "context_tokens")
 		fileVal, fileHas := pointerIn(readDisk(), segs)
 		keepFromFile(edits, segs, fileVal, fileHas)
+		if unsaid && want.ContextTokens != then.ContextTokens {
+			skipped = append(skipped, EnvField{ptr + "/context_tokens", name})
+		}
 	}
 	if len(env) > 0 && !b.AllowShadow {
 		onDisk := readDisk()
