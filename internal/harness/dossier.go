@@ -724,6 +724,9 @@ type dossierJob struct {
 	// rescues: restarts in a row, this one included, made for
 	// conversations too long from their start (restartFacts).
 	rescues int
+	// moved: the route eagent was on when the pass began (state.Moved).
+	// retry and rescues were counted on it.
+	moved int64
 }
 
 // dossierResult is what a pass came back with.
@@ -761,7 +764,7 @@ func (r *Runtime) startDossier() {
 	// Said before the place the dossier covers is fixed: a restart that
 	// carries nothing then carries the notice neither.
 	r.tellRereading()
-	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt}
+	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt, moved: r.st.Moved()}
 	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
 	// It grew to the window: refused after its calls went through, and its
 	// looks took in something that arrived after its briefing. Calls alone
@@ -1491,7 +1494,13 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	}
 	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
-	r.restartCarried, r.restartRetried, r.decidedWindow, r.restartRescues = carriedNothing, job.retry, 0, job.rescues
+	r.restartCarried, r.decidedWindow = carriedNothing, 0
+	if r.st.Moved() == job.moved {
+		// Unless eagent moved to another model during the pass: the
+		// restarts in a row were the old model's, and the new one
+		// started with none (newModel).
+		r.restartRetried, r.restartRescues = job.retry, job.rescues
+	}
 	if job.carry {
 		r.restartCarried = carriedSome
 	}
