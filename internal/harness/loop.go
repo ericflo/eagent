@@ -800,6 +800,10 @@ func (r *Runtime) turn(w wake) {
 	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
 	end := "done"
 	closedOut := false // a closing turn whose call failed: it owes nothing
+	// stoppedClosing: a check in this turn found the session no longer
+	// ending (stillClosing). The turn's end goes by that, not by a check of
+	// its own made after what kept it open has gone.
+	stoppedClosing := false
 	// tail is the end of the prompt: written when the turn starts, and
 	// again when something that asks for a look arrives while the turn is
 	// running (the user writes, the agent ends a turn), so that nothing
@@ -876,7 +880,7 @@ func (r *Runtime) turn(w wake) {
 				// first call went out: no call is made, and what came
 				// (the user wrote, an agent is being started) is taken up
 				// as it would be after one.
-				asked, end = false, "not closing"
+				asked, end, stoppedClosing = false, "not closing", true
 				return
 			}
 			msgs = base
@@ -962,6 +966,7 @@ func (r *Runtime) turn(w wake) {
 			}
 			r.sync(func() {
 				closing := r.stillClosing()
+				stoppedClosing = stoppedClosing || !closing
 				if w.wait > 0 && closing {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
@@ -1035,6 +1040,7 @@ func (r *Runtime) turn(w wake) {
 			closing := true
 			if w.final || w.wait > 0 {
 				r.sync(func() { closing = r.stillClosing() })
+				stoppedClosing = stoppedClosing || !closing
 			}
 			var back string
 			switch {
@@ -1120,6 +1126,7 @@ func (r *Runtime) turn(w wake) {
 			// its last call too), is owed (wakeFor) to an ordinary turn.
 			closing := true
 			r.sync(func() { closing = r.stillClosing() })
+			stoppedClosing = stoppedClosing || !closing
 			if !closing && (call < maxCalls || end == "timeout") {
 				if end == "timeout" || again && end == "done" {
 					end = "not closing"
@@ -1194,7 +1201,7 @@ func (r *Runtime) turn(w wake) {
 			r.threadAsked(tc.threaded)
 		}
 		if w.final || w.wait > 0 {
-			closing := r.stillClosing()
+			closing := !stoppedClosing && r.stillClosing()
 			if w.final && mustSpeak && !tc.spoke && end != "error" && closing {
 				r.fallbackFinal()
 			}
