@@ -180,10 +180,14 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return errors.New("the session is running; its own mirror reads the thread")
+		return ErrRunning
 	}
 	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
 }
+
+// ErrRunning is Resume's answer for a session that is already running, here
+// or in another process: the reply is its own mirror's to read.
+var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
 
 // phoneResumeOptions are the options a session is resumed with for a
 // message the user sent from the phone.
@@ -862,6 +866,11 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		h.code = rt.Run(ctx)
 		s.mu.Lock()
 		delete(s.running, rt.SessionID())
+		if rt.State().EndReason == "quit" {
+			// The user stopped it (a stop, /quit): a list rememberHosted
+			// wrote must not bring it back.
+			s.forgetHosted(rt.SessionID())
+		}
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
