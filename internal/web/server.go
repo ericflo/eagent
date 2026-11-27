@@ -49,7 +49,8 @@ type Server struct {
 	mu      sync.Mutex
 	running map[string]*hosted
 	// resuming is held while a request from the browser decides between a
-	// session's inbox and resuming it (deliver).
+	// session's inbox and resuming it (deliver), and while a reply from the
+	// phone decides whether to resume it (Resume).
 	resuming sync.Mutex
 	mux      *http.ServeMux
 	logf     func(string, ...any)
@@ -163,7 +164,8 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // question it stopped on); its source keeps the mirror from echoing it. It
 // carries what a running session reads off the message too (its id, the
 // composer's route and delivery, the client's capabilities), so it is
-// taken as it would be had the session been running.
+// taken as it would be had the session been running. It decides one at a
+// time with the browser's deliver, so the two never both resume it.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
@@ -172,6 +174,8 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if info.ID != sessionID {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return errors.New("the session is running; its own mirror reads the thread")
 	}
