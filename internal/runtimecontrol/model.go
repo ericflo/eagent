@@ -579,6 +579,18 @@ func pinnedBy(key, model string) string {
 
 // SavePresetName returns the trimmed preset name when a proposal sets
 // /save_preset, or "" otherwise.
+// ChosenConfig is the configuration a change chooses (/config), by the
+// edit's name, or "": with a preset saved in the same change, the values'
+// Config names that preset instead.
+func ChosenConfig(p control.Proposal) string {
+	for _, e := range p.Edits {
+		if name, ok := e.Value.(string); ok && e.Key == "/config" && e.Op == "set" {
+			return name
+		}
+	}
+	return ""
+}
+
 func SavePresetName(p control.Proposal) string {
 	for _, edit := range p.Edits {
 		if edit.Key == "/save_preset" && edit.Op == "set" {

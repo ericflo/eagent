@@ -80,15 +80,8 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	// Resolve every changed route before recording anything, so a route
 	// that cannot run fails the change instead of being reported as applied.
 	// A configuration chosen in this change (/config) runs its routes as it
-	// defines them. Its name is the edit's: values.Config names a preset
-	// saved in the same change instead.
-	chosen := ""
-	for _, e := range q.Proposal.Edits {
-		if e.Key == "/config" {
-			chosen, _ = e.Value.(string)
-		}
-	}
-	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes, chosen)
+	// defines them.
+	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes, runtimecontrol.ChosenConfig(q.Proposal))
 	if err != nil {
 		return refuse(err)
 	}
