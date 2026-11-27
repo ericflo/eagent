@@ -95,6 +95,9 @@ type keptReply struct {
 	Message finalechat.Message `json:"message"`
 	Since   time.Time          `json:"since"`
 	Told    bool               `json:"told,omitempty"`
+	// Restored: a restore is resuming the session with it (PendingReply);
+	// the thread is looked at only once the record holds it.
+	Restored bool `json:"restored,omitempty"`
 }
 
 // lockKept holds the kept file for one process's read and write of it: two
@@ -120,7 +123,7 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) erro
 	}
 	r.mu.Lock()
 	for id, p := range r.replies {
-		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told}
+		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored}
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
@@ -154,7 +157,7 @@ func (r *replyRetries) takeUp(project string) {
 	for id, k := range kept {
 		thread := finalechat.Thread{ExternalID: k.Thread}
 		if !k.Told {
-			r.keepQuietly(thread, k.Message, k.Since)
+			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored})
 			continue
 		}
 		r.mu.Lock()
@@ -178,10 +181,11 @@ type resumeWatcher struct {
 // pendingReply is a reply whose session could not be resumed yet, or one
 // that reached a running session (told false: keepUntilStopped).
 type pendingReply struct {
-	thread finalechat.Thread
-	msg    finalechat.Message
-	since  time.Time
-	told   bool
+	thread   finalechat.Thread
+	msg      finalechat.Message
+	since    time.Time
+	told     bool
+	restored bool // keptReply.Restored
 }
 
 // replyRetries outlives one connection to the event stream: a reply that
@@ -194,8 +198,9 @@ type replyRetries struct {
 // leaveWithWatcher writes m down, quietly, for the next sweep of whoever
 // holds the project's watch (this process or another), as a stopping
 // watcher writes down what it keeps.
-func leaveWithWatcher(project string, info store.Info, m finalechat.Message) error {
-	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now()}}}
+// restored says the restore resumes the session with m.
+func leaveWithWatcher(project string, info store.Info, m finalechat.Message, restored bool) error {
+	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now(), restored: restored}}}
 	return r.writeDown(project, func(string, ...any) {})
 }
 
@@ -421,21 +426,20 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	if err != nil || !ReadPhoneLedger(evs).Keeps {
 		return
 	}
-	w.retries.keepQuietly(thread, m, time.Now())
+	w.retries.keepQuietly(pendingReply{thread: thread, msg: m, since: time.Now()})
 }
 
-// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped),
-// kept since then.
-func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message, since time.Time) {
+// keepQuietly keeps q as its thread's one quiet entry (keepUntilStopped).
+func (r *replyRetries) keepQuietly(q pendingReply) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, p := range r.replies {
-		if !p.told && p.thread.ExternalID == thread.ExternalID {
+		if !p.told && p.thread.ExternalID == q.thread.ExternalID {
 			delete(r.replies, id)
 		}
 	}
-	if _, kept := r.replies[m.ID]; !kept {
-		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: since}
+	if _, kept := r.replies[q.msg.ID]; !kept {
+		r.replies[q.msg.ID] = q
 	}
 }
 
@@ -486,6 +490,12 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if p.restored && !w.holds(p) {
+			// The restore that left it has not resumed the session with
+			// it yet: resumed from here too, the message would be taken
+			// twice.
+			continue
+		}
 		if !p.told {
 			// Kept while its session ran: the thread is read as a sweep
 			// reads it, not from the copy kept, which knows nothing of a
@@ -495,6 +505,17 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		}
 		w.consider(ctx, p.thread, p.msg)
 	}
+}
+
+// holds reports whether p's session's record holds p's message (its
+// ledger has taken it in).
+func (w *resumeWatcher) holds(p pendingReply) bool {
+	info, ok := w.session(strings.TrimPrefix(p.thread.ExternalID, "eagent:"))
+	if !ok {
+		return false
+	}
+	evs, err := store.Read(info.Path)
+	return err == nil && ReadPhoneLedger(evs).Taken[p.msg.ID]
 }
 
 func (w *resumeWatcher) session(id string) (store.Info, bool) {
@@ -619,7 +640,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 				// project's reply watcher keeps it quietly, as it keeps
 				// one whose notice it could not post itself. When that
 				// cannot be written either, the restore is told both.
-				err = errors.Join(err, leaveWithWatcher(project, info, last))
+				err = errors.Join(err, leaveWithWatcher(project, info, last, false))
 			}
 			return PhoneMessage{}, false, err
 		}
@@ -629,8 +650,10 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// project's reply watcher once it has stopped, as after a resume of the
 	// watcher's own: its closing note may hide the thread from the sweep.
 	// When that cannot be written down, nothing is taken and the restore
-	// gets the error, as for a notice that could not be posted.
-	if err := leaveWithWatcher(project, info, last); err != nil {
+	// gets the error, as for a notice that could not be posted. A watcher
+	// that takes it up before the restore has started the session leaves
+	// the session to the restore (retryPending).
+	if err := leaveWithWatcher(project, info, last, true); err != nil {
 		return PhoneMessage{}, false, err
 	}
 	// Also a message whose files were all refused: the session takes it

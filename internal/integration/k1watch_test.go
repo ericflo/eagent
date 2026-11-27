@@ -540,3 +540,32 @@ func TestK1ARestoreWhoseNoticeAndHandOverFailSaysBoth(t *testing.T) {
 		t.Fatalf("ok=%v err=%v, want the notice's error and the hand-over's", ok, err)
 	}
 }
+
+// Batch 2, the window: a serve restart finds /quit and a message after it
+// in a thread whose latest message is eagent's (the sweep's own pass does
+// not look at it), and `connector run` holds the watch. Its watcher sweeps
+// after PendingReply has handed the reply over and before the restore
+// starts the session: it leaves the session to the restore, which resumes
+// it with the /quit, and then resumes it with the message after it. The
+// /quit is taken once.
+func TestK1AWatcherElsewhereLeavesARestoredReplyToTheRestore(t *testing.T) {
+	sid, f, quit, _ := r13QuitWaiting(t, "/quit", "actually fix the login bug")
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "note", "sender": "system", "origin": "token", "body": "eagent session ended (shutdown).", "created_at": time.Now(), "meta": map[string]any{}})
+	f.mu.Unlock()
+	t.Setenv("FINALECHAT_URL", f.srv.URL)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid))
+	if err != nil || !ok || msg.ID != "m1" {
+		t.Fatalf("pending reply %#v ok=%v err=%v, want the /quit", msg, ok, err)
+	}
+	connector := f.watcher(quit.project, quit, t)
+	connector.sweep(context.Background())
+	if err := quit.Resume(sid, msg); err != nil {
+		t.Fatal(err)
+	}
+	connector.sweep(context.Background())
+	if got := r13Resumed(quit); len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("resumed %v, want the /quit once and then the message after it", got)
+	}
+}
