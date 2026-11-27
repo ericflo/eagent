@@ -2038,10 +2038,10 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 		res := r.awaitSend(done)
 		how, err := res.how, res.err
 		if errors.Is(err, errEnding) {
-			// Given up for the session's end, not failed: how the send
-			// ended is recorded where it ends (settleSend, or finish for
-			// one never typed).
-			return fmt.Sprintf("Could not send to %s: %v", rel.Who(), err), true
+			// Given up for the session's end, not failed: the send may still
+			// be typed. How it ended is recorded where it ends (settleSend,
+			// or finish for one never typed), and that decides.
+			return fmt.Sprintf("The session ended before %s's send (%s) was confirmed; its outcome is recorded on its own.", rel.Who(), id), false
 		}
 		if err != nil {
 			r.sync(func() {
@@ -2191,6 +2191,11 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// handover (finishLaunch queued both, in that order).
 			berr := r.awaitSend(briefDone).err
 			r.awaitSend(drained)
+			if errors.Is(berr, errEnding) {
+				// Given up for the session's end, not failed: the brief's
+				// own outcome, recorded where its typing ends, decides.
+				return fmt.Sprintf("Switched to %s; the session ended before the handoff brief (%s) was confirmed; its outcome is recorded on its own.", started, sw.briefID), false
+			}
 			if berr != nil {
 				// On the record like any send that failed: it wakes eagent,
 				// and the new relay stops waiting for its arrival.
