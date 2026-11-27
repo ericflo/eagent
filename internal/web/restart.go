@@ -68,10 +68,8 @@ func (s *Server) forgetHosted(id string) {
 	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
 }
 
-// listed reports whether the list names the session.
+// listed reports whether the list names the session. Under mu.
 func (s *Server) listed(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	raw, err := os.ReadFile(hostedFile(s.Project))
 	var list hostedList
 	return err == nil && json.Unmarshal(raw, &list) == nil && slices.Contains(list.Sessions, id)

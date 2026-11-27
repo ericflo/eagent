@@ -3,6 +3,8 @@ package web
 import (
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +63,53 @@ func k7Shutdown(t *testing.T, s *Server, info store.Info) {
 	s.resuming.Lock()
 	s.stopping = true
 	s.resuming.Unlock()
+}
+
+// Two Stops at once during the shutdown: the second waits for the first
+// and gets its answer. It used to fail on the session's lock, which the
+// first held, with a 500 naming this server's own pid.
+func TestK7TwoStopsAtOnceDuringTheShutdownGetOneAnswer(t *testing.T) {
+	s, project := newTestServer(t)
+	info := srAgentSession(t, project)
+	entered, gate := make(chan struct{}), make(chan struct{})
+	old := killAgent
+	killAgent = func(host, target string) error { close(entered); <-gate; return nil }
+	t.Cleanup(func() { killAgent = old })
+	k7Shutdown(t, s, info)
+	first, second := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil) }()
+	<-entered // the first is stopping the agent, under the session's lock
+	secondDone := make(chan struct{})
+	go func() { second <- do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil); close(secondDone) }()
+	k7Waiting(t, "web.(*Server).postStop", secondDone) // it waits for the first, or has answered
+	close(gate)
+	a, b := <-first, <-second
+	if a.Code != http.StatusOK || b.Code != a.Code || b.Body.String() != a.Body.String() {
+		t.Fatalf("first: %d %s; second: %d %s", a.Code, a.Body, b.Code, b.Body)
+	}
+}
+
+// k7Waiting waits until a goroutine is parked receiving from a channel
+// within fn, or done is closed (fn went on without waiting).
+func k7Waiting(t *testing.T, fn string, done <-chan struct{}) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for deadline := time.Now().Add(5 * time.Second); ; runtime.Gosched() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		n := runtime.Stack(buf, true)
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, "[chan receive") && strings.Contains(g, fn) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s neither waited nor returned", fn)
+		}
+	}
 }
 
 // A Stop during the shutdown settles the sends its agent had not yet shown
