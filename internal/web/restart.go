@@ -136,11 +136,15 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
+		how := "was stopped"
+		if rel.State == "exited" {
+			how = "exited" // as settleExited says it of an agent that exited
+		}
 		for _, d := range waiting {
 			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
-				Detail: "the agent was stopped before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
+				Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
 			if takenBack[d.ID] {
-				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent was stopped"
+				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent "+how
 			}
 			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
 				return stopped, failed, err

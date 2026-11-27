@@ -129,6 +129,42 @@ func TestK11AMarkedStopThatFailsStaysMarked(t *testing.T) {
 	}
 }
 
+// A send still waiting on an agent the record shows exited is settled by a
+// Stop during the shutdown as one whose agent exited, not as one whose
+// agent the Stop stopped.
+func TestK11ASendOfAnExitedAgentIsSettledAsExited(t *testing.T) {
+	s, project := newTestServer(t)
+	k5Kills(t)
+	info := srAgentSession(t, project)
+	sess, _, err := store.Open(info.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []event.Event{
+		event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "s1", From: "user", Text: "run the tests"}),
+		event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "exited", Detail: "the process ended"}),
+	} {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = sess.Close()
+	k7Shutdown(t, s, info)
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("stop: %d %s", w.Code, w.Body)
+	}
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		var d event.RelayDeliveredData
+		if ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && d.ID == "s1" && !strings.Contains(d.Detail, "exited") {
+			t.Fatalf("the send to an agent that had exited is settled as %q", d.Detail)
+		}
+	}
+}
+
 // A message the user sent from the phone is held for the end of Claude's
 // turn (in its spool; the phone's receipt reads "held"). The server's
 // shutdown ends the run, which leaves the message held: the agent's hook
