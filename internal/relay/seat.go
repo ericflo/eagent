@@ -2165,8 +2165,18 @@ func (s *Seat) checkScreen(now time.Time) {
 	} else if state == "blocked" && ready && !(s.hung && s.atWork(screen)) && !s.dialogShowing() {
 		// A quiet agent's prompt or status line shows while it works, so
 		// it is idle only if its screen does not also say it is busy. A
-		// slow start is over as soon as the prompt shows.
+		// slow start is over as soon as the prompt shows. A quiet turn
+		// (hung) is over too, though no line said so: what was held for
+		// its end is looked at as after a turn end (leftOvers).
+		s.mu.Lock()
+		turn := s.hung
+		s.mu.Unlock()
 		s.setState("idle", "")
+		s.mu.Lock()
+		if turn && s.state == "idle" && s.turnEndAt.IsZero() {
+			s.turnEndAt = now
+		}
+		s.mu.Unlock()
 	} else if state == "blocked" {
 		// Still quiet: stuck as the agent's own evidence says now
 		// (Status.Stuck).
