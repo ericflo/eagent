@@ -203,11 +203,15 @@ type Runtime struct {
 	relayNext map[string]nextPick
 
 	ending bool
-	// closingRefused: the provider refused a call (4xx) while the session
-	// was ending, and no call has come back since (refusedWhileClosing).
-	// Per run, as the closing it belongs to is (finalAsked, summary.final).
-	// Loop goroutine.
-	closingRefused bool
+	// closings counts the times this run started ending (stillClosing
+	// turning true, as noteClosing sees it at each loop step), and
+	// wasClosing says whether it was ending when last seen. refusedIn is
+	// the closing in which the provider refused a call (4xx), 0 for none:
+	// the refusal is final for that closing alone (refusedWhileClosing).
+	// Per run, as the closing is (finalAsked, summary.final). Loop
+	// goroutine.
+	closings, refusedIn int
+	wasClosing          bool
 	// recordFailed: an event could not be written to the record (append).
 	// The run ends on it, and takes nothing more off the inbox. Loop
 	// goroutine.
@@ -1057,23 +1061,27 @@ func (r *Runtime) endQueue() {
 	}
 }
 
-// sync runs fn on the loop goroutine and waits for it. During shutdown
-// finish keeps running what the queue took (enqueue), so late events (a
-// last message, a tool result, a send's end) are still recorded; once it
-// has ended the queue, fn is not run and sync returns at once.
-func (r *Runtime) sync(fn func()) {
+// sync runs fn on the loop goroutine and waits for it, and reports that it
+// ran. During shutdown finish keeps running what the queue took
+// (enqueue), so late events (a last message, a tool result, a send's end)
+// are still recorded; once it has ended the queue, fn is not run and sync
+// returns false at once: the session has ended, and a turn does nothing
+// more (turn).
+func (r *Runtime) sync(fn func()) bool {
 	done := make(chan struct{})
 	if r.enqueue(func() { fn(); close(done) }) {
 		<-done
+		return true
 	}
+	return false
 }
 
 // post runs fn on the loop goroutine without waiting; once finish has ended
-// the queue it is not run, and the log says so.
+// the queue it is not run. Nothing is recorded after session.end, so what
+// is refused then (a seat's last news as it is closed, a timer that came
+// due) would not be recorded either.
 func (r *Runtime) post(fn func()) {
-	if !r.enqueue(fn) {
-		r.ui.Log("loop work after the session's end was not run")
-	}
+	r.enqueue(fn)
 }
 
 // append writes an event and folds it into state. Loop goroutine only
@@ -1179,6 +1187,7 @@ func (r *Runtime) tick() {
 		r.later = r.later[1:]
 		fn()
 	}
+	r.noteClosing()
 	if r.ending {
 		return
 	}
@@ -1430,8 +1439,9 @@ drain:
 			break drain
 		}
 	}
-	// What the loop was handed before it stopped (a seat's news among it)
-	// runs, once; nothing handed to it after the close does.
+	// What the loop has been handed so far (a seat's news among it) runs
+	// now. The queue stays open: what is handed to it later runs in the
+	// reads below, up to its end (endQueue).
 queued:
 	for {
 		select {
