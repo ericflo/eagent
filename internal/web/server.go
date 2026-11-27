@@ -180,10 +180,14 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return errors.New("the session is running; its own mirror reads the thread")
+		return ErrRunning
 	}
 	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
 }
+
+// ErrRunning is Resume's answer for a session that is already running, here
+// or in another process: the reply is its own mirror's to read.
+var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
 
 // phoneResumeOptions are the options a session is resumed with for a
 // message the user sent from the phone.

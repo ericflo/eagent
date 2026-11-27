@@ -8,6 +8,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/integration"
 )
 
 // k3Listed is what the next server would bring back.
@@ -54,4 +56,17 @@ func TestK3ASessionTheUserStopsDuringTheShutdownIsNotBroughtBack(t *testing.T) {
 func sortedIDs(ids ...string) []string {
 	slices.Sort(ids)
 	return ids
+}
+
+// A reply from the phone for a session already running is answered with
+// ErrRunning, which the reply watcher takes as left to the session's own
+// mirror (when the browser resumed the session first, say).
+func TestK3ResumeOfASessionRunningIsErrRunning(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := k1Model(t, s, project)
+	info := r11Session(t, project)
+	k2Hosted(t, s, cfg, project, info)
+	if err := s.Resume(info.ID, integration.PhoneMessage{ID: "m1", Text: "from the phone"}); !errors.Is(err, ErrRunning) {
+		t.Fatalf("Resume: %v, want ErrRunning", err)
+	}
 }
