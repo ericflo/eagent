@@ -116,9 +116,10 @@ func TestARefusalNamesTheStoppedHolderWhenAnEarlierAttemptFailed(t *testing.T) {
 }
 
 // Finding 11, second part. A send typed and never confirmed when the relay
-// is stopped is left as it was by the stop. When that relay is restarted on
-// its own conversation, the new process waits on nothing: the send is
-// reported unconfirmed, once, not left waiting for ever.
+// is stopped is reported unconfirmed by the stop (known limit A5: it was
+// left waiting until a restart). When that relay is restarted on its own
+// conversation, the new process waits on nothing, and the send keeps its
+// one outcome.
 func TestASendLeftByAStopIsSettledOnceWhenTheRelayIsRestarted(t *testing.T) {
 	old, next := newFakeSeat("one"), newFakeSeat("two")
 	g := useGatedLaunches(t, []relaySeat{old, next}, nil)
@@ -135,8 +136,8 @@ func TestASendLeftByAStopIsSettledOnceWhenTheRelayIsRestarted(t *testing.T) {
 	if text, isErr := control("stop"); isErr {
 		t.Fatalf("stop: %s", text)
 	}
-	if got := deliveredFor(rt, typed); len(got) != 0 {
-		t.Fatalf("the stop reported the send: %+v", got)
+	if got := deliveredFor(rt, typed); len(got) != 1 || got[0].Outcome != event.DeliveryUnconfirmed {
+		t.Fatalf("after the stop: %+v, want one unconfirmed", got)
 	}
 	restarted := make(chan string, 1)
 	go func() {
