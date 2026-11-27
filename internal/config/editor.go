@@ -389,10 +389,11 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 			}
 		case "model", "summarizer":
 			diff := diffObjects(h, w)
-			// A route whose model the file changes takes the new model's
-			// window unless the file names one (followModel), so a window
-			// shown for it is written even when it equals the base's.
-			if _, changed := diff["model"]; changed && k == "model" {
+			// A route the file moves to another model or address takes
+			// the window there unless the file names one (followModel), so
+			// a window shown for it is written even when it equals the
+			// base's.
+			if k == "model" && routeMoved(h, w) {
 				if _, named := diff["context_tokens"]; !named {
 					if cw := object(w)["context_tokens"]; cw != nil {
 						diff["context_tokens"] = cw
@@ -588,6 +589,16 @@ func canon(raw json.RawMessage) []byte {
 	return b
 }
 
+// routeMoved says whether the route object want names another model than
+// have, or reaches it at another address: the loader's rule (moved), by
+// which a layer that does so without naming a window gets the one there.
+func routeMoved(have, want json.RawMessage) bool {
+	var h, w ModelRoute
+	_ = json.Unmarshal(have, &h)
+	_ = json.Unmarshal(want, &w)
+	return moved(h, w)
+}
+
 // diffObjects returns the keys of want whose value differs from have, plus
 // explicit nulls for keys have has and want lacks.
 func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
@@ -607,8 +618,8 @@ func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
 		// from below.
 		if ok && object(hv) != nil && object(v) != nil {
 			sub := diffObjects(hv, v)
-			if _, changed := sub["model"]; changed {
-				// As for the main route: a new model takes the window shown.
+			if routeMoved(hv, v) {
+				// As for the main route: a route moved takes the window shown.
 				if _, named := sub["context_tokens"]; !named {
 					if cw := object(v)["context_tokens"]; cw != nil {
 						sub["context_tokens"] = cw
