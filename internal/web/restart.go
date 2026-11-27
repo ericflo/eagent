@@ -10,8 +10,11 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -58,6 +61,43 @@ func (s *Server) forgetHosted(id string) {
 		return
 	}
 	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
+}
+
+// listed reports whether the list names the session.
+func (s *Server) listed(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, err := os.ReadFile(hostedFile(s.Project))
+	var list hostedList
+	return err == nil && json.Unmarshal(raw, &list) == nil && slices.Contains(list.Sessions, id)
+}
+
+// killAgent stops an agent's terminal; tests replace it.
+var killAgent = func(host, target string) error { return relay.HostByName(host).Kill(target) }
+
+// stopAgents stops the agents the record of a session nobody runs shows
+// running, as a stop the session takes does (stopSession): each one's
+// terminal is killed and its relay.end recorded, under the session's lock.
+// It returns who was stopped, and who could not be killed (recorded as
+// stopped all the same, as stopSession does).
+func stopAgents(path string) (stopped, failed []string, err error) {
+	sess, evs, err := store.Open(path, time.Now())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer sess.Close()
+	for _, rel := range state.Replay(evs).ActiveRelays() {
+		if rel.Target != "" {
+			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
+				failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
+			}
+		}
+		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
+			return stopped, failed, err
+		}
+		stopped = append(stopped, rel.Who())
+	}
+	return stopped, failed, nil
 }
 
 // writeHosted writes the list of sessions to bring back.

@@ -709,7 +709,7 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !alive(info.Path) && !s.isHosted(info.ID) {
-		if s.stopForShutdown(w, info.ID) {
+		if s.stopForShutdown(w, info) {
 			return
 		}
 		// A stop for a session nobody runs would sit in the inbox and quit
@@ -718,7 +718,7 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
-		if errors.Is(err, errEnding) && s.stopForShutdown(w, info.ID) {
+		if errors.Is(err, errEnding) && s.stopForShutdown(w, info) {
 			return
 		}
 		writeErr(w, handCode(err), err)
@@ -727,21 +727,43 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// stopForShutdown honours a stop the server's shutdown has overtaken (the
-// run is ending, or has ended, with the server): the session comes off the
-// list the next server brings back, and the answer says it is stopped. It
-// reports false, doing nothing, when the shutdown has not begun.
-func (s *Server) stopForShutdown(w http.ResponseWriter, id string) bool {
+// stopForShutdown honours a stop the server's shutdown has overtaken: the
+// run here is ending with the server, or has ended and is on the list the
+// next server brings back. Once that run has let go of the session, the
+// agents its record shows running are stopped as a stop the run takes
+// stops them (stopAgents), the session comes off the list, and the answer
+// says what was stopped. It reports false, doing nothing, for any other
+// session, and before the shutdown has begun.
+func (s *Server) stopForShutdown(w http.ResponseWriter, info store.Info) bool {
 	s.resuming.Lock()
 	stopping := s.stopping
 	s.resuming.Unlock()
-	if !stopping {
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if !stopping || h == nil && !s.listed(info.ID) {
 		return false
 	}
+	if h != nil {
+		<-h.done
+	}
+	stopped, failed, err := stopAgents(info.Path)
+	if err != nil {
+		writeErr(w, 500, fmt.Errorf("could not stop the session's agents: %w", err))
+		return true
+	}
 	s.mu.Lock()
-	s.forgetHosted(id)
+	s.forgetHosted(info.ID)
 	s.mu.Unlock()
-	writeJSON(w, map[string]any{"ok": true, "message": "Stopped: eagent is shutting down, and will not bring this session back when it starts again."})
+	msg := "Stopped"
+	if len(stopped) > 0 {
+		msg += ", with " + strings.Join(stopped, " and ")
+	}
+	msg += ": eagent is shutting down, and will not bring this session back when it starts again."
+	if len(failed) > 0 {
+		msg += " Could not stop " + strings.Join(failed, "; ") + "."
+	}
+	writeJSON(w, map[string]any{"ok": true, "message": msg})
 	return true
 }
 

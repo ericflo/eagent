@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"testing"
@@ -67,12 +68,12 @@ func TestK3AStopDuringTheShutdownIsHonoured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
+	t.Cleanup(func() { _ = lock.Close() })
+	finishing := &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
 	s.mu.Lock()
-	s.running[ending.ID] = &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
+	s.running[ending.ID] = finishing
 	s.running[ended.ID] = &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
 	s.mu.Unlock()
-	t.Cleanup(func() { s.mu.Lock(); delete(s.running, ending.ID); s.mu.Unlock() })
 	s.rememberHosted() // the shutdown begins: the list, then the mark
 	s.resuming.Lock()
 	s.stopping = true
@@ -80,11 +81,19 @@ func TestK3AStopDuringTheShutdownIsHonoured(t *testing.T) {
 	s.mu.Lock()
 	delete(s.running, ended.ID) // its run has stopped
 	s.mu.Unlock()
-	for _, info := range []store.Info{ending, ended} {
-		w := do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("stop of %s: %d %s", info.ID, w.Code, w.Body)
-		}
+	if w := do(s, "POST", "/api/sessions/"+ended.ID+"/stop", nil, nil); w.Code != http.StatusOK {
+		t.Fatalf("stop of the ended run's session: %d %s", w.Code, w.Body)
+	}
+	// The stop of the one whose run is finishing waits for it to let go.
+	got := make(chan *httptest.ResponseRecorder, 1)
+	go func() { got <- do(s, "POST", "/api/sessions/"+ending.ID+"/stop", nil, nil) }()
+	_ = lock.Close() // as s.run has it once Run has returned
+	s.mu.Lock()
+	delete(s.running, ending.ID)
+	s.mu.Unlock()
+	close(finishing.done)
+	if w := <-got; w.Code != http.StatusOK {
+		t.Fatalf("stop of the ending run's session: %d %s", w.Code, w.Body)
 	}
 	if got := k3Listed(t, project); len(got) != 0 {
 		t.Fatalf("the next server would bring back %q, which the user stopped", got)
