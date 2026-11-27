@@ -145,33 +145,6 @@ func (r *Runtime) pollInbox() {
 	}
 }
 
-// InboxWordsLeft reports whether the inbox holds words of the user's,
-// posted with PostInbox, that this run did not take and the record does not
-// hold: words put there after the run's last look. It reads only, and only
-// once Run has returned.
-func (r *Runtime) InboxWordsLeft() bool {
-	dir := InboxDir(r.sess.Path)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var msg InboxMessage
-		id := inboxFileID(raw, e.Name())
-		if id != "" && json.Unmarshal(raw, &msg) == nil && !r.inboxTaken[id] && !r.inboxRecorded(id) && inboxWords(msg, r.ownCommand) {
-			return true
-		}
-	}
-	return false
-}
-
 // inboxFileID is the id of the submission in an inbox file: the file's
 // name without ".json", when the file itself gives that as its "inbox_id"
 // (PostInbox's do). A name alone cannot serve, because a writer may use one
