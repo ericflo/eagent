@@ -1503,11 +1503,19 @@ func (r *Runtime) stopSession(reason string) {
 	r.stopLaunches("", reason)
 	for _, rel := range r.st.ActiveRelays() {
 		var drained <-chan struct{}
-		if seat := r.relays.get(rel.Name); seat != nil {
+		seat := r.relays.get(rel.Name)
+		if seat != nil {
 			if err := seat.Kill(); err != nil {
 				r.ui.Log("relay %s: %v", rel.Name, err)
 			}
 			r.relays.drop(rel.Name, seat)
+		} else if job := r.relays.launch(rel.Name); job != nil && job.old != nil {
+			// A start under way took its seat out of use (and stops its
+			// agent, run): what that seat saw last is still this relay's
+			// word, and the start settles the rest where it ends.
+			seat = job.old
+		}
+		if seat != nil {
 			r.relays.mu.Lock()
 			if drained = r.relays.drained[seat]; drained != nil {
 				// What its seat saw last (an arrival, a held message taken
@@ -1524,10 +1532,11 @@ func (r *Runtime) stopSession(reason string) {
 		settle := r.relays.launch(rel.Name) == nil
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: reason}))
 		switch {
-		case settle && drained != nil:
+		case drained != nil:
 			// Once all its seat saw is on the record, as relay_control stop
 			// settles, bounded the same way; finish runs the step before the
-			// session ends (stopSettles).
+			// session ends (stopSettles). With a start under way, that start
+			// settles where it ends, after the same drain (run).
 			settled, name := make(chan struct{}), rel.Name
 			r.stopSettles = append(r.stopSettles, settled)
 			go func() {
@@ -1541,7 +1550,7 @@ func (r *Runtime) stopSession(reason string) {
 					r.relays.mu.Lock()
 					delete(r.relays.stopping, name) // nothing it says later is taken
 					r.relays.mu.Unlock()
-					if rel := r.st.Relays[name]; rel != nil {
+					if rel := r.st.Relays[name]; rel != nil && settle {
 						r.settleExited(rel)
 					}
 				})

@@ -47,3 +47,30 @@ func TestSR6AWaitingChangeKillsALongQuietTurn(t *testing.T) {
 	waitFor(t, "the message's outcome", func() bool { return len(deliveredFor(rt, id)) > 0 })
 	t.Errorf("the user's message Codex held for its next step: %q %+v", k2Outcome(rt, id), deliveredFor(rt, id))
 }
+
+// The sixth review's suspicion: Stop session while a model change restarts
+// Codex. The restart took the old seat out of use, so Stop session found no
+// seat to mark stopping, and the old seat's last look, which read a send
+// arriving, was dropped as the session ended: the send was then settled
+// unconfirmed where the start ended. Its arrival counts, as at a stop.
+func TestK9StopSessionDuringARestartTakesTheOldSeatsArrival(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
+	rt.sync(func() {
+		if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("restart: %v", err)
+		}
+	})
+	seat.waitGone(t) // the restart stopped the old Codex; its seat drains
+	rt.sync(func() { rt.stopSession("the user stopped the session") })
+	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}) // its last look
+	seat.end()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitFor(t, "the send's outcome", func() bool { return len(deliveredFor(rt, id)) > 0 })
+	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK {
+		t.Errorf("%s, read arriving by the old seat: %+v; want its one outcome, arrived", id, got)
+	}
+}
