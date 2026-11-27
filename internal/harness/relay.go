@@ -494,7 +494,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 			// meanwhile passed it on to the new agent.
 			r.typingFailed(sendHolder(r.st, h.id, q.name), h.id, res.err)
 		case gone != "" && !r.hasOutcome(h.id):
-			r.append(goneUnconfirmed(q.name, h.id, gone))
+			r.appendOutcome(goneUnconfirmed(q.name, h.id, gone))
 		}
 	})
 	if !ran && untyped {
@@ -529,7 +529,23 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 	if r.hasOutcome(id) {
 		return
 	}
-	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
+	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
+}
+
+// appendOutcome records how a send ended (relay.delivered); every outcome
+// the harness writes goes through here. One that did not arrive, of a
+// relay between turns whose terminal is up, may have been the last thing
+// on its way to the agent, and no turn starts with it: a change waiting
+// for the relay is looked at again (applyWaitingRepick). Loop goroutine.
+func (r *Runtime) appendOutcome(ev event.Event) {
+	r.append(ev)
+	var d event.RelayDeliveredData
+	if ev.Decode(&d) != nil || d.OK {
+		return
+	}
+	if rel := r.st.Relays[d.Name]; rel != nil && rel.State == "idle" && r.relays.get(d.Name) != nil {
+		r.applyWaitingRepick(d.Name)
+	}
 }
 
 // prepareLaunch settles what a start launches. Loop goroutine (or before
@@ -748,7 +764,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: failed}
 				continue
 			}
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -1048,12 +1064,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			r.settleExited(rel)
 		}
 	case relay.KindDelivered:
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
-		if rel := r.st.Relays[name]; !ev.OK && rel != nil && rel.State == "idle" {
-			// A send a change waited for ended without arriving, and no
-			// turn started with it: the change applies now.
-			r.applyWaitingRepick(name)
-		}
+		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
 	case relay.KindProgress:
 		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
 	case relay.KindTurn:
@@ -1161,7 +1172,7 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		if queued[s.ID] {
 			continue
 		}
-		r.append(goneUnconfirmed(rel.Name, s.ID, how))
+		r.appendOutcome(goneUnconfirmed(rel.Name, s.ID, how))
 	}
 }
 
@@ -1536,7 +1547,7 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 	seat := r.relays.get(name)
 	if seat == nil {
 		if !r.holdSend(name, heldSend{id: id, text: text, mode: mode}) {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 		}
 		return
 	}
@@ -1702,7 +1713,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				return
 			}
 			if held = r.holdSend(rel.Name, heldSend{id: id, text: text, mode: mode}); !held {
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 			}
 		})
 		if !ran {
