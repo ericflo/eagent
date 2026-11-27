@@ -190,6 +190,12 @@ func (r *Runtime) pollInbox() {
 			// this one before its first tick. Messages and answers are kept.
 			_ = os.Remove(path)
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
+		case r.loopGone() && (id == "" || !inboxWords(msg, r.ownCommand)):
+			// The run's last look, its loop gone (finish): nothing can be
+			// carried out now, so a command, a stop or a dismissal stays in
+			// the inbox for the next run, as on main. Words are recorded,
+			// kept for the next run (below).
+			continue
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			if id != "" && (msg.Type == "message" || msg.Type == "") {
 				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id, "text": strings.TrimSpace(msg.Text)}))

@@ -123,18 +123,11 @@ func TestK2AnAnswerOnALostCardIsTakenOnceWhenTheCardCannotBeChecked(t *testing.T
 	fp.questionsDown = true
 	fp.mu.Unlock()
 	g.resume(Options{Prompt: "blue", PromptSource: "finalechat", PromptPhoneID: fp.lastMessageID(), PromptAnswers: card})
-	waitFor(t, "the re-ask to record the card", func() bool {
-		for _, ev := range g.log() {
-			var d event.PhoneQuestionData
-			if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.CardID == card {
-				return true
-			}
-		}
-		return false
-	})
-	// No card of the question is open on the phone now: a session with no
-	// terminal does not wait there for ever.
-	g.exit(20 * time.Second)
+	// The question stays open; the re-ask finds the card answered and its
+	// answer taken, and asks the question again on a new card.
+	waitFor(t, "the question on a new card", func() bool { return fp.pendingQuestions() == 1 })
+	r14Drained(t, g)
+	g.interrupt()
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
 		r5takenDump(g)
 		t.Fatalf("one tap on the card is recorded %d times as the answer and %d times as a message", a, m)

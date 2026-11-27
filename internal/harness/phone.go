@@ -881,6 +881,13 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 
 // ask poses a narrator question on the phone. Loop goroutine only.
 func (p *phone) ask(r *Runtime, qid, text string, options []string) {
+	p.askPast(r, qid, text, options, false)
+}
+
+// askPast is ask; with past, the walk over the question's keys also passes
+// a card whose answer the session took already (as a message, the
+// question still open), which can hold no answer to it any more.
+func (p *phone) askPast(r *Runtime, qid, text string, options []string, past bool) {
 	var opts []finalechat.Option
 	for _, o := range options {
 		opts = append(opts, finalechat.Option{Label: clipLabel(o, 200)})
@@ -924,8 +931,9 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			q, thread, err = p.client.Ask(ctx, p.ref, finalechat.AskRequest{Prompt: text, Options: opts, AllowFreeform: boolPtr(true), TimeoutSeconds: timeout, Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: key, Activity: act})
 			// A dismissed card stays the answer: the user closed it, and
 			// asking again would undo that. Only a card that timed out or
-			// was withdrawn is passed over.
-			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled") {
+			// was withdrawn is passed over, and, asked again for that
+			// (past), one answered whose answer the session took already.
+			if err != nil || key == "" || (q.Status != "expired" && q.Status != "cancelled" && !(past && q.Status == "answered" && p.isTaken(q.ID))) {
 				break
 			}
 			if n >= start+100 {
@@ -1053,11 +1061,12 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 				}
 				if p.isTaken(fid) {
 					// Its answer reached the session already, as a message
-					// (whose card it was could not be learned then): no card
-					// of the question is open, and none waits on the phone.
-					p.mu.Lock()
-					p.gone[qid] = true
-					p.mu.Unlock()
+					// (whose card it was could not be learned then). With
+					// the question still open it is asked again, on a new
+					// card past this one; closed meanwhile, nothing waits.
+					if q := r.st.Question; q != nil && q.ID == qid {
+						p.askPast(r, qid, q.Text, q.Options, true)
+					}
 					return
 				}
 				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat", CardID: fid})
@@ -1202,30 +1211,14 @@ var (
 // started is the ledger as this run's first write starts it (startPhone).
 func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
-	// What it leaves for the next run is looked for once the session has
-	// stopped; a poll that returns with its context live left a message
-	// whose fetch the shutdown cut off.
-	// A message read is handed to the loop in a step; one whose step never
-	// ran (dropped once the loop had closed, or still queued when it
-	// closed) was neither taken in nor seen to be left, and counts as left.
-	unrun := 0 // guarded by p.mu
-	step := func(fn func()) {
-		p.mu.Lock()
-		unrun++
-		p.mu.Unlock()
-		r.post(func() {
-			p.mu.Lock()
-			unrun--
-			p.mu.Unlock()
-			fn()
-		})
-	}
-	defer func() {
-		p.mu.Lock()
-		left := p.left || unrun > 0
-		p.mu.Unlock()
-		integration.LeftForNextRun(r.projectPath(), r.sess.ID, p.ctx.Err() == nil || left, r.ui.Log)
-	}()
+	// The poll stops as the session ends, and cannot know it read all that
+	// was sent before the closing note: its last read may not have come
+	// back, a message it left for the next run (p.left) or read once the
+	// loop had closed was not taken in, and a fetch the shutdown cut off
+	// left its message. So what may have waited is looked for by the reply
+	// watcher once the session has stopped; it takes only what the record
+	// shows untaken, so nothing is taken twice.
+	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, r.ui.Log)
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
@@ -1384,7 +1377,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			// session is ending, leaves its message for the next run.
 			phoneID := m.ID
 			if body == "" && len(atts) == 0 {
-				step(func() {
+				r.post(func() {
 					if !r.ending {
 						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
@@ -1400,7 +1393,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				p.mu.Unlock()
 				if p.isTaken(fid) {
 					// Its answer was taken already (handOver claims it).
-					step(func() {
+					r.post(func() {
 						if !r.ending {
 							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
@@ -1432,7 +1425,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					}
 				}
 				caps := capsFromMeta(m.Meta)
-				step(func() {
+				r.post(func() {
 					if r.ending {
 						p.left = true
 						return
@@ -1447,7 +1440,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			p.settleDismissals(r)
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
-			step(func() {
+			r.post(func() {
 				if r.ending {
 					// A command is not run by a session that is ending, and
 					// left for the next run it would have the reply watcher
@@ -1679,6 +1672,17 @@ func (r *Runtime) waitingOnPhone() bool {
 // with a phone message read from then on, words put in its inbox now wait
 // for its next run. Safe from any goroutine.
 func (r *Runtime) Ending() bool { return r.ctx.Err() != nil }
+
+// loopGone reports that the loop has stopped taking work (finish has
+// closed it): nothing posted to it runs any more.
+func (r *Runtime) loopGone() bool {
+	select {
+	case <-r.closed:
+		return true
+	default:
+		return false
+	}
+}
 
 // latestKeys is, for each thread the record knows a card of question qid
 // in, the highest key number among those cards. Cards recorded without a
