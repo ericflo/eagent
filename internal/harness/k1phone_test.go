@@ -184,6 +184,33 @@ func TestK1AQuestionPostedAsAMessageIsNotPostedAgainOnResume(t *testing.T) {
 	}
 }
 
+// B5, the other half: a question that went to the thread as a message is
+// answered at the terminal, with the mirror off. A card would be
+// withdrawn; the message stays as it was, and nothing in the thread says
+// the question is settled.
+func TestK1AQuestionPostedAsAMessageAndAnsweredElsewhereIsSettledInTheThread(t *testing.T) {
+	t.Skip("known, not fixed: a question posted as a message cannot be withdrawn when it is answered elsewhere; FinaleChat gives a token no call to withdraw or settle a message, and eagent posts no note in its place")
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	choices := r8Choices(21)
+	off := false
+	g := phoneStart(t, fp, "pick the branch to ship", true, func(_ string, msgs []map[string]any) reply {
+		if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "Which branch?") {
+			args, _ := json.Marshal(map[string]any{"text": "Which branch?", "options": choices})
+			return reply{calls: []event.ToolCall{tc("ask_user", string(args))}}
+		}
+		return hold()
+	}, func(c *config.Config) { c.Finalechat.MirrorInput = &off })
+	waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
+	before := fp.postCount()
+	g.ui.input <- "3"
+	waitFor(t, "the answer", func() bool { return len(r14Answers(g)) == 1 })
+	r14Drained(t, g)
+	if fp.postCount() == before {
+		t.Fatal("the question was answered at the terminal; the thread still shows it as asked, with nothing after it")
+	}
+}
+
 // B5, the thread deleted meanwhile: the question's message went with it,
 // and the resume posts it in the thread its first post recreated.
 func TestK1AQuestionPostedAsAMessageIsPostedAgainInARecreatedThread(t *testing.T) {
