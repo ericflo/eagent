@@ -862,6 +862,11 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		h.code = rt.Run(ctx)
 		s.mu.Lock()
 		delete(s.running, rt.SessionID())
+		if rt.State().EndReason == "quit" {
+			// The user stopped it (a stop, /quit): a list rememberHosted
+			// wrote must not bring it back.
+			s.forgetHosted(rt.SessionID())
+		}
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
