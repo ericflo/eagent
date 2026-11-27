@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -360,5 +361,26 @@ func TestK2AFailureFromTheModelMovedOffCountsNothingOnTheNewOne(t *testing.T) {
 				t.Fatal("the call was not made again on the new model")
 			}
 		})
+	}
+}
+
+// Two agents are on the record: the first has exited (its terminal is
+// gone), the second runs. When eagent's model is not answering, the notice
+// names the one still running, as eagent's own closing words do
+// (fallbackFinal), and does not say the user's messages go straight to an
+// agent: with two on the record they are kept for eagent (routeUserMessage).
+func TestK2TheDownNoticeNamesTheAgentsStillRunning(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("ok"))
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.sess.Close()
+	rt.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Profile: "claude", Agent: "claude", AgentLabel: "Claude", Label: "Claude"}))
+	rt.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "codex", State: "exited"}))
+	text := rt.unreachableNotice(errors.New("timeout")).Text
+	if strings.Contains(text, "Codex") || strings.Contains(text, "straight to") || !strings.Contains(text, "Claude") {
+		t.Fatalf("with Codex exited and Claude running, told: %q", text)
 	}
 }
