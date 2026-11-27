@@ -26,8 +26,8 @@ func TestSRRelayCommandOnItsWayLeavesAModelChangeWaitingForATurnThatNeverComes(t
 	_, id := k2Forward(t, rt, seat, "/clear", "queue")
 	msg := k1Repick(t, rt)
 	if k1Restarting(rt) {
-		// A command starts no turn and holds nothing back: the change
-		// starts the agent again at once, as on main.
+		// Applied at once is as good as on main. (A command being typed
+		// holds the change until it is typed: TestK5AChangeDoesNotCut...)
 		seat.end()
 		g.release <- struct{}{}
 		waitRelayStarts(t, rt)

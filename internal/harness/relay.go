@@ -543,14 +543,19 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 }
 
 // appendOutcome records how a send ended (relay.delivered); every outcome
-// the harness writes goes through here. One that did not arrive, of a
-// relay between turns whose terminal is up, may have been the last thing
-// on its way to the agent, and no turn starts with it: a change waiting
-// for the relay is looked at again (applyWaitingRepick). Loop goroutine.
+// the harness writes goes through here. One that did not arrive, or the
+// arrival of the agent's own command typed into its prompt, of a relay
+// between turns whose terminal is up, may have been the last thing on its
+// way to the agent, and no turn starts with it: a change waiting for the
+// relay is looked at again (applyWaitingRepick). Any other arrival starts
+// the turn the change waits for. Loop goroutine.
 func (r *Runtime) appendOutcome(ev event.Event) {
 	r.append(ev)
 	var d event.RelayDeliveredData
-	if ev.Decode(&d) != nil || d.OK {
+	if ev.Decode(&d) != nil {
+		return
+	}
+	if s, ok := sendRecord(r.st, d.ID); d.OK && (!ok || !typedCommand(r.st, d.ID, s.Text)) {
 		return
 	}
 	if rel := r.st.Relays[d.Name]; rel != nil && rel.State == "idle" && r.relays.get(d.Name) != nil {

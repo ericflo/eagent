@@ -167,6 +167,35 @@ func TestK5ANewerChangeTheEndOvertakesIsSaidTruthfully(t *testing.T) {
 	}
 }
 
+// A review's suspicion on df2c602: eagent types one of the agent's own
+// commands (/clear) into an idle Codex and, while it is being typed, the
+// model is changed. A command holds nothing back since df2c602, so the
+// change stopped Codex under the typing. A change never cuts a send being
+// typed: it waits for the command to be typed, then applies.
+func TestK5AChangeDoesNotCutACommandBeingTyped(t *testing.T) {
+	seat := newGateSeat("…")
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() { rt.st.Relays["codex"].State = "idle" })
+	sent := make(chan string, 1)
+	go func() {
+		out, _ := rt.relayTool("relay_send", argStr(map[string]any{"text": "/clear"}), argNum(nil), argList(nil), false)
+		sent <- out
+	}()
+	recv(t, seat.entered, "the command being typed")
+	msg := k1Repick(t, rt)
+	if k1Restarting(rt) {
+		t.Errorf("the change started Codex again while /clear was being typed (%q)", msg)
+	}
+	close(seat.gate)
+	if out := recv(t, sent, "relay_send"); strings.Contains(out, "not running") {
+		t.Errorf("the command was cut: %q", out)
+	}
+	waitFor(t, "the change applied once the command is typed", func() bool { return k1Restarting(rt) })
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+}
+
 // A start that comes up after the session's end stopped waiting for starts
 // (relayOpsGrace) cannot be recorded: nothing is written after
 // session.end, and its agent is stopped, as nothing would know it runs.
