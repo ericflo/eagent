@@ -92,7 +92,10 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 	}
 	defer sess.Close()
 	for _, rel := range state.Replay(evs).ActiveRelays() {
-		if rel.Target != "" {
+		// One the record shows exited has no terminal to kill: its
+		// relay.end is recorded, and nothing is said of it.
+		exited := rel.State == "exited"
+		if rel.Target != "" && !exited {
 			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
 				failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
 			}
@@ -100,7 +103,9 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
-		stopped = append(stopped, rel.Who())
+		if !exited {
+			stopped = append(stopped, rel.Who())
+		}
 	}
 	return stopped, failed, nil
 }
