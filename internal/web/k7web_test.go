@@ -4,12 +4,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/store"
 )
 
@@ -86,6 +88,29 @@ func TestK7TwoStopsAtOnceDuringTheShutdownGetOneAnswer(t *testing.T) {
 	a, b := <-first, <-second
 	if a.Code != http.StatusOK || b.Code != a.Code || b.Body.String() != a.Body.String() {
 		t.Fatalf("first: %d %s; second: %d %s", a.Code, a.Body, b.Code, b.Body)
+	}
+}
+
+// Words from the browser sent while a Stop during the shutdown is stopping
+// the session's agents are refused, and the page keeps them: the session
+// is locked by that stop, not run, and will not be brought back. They used
+// to be put in its inbox and answered "delivered".
+func TestK7WordsDuringAStopInTheShutdownAreRefused(t *testing.T) {
+	s, project := newTestServer(t)
+	info := srAgentSession(t, project)
+	entered, gate := make(chan struct{}), make(chan struct{})
+	old := killAgent
+	killAgent = func(host, target string) error { close(entered); <-gate; return nil }
+	t.Cleanup(func() { killAgent = old })
+	k7Shutdown(t, s, info)
+	stopped := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopped <- do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil) }()
+	<-entered // the stop holds the session's lock
+	w := do(s, "POST", "/api/sessions/"+info.ID+"/message", map[string]any{"text": "one more thing"}, nil)
+	close(gate)
+	<-stopped
+	if left, _ := os.ReadDir(harness.InboxDir(info.Path)); w.Code != http.StatusServiceUnavailable || len(left) != 0 {
+		t.Fatalf("answered %d %s, %d file(s) left in the inbox of a session nothing will run", w.Code, w.Body, len(left))
 	}
 }
 

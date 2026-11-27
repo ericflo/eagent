@@ -614,6 +614,14 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 	}
 	defer s.resuming.Unlock()
 	if alive(info.Path) || s.isHosted(info.ID) {
+		// Locked by a stop of this server's that the shutdown overtook,
+		// not by a run: nothing will read its inbox.
+		s.mu.Lock()
+		stopped := s.stops[info.ID] != nil
+		s.mu.Unlock()
+		if stopped {
+			return "", errStopping
+		}
 		return "inbox", harness.PostInbox(info.Path, msg)
 	}
 	if s.stopping {
