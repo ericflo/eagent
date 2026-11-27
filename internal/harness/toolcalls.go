@@ -120,26 +120,19 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			return "not sent: " + err.Error() + ". Fix the attachment or send the message without it.", true, true
 		}
 		important, _ := args["important"].(bool)
-		// The closing word of a session always buzzes.
-		important = important || tc.wake.final
-		// A closing word the user's own message overtook (they wrote
-		// while the call was out) is not sent on top of it: asked in the
-		// step that records it. Only that: a closing reply that itself
-		// set a timer or started an agent before this call still tells
-		// the user so.
-		stale := false
 		r.sync(func() {
-			if stale = tc.wake.final && r.turns.wakes[wakeUser] > r.turns.seen; stale {
-				return
-			}
-			r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts})
+			// The closing word of a session always buzzes: asked as it is
+			// recorded, since a turn made for the closing word is not
+			// saying it once the session has stopped ending (the user
+			// wrote and the turn took their message up, or the reply
+			// itself set a timer or started an agent). The message goes
+			// out either way: what the model tells the user is never held
+			// back for being late.
+			r.recordMessage(event.MessageData{Text: text, Important: important || tc.wake.final && r.stillClosing(), Attachments: atts})
 			if n := len(r.st.Events); n > 0 && r.st.Events[n-1].Type == event.Message {
 				tc.own = append(tc.own, r.st.Events[n-1].Seq)
 			}
 		})
-		if stale {
-			return "not sent: the user wrote while you wrote this, so no closing word goes out on top of their message. It is looked at next.", true, false
-		}
 		tc.spoke, tc.said = true, true
 		tc.handle()
 		if len(atts) > 0 {

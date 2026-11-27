@@ -24,13 +24,15 @@ func (u *sr13UI) Stream(kind, delta string) {
 	}
 }
 
-// The sibling of TestSR12PlainTextClosingReportAfterTheUserWroteIsNotSent:
-// the closing call answers with send_message instead of plain text. The
-// user wrote while it was out, so the session is not ending; the report
-// written for an end that is not happening should not go out as the
-// closing word (important), on top of the answer to what they asked.
+// The closing call answers with send_message; the user wrote while it was
+// out, so the session is not ending. What the model tells the user is
+// never held back: the report goes out, without the buzz of a closing word
+// (the session is not saying its last), and the user's question is
+// answered next. (For two passes a check refused such a message; each time
+// it also refused one that should have gone.)
 func TestSR13SendMessageClosingReportAfterTheUserWrote(t *testing.T) {
 	const report = "Final report: #42 is merged and this session is ending."
+	const answer = "Yes, #42 is merged and the tests are green."
 	var phase atomic.Int32
 	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
 		tail := lastUserText(msgs)
@@ -39,7 +41,7 @@ func TestSR13SendMessageClosingReportAfterTheUserWrote(t *testing.T) {
 			r12Write(rt, "is #42 merged?")
 			return say(report)
 		case phase.CompareAndSwap(2, 3):
-			return say("Yes, #42 is merged and the tests are green.")
+			return say(answer)
 		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
 			return stopsWhenDone()
 		}
@@ -49,10 +51,28 @@ func TestSR13SendMessageClosingReportAfterTheUserWrote(t *testing.T) {
 	if phase.Load() < 2 {
 		t.Fatalf("setup: no closing call (phase %d)", phase.Load())
 	}
-	for _, m := range s.ui.said() {
-		if strings.Contains(m, report) {
-			t.Fatalf("exit %d: the closing report written before the user's message was sent after the session stopped ending; said %q", code, s.ui.said())
+	var asked, reported, answered int64
+	buzzed := false
+	for _, ev := range mustReadCore(t, s.rt.sess.Path) {
+		var u event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&u) == nil && u.Text == "is #42 merged?" {
+			asked = ev.Seq
 		}
+		var m event.MessageData
+		if ev.Type == event.Message && ev.Decode(&m) == nil {
+			switch m.Text {
+			case report:
+				reported, buzzed = ev.Seq, m.Important
+			case answer:
+				answered = ev.Seq
+			}
+		}
+	}
+	if asked == 0 || reported < asked || answered < reported {
+		t.Fatalf("exit %d: the user's question at %d, the report at %d, the answer at %d; want the report sent and the question answered after it; said %q", code, asked, reported, answered, s.ui.said())
+	}
+	if buzzed {
+		t.Fatalf("exit %d: the report went out marked important, as a closing word is, though the user had written and the session was not ending", code)
 	}
 }
 
