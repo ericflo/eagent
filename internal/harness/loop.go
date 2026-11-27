@@ -442,6 +442,11 @@ func (r *Runtime) maybeTurn() {
 	if t.busy || r.ending {
 		return
 	}
+	if r.closingRefused && !r.stillClosing() {
+		// The session stopped ending: the refusal was final for that
+		// closing, not for one that comes later (refusedWhileClosing).
+		r.closingRefused = false
+	}
 	if r.refusedWhileClosing() {
 		// Final for an ending session: only the last title and summary,
 		// if the end waits on it, is still asked for (one attempt).
@@ -470,12 +475,14 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if r.needsDossier() {
+	if r.needsDossier() && !r.endsAtQuiet() {
 		// Restart at the first quiet moment: the prompt is still in the
 		// provider's cache, so the dossier is cheap to write now, and the
 		// user's next message does not have to wait for it. Not in a
 		// session that is ending: nothing will be asked of it again
-		// (noRestartNow).
+		// (noRestartNow). Nor in one that ends at this quiet moment
+		// (endsAtQuiet): maybeEnd, next in this tick, asks its closing
+		// word on the conversation that still fits, or ends it.
 		r.startDossier()
 		return
 	}
@@ -1602,10 +1609,13 @@ var (
 func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
-	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && r.stillClosing() {
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
 		// The session is ending: a refusal is final for it
 		// (refusedWhileClosing). No restart, no try again, no notice: it
-		// ends in its closing path's own words.
+		// ends in its closing path's own words. A transient status (a
+		// rate limit, a timeout: Retryable) is no refusal: it is tried
+		// again after its wait, and a session whose calls all fail ends
+		// as one whose model could not be reached (maybeEnd).
 		r.closingRefused = true
 		if ae.ContextOverflow() {
 			// Should the session stop ending, the next look restarts
@@ -1681,13 +1691,13 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	}
 }
 
-// refusedWhileClosing reports that the last call was refused (4xx: too
-// long, or any other refusal) while the session is ending (stillClosing;
-// turnFailed): that is final for it. No restart is made (noRestartNow),
-// the look is not made again (maybeTurn), no notice is given, and the
-// session ends (maybeEnd) in its closing path's own words, as done: its
-// closing word was asked for, and what was refused came after it. Loop
-// goroutine.
+// refusedWhileClosing reports that the last call was refused (a 4xx that
+// is not transient: too long, or any other refusal) while the session is
+// ending (stillClosing; turnFailed): that is final for it. No restart is
+// made (noRestartNow), the look is not made again (maybeTurn), no notice
+// is given, and the session ends (maybeEnd) in its closing path's own
+// words, as done: its closing word was asked for, and what was refused
+// came after it. Loop goroutine.
 func (r *Runtime) refusedWhileClosing() bool {
 	return r.closingRefused && r.stillClosing()
 }
