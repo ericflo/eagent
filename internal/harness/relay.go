@@ -1129,15 +1129,18 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 					ours = r.relays.stopping[name] != nil
 					r.relays.mu.Unlock()
 				}
-				if job := r.relays.launch(name); !ours && ev.Kind == relay.KindInner && job != nil && job.old == seat && job.replaces == job.name {
-					// The agent a restart replaces moved to another session
-					// of its own (pi's /new) before it was stopped: the
-					// restart opens that one, not the one it left (run takes
-					// it after the old seat has drained).
+				if job := r.relays.launch(name); !ours && ev.Kind == relay.KindInner && job != nil && job.old == seat {
+					// The agent a restart or a switch replaces moved to
+					// another session of its own (pi's /new) before it was
+					// stopped: the record keeps that session, which a later
+					// start of this relay opens; a restart opens it now, not
+					// the one it left (run takes it after the drain).
 					ours = true
-					r.relays.mu.Lock()
-					job.innerID = ev.InnerID
-					r.relays.mu.Unlock()
+					if job.replaces == job.name {
+						r.relays.mu.Lock()
+						job.innerID = ev.InnerID
+						r.relays.mu.Unlock()
+					}
 				}
 				if ours {
 					r.onRelayEvent(name, ev)

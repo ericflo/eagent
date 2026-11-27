@@ -48,6 +48,30 @@ func TestSR6AWaitingChangeKillsALongQuietTurn(t *testing.T) {
 	t.Errorf("the user's message Codex held for its next step: %q %+v", k2Outcome(rt, id), deliveredFor(rt, id))
 }
 
+// The sixth review's suspicion: pi ran /new just before a switch to Claude
+// stopped it, and its seat says the move in its last look. The switch took
+// that seat out of use, and the move was dropped as a replaced seat's news:
+// a later restart of pi (relay_control restart of the stopped relay) would
+// resume the session /new had left. The record keeps the move.
+func TestK9AMoveSaidAtASwitchsCloseIsRecorded(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("claude")}, nil)
+	rt := sr3PiRuntime(t)
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	seat.waitGone(t)
+	seat.say(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"}) // its last look
+	seat.end()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, switched, "switch")
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		if rel := rt.st.Relays["pi"]; rel == nil || rel.InnerID != "sess-new" {
+			t.Errorf("pi on the record after the switch: %+v; want the session its /new opened, sess-new", rel)
+		}
+	})
+}
+
 // The sixth review's suspicion: Stop session while a model change restarts
 // Codex. The restart took the old seat out of use, so Stop session found no
 // seat to mark stopping, and the old seat's last look, which read a send
