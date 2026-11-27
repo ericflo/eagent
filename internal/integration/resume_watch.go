@@ -79,19 +79,22 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 }
 
 // keptFile is where a stopping reply watcher writes down the replies it
-// keeps quietly (keepUntilStopped), and the sweep of whoever holds the
-// watch next takes them up, once: a session that stops meanwhile hides its
-// thread from the sweep behind its closing note. A hard kill writes
-// nothing, as for the serve's list of hosted sessions.
+// keeps (quietly, keepUntilStopped, or told it keeps trying, retryLater),
+// and the sweep of whoever holds the watch next takes them up, once: a
+// session that stops meanwhile hides its thread from the sweep behind its
+// closing note, as eagent's note that it keeps trying does. A hard kill
+// writes nothing, as for the serve's list of hosted sessions.
 func keptFile(project string) string {
 	return filepath.Join(stateDir(project), "resume-watch-kept.json")
 }
 
-// keptReply is a reply written down, with the time it was first kept: the
-// day's cutoff (retryPending) counts from then, across restarts.
+// keptReply is a reply written down, by its id, with the time it was first
+// kept: the day's cutoff (retryPending) counts from then, across restarts.
 type keptReply struct {
+	Thread  string             `json:"thread"`
 	Message finalechat.Message `json:"message"`
 	Since   time.Time          `json:"since"`
+	Told    bool               `json:"told,omitempty"`
 }
 
 // lockKept holds the kept file for one process's read and write of it: two
@@ -102,8 +105,8 @@ func lockKept(project string) (func(), error) {
 	return filelock.Acquire(ctx, keptFile(project)+".lock")
 }
 
-// writeDown adds the quiet entries, by thread, to those written down that
-// nobody has taken up yet.
+// writeDown adds the replies kept to those written down that nobody has
+// taken up yet.
 func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 	unlock, err := lockKept(project)
 	if err != nil {
@@ -116,10 +119,8 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 		_ = json.Unmarshal(raw, &kept)
 	}
 	r.mu.Lock()
-	for _, p := range r.replies {
-		if !p.told {
-			kept[p.thread.ExternalID] = keptReply{Message: p.msg, Since: p.since}
-		}
+	for id, p := range r.replies {
+		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told}
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
@@ -130,7 +131,8 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 	}
 }
 
-// takeUp keeps, quietly, what an earlier watcher wrote down.
+// takeUp keeps what an earlier watcher wrote down, as it kept it: a reply
+// the thread was told about is not told about again (retryLater).
 func (r *replyRetries) takeUp(project string) {
 	if _, err := os.Stat(keptFile(project)); err != nil {
 		return
@@ -147,8 +149,17 @@ func (r *replyRetries) takeUp(project string) {
 	_ = os.Remove(keptFile(project))
 	var kept map[string]keptReply
 	_ = json.Unmarshal(raw, &kept)
-	for ext, k := range kept {
-		r.keepQuietly(finalechat.Thread{ExternalID: ext}, k.Message, k.Since)
+	for id, k := range kept {
+		thread := finalechat.Thread{ExternalID: k.Thread}
+		if !k.Told {
+			r.keepQuietly(thread, k.Message, k.Since)
+			continue
+		}
+		r.mu.Lock()
+		if _, ok := r.replies[id]; !ok {
+			r.replies[id] = pendingReply{thread: thread, msg: k.Message, since: k.Since, told: true}
+		}
+		r.mu.Unlock()
 	}
 }
 

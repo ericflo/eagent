@@ -451,3 +451,39 @@ func TestK1AKeptReplyIsLeftToTheMirrorInOneLogLine(t *testing.T) {
 		t.Fatalf("%d lines, kept %#v; want one line and the reply kept", n, w.retries.replies)
 	}
 }
+
+// Batch 2, the promise: a reply could not resume its session, and the
+// thread was told eagent keeps trying every minute; that note is the
+// thread's latest message, which the sweep passes over. The serve
+// restarts. The next serve's watcher keeps trying, resumes the session
+// with the reply, and does not tell the thread a second time.
+func TestK1AReplyWhoseResumeFailedIsTriedAgainAfterARestart(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	fr := newR10Front(t, f)
+	host := &flakyResumeHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, failures: 1}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if p := w.retries.replies["m1"]; host.calls() != 0 || !p.told || r10Preview(f, sid) != "system" {
+		t.Fatalf("after the failed resume: resumed %#v, kept %#v, latest from %s", host.resumed, w.retries.replies, r10Preview(f, sid))
+	}
+	w.retries.writeDown(project, t.Logf)
+	next := f.watcher(project, host, t)
+	next.client = w.client
+	next.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("after the restart: resumed %#v", host.resumed)
+	}
+	if n := r11Told(fr, "could not resume"); n != 1 {
+		t.Fatalf("told %d times: %q", n, fr.posted())
+	}
+}
