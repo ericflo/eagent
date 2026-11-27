@@ -1,14 +1,17 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,5 +200,89 @@ func TestK1ASweepFindsAReplyPastTheNewestTwoHundredThreads(t *testing.T) {
 	w.sweep(context.Background())
 	if host.calls() != 1 || host.resumed[0].ID != "m1" || pages.Load() != 1 {
 		t.Fatalf("resumed %#v after %d first pages", host.resumed, pages.Load())
+	}
+}
+
+// k1Files stands in front of an r6Thread fixture: its downloads answer 502
+// while fails lasts (each takes one), and it counts the downloads and keeps
+// the bodies posted.
+type k1Files struct {
+	srv       *httptest.Server
+	fails     atomic.Int32
+	downloads atomic.Int32
+	mu        sync.Mutex
+	notes     []string
+}
+
+func newK1Files(t *testing.T, f *r6Thread, fails int32) *k1Files {
+	t.Helper()
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	fr := &k1Files{}
+	fr.fails.Store(fails)
+	fr.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/files/") {
+			fr.downloads.Add(1)
+			if fr.fails.Add(-1) >= 0 {
+				http.Error(w, "upstream unavailable", http.StatusBadGateway)
+				return
+			}
+		}
+		if r.Method == http.MethodPost {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			fr.mu.Lock()
+			fr.notes = append(fr.notes, fmt.Sprint(body["body"]))
+			fr.mu.Unlock()
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(fr.srv.Close)
+	return fr
+}
+
+func (fr *k1Files) posted() []string {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	return append([]string(nil), fr.notes...)
+}
+
+// B12: the download of a file sent with a reply to a stopped session fails
+// once with a 502. It is tried again, and the session comes back with the
+// file; nobody is told it was refused.
+func TestK1AFileWhoseDownloadFailedOnceIsTriedAgain(t *testing.T) {
+	_, _, f, _, host, w := r9Stopped(t, "see the screenshot", r9Shot())
+	fr := newK1Files(t, f, 1)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 1 {
+		t.Fatalf("resumed %#v, want once with the words and the file", host.resumed)
+	}
+	if notes := fr.posted(); len(notes) != 0 {
+		t.Fatalf("posted %q for a file that came", notes)
+	}
+}
+
+// B12, its bound: a file whose download always fails with a 502 is tried
+// three times, as the client tries a post, and then refused: the sender is
+// told, and the session comes back with the words.
+func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
+	_, _, f, _, host, w := r9Stopped(t, "see the screenshot", r9Shot())
+	fr := newK1Files(t, f, 1000)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 {
+		t.Fatalf("resumed %#v, want once with the words", host.resumed)
+	}
+	if n := fr.downloads.Load(); n != 3 {
+		t.Fatalf("%d downloads, want three", n)
+	}
+	if notes := fr.posted(); len(notes) != 1 || !strings.Contains(notes[0], "shot.png") {
+		t.Fatalf("the sender was not told once: %q", notes)
 	}
 }
