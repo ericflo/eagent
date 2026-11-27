@@ -279,8 +279,9 @@ func ranSince(path string, at time.Time) bool {
 // down if there is one; tests substitute it.
 var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error { return s.Resume(id, reply) }
 
-// pendingReply finds that reply; tests substitute it.
-var pendingReply = integration.PendingReply
+// pendingReply finds that reply; tests substitute it. Left nil, the restore
+// reads it on this server's own phone (integration.PendingReplyIn).
+var pendingReply func(ctx context.Context, project string, info store.Info) (integration.PhoneMessage, bool, error)
 
 // releaseReply gives it back to the reply watcher when the session could
 // not come back with it; tests substitute it.
@@ -348,14 +349,17 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	back := 0
-	// With the phone off for the sessions this server resumes (their
-	// configuration's finalechat.enabled; the kill switch is PendingReply's
-	// own check), no reply is taken from their threads, as the reply watcher
-	// takes none.
+	// The reply that waited is read on the phone the sessions this server
+	// resumes run with (its bundle and preset over the project's), and none
+	// is taken when that phone is off, as their mirror takes none.
 	takeReply := pendingReply
-	if !finalechat.Disabled() && !s.PhoneWanted() {
-		takeReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
-			return integration.PhoneMessage{}, false, nil
+	if takeReply == nil {
+		fc, err := s.PhoneConfig()
+		takeReply = func(ctx context.Context, project string, info store.Info) (integration.PhoneMessage, bool, error) {
+			if err != nil {
+				return integration.PhoneMessage{}, false, err
+			}
+			return integration.PendingReplyIn(ctx, fc, project, info)
 		}
 	}
 	for _, id := range list.Sessions {
