@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,5 +44,53 @@ func TestSRLoopDownNoticePromisesRetriesTheEndingSessionNeverMakes(t *testing.T)
 	}
 	if promise != "" && closing != "" {
 		t.Fatalf("exit %d: told %q, then the session ended at once: %q", code, promise, closing)
+	}
+}
+
+// SR2: the conversation passes its restart size while the session's
+// directory takes no new file (a directory it may no longer write, inodes
+// used up), though its open record still takes appends. The dossier pass
+// was paid for in full (up to 40 calls over the whole conversation) and
+// only then did finishDossier find the next file cannot be made; the
+// briefing was thrown away, and dossierRetry later the same paid pass ran
+// again, without end. main made the file first (startRollover) and paid
+// no model call for a restart that could not be made. Here dossierRetry is
+// shortened so the tries show in a fraction of a second: each gives the
+// restart up without a pass.
+func TestSRLoopARestartWhoseFileCannotBeMadePaysForAPassAgainAndAgain(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a directory cannot be made read-only for root")
+	}
+	setFor(t, &dossierRetry, 50*time.Millisecond)
+	var ready atomic.Bool
+	var passes atomic.Int32
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			if last, _ := m[len(m)-1]["content"].(string); strings.Contains(last, dossierAsk) {
+				passes.Add(1) // a pass's first call
+			}
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		r := hold()
+		if ready.Load() {
+			r.prompt = 30000 // past the 20,000 restart size of testConfig
+		}
+		return r
+	}
+	s := startSession(t, "", brain, nil)
+	r5LogOnFailure(s)
+	s.settled()
+	if err := os.Chmod(s.rt.sess.Path, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(s.rt.sess.Path, 0o755) })
+	ready.Store(true)
+	r14AgentTurn(s, "The build is green.")
+	r6Until(t, "three restarts given up, or four passes", func() bool {
+		return r4Logged(s, "the conversation continues as it is for now") >= 3 || passes.Load() >= 4
+	})
+	if n := passes.Load(); n != 0 {
+		t.Fatalf("%d paid dossier passes for a restart whose file cannot be made (%d briefings thrown away so far)", n, r4Logged(s, "the conversation continues as it is for now"))
 	}
 }
