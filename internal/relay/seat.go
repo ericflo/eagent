@@ -620,12 +620,18 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		s.mu.Lock()
-		state, closed, hung := s.state, s.closed, s.hung
+		state, closed, hung, catching := s.state, s.closed, s.hung, s.catchingUp
 		s.mu.Unlock()
 		if closed {
 			// Nothing watches this seat any more, so its state is stale and
 			// it is no longer the relay's terminal.
 			return state, ErrClosed
+		}
+		if catching && state != "exited" {
+			// Reattached: what the agent is doing is known once the watcher
+			// has read the transcript to its end (caughtUp). Until then a send
+			// waits as for a start.
+			state = "starting"
 		}
 		switch state {
 		case "starting":
@@ -1068,12 +1074,18 @@ func (s *Seat) watch() {
 	lastAlive := time.Now()
 	lastDialog := time.Time{}
 	missed := 0 // liveness checks in a row that found no pane
+	s.mu.Lock()
+	wait := !s.catchingUp // a reattached seat looks at once: a send waits for its catch-up (waitReady)
+	s.mu.Unlock()
 	for {
-		select {
-		case <-s.stop:
-			return
-		case <-tick.C:
+		if wait {
+			select {
+			case <-s.stop:
+				return
+			case <-tick.C:
+			}
 		}
+		wait = true
 		now := time.Now()
 		s.mu.Lock()
 		moved, movedTo := s.refollow, s.inner
