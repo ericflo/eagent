@@ -338,7 +338,7 @@ var toolTokens = sync.OnceValue(func() estTokens {
 // it as too long. Loop goroutine only.
 func (r *Runtime) needsDossier() bool {
 	t := &r.turns
-	if t.compacting || time.Since(t.dossierFailedAt) < dossierRetry {
+	if r.noRestartNow() {
 		return false
 	}
 	if t.adopt {
@@ -431,13 +431,23 @@ func (r *Runtime) needsDossier() bool {
 	return true
 }
 
+// noRestartNow reports what stops any restart for now, whatever the
+// conversation's size: one is under way, the last could not be made a
+// moment ago (dossierRetry), or the session is ending (stillClosing),
+// when nothing will be asked of a new conversation. needsDossier and
+// restartRuns ask it first. Loop goroutine only.
+func (r *Runtime) noRestartNow() bool {
+	t := &r.turns
+	return t.compacting || time.Since(t.dossierFailedAt) < dossierRetry || r.stillClosing()
+}
+
 // restartRuns reports that needsDossier, asked now, would restart the
 // conversation: the same questions in the same order, with nothing said or
 // logged (that is needsDossier's to do when it is asked). Loop goroutine
 // only.
 func (r *Runtime) restartRuns() bool {
 	t := &r.turns
-	if t.compacting || time.Since(t.dossierFailedAt) < dossierRetry {
+	if r.noRestartNow() {
 		return false
 	}
 	if t.adopt || r.st.Unfinished() {

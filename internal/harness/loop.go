@@ -450,8 +450,9 @@ func (r *Runtime) maybeTurn() {
 			return // the model was failing a moment ago; a message from the user does not wait
 		}
 		// Not in a session that is ending (a notice of its own asks for
-		// the look): nothing will be asked of a new conversation.
-		if !r.stillClosing() && r.needsDossier() {
+		// the look): nothing will be asked of a new conversation
+		// (noRestartNow).
+		if r.needsDossier() {
 			r.startDossier()
 			return
 		}
@@ -461,11 +462,12 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if !r.stillClosing() && r.needsDossier() {
+	if r.needsDossier() {
 		// Restart at the first quiet moment: the prompt is still in the
 		// provider's cache, so the dossier is cheap to write now, and the
 		// user's next message does not have to wait for it. Not in a
-		// session that is ending: nothing will be asked of it again.
+		// session that is ending: nothing will be asked of it again
+		// (noRestartNow).
 		r.startDossier()
 		return
 	}
@@ -1622,6 +1624,13 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
+		if !answered && r.endsDown() {
+			// A session with no terminal that nothing keeps open ends on
+			// this as one whose model is down, in its own words
+			// (maybeEnd): it does not keep trying, nor keep what is
+			// written for an answer, so it does not say so.
+			return
+		}
 		// Unless the restart could not be made (its file could not be
 		// created, finishDossier): then nothing was restarted, and the user
 		// hears what any failed call tells them.
@@ -1641,12 +1650,6 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 			// The model answered a call of this turn: it can be reached,
 			// and what fails is a call after.
 			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", failingNotice, shortErr(err), r.whileDown())})
-			return
-		}
-		if r.endsDown() {
-			// A session with no terminal that nothing keeps open ends on
-			// this as one whose model is down, in its own words
-			// (maybeEnd): it does not keep trying, so it does not say so.
 			return
 		}
 		r.recordMessage(r.unreachableNotice(err))
