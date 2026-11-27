@@ -242,6 +242,7 @@ func TestK14ARefusalNoteThatCannotBePostedYetIsPostedOnceItCan(t *testing.T) {
 // once its thread is attached, and the record says so.
 func TestK14ARefusalNoteOwedByAStoppedRunIsPostedByTheNext(t *testing.T) {
 	setFor(t, &phoneRetryStep, 5*time.Millisecond)
+	setFor(t, &phoneCloseWait, 200*time.Millisecond) // the note owed at the end is tried that long
 	fp := newPhoneFake(true)
 	fp.features = []string{"activity", "dismiss", "attachments"}
 	t.Cleanup(fp.srv.Close)
