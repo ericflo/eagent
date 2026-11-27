@@ -188,8 +188,9 @@ type relayLaunch struct {
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
 	// oldDrained is closed once all the old seat saw is on the record
-	// (watchSeat), closed the loop's end.
+	// (watchSeat), closed the loop's end. undrained: run went on without it.
 	oldDrained, closed <-chan struct{}
+	undrained          bool
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -653,18 +654,23 @@ func (job *relayLaunch) run() {
 		// What the old seat saw before it closed (an arrival, a held message
 		// taken back) is recorded before the new agent starts: how its sends
 		// ended is its word, and finishLaunch settles only what is left.
+		// Bounded as the wait above: a watcher stuck past it is gone on from.
 		select {
 		case <-job.oldDrained:
 		case <-job.closed:
+		case <-time.After(oldSendSettle):
+			job.undrained = true
 		}
 	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
 
 // oldSendSettle bounds how long a start waits for the send the agent it
-// replaces was typing to give up. Once the old terminal is closed that send
-// fails at its next step, which takes well under a second.
-const oldSendSettle = 15 * time.Second
+// replaces was typing to give up, and a start or a stop for all the old
+// seat saw to be recorded. Once the old terminal is closed that send fails
+// at its next step, and its watcher ends, well under a second. A variable
+// so tests can shorten it.
+var oldSendSettle = 15 * time.Second
 
 // finishLaunch records how a start went and returns the relay's name. The
 // sends that waited for it are queued for the new seat, after a switch's
@@ -682,6 +688,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	held, job.held = job.held, nil
 	stopped := job.stopped
 	r.relays.mu.Unlock()
+	if job.undrained {
+		r.ui.Log("relay %s: the agent it replaces had not said all it saw after %s; what it said after that is not recorded", firstNonEmpty(job.replaces, job.name), oldSendSettle)
+	}
 	err = job.err
 	if err == nil {
 		rel := r.st.Relays[job.replaces]
@@ -1968,23 +1977,30 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 					select {
 					case <-drained:
 					case <-r.closed:
+					case <-time.After(oldSendSettle):
+						r.ui.Log("relay %s: the stopped agent had not said all it saw after %s; what it said after that is not recorded", rel.Name, oldSendSettle)
 					}
 				}
-				if settleLater {
-					r.onLoop(func() {
-						// A start asked for meanwhile waits for this stop
-						// (stopping): what it holds is its to type.
-						var held []string
-						r.relays.mu.Lock()
-						if job := r.relays.launching[rel.Name]; job != nil {
-							for _, h := range job.held {
-								held = append(held, h.id)
-							}
+				r.onLoop(func() {
+					// From this step on nothing more of the stopped seat is
+					// taken, so nothing it says later follows the settle. A
+					// start asked for meanwhile waits for this stop
+					// (stopping): what it holds is its to type.
+					var held []string
+					r.relays.mu.Lock()
+					if r.relays.stopping[rel.Name] == killed {
+						delete(r.relays.stopping, rel.Name)
+					}
+					if job := r.relays.launching[rel.Name]; job != nil {
+						for _, h := range job.held {
+							held = append(held, h.id)
 						}
-						r.relays.mu.Unlock()
+					}
+					r.relays.mu.Unlock()
+					if settleLater {
 						r.settleExited(r.st.Relays[rel.Name], held...)
-					})
-				}
+					}
+				})
 				r.relays.mu.Lock()
 				if r.relays.stopping[rel.Name] == killed {
 					delete(r.relays.stopping, rel.Name)
