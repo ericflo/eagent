@@ -1369,15 +1369,11 @@ func (r *Runtime) afterCallLimit(maxCalls int) {
 }
 
 // stillClosing reports whether the session a closing turn was made for is
-// still ending, as maybeEnd has it: no agent, timer (unless a question nobody
-// can answer is open), phone question or word from the user keeps it going.
-// Loop goroutine.
+// still ending: nothing keeps it open, as maybeEnd has it (keptOpen), and
+// no word from the user waits. Loop goroutine.
 func (r *Runtime) stillClosing() bool {
-	r.relays.mu.Lock()
-	starting := len(r.relays.launching) > 0
-	r.relays.mu.Unlock()
-	kept := (len(r.st.ActiveRelays()) > 0 || starting || len(r.st.ActiveSchedules()) > 0) && (r.st.Question == nil || r.phone != nil)
-	return (r.turns.finalAsked || r.summary.final) && !kept && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
+	kept, _ := r.keptOpen()
+	return (r.turns.finalAsked || r.summary.final) && !kept && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
 // fallbackFinal makes sure a session with no terminal does not end in

@@ -1163,37 +1163,11 @@ func (r *Runtime) maybeEnd() {
 		r.ui.Idle(r.st.Waiting())
 		return
 	}
-	// unanswerable: a question is open, and nobody can answer it while the
-	// session runs: there is no terminal and no phone. eagent was told
-	// that asking ends such a session until the user resumes it (the
-	// prompt, and ask_user's own result), so it ends even with an agent
-	// running or a timer set. The agent keeps running in its own terminal,
-	// and the resumed session picks it up and sets the timer again.
-	unanswerable := r.st.Question != nil && r.phone == nil
-	// An agent being started (a command's /restart of a stopped one, say)
-	// counts as running, as for the check on idle agents: a session that
-	// ended under the start would stop the agent it brings up.
-	r.relays.mu.Lock()
-	starting := len(r.relays.launching) > 0
-	r.relays.mu.Unlock()
-	if (len(r.st.ActiveRelays()) > 0 || starting) && !unanswerable {
-		r.checkIdleAgents()
+	if kept, agents := r.keptOpen(); kept {
+		if agents {
+			r.checkIdleAgents()
+		}
 		return
-	}
-	if len(r.st.ActiveSchedules()) > 0 && !unanswerable {
-		return // a timer is set: the session stays to keep it
-	}
-	if r.waitingOnPhone() {
-		// A question is open on the user's phone: the session waits for the
-		// answer (or the question's expiry) instead of ending.
-		return
-	}
-	if r.listeningAfterDismissal() {
-		// They closed the question to say something else; wait for it.
-		return
-	}
-	if r.commands > 0 {
-		return // a command's work is done and told first (relayCommand)
 	}
 	switch {
 	case t.finalAsked:
@@ -1224,6 +1198,32 @@ func (r *Runtime) maybeEnd() {
 		return
 	}
 	r.beginShutdown("done", 0)
+}
+
+// keptOpen reports that something keeps a session with no terminal from
+// ending (maybeEnd), and whether that is an agent. Loop goroutine.
+func (r *Runtime) keptOpen() (kept, agents bool) {
+	// unanswerable: a question is open, and nobody can answer it while the
+	// session runs: there is no terminal and no phone. eagent was told
+	// that asking ends such a session until the user resumes it (the
+	// prompt, and ask_user's own result), so it ends even with an agent
+	// running or a timer set. The agent keeps running in its own terminal,
+	// and the resumed session picks it up and sets the timer again.
+	unanswerable := r.st.Question != nil && r.phone == nil
+	// An agent being started (a command's /restart of a stopped one, say)
+	// counts as running, as for the check on idle agents: a session that
+	// ended under the start would stop the agent it brings up.
+	r.relays.mu.Lock()
+	starting := len(r.relays.launching) > 0
+	r.relays.mu.Unlock()
+	if (len(r.st.ActiveRelays()) > 0 || starting) && !unanswerable {
+		return true, true
+	}
+	// A timer is set: the session stays to keep it. A question is open on
+	// the user's phone: it waits for the answer (or the question's expiry).
+	// They closed the question to say something else: it waits for that.
+	// A command's work is done and told first (relayCommand).
+	return len(r.st.ActiveSchedules()) > 0 && !unanswerable || r.waitingOnPhone() || r.listeningAfterDismissal() || r.commands > 0, false
 }
 
 // beginShutdown records the end and stops the turn; finish() completes it.
