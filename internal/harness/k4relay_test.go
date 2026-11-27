@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -50,6 +51,30 @@ func TestSRRelayCommandOnItsWayLeavesAModelChangeWaitingForATurnThatNeverComes(t
 	seat.end()
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
+}
+
+// A review's case: eagent typed words of its own into Codex (relay_send),
+// their arrival not shown, and then switched to Claude. The brief quotes
+// only the user's sends, so nothing carries eagent's: with Codex stopped,
+// the send is reported unconfirmed, once, as at a stop. The user's send
+// stays as before (the brief quotes it).
+func TestK4AnEagentSendToTheAgentASwitchReplacesIsSettled(t *testing.T) {
+	seat := newK1QuietSeat()
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	if out, isErr := rt.relayTool("relay_send", argStr(map[string]any{"text": "run the linter"}), argNum(nil), argList(nil), false); isErr {
+		t.Fatalf("relay_send: %s", out)
+	}
+	id := lastSendID(rt)
+	k1QueuesIdle(t, rt)
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, switched, "switch")
+	waitRelayStarts(t, rt)
+	if got := deliveredFor(rt, id); len(got) != 1 || got[0].Outcome != event.DeliveryUnconfirmed {
+		t.Fatalf("%s: %+v; want its one outcome, unconfirmed", id, got)
+	}
 }
 
 // SR-2. A model change restarts Codex beside the loop; the user quits

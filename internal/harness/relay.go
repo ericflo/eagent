@@ -859,6 +859,24 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true, handover: job.handover})
 	}
+	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Ended {
+		// eagent's own words to the agent this switch stopped: the brief
+		// quotes only the user's, so nothing carries them, and their
+		// arrival can no longer show. Settled as at a stop; what the
+		// switch holds is passed on below. (After the brief: a switch's
+		// end, start and brief are neighbours on the record.)
+		skip := map[string]bool{}
+		for _, h := range held {
+			skip[h.id] = true
+		}
+		var except []string
+		for _, s := range unresolvedSends(r.st, rel) {
+			if d, ok := sendRecord(r.st, s.ID); skip[s.ID] || !ok || d.From != "eagent" {
+				except = append(except, s.ID)
+			}
+		}
+		r.settleExited(rel, except...)
+	}
 	for _, h := range held {
 		if h.brief && job.brief != "" {
 			// The brief of the switch before this one, never typed: it
