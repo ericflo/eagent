@@ -81,6 +81,36 @@ func TestSR7WebAStopAfterQueuedWordsIsDroppedByTheWatchersResume(t *testing.T) {
 	}
 }
 
+// Words for a session another process runs, sent once this server's
+// shutdown has begun, are answered with what is true: they wait in the
+// session's inbox until it next runs (this server resumes nothing now).
+// The answer used to promise they would be taken "when it is resumed for
+// them", which nobody would do.
+func TestK14WordsQueuedDuringTheShutdownPromiseNoResume(t *testing.T) {
+	s, project := newTestServer(t)
+	old := inboxWatchEvery
+	inboxWatchEvery = time.Millisecond
+	t.Cleanup(func() { inboxWatchEvery = old })
+	info := r11Session(t, project)
+	sess, _, err := store.Open(info.Path, time.Now()) // a terminal runs it
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.resuming.Lock()
+	s.stopping = true
+	s.resuming.Unlock()
+	w := do(s, "POST", "/api/sessions/"+info.ID+"/message", map[string]any{"text": "one more thing"}, nil)
+	_ = sess.Close() // the terminal's run lets go
+	if sr7WatcherGone(t, s, info.ID) {
+		t.Fatal("the session was resumed during the shutdown")
+	}
+	s.resuming.Lock() // after the watcher's last step (it unlocks this)
+	s.resuming.Unlock()
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued"`) || strings.Contains(w.Body.String(), "resumed") || !strings.Contains(w.Body.String(), "next runs") {
+		t.Fatalf("answered %d %s", w.Code, w.Body)
+	}
+}
+
 // sr7Held is a terminal's UI whose loop the test holds while it records
 // the line "hold".
 type sr7Held struct {

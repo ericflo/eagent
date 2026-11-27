@@ -589,7 +589,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how))
 }
 
 // deliver hands words from the browser to a session: to its inbox when
@@ -754,11 +754,19 @@ func wordsWait(path, id string, posted time.Time) bool {
 }
 
 // deliveredAnswer is the answer to words deliver took as how; words left
-// "queued" are said to wait, not to be delivered.
-func deliveredAnswer(how string) map[string]any {
+// "queued" are said to wait, not to be delivered, and, once this server's
+// shutdown has begun (it resumes nothing for them then), to wait for the
+// session's next run.
+func (s *Server) deliveredAnswer(how string) map[string]any {
 	out := map[string]any{"delivered": how}
 	if how == "queued" {
+		s.resuming.Lock()
+		stopping := s.stopping
+		s.resuming.Unlock()
 		out["message"] = "They wait in the session's inbox: it takes them when it next reads it, or when it is resumed for them."
+		if stopping {
+			out["message"] = "They wait in the session's inbox until it next runs."
+		}
 	}
 	return out
 }
@@ -791,7 +799,7 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how))
 }
 
 // postDismiss closes the session's open question with no answer. Nothing
