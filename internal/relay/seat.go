@@ -464,11 +464,13 @@ func (s *Seat) emitAside(ev Event) {
 	}
 }
 
-func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "") }
+func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "", s.emit) }
 
 // setDialogState is setState for blocked by a dialog the agent reports
-// (reportDialog), whose title goes with the event (Event.Dialog).
-func (s *Seat) setDialogState(state, detail, dialog string) {
+// (reportDialog), whose title goes with the event (Event.Dialog), sent
+// with send (emitAside for a state history says, which says nothing of
+// how far the record has read).
+func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	s.mu.Lock()
 	if s.state == state && detail == "" {
 		s.mu.Unlock()
@@ -482,7 +484,7 @@ func (s *Seat) setDialogState(state, detail, dialog string) {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
 	s.mu.Unlock()
-	s.emit(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
+	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
 }
 
 // Close stops watching. The agent keeps running.
@@ -1626,7 +1628,10 @@ func (s *Seat) foldHistory(o obs) {
 	}
 	s.mu.Unlock()
 	if state != "" {
-		s.setState(state, "")
+		// Said by a line before the record's mark (history): without its
+		// end, which would move that mark back (as a confirmation from
+		// history, b5dff3e).
+		s.setDialogState(state, "", "", s.emitAside)
 	}
 }
 
@@ -1805,7 +1810,7 @@ func (s *Seat) reportDialog(title string) {
 		}
 		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
-		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title)
+		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title, s.emit)
 		return
 	}
 	back := s.dialogPrev

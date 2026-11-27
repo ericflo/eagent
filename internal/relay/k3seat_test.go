@@ -234,3 +234,55 @@ func TestSr2SeatCommandTypedWhileTheSeatClosesDoesNotPanic(t *testing.T) {
 		t.Errorf("Send panicked in %d of %d closes during the typing of a command", panics, tries)
 	}
 }
+
+// The suspicion: a reattach's first look cannot read the transcript (here
+// it is unreadable for a moment), so the catch-up ends with no history
+// read; the next looks read that history, all before the record's read
+// mark. What it says (the turn it was in) is no news, and no event it
+// gives may say the transcript was read to less than the record's mark:
+// that would move the mark back, and a later reattach would report again
+// what the record already has.
+func TestK3HistoryReadAfterAnEarlyCatchUpDoesNotMoveTheMarkBack(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	since := time.Now().Add(-time.Minute)
+	history := []string{
+		claudeUser(since.Add(-2*time.Second), "sort the shelves"),
+		`{"type":"assistant","timestamp":"` + stamp(since.Add(-time.Second)) + `","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`,
+	}
+	writeLines(t, path, history...)
+	st, _ := os.Stat(path)
+	mark := st.Size()
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	w := &reattachedSeat{h: &fakeHost{alive: true}, done: make(chan struct{})}
+	w.s = attachSeat(Spec{Read: mark}, claudeAgent{}, w.h, "k3-early-"+filepath.Base(dir), "", path, since)
+	w.s.poll = piLook
+	go w.s.watch()
+	go func() {
+		defer close(w.done)
+		for ev := range w.s.Events() {
+			w.mu.Lock()
+			w.events = append(w.events, ev)
+			w.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() { w.s.Close(); <-w.done })
+	w.caughtUp(t)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.settle()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, ev := range w.events {
+		if ev.Read > 0 && ev.Read < mark {
+			t.Errorf("%s event %q says the transcript was read to %d, before the record's mark %d", ev.Kind, ev.State+ev.Text, ev.Read, mark)
+		}
+	}
+}
