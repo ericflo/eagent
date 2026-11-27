@@ -36,9 +36,14 @@ type hostedList struct {
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
-// One the user stops after that is taken off again (forgetHosted): the
-// list is written under mu, as a run's end is recorded.
+// It sets the shutdown mark first, under the lock every start holds, so no
+// run starts after the list is taken (host, hostNewCfg). One the user
+// stops after that is taken off again (forgetHosted): the list is written
+// under mu, as a run's end is recorded.
 func (s *Server) rememberHosted() {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	s.stopping = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ids := make([]string, 0, len(s.running))
