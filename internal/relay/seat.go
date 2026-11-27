@@ -554,7 +554,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	if !s.host.Alive(s.target) {
 		return "", errors.New("the agent is not running")
 	}
-	state, err := s.waitReady(40 * time.Second)
+	state, err := s.waitReady(readyWait)
 	if errors.Is(err, errUnknownScreen) && mode == "interrupt" {
 		// Quiet for ten minutes on a screen the seat does not know: the
 		// interrupt itself goes (it is how a stuck agent is got back), its
@@ -751,9 +751,31 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 		case "exited":
 			return state, errors.New("the agent has exited")
 		}
+		s.mu.Lock()
+		attached := s.attached
+		s.mu.Unlock()
+		if attached && !s.atOwnScreen() {
+			// Reattached, and nothing the agent wrote read since: a dialog
+			// that came up while eagent was down shows on the screen alone.
+			// A message goes once the screen shows the agent's own prompt
+			// or busy line, as for a seat quiet in a turn (hung), and waits
+			// for that within the bound.
+			if time.Now().After(deadline) {
+				return state, errUnknownScreen
+			}
+			select {
+			case <-time.After(300 * time.Millisecond):
+			case <-s.stop:
+			}
+			continue
+		}
 		return state, nil
 	}
 }
+
+// readyWait is how long a send waits for the agent to be ready to type
+// into. Tests shorten it.
+var readyWait = 40 * time.Second
 
 // typeSettle is the pause between pasting a message and pressing Enter.
 // Tests shorten it.

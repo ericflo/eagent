@@ -30,6 +30,62 @@ func (h *sr3MoveHost) Alive(target string) bool {
 	return h.fakeHost.Alive(target)
 }
 
+// Known limits, thirteenth review, "noticed by its fixers and not
+// changed": a reattached Claude or Codex seat with an unknown dialog that
+// came up while eagent was down can be typed into. Still so: the history
+// ends inside a turn, the transcript has been quiet for a minute and a
+// half (under the ten minutes caughtUp waits for), and the screen shows
+// neither Claude's prompt nor its busy line but a question of its own.
+// Send types the message into it, and its Enter answers it.
+func TestSr3SeatReattachedClaudeTypesIntoADialogThatCameUpWhileEagentWasDown(t *testing.T) {
+	savedWait := readyWait
+	readyWait = 100 * time.Millisecond // the wait for the agent's own screen, shortened
+	t.Cleanup(func() { readyWait = savedWait })
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "sess.jsonl")
+	at := time.Now().Add(-2 * time.Minute)
+	writeLines(t, transcript,
+		claudeUser(at, "migrate the database"),
+		fmt.Sprintf(`{"type":"assistant","timestamp":"%s","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"make migrate","description":"Run the migration"}}]}}`, stamp(at.Add(time.Second))),
+	)
+	quiet := time.Now().Add(-90 * time.Second)
+	if err := os.Chtimes(transcript, quiet, quiet); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(transcript)
+	h := &fakeHost{alive: true, screen: "make migrate\nThis will drop table users. Continue?\n❯ 1. Yes\n  2. No\n"}
+	s := attachSeat(Spec{Dir: dir, State: "working", Read: st.Size()}, claudeAgent{}, h, "sr3-claude-dialog", "id", transcript, quiet)
+	s.poll = piLook
+	done := make(chan struct{})
+	go s.watch()
+	go func() {
+		defer close(done)
+		for range s.Events() {
+		}
+	}()
+	t.Cleanup(func() { s.Close(); <-done })
+	if !eventually(func() bool { s.mu.Lock(); defer s.mu.Unlock(); return !s.catchingUp }) {
+		t.Fatal("never caught up")
+	}
+	saved := typeSettle
+	typeSettle = time.Millisecond
+	t.Cleanup(func() { typeSettle = saved })
+	res, err := s.Send("s1", "also update the README", "queue")
+	h.mu.Lock()
+	typed, keys := append([]string(nil), h.typed...), append([]string(nil), h.keys...)
+	h.mu.Unlock()
+	if len(typed) > 0 {
+		t.Errorf("typed %q into a screen showing the dialog (keys %q; Send said %q, %v); want it refused as for a seat that cannot tell the screen is the agent's own", typed, keys, res, err)
+	}
+	// Once the screen shows Claude's own prompt, a send goes.
+	h.mu.Lock()
+	h.screen = "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	h.mu.Unlock()
+	if _, err := s.Send("s2", "also update the README", "queue"); err != nil || len(k1Typed(h)) != 1 {
+		t.Errorf("at Claude's prompt: Send %v, typed %q", err, k1Typed(h))
+	}
+}
+
 // A restored send is confirmed by a line before the record's read mark
 // (history) when the line is stamped no earlier than the send was
 // recorded. That line was read before eagent stopped, and the record has
