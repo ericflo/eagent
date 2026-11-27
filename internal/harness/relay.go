@@ -691,6 +691,14 @@ func (r *Runtime) hasOutcome(id string) bool {
 	return false
 }
 
+// sameWord says whether the record already has, as the send's outcome,
+// what the seat says of it now. A seat's word that differs is its newer
+// one (a message its agent's queue gave up unread had arrived there
+// first).
+func (r *Runtime) sameWord(ev relay.Event) bool {
+	return r.st.SendOutcome(ev.SendID) == state.DeliveryOutcome(event.RelayDeliveredData{OK: ev.OK, Outcome: ev.Outcome})
+}
+
 // goneUnconfirmed is the outcome of a send typed into a process that is
 // gone (how) before its arrival showed.
 func goneUnconfirmed(name, id, how string) event.Event {
@@ -1360,22 +1368,23 @@ var lastWordGrace = 5 * time.Second
 
 // recordLateNews records how a send went where its seat said so after the
 // loop's queue had ended: a held message taken back from the spool as its
-// agent's turn ended, an arrival. Nothing else would say it (the message
-// is gone from the spool, and a resume would call it unconfirmed). The
-// seats are closed by now; while a send still has no outcome, their
-// watchers are waited for (bounded), and then each such word is written,
-// once. Finish's goroutine: the loop is no longer running.
+// agent's turn ended, an arrival, a message the agent's queue gave up
+// unread that no prompt had shown when the seat was closed. Nothing else
+// would say it (the message is gone from the spool, and a resume would
+// call it unconfirmed; the queue's message stays arrived on the record).
+// The seats are closed by now: their watchers are waited for (bounded),
+// and then each word the record does not have yet is written. Finish's
+// goroutine: the loop is no longer running.
 func (r *Runtime) recordLateNews() {
-	waiting := false
-	for _, rel := range r.st.Relays {
-		waiting = waiting || len(rel.Undelivered) > 0
-	}
-	for deadline := time.Now().Add(lastWordGrace); waiting && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	pumping := func() bool {
 		r.relays.mu.Lock()
-		waiting = r.relays.pumping > 0
-		r.relays.mu.Unlock()
+		defer r.relays.mu.Unlock()
+		return r.relays.pumping > 0
 	}
-	if waiting {
+	for deadline := time.Now().Add(lastWordGrace); pumping() && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if pumping() {
 		r.ui.Log("an agent's watcher had not said its last after %s; what it says of its sends now is not recorded", lastWordGrace)
 	}
 	r.relays.mu.Lock()
@@ -1383,7 +1392,7 @@ func (r *Runtime) recordLateNews() {
 	r.relays.lateSaid = nil
 	r.relays.mu.Unlock()
 	for _, n := range said {
-		if r.hasOutcome(n.ev.SendID) {
+		if r.sameWord(n.ev) {
 			continue
 		}
 		r.appendOutcomeDirect(r.outcomeAside(sendHolder(r.st, n.ev.SendID, n.name), n.ev))
@@ -1442,7 +1451,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		// went, and that is recorded: nothing else will say it (a message
 		// it took back from the spool is gone from there, and a resume
 		// would call it unconfirmed). Nothing more is decided on it.
-		if ev.Kind == relay.KindDelivered && !r.hasOutcome(ev.SendID) {
+		if ev.Kind == relay.KindDelivered && !r.sameWord(ev) {
 			r.append(r.outcomeAside(name, ev))
 		}
 		return

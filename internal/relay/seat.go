@@ -136,11 +136,11 @@ type Seat struct {
 	activityAt time.Time
 	lastLine   time.Time
 	pending    []*pending
-	// inQueue are the sends that arrived in the agent's own queue
-	// (Claude's enqueue line), until a prompt shows them or the queue
-	// gives them back into the input box (requeue): then each is watched
-	// again as a send typed and not yet shown.
-	inQueue    []queuedSend
+	// inQueue are the sends that arrived in the agent's own queue, by the
+	// parser's number for the queued message (obs.queue), until the
+	// parser says the message left the queue. One that left unread is
+	// watched again as a send typed and not yet shown (requeue).
+	inQueue    map[int][]*pending
 	turnStart  time.Time
 	turnTools  int
 	turnImages []string
@@ -223,6 +223,10 @@ type pending struct {
 	// answered yet. Until it has, the send is not taken for one the turn's
 	// end left over: a hand-over that then fails is typed (Send).
 	handing bool
+	// requeued: it arrived in the agent's own queue, which then gave it
+	// up unread (Seat.requeue). It is watched as a typed send is, whatever
+	// its mode.
+	requeued bool
 	// after is how far the transcript afterIn was written when the seat
 	// began to watch for the send: an entry of it that starts before that
 	// was written before, and is not the send's arrival. afterIn is ""
@@ -230,13 +234,6 @@ type pending struct {
 	// started again from the top since (readTail).
 	afterIn string
 	after   int64
-}
-
-// queuedSend is a send in the agent's own queue (Seat.inQueue): as is the
-// queue entry it arrived in, normalized.
-type queuedSend struct {
-	p  *pending
-	as string
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -464,7 +461,7 @@ func spoolHolds(names []string, id string) bool {
 // message is due; once a turn ends and no other starts, it is lost
 // (reportLeftOvers). Nor is a restored send before the catch-up has ended.
 func (p *pending) timed() bool {
-	return !p.dormant && (p.mode != "after_turn" || p.lost)
+	return !p.dormant && (p.mode != "after_turn" || p.lost || p.requeued)
 }
 
 // markAttached starts a reattached seat. The agent may be in the middle of
@@ -1188,48 +1185,57 @@ func (s *Seat) takeSends(text string, at time.Time, pos int64, news bool) []*pen
 	return taken
 }
 
-// noteQueued keeps the sends that arrived in the agent's own queue as the
-// entry it wrote for them (inQueue).
-func (s *Seat) noteQueued(got []*pending, entry string) {
+// requeuedLeft takes the requeued sends still watched off the list and
+// gives the seat's last word on each: not confirmed.
+func (s *Seat) requeuedLeft() []Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, p := range got {
-		s.inQueue = append(s.inQueue, queuedSend{p, normalize(entry)})
-	}
-	if n := len(s.inQueue) - 64; n > 0 {
-		s.inQueue = s.inQueue[n:]
-	}
-}
-
-// shownQueued forgets the queued sends a prompt has shown running.
-func (s *Seat) shownQueued(prompt string) {
-	got := normalize(prompt)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.inQueue = slices.DeleteFunc(s.inQueue, func(q queuedSend) bool { return strings.Contains(got, q.as) })
-}
-
-// requeue: the agent's queue gave the entry back into its input box,
-// unread (Claude's popAll, at an interrupt). The sends that arrived as it
-// are watched again as typed and not yet shown: the check of the screen
-// presses Enter on one whose words sit in the box once the agent is idle,
-// a prompt that shows it confirms it, and one that never shows is reported
-// as any typed send is. (It stayed "arrived" on the record while it sat in
-// the box for good.)
-func (s *Seat) requeue(entry string) {
-	as := normalize(entry)
-	var back []*pending
-	s.mu.Lock()
-	s.inQueue = slices.DeleteFunc(s.inQueue, func(q queuedSend) bool {
-		if q.as == as {
-			back = append(back, q.p)
+	var last []Event
+	s.pending = slices.DeleteFunc(s.pending, func(p *pending) bool {
+		if p.requeued {
+			last = append(last, Event{Kind: KindDelivered, SendID: p.id, OK: false, Outcome: OutcomeUnconfirmed,
+				Detail: "was taken into the agent's queue, which gave it up unread (Escape puts queued messages back into the input box), and no prompt had shown it when the agent's seat was closed"})
 		}
-		return q.as == as
+		return p.requeued
 	})
-	s.mu.Unlock()
-	for _, p := range back {
-		s.trackSend(&pending{id: p.id, text: p.text, mode: p.mode})
+	return last
+}
+
+// noteQueued keeps the sends that arrived as the agent's queued message n.
+func (s *Seat) noteQueued(n int, got []*pending) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inQueue == nil {
+		s.inQueue = map[int][]*pending{}
 	}
+	s.inQueue[n] = append(s.inQueue[n], got...)
+}
+
+// forgetQueued: the agent's queued message n was read, or is not known of
+// any more.
+func (s *Seat) forgetQueued(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inQueue, n)
+}
+
+// requeue: the agent's queue gave its message n up unread: back into its
+// input box (Claude's popAll, at Escape while messages are queued) or
+// thrown away. The sends that arrived as it are watched again as typed and
+// not yet shown: the check of the screen presses Enter on one whose words
+// sit in the box once the agent is idle, a prompt that shows it confirms
+// it, and one that never shows is reported as any typed send is. (It
+// stayed "arrived" on the record while it sat in the box for good.) pos is
+// where the queue's line starts in the transcript: only what is written
+// after it shows the send.
+func (s *Seat) requeue(n int, pos int64) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.inQueue[n] {
+		s.pending = append(s.pending, &pending{id: p.id, text: p.text, mode: p.mode, requeued: true, at: now, afterIn: s.transcript, after: pos})
+	}
+	delete(s.inQueue, n)
 }
 
 // spoolNames lists a spool's file names; [] (not nil) when it has none.
@@ -1436,6 +1442,12 @@ var tailBackfill int64 = 4 << 20
 func (s *Seat) watch() {
 	defer close(s.done)
 	defer func() {
+		// A send the agent's queue gave up unread, which no prompt has
+		// shown since: the record has it arrived (its queue line said
+		// so), and nothing watches it once this seat is gone.
+		for _, ev := range s.requeuedLeft() {
+			s.emitHeld(ev)
+		}
 		// A Send under way may still say how it ended (a command typed as
 		// the seat closed): the last one to return closes events then.
 		s.mu.Lock()
@@ -1542,6 +1554,7 @@ func (s *Seat) watch() {
 				tail, p = &tailer{path: path}, s.agent.newParser(s.spec)
 				s.mu.Lock()
 				s.queueHolds = false // a new parser knows of no queue yet
+				s.inQueue = nil      // nor of the numbers the last one gave
 				first := s.transcript == ""
 				if _, ok := s.agent.(sessionStarter); ok && first && !s.followed && s.inner != "" && inner != s.inner {
 					// The agent left the session it was started on before
@@ -2027,11 +2040,8 @@ func (s *Seat) fold(o obs) {
 		if !o.again {
 			got = s.takeSends(o.text, o.at, o.pos, true)
 		}
-		switch {
-		case o.queued:
-			s.noteQueued(got, o.text)
-		case o.again:
-			s.shownQueued(o.text)
+		if o.queue != 0 && len(got) > 0 {
+			s.noteQueued(o.queue, got)
 		}
 		for _, p := range got {
 			s.emit(Event{Kind: KindDelivered, SendID: p.id, OK: true})
@@ -2039,8 +2049,10 @@ func (s *Seat) fold(o obs) {
 		if len(got) == 0 {
 			s.silentUser = true // readTail says how far it was read
 		}
+	case "dequeued":
+		s.forgetQueued(o.queue)
 	case "unqueued":
-		s.requeue(o.text)
+		s.requeue(o.queue, o.pos)
 	case "working":
 		s.mu.Lock()
 		fresh := s.state != "working" && !s.heldByDialog("working")
@@ -2263,6 +2275,9 @@ func (s *Seat) checkScreen(now time.Time) {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
+			if stuck.requeued {
+				detail = "was taken into the agent's queue, which gave it up unread (Escape puts queued messages back into the input box), and no prompt has shown it since. The screen ends:\n" + lastLines(screen, 8)
+			}
 			if stuck.restored {
 				detail = "was recorded before eagent restarted, and the agent's transcript does not show it arriving; it was not typed again, so send it again if it is still wanted. The screen ends:\n" + lastLines(screen, 8)
 				if isAgentCommand(stuck.text) {
