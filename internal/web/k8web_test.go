@@ -35,6 +35,45 @@ func TestK8ADismissDuringAStopInTheShutdownIsRefused(t *testing.T) {
 	}
 }
 
+// A Stop during the shutdown for a session whose run here is slow to
+// finish takes the session off the list before it waits for the run: the
+// process may exit first, and the next serve must not bring it back. It
+// used to wait first.
+func TestK8AStopWaitingOnASlowRunTakesTheSessionOffTheListFirst(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := k1Model(t, s, project)
+	info := r11Session(t, project)
+	rt, ui := r11Ended(t, cfg, project, info)
+	lock, _, err := store.Open(info.Path, time.Now()) // the run is finishing, slowly
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	slow := &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
+	s.mu.Lock()
+	s.running[info.ID] = slow
+	s.mu.Unlock()
+	s.rememberHosted() // the shutdown begins: the mark, then the list
+	stopped, stopDone := make(chan int, 1), make(chan struct{})
+	go func() {
+		stopped <- do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil).Code
+		close(stopDone)
+	}()
+	k7Waiting(t, "web.(*Server).stopAgentsOf", stopDone) // it waits for the run
+	listed := k3Listed(t, project)
+	_ = lock.Close() // the run lets go at last
+	s.mu.Lock()
+	delete(s.running, info.ID)
+	s.mu.Unlock()
+	close(slow.done)
+	if code := <-stopped; code != http.StatusOK {
+		t.Fatalf("stop: %d", code)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("while the Stop waited for the run, the next server would have brought back %q", listed)
+	}
+}
+
 // A message held for the end of the agent's turn waits in the agent's
 // spool (its Stop hook hands it over) when the server's shutdown ends the
 // run. The user presses Stop: the agent is killed, so its hook never takes

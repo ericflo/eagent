@@ -823,9 +823,13 @@ func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
 	return true
 }
 
-// stopAgentsOf stops the agents of a session the shutdown ends, once its
-// run here (h, if any) has let go of it, and takes it off the list.
+// stopAgentsOf takes a session the shutdown ends off the list, first (the
+// process may exit while its run finishes), and stops its agents once its
+// run here (h, if any) has let go of it.
 func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
+	s.mu.Lock()
+	s.forgetHosted(info.ID)
+	s.mu.Unlock()
 	if h != nil {
 		<-h.done
 	}
@@ -833,9 +837,6 @@ func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
-	s.mu.Lock()
-	s.forgetHosted(info.ID)
-	s.mu.Unlock()
 	msg := "Stopped"
 	if len(stopped) > 0 {
 		msg += ", with " + strings.Join(stopped, " and ")
