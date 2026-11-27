@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 )
@@ -382,5 +383,53 @@ func TestK2TheDownNoticeNamesTheAgentsStillRunning(t *testing.T) {
 	text := rt.unreachableNotice(errors.New("timeout")).Text
 	if strings.Contains(text, "Codex") || strings.Contains(text, "straight to") || !strings.Contains(text, "Claude") {
 		t.Fatalf("with Codex exited and Claude running, told: %q", text)
+	}
+}
+
+// C2, the edited window: no restart could make room on a 60k window. The
+// session is stopped, the same model's window is raised in the config,
+// and it is resumed. The user pastes more than the new window holds: the
+// conversation as it is is refused, and a restart, which gives the paste
+// by place, would fit. The decision was found on less room than is in
+// force now, so it does not stand: the restart is made and the user is
+// answered.
+func TestK2ADecisionFoundOnLessRoomDoesNotStandAfterTheWindowIsRaised(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
+	route := &r5PictureRoute{window: 60000, ceiling: 2048, picture: 80000}
+	inner := route.brain()
+	var raised atomic.Bool
+	brain := func(model string, m []map[string]any) reply {
+		r := inner(model, m)
+		if raised.Load() && r.status == 0 && dossierRequest(m) == "" && m[len(m)-1]["role"] != "tool" {
+			return say("Here it is.")
+		}
+		return r
+	}
+	s := startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	route.refuseAll.Store(true)
+	r5SendPicture(s, "@e what does this screenshot show?")
+	r4Until(t, "the user to be told no restart can make room", func() bool { return r5Told(s, fullNotice) > 0 })
+	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	cfg.Model.ContextTokens = 70000
+	route.mu.Lock()
+	route.window = 70000
+	route.mu.Unlock()
+	route.refuseAll.Store(false)
+	raised.Store(true)
+	s2 := audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, s.model)
+	r5LogOnFailure(s2)
+	paste := "the log: " + strings.Repeat("a line of the build log ", 12000) // ~82k tokens by the estimate
+	s2.rt.sync(func() { s2.rt.userMessage(event.UserMessageData{Text: paste, Route: "eagent"}) })
+	r4Until(t, "an answer, or the message told it waits", func() bool {
+		return r5Told(s2, "Here it is.") > 0 || r5Told(s2, stillFullNotice+`"the log:`) > 0
+	})
+	if r5Told(s2, "Here it is.") == 0 {
+		t.Fatalf("on the raised window: %d restarts, and the user was told their message waits; a restart there makes room", r6Dossiers(s2))
 	}
 }

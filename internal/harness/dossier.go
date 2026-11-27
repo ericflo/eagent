@@ -419,7 +419,10 @@ func (r *Runtime) needsDossier() bool {
 						text = fullNotice + ": after several restarts in a row, the new conversation was again past my restart size on its very first call, so I've stopped restarting. I carry on with a conversation longer than it should be, which makes each answer slower and dearer. When it reaches my model's window I can't restart it again; a model with a larger context, picked in this thread's settings, would take it then. Raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help too."
 					}
 				}
-				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
+				// With the room it was found on, which a resumed run on a
+				// window raised in the config compares (roomStands).
+				room, _ := r.inputRoom()
+				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text, Room: int(room)})
 			}
 		}
 		r.tellStillFull()
@@ -469,8 +472,8 @@ func (r *Runtime) restartFull(limit provTokens) bool {
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
 	// The full notice in the record decides on the model it was found on
-	// (toldFullHere).
-	f := restartFacts{refused: r.refusedFirst(), decided: r.turns.futileLogged || r.toldFullHere()}
+	// (toldFullHere), while it has no more room than then (roomStands).
+	f := restartFacts{refused: r.refusedFirst(), decided: (r.turns.futileLogged || r.toldFullHere()) && r.roomStands()}
 	f.carried, f.retried, f.rescues = r.restartOf()
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
@@ -743,14 +746,31 @@ func (r *Runtime) turnEnded() bool {
 // restartDecided reports that, for a conversation a restart began, no
 // restart can make room was found and said on the model in use (this
 // run, or by the record's full notice), and no call has gone through
-// since. On a model picked after it the conversation is sent as it is,
-// and needsDossier asks afresh (toldFullHere). Loop goroutine only.
+// since. On a model picked after it, or with more room for input than the
+// notice says it was found on (the window raised in the config), the
+// conversation is sent as it is, and needsDossier asks afresh
+// (toldFullHere, roomStands). Loop goroutine only.
 func (r *Runtime) restartDecided() bool {
 	cur := r.st.Current()
 	if cur == nil || (cur.Reason != "rollover" && cur.Reason != "upgrade") || r.turns.subCalls > 0 {
 		return false
 	}
-	return r.turns.futileLogged || r.toldFullHere()
+	return (r.turns.futileLogged || r.toldFullHere()) && r.roomStands()
+}
+
+// roomStands reports that the room for input in force is no larger than
+// the room the conversation's full notice says it was found on, when that
+// notice was found on the model in use and says it; true when there is no
+// such notice, or one from before notices said their room. Loop goroutine
+// only.
+func (r *Runtime) roomStands() bool {
+	ev, told := r.fullNoticeSaid()
+	var d event.MessageData
+	if !told || ev.Seq < r.st.Moved() || ev.Decode(&d) != nil || d.Room == 0 {
+		return true
+	}
+	room, _ := r.inputRoom()
+	return room <= provTokens(d.Room)
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
