@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -259,6 +260,39 @@ func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T)
 	stop()
 	if got := r6PhoneIDs(path); !slices.Equal(got, []string{first, second, later}) {
 		t.Fatalf("recorded %v, want %v", got, []string{first, second, later})
+	}
+}
+
+// B3: the phone's worker is stuck on a call the service does not answer,
+// the queue fills, and a message eagent writes is dropped. Once the queue
+// has drained, the thread itself is told that updates did not reach it,
+// not only the terminal. (The update here is the copy of words typed at
+// the terminal.)
+func TestK1AnUpdateDroppedOnAFullQueueIsSaidInTheThread(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	r14Drained(t, g)
+	var p *phone
+	g.rt.sync(func() { p = g.rt.phone })
+	stuck, release := make(chan struct{}), make(chan struct{})
+	var released sync.Once
+	t.Cleanup(func() { released.Do(func() { close(release) }) })
+	p.enqueue(func(context.Context) { close(stuck); <-release })
+	<-stuck
+	for p.enqueue(func(context.Context) {}) {
+	}
+	g.ui.input <- "check the tests first"
+	waitFor(t, "the words in the record", func() bool { return len(g.events(event.UserMessage)) == 2 })
+	released.Do(func() { close(release) })
+	waitFor(t, "the queue to drain", func() bool { return len(p.queue) == 0 })
+	r14Drained(t, g)
+	if n := len(fp.postsWhere(k1UserSaid("check the tests first"))); n != 0 {
+		t.Fatalf("the copy of the words was posted %d times; it was to be dropped", n)
+	}
+	if got := fp.postsWhere(k1Kind("updates_dropped")); len(got) != 1 {
+		t.Fatalf("the thread was told of the drop %d times; the terminal was told %q", len(got), g.ui.logged())
 	}
 }
 

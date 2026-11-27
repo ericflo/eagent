@@ -482,18 +482,23 @@ func (p *phone) mirror1(seq int64, id string) {
 // enqueue schedules an outbound call and reports whether it was queued.
 // A full queue means the service has been unreachable for a while; losing
 // a mirror call is better than blocking the loop, but it is said, once
-// per stretch of drops, so it is never silent.
+// per stretch of drops, so it is never silent: in the session's log when
+// it begins, and in the thread, ahead of what comes next, once it is over.
 func (p *phone) enqueue(fn func(context.Context)) bool {
+	// A stretch of drops is over when the queue has really drained, not
+	// when a slow phone took one post and left room for one more: that
+	// would say the same thing again for every post it takes.
+	p.mu.Lock()
+	over := p.dropping && len(p.queue) < cap(p.queue)/2
+	if over {
+		p.dropping = false
+	}
+	p.mu.Unlock()
+	if over {
+		p.enqueue(p.saidDropped)
+	}
 	select {
 	case p.queue <- fn:
-		// A stretch of drops is over when the queue has really drained,
-		// not when a slow phone took one post and left room for one more:
-		// that would say the same thing again for every post it takes.
-		if len(p.queue) <= cap(p.queue)/2 {
-			p.mu.Lock()
-			p.dropping = false
-			p.mu.Unlock()
-		}
 		return true
 	default:
 		p.mu.Lock()
@@ -504,6 +509,16 @@ func (p *phone) enqueue(fn func(context.Context)) bool {
 			p.say("finalechat: the phone has not taken what was sent for a while; updates to the thread are being dropped until it does")
 		}
 		return false
+	}
+}
+
+// saidDropped tells the thread that updates to it were dropped (enqueue).
+func (p *phone) saidDropped(ctx context.Context) {
+	act := p.attach()
+	msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: "eagent could not reach this thread for a while and dropped some of its updates to it; the session's log in eagent has them all.", Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "updates_dropped"}, ClientKey: p.key("dropped", strconv.FormatInt(time.Now().UnixNano(), 10)), Activity: act})
+	if err == nil {
+		p.rememberIn(msg, thread)
+		p.markSent(act)
 	}
 }
 
