@@ -415,36 +415,6 @@ func TestK18AStopNeverMakesAThread(t *testing.T) {
 	}
 }
 
-// ResumeMirroring says whether the run it started mirrors to the phone:
-// yes on a server whose own configuration has the phone on (with a
-// token), no with it off.
-func TestK18ResumeMirroringSaysWhetherTheRunMirrors(t *testing.T) {
-	for _, phone := range []bool{true, false} {
-		s, project := newTestServer(t)
-		t.Setenv("EAGENT_FINALECHAT", "")
-		f := &sr6Phone{keys: map[string]bool{}}
-		srv := httptest.NewServer(http.HandlerFunc(f.serve))
-		t.Cleanup(srv.Close)
-		t.Setenv("FINALECHAT_TOKEN", "fc_test")
-		t.Setenv("FINALECHAT_URL", srv.URL)
-		cfg := r11Model(t)
-		cfg.Finalechat.Enabled = &phone
-		if _, err := config.Write(project, cfg); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { s.Shutdown(5 * time.Second) })
-		info := r11Session(t, project)
-		mirrors, err := s.ResumeMirroring(info.ID, integration.PhoneMessage{ID: "reply-1", Text: "what is the status?"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mirrors != phone {
-			t.Fatalf("the server's phone on %v: ResumeMirroring says the run mirrors %v", phone, mirrors)
-		}
-		sr9Stop(t, s, info, "the phone's resume")
-	}
-}
-
 // A reply from the phone during this server's shutdown resumes nothing,
 // and its answer says what is true for the phone: the reply is kept, and
 // there is nothing to send again (errStopping's words are the page's).

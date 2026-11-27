@@ -29,7 +29,6 @@ import (
 	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
-	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/projection"
@@ -174,42 +173,27 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // taken as it would be had the session been running. It decides one at a
 // time with the browser's deliver, so the two never both resume it.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
-	_, err := s.ResumeMirroring(sessionID, msg)
-	return err
-}
-
-// ResumeMirroring is Resume, which also reports whether the run it started
-// mirrors to the phone: this server's own configuration, which it runs on,
-// wants the phone, nothing turns it off (EAGENT_FINALECHAT), and it has an
-// account (a token). A run that does not mirror tells the thread nothing,
-// refusal notes for the reply included. During this server's shutdown it
-// starts nothing and says the reply is kept (errReplyKept).
-func (s *Server) ResumeMirroring(sessionID string, msg integration.PhoneMessage) (mirrors bool, err error) {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if info.ID != sessionID {
-		return false, fmt.Errorf("session %s not found", sessionID)
+		return fmt.Errorf("session %s not found", sessionID)
 	}
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return false, ErrRunning
+		return ErrRunning
 	}
 	if err := s.host(info.Path, s.phoneResumeOptions(msg), "", "", true); err != nil {
 		if errors.Is(err, errStopping) {
-			return false, errReplyKept
+			// During this server's shutdown nothing is started, and the
+			// reply is kept (errReplyKept).
+			return errReplyKept
 		}
-		return false, err
+		return err
 	}
-	cfg, err := s.loadConfig("", "")
-	if err != nil {
-		return false, nil
-	}
-	fc := cfg.Finalechat
-	_, account := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
-	return fc.Wanted() && !finalechat.Disabled() && account, nil
+	return nil
 }
 
 // ErrRunning is Resume's answer for a session that is already running, here
