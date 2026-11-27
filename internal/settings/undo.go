@@ -108,7 +108,8 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 
 // PrepareUndo writes a reversal under the caller's project lock. It is a
 // conflict when any key of the reversal now differs from the file the
-// command wrote, and nothing else is; the file it writes is checked as a
+// command wrote, or the address of a route the reversal sets a model back
+// on does, and nothing else is; the file it writes is checked as a
 // person's save of it would be. beforeRaw and desiredRaw are the journal's
 // before_raw and desired.
 func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
@@ -128,6 +129,13 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 	keys := slices.Clone(nulls)
 	for _, edit := range inverse.Edits {
 		keys = append(keys, edit.Key)
+	}
+	// A model set back on a route is sent to the address the route has
+	// then, so a change of that address since the command conflicts too.
+	for _, edit := range inverse.Edits {
+		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && edit.Op == "set" && !slices.Contains(keys, route+"/base_url") {
+			keys = append(keys, route+"/base_url")
+		}
 	}
 	for _, key := range keys {
 		want, wantExists := pointerValue(desired, key)

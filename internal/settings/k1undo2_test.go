@@ -45,7 +45,7 @@ func rv15Load(t *testing.T, project string) config.Config {
 // undo with nothing changed locally. At f36e19c the change left the key
 // variable and the undo (/preset alone) went through.
 func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
-	t.Skip("contradicts undo rule 3 (no exemption for values held before): OPENAI_API_KEY_WORK, which the pick replaced, is not a key variable today's choices offer; asked the coordinator")
+	t.Skip("known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)")
 	for _, fc := range []string{"", "off"} {
 		t.Run("finalechat="+fc, func(t *testing.T) {
 			clearRouteEnv(t)
@@ -76,7 +76,7 @@ func TestRV15UndoOfPresetChangeWithOwnKeyVar(t *testing.T) {
 // as the file the command wrote.
 func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
 	skips := map[string]string{
-		"preset unset, key var": "contradicts undo rule 3 (no exemption for values held before): MY_OPENAI_KEY, which the pick replaced, is not a key variable today's choices offer; asked the coordinator",
+		"preset unset, key var": "known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)",
 	}
 	for _, tc := range []struct {
 		name, before string
@@ -130,7 +130,7 @@ func TestRV15UndoThenRedoLoadAsBeforeAndAfter(t *testing.T) {
 // that variable back: the file before the command paired it with its
 // address. Its redo loads as the command left the file.
 func TestK1UndoOfAModelPickWithOwnKeyVar(t *testing.T) {
-	t.Skip("contradicts undo rule 3 (no exemption for values held before): OPENAI_API_KEY_WORK, which the pick replaced, is not a key variable today's choices offer; asked the coordinator")
+	t.Skip("known, not fixed: accepting a pair in force at the command needs that record in the journal (commandJournal, internal/integration/connector.go, not this fixer's file)")
 	for _, fc := range []string{"", "off"} {
 		t.Run("finalechat="+fc, func(t *testing.T) {
 			clearRouteEnv(t)
@@ -193,7 +193,6 @@ func TestK1UndoDoesNotPairAnOldKeyWithANewAddress(t *testing.T) {
 // reached at was changed locally since the command, the model would go to
 // an address it was never chosen for: the undo is a conflict.
 func TestK1UndoPuttingBackAModelConflictsOnALocalAddressEdit(t *testing.T) {
-	t.Skip("contradicts undo rule 2 (a conflict is a reversal key changed since, nothing else): the address is no key of the reversal, so the model goes to the new address; asked the coordinator")
 	for _, fc := range []string{"", "off"} {
 		t.Run("finalechat="+fc, func(t *testing.T) {
 			clearRouteEnv(t)

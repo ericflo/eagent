@@ -62,6 +62,16 @@ func TestK1ReversalRules(t *testing.T) {
 		{name: "2: a fallback put back to null conflicts on a local edit of it", before: `{"preset":"openai-high","model":{"fallback":null}}`, edits: []control.Edit{{Op: "set", Key: "/model/fallback/model", Value: "openai/gpt-6.1-sol"}}, local: func(m map[string]any) {
 			m["model"].(map[string]any)["fallback"].(map[string]any)["max_tokens"] = float64(2000)
 		}, want: "conflict"},
+		{name: "2: a model set back conflicts on a local move of its address", before: `{"preset":"openai-high","model":{"model":"gpt-6.1-sol"}}`, edits: []control.Edit{{Op: "set", Key: "/model/model", Value: "gpt-6-astra"}}, local: func(m map[string]any) {
+			m["model"].(map[string]any)["base_url"] = "https://openrouter.ai/api/v1"
+		}, want: "conflict"},
+		{name: "2: a model taken out does not conflict on a local move of its address", before: `{"preset":"openai-high"}`, edits: model, local: func(m map[string]any) {
+			m["model"].(map[string]any)["base_url"] = "https://api.openai.com/v1/"
+		}, want: "ok", check: func(t *testing.T, c config.Config) {
+			if c.Model.Model == "gpt-6.1-sol" || c.Model.BaseURL != "https://api.openai.com/v1/" {
+				t.Fatalf("after undo %s @ %s, want the preset's model at the local address", c.Model.Model, c.Model.BaseURL)
+			}
+		}},
 		// Rule 3: a key variable the command replaced, which nothing saved
 		// today names, is not a choice a person has here now.
 		{name: "3: a key variable no longer offered is refused", before: `{"preset":"openai-high","model":{"api_key_env":"OPENAI_API_KEY_WORK"}}`, edits: []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}}, want: "refused"},

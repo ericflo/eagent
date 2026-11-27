@@ -84,7 +84,7 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		return err
 	}
 	if p.Parameters["restore_sha256"] != inverseDigest(inverse) {
-		return fmt.Errorf("the reviewed undo no longer matches its original command")
+		return fmt.Errorf("this undo was reviewed as a different change from the one it would make now (an undo offered by an earlier eagent can differ); nothing was changed, so put those settings back by hand instead")
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion, inverse.Generation = p.SchemaVersion, p.ExpectedVersion, p.Generation
 	journal.Applied = &inverse
