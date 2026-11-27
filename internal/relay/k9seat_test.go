@@ -4,6 +4,7 @@ package relay
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -94,4 +95,41 @@ func TestSr7SeatABlockThatTurnsStuckSaysSo(t *testing.T) {
 		break
 	}
 	t.Fatalf("the seat is stuck now (Status.Stuck) and said nothing a waiting change looks at (events %v): a model change that waited for the turn waits for good", said)
+}
+
+// SR7-2. SR6-2 for pi. pi's /compact runs no agent run: the extension
+// saves "working" only at agent_start, so pi's status file says idle all
+// through a compaction (the extension's own comment: a hand-over "pi
+// refused outright (it was compacting)" was tried because the status said
+// idle), and pi writes nothing to its session file until the compaction
+// entry. The command's hold ends quietMoveLooks looks after the first idle
+// look, and atRest for pi is the status file alone (idle, no dialog), so
+// two looks later the seat says quiet while pi is still compacting. A
+// model change waiting for quiet ("acting on one of its own commands; it
+// starts again with X once it has") then kills pi mid-compaction: the
+// /compact recorded delivered never takes effect. Claude's compaction is
+// held by its spinner (TestSr6SeatClaudeCompactIsQuietWhileItRuns).
+func TestSr7SeatPiCompactIsQuietWhileItRuns(t *testing.T) {
+	isolatePi(t)
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	now := time.Now().Add(-time.Minute)
+	lines := append([]string{piHeaderLine("first", now)}, piTurnLines("t1", "sort the shelves", "Sorted.", now.Add(time.Second))...)
+	w := newPiSwitchSeat(t, time.Time{}, lines, entries(0))
+	s := w.s
+	if got := quietOrder(t, s, 5*time.Second); got[len(got)-1] != "quiet" {
+		t.Fatalf("never quiet at the start: %q", got)
+	}
+	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	// pi compacts: its status file still says idle (no agent_start), and
+	// nothing is written to the session until the compaction entry. The
+	// extension says it compacts (session_before_compact), as pi starts.
+	writePiStatus(t, w.status, piStatus{State: "idle", Compacting: true, SessionFile: w.first, SessionID: "first", SessionEntries: entries(0)})
+	got := quietOrder(t, s, looks(16))
+	if slices.Contains(got, "quiet") {
+		t.Fatalf("events %q: quiet while pi is still compacting (no compaction entry in its session yet)", got)
+	}
 }
