@@ -459,10 +459,11 @@ func (r *Runtime) maybeTurn() {
 	if time.Now().Before(t.retryAt) {
 		return
 	}
-	if r.needsDossier() {
+	if !r.stillClosing() && r.needsDossier() {
 		// Restart at the first quiet moment: the prompt is still in the
 		// provider's cache, so the dossier is cheap to write now, and the
-		// user's next message does not have to wait for it.
+		// user's next message does not have to wait for it. Not in a
+		// session that is ending: nothing will be asked of it again.
 		r.startDossier()
 		return
 	}
@@ -801,9 +802,9 @@ func (r *Runtime) turn(w wake) {
 	end := "done"
 	closedOut := false // a closing turn whose call failed: it owes nothing
 	// answers: a call of this turn came back (looked) and no call failed
-	// after it (turnFailed). Only then does the turn's end clear the
-	// model's failures: one whose next call failed after one went through
-	// is a failure more, so the waits between such turns grow.
+	// after it (turnFailed counted none). Only then does the turn's end
+	// clear the model's failures: one whose next call failed after one
+	// went through is a failure more, so the waits between such turns grow.
 	answers := false
 	// stoppedClosing: a check in this turn found the session no longer
 	// ending (stillClosing). The turn's end goes by that, not by a check of
@@ -984,8 +985,12 @@ func (r *Runtime) turn(w wake) {
 					closedOut = true
 					return
 				}
-				r.turnFailed(err, covered)
-				answers = false
+				// A refusal as too long that restarts the conversation is
+				// no failed call (turnFailed counts none): a call of this
+				// turn that came back still ends the failures before it.
+				counted := r.turns.failures
+				r.turnFailed(err, covered, answers)
+				answers = answers && r.turns.failures == counted
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				// The closing turn of a session still ending has had its word
 				// (the model's, or eagent's own here): nothing is owed after it.
@@ -1578,10 +1583,11 @@ var (
 )
 
 // turnFailed handles a model call that did not come back, which had been
-// shown the record up to shown. What asked for the look is still owed one,
-// so the loop tries again later; a message from the user after shown (one
-// written while the call was out too) tries at once. Loop goroutine.
-func (r *Runtime) turnFailed(err error, shown int64) {
+// shown the record up to shown; answered says a call of its turn came
+// back before it. What asked for the look is still owed one, so the loop
+// tries again later; a message from the user after shown (one written
+// while the call was out too) tries at once. Loop goroutine.
+func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
@@ -1624,28 +1630,69 @@ func (r *Runtime) turnFailed(err error, shown int64) {
 				// (needsDossier): this model restarted nothing.
 				return
 			}
-			who := "the agent"
-			if active := r.st.ActiveRelays(); len(active) > 0 {
-				who = active[0].Who()
-			}
 			// Not an outage: the provider refuses the prompt as too long,
 			// and restarting from a dossier did not make it fit.
-			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My model refuses my conversation as too long, even after I restarted it from my notes, " + r.whileDown() + " Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings."})
+			return
+		}
+		if answered {
+			// The model answered a call of this turn: it can be reached,
+			// and what fails is a call after.
+			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", failingNotice, shortErr(err), r.whileDown())})
 			return
 		}
 		r.recordMessage(r.unreachableNotice(err))
 	}
 }
 
+// failingNotice opens what the user is told after two failed calls in a
+// row when a call of the turn that failed second came back first.
+const failingNotice = "My calls to my own model keep failing"
+
+// lastFailedAnswered reports that a call of the turn whose call failed
+// last came back first: that turn is on the record, which a turn is once a
+// call of it came back and acted, and it ended on the failure ("error", or
+// "error, closing") after the failure's own event. Loop goroutine only,
+// once that turn has ended.
+func (r *Runtime) lastFailedAnswered() bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		switch {
+		case ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent && ev.Task == "":
+			var d event.TurnData
+			if ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "error") {
+				return true
+			}
+		case ev.Type == event.Error:
+			var d event.ErrorData
+			if ev.Decode(&d) == nil && d.Where == event.ActorEagent {
+				return false
+			}
+		}
+	}
+	return false
+}
+
 // unreachableNotice is what the user is told when eagent's model has not
 // answered for a while: automatic, so it is no answer to them. Loop
 // goroutine.
 func (r *Runtime) unreachableNotice(err error) event.MessageData {
-	who := "the agent"
-	if active := r.st.ActiveRelays(); len(active) > 0 {
-		who = active[0].Who()
+	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), %s I keep trying and will pick up where I left off.", shortErr(err), r.whileDown())}
+}
+
+// whileDown is what a notice that eagent's model is not answering says of
+// the user's messages: with an agent running they still go straight to it;
+// with none (none started, stopped, or its terminal gone, as fallbackFinal
+// counts it) they wait for eagent. Loop goroutine.
+func (r *Runtime) whileDown() string {
+	active := r.st.ActiveRelays()
+	for _, rel := range active {
+		if rel.State != "exited" {
+			who := active[0].Who()
+			return fmt.Sprintf("so I can't tell you what %s is doing. Your messages still go straight to %s.", who, who)
+		}
 	}
-	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", shortErr(err), who, who)}
+	return "so I can't answer you for now. What you write to me is kept, and I'll answer it when my model does."
 }
 
 // stopTimers stops the loop's timers at the end of a run.

@@ -280,13 +280,13 @@ func (r *Runtime) swapRoute(sw routeSwap) {
 // (a pick in settings, swapRoute; a fallback, takeRoute), what the old model
 // did, which belongs to it: its failures and the wait before the next try
 // (up to an hour), a refusal of the prompt as too long (which would write
-// the next dossier from the files), the restarts in a row it needed, and how
-// its provider counts tokens (recordRoute forgets the first call's size).
-// If the new one fails too, it backs off on its own count. Loop goroutine.
+// the next dossier from the files), and how its provider counts tokens
+// (recordRoute forgets the first call's size). The restarts in a row it
+// needed are forgotten by the move on the record (restartOf). If the new
+// one fails too, it backs off on its own count. Loop goroutine.
 func (r *Runtime) newModel() {
 	t := &r.turns
 	t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
 	t.overflowed, t.futileLogged = false, false
 	r.tokenScale = 0
-	r.restartRetried, r.restartRescues = false, 0
 }

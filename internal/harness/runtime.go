@@ -175,10 +175,6 @@ type Runtime struct {
 	turns          turnState             // the model loop (loop.go); loop-owned
 	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
 	tokenScaleOn   string                // the route tokenScale was learned on (dossier.go); loop-owned
-	restartCarried carried               // what the restart that began this conversation carried whole (dossier.go); loop-owned
-	restartRetried bool                  // that restart was the one more try after one that carried nothing (dossier.go); loop-owned
-	decidedWindow  provTokens            // the window on which no restart can make room was found, 0 when not (dossier.go); loop-owned
-	restartRescues int                   // restarts in a row for conversations too long from their start (dossier.go); loop-owned
 	summary        summaryKeeper         // the thread's title and summary (summary.go); loop-owned
 	activeSettings runtimecontrol.Values // loop-owned; cfg remains immutable
 	runtimeControl *runtimecontrol.Controller
@@ -200,7 +196,11 @@ type Runtime struct {
 	inboxTaken  map[string]bool
 	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
-	ending       bool
+	ending bool
+	// recordFailed: an event could not be written to the record (append).
+	// The run ends on it, and takes nothing more off the inbox. Loop
+	// goroutine.
+	recordFailed bool
 	endReason    string
 	shutdownOnce sync.Once
 	exitCode     int
@@ -1027,6 +1027,7 @@ func (r *Runtime) append(ev event.Event) event.Event {
 		// The log is the record; without it nothing can be trusted. End with
 		// a failing exit code and reason rather than a quiet 0.
 		r.ui.Log("FATAL: cannot append to session log: %v", err)
+		r.recordFailed = true
 		r.beginShutdown("error", 1)
 		return ev
 	}
@@ -1162,10 +1163,12 @@ func (r *Runtime) maybeEnd() {
 	if r.ending || t.busy || t.compacting {
 		return
 	}
-	// down: the model has failed twice running, and the user has been told.
-	// Unless the user has written or answered since what the last failed
-	// call was shown: that is looked at first, without the wait (maybeTurn).
-	down := t.failures >= 2
+	// down: the model has failed twice running, the last time with no call
+	// of that turn coming back first (lastFailedAnswered), and the user has
+	// been told. Unless the user has written or answered since what the
+	// last failed call was shown: that is looked at first, without the
+	// wait (maybeTurn).
+	down := t.failures >= 2 && !r.lastFailedAnswered()
 	fresh := t.wakes[wakeUser] > t.seen && t.wakes[wakeUser] > t.failSeq
 	if r.wakePending() && (r.opts.Interactive || !down || fresh) {
 		return
@@ -1420,7 +1423,15 @@ func (r *Runtime) onInputFrom(line, source, phoneID, inbox string, client *clien
 func (r *Runtime) userMessage(d event.UserMessageData) {
 	rel, held := r.routeUserMessage(d)
 	d.Held = held
+	failed := r.recordFailed
 	ev := r.append(event.New(event.UserMessage, event.ActorUser, d))
+	if !failed && r.recordFailed && (d.Inbox != "" || d.PhoneID != "") {
+		// It could not go on the record, and it is still where it came
+		// from (its inbox file, the phone's thread): the next run takes
+		// it from there and passes it on, once. (One typed at the
+		// terminal is kept nowhere else, and still goes to the agent.)
+		return
+	}
 	if held != "" {
 		if r.phone != nil && len(r.st.ActiveRelays()) > 0 {
 			r.phone.setReceipt(r, ev.Seq, "eagent")
