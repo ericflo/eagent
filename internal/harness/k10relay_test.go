@@ -121,7 +121,6 @@ func TestK10AStopAfterAnExitDropsTheKeptChange(t *testing.T) {
 // confirmed" and the phone marks it may-not-have-arrived, for a message
 // that arrived. A resume does not look again: the record has its outcome.
 func TestSR7AQuitDuringARestartDropsTheOldSeatsArrival(t *testing.T) {
-	t.Skip("known, not fixed: SR7-3, fixed in a later commit")
 	seat := newK2FeedSeat(t)
 	rt, g, done := r10Session(t, seat, newFakeSeat("two"))
 	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
@@ -167,7 +166,6 @@ func TestSR7AQuitDuringARestartDropsTheOldSeatsArrival(t *testing.T) {
 // session.end, and a resume never settles it (an ended relay is not
 // reattached).
 func TestSR7StopSessionDuringAStopLeavesTheSendUnresolved(t *testing.T) {
-	t.Skip("known, not fixed: SR7-2, fixed in a later commit")
 	seat := newK2FeedSeat(t)
 	rt, _, done := r10Session(t, seat)
 	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
@@ -199,5 +197,40 @@ func TestSR7StopSessionDuringAStopLeavesTheSendUnresolved(t *testing.T) {
 	}
 	if len(outcomes) != 1 {
 		t.Errorf("%s, typed into Codex before it was stopped: outcomes %v; want one (unconfirmed: the agent was stopped) before session.end", id, outcomes)
+	}
+}
+
+// The seventh review's suspicion: a stopped (or restarted) agent's seat
+// takes past the bound to say all it saw, so its sends are settled as they
+// stand; then it says one of them arrived. A send has one outcome: once a
+// seat's sends are settled, what it says is logged, not recorded.
+func TestK10ANewsAfterAStoppedSeatsSettleIsNotRecorded(t *testing.T) {
+	saved := oldSendSettle
+	oldSendSettle = 20 * time.Millisecond
+	t.Cleanup(func() { oldSendSettle = saved })
+	for _, restart := range []bool{false, true} {
+		seat := newK2FeedSeat(t)
+		g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+		rt := newLaunchRuntime(t)
+		_, id := k2Forward(t, rt, seat, "run the tests", "queue")
+		if restart {
+			rt.sync(func() {
+				if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
+					t.Errorf("restart: %v", err)
+				}
+			})
+			g.waitEntered(t) // past run's bound: launching
+			g.release <- struct{}{}
+		} else {
+			relayToolAsync(rt, map[string]any{"action": "stop"})
+		}
+		seat.waitGone(t)
+		waitFor(t, "the send settled past the bound", func() bool { return len(deliveredFor(rt, id)) > 0 })
+		seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}) // too late
+		rt.sync(func() {})
+		if got := deliveredFor(rt, id); len(got) != 1 || got[0].OK {
+			t.Errorf("restart %v: %s has %+v; want its one outcome, as settled", restart, id, got)
+		}
+		seat.end()
 	}
 }

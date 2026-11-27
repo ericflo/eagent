@@ -175,10 +175,6 @@ type Runtime struct {
 	// stopped, so the process never exits with an agent coming up or going
 	// down that the record does not account for. Added to on the loop only.
 	relayOps sync.WaitGroup
-	// stopSettles are closed once each relay Stop session stopped is
-	// settled, after its seat has drained (stopSession); finish runs the
-	// loop's queue until they are. Loop-owned, then finish's.
-	stopSettles []chan struct{}
 
 	turns          turnState             // the model loop (loop.go); loop-owned
 	tokenScale     int                   // provider tokens per 1000 estimated (dossier.go); loop-owned
@@ -220,6 +216,11 @@ type Runtime struct {
 	shutdownOnce sync.Once
 	exitCode     int
 	closed       chan struct{} // closed when the loop has fully stopped
+	// late takes, once the loop has stopped (loopDone: finish began), a
+	// seat's news and a send's end for finish (postNews), until lateEnd:
+	// finish has settled every seat taken out of use.
+	late              chan func()
+	loopDone, lateEnd chan struct{}
 }
 
 // New creates a new session in the project directory.
@@ -459,6 +460,7 @@ func build(cfg config.Config, opts Options, ui UI, sess *store.Session, st *stat
 		loop:           make(chan func(), 1024),
 		ctx:            ctx, stop: cancel,
 		closed: make(chan struct{}),
+		late:   make(chan func()), loopDone: make(chan struct{}), lateEnd: make(chan struct{}),
 	}
 	if cfg.ReportMaxChars > 0 {
 		r.view.ReportChars = cfg.ReportMaxChars
@@ -1042,6 +1044,46 @@ func (r *Runtime) post(fn func()) {
 	}
 }
 
+// postNews is post for a seat's news and the end of a send typed into it:
+// once the loop has stopped, finish runs fn (late), until it has settled
+// every seat taken out of use (lateEnd); after that fn is dropped.
+func (r *Runtime) postNews(fn func()) {
+	late := func() {
+		select {
+		case r.late <- fn:
+		case <-r.lateEnd:
+		}
+	}
+	select {
+	case <-r.loopDone:
+		late()
+		return
+	default:
+	}
+	select {
+	case r.loop <- fn:
+	case <-r.loopDone:
+		late()
+	}
+}
+
+// syncNews is postNews that waits for fn to run, and says whether it ran.
+func (r *Runtime) syncNews(fn func()) bool {
+	done := make(chan struct{})
+	r.postNews(func() { fn(); close(done) })
+	select {
+	case <-done:
+		return true
+	case <-r.lateEnd:
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
 // append writes an event and folds it into state. Loop goroutine only
 // (or before the loop starts).
 func (r *Runtime) append(ev event.Event) event.Event {
@@ -1312,6 +1354,7 @@ func (r *Runtime) beginShutdown(reason string, code int) {
 // finish runs after the loop exits: waits for the turn in flight, records
 // session.end, closes the store.
 func (r *Runtime) finish() {
+	close(r.loopDone) // a seat's news comes to finish from now on (postNews)
 	waitDone := make(chan struct{})
 	go func() { r.wg.Wait(); close(waitDone) }()
 	grace := 5 * time.Second
@@ -1334,18 +1377,15 @@ drain:
 			break drain
 		}
 	}
-	// Stop session: each relay it stopped is settled once all its seat saw
-	// is on the record; that news and the settle come through the loop's
-	// queue, run here (the wait for the drain is bounded: stopSession).
-	for _, settled := range r.stopSettles {
-	settle:
-		for {
-			select {
-			case fn := <-r.loop:
-				fn()
-			case <-settled:
-				break settle
-			}
+	// What the loop was handed before it stopped (a seat's news among it)
+	// runs, once; nothing handed to it after the close does.
+queued:
+	for {
+		select {
+		case fn := <-r.loop:
+			fn()
+		default:
+			break queued
 		}
 	}
 	close(r.closed)
@@ -1355,6 +1395,44 @@ drain:
 	// else waits for the next run (pollInbox), as does a file written
 	// after this.
 	r.pollInbox()
+	// Every seat taken out of use (a stop, a restart, a switch, Stop
+	// session) has drained and its sends are settled before the end: what
+	// it says, and how a send typed into it ended, come here now
+	// (postNews), and each is settled once it has drained and no send is
+	// being typed into it, within one bound for all; past it, the rest are
+	// settled as they stand. A start under way settles its own (below).
+	r.settleDueRetired()
+	limit := time.NewTimer(oldSendSettle)
+retired:
+	for {
+		r.relays.mu.Lock()
+		pending := r.retiringPendingLocked()
+		r.relays.mu.Unlock()
+		if !pending {
+			break
+		}
+		select {
+		case fn := <-r.late:
+			fn()
+		case <-limit.C:
+			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
+			break retired
+		}
+		r.settleDueRetired()
+	}
+	limit.Stop()
+	r.relays.mu.Lock()
+	var rest []relaySeat
+	for seat, e := range r.relays.retiring {
+		if !e.settled && e.settle != nil {
+			rest = append(rest, seat)
+		}
+	}
+	r.relays.mu.Unlock()
+	for _, seat := range rest {
+		r.settleRetired(seat)
+	}
+	close(r.lateEnd) // later news of a stopped agent is not recorded
 	// A start still under way is waited for: one whose agent comes up is
 	// recorded below (abandonLaunch). Nothing is under way in an ordinary
 	// shutdown, so this costs nothing then.
