@@ -296,3 +296,46 @@ func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
 		t.Fatalf("the session's log does not say the sender was not told: %q", g.ui.logged())
 	}
 }
+
+// B12, in the running mirror: a file from the phone whose first download
+// fails as a service briefly down does (502) is tried again, as the reply
+// watcher tries one, and reaches the session; nothing is refused.
+func TestK2AFileWhoseDownloadFailsOnceIsTakenByTheMirror(t *testing.T) {
+	setFor(t, &phoneRetryStep, 5*time.Millisecond)
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.files["att-1"] = phoneFakeFile{name: "IMG_1.png", contentType: "image/png", data: tinyPNG}
+	var mu sync.Mutex
+	failed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		first := r.URL.Path == "/api/v1/attachments/att-1" && !failed
+		if first {
+			failed = true
+		}
+		mu.Unlock()
+		if first {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"code":"bad_gateway","message":"a moment"}}`))
+			return
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	file := map[string]any{"id": "att-1", "kind": "image", "content_type": "image/png", "filename": "IMG_1.png", "size": len(tinyPNG), "url": "/api/v1/attachments/att-1"}
+	id := r10Says(fp, r10Msg("here is the shot", file))[0]
+	waitFor(t, "the words to be taken", func() bool { return r14Taken(g, id) == 1 })
+	r14Drained(t, g)
+	for _, ev := range g.log() {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id && len(d.Attachments) != 1 {
+			t.Fatalf("the message was taken with %d files, want its one", len(d.Attachments))
+		}
+	}
+	if got := r11Refusals(fp); len(got) != 0 {
+		t.Fatalf("the file was refused: %v", got)
+	}
+}

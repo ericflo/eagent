@@ -1240,6 +1240,16 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			var notes []func(context.Context)
 			for _, a := range m.Attachments {
 				saved, err := r.downloadAttachment(p.client, a)
+				// A download that may work later (the service could not be
+				// reached, or answered 429 or 5xx) is tried three times, as
+				// the reply watcher tries one, before the file is refused.
+				for try := 1; try < 3 && err != nil && r.ctx.Err() == nil && finalechat.Transient(err); try++ {
+					select {
+					case <-r.ctx.Done():
+					case <-time.After(time.Duration(try) * phoneRetryStep):
+						saved, err = r.downloadAttachment(p.client, a)
+					}
+				}
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
 					if r.ctx.Err() != nil {
