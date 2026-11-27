@@ -1427,10 +1427,19 @@ func (r *Runtime) fallbackFinal() {
 	}
 	// It does not retry on its own once it has ended. An agent can still
 	// be running: a question nobody can answer ends the session anyway
-	// (maybeEnd).
+	// (maybeEnd). One whose pane went away (exited) is not running.
+	var who []string
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State != "exited" {
+			who = append(who, rel.Who())
+		}
+	}
 	running := "Nothing is running now."
-	if active := r.st.ActiveRelays(); len(active) > 0 {
-		running = active[0].Who() + " keeps running in its own terminal."
+	switch {
+	case len(who) == 1:
+		running = who[0] + " keeps running in its own terminal."
+	case len(who) > 1:
+		running = strings.Join(who, " and ") + " keep running in their own terminals."
 	}
 	if r.phone != nil {
 		b.WriteString("\n\n" + running + " A reply here picks the session back up.")
