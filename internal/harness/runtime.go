@@ -1152,10 +1152,12 @@ func (r *Runtime) maybeEnd() {
 	if r.ending || t.busy || t.compacting {
 		return
 	}
-	// down: the model has failed twice running, and the user has been told.
-	// Unless the user has written or answered since what the last failed
-	// call was shown: that is looked at first, without the wait (maybeTurn).
-	down := t.failures >= 2
+	// down: the model has failed twice running, the last time with no call
+	// of that turn coming back first (lastFailedAnswered), and the user has
+	// been told. Unless the user has written or answered since what the
+	// last failed call was shown: that is looked at first, without the
+	// wait (maybeTurn).
+	down := t.failures >= 2 && !r.lastFailedAnswered()
 	fresh := t.wakes[wakeUser] > t.seen && t.wakes[wakeUser] > t.failSeq
 	if r.wakePending() && (r.opts.Interactive || !down || fresh) {
 		return

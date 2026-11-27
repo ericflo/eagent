@@ -1634,9 +1634,9 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
 			return
 		}
-		if answered || r.failedAfterAnswers() {
-			// The model answered a call of one of these turns: it can be
-			// reached, and what fails is a call after.
+		if answered {
+			// The model answered a call of this turn: it can be reached,
+			// and what fails is a call after.
 			who := "the agent"
 			if active := r.st.ActiveRelays(); len(active) > 0 {
 				who = active[0].Who()
@@ -1649,32 +1649,28 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 }
 
 // failingNotice opens what the user is told after two failed calls in a
-// row when a call of those turns came back first.
+// row when a call of the turn that failed second came back first.
 const failingNotice = "My calls to my own model keep failing"
 
-// failedAfterAnswers reports that in the run of failed calls (the newest
-// t.failures on the record) a call came back before one of them: its turn
-// is on the record, which a turn is once a call of it came back and acted,
-// and it ended on the failure ("error", or "error, closing"). A turn whose
-// call is failing now has not ended yet (turnFailed's answered says it).
-// Loop goroutine only.
-func (r *Runtime) failedAfterAnswers() bool {
-	n, ended := r.turns.failures, false
-	for i := len(r.st.Events) - 1; i >= 0 && n > 0; i-- {
+// lastFailedAnswered reports that a call of the turn whose call failed
+// last came back first: that turn is on the record, which a turn is once a
+// call of it came back and acted, and it ended on the failure ("error", or
+// "error, closing") after the failure's own event. Loop goroutine only,
+// once that turn has ended.
+func (r *Runtime) lastFailedAnswered() bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
 		switch {
 		case ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent && ev.Task == "":
 			var d event.TurnData
-			ended = ended || ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "error")
-		case ev.Type == event.Error:
-			var d event.ErrorData
-			if ev.Decode(&d) != nil || d.Where != event.ActorEagent {
-				continue
-			}
-			if ended {
+			if ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "error") {
 				return true
 			}
-			n--
+		case ev.Type == event.Error:
+			var d event.ErrorData
+			if ev.Decode(&d) == nil && d.Where == event.ActorEagent {
+				return false
+			}
 		}
 	}
 	return false
