@@ -30,7 +30,9 @@ func (r *Runtime) relayRoutes() map[string]runtimecontrol.RelayRoute {
 	out := map[string]runtimecontrol.RelayRoute{}
 	for _, rel := range r.st.ActiveRelays() {
 		pick, waiting := r.relayRepick[rel.Name]
-		if !waiting {
+		if next, ok := r.relayNext[rel.Name]; !waiting && ok {
+			pick = next // what its next start runs
+		} else if !waiting {
 			pick = relayPick{rel.Model, rel.Effort}
 		}
 		model, effort := r.relayDefaults(rel)
@@ -214,13 +216,17 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...hel
 // "dialog" while a dialog the agent reports holds it, "busy" while the seat
 // is not quiet (in a turn, a send on its way or being typed, one of the
 // agent's own commands not yet acted on as far as the seat can tell, a move
-// not yet followed, a catch-up). The record cannot say so: it infers from
-// what it was told, and what it was told runs behind the seat. A stuck seat
-// (blocked with no dialog: a slow start, a turn gone quiet) or one whose
-// agent exited holds nothing, as a stuck agent may need the restart; nor
-// does a relay with no seat watching it. The one rule for a change asked
-// now (repickRelay) and one that waited (applyWaitingRepick, looked at
-// again when the seat says it is quiet). Loop goroutine.
+// not yet followed, a catch-up, a block the seat does not know to be
+// stuck). The record cannot say so: it infers from what it was told, and
+// what it was told runs behind the seat. A stuck seat (Status.Stuck: a
+// start that never got ready, a turn gone quiet whose screen does not show
+// it at work) holds nothing, as a stuck agent may need the restart; a quiet
+// agent still at work (a long build, a subagent) holds the change to its
+// turn's end. Nor does a relay with no seat watching it, or whose agent
+// exited (a change that waited then is what its next start runs:
+// applyWaitingRepick). The one rule for a change asked now (repickRelay)
+// and one that waited (applyWaitingRepick, looked at again when the seat
+// says it is quiet, stuck, or exited). Loop goroutine.
 func (r *Runtime) heldBack(rel *state.Relay) string {
 	seat := r.relays.get(rel.Name)
 	if seat == nil {
@@ -229,7 +235,7 @@ func (r *Runtime) heldBack(rel *state.Relay) string {
 	switch st := seat.Snapshot(); {
 	case st.Dialog != "":
 		return "dialog"
-	case !st.Quiet && st.State != "blocked" && st.State != "exited":
+	case !st.Quiet && !st.Stuck && st.State != "exited":
 		return "busy"
 	}
 	return ""
@@ -278,8 +284,21 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	if r.relays.launch(name) != nil {
 		return // a start under way applies it when it is up
 	}
+	if rel.State == "exited" {
+		// Not by starting it again: an agent that exited (the user's own
+		// /exit among the ways) stays so. The change is what its next start
+		// runs (relaunch), no longer one that waits, and that start is one.
+		delete(r.relayRepick, name)
+		if r.relayNext == nil {
+			r.relayNext = map[string]relayPick{}
+		}
+		r.relayNext[name] = pick
+		r.syncRelaySettings()
+		r.publishRelayMeta()
+		return
+	}
 	if r.heldBack(rel) != "" {
-		return // applied once the seat says it is quiet (KindQuiet)
+		return // applied once the seat says it is quiet (KindQuiet) or stuck
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.repickFailed(rel, pick, err)

@@ -784,8 +784,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended {
 		// A change still waiting under this name was for the agent that
 		// was stopped (no change can be asked of a stopped relay), not
-		// for the one starting now.
+		// for the one starting now; so was a pick kept for its next start.
 		delete(r.relayRepick, job.name)
+		delete(r.relayNext, job.name)
+	} else if err == nil {
+		delete(r.relayNext, job.name) // this start ran it
 	}
 	if err != nil {
 		var waiting []string // held for the start: reported below
@@ -1056,7 +1059,11 @@ func (r *Runtime) relaunch(name string, check func(*state.Relay) error) (string,
 				return nil, err
 			}
 		}
-		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, relayPick{rel.Model, rel.Effort})
+		pick, next := r.relayNext[rel.Name]
+		if !next {
+			pick = relayPick{rel.Model, rel.Effort}
+		}
+		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, pick)
 		if err != nil {
 			return nil, err
 		}
@@ -1183,9 +1190,10 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			r.settleExited(rel)
 		}
 		if ev.State == "blocked" || ev.State == "exited" {
-			// Stuck or gone: no quiet comes, and nothing holds a change
-			// then unless a dialog the agent reports does (heldBack). A
-			// change that waited applies now, as one asked now would.
+			// No quiet comes. A change that waited applies now if the seat
+			// says the agent is stuck, as one asked now would (heldBack: a
+			// quiet agent at work keeps it waiting for its turn's end); one
+			// whose agent exited is what its next start runs.
 			r.applyWaitingRepick(name)
 		}
 	case relay.KindDelivered:

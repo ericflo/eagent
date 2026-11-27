@@ -262,7 +262,9 @@ func (s *k1HeldSeat) Snapshot() relay.Status {
 	s.fakeSeat.mu.Unlock()
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog, Quiet: s.state == "idle" && s.dialog == "" && unsaid == 0}
+	// Blocked with no dialog (set): the seat knows it stuck, its screen
+	// showing nothing at work, as these tests have it.
+	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog, Quiet: s.state == "idle" && s.dialog == "" && unsaid == 0, Stuck: s.state == "blocked" && s.dialog == ""}
 }
 
 const (

@@ -431,6 +431,9 @@ type fakeSeat struct {
 	sending       int
 	unsaid        map[string]bool
 	quietSaid     bool
+	// stuck: a block it says is one the seat knows stuck (Status.Stuck),
+	// not a quiet agent at work (setStuck).
+	stuck bool
 	// quietTo, when set, is where a quiet said at a Send's end goes (a
 	// seat whose events go out on a channel of its own: k2FeedSeat).
 	quietTo func(relay.Event)
@@ -532,7 +535,15 @@ func (f *fakeSeat) Close() {
 func (f *fakeSeat) Snapshot() relay.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return relay.Status{State: f.stateLocked(), Since: time.Now(), Dialog: f.dialog, Quiet: f.quietLocked()}
+	return relay.Status{State: f.stateLocked(), Since: time.Now(), Dialog: f.dialog, Quiet: f.quietLocked(), Stuck: f.state == "blocked" && f.dialog == "" && f.stuck}
+}
+
+// setStuck says whether a block the seat says is one it knows stuck (its
+// screen shows nothing at work) or a quiet agent at work.
+func (f *fakeSeat) setStuck(stuck bool) {
+	f.mu.Lock()
+	f.stuck = stuck
+	f.mu.Unlock()
 }
 
 // setState sets what the seat sees the agent doing (Snapshot) without its
