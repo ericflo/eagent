@@ -187,7 +187,9 @@ func stopAgents(path string, cfg *config.Config) (stopped, failed []string, err 
 		}
 	}
 	if cfg != nil {
-		tellPhoneStopped(*cfg, path)
+		// A note the sender is still owed, once posted, is recorded posted
+		// here, in the record this holds, so no later run posts it again.
+		tellPhoneStopped(*cfg, path, func(ev event.Event) { _, _ = sess.Append(ev) })
 	}
 	return stopped, failed, nil
 }

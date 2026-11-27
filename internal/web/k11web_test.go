@@ -136,7 +136,7 @@ func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
 	k5Kills(t)
 	var told []string
 	old := tellPhoneStopped
-	tellPhoneStopped = func(_ config.Config, path string) { told = append(told, filepath.Base(path)) }
+	tellPhoneStopped = func(_ config.Config, path string, _ func(event.Event)) { told = append(told, filepath.Base(path)) }
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := srAgentSession(t, project)
 	s.mu.Lock()

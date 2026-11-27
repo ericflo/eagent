@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
@@ -16,12 +17,13 @@ import (
 // server's Stop during its shutdown, or the next server finishing one), in
 // the same order: the agent header as the record now has it (none
 // running), the receipt of each of the user's messages as the record now
-// settles it (one taken back unread turns to failed), and the closing note
-// of a stop, keyed as a run's is (eagent:<id>:end:quit:<resumes>) so a
-// stop told twice shows once. cfg is the configuration the session ran on.
-// It does nothing when that has no phone, and writes nothing to the
-// record. The caller holds the session's lock.
-func TellPhoneStopped(cfg config.Config, sessionPath string) {
+// settles it (one taken back unread turns to failed), the notes the sender
+// is still owed (payOwed: each one posted is recorded with record, which
+// appends to the session's record), and the closing note of a stop, keyed
+// as a run's is (eagent:<id>:end:quit:<resumes>) so a stop told twice
+// shows once. cfg is the configuration the session ran on. It does nothing
+// when that has no phone. The caller holds the session's lock.
+func TellPhoneStopped(cfg config.Config, sessionPath string, record func(event.Event)) {
 	fc := cfg.Finalechat
 	if !fc.Wanted() || finalechat.Disabled() {
 		return
@@ -50,16 +52,24 @@ func TellPhoneStopped(cfg config.Config, sessionPath string) {
 		client: client, ref: finalechat.Ref("eagent:" + sid), logf: func(string, ...any) {},
 		sid: sid, resumes: st.Resumes, features: featureSet(me.Features),
 		ctx: ctx, cancel: cancel, queue: make(chan func(context.Context), 4),
+		posted: map[string]bool{}, owed: owedRefusals(evs),
 	}
 	p.wg.Add(1)
 	go p.worker()
-	// With the mirror's own functions, on its one worker, in a run's
-	// order: the header (as after relay.end), the receipts, then the
-	// closing note.
+	// With the mirror's own functions, in a run's order: the header (as
+	// after relay.end) and the receipts on its one worker, the owed notes
+	// once those have gone, then the closing note.
 	r := &Runtime{st: st, cfg: cfg, phone: p}
 	r.publishRelayMeta()
 	p.loadReceipts(r)
 	p.mu.Lock()
 	p.publishReceipts(r)
+	sent := make(chan struct{})
+	p.enqueue(func(context.Context) { close(sent) })
+	select {
+	case <-sent:
+	case <-time.After(phoneCloseWait):
+	}
+	p.payOwed(record)
 	p.close("quit")
 }
