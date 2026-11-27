@@ -135,8 +135,15 @@ func (r *Runtime) startPhone() {
 	if before < len(r.st.Events) {
 		started = integration.ReadPhoneLedger(r.st.Events[:before+1])
 	}
-	for card := range integration.ReadPhoneLedger(r.st.Events).Cards {
+	whole := integration.ReadPhoneLedger(r.st.Events)
+	for card := range whole.Cards {
 		p.taken[card] = true
+	}
+	// The poll skips every id in posted: eagent's own posts, and every app
+	// message the session has taken in, so a page that lists one again
+	// (after an anchor the service no longer knows) does not take it twice.
+	for id := range whole.Taken {
+		p.posted[id] = true
 	}
 	r.phone = p
 	p.wg.Add(1)
@@ -1108,6 +1115,10 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				// a tombstone is a message the user took back.
 				continue
 			}
+			// Read once: its step on the loop takes it, or finds the session
+			// ending and nothing more is taken. A later page that lists it
+			// again before or after that step skips it.
+			p.remember(m.ID)
 			body := strings.TrimSpace(m.Body)
 			var atts []event.Attachment
 			var notes []func(context.Context)

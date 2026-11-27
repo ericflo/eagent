@@ -194,3 +194,116 @@ func TestR14NoFileIsRefusedBeforeEveryFetchHasFinished(t *testing.T) {
 		})
 	}
 }
+
+// r14LostAnchor is the fake Finalechat with reads that never wait (each
+// read sees the thread as it is then), answering a read after a message
+// the thread no longer has as the service does: the anchor is unknown, and
+// the page lists the user's messages from the thread's first.
+func r14LostAnchor(t *testing.T, fp *phoneFake) *httptest.Server {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/messages") && r.Method == http.MethodGet {
+			q := r.URL.Query()
+			after := q.Get("after")
+			fp.mu.Lock()
+			known := after == ""
+			page := []map[string]any{}
+			for _, m := range fp.messages {
+				known = known || m["id"] == after
+				if m["sender"] == "user" {
+					page = append(page, phoneCopy(m))
+				}
+			}
+			fp.mu.Unlock()
+			if !known {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"messages": page, "has_more": false, "timed_out": false, "anchor_unknown": true})
+				return
+			}
+			q.Set("wait", "0")
+			r.URL.RawQuery = q.Encode()
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// r14TakeBack is the person taking a message back: the thread no longer
+// has it.
+func r14TakeBack(fp *phoneFake, id string) {
+	fp.mu.Lock()
+	defer fp.mu.Unlock()
+	for i, m := range fp.messages {
+		if m["id"] == id {
+			fp.messages = append(fp.messages[:i:i], fp.messages[i+1:]...)
+			return
+		}
+	}
+}
+
+// r14Taken is how many times the session's record took app message id.
+func r14Taken(g *phoneRig, id string) int {
+	n := 0
+	for _, ev := range g.log() {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id {
+			n++
+		}
+	}
+	return n
+}
+
+// r14Session is an interactive session with an agent, whose phone reads
+// go through srv.
+func r14Session(t *testing.T, fp *phoneFake, srv *httptest.Server) *phoneRig {
+	t.Helper()
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	return g
+}
+
+// Finding 12 of the fourteenth review: the person sends two messages,
+// takes the second back and writes a third. The service no longer knows
+// the message the poll reads on from and lists the thread from its first
+// message; the first message, taken already, is not taken a second time.
+func TestR14AMessageTakenBeforeALostAnchorIsNotTakenAgain(t *testing.T) {
+	setFor(t, &phonePollFloor, 5*time.Millisecond)
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r14Session(t, fp, r14LostAnchor(t, fp))
+	ids := r10Says(fp, r10Msg("run the migration"), r10Msg("actually wait"))
+	g.phoneWeighed(ids[1])
+	r14TakeBack(fp, ids[1])
+	later := r10Says(fp, r10Msg("check status"))[0]
+	waitFor(t, "the later message to be taken", func() bool { return r14Taken(g, later) == 1 })
+	g.rt.sync(func() {})
+	if n := r14Taken(g, ids[0]); n != 1 {
+		t.Fatalf("the first message was taken %d times; the agent was sent %q", n, g.seat.sentTexts())
+	}
+}
+
+// Finding 12, across runs: what an earlier run took is not taken again by
+// a later one when the service loses the anchor of the later one's read.
+func TestR14AMessageAnEarlierRunTookIsNotTakenAgainAfterALostAnchor(t *testing.T) {
+	setFor(t, &phonePollFloor, 5*time.Millisecond)
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r14Session(t, fp, r14LostAnchor(t, fp))
+	before := r10Says(fp, r10Msg("run the migration"), r10Msg("then the seed"))
+	waitFor(t, "the first run to take both", func() bool { return r14Taken(g, before[1]) == 1 })
+	g.interrupt()
+	reads := fp.getCount()
+	g.resume(Options{Interactive: true})
+	waitFor(t, "the resumed run's poll", func() bool { return fp.getCount() > reads })
+	second := r10Says(fp, r10Msg("actually wait"))[0]
+	g.phoneWeighed(second)
+	r14TakeBack(fp, second)
+	later := r10Says(fp, r10Msg("check status"))[0]
+	waitFor(t, "the later message to be taken", func() bool { return r14Taken(g, later) == 1 })
+	g.rt.sync(func() {})
+	for _, id := range before {
+		if n := r14Taken(g, id); n != 1 {
+			t.Errorf("message %s of the first run was taken %d times", id, n)
+		}
+	}
+}
