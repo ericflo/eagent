@@ -53,6 +53,11 @@ type Relay struct {
 	// LastEventAt is the time of the newest relay event, so a reattaching
 	// eagent knows which transcript lines are already on the record.
 	LastEventAt time.Time
+	// Read is how far the transcript ReadIn was read, from the newest relay
+	// event that says (`read`); a reattach to the same transcript reads on
+	// from there in place of LastEventAt. 0 in records written before.
+	Read   int64
+	ReadIn string
 }
 
 // Who names the agent for people: the short name relay.start recorded,
@@ -219,6 +224,12 @@ func (s *State) applyRelay(ev event.Event) {
 		return
 	}
 	r.LastEventAt = ev.Time
+	var pos struct {
+		Read int64 `json:"read"`
+	}
+	if ev.Decode(&pos) == nil && pos.Read > 0 {
+		r.Read, r.ReadIn = pos.Read, r.Transcript
+	}
 	switch ev.Type {
 	case event.RelayInner:
 		var d event.RelayInnerData

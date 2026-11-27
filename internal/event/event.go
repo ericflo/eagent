@@ -83,6 +83,7 @@ const (
 	RelayLimit     = "relay.limit"     // the agent's usage budget crossed a threshold or ran out
 	RelayEnd       = "relay.end"       // the agent was stopped on purpose
 	RelayAutopilot = "relay.autopilot" // a standing order to keep the agent going (or its end)
+	RelayRead      = "relay.read"      // how far the agent's transcript was read, after a read the record has nothing else of
 )
 
 // Event is one line of the session log.
@@ -618,6 +619,10 @@ type RelayDeliveredData struct {
 	// DeliveryNotSent or DeliveryUnconfirmed. Empty in a record written
 	// before it existed, which reads as DeliveryUnconfirmed.
 	Outcome string `json:"outcome,omitempty"`
+	// Read, on this and the other relay events a line of the agent's
+	// transcript gave, is how far that transcript was read then (the end
+	// of the line); 0 otherwise, and in older records.
+	Read int64 `json:"read,omitempty"`
 }
 
 // The outcomes of a send that did not arrive.
@@ -639,12 +644,21 @@ type RelayStateData struct {
 	// Dialog, on blocked, is the title of the dialog the agent reports
 	// holding it (pi's extension); "" otherwise, and in older records.
 	Dialog string `json:"dialog,omitempty"`
+	Read   int64  `json:"read,omitempty"` // as RelayDeliveredData.Read
 }
 
 // RelayProgressData is something the agent said before its turn ended.
 type RelayProgressData struct {
 	Name string `json:"name"`
 	Text string `json:"text"`
+	Read int64  `json:"read,omitempty"` // as RelayDeliveredData.Read
+}
+
+// RelayReadData is how far the agent's transcript was read, after a read
+// whose only news was a user line that confirmed nothing (relay.read).
+type RelayReadData struct {
+	Name string `json:"name"`
+	Read int64  `json:"read"`
 }
 
 // RelayTurnData is the end of one of the agent's turns.
@@ -658,7 +672,8 @@ type RelayTurnData struct {
 	// Idle marks a turn that answered a message eagent itself sent (not
 	// one of the user's) without running any tools: an agent waiting on its
 	// own work.
-	Idle bool `json:"idle,omitempty"`
+	Idle bool  `json:"idle,omitempty"`
+	Read int64 `json:"read,omitempty"` // as RelayDeliveredData.Read
 }
 
 // ScheduleCreateData registers a loop, cron, or one-shot wake.
@@ -691,6 +706,7 @@ type RelayLimitData struct {
 	ResetsAt    string  `json:"resets_at,omitempty"`
 	Text        string  `json:"text,omitempty"`
 	Exhausted   bool    `json:"exhausted,omitempty"`
+	Read        int64   `json:"read,omitempty"` // as RelayDeliveredData.Read
 }
 
 // RelayAutopilotData is a standing order: keep the agent working on

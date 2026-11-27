@@ -1095,7 +1095,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if cur := r.st.Relays[name]; cur != nil {
 			dialog = cur.Dialog
 		}
-		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog}))
+		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog, Read: ev.Read}))
 		if ev.State == "idle" {
 			r.applyWaitingRepick(name)
 			if dialog != "" {
@@ -1108,9 +1108,13 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			r.settleExited(rel)
 		}
 	case relay.KindDelivered:
-		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
+		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+	case relay.KindRead:
+		// How far the transcript was read, after a read the record has
+		// nothing else of (a reattach reads on from there).
+		r.append(event.New(event.RelayRead, event.ActorHarness, event.RelayReadData{Name: name, Read: ev.Read}))
 	case relay.KindProgress:
-		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
+		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000), Read: ev.Read}))
 	case relay.KindTurn:
 		// A turn that answered eagent's own message and ran nothing is an
 		// agent waiting on work of its own; nudging it again only starts
@@ -1119,7 +1123,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if cur := r.st.Relays[name]; cur != nil {
 			idle = ev.Tools == 0 && !ev.Interrupted && cur.LastSendFrom == "eagent" && cur.LastSendAt.After(cur.LastTurnAt)
 		}
-		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, maxRecordedReport), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle}))
+		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, maxRecordedReport), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle, Read: ev.Read}))
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
@@ -1127,7 +1131,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.applyWaitingRepick(name)
 		r.armAutopilotCheck(name)
 	case relay.KindLimit:
-		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted}))
+		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted, Read: ev.Read}))
 	case relay.KindActivity:
 		r.relays.mu.Lock()
 		if r.relays.activity == nil {
@@ -1160,6 +1164,11 @@ func (r *Runtime) reattachRelays() []string {
 			// The new seat confirms what the record still waits on from the
 			// transcript, as the old one would have; nothing is typed again.
 			spec.Restore, spec.State = unresolvedSends(r.st, rel), rel.State
+			if rel.Read > 0 && rel.ReadIn == rel.Transcript {
+				// How far the record says this transcript was read: what
+				// follows is news, whenever it was written.
+				spec.Read = rel.Read
+			}
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)

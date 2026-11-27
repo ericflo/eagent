@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -25,6 +26,10 @@ const (
 	KindTurn      = "turn"      // the agent finished a turn
 	KindLimit     = "limit"     // usage budget news
 	KindActivity  = "activity"  // what the agent is doing right now (not logged)
+	// KindRead says how far the transcript was read (Read) after a read
+	// whose only news was a user line that confirmed nothing: so the record
+	// knows that line was read too (Spec.Read).
+	KindRead = "read"
 )
 
 // Event is one thing a seat observed.
@@ -49,6 +54,9 @@ type Event struct {
 	// Dialog, on a state event blocked by a dialog the agent reports (pi's
 	// extension), is its title; "" on every other event.
 	Dialog string
+	// Read, on an event a line of the transcript gave and on KindRead, is
+	// how far the transcript was read: the end of that line. 0 otherwise.
+	Read int64
 }
 
 // Spec describes one relay.
@@ -74,6 +82,10 @@ type Spec struct {
 	Restore []Restored
 	// State, on a reattach, is the relay's state on the record.
 	State string
+	// Read, on a reattach, is how far the record says Transcript was read
+	// (Event.Read), 0 when it does not say: a line that starts before it is
+	// history, one after it news, in place of the cut by time.
+	Read int64
 }
 
 // Restored is a send recorded before eagent stopped whose arrival the
@@ -105,6 +117,15 @@ type Seat struct {
 	transcript string
 	launched   time.Time
 	since      time.Time // ignore transcript lines at or before this (reattach)
+	// readFrom, readIn: on a reattach whose record says how far it read
+	// (Spec.Read), lines of readIn starting before readFrom are history, in
+	// place of the cut by since. readTo is the end of the line being folded
+	// (0 between reads), which emit puts on events; silentUser: this read
+	// had a user line that confirmed nothing (watcher goroutine only).
+	readFrom   int64
+	readIn     string
+	readTo     atomic.Int64
+	silentUser bool
 	state      string
 	stateAt    time.Time
 	activity   string
@@ -264,6 +285,9 @@ func attachSeat(spec Spec, a Agent, host Host, target, innerID, transcript strin
 	s := newSeat(spec, a, host, target, innerID)
 	s.transcript = transcript
 	s.markAttached(since)
+	if spec.Read > 0 && transcript != "" {
+		s.readFrom, s.readIn = spec.Read, transcript
+	}
 	s.restore(spec.Restore)
 	return s
 }
@@ -412,6 +436,9 @@ func (s *Seat) innerID() string {
 }
 
 func (s *Seat) emit(ev Event) {
+	if ev.Read == 0 {
+		ev.Read = s.readTo.Load()
+	}
 	select {
 	case s.events <- ev:
 	case <-s.stop:
@@ -1255,8 +1282,19 @@ func (s *Seat) watch() {
 					// record; read only the end of a long transcript. With
 					// sends the record still waits on, all of it: their
 					// arrival may lie anywhere after they were recorded.
-					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
-						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
+					if st, err := os.Stat(path); err == nil {
+						// From the end, or from where the record says it
+						// read when that is further back: what follows is
+						// news.
+						from := st.Size()
+						s.mu.Lock()
+						if s.readFrom > 0 && path == s.readIn && s.readFrom < from {
+							from = s.readFrom
+						}
+						s.mu.Unlock()
+						if from > tailBackfill {
+							tail.offset, tail.skipPartial = from-tailBackfill, true
+						}
 					}
 				}
 				if first {
@@ -1352,6 +1390,13 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 		s.mu.Unlock()
 		var newest time.Time
 		for i, line := range lines {
+			// What this line gives is said with how far the transcript was
+			// read: to its end (where the next line starts).
+			end := tail.offset
+			if i+1 < len(starts) {
+				end = starts[i+1]
+			}
+			s.readTo.Store(end)
 			for _, o := range p.line(line) {
 				o.pos = starts[i]
 				s.fold(o)
@@ -1360,11 +1405,20 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 				}
 			}
 		}
+		s.readTo.Store(0)
 		s.mu.Lock()
 		if newest.After(s.readAt) {
 			s.readAt = newest
 		}
 		s.mu.Unlock()
+		if s.silentUser {
+			// A user line that confirmed nothing (a copy of a queued
+			// message, words typed in the terminal) says nothing to the
+			// record: say how far it was read, so a reattach does not take
+			// it for news.
+			s.silentUser = false
+			s.emit(Event{Kind: KindRead, Read: tail.offset})
+		}
 	}
 	return err
 }
@@ -1373,8 +1427,14 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 func (s *Seat) fold(o obs) {
 	s.mu.Lock()
 	since := s.since
+	history := !since.IsZero() && !o.at.IsZero() && !o.at.After(since)
+	if s.readFrom > 0 && s.transcript == s.readIn {
+		// The record says how far this transcript was read: what starts
+		// before that is history, whenever it was written.
+		history = o.pos < s.readFrom
+	}
 	s.mu.Unlock()
-	if !since.IsZero() && !o.at.IsZero() && !o.at.After(since) && o.kind != "meta" {
+	if history && o.kind != "meta" {
 		// Already on the record before this eagent attached; it only says
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
@@ -1402,11 +1462,15 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		if o.again {
-			break
+		var ids []string
+		if !o.again {
+			ids = s.matchSends(o.text, time.Time{}, o.pos)
 		}
-		for _, id := range s.matchSends(o.text, time.Time{}, o.pos) {
+		for _, id := range ids {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+		}
+		if len(ids) == 0 {
+			s.silentUser = true // readTail says how far it was read
 		}
 	case "working":
 		s.mu.Lock()
