@@ -45,3 +45,103 @@ func TestR13UpgradeDuringAFailingClosingCallGetsNoClosingWords(t *testing.T) {
 		t.Fatalf("said %q, with the agent upgraded and running again", s.ui.said())
 	}
 }
+
+// ---- 1. the first call of a turn ------------------------------------------
+
+// The closing turn is started, and the user writes before its first call
+// goes out. The session is not ending: no call is told it is, under the
+// user's unanswered message, and they get their answer.
+func TestR13MessageBeforeTheFirstClosingCallIsNotToldTheSessionEnds(t *testing.T) {
+	const asked, answer = "wait, do not end: is #42 merged?", "Yes, #42 is merged."
+	var phase atomic.Int32
+	var told atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(allText(msgs), asked) && phase.CompareAndSwap(1, 2):
+			// The first call made with the user's message in it.
+			if strings.Contains(tail, "The session is ending now") {
+				told.Add(1)
+			}
+			return say(answer)
+		case strings.Contains(tail, "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" && phase.CompareAndSwap(0, 1):
+			// Held open (a command's work, say) until the test starts
+			// the closing turn itself.
+			r := rt.Load()
+			r.sync(func() { r.commands++ })
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	s.waitFor("the agent stopped", func() bool { return phase.Load() == 1 && len(s.events(event.RelayEnd)) > 0 })
+	s.settled()
+	// The closing turn starts, and in the same moment the user writes:
+	// both before its first call is built.
+	s.rt.sync(func() {
+		s.rt.commands--
+		s.rt.maybeEnd()
+		s.rt.userMessage(event.UserMessageData{Text: asked})
+	})
+	code := coreExit(s)
+	if n := told.Load(); n > 0 || r5Told(s, answer) != 1 || code != 0 {
+		t.Fatalf("%d call(s) with the user's message unanswered were told the session is ending; exit %d, said %q", n, code, s.ui.said())
+	}
+}
+
+// The closing turn is started, and the user restarts the stopped agent
+// (/restart) before its first call goes out. The session is not ending:
+// no call is told that it is and that no agent is running.
+func TestR13RestartBeforeTheFirstClosingCallIsNotToldTheSessionEnds(t *testing.T) {
+	useRelayFactory(t, "Coat one is on.")
+	var phase, told atomic.Int32
+	s, _ := r12Start(t, nil, func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(tail, "The session is ending now"):
+			told.Add(1)
+		case strings.Contains(tail, "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" && phase.CompareAndSwap(0, 1):
+			r := rt.Load()
+			r.sync(func() { r.commands++ }) // held open until the test starts the closing turn
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	s.waitFor("the agent stopped", func() bool { return phase.Load() == 1 && len(s.events(event.RelayEnd)) > 0 })
+	s.settled()
+	s.rt.sync(func() {
+		s.rt.commands--
+		s.rt.maybeEnd()
+		s.rt.onInputFrom("/restart", "web", "", "", nil)
+	})
+	s.waitFor("the agent back", func() bool { return saidWith(s.ui, "Restarted") })
+	s.settled()
+	if n := told.Load(); n > 0 {
+		t.Fatalf("%d call(s) were told the session is ending with the agent being restarted; said %q", n, s.ui.said())
+	}
+}
+
+// A look about the thread's title alone is started, and the agent ends a
+// turn before its first call goes out. That call is told about the turn
+// end, and the look the turn end asks for is not used up by a call told
+// that nothing has happened.
+func TestR13TurnEndBeforeTheFirstCallOfATitleLookIsLookedAt(t *testing.T) {
+	const report = "CRITICAL BUILD FAILURE: tests broken on main."
+	var looked atomic.Int32
+	s := startSession(t, brief, func(_ string, msgs []map[string]any) reply {
+		if strings.Contains(allText(msgs), report) && strings.Contains(lastUserText(msgs), "finished a turn") {
+			looked.Add(1)
+		}
+		return hold()
+	}, nil)
+	s.waitFor("the agent's first turn", func() bool { return len(s.events(event.RelayTurn)) > 0 })
+	s.settled()
+	s.rt.sync(func() {
+		s.rt.startTurn(wake{thread: true})
+		name := s.rt.st.ActiveRelays()[0].Name
+		s.rt.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: report}))
+	})
+	s.settled()
+	if looked.Load() == 0 {
+		t.Fatal("the agent's turn end was never looked at: the title look's first call was told nothing had happened")
+	}
+}

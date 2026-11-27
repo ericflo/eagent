@@ -871,6 +871,14 @@ func (r *Runtime) turn(w wake) {
 		var msgs []llm.Message
 		r.sync(func() {
 			defer func() { r.turns.callAt = time.Now() }()
+			if tail == "" && (w.final || w.wait > 0) && !r.stillClosing() {
+				// The session stopped ending before the closing turn's
+				// first call went out: no call is made, and what came
+				// (the user wrote, an agent is being started) is taken up
+				// as it would be after one.
+				asked, end = false, "not closing"
+				return
+			}
 			msgs = base
 			if !tailKept {
 				msgs = state.WithTail(base, tail)
@@ -880,19 +888,21 @@ func (r *Runtime) turn(w wake) {
 			}
 			refresh = false
 			base, covered = r.st.View(&r.view), r.st.LastSeq()
-			fresh := tail == ""
-			if !fresh {
+			first, owed := tail == "", w.owed
+			fresh := first
+			if !first || !w.event {
 				// Only something that asks for a look gets a tail of its
 				// own. Anything else that came (a remark from the agent,
 				// what this turn's own calls put on the record) is in the
-				// conversation the call is given, and counts as seen.
+				// conversation the call is given, and counts as seen. A
+				// turn made for nothing that happened takes up such a
+				// thing that came before its first call too.
 				if k, ok := r.dueWake(); ok {
 					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
 			if fresh {
-				first := tail == ""
 				if h := r.heldSince(r.turns.seen); h > 0 {
 					// Not answered by what the turn did before it came. One
 					// kept earlier in this turn and not dealt with yet stays
@@ -911,7 +921,7 @@ func (r *Runtime) turn(w wake) {
 					// one made for something else. That is the reminder:
 					// a hold is not sent back with it again.
 					answerDebt, remindedAnswer = true, true
-				} else if first && w.owed && held == 0 {
+				} else if first && owed && held == 0 {
 					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {
@@ -935,6 +945,9 @@ func (r *Runtime) turn(w wake) {
 				msgs = state.WithTail(base, tail)
 			}
 		})
+		if end == "not closing" {
+			break
+		}
 		// Every call of a session is the same request but for its messages:
 		// one system prompt, one tool list, one effort, one output ceiling.
 		// Anything that varied would cost the provider's cache of the
