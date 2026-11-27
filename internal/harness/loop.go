@@ -1454,11 +1454,18 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	// still out when the model changed counted the old one's (promptOf). A
 	// resumed session reads it the same from the record (turnState.init).
 	r.called(r.promptOf(resp))
+	refused := t.overflowed
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
 	}
-	if t.failures > 0 {
+	switch {
+	case refused:
+		// The last call was refused as too long and no restart followed
+		// (turnFailed): this shorter one coming back does not show the
+		// conversation fits, so the failures count on. Its wait is over.
+		t.retryAt = time.Time{}
+	case t.failures > 0:
 		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
 		r.ui.Log("eagent: the model answers again")
 	}
@@ -1561,11 +1568,15 @@ func (r *Runtime) turnFailed(err error) {
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
 		// The prompt no longer fits: restart the conversation from a
 		// dossier before anything else. If it does not fit even then, the
-		// second refusal takes the ordinary path below.
-		r.ui.Log("eagent: the model refused the prompt as too long (%s); restarting the conversation from a dossier", shortErr(err))
+		// second refusal takes the ordinary path below, and so does this
+		// one when no restart will be made for it (needsDossier: the
+		// restarts were stopped, or one could not be made a moment ago).
 		t.overflowed = true
 		t.promptTokens = max(t.promptTokens, r.rolloverTokens())
-		return
+		if r.restartRuns() {
+			r.ui.Log("eagent: the model refused the prompt as too long (%s); restarting the conversation from a dossier", shortErr(err))
+			return
+		}
 	}
 	t.failures++
 	wait := errorRetryDelays[min(t.failures, len(errorRetryDelays))-1]

@@ -423,6 +423,29 @@ func (r *Runtime) needsDossier() bool {
 	return true
 }
 
+// restartRuns reports that needsDossier, asked now, would restart the
+// conversation: the same questions in the same order, with nothing said or
+// logged (that is needsDossier's to do when it is asked). Loop goroutine
+// only.
+func (r *Runtime) restartRuns() bool {
+	t := &r.turns
+	if t.compacting || time.Since(t.dossierFailedAt) < dossierRetry {
+		return false
+	}
+	if t.adopt || r.st.Unfinished() {
+		return true
+	}
+	if r.restartDecided() {
+		return false
+	}
+	limit := r.rolloverTokens()
+	if !t.overflowed && r.contextTokens() < limit {
+		return false
+	}
+	cur := r.st.Current()
+	return !(cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || t.overflowed) && r.restartFull(limit))
+}
+
 // restartFull reports, once the first call after a restart was already too
 // long, that the restart itself is what fills it: no restart can make room
 // (restartHelps). On a route of any size: what arrives in the moment after
