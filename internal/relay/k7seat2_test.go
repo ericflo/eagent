@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -36,6 +37,41 @@ func TestK7ACommandQueuedMidTurnIsWaitedOnFromTheIdleAfterIt(t *testing.T) {
 	got := quietOrder(t, s, 5*time.Second)
 	if n := len(got); n < 2 || got[n-1] != "quiet" || got[n-2] != "inner b-id" {
 		t.Fatalf("events %q; want the move to b-id the queued /clear made said before quiet", got)
+	}
+}
+
+// sayQuiet marked quiet as said after its KindQuiet went out. A Send begun
+// while that event waited to be read (which clears the mark: not quiet
+// while it is under way) and failed, saying nothing, had its clear
+// overwritten: quiet again, the seat never said so.
+func TestK7QuietIsSaidAgainAfterASendBegunAsItWasSaid(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	h := &k1Host{fakeHost: &fakeHost{alive: true}, paste: func() error { return errors.New("no such pane") }}
+	s := newSeat(Spec{}, claudeAgent{}, h, "k7-said", "id")
+	s.state, s.poll = "idle", piLook
+	s.events = make(chan Event) // each event waits until it is read
+	go s.watch()
+	t.Cleanup(s.Close)
+	sending := func() bool { // the watcher is in an emit, waiting for a reader
+		if s.emitMu.TryLock() {
+			s.emitMu.Unlock()
+			return false
+		}
+		return true
+	}
+	if !eventually(sending) {
+		t.Fatal("the watcher never said anything")
+	}
+	if _, err := s.Send("r1", "run the tests", "queue"); err == nil {
+		t.Fatal("the paste failed; Send said it went")
+	}
+	if ev := <-s.events; ev.Kind != KindQuiet {
+		t.Fatalf("first event %q; want the quiet of the first look", ev.Kind)
+	}
+	if got := quietOrder(t, s, 2*time.Second); got[len(got)-1] != "quiet" {
+		t.Fatalf("after the failed send: %q; want quiet said again", got)
 	}
 }
 

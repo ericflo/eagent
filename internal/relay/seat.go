@@ -592,8 +592,8 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	// tracked while it is typed. Quiet is said again once it holds.
 	s.mu.Lock()
 	s.sending++
-	s.mu.Unlock()
 	s.quietSaid.Store(false)
+	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.sending--
@@ -1588,11 +1588,12 @@ func (s *Seat) sayQuiet() {
 			s.moveFrom, s.moveLook, s.moveIdle = "", 0, 0
 		}
 	}
-	q := s.quietLocked()
+	// Marked said before it goes out, under the lock Send's start clears
+	// the mark under: a clear made while it goes out is never overwritten.
+	say := s.quietLocked() && s.quietSaid.CompareAndSwap(false, true)
 	s.mu.Unlock()
-	if q && !s.quietSaid.Load() {
+	if say {
 		s.emitAside(Event{Kind: KindQuiet})
-		s.quietSaid.Store(true)
 	}
 }
 
