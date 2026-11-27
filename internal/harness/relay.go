@@ -704,7 +704,13 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		}
 		for _, h := range held {
 			if h.done != nil {
-				h.done <- sendResult{err: fmt.Errorf("the agent could not start again: %w", err)}
+				// Recorded here, as its waiter may never get the loop again
+				// (the session's end): one outcome, as it would record.
+				failed := fmt.Errorf("the agent could not start again: %w", err)
+				if !h.barrier {
+					r.typingFailed(sendHolder(r.st, h.id, firstNonEmpty(h.on, job.replaces)), h.id, failed)
+				}
+				h.done <- sendResult{err: failed}
 				continue
 			}
 			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
@@ -780,8 +786,10 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// The brief of the switch before this one, never typed: it
 			// introduced the agent this switch has just replaced, and the
 			// new agent has a brief of its own. That switch is told its
-			// brief did not go in.
-			h.done <- sendResult{err: fmt.Errorf("%s took over before the brief was typed", job.name)}
+			// brief did not go in, and it is recorded here, as above.
+			failed := fmt.Errorf("%s took over before the brief was typed", job.name)
+			r.typingFailed(sendHolder(r.st, h.id, firstNonEmpty(h.on, job.replaces)), h.id, failed)
+			h.done <- sendResult{err: failed}
 			continue
 		}
 		if h.on != "" && h.on != job.name && !h.barrier {
