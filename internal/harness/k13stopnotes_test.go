@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestSR6TellPhoneStoppedFollowsTheConfigurationTheSessionRan(t *testing.T) {
 	if err != nil || !ran.Finalechat.Wanted() {
 		t.Fatalf("setup: the session's configuration does not want the phone: %v", err)
 	}
-	TellPhoneStopped(ran, filepath.Clean(path))
+	TellPhoneStopped(ran, filepath.Clean(path), nil)
 	if posts.Load() == 0 {
 		t.Fatalf("a session that ran with the phone on (saved preset phone, the server's --config) was stopped from outside its run: the phone was told nothing (no receipt, no closing note)")
 	}
@@ -81,9 +82,60 @@ func TestSR6TellPhoneStoppedControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	TellPhoneStopped(cfg, path)
+	TellPhoneStopped(cfg, path, nil)
 	if posts.Load() == 0 {
 		t.Fatalf("control: the phone was told nothing")
+	}
+}
+
+// A session stopped from outside its run that still owes the sender a
+// refusal note gets it posted before the closing note, recorded as posted
+// on its record, and a second telling posts neither again.
+func TestK13AStopToldFromOutsidePaysWhatTheSenderIsOwed(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	t.Setenv("EAGENT_TEST_FC", "fc_test")
+	project := t.TempDir()
+	cfg := phoneFakeConfig(t, project, "http://127.0.0.1:1", fp)
+	sess, err := store.Create(store.Root(project), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	for _, ev := range []event.Event{
+		event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project}),
+		event.New(phoneRefusedEvent, event.ActorHarness, phoneRefusedData{MessageID: "pm1", AttachmentID: "a1", Text: "IMG_1.png was not taken: it is over 10 MB."}),
+	} {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := func(ev event.Event) {
+		if _, err := sess.Append(ev); err != nil {
+			t.Error(err)
+		}
+	}
+	TellPhoneStopped(cfg, sess.Path, record)
+	var kinds []string
+	for _, p := range fp.postsWhere(func(map[string]any) bool { return true }) {
+		meta, _ := p["meta"].(map[string]any)
+		kind, _ := meta["kind"].(string)
+		kinds = append(kinds, kind)
+	}
+	note, end := slices.Index(kinds, "attachment_refused"), slices.Index(kinds, "session_end")
+	if note < 0 || end < 0 || note > end {
+		t.Fatalf("posted %q; want the owed note, then the closing note", kinds)
+	}
+	evs, err := store.Read(sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owed := owedRefusals(evs); len(owed) != 0 {
+		t.Fatalf("the record still owes %+v after the note was posted", owed)
+	}
+	TellPhoneStopped(cfg, sess.Path, record)
+	if n, m := len(fp.postsWhere(k1Kind("attachment_refused"))), len(fp.postsWhere(k1Kind("session_end"))); n != 1 || m != 1 {
+		t.Fatalf("told twice: %d owed note(s), %d closing note(s), want one each", n, m)
 	}
 }
 
@@ -137,7 +189,7 @@ func TestSR6PhoneStopFromOutsideLeavesTheStoppedAgentInTheHeader(t *testing.T) {
 	t.Setenv("FINALECHAT_URL", fp.srv.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_test")
 	closes := len(fp.postsWhere(k1Kind("session_end")))
-	TellPhoneStopped(g.rt.cfg, g.rt.sess.Path)
+	TellPhoneStopped(g.rt.cfg, g.rt.sess.Path, nil)
 	if n := len(fp.postsWhere(k1Kind("session_end"))); n != closes+1 {
 		t.Fatalf("setup: TellPhoneStopped posted %d closing notes", n-closes)
 	}
