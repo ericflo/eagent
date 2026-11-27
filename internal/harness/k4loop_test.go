@@ -1,0 +1,71 @@
+package harness
+
+import (
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/event"
+)
+
+var sr2TooLong = reply{status: 400, body: `{"error":{"message":"prompt is too long: 250000 tokens > 200000 maximum","type":"invalid_request_error"}}`}
+
+// The sibling of 17912f6: a session with no terminal is ending, a notice
+// of eagent's own asks for a look during the closing look, and the
+// provider refuses that look as too long. maybeTurn no longer restarts a
+// closing session, but turnFailed still takes the first refusal for a
+// restart (restartRuns has no stillClosing gate): no failure is counted,
+// no pass is made, and the second failure tells the user (important,
+// buzzing the phone) that the model refuses the conversation "even after
+// I restarted it from my notes". No restart was made.
+func TestSR2LoopAnEndingSessionSaysItRestartedWhenItDidNot(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+	var passes, refused atomic.Int32
+	var rt atomic.Pointer[Runtime]
+	var injected, stopped atomic.Bool
+	r0, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			passes.Add(1)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case injected.Load():
+			refused.Add(1)
+			return sr2TooLong
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			if r := rt.Load(); r != nil && !injected.Load() {
+				r.sync(func() {
+					r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] A note of your own came due."}))
+				})
+				injected.Store(true)
+			}
+			return hold()
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	rt.Store(r0)
+	var code int
+	select {
+	case code = <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q", ui.said())
+	}
+	if !injected.Load() || refused.Load() == 0 {
+		t.Fatalf("setup: notice %v, refused calls %d (exit %d)", injected.Load(), refused.Load(), code)
+	}
+	if n := passes.Load(); n != 0 {
+		t.Fatalf("setup: %d dossier passes", n)
+	}
+	for _, m := range ui.said() {
+		if strings.Contains(m, "even after I restarted it from my notes") {
+			t.Fatalf("told %q after %d refused calls and no restart at all (exit %d)", m, refused.Load(), code)
+		}
+	}
+}
