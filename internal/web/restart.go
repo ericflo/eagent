@@ -13,6 +13,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
@@ -97,6 +98,10 @@ func (s *Server) listed(id string) bool {
 	list, ok := s.readHosted()
 	return ok && slices.Contains(list.Sessions, id)
 }
+
+// tellPhoneStopped tells the session's phone thread of a stop stopAgents
+// recorded: its receipts, and the closing note (harness.TellPhoneStopped).
+var tellPhoneStopped = harness.TellPhoneStopped
 
 // killAgent stops an agent's terminal; tests replace it.
 var killAgent = func(host, target string) error { return relay.HostByName(host).Kill(target) }
@@ -294,6 +299,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 				s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 			} else {
 				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
+				tellPhoneStopped(s.Project, info.Path)
 				forget(id)
 			}
 			continue
