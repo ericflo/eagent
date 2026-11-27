@@ -52,8 +52,29 @@ func (claudeAgent) prepare(spec *Spec, stateDir string) error {
 	// binary); without the hook, held messages are typed instead.
 	if exe, err := os.Executable(); err == nil && strings.HasPrefix(filepath.Base(exe), "eagent") {
 		spec.Hook = ShellQuote(exe) + " relay-hook " + ShellQuote(spec.Spool)
+		// The same command at SessionStart records the session Claude is
+		// on (a new one after /clear), which the seat follows (poll).
+		spec.StatusFile = claudeSessionFile(spec.Spool)
 	}
 	return nil
+}
+
+// claudeSessionFile is where the hook keeps the session Claude is on: next
+// to the spool, in the relay's state directory.
+func claudeSessionFile(spool string) string {
+	return filepath.Join(filepath.Dir(spool), "claude-session.json")
+}
+
+// claudeSession is what Claude's SessionStart hook says of its session.
+type claudeSession struct {
+	ID         string `json:"session_id"`
+	Transcript string `json:"transcript_path"`
+}
+
+func readClaudeSession(file string) (claudeSession, bool) {
+	var st claudeSession
+	raw, err := os.ReadFile(file)
+	return st, err == nil && json.Unmarshal(raw, &st) == nil
 }
 
 func (claudeAgent) command(p config.RelayProfile, innerID string, resume bool, hook string) []string {
@@ -70,7 +91,8 @@ func (claudeAgent) command(p config.RelayProfile, innerID string, resume bool, h
 		argv = append(argv, "--effort", p.Effort)
 	}
 	if hook != "" {
-		settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hook}}}}}})
+		run := []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hook}}}}
+		settings, _ := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": run, "SessionStart": run}})
 		argv = append(argv, "--settings", string(settings))
 	}
 	return append(argv, p.Args...)
@@ -106,8 +128,22 @@ func (claudeAgent) afterTurn(s *Seat, id, text string) error {
 
 // poll reports what is left in the spool after a turn the transcript shows
 // over: Claude's Stop hook does not run on an interrupt, and a message held
-// just as a turn ended finds no turn to end.
-func (claudeAgent) poll(s *Seat, now time.Time) { s.reportLeftOvers(now) }
+// just as a turn ended finds no turn to end. And it follows Claude to the
+// session its SessionStart hook last named: /clear starts a new one (a new
+// id and transcript file), as an in-app /resume moves to another.
+func (claudeAgent) poll(s *Seat, now time.Time) {
+	s.reportLeftOvers(now)
+	st, ok := readClaudeSession(s.spec.StatusFile)
+	if !ok || st.ID == "" {
+		return
+	}
+	switch inner := s.innerID(); {
+	case inner == st.ID:
+		s.onSession(now)
+	case inner != "":
+		s.follow(st.ID, false)
+	}
+}
 
 // canResume: Claude saves a session only when its first message is sent,
 // and exits at once on --resume of an id it never saved.
@@ -119,9 +155,26 @@ func (a claudeAgent) canResume(spec Spec, innerID string) bool {
 // RunStopHook is Claude Code's Stop hook for a relay: it takes every message
 // waiting in spool and returns them as the reason to keep going, which
 // Claude reads as its next instruction. With nothing waiting it lets the
-// turn end.
+// turn end. Run as Claude's SessionStart hook, it records the session
+// Claude is on (claudeSessionFile) and hands nothing over.
 func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
-	_, _ = io.Copy(io.Discard, io.LimitReader(stdin, 1<<20))
+	raw, _ := io.ReadAll(io.LimitReader(stdin, 1<<20))
+	var in struct {
+		Event string `json:"hook_event_name"`
+		claudeSession
+	}
+	if json.Unmarshal(raw, &in) == nil && in.Event == "SessionStart" {
+		if in.ID != "" {
+			if out, err := json.Marshal(in.claudeSession); err == nil {
+				file := claudeSessionFile(spool)
+				tmp := file + ".tmp"
+				if os.WriteFile(tmp, out, 0o644) == nil {
+					_ = os.Rename(tmp, file)
+				}
+			}
+		}
+		return 0
+	}
 	taken, texts := takeSpool(spool)
 	for _, path := range taken {
 		_ = os.Remove(path)
