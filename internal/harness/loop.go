@@ -1084,6 +1084,7 @@ func (r *Runtime) turn(w wake) {
 				tc.handle()
 				break
 			}
+			stoppedClosing = true
 		}
 		// last: no call is left in this turn. A reply sent back now would
 		// never be answered, and the wake would stay unsettled, so the next

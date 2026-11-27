@@ -122,13 +122,14 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		important, _ := args["important"].(bool)
 		// The closing word of a session always buzzes.
 		important = important || tc.wake.final
-		// A closing word written for an end that is not happening any
-		// more (the user wrote, or an agent came up, while the call was
-		// out) is not sent, as plain text for it is not (stillClosing):
-		// asked in the step that records it.
+		// A closing word the user's own message overtook (they wrote
+		// while the call was out) is not sent on top of it: asked in the
+		// step that records it. Only that: a closing reply that itself
+		// set a timer or started an agent before this call still tells
+		// the user so.
 		stale := false
 		r.sync(func() {
-			if stale = tc.wake.final && !r.stillClosing(); stale {
+			if stale = tc.wake.final && r.turns.wakes[wakeUser] > r.turns.seen; stale {
 				return
 			}
 			r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts})
@@ -137,7 +138,7 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 			}
 		})
 		if stale {
-			return "not sent: the session is not ending any more (the user wrote, or an agent came up, while you wrote this), so no closing word goes out. What came is looked at next.", true, false
+			return "not sent: the user wrote while you wrote this, so no closing word goes out on top of their message. It is looked at next.", true, false
 		}
 		tc.spoke, tc.said = true, true
 		tc.handle()
