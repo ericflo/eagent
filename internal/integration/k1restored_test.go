@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/finalechat"
 )
@@ -55,5 +56,20 @@ func TestK1ARestoredRunThatEndsWithoutTheReplyLeavesItToTheWatcher(t *testing.T)
 	w.sweep(context.Background())
 	if stopped.calls() != 1 || stopped.resumed[0].ID != "m1" {
 		t.Fatalf("resumed %#v, want the reply the run did not take", stopped.resumed)
+	}
+}
+
+// A watcher holds a restore's entry (the restore has not resumed the
+// session yet) and then takes up another entry for the same thread, not
+// the restore's (an earlier run's message left for the next one). The
+// restore's hold stays: the thread keeps one entry, still the restore's.
+func TestK1ATakingUpAnotherEntryKeepsTheRestoresHold(t *testing.T) {
+	project := t.TempDir()
+	thread := finalechat.Thread{ExternalID: "eagent:s1"}
+	r := &replyRetries{replies: map[string]pendingReply{"m1": {thread: thread, msg: finalechat.Message{ID: "m1"}, since: time.Now(), restored: true}}}
+	LeftForNextRun(project, "s1", true, t.Logf)
+	r.takeUp(project)
+	if p, ok := r.replies["m1"]; !ok || !p.restored || len(r.replies) != 1 {
+		t.Fatalf("kept %#v, want the restore's entry alone", r.replies)
 	}
 }

@@ -158,6 +158,9 @@ func (r *replyRetries) takeUp(project string) {
 	for id, k := range kept {
 		thread := finalechat.Thread{ExternalID: k.Thread}
 		if !k.Told {
+			if !k.Restored && r.held(k.Thread) {
+				continue // a restore's hold on the thread stays; its entry looks at the thread too
+			}
 			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored})
 			continue
 		}
@@ -437,6 +440,18 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 		return
 	}
 	w.retries.keepQuietly(pendingReply{thread: thread, msg: m, since: time.Now()})
+}
+
+// held reports whether the thread's quiet entry is a restore's (restored).
+func (r *replyRetries) held(ext string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.replies {
+		if p.restored && !p.told && p.thread.ExternalID == ext {
+			return true
+		}
+	}
+	return false
 }
 
 // keepQuietly keeps q as its thread's one quiet entry (keepUntilStopped).
