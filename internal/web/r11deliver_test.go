@@ -121,7 +121,7 @@ func TestR11WordsWaitForEachEndingRunInTurn(t *testing.T) {
 	s.mu.Lock()
 	s.running[info.ID] = first
 	go func() {
-		how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: "one more thing", From: "web"}, func() error {
+		how, err := s.deliver(context.Background(), info, harness.InboxMessage{Type: "message", Text: "one more thing", From: "web"}, func() error {
 			resumed++
 			return nil
 		})
