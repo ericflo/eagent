@@ -1116,10 +1116,11 @@ func (r *Runtime) turn(w wake) {
 		}
 		if w.final || w.wait > 0 {
 			// A closing turn whose session stopped ending ends here. A call
-			// it still wanted is owed (wakeFor) to an ordinary turn.
+			// it still wanted, or one whose tools ran out of its time (on
+			// its last call too), is owed (wakeFor) to an ordinary turn.
 			closing := true
 			r.sync(func() { closing = r.stillClosing() })
-			if !closing && call < maxCalls {
+			if !closing && (call < maxCalls || end == "timeout") {
 				if end == "timeout" || again && end == "done" {
 					end = "not closing"
 				}

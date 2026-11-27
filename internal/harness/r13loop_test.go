@@ -5,8 +5,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // Findings 1-6 of the thirteenth review: what stillClosing is asked, and
@@ -146,6 +148,54 @@ func TestR13MessageDuringAHoldingClosingCallIsNotSentBack(t *testing.T) {
 	code := coreExit(s)
 	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
 		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
+
+// ---- 6. the last call of a closing turn runs out of time ------------------
+
+// With one call a turn, the closing turn starts an agent and tells the user
+// about it, and the start outlasts the closing word's own time, so the
+// message is not sent (interrupted). The session is not ending any more:
+// the turn ends owing that call, and an ordinary turn makes it.
+func TestR13LastClosingCallThatStartsAnAgentAndRunsOutOfTimeIsOwed(t *testing.T) {
+	setFor(t, &finalReportTimeout, 200*time.Millisecond)
+	first, second := newFakeSeat("First coat on."), newFakeSeat("Second coat on.")
+	useSeatList(t, first, second)
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	inner := launchRelay // restored by useSeatList's cleanup
+	var starts atomic.Int32
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		if starts.Add(1) == 2 {
+			<-gate
+		}
+		return inner(spec, innerID, resume)
+	}
+	var phase atomic.Int32
+	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case phase.CompareAndSwap(2, 3):
+			// The first call after the closing turn.
+			return reply{calls: []event.ToolCall{tc("relay_send", `{"text":"paint the second coat"}`)}}
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			time.AfterFunc(2*finalReportTimeout, release)
+			return reply{calls: []event.ToolCall{tc("relay_start", `{"profile":"codex"}`), tc("send_message", `{"text":"Starting Codex on the second coat."}`)}}
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	cfg := testConfig(model.srv.URL)
+	cfg.MaxCallsPerTurn = 1
+	s := audit2Start(t, cfg, Options{Prompt: brief}, nil, model, nil)
+	sent := func() bool { return len(second.sentTexts()) > 0 }
+	s.waitFor("the new agent's work, or the closing turn ended owing nothing", func() bool {
+		return sent() || len(r11Ends(s, "timeout")) > 0
+	})
+	if !sent() {
+		t.Fatalf("the closing turn ended %q after the session stopped ending, and the call it was cut off in is never made", r11Ends(s, "timeout"))
 	}
 }
 
