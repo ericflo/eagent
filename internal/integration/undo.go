@@ -47,7 +47,17 @@ func undoOffer(j commandJournal) map[string]any {
 		}
 		offer["resource"] = map[string]any{"kind": j.Resource.Kind, "name": j.Resource.Name, "restore_override": j.Resource.BeforeExists, "restore_sha256": artifact.Digest(j.Resource.Before)}
 	} else {
-		offer["edits"] = inverse.Edits
+		// A set with no value writes null (a route turned off): the review
+		// shows the null rather than leave the value out.
+		edits := []map[string]any{}
+		for _, e := range inverse.Edits {
+			edit := map[string]any{"op": e.Op, "key": e.Key}
+			if e.Op == "set" {
+				edit["value"] = e.Value
+			}
+			edits = append(edits, edit)
+		}
+		offer["edits"] = edits
 	}
 	// Return the same JSON representation recovered from the durable journal.
 	raw, _ := json.Marshal(offer)

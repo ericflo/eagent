@@ -17,20 +17,21 @@ import (
 // decides what an undo restores. It is every key whose value differs
 // between the two files, put back to its value before, or unset where
 // that file had none; keys the command did not change are never in it.
-// edits holds the fields, the command's own keys first in its order; nulls
-// holds the routes the file before had as null that the command wrote one
-// into (a fallback turned off, a summarizer route of none), which no field
-// can write and which are put back to null.
-func reversal(order []control.Edit, beforeRaw, desiredRaw string) (edits []control.Edit, nulls []string, err error) {
+// The command's own keys come first, in its order. A route the file before
+// had as null that the command wrote one into (a fallback turned off, a
+// summarizer route of none) is one edit, a set of the route with no value,
+// which writes the null back; the fields under it are not listed.
+func reversal(order []control.Edit, beforeRaw, desiredRaw string) ([]control.Edit, error) {
 	before, err := fileValues(beforeRaw)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	desired, err := fileValues(desiredRaw)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var keys []string
+	nulls := map[string]bool{}
 	var walk func(a, b any, hadA, hadB bool, ptr string)
 	walk = func(a, b any, hadA, hadB bool, ptr string) {
 		am, aObj := a.(map[string]any)
@@ -42,7 +43,8 @@ func reversal(order []control.Edit, beforeRaw, desiredRaw string) (edits []contr
 			return
 		}
 		if bObj && !aObj && hadA && a == nil {
-			nulls = append(nulls, ptr)
+			keys, nulls[ptr] = append(keys, ptr), true
+			return
 		}
 		names := []string{}
 		for k := range am {
@@ -68,10 +70,13 @@ func reversal(order []control.Edit, beforeRaw, desiredRaw string) (edits []contr
 		return len(order)
 	}
 	slices.SortStableFunc(keys, func(a, b string) int { return rank(a) - rank(b) })
+	var edits []control.Edit
 	for _, key := range keys {
 		value, exists := pointerValue(before, key)
 		reverse := control.Edit{Key: key, Op: "unset"}
 		switch {
+		case nulls[key]:
+			reverse.Op = "set"
 		case exists && value != nil:
 			reverse.Op, reverse.Value = "set", value
 		// A field the file cleared with null is cleared again with the
@@ -86,7 +91,7 @@ func reversal(order []control.Edit, beforeRaw, desiredRaw string) (edits []contr
 		}
 		edits = append(edits, reverse)
 	}
-	return edits, nulls, nil
+	return edits, nil
 }
 
 // ConfigInverse is the reversal of a command, as the proposal an undo
@@ -96,7 +101,7 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 	if original.Operation != "settings.apply" || len(original.Edits) == 0 {
 		return inverse, fmt.Errorf("this command has no reversible settings edits")
 	}
-	edits, _, err := reversal(original.Edits, beforeRaw, desiredRaw)
+	edits, err := reversal(original.Edits, beforeRaw, desiredRaw)
 	if err != nil {
 		return inverse, err
 	}
@@ -125,18 +130,14 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 	if err != nil {
 		return "", "", RemoteView{}, err
 	}
-	_, nulls, err := reversal(inverse.Edits, beforeRaw, desiredRaw)
-	if err != nil {
-		return "", "", RemoteView{}, err
-	}
-	keys := slices.Clone(nulls)
+	keys := []string{}
 	for _, edit := range inverse.Edits {
 		keys = append(keys, edit.Key)
 	}
 	// A model set back on a route is sent to the address the route has
 	// then, so a change of that address since the command conflicts too.
 	for _, edit := range inverse.Edits {
-		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && edit.Op == "set" && !slices.Contains(keys, route+"/base_url") {
+		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && edit.Op == "set" && edit.Value != nil && !slices.Contains(keys, route+"/base_url") {
 			keys = append(keys, route+"/base_url")
 		}
 	}
@@ -147,7 +148,7 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	raw, etag, view, err := s.prepare(inverse, grant, true, nulls, inForce)
+	raw, etag, view, err := s.prepare(inverse, grant, true, inForce)
 	var conflict *config.ErrConflict
 	if err != nil && !errors.As(err, &conflict) {
 		err = fmt.Errorf("this undo would write settings that cannot be saved from here now (%v); nothing was changed, so put those settings back by hand instead", err)
