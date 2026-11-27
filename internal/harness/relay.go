@@ -994,12 +994,16 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				if !ours && ev.Kind == relay.KindDelivered {
 					// Except how a send ended, as the agent a restart or a
 					// switch is replacing saw it, before the new one is up
-					// (finishLaunch): an arrival, or a held message taken
-					// back unread. It is this relay's word on its own send,
-					// and the start then finds the send settled instead of
+					// (finishLaunch), or one a stop is closing saw it: an
+					// arrival, or a held message taken back unread. It is
+					// this relay's word on its own send, and the start or
+					// the stop then finds the send settled instead of
 					// calling it unconfirmed.
 					job := r.relays.launch(name)
-					ours = job != nil && job.old == seat
+					r.relays.mu.Lock()
+					stopping := r.relays.stopping[name] != nil
+					r.relays.mu.Unlock()
+					ours = job != nil && job.old == seat || stopping
 				}
 				if ours {
 					r.onRelayEvent(name, ev)
@@ -1914,6 +1918,8 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// end is never recorded over the agent that restart brings up.
 			var current relaySeat
 			var killed chan struct{}
+			var drained <-chan struct{}
+			settleLater := false
 			if !r.onLoop(func() {
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
@@ -1927,16 +1933,18 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 						r.relays.stopping = map[string]chan struct{}{}
 					}
 					r.relays.stopping[rel.Name] = killed
+					drained = r.relays.drained[current]
 					r.relays.mu.Unlock()
 				}
 				// What the stopped agent was typed and not yet shown to
-				// read is settled with the end (settleExited); with a start
-				// under way for the name, where that start ends.
+				// read is settled (settleExited): once all its seat saw is
+				// on the record, below, or now when it had none; with a
+				// start under way for the name, where that start ends.
 				cur := r.st.Relays[rel.Name]
 				settle := cur.Active() && r.relays.launch(rel.Name) == nil
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
-				if settle {
+				if settleLater = settle && current != nil; settle && current == nil {
 					r.settleExited(cur)
 				}
 				r.armAutopilots()
@@ -1945,6 +1953,27 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			}
 			if current != nil {
 				_ = current.Kill()
+				if drained != nil {
+					select {
+					case <-drained:
+					case <-r.closed:
+					}
+				}
+				if settleLater {
+					r.onLoop(func() {
+						// A start asked for meanwhile waits for this stop
+						// (stopping): what it holds is its to type.
+						var held []string
+						r.relays.mu.Lock()
+						if job := r.relays.launching[rel.Name]; job != nil {
+							for _, h := range job.held {
+								held = append(held, h.id)
+							}
+						}
+						r.relays.mu.Unlock()
+						r.settleExited(r.st.Relays[rel.Name], held...)
+					})
+				}
 				r.relays.mu.Lock()
 				if r.relays.stopping[rel.Name] == killed {
 					delete(r.relays.stopping, rel.Name)
