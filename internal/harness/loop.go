@@ -962,7 +962,7 @@ func (r *Runtime) turn(w wake) {
 			}
 			r.sync(func() {
 				closing := r.stillClosing()
-				if w.wait > 0 && !w.event && closing {
+				if w.wait > 0 && closing {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
 					// (summary.go). Taken for an outage it would be tried
@@ -1425,11 +1425,17 @@ func (r *Runtime) fallbackFinal() {
 	if r.st.Question != nil {
 		b.WriteString("\n\nStill open: " + clipRunes(oneLine(r.st.Question.Text, 300), 300))
 	}
-	// It does not retry on its own once it has ended.
+	// It does not retry on its own once it has ended. An agent can still
+	// be running: a question nobody can answer ends the session anyway
+	// (maybeEnd).
+	running := "Nothing is running now."
+	if active := r.st.ActiveRelays(); len(active) > 0 {
+		running = active[0].Who() + " keeps running in its own terminal."
+	}
 	if r.phone != nil {
-		b.WriteString("\n\nNothing is running now. A reply here picks the session back up.")
+		b.WriteString("\n\n" + running + " A reply here picks the session back up.")
 	} else {
-		b.WriteString("\n\nNothing is running now. `eagent -c` picks the session back up.")
+		b.WriteString("\n\n" + running + " `eagent -c` picks the session back up.")
 	}
 	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: b.String()})
 }

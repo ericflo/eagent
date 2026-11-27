@@ -302,6 +302,86 @@ func TestR13LastSummaryIsAskedAgainAfterAFailedRestart(t *testing.T) {
 	}
 }
 
+// ---- 5. the last summary of a session ending on a question ----------------
+
+// r13Turn records a turn end of the session's running agent, from inside a
+// scripted reply (the call is still out).
+func r13Turn(rt *atomic.Pointer[Runtime], text string) {
+	r := rt.Load()
+	r.sync(func() {
+		name := r.st.ActiveRelays()[0].Name
+		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: text}))
+	})
+}
+
+// A batch session with no phone asks a question and leaves the agent
+// running; its last title and summary reads something, the agent ends a
+// turn while that call is out, and the call after the read fails. The last
+// summary is one attempt whatever else came: the failed call is not owed,
+// and no call is told to carry on from it. The agent's turn end gets its
+// own look.
+func TestR13LastSummaryOnAQuestionIsOneAttemptWhenTheAgentEndsATurn(t *testing.T) {
+	coreSummariesOn(t, false)
+	var phase atomic.Int32
+	var carried, lookedAtTurn atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; #45 conflicts."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail, last := lastUserText(msgs), msgs[len(msgs)-1]["role"]
+		switch {
+		case phase.Load() >= 2 && last != "tool":
+			if strings.Contains(tail, "Your last turn ended before it was done") {
+				carried.Add(1)
+			}
+			if strings.Contains(tail, "finished a turn") {
+				lookedAtTurn.Add(1)
+			}
+			return hold()
+		case phase.CompareAndSwap(1, 2):
+			return r10Bad // the call after the read
+		case last == "tool":
+			return hold()
+		case strings.Contains(tail, "this look is only about the thread's title and summary") && phase.CompareAndSwap(0, 1):
+			r13Turn(rt, "Rebased #45 onto main; the tests are running.")
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"#45"}`)}}
+		case strings.Contains(tail, "finished a turn") && phase.Load() == 0:
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Rebase #45 or leave it?","options":["rebase","leave"]}`)}}
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if phase.Load() < 2 {
+		t.Fatalf("the last title and summary call never failed after its read (phase %d)", phase.Load())
+	}
+	if code != 2 || carried.Load() != 0 || lookedAtTurn.Load() == 0 {
+		t.Fatalf("exit %d, %d call(s) told to carry on from the failed one, %d look(s) at the agent's turn end; said %q", code, carried.Load(), lookedAtTurn.Load(), s.ui.said())
+	}
+}
+
+// The same session's model cannot be reached at all after it asks: the
+// session ends in eagent's own words, which do not say that nothing is
+// running while the agent is.
+func TestR13ClosingWordsOverARunningAgentDoNotSayNothingRuns(t *testing.T) {
+	var phase atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; #45 conflicts."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		if phase.Load() >= 1 {
+			return r10Bad
+		}
+		if strings.Contains(lastUserText(msgs), "finished a turn") && phase.CompareAndSwap(0, 1) {
+			r13Turn(rt, "Rebased #45 onto main; the tests are running.")
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Merge #45 once the tests pass?","options":["yes","no"]}`)}}
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if code != 2 || r5Told(s, "This session is ending") != 1 || len(s.events(event.RelayEnd)) > 0 {
+		t.Fatalf("exit %d, said %q; want exit 2 and eagent's own closing words, with the agent never stopped", code, s.ui.said())
+	}
+	for _, m := range s.ui.said() {
+		if strings.Contains(m, "Nothing is running now") {
+			t.Fatalf("said %q with the agent still running", m)
+		}
+	}
+}
+
 // A look about the thread's title alone is started, and the agent ends a
 // turn before its first call goes out. That call is told about the turn
 // end, and the look the turn end asks for is not used up by a call told
