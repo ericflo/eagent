@@ -911,9 +911,12 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 // the address changes, keeps the rest of the route, and its window becomes
 // unknown. The fallback is kept, as the local editor keeps it.
 func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, d control.Descriptor) error {
-	writable := map[string]bool{}
+	writable, locked := map[string]bool{}, map[string]string{}
 	for _, f := range d.Fields {
-		writable[f.Key] = f.Writable
+		writable[f.Key], locked[f.Key] = f.Writable, f.LockedReason
+	}
+	names := func(key string) bool {
+		return slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == key })
 	}
 	raw, err := json.Marshal(values)
 	if err != nil {
@@ -928,8 +931,10 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		return nil // reported once the edits are applied
 	}
 	// A preset chosen or unset without a model is a pick of the main route:
-	// choosing one sets the model to it, as /preset says.
-	presetPick := after.Preset != prior.Preset && !slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == "/model/model" || e.Key == "/model/base_url" })
+	// choosing one sets the model to it, as /preset says. (A saved preset
+	// chosen or unset, /default_config, can bring another preset with it
+	// and is no pick: the file's own route is not that change's to remove.)
+	presetPick := after.Preset != prior.Preset && names("/preset") && !names("/model/model") && !names("/model/base_url")
 	if presetPick {
 		// The file's own choice of model and of where it is reached goes,
 		// by the rule `eagent presets use` and a session's pick have
@@ -939,24 +944,62 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		// goes by the same rule. The route's effort and reply ceiling
 		// stay, and so does its fallback, a route of its own, as for
 		// every pick here. A field the proposal names keeps the
-		// proposal's value. A field the connector may not write is one a
-		// variable or a saved preset sets here, and stays as it is.
+		// proposal's value. A field the connector may not write (a
+		// variable or a saved preset sets it here, or its grant does not
+		// cover it) stays as it is.
 		rest, _ := config.DropModelChoice(file)
 		var was, left map[string]json.RawMessage
 		_ = json.Unmarshal(file["model"], &was)
 		_ = json.Unmarshal(rest["model"], &left)
-		named := func(leaf string) bool {
-			return slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == "/model/"+leaf })
-		}
 		dropped := false
 		for leaf := range was {
-			if _, kept := left[leaf]; !kept && leaf != "fallback" && !named(leaf) && writable["/model/"+leaf] {
+			if _, kept := left[leaf]; !kept && leaf != "fallback" && !names("/model/"+leaf) && writable["/model/"+leaf] {
 				setPointer(values, "/model/"+leaf, nil, true)
 				dropped = true
 			}
 		}
 		if dropped {
 			return s.routePicks(values, edits, prior, d)
+		}
+		// What then runs must be the preset's route (the defaults', when
+		// the preset was unset), but for what the proposal names. Where a
+		// part that stayed makes it another, nothing is written, as
+		// `eagent presets use` writes nothing: the settings would name a
+		// preset whose model runs at another address or with another key.
+		if err == nil {
+			want := config.Defaults()
+			if canon, ok := config.ResolvePreset(after.Preset); ok {
+				config.Presets[canon](&want)
+			}
+			var parts []string
+			for _, f := range []struct{ leaf, now, want string }{
+				{"model", after.Model.Model, want.Model.Model},
+				{"base_url", strings.TrimRight(after.Model.BaseURL, "/"), strings.TrimRight(want.Model.BaseURL, "/")},
+				{"protocol", after.Model.Protocol, want.Model.Protocol},
+				{"api_key_env", after.Model.APIKeyEnv, want.Model.APIKeyEnv},
+			} {
+				if f.now == f.want || names("/model/"+f.leaf) {
+					continue
+				}
+				why := "set outside the project file"
+				if name, ok := config.EnvOverrides()["/model/"+f.leaf]; ok {
+					why = name + " sets it"
+				} else if _, own := pointerValue(values, "/model/"+f.leaf); own {
+					if why = locked["/model/"+f.leaf]; why == "" {
+						why = "this change may not write it"
+					}
+				} else if after.Name != "" {
+					why = fmt.Sprintf("the saved preset %q sets it", after.Name)
+				}
+				parts = append(parts, fmt.Sprintf("%s stays %s (%s)", f.leaf, f.now, why))
+			}
+			if len(parts) > 0 {
+				chosen := fmt.Sprintf("the preset %s (%s @ %s) would not run as it is", after.Preset, want.Model.Model, want.Model.BaseURL)
+				if after.Preset == "" {
+					chosen = fmt.Sprintf("the defaults (%s @ %s) would not run as they are", want.Model.Model, want.Model.BaseURL)
+				}
+				return fmt.Errorf("eagent's %s, so %s; nothing was changed", strings.Join(parts, ", and its "), chosen)
+			}
 		}
 	}
 	summarizer := prior.Summarizer.Route(prior.Model)
