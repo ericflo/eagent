@@ -228,7 +228,7 @@ function renderSessionShell() {
 // being swapped out; what it does is decided when it is clicked.
 function sessionTools(d) {
   const act = ARCHIVE ? null : h('button', {id: 'session-act', onclick: async () => {
-    if (S.detail && S.detail.alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); return; }
+    if (S.detail && S.detail.alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) { try { await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); } catch (e) { toast(e.message, 'bad'); } } return; }
     try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); }
   }}, d.alive ? 'Stop' : 'Resume');
   return h('div', {class: 'tools', id: 'session-tools'}, h('span', {id: 'session-badges', style: 'display:contents'}, ...toolBadges(d)), act);

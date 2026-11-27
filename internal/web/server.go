@@ -709,16 +709,40 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !alive(info.Path) && !s.isHosted(info.ID) {
+		if s.stopForShutdown(w, info.ID) {
+			return
+		}
 		// A stop for a session nobody runs would sit in the inbox and quit
 		// the next resume before its first tick.
 		writeErr(w, 409, errors.New("session is not running"))
 		return
 	}
 	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
+		if errors.Is(err, errEnding) && s.stopForShutdown(w, info.ID) {
+			return
+		}
 		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// stopForShutdown honours a stop the server's shutdown has overtaken (the
+// run is ending, or has ended, with the server): the session comes off the
+// list the next server brings back, and the answer says it is stopped. It
+// reports false, doing nothing, when the shutdown has not begun.
+func (s *Server) stopForShutdown(w http.ResponseWriter, id string) bool {
+	s.resuming.Lock()
+	stopping := s.stopping
+	s.resuming.Unlock()
+	if !stopping {
+		return false
+	}
+	s.mu.Lock()
+	s.forgetHosted(id)
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true, "message": "Stopped: eagent is shutting down, and will not bring this session back when it starts again."})
+	return true
 }
 
 func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
