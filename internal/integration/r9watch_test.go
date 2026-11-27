@@ -304,7 +304,8 @@ func TestAReplyAStoppingSessionTookInIsNotTakenAgain(t *testing.T) {
 
 // Finding 7: several messages to one running session keep one of them;
 // once it has stopped without taking them, it is resumed once, with the
-// first (its poll reads on after it), and nothing is kept after.
+// first (its poll reads on after it), and one quiet entry is kept after,
+// for when it stops again.
 func TestRepliesToARunningSessionKeepOneEntry(t *testing.T) {
 	_, sid, sess, f, host, w := r9Running(t, true)
 	for _, id := range []string{"m1", "m2", "m3"} {
@@ -323,8 +324,8 @@ func TestRepliesToARunningSessionKeepOneEntry(t *testing.T) {
 	if host.calls() != 1 || host.resumed[0].ID != "m1" {
 		t.Fatalf("resumed with %#v", host.resumed)
 	}
-	if len(w.retries.replies) != 0 {
-		t.Fatalf("still kept: %#v", w.retries.replies)
+	if p := w.retries.replies["m1"]; len(w.retries.replies) != 1 || p.msg.ID != "m1" || p.told {
+		t.Fatalf("kept %#v", w.retries.replies)
 	}
 }
 

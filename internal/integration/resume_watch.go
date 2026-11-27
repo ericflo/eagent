@@ -264,7 +264,12 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	w.retries.mu.Lock()
 	delete(w.retries.replies, m.ID)
 	w.retries.mu.Unlock()
-	w.dropKept(thread.ExternalID)
+	// What the session does not take in before it stops again (a /quit it
+	// was resumed with ends it before it reads on; a reply kept while it
+	// came back) is looked for once it has stopped, as for any reply that
+	// reached it while it ran: its closing note may hide the thread from
+	// the sweep.
+	w.keepUntilStopped(info, thread, m)
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
 }
 
