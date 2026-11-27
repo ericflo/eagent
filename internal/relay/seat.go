@@ -118,6 +118,7 @@ type Seat struct {
 	followed   bool                 // ...and where its news begins is decided when it opens
 	sinceKept  time.Time            // since as it was before the move
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
+	readAt     time.Time            // the newest stamp read from a transcript (readTail)
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
@@ -1317,12 +1318,21 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 		s.mu.Lock()
 		s.lastLine = now
 		s.mu.Unlock()
+		var newest time.Time
 		for i, line := range lines {
 			for _, o := range p.line(line) {
 				o.pos = starts[i]
 				s.fold(o)
+				if o.at.After(newest) {
+					newest = o.at
+				}
 			}
 		}
+		s.mu.Lock()
+		if newest.After(s.readAt) {
+			s.readAt = newest
+		}
+		s.mu.Unlock()
 	}
 	return err
 }
@@ -1792,8 +1802,8 @@ func (s *Seat) follow(id string, idle bool) {
 
 // moveCut is where news begins in a transcript the agent moved to, when the
 // agent cannot say: just before it was last seen on the session it left,
-// never earlier than sinceKept, "now" without a sighting. The caller holds
-// s.mu and has set sinceKept.
+// never earlier than sinceKept or the newest stamp read so far, "now"
+// without a sighting. The caller holds s.mu and has set sinceKept.
 func (s *Seat) moveCut() time.Time {
 	cut := time.Now()
 	if !s.onAt.IsZero() && s.onAt.Before(cut) {
@@ -1801,6 +1811,11 @@ func (s *Seat) moveCut() time.Time {
 	}
 	if cut.Before(s.sinceKept) {
 		cut = s.sinceKept
+	}
+	if cut.Before(s.readAt) {
+		// What the seat read from the session left is no news: a fork
+		// copies the turns it keeps with their own stamps.
+		cut = s.readAt
 	}
 	return cut
 }

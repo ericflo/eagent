@@ -231,3 +231,82 @@ func TestK2ARestoredSendOlderThanTheTailIsConfirmed(t *testing.T) {
 		t.Fatalf("confirmed %v, not confirmed %v; want r1 confirmed", ok, failed)
 	}
 }
+
+// k2PausedPi is pi whose seat's watcher waits for the test after each poll
+// (which comes right after the look's read of the transcript).
+type k2PausedPi struct {
+	piAgent
+	read, more chan struct{}
+}
+
+func (a *k2PausedPi) poll(s *Seat, now time.Time) {
+	a.piAgent.poll(s, now)
+	select {
+	case a.read <- struct{}{}:
+	case <-s.stop:
+		return
+	}
+	select {
+	case <-a.more:
+	case <-s.stop:
+	}
+}
+
+func (a *k2PausedPi) look(t *testing.T) {
+	t.Helper()
+	select {
+	case a.more <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher is not waiting")
+	}
+	select {
+	case <-a.read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher did not look")
+	}
+}
+
+// A4: with an extension too old to record how many entries a session held
+// when pi opened it, news in a session pi moved to is what was written
+// after pi was last seen on the old one. A fork copies the turns it keeps
+// with their own stamps: a turn that settled between that sighting and
+// the look that saw the move was read from the old session, and its copy
+// in the fork is no news. A turn pi runs in the fork is.
+func TestK2APiTurnJustBeforeAForkIsReportedOnce(t *testing.T) {
+	isolatePi(t)
+	dir := t.TempDir()
+	first, forked, status := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "forked.jsonl"), filepath.Join(dir, "pi-status.json")
+	old := time.Now().Add(-time.Hour)
+	writeLines(t, first, append([]string{piHeaderLine("first", old)}, piTurnLines("t0", "sort the shelves", "Sorted.", old)...)...)
+	writePiStatus(t, status, piStatus{State: "idle", SessionFile: first, SessionID: "first"})
+	a := &k2PausedPi{piAgent: piAgent{label: "Pi"}, read: make(chan struct{}), more: make(chan struct{})}
+	s := newSeat(Spec{StatusFile: status, Dir: dir}, a, &fakeHost{alive: true}, "k2-a4-"+filepath.Base(dir), "first")
+	s.state, s.poll = "idle", time.Millisecond
+	go s.watch()
+	t.Cleanup(s.Close)
+	select {
+	case <-a.read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher never looked")
+	}
+	// Between two looks: a turn settles on the old session, and pi forks.
+	at := time.Now().Add(time.Millisecond)
+	turn := piTurnLines("t1", "label the jars", "Labelled.", at)
+	appendLines(t, first, turn...)
+	writeLines(t, forked, append(append([]string{piHeaderLine("forked", at.Add(10*time.Millisecond))}, piTurnLines("t0", "sort the shelves", "Sorted.", old)...), turn...)...)
+	writePiStatus(t, status, piStatus{State: "idle", SessionFile: forked, SessionID: "forked"})
+	a.look(t) // reads the turn from the old session, sees the move
+	a.look(t) // opens the fork
+	a.look(t)
+	appendLines(t, forked, piTurnLines("t2", "dust them", "Dusted.", time.Now().Add(time.Millisecond))...)
+	a.look(t)
+	var turns []string
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindTurn {
+			turns = append(turns, ev.Text)
+		}
+	}
+	if n := slices.Index(turns, "Labelled."); n < 0 || slices.Contains(turns[n+1:], "Labelled.") || !slices.Contains(turns, "Dusted.") {
+		t.Fatalf("turns %q; want Labelled. once, then Dusted.", turns)
+	}
+}
