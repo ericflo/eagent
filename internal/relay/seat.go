@@ -349,9 +349,10 @@ func spoolHolds(names []string, id string) bool {
 // never arrives. A message held for the end of a turn is not until it is
 // lost: restored with nothing holding it any more, or its turn over and its
 // spool file gone (reportLeftOvers). One handed to an agent's own queue
-// (Codex, Antigravity) is never timed: that queue runs one message a turn,
-// so the end of a turn does not say a queued message is due. Nor is a
-// restored send before the catch-up has ended.
+// (Codex, Antigravity) is not timed while turns follow each other: that
+// queue runs one message a turn, so the end of a turn does not say a queued
+// message is due; once a turn ends and no other starts, it is lost
+// (reportLeftOvers). Nor is a restored send before the catch-up has ended.
 func (p *pending) timed() bool {
 	return !p.dormant && (p.mode != "after_turn" || p.lost)
 }
@@ -723,7 +724,10 @@ var heldGrace = 5 * time.Second
 // still claimed (.taken) now, is lost from now: the hook claimed it and may
 // have died before handing it over. It is confirmed if the transcript shows
 // it, reported unconfirmed after the usual wait otherwise; a claimed file
-// left behind is removed.
+// left behind is removed. An agent with no spool (Codex, Antigravity) holds
+// an after-turn send in its own queue, which starts the next turn as soon
+// as one ends: one tracked before that turn ended is lost from now in the
+// same way (the agent dropped its queue).
 func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
 
 // leftOvers is reportLeftOvers; with sweep false, for an agent whose own
@@ -731,9 +735,6 @@ func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
 // nothing is taken from the spool, and a claimed file is the hook's
 // hand-over under way: only a held message whose file is gone is lost.
 func (s *Seat) leftOvers(now time.Time, sweep bool) {
-	if s.spec.Spool == "" {
-		return
-	}
 	s.mu.Lock()
 	end := s.turnEndAt
 	over := s.state == "idle" && !end.IsZero() && now.Sub(end) >= heldGrace
@@ -743,7 +744,7 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 	}
 	var taken []string
 	holds := spoolHolds
-	if sweep {
+	if sweep && s.spec.Spool != "" {
 		taken, _ = takeSpool(s.spec.Spool)
 		holds = spoolWaits
 	}
@@ -765,7 +766,8 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 		if ids[p.id] {
 			continue
 		}
-		if same && p.held && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
+		queued := s.spec.Spool == "" && p.mode == "after_turn"
+		if same && (p.held || queued) && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
 			p.lost, p.at = true, now
 			for _, n := range names {
 				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {

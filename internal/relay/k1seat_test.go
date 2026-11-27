@@ -386,3 +386,76 @@ func TestK1ClaudePromptsThatStayArrivals(t *testing.T) {
 		t.Run(c.name, c.run)
 	}
 }
+
+// A2: an after-turn send handed to the agent's own queue (`codex queue`,
+// Antigravity's native queue) waits for the end of a turn. Once the
+// transcript showed a turn over after it and the agent stayed idle the
+// grace a held message gets, nothing will run it (the agent dropped its
+// queue): it is watched on the timer from then, never typed again, and
+// reported unconfirmed when it never arrives; its arrival still confirms
+// it. A turn that starts within the grace (the queue runs) loses nothing.
+func TestK1AnAfterTurnSendTheAgentsQueueDroppedIsReported(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	const text = "then commit the fix"
+	for _, c := range []struct {
+		name  string
+		agent Agent
+	}{
+		{"codex", handOverWorks{}},
+		{"antigravity", antigravityAgent{}},
+	} {
+		start := func(t *testing.T) (*Seat, *fakeHost) {
+			h := &fakeHost{alive: true}
+			s := newSeat(Spec{}, c.agent, h, "k1q-"+c.name, "thread-1")
+			s.state = "working"
+			if _, err := s.Send("r1", text, "after_turn"); err != nil {
+				t.Fatal(err)
+			}
+			s.fold(obs{kind: "turn", text: "Done."})
+			return s, h
+		}
+		poll := func(s *Seat, now time.Time) {
+			if pl, ok := s.agent.(poller); ok {
+				pl.poll(s, now)
+			}
+		}
+		t.Run(c.name+"/dropped", func(t *testing.T) {
+			s, h := start(t)
+			typed := len(k1Typed(h))
+			poll(s, time.Now().Add(heldGrace))
+			s.mu.Lock()
+			s.stateAt = time.Now().Add(-time.Hour)
+			s.mu.Unlock()
+			later := time.Now().Add(time.Hour)
+			s.checkScreen(later)
+			var got []string
+			for _, ev := range deliveries(drain(s.events)) {
+				got = append(got, ev.SendID+":"+ev.Outcome)
+			}
+			if !slices.Equal(got, []string{"r1:" + OutcomeUnconfirmed}) || len(k1Typed(h)) != typed {
+				t.Fatalf("reported %v, typed %q; want r1 unconfirmed and nothing typed again (pending %v)", got, k1Typed(h), s.Snapshot().Pending)
+			}
+		})
+		t.Run(c.name+"/dropped_then_arrives", func(t *testing.T) {
+			s, _ := start(t)
+			poll(s, time.Now().Add(heldGrace))
+			s.fold(obs{kind: "user", text: text})
+			if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, []string{"r1"}) {
+				t.Fatalf("confirmed %v; want r1", ok)
+			}
+		})
+		t.Run(c.name+"/the_queue_runs", func(t *testing.T) {
+			s, _ := start(t)
+			s.fold(obs{kind: "working"})
+			poll(s, time.Now().Add(time.Hour))
+			s.mu.Lock()
+			lost := len(s.pending) == 1 && s.pending[0].lost
+			s.mu.Unlock()
+			if lost {
+				t.Fatal("a send the next turn may run was taken as dropped")
+			}
+		})
+	}
+}
