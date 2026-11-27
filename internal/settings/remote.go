@@ -930,6 +930,30 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	// A preset chosen or unset without a model is a pick of the main route:
 	// choosing one sets the model to it, as /preset says.
 	presetPick := after.Preset != prior.Preset && !slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == "/model/model" || e.Key == "/model/base_url" })
+	if presetPick {
+		// The file's own choice of model and of where it is reached goes,
+		// by the rule `eagent presets use` and a session's pick have
+		// (config.DropModelChoice): left in the file it would run under
+		// the preset in part (the file's address with the preset's model
+		// or protocol). The route's effort and reply ceiling stay, and so
+		// does its fallback, a route of its own, as for every pick here.
+		// A field the connector may not write is one a variable or a
+		// saved preset sets here, and stays as it is.
+		rest, _ := config.DropModelChoice(file)
+		var was, left map[string]json.RawMessage
+		_ = json.Unmarshal(file["model"], &was)
+		_ = json.Unmarshal(rest["model"], &left)
+		dropped := false
+		for leaf := range was {
+			if _, kept := left[leaf]; !kept && leaf != "fallback" && writable["/model/"+leaf] {
+				setPointer(values, "/model/"+leaf, nil, true)
+				dropped = true
+			}
+		}
+		if dropped {
+			return s.routePicks(values, edits, prior, d)
+		}
+	}
 	summarizer := prior.Summarizer.Route(prior.Model)
 	if prior.Summarizer.Model == nil {
 		summarizer.Fallback = nil
@@ -1026,13 +1050,6 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 			// and key variable: the old provider's key is not sent there.
 			if strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
 				continue
-			}
-			// A model the file names without an address, which the new
-			// preset's provider does not list, was the old preset's: the new
-			// preset's model runs at the new address.
-			if presetPick && r.ptr == "/model" && leaves["model"] != nil && leaves["base_url"] == nil && writable["/model/model"] {
-				setPointer(values, "/model/model", nil, true)
-				return s.routePicks(values, edits, prior, d)
 			}
 			picked = r.after
 			picked.Protocol, picked.APIKeyEnv = pr.Protocol, pr.KeyEnv
