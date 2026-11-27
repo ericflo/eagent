@@ -1171,7 +1171,9 @@ func (r *Runtime) maybeEnd() {
 	// last failed call was shown: that is looked at first, without the
 	// wait (maybeTurn).
 	down := t.failures >= 2 && !r.lastFailedAnswered()
-	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) {
+	// A look refused as too long while the session is ending is final for
+	// it: what asked for that look is left, and the session ends.
+	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) && !r.refusedWhileClosing() {
 		return
 	}
 	if r.opts.Interactive {
