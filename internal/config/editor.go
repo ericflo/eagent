@@ -113,19 +113,7 @@ func Resolve(project, preset, bundle string) Resolution {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		res.LoadError = err.Error()
 	}
-	explicitPreset := preset
-	if explicitPreset == "" {
-		explicitPreset = os.Getenv("EAGENT_PRESET")
-	}
-	if bundle == "" && explicitPreset != "" {
-		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
-			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
-				bundle = explicitPreset
-				preset = ""
-				explicitPreset = ""
-			}
-		}
-	}
+	preset, bundle, explicitPreset := explicitChoice(project, preset, bundle)
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
 		if canon, isPreset := ResolvePreset(bundle); isPreset {
