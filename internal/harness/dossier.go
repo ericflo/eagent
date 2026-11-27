@@ -404,7 +404,7 @@ func (r *Runtime) needsDossier() bool {
 				text := fullNotice + " from my notes: the notes and this project's standing instructions alone reach the limit, so another restart cannot make room. Raise `rollover_tokens` in .agents/eagent/config.json or shorten .agents/eagent/INSTRUCTIONS.md. Until then I carry on with a conversation longer than it should be."
 				switch cause {
 				case fullBurst:
-					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
+					text = burstNotice + ", more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
 				case fullGrew:
 					text = fullNotice + ": after several restarts in a row, the newest conversation reached my model's window too, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now."
 				case fullOpening:
@@ -474,7 +474,7 @@ func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
 	// room it resumed on: a model with more room picked since is asked
 	// afresh.
 	room, _ := r.inputRoom()
-	told := r.toldFull() && (r.decidedWindow == 0 || room <= r.decidedWindow)
+	told := r.toldFullHere() && (r.decidedWindow == 0 || room <= r.decidedWindow)
 	f := restartFacts{refused: r.refusedFirst(), carried: r.restartCarried, retried: r.restartRetried, rescues: r.restartRescues, decided: r.turns.futileLogged || told}
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
@@ -721,7 +721,8 @@ func (r *Runtime) turnEnded() bool {
 // model picked in the thread's settings, unless the new model has more
 // room for input (inputRoom: its window less its reply ceiling) than the
 // one it was found on: then the conversation is sent to it as it is
-// (needsDossier asks the size of the new window as usual). The room it was
+// (needsDossier asks the size of the new window as usual). Nor does one
+// found on what arrived during the passes (toldFullHere). The room it was
 // found on is kept by this run; a resumed run takes the room it resumes
 // on. Loop goroutine only.
 func (r *Runtime) restartDecided() bool {
@@ -729,7 +730,7 @@ func (r *Runtime) restartDecided() bool {
 	if cur == nil || (cur.Reason != "rollover" && cur.Reason != "upgrade") || r.turns.subCalls > 0 {
 		return false
 	}
-	if !r.turns.futileLogged && !r.toldFull() {
+	if !r.turns.futileLogged && !r.toldFullHere() {
 		return false
 	}
 	room, _ := r.inputRoom()
@@ -752,10 +753,33 @@ func (r *Runtime) refusedFirst() bool {
 // be made shorter by restarting it.
 const fullNotice = "My conversation is full again right after I restarted it"
 
+// burstNotice opens the full notice found on what arrived while the
+// session was reread (fullBurst).
+const burstNotice = fullNotice + ": while I was rereading the session"
+
 // toldFull reports that the user was already told so since the
 // conversation was last restarted. The record remembers it, so a session
 // that is stopped and resumed does not say (and buzz) it again every run.
 func (r *Runtime) toldFull() bool {
+	_, told := r.fullNoticeSaid()
+	return told
+}
+
+// toldFullHere is toldFull for the decision it records: one found on what
+// arrived during the passes stands on the model it was found on, not on
+// one picked after it. It was decided by the one more try and the
+// restarts in a row, and those were the old model's (newModel). Loop
+// goroutine only.
+func (r *Runtime) toldFullHere() bool {
+	ev, told := r.fullNoticeSaid()
+	var d event.MessageData
+	_ = ev.Decode(&d)
+	return told && (ev.Seq > r.st.Moved() || !strings.HasPrefix(d.Text, burstNotice))
+}
+
+// fullNoticeSaid returns the newest full notice since the conversation was
+// last restarted. Loop goroutine only.
+func (r *Runtime) fullNoticeSaid() (event.Event, bool) {
 	cur := r.st.Current()
 	for i := len(r.st.Events) - 1; i >= 0; i-- {
 		ev := r.st.Events[i]
@@ -765,11 +789,11 @@ func (r *Runtime) toldFull() bool {
 		if ev.Type == event.Message {
 			var d event.MessageData
 			if ev.Decode(&d) == nil && d.Auto && strings.HasPrefix(d.Text, fullNotice) {
-				return true
+				return ev, true
 			}
 		}
 	}
-	return false
+	return event.Event{}, false
 }
 
 // dossierJob is what one dossier pass works from, gathered on the loop.

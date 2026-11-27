@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/runtimecontrol"
 )
 
 // k1BadRequest is a failure that is not a refusal as too long, and that
@@ -129,5 +132,54 @@ func TestK1ABatchSessionWhoseTurnEndedWellAfterRefusalsIsNotEndedAsDown(t *testi
 	}
 	if code != 0 {
 		t.Fatalf("exit %d after a turn that ended well, want 0; said %q", code, ui.said())
+	}
+}
+
+// k1Swap moves eagent's calls to another model with this window and reply
+// ceiling, served by brain, as a pick in the thread's settings does.
+func k1Swap(t *testing.T, s *session, window, ceiling int, brain func(string, []map[string]any) reply) *scripted {
+	srv := newScripted(brain)
+	t.Cleanup(srv.srv.Close)
+	conf := config.ModelRoute{Protocol: llm.ProtocolChat, BaseURL: srv.srv.URL, Model: "other-model", APIKeyEnv: "EAGENT_TEST_KEY", ContextTokens: window, MaxTokens: ceiling}
+	eps, err := conf.Routes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rt.sync(func() {
+		s.rt.swapRoute(routeSwap{who: event.ActorEagent, pick: runtimecontrol.Route{Provider: "test", Model: "other-model"}, eps: eps, conf: conf})
+	})
+	return srv
+}
+
+// The burst of pictures keeps coming during both passes on the first
+// model, so the one more try is spent and no restart can make room there.
+// The person then picks a model with the same room: the restarts in a row
+// and the one more try were the old model's (newModel), so the new one
+// gets its own restart, which sets the burst aside by place, and the
+// person's message is answered. The decision found on the old model does
+// not stand on it, as one found on the opening alone would.
+func TestK1ABurstDecisionDoesNotStandOnAModelPickedAfterIt(t *testing.T) {
+	const window, ceiling = 128_000, 16384
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	s, _ := r6QuietRestart(t, window, func(s *session, pass int) {
+		if pass <= 2 {
+			r6SendPictures(s, window)
+		}
+	})
+	if n := r5Told(s, fullNotice+": while I was rereading"); n != 1 {
+		t.Fatalf("told %d times that what arrived during the passes is too much, want once", n)
+	}
+	before := r6Dossiers(s)
+	k1Swap(t, s, window, ceiling, r6Brain(window, ceiling, 100))
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e still there?", Route: "eagent"}) })
+	r6Until(t, "an answer, or the message told it waits", func() bool {
+		return r5Told(s, "Noted.") > 1 || r5Told(s, stillFullNotice+`"@e still there?"`) > 0 || r5Told(s, stillFullNotice+`"still there?"`) > 0
+	})
+	if r5Told(s, "Noted.") < 2 {
+		t.Fatalf("on the model picked after the decision: %d restarts, and the message was told it waits; that model's own restart sets the burst aside", r6Dossiers(s)-before)
+	}
+	if n := r6Dossiers(s) - before; n != 1 {
+		t.Fatalf("%d restarts on the model picked after the decision, want its one", n)
 	}
 }
