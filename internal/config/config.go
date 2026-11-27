@@ -658,8 +658,7 @@ func DeleteBundle(project, name string) error {
 		return err
 	}
 	defer editor.Close()
-	res := Resolve(project, "", "")
-	if res.Effective.DefaultConfig == name {
+	if IsDefaultBundle(Resolve(project, "", ""), name) {
 		return fmt.Errorf("select a different default before deleting %q", name)
 	}
 	if _, err := os.Stat(BundlePath(project, name)); errors.Is(err, os.ErrNotExist) {
@@ -745,6 +744,13 @@ func DefaultBundle(fileCfg map[string]json.RawMessage) string {
 		_ = json.Unmarshal(raw, &bundle)
 	}
 	return bundle
+}
+
+// IsDefaultBundle says whether sessions started with no bundle named load
+// the saved bundle name, so it is not to be deleted: EAGENT_CONFIG names it,
+// or the file's default_config does.
+func IsDefaultBundle(res Resolution, name string) bool {
+	return name != "" && (os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name)
 }
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {

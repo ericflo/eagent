@@ -130,6 +130,6 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		before = "{}\n"
 	}
 	journal.BeforeRaw = &before
-	journal.InForce = settings.RoutePairs(res.Effective)
+	journal.InForce = s.RunningPairs(res)
 	return nil
 }

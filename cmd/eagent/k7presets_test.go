@@ -8,6 +8,23 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
+// `eagent presets delete` keeps the saved preset EAGENT_CONFIG names, as it
+// keeps the one default_config names: sessions load it.
+func TestK10PresetsDeleteKeepsTheOneEAGENTCONFIGNames(t *testing.T) {
+	r3NoEnv(t)
+	project := t.TempDir()
+	r3WriteConfig(t, project, `{"preset":"openai-high"}`)
+	if _, err := config.SaveBundle(project, "work", "", config.Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EAGENT_CONFIG", "work")
+	var code int
+	out := captureStdout(t, func() { code = cmdConfig(project, "", "", false, []string{"delete", "work"}) })
+	if _, err := os.Stat(config.BundlePath(project, "work")); err != nil || code == 0 {
+		t.Fatalf("eagent presets delete work under EAGENT_CONFIG=work: exit %d, file %v\n%s", code, err, out)
+	}
+}
+
 // `eagent presets save` saves what the files and the bundle say, never what
 // only the environment gives (a persona, a rollover, FinaleChat turned off).
 func TestK7PresetsSaveLeavesTheEnvironmentOut(t *testing.T) {

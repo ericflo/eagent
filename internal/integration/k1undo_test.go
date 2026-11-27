@@ -11,6 +11,35 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
+// The pairs a command's journal records as in force are those of what
+// runs, a saved preset in force through default_config included.
+func TestK10TheJournalRecordsTheBundleInForce(t *testing.T) {
+	s, g, _ := fixtureCommand(t)
+	t.Setenv("MY_WORK_KEY", "x")
+	if err := os.MkdirAll(filepath.Dir(config.BundlePath(s.Project, "work")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.BundlePath(s.Project, "work"), []byte(`{"model":{"protocol":"openai-responses","base_url":"https://api.openai.com/v1","model":"gpt-6-astra","api_key_env":"MY_WORK_KEY"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SaveRaw(s.Project, `{"preset":"glm","default_config":"work"}`, "", true); err != nil {
+		t.Fatal(err)
+	}
+	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/tick_seconds", Value: float64(45)}}})
+	first := executeExpected(t, s, g, q, "succeeded")
+	raw, _ := os.ReadFile(filepath.Join(stateDir(s.Project), "commands", first.CommandID+".json"))
+	var j commandJournal
+	if err := json.Unmarshal(raw, &j); err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range j.InForce {
+		if pair == [2]string{"https://api.openai.com/v1", "MY_WORK_KEY"} {
+			return
+		}
+	}
+	t.Fatalf("the journal records %v in force; the bundle work runs https://api.openai.com/v1 with MY_WORK_KEY", j.InForce)
+}
+
 // The review an undo offers is what it writes: a fallback the file had
 // turned off with null, which a remote edit wrote into, is reviewed as a set
 // of the fallback to null, and the undo writes that null.
