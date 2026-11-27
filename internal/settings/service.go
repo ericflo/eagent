@@ -60,20 +60,20 @@ func (s *Service) hostRuns() (config.Config, bool) {
 	return cfg, err == nil
 }
 
-// hostKeeps is why a saved preset the eagent server runs its sessions on is
-// in force, and what frees it.
-const hostKeeps = "the eagent server runs its sessions on it (by its --config or --preset, or its default); it can be deleted once the server runs on another"
-
 // inForce refuses to delete the saved preset name while sessions start on
-// it, saying everything that keeps it and what would free it: the loader's
-// rule (config.KeptBy), and the host's bundle (the server's --config or
-// --preset, which no default chosen changes) unless this service's own
-// flags already said so.
+// it, saying everything that keeps it and what would free it
+// (config.Keeps): the file's default_config, and the bundle loading lays
+// where sessions start, by the layer that chose it, as loading itself
+// chose them. Sessions start on the host's configuration (its own flags
+// and environment) when a host is registered, else on this service's
+// (its flags).
 func (s *Service) inForce(name string) error {
-	why := config.KeptBy(config.Resolve(s.Project, s.Preset, s.Bundle), s.Preset, s.Bundle, name)
-	if cfg, ok := s.hostRuns(); ok && name != "" && cfg.Name == name && !slices.Contains(why, config.FlagKeeps) {
-		why = append(why, hostKeeps)
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	laid, from := res.Loads.Name, res.Loads.From
+	if cfg, ok := s.hostRuns(); ok {
+		laid, from = cfg.Name, cfg.NameFrom
 	}
+	why := config.Keeps(res.Effective.DefaultConfig, laid, from, name)
 	if len(why) == 0 {
 		return nil
 	}

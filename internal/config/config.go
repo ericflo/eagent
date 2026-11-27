@@ -125,6 +125,9 @@ type Config struct {
 	// Migrated lists what was carried over from keys of the three-actor
 	// design when this configuration was read, for `eagent doctor`.
 	Migrated []string `json:"-"`
+	// NameFrom is the layer that chose the bundle Name when it was loaded:
+	// "flag", "EAGENT_PRESET", "EAGENT_CONFIG" or "default_config".
+	NameFrom string `json:"-"`
 }
 
 // Relay configures relay sessions. Profiles are kept in a map so the remote
@@ -736,14 +739,48 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 // explicit preset names a saved one: EAGENT_CONFIG, else the file's
 // default_config. It may name a built-in preset, which is then the preset.
 func DefaultBundle(fileCfg map[string]json.RawMessage) string {
+	bundle, _ := defaultBundle(fileCfg)
+	return bundle
+}
+
+// defaultBundle is DefaultBundle and the layer that chose it.
+func defaultBundle(fileCfg map[string]json.RawMessage) (string, string) {
 	if bundle := os.Getenv("EAGENT_CONFIG"); bundle != "" {
-		return bundle
+		return bundle, "EAGENT_CONFIG"
 	}
 	var bundle string
 	if raw, ok := fileCfg["default_config"]; ok {
 		_ = json.Unmarshal(raw, &bundle)
 	}
-	return bundle
+	return bundle, "default_config"
+}
+
+// chooseBundle is loading's choice of the bundle to lay for a caller's
+// preset and bundle over the file, and the layer that chose it (as
+// Config.NameFrom): the bundle named ("flag"), else a saved preset the
+// caller's preset ("flag") or EAGENT_PRESET names (explicitChoice), else
+// the default one (defaultBundle). A built-in named as the bundle is the
+// preset instead, and no bundle is laid. It also returns the preset and
+// the explicit preset still to apply.
+func chooseBundle(project, preset, bundle string, fileCfg map[string]json.RawMessage) (string, string, string, string) {
+	named, flagged := bundle != "", preset != ""
+	preset, bundle, explicit := explicitChoice(project, preset, bundle)
+	from := ""
+	switch {
+	case named || bundle != "" && flagged:
+		from = "flag"
+	case bundle != "":
+		from = "EAGENT_PRESET"
+	default:
+		bundle, from = defaultBundle(fileCfg)
+	}
+	if canon, isPreset := ResolvePreset(bundle); bundle == "" || isPreset {
+		if isPreset && preset == "" {
+			preset = canon
+		}
+		bundle, from = "", ""
+	}
+	return preset, bundle, explicit, from
 }
 
 // explicitChoice is the one place an explicit preset (the caller's, else
@@ -777,31 +814,38 @@ func IsDefaultBundle(res Resolution, name string) bool {
 	return len(KeptBy(res, "", "", name)) > 0
 }
 
-// FlagKeeps is why a saved preset eagent was started on (--config, or
-// --preset naming it) is in force, and what frees it.
-const FlagKeeps = "this eagent was started on it (--config or --preset); it can be deleted once eagent runs on another"
+// KeptBy says what keeps the saved bundle name in force where res was
+// resolved (Resolve with the caller's preset and bundle, the two blanks),
+// so it is not to be deleted: Keeps, with the bundle loading lays there and
+// the layer that chose it, as loading itself chose them (res.Loads).
+func KeptBy(res Resolution, _, _ string, name string) []string {
+	return Keeps(res.Effective.DefaultConfig, res.Loads.Name, res.Loads.From, name)
+}
 
-// KeptBy says what keeps the saved bundle name in force, so it is not to be
-// deleted, each with what would free it; none when nothing does. res is
-// Resolve's for the caller's preset and bundle. The bundle loading lays is
-// kept: the one res laid (the caller's, else a saved preset its preset or
-// EAGENT_PRESET names: explicitChoice), else EAGENT_CONFIG's; and so is the
-// file's default_config, which every start naming none takes.
-func KeptBy(res Resolution, preset, bundle, name string) []string {
+// Keeps says what keeps the saved bundle name in force, each with what
+// would free it; none when nothing does. The file's default_config keeps
+// it, as every start naming none takes it; and so does the bundle a
+// context's loading lays (laid, as Config.Name), by the layer that chose it
+// (from, as Config.NameFrom).
+func Keeps(defaultConfig, laid, from, name string) []string {
 	if name == "" {
 		return nil
 	}
 	var why []string
-	if res.Effective.DefaultConfig == name {
+	if defaultConfig == name {
 		why = append(why, "it is the project's default (default_config); select a different default first")
 	}
-	switch {
-	case res.Active.Kind == "bundle" && res.Active.Name == name && (preset != "" || bundle != ""):
-		why = append(why, FlagKeeps)
-	case res.Active.Kind == "bundle" && res.Active.Name == name:
-		why = append(why, "EAGENT_PRESET names it in eagent's environment; it can be deleted once that variable names another")
-	case res.Active.Kind != "bundle" && os.Getenv("EAGENT_CONFIG") == name:
-		why = append(why, "EAGENT_CONFIG names it in eagent's environment; it can be deleted once that variable names another")
+	if laid == name {
+		switch from {
+		case "flag":
+			why = append(why, "this eagent was started on it (--config or --preset); it can be deleted once eagent runs on another")
+		case "EAGENT_PRESET", "EAGENT_CONFIG":
+			why = append(why, from+" names it in eagent's environment; it can be deleted once that variable names another")
+		case "default_config":
+			if defaultConfig != name {
+				why = append(why, "it is the project's default (default_config); select a different default first")
+			}
+		}
 	}
 	return why
 }
@@ -809,30 +853,19 @@ func KeptBy(res Resolution, preset, bundle, name string) []string {
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
 	cfg := Defaults()
 	var err error
-	preset, bundle, explicitPreset := explicitChoice(project, preset, bundle)
-	if bundle == "" {
-		bundle = DefaultBundle(fileCfg)
-	}
+	preset, bundle, explicitPreset, from := chooseBundle(project, preset, bundle, fileCfg)
 	var bundleCfg map[string]json.RawMessage
 	if bundle != "" {
-		// A bundle name may also be a built-in preset.
-		if canon, isPreset := ResolvePreset(bundle); isPreset {
-			if preset == "" {
-				preset = canon
-			}
-			bundle = ""
-		} else {
-			if !validName(bundle) {
-				return cfg, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
-			}
-			bundleCfg, err = readJSONMap(BundlePath(project, bundle))
-			if err != nil {
-				return cfg, err
-			}
-			if bundleCfg == nil {
-				names, _ := ListBundles(project)
-				return cfg, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
-			}
+		if !validName(bundle) {
+			return cfg, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+		}
+		bundleCfg, err = readJSONMap(BundlePath(project, bundle))
+		if err != nil {
+			return cfg, err
+		}
+		if bundleCfg == nil {
+			names, _ := ListBundles(project)
+			return cfg, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
 		}
 	}
 	// Preset precedence: flag > env > bundle > file.
@@ -873,7 +906,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle), &n); err != nil {
 			return cfg, err
 		}
-		cfg.Name = bundle
+		cfg.Name, cfg.NameFrom = bundle, from
 	}
 	applyEnv(project, &cfg, n)
 	normalize(&cfg)

@@ -44,7 +44,11 @@ type Resolution struct {
 	// variable moves the route to).
 	Sources map[string]string `json:"sources"`
 	Active  Active            `json:"active"`
-	Preset  string            `json:"preset"` // the preset in force before the file, if any
+	// Loads is the bundle loading lays here, as loading chooses it (one a
+	// default chooses too, which Active leaves to the callers), and the
+	// layer that chose it (Config.Name and NameFrom).
+	Loads  struct{ Name, From string } `json:"-"`
+	Preset string                      `json:"preset"` // the preset in force before the file, if any
 	// File is the project's config.json as found on disk.
 	File FileState `json:"file"`
 	// LoadError is set when the configuration could not be loaded; Effective
@@ -113,6 +117,7 @@ func Resolve(project, preset, bundle string) Resolution {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		res.LoadError = err.Error()
 	}
+	_, res.Loads.Name, _, res.Loads.From = chooseBundle(project, preset, bundle, fileMap)
 	preset, bundle, explicitPreset := explicitChoice(project, preset, bundle)
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
