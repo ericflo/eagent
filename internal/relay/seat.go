@@ -134,10 +134,6 @@ type pending struct {
 	nudges         int
 	// held: the message waits in the spool for a hook to hand it over.
 	held bool
-	// staging: an after-turn send whose hand-over (afterTurn) has not
-	// returned yet. No entry is its arrival: should the hand-over fail, it
-	// is typed instead.
-	staging bool
 	// restored: recorded before eagent stopped (see Seat.restore); sentAt
 	// is when. Such a send can be confirmed by transcript lines from before
 	// the reattach, and is never pressed again. dormant: the seat has not
@@ -513,23 +509,14 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				return "", ErrClosed
 			}
 			// An agent with a spool holds it there; one without hands it to
-			// its own queue. Either way it is tracked before it is handed
-			// over (so a sweep of the spool right after finds it), but no
-			// entry is its arrival until the hand-over has worked
-			// (staging), and, as every after-turn send, it is never pressed
+			// its own queue. Either way it is tracked for its arrival before
+			// it is handed over (so an arrival or a sweep of the spool right
+			// after finds it), and, as every after-turn send, never pressed
 			// again, nor reported lost on a timer before its turn is over
 			// (see pending.lost). Only Claude's and pi's hand-overs go
 			// through the spool.
-			s.mu.Lock()
-			p := &pending{id: id, text: text, mode: mode, at: time.Now(), held: s.spec.Spool != "", staging: true}
-			s.pending = append(s.pending, p)
-			s.mu.Unlock()
+			s.trackHeld(id, text, mode, s.spec.Spool != "")
 			err := s.agent.afterTurn(s, id, text)
-			if err == nil {
-				s.mu.Lock()
-				p.staging = false
-				s.mu.Unlock()
-			}
 			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
 				// The agent's own command in its own queue: it runs it
 				// rather than recording a message, so handed over is
@@ -538,8 +525,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
-				// Handed over (a sweep of the spool may have reported it
-				// already).
+				// Handed over, or already confirmed or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
 				// It was being typed when it failed: typing it again
@@ -816,9 +802,6 @@ func (s *Seat) matchSends(text string, at time.Time) []string {
 	defer s.mu.Unlock()
 	var cands []int
 	for i, p := range s.pending {
-		if p.staging {
-			continue
-		}
 		// Antigravity stamps to the whole second, so its entry for a send
 		// can carry a time up to a second before the send's own; Claude and
 		// pi stamp to the millisecond, so theirs up to a millisecond. An
