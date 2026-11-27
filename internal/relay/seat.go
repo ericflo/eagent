@@ -571,10 +571,10 @@ type Status struct {
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 	// Stuck: blocked with no dialog, and the seat knows the agent is not
-	// working: a start that never got ready, or a turn gone quiet whose
-	// screen does not show it busy (as last looked). A quiet agent whose
-	// screen shows it at work (a long build, a subagent) is not stuck, nor
-	// is a block the seat cannot tell about (kept from before a reattach).
+	// working: a start that never got ready, or a turn gone quiet that the
+	// agent's own evidence (atWork, as last looked) does not show at work.
+	// A quiet agent at work (a long build, a subagent) is not stuck. A
+	// block from before a reattach is judged at the screen check after it.
 	Stuck bool
 }
 
@@ -1612,13 +1612,19 @@ func (s *Seat) quietLocked() bool {
 // footer and no spinner; Codex: its composer and no working line;
 // Antigravity: the relay status line saying idle).
 func (s *Seat) atRest() bool {
-	if rr, ok := s.agent.(readyReporter); ok {
-		if ready, known := rr.reportedReady(s); known {
-			return ready
-		}
-	}
 	screen, err := s.host.Capture(s.target, 0)
-	return err == nil && s.agent.ready(screen) && !s.busy(screen)
+	return err == nil && s.ready(screen) && !s.atWork(screen)
+}
+
+// atWork is the one judgement of whether the agent's own evidence says it
+// is at work (atRest, Status.Stuck): pi's status file says it works;
+// Claude's spinner line, Codex's working line, or Antigravity's status
+// line naming a state other than idle is on its screen.
+func (s *Seat) atWork(screen string) bool {
+	if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
+		return true
+	}
+	return s.busy(screen)
 }
 
 // queueHolder is a parser that follows the agent's own queue of messages
@@ -2140,25 +2146,26 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.mu.Unlock()
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
-		busy := s.busy(screen)
+		work := s.atWork(screen)
 		s.mu.Lock()
-		s.stuck = !busy
+		s.stuck = !work
 		s.mu.Unlock()
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
 		s.mu.Lock()
 		s.hung = s.state == "blocked"
 		s.mu.Unlock()
-	} else if state == "blocked" && ready && !(s.hung && s.busy(screen)) && !s.dialogShowing() {
+	} else if state == "blocked" && ready && !(s.hung && s.atWork(screen)) && !s.dialogShowing() {
 		// A quiet agent's prompt or status line shows while it works, so
 		// it is idle only if its screen does not also say it is busy. A
 		// slow start is over as soon as the prompt shows.
 		s.setState("idle", "")
 	} else if state == "blocked" {
-		// Still quiet: stuck as its screen says now (Status.Stuck).
-		busy := s.busy(screen)
+		// Still quiet: stuck as the agent's own evidence says now
+		// (Status.Stuck).
+		work := s.atWork(screen)
 		s.mu.Lock()
 		if s.hung && s.state == "blocked" {
-			s.stuck = !busy
+			s.stuck = !work
 		}
 		s.mu.Unlock()
 	}
