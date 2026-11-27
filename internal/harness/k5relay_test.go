@@ -23,7 +23,6 @@ import (
 // (relay.moved). The tool's answer says the opposite: "Codex is starting;
 // the message is typed in once it is up", though Codex is being stopped.
 func TestSR2ASendDuringASwitchSaysWhichAgentGetsIt(t *testing.T) {
-	t.Skip("known, not fixed: SR2-3, fixed in a later commit")
 	g := useGatedLaunches(t, []relaySeat{newK1QuietSeat(), newFakeSeat("two")}, nil)
 	rt := newLaunchRuntime(t)
 	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})

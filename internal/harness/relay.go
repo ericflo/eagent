@@ -1760,7 +1760,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 	case "relay_forward", "relay_send":
 		mode := str("mode")
 		var rel *state.Relay
-		var id, text string
+		var id, text, starting string
 		var err error
 		var seat relaySeat
 		held := false
@@ -1821,6 +1821,9 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			}
 			if held = r.holdSend(rel.Name, heldSend{id: id, text: text, mode: mode}); !held {
 				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+			} else if job := r.relays.launch(rel.Name); job != nil && job.name != rel.Name {
+				// A switch: the words go to the agent taking over.
+				starting = relay.AgentLabel(job.spec.Profile.Agent) + " is starting in place of " + rel.Who()
 			}
 		})
 		if !ran {
@@ -1830,7 +1833,10 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			return err.Error(), true
 		}
 		if held {
-			return fmt.Sprintf("%s is starting; the message (%s) is typed in once it is up. Its transcript will confirm arrival; you are told only if it does not.", rel.Who(), id), false
+			if starting == "" {
+				starting = rel.Who() + " is starting"
+			}
+			return fmt.Sprintf("%s; the message (%s) is typed in once it is up. Its transcript will confirm arrival; you are told only if it does not.", starting, id), false
 		}
 		if seat == nil {
 			return rel.Who() + " is not running; restart it with relay_control restart.", true
