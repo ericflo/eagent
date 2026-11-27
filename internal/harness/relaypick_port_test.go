@@ -105,6 +105,7 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 
 	// Mid-turn: the change waits.
 	rel.State = "working"
+	seat.setState("working")
 	msg, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""})
 	if err != nil || !strings.Contains(msg, "when the turn ends") || len(launchedSpecs(launched)) != 1 {
 		t.Fatalf("repick mid-turn: %q %v, launched %d", msg, err, len(launchedSpecs(launched)))
@@ -115,7 +116,11 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 	// The turn ends: Codex starts again, continuing its conversation, with
 	// the new model and its own effort.
 	relayServeLoop(t, rt)
-	rt.sync(func() { rt.onRelayEvent("codex", relay.Event{Kind: relay.KindTurn, Text: "finished"}) })
+	seat.setState("idle")
+	rt.sync(func() {
+		rt.onRelayEvent("codex", relay.Event{Kind: relay.KindTurn, Text: "finished"})
+		rt.onRelayEvent("codex", relay.Event{Kind: relay.KindQuiet}) // as the seat says after it
+	})
 	waitRelayStarts(t, rt)
 	if len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "gpt-6.2-astra" || launchedSpecs(launched)[1].Profile.Effort != "" || !seat.wasKilled() {
 		t.Fatalf("after the turn: launched %+v killed %v", launchedSpecs(launched), seat.wasKilled())

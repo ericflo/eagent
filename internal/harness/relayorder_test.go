@@ -27,6 +27,7 @@ func newGateSeat(reply string) *gateSeat {
 }
 
 func (g *gateSeat) Send(id, text, mode string) (string, error) {
+	g.typing(id) // being typed: not quiet
 	g.gmu.Lock()
 	g.calls++
 	first := g.calls == 1

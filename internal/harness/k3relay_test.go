@@ -84,7 +84,7 @@ func TestK3AChangeAskedWithAMessageOnItsWayWaits(t *testing.T) {
 	if k1Restarting(rt) {
 		t.Fatal("the change started the agent again in the turn the message began")
 	}
-	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran them."})
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran them."}, relay.Event{Kind: relay.KindState, State: "idle"})
 	seat.waitGone(t)
 	seat.end()
 	g.release <- struct{}{}

@@ -547,19 +547,16 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 }
 
 // appendOutcome records how a send ended (relay.delivered); every outcome
-// the harness writes goes through here. One that did not arrive, or the
-// arrival of the agent's own command typed into its prompt, of a relay
-// between turns whose terminal is up, may have been the last thing on its
-// way to the agent, and no turn starts with it: a change waiting for the
-// relay is looked at again (applyWaitingRepick). Any other arrival starts
-// the turn the change waits for. Loop goroutine.
+// the harness writes goes through here. One that did not arrive, of a
+// relay between turns whose terminal is up, may have been the last thing
+// on its way to the agent, with nothing after it for the seat to say
+// (KindQuiet goes out only after other news): a change waiting for the
+// relay is looked at again (applyWaitingRepick, which asks the seat).
+// Loop goroutine.
 func (r *Runtime) appendOutcome(ev event.Event) {
 	r.append(ev)
 	var d event.RelayDeliveredData
-	if ev.Decode(&d) != nil {
-		return
-	}
-	if s, ok := sendRecord(r.st, d.ID); d.OK && (!ok || !typedCommand(r.st, d.ID, s.Text)) {
+	if ev.Decode(&d) != nil || d.OK {
 		return
 	}
 	if rel := r.st.Relays[d.Name]; rel != nil && rel.State == "idle" && r.relays.get(d.Name) != nil {
@@ -1169,12 +1166,6 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.append(event.New(event.RelayInner, event.ActorHarness, event.RelayInnerData{Name: name, InnerID: ev.InnerID, Transcript: ev.Transcript}))
 	case relay.KindState:
 		if cur := r.st.Relays[name]; cur != nil && cur.State == ev.State && ev.Detail == "" {
-			if ev.State == "idle" {
-				// Idle on the record already (its turn ended while a
-				// dialog it reports held it): a change that waited for
-				// the dialog applies now.
-				r.applyWaitingRepick(name)
-			}
 			return
 		}
 		dialog := ""
@@ -1182,19 +1173,21 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			dialog = cur.Dialog
 		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog, Read: ev.Read}))
-		if ev.State == "idle" {
-			r.applyWaitingRepick(name)
-			if dialog != "" {
-				// A dialog the agent reports held it, through a turn's end
-				// that left the record blocked: idle now, as at that end.
-				r.armAutopilotCheck(name)
-			}
+		if ev.State == "idle" && dialog != "" {
+			// A dialog the agent reports held it, through a turn's end
+			// that left the record blocked: idle now, as at that end. (A
+			// change that waited applies once the seat is quiet.)
+			r.armAutopilotCheck(name)
 		}
 		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
 			r.settleExited(rel)
 		}
 	case relay.KindDelivered:
 		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+	case relay.KindQuiet:
+		// Nothing waits on the agent any more, as its seat says: a change
+		// that waited for that applies now.
+		r.applyWaitingRepick(name)
 	case relay.KindRead:
 		// How far the transcript was read, after a read the record has
 		// nothing else of (a reattach reads on from there).
@@ -1213,8 +1206,10 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
-		// A model or effort change that waited for this turn to end.
-		r.applyWaitingRepick(name)
+		// A model or effort change that waited for this turn to end applies
+		// when the seat says nothing waits on the agent (KindQuiet): a turn
+		// end in the same look as the start of the next (a held message
+		// handed over) is not the end of the agent's work.
 		r.armAutopilotCheck(name)
 	case relay.KindLimit:
 		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted, Read: ev.Read}))

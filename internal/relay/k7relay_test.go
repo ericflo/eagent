@@ -16,7 +16,6 @@ import (
 // and the restart kills this seat before any later look could report the
 // move, so pi is started again in the session /new left: SR3-1, still.
 func TestSR4TypedCommandIsDeliveredBeforePiHasActedOnIt(t *testing.T) {
-	t.Skip("known, not fixed: SR4-2, the seat fixer's (Status.Quiet)")
 	isolatePi(t)
 	saved := typeSettle
 	typeSettle = 0
@@ -62,10 +61,20 @@ func TestSR4TypedCommandIsDeliveredBeforePiHasActedOnIt(t *testing.T) {
 		}
 	}
 	st, _ := readPiStatus(status)
+	t.Logf("delivered with pi on %q; moves said before it: %v", st.SessionID, before)
+	// Since bcb0223 the harness restarts on the seat's quiet, not on the
+	// delivered: the seat is not quiet until it has said the move /new makes.
+	if s.Snapshot().Quiet && len(before) == 0 {
+		t.Errorf("the seat is quiet right after /new was delivered, pi still on session %q and no move seen", st.SessionID)
+	}
 	// pi runs /new now, after the seat's look.
 	writeLines(t, second, piHeaderLine("second", time.Now()))
 	writePiStatus(t, status, piStatus{State: "idle", SessionFile: second, SessionID: "second", SessionEntries: entries(0)})
-	if len(before) == 0 {
-		t.Errorf("the seat said /new delivered (acted on) while pi was still on session %q and no move was seen; a change waiting on it restarts pi into that session, and the restart's kill ends this seat before it can report the move", st.SessionID)
+	moved := len(before) > 0
+	for ev := next(); ev.Kind != KindQuiet; ev = next() {
+		moved = moved || ev.Kind == KindInner && ev.InnerID == "second"
+	}
+	if !moved {
+		t.Error("the seat said it is quiet before it said pi's move to the session /new opened: a change waiting on it restarts pi into the session it left")
 	}
 }

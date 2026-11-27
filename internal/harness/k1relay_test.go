@@ -256,9 +256,12 @@ func (s *k1HeldSeat) setDialog(title string) {
 }
 
 func (s *k1HeldSeat) Snapshot() relay.Status {
+	s.fakeSeat.mu.Lock()
+	unsaid := len(s.fakeSeat.unsaid)
+	s.fakeSeat.mu.Unlock()
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog}
+	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog, Quiet: s.state == "idle" && s.dialog == "" && unsaid == 0}
 }
 
 const (

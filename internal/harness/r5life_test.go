@@ -110,6 +110,7 @@ func TestAWaitingModelChangeDiesWithTheAgentItWasFor(t *testing.T) {
 	first, fresh := newFakeSeat("one"), newFakeSeat("two")
 	g := useGatedLaunches(t, []relaySeat{first, fresh}, nil)
 	rt := newLaunchRuntime(t)
+	first.setState("working")
 	rt.sync(func() { rt.st.Relays["codex"].State = "working" })
 	rt.sync(func() {
 		if msg, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil || !strings.Contains(msg, "when the turn ends") {
