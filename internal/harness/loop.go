@@ -442,6 +442,14 @@ func (r *Runtime) maybeTurn() {
 	if t.busy || r.ending {
 		return
 	}
+	if r.refusedWhileClosing() {
+		// Final for an ending session: only the last title and summary,
+		// if the end waits on it, is still asked for (one attempt).
+		if t.threadDue && r.summary.final {
+			r.startTurn(wake{thread: true})
+		}
+		return
+	}
 	if kind, ok := r.dueWake(); ok {
 		if t.settle != nil {
 			return // more may be on its way; the timer ticks the loop
@@ -1594,6 +1602,14 @@ var (
 func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
+	if errors.As(err, &ae) && ae.ContextOverflow() && r.stillClosing() {
+		// The session is ending: the refusal is final for it
+		// (refusedWhileClosing). No restart, no try again, no notice: it
+		// ends in its closing path's own words.
+		t.overflowed = true
+		r.ui.Log("eagent: the model refused the prompt as too long (%s); the session is ending, and ends without this look", shortErr(err))
+		return
+	}
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
 		// The prompt no longer fits: restart the conversation from a
 		// dossier before anything else. If it does not fit even then, the
@@ -1654,6 +1670,16 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		}
 		r.recordMessage(r.unreachableNotice(err))
 	}
+}
+
+// refusedWhileClosing reports that the last call was refused as too long
+// while the session is ending (stillClosing; turnFailed): that is final
+// for it. No restart is made (noRestartNow), the look is not made again
+// (maybeTurn), no notice is given, and the session ends (maybeEnd) in its
+// closing path's own words, as done: its closing word was asked for, and
+// what was refused came after it. Loop goroutine.
+func (r *Runtime) refusedWhileClosing() bool {
+	return r.turns.overflowed && r.stillClosing()
 }
 
 // failingNotice opens what the user is told after two failed calls in a
