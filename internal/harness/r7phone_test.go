@@ -159,7 +159,6 @@ func TestMessagesThatWaitedAreTakenWhenTheFirstReadFails(t *testing.T) {
 // the answer before the re-ask returns. It is the question's answer, once,
 // and the question closes.
 func TestACardAnsweredWhileStoppedIsTheAnswerWhenThePollReadsItFirst(t *testing.T) {
-	t.Skip("known, not fixed: knowing the card's question before the poll starts breaks TestACardAnswerTheReaskFindsAfterAnAnswerElsewhereIsKeptAsAMessage, which relies on the misroute")
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	g := r5AskedAndStopped(t, fp)
