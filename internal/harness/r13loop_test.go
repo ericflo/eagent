@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -196,6 +197,108 @@ func TestR13LastClosingCallThatStartsAnAgentAndRunsOutOfTimeIsOwed(t *testing.T)
 	})
 	if !sent() {
 		t.Fatalf("the closing turn ended %q after the session stopped ending, and the call it was cut off in is never made", r11Ends(s, "timeout"))
+	}
+}
+
+// ---- 4. the closing word is asked again -----------------------------------
+
+// The user restarts the stopped agent (/restart) while the first call of the
+// closing turn is out, that call fails while the start is under way, and
+// then the start fails. The session ends after all, and the user still gets
+// a closing report: the closing word the failed call did not give is asked
+// for again.
+func TestR13ClosingWordIsAskedAgainAfterAFailedRestart(t *testing.T) {
+	useFakeRelays(t, newFakeSeat("Merged #42; the tests are green."))
+	inner := launchRelay // restored by useFakeRelays' cleanup
+	entered := make(chan struct{}, 1)
+	launchGate, callGate := make(chan struct{}), make(chan struct{})
+	releaseLaunch, releaseCall := sync.OnceFunc(func() { close(launchGate) }), sync.OnceFunc(func() { close(callGate) })
+	t.Cleanup(func() { releaseLaunch(); releaseCall() })
+	var starts atomic.Int32
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		if starts.Add(1) == 2 {
+			entered <- struct{}{}
+			<-launchGate
+			return nil, relay.Started{}, errors.New("tmux failed to start")
+		}
+		return inner(spec, innerID, resume)
+	}
+	var phase atomic.Int32
+	s, _ := r12Start(t, nil, func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(2, 3):
+			return reply{calls: []event.ToolCall{tc("send_message", `{"text":"Final report: #42 is merged; the restart failed.","important":true}`)}}
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			r := rt.Load()
+			r.sync(func() { r.onInputFrom("/restart", "web", "", "", nil) })
+			return reply{block: callGate, status: r10Bad.status, body: r10Bad.body}
+		case strings.Contains(tail, "finished a turn") && msgs[len(msgs)-1]["role"] != "tool" && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the restart never began")
+	}
+	releaseCall()
+	s.waitFor("the failed closing call", func() bool { return len(s.events(event.Error)) > 0 })
+	releaseLaunch()
+	code := coreExit(s)
+	if r5Told(s, "Final report") != 1 || code != 0 {
+		t.Fatalf("exit %d, said %q; want the closing report after the failed restart", code, s.ui.said())
+	}
+}
+
+// The same for the last title and summary: the user restarts the stopped
+// agent while its first call is out, that call holds, and the start fails.
+// The session ends after all, with the last title and summary written.
+func TestR13LastSummaryIsAskedAgainAfterAFailedRestart(t *testing.T) {
+	coreSummariesOn(t, false)
+	useFakeRelays(t, newFakeSeat("Both coats are on."))
+	inner := launchRelay // restored by useFakeRelays' cleanup
+	entered := make(chan struct{}, 1)
+	launchGate := make(chan struct{})
+	releaseLaunch := sync.OnceFunc(func() { close(launchGate) })
+	t.Cleanup(releaseLaunch)
+	var starts atomic.Int32
+	launchRelay = func(spec relay.Spec, innerID string, resume bool) (relaySeat, relay.Started, error) {
+		if starts.Add(1) == 2 {
+			entered <- struct{}{}
+			<-launchGate
+			return nil, relay.Started{}, errors.New("tmux failed to start")
+		}
+		return inner(spec, innerID, resume)
+	}
+	var phase atomic.Int32
+	s, _ := r12Start(t, nil, func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		summary := strings.Contains(tail, "this look is only about the thread's title and summary")
+		switch {
+		case summary && phase.CompareAndSwap(2, 3):
+			return reply{calls: []event.ToolCall{tc("update_thread", `{"title":"Paint both coats","summary":"Both coats are on; the restart failed."}`)}}
+		case summary && phase.CompareAndSwap(1, 2):
+			r := rt.Load()
+			r.sync(func() { r.onInputFrom("/restart", "web", "", "", nil) })
+			return hold()
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsAndReports("Done: both coats are on.")
+		}
+		return hold()
+	})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the restart never began")
+	}
+	s.waitFor("the last summary's call", func() bool { return phase.Load() == 2 })
+	s.settled()
+	releaseLaunch()
+	code := coreExit(s)
+	if titles := coreTitles(mustReadCore(t, s.rt.sess.Path)); len(titles) == 0 || code != 0 {
+		t.Fatalf("exit %d, titles %v, said %q; want the last title and summary written after the failed restart", code, titles, s.ui.said())
 	}
 }
 

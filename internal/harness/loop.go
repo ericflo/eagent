@@ -1193,8 +1193,20 @@ func (r *Runtime) turn(w wake) {
 		if asked && end != "error" && end != "interrupted" && end != "timeout" {
 			r.threadAsked(tc.threaded)
 		}
-		if w.final && mustSpeak && !tc.spoke && end != "error" && r.stillClosing() {
-			r.fallbackFinal()
+		if w.final || w.wait > 0 {
+			closing := r.stillClosing()
+			if w.final && mustSpeak && !tc.spoke && end != "error" && closing {
+				r.fallbackFinal()
+			}
+			// One whose session stopped ending before it gave the closing
+			// word, or the last title and summary, leaves it to be asked
+			// for again if the session ends after all (maybeEnd).
+			if !closing && w.final && !tc.spoke {
+				r.turns.finalAsked = false
+			}
+			if !closing && w.wait > 0 && !tc.threaded {
+				r.summary.final = false
+			}
 		}
 	})
 }
