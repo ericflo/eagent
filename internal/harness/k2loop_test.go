@@ -131,3 +131,52 @@ func TestK2ADossierPassThatDropsItsLookupsSendsNoTwoUserMessagesInARow(t *testin
 		t.Fatalf("the note after the drop is a user message of its own after the request: %v", rs)
 	}
 }
+
+// C7: the agent is stopped, then eagent's model fails twice running. The
+// user is told so, and the notice does not say their messages still go
+// straight to an agent: none is running, and what they write waits for
+// eagent.
+func TestK2TheDownNoticeWithNoAgentRunningSaysWhereMessagesGo(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		answer bool // the failing turns' first call comes back
+	}{{"unreachable", false}, {"failing", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+			var stopped, failing atomic.Bool
+			brain := func(_ string, m []map[string]any) reply {
+				switch {
+				case !stopped.Load():
+					stopped.Store(true)
+					return reply{calls: []event.ToolCall{tc("relay_control", `{"action":"stop","reason":"the work is done"}`)}}
+				case !failing.Load():
+					return hold()
+				case c.answer && m[len(m)-1]["role"] != "tool":
+					return reply{calls: []event.ToolCall{tc("session_search", `{"query":"build"}`)}}
+				}
+				return k1BadRequest
+			}
+			s := startSession(t, "", brain, nil)
+			r5LogOnFailure(s)
+			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e stop codex", Route: "eagent"}) })
+			r6Until(t, "the agent stopped", func() bool {
+				n := 1
+				s.rt.sync(func() { n = len(s.rt.st.ActiveRelays()) })
+				return n == 0
+			})
+			s.settled()
+			failing.Store(true)
+			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what now?", Route: "eagent"}) })
+			r6Until(t, "the notice", func() bool { return r4Logged(s, "trying again in") > 0 })
+			for _, m := range s.ui.said() {
+				if strings.Contains(m, "can't reach my own model") || strings.HasPrefix(m, failingNotice) {
+					if strings.Contains(m, "straight to") {
+						t.Fatalf("with no agent running, told: %q", m)
+					}
+					return
+				}
+			}
+			t.Fatalf("no notice; said %q", s.ui.said())
+		})
+	}
+}

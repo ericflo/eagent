@@ -1630,23 +1630,15 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 				// (needsDossier): this model restarted nothing.
 				return
 			}
-			who := "the agent"
-			if active := r.st.ActiveRelays(); len(active) > 0 {
-				who = active[0].Who()
-			}
 			// Not an outage: the provider refuses the prompt as too long,
 			// and restarting from a dossier did not make it fit.
-			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My model refuses my conversation as too long, even after I restarted it from my notes, " + r.whileDown() + " Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings."})
 			return
 		}
 		if answered {
 			// The model answered a call of this turn: it can be reached,
 			// and what fails is a call after.
-			who := "the agent"
-			if active := r.st.ActiveRelays(); len(active) > 0 {
-				who = active[0].Who()
-			}
-			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", failingNotice, shortErr(err), who, who)})
+			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", failingNotice, shortErr(err), r.whileDown())})
 			return
 		}
 		r.recordMessage(r.unreachableNotice(err))
@@ -1685,11 +1677,22 @@ func (r *Runtime) lastFailedAnswered() bool {
 // answered for a while: automatic, so it is no answer to them. Loop
 // goroutine.
 func (r *Runtime) unreachableNotice(err error) event.MessageData {
-	who := "the agent"
-	if active := r.st.ActiveRelays(); len(active) > 0 {
-		who = active[0].Who()
+	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), %s I keep trying and will pick up where I left off.", shortErr(err), r.whileDown())}
+}
+
+// whileDown is what a notice that eagent's model is not answering says of
+// the user's messages: with an agent running they still go straight to it;
+// with none (none started, stopped, or its terminal gone, as fallbackFinal
+// counts it) they wait for eagent. Loop goroutine.
+func (r *Runtime) whileDown() string {
+	active := r.st.ActiveRelays()
+	for _, rel := range active {
+		if rel.State != "exited" {
+			who := active[0].Who()
+			return fmt.Sprintf("so I can't tell you what %s is doing. Your messages still go straight to %s.", who, who)
+		}
 	}
-	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", shortErr(err), who, who)}
+	return "so I can't answer you for now. What you write to me is kept, and I'll answer it when my model does."
 }
 
 // stopTimers stops the loop's timers at the end of a run.
