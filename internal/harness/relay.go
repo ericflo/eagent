@@ -1023,28 +1023,8 @@ func (r *Runtime) reattachRelays() []string {
 			// The new seat confirms what the record still waits on from the
 			// transcript, as the old one would have; nothing is typed again.
 			spec.Restore, spec.State = unresolvedSends(r.st, rel), rel.State
-			// The transcript was read up to the newest of the relay's events
-			// that came from reading it or the screen (a turn, a remark, an
-			// arrival, a limit, a state) or its start. A send, an autopilot
-			// order, a move or a failure is recorded without reading it:
-			// what the agent wrote before one may not be on the record yet.
-			// (A state counts so that a recorded blocked is not undone by
-			// the lines that led to it.)
-			var since time.Time
-			for i := len(r.st.Events) - 1; i >= 0; i-- {
-				ev := r.st.Events[i]
-				var d struct {
-					Name string `json:"name"`
-					OK   bool   `json:"ok"`
-				}
-				read := ev.Type == event.RelayStart || ev.Type == event.RelayTurn || ev.Type == event.RelayProgress || ev.Type == event.RelayLimit || ev.Type == event.RelayState || ev.Type == event.RelayDelivered
-				if read && ev.Decode(&d) == nil && d.Name == rel.Name && (d.OK || ev.Type != event.RelayDelivered) {
-					since = ev.Time
-					break
-				}
-			}
 			var seat relaySeat
-			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, since); err == nil {
+			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)
 				continue
 			}
