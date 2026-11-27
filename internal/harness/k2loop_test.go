@@ -180,32 +180,54 @@ func TestK2TheDownNoticeWithNoAgentRunningSaysWhereMessagesGo(t *testing.T) {
 }
 
 // C11: the session's record can no longer be written, and a message for
-// the agent (or a command) comes in through the inbox (the web page's
-// way in). The session ends on the failure, but the message is not taken
-// off its source before it is on the record: its file is still in the
-// inbox for the next run, where once it was removed and lost.
+// the agent (or a command) comes in through the inbox. The session ends on
+// the failure, but the message is not taken off its source before it is on
+// the record, where once it was removed and lost. A file written into the
+// inbox (by another process, or a script) stays for the next run. Words a
+// web page hands to this run (Take) are refused instead, with the file
+// removed, so the page keeps them and nothing waits to be taken twice.
 func TestK2AnInboxMessageIsNotTakenOffItsSourceWhenTheRecordFails(t *testing.T) {
+	inboxFiles := func(path string) int {
+		entries, _ := os.ReadDir(InboxDir(path))
+		n := 0
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".json") {
+				n++
+			}
+		}
+		return n
+	}
 	for _, c := range []struct{ name, text string }{
 		{"words", "run the tests"},
 		{"a command", "/restart"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(c.name+"/a file in the inbox", func(t *testing.T) {
 			s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
 			s.settled()
 			path := s.rt.sess.Path
 			s.rt.sync(func() { _ = s.rt.sess.Close() })
-			if _, err := s.rt.Take(InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); err != nil {
+			if err := PostInbox(path, InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); err != nil {
 				t.Fatal(err)
 			}
-			entries, _ := os.ReadDir(InboxDir(path))
-			n := 0
-			for _, e := range entries {
-				if strings.HasSuffix(e.Name(), ".json") {
-					n++
-				}
-			}
-			if n != 1 {
+			s.rt.sync(func() { s.rt.pollInbox() })
+			if n := inboxFiles(path); n != 1 {
 				t.Fatalf("%d files left in the inbox after the record failed, want the message's one", n)
+			}
+			if r4Logged(s, "FATAL: cannot append") == 0 {
+				t.Fatalf("setup: the record did not fail; logs %q", s.ui.logged())
+			}
+		})
+		t.Run(c.name+"/handed to this run", func(t *testing.T) {
+			s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+			s.settled()
+			path := s.rt.sess.Path
+			s.rt.sync(func() { _ = s.rt.sess.Close() })
+			took, err := s.rt.Take(InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"})
+			if took || err == nil {
+				t.Fatalf("Take = %v, %v; want it refused, so the page keeps the words", took, err)
+			}
+			if n := inboxFiles(path); n != 0 {
+				t.Fatalf("%d files left in the inbox though the page keeps the words, want none", n)
 			}
 			if r4Logged(s, "FATAL: cannot append") == 0 {
 				t.Fatalf("setup: the record did not fail; logs %q", s.ui.logged())
