@@ -302,6 +302,16 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	back := 0
+	// With the phone off for the sessions this server resumes (their
+	// configuration's finalechat.enabled; the kill switch is PendingReply's
+	// own check), no reply is taken from their threads, as the reply watcher
+	// takes none.
+	takeReply := pendingReply
+	if !finalechat.Disabled() && !s.PhoneWanted() {
+		takeReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
+			return integration.PhoneMessage{}, false, nil
+		}
+	}
 	for _, id := range list.Sessions {
 		info, err := store.Resolve(store.Root(s.Project), id)
 		if err != nil || info.ID != id {
@@ -334,7 +344,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			}
 			continue
 		}
-		reply, _, err := pendingReply(ctx, s.Project, info)
+		reply, _, err := takeReply(ctx, s.Project, info)
 		if finalechat.Gone(err) {
 			// FinaleChat says the session has no thread there, so no reply
 			// can be waiting in one: it comes back as it was.

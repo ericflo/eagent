@@ -164,6 +164,15 @@ func alive(sessionPath string) bool { return store.Alive(sessionPath) }
 // Hosted reports whether this process is running the session.
 func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 
+// PhoneWanted reports whether the sessions this server resumes for replies
+// from the phone run with the phone mirror on, by the configuration they
+// run with (the server's bundle and preset over the project's), as their
+// mirror decides. The reply watcher and the restore act only then.
+func (s *Server) PhoneWanted() bool {
+	cfg, err := s.loadConfig("", "")
+	return err == nil && cfg.Finalechat.Wanted()
+}
+
 // Resume reopens a session nobody is running with a reply the user sent to
 // its thread from the phone, the way postMessage resumes one from the
 // browser. The reply is the session's next turn (or the answer to the

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/filelock"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -226,10 +227,25 @@ func leaveWithWatcher(project string, info store.Info, m finalechat.Message, res
 	return r.writeDown(project, func(string, ...any) {})
 }
 
+// phoneWanted says whether the sessions host resumes for project run with
+// the phone mirror on (finalechat.enabled), as their mirror decides: by the
+// host's own configuration when it says (web.Server's PhoneWanted, which
+// counts the serve's bundle and preset), else the project's.
+func phoneWanted(project string, host ResumeHost) bool {
+	if h, ok := host.(interface{ PhoneWanted() bool }); ok {
+		return h.PhoneWanted()
+	}
+	cfg, err := config.Load(project, "")
+	return err == nil && cfg.Finalechat.Wanted()
+}
+
 // watchResumes runs one connection to the event stream, sweeping first and
 // then every minute while it lasts, since the stream has no replay and a
 // busy server may drop an event for a subscriber.
 func watchResumes(ctx context.Context, project string, host ResumeHost, retries *replyRetries, logf func(string, ...any)) error {
+	if !phoneWanted(project, host) {
+		return errors.New("the phone is off for the sessions it would resume (finalechat.enabled is false)")
+	}
 	client, err := settingsAccount(project)
 	if err != nil {
 		return err
@@ -277,6 +293,9 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message) {
 	if trigger.ID != "" && (trigger.Sender != "user" || trigger.Origin == "token" || trigger.Deleted) {
 		return
+	}
+	if !phoneWanted(w.project, w.host) {
+		return // turned off since the watcher connected
 	}
 	sid, ok := strings.CutPrefix(thread.ExternalID, "eagent:")
 	if !ok {

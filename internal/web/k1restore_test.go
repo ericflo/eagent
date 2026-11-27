@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -75,5 +78,32 @@ func TestK1APhoneResumeCarriesTheRefusedFiles(t *testing.T) {
 	o := s.phoneResumeOptions(integration.PhoneMessage{ID: "m1", Text: "see the screenshot", Refused: refused})
 	if len(o.PromptRefused) != 1 || o.PromptRefused[0] != refused[0] || o.PromptPhoneID != "m1" {
 		t.Fatalf("resumed with refused %#v", o.PromptRefused)
+	}
+}
+
+// With the phone off for the sessions the server resumes (the project's
+// finalechat.enabled false), a restart brings a session back as it was:
+// no reply is taken from its thread, as the reply watcher takes none.
+func TestK4ARestoreWithThePhoneOffTakesNoReply(t *testing.T) {
+	s, project := newTestServer(t)
+	t.Setenv("EAGENT_FINALECHAT", "") // the configuration, not the kill switch, turns the phone off
+	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"enabled": false}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := newSession(t, project)
+	_ = sess.Close()
+	s.running[sess.ID] = fakeHosted()
+	s.rememberHosted()
+	got := stubRestore(t, map[string]string{sess.ID: "are you still there?"}, nil)
+	next := New(project, nil)
+	if next.PhoneWanted() {
+		t.Fatal("the phone is wanted though the project turns it off")
+	}
+	next.restoreHosted(context.Background())
+	if len(*got) != 1 || (*got)[0].reply != "" {
+		t.Fatalf("brought back %+v, want the session with no reply", *got)
 	}
 }
