@@ -285,8 +285,7 @@ func (s *Seat) restore(list []Restored) {
 //
 // The state the history left the seat in (foldHistory) is said here, once:
 // working, or idle when the history showed a turn end. A history that ends
-// inside a turn leaves a relay the record says is blocked blocked; one
-// with no turn in it leaves a relay starting or blocked as the record says.
+// inside a turn leaves a relay the record says is blocked blocked.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	if !s.catchingUp {
@@ -320,12 +319,6 @@ func (s *Seat) caughtUp(now time.Time) {
 	kept := s.attached && state == "working" && s.spec.State == "blocked"
 	if kept {
 		s.state, s.hung = "blocked", true
-	}
-	// No turn begun or ended in the history (none read yet, or no
-	// transcript): a record that said starting or blocked still does, and
-	// the screen settles it (wantsDialogCheck) as for the seat that said it.
-	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
-		s.state = s.spec.State
 	}
 	s.mu.Unlock()
 	if !kept && (state != "idle" || ended) {
