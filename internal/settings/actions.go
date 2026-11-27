@@ -146,7 +146,7 @@ func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, gra
 			change.AfterExists = true
 		} else {
 			res := config.Resolve(s.Project, s.Preset, s.Bundle)
-			if res.Active.Kind == "bundle" && res.Active.Name == name || res.Effective.DefaultConfig == name {
+			if res.Active.Kind == "bundle" && res.Active.Name == name || config.IsDefaultBundle(res, name) {
 				return change, fmt.Errorf("select a different default before deleting its bundle")
 			}
 		}
