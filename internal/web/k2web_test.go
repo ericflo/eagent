@@ -45,7 +45,7 @@ func k2Stubs(box, detail string) string {
 	return `
 const ta = {value: ` + box + `, style: {}};
 const $ = () => ta;
-const S = {sid: 's1', detail: ` + detail + `};
+const S = {sid: 's1', detail: ` + detail + `, drafts: {}};
 const clientCaps = () => ({});
 const sent = [], screens = [];
 const toast = () => {};

@@ -94,7 +94,7 @@ document.addEventListener('click', e => {
 
 // ---- state ------------------------------------------------------------------
 function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
-const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, queued: [], queuedSeq: 0, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
+const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, queued: [], queuedSeq: 0, drafts: {}, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
 
 let lastHash = location.hash;
 function route() {
@@ -341,12 +341,16 @@ function renderChat(pane) {
     h('form', {onsubmit: e => { e.preventDefault(); send(); }},
       h('textarea', {id: 'input', placeholder: 'Message the agent… (Enter to send, Shift+Enter for a new line)', rows: 1,
         onkeydown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } },
-        oninput: e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
+        oninput: e => { S.drafts[S.sid] = e.target.value; e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
       h('button', {class: 'primary', type: 'submit'}, 'Send')),
     h('div', {class: 'hint'},
       h('span', {id: 'hint'}),
       h('label', {class: 'toggle'}, h('input', {type: 'checkbox', checked: activityShown(), onchange: e => setActivity(e.target.checked)}), 'show activity'))));
   pane.replaceChildren(scroll, composer);
+  // What the session's box held when it was last on the page (S.drafts:
+  // typed and not sent, or sent and refused) is in the new one.
+  const draft = S.drafts[S.sid];
+  if (draft) { const ta = $('#input'); ta.value = draft; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; }
   scroll.scrollTop = scroll.scrollHeight;
   updateComposer();
   renderLive();
@@ -369,19 +373,28 @@ function updateComposer() {
 }
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
-  ta.value = ''; ta.style.height = 'auto';
+  const sid = S.sid;
+  ta.value = ''; ta.style.height = 'auto'; delete S.drafts[sid];
   // /screen shows the agent's terminal here, as its Screen button does: the
   // session itself shows it only at its own terminal and on the phone.
   const d = S.detail;
   const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
   if (agent) { showScreen(agent.name); return; }
-  const sid = S.sid;
   try {
     let r;
     if (S.detail && S.detail.question) r = await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
     else r = await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
     if (r && r.delivered === 'queued') showQueued(sid, text, r.message, r.inbox);
-  } catch (e) { if (!ta.value) ta.value = text; toast(e.message, 'bad'); }
+  } catch (e) {
+    // Refused: the words go back where they can be sent again, in front
+    // of anything typed since. The box they came from may be gone (the
+    // request can wait for seconds, and another tab or session rebuilds
+    // it): they are the session's draft again, which its box is filled
+    // from, and are put into that box at once when it is on the page.
+    S.drafts[sid] = S.drafts[sid] ? text + '\n' + S.drafts[sid] : text;
+    const box = S.sid === sid && $('#input'); if (box) box.value = S.drafts[sid];
+    toast(e.message, 'bad');
+  }
 }
 // Words the server answered "queued" (another process runs the session;
 // they wait in its inbox, not yet on its record) show in the chat with

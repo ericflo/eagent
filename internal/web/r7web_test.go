@@ -94,7 +94,7 @@ func TestThePageKeepsTheWordsWhenASendFails(t *testing.T) {
 	script := `
 const ta = {value: '  ship it  ', style: {}};
 const $ = () => ta;
-const S = {sid: 's1', detail: null};
+const S = {sid: 's1', detail: null, drafts: {}};
 const clientCaps = () => ({});
 let told = '';
 const toast = (m) => { told = m; };

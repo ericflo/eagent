@@ -44,7 +44,7 @@ const $ = sel => sel === '#input' ? ta : sel === '.chat .col' ? col : sel === '#
 const document = {querySelector: sel => all.find(n => !n.removed && sel === '[data-queued="' + n.attrs['data-queued'] + '"]') || null};
 const md = s => s;
 const ARCHIVE = null;
-const S = {sid: 's1', tab: 'chat', detail: {alive: true, agents: []}, events: [], lastSeq: 4, queued: [], queuedSeq: 0};
+const S = {sid: 's1', tab: 'chat', detail: {alive: true, agents: []}, events: [], lastSeq: 4, queued: [], queuedSeq: 0, drafts: {}};
 const clientCaps = () => ({});
 const showScreen = () => {};
 const told = [];
