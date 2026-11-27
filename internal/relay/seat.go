@@ -3,6 +3,7 @@ package relay
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,6 +144,12 @@ type pending struct {
 	// typed send is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
+	// after is how far the transcript afterIn was written when the seat
+	// began to watch for the send: an entry of it that starts before that
+	// was written before, and is not the send's arrival. afterIn is ""
+	// when the seat followed no transcript then.
+	afterIn string
+	after   int64
 }
 
 // Launch starts the agent in a new terminal session and begins watching it.
@@ -511,10 +518,11 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			// An agent with a spool holds it there; one without hands it to
 			// its own queue. Either way it is tracked for its arrival before
 			// it is handed over (so an arrival or a sweep of the spool right
-			// after finds it), and, as every after-turn send, never pressed
-			// again, nor reported lost on a timer before its turn is over
-			// (see pending.lost). Only Claude's and pi's hand-overs go
-			// through the spool.
+			// after finds it; an entry already written is not its arrival),
+			// and, as every after-turn send, never pressed again, nor
+			// reported lost on a timer before its turn is over (see
+			// pending.lost). Only Claude's and pi's hand-overs go through
+			// the spool.
 			s.trackHeld(id, text, mode, s.spec.Spool != "")
 			err := s.agent.afterTurn(s, id, text)
 			if err == nil && s.spec.Spool == "" && isAgentCommand(text) && s.untrack(id) {
@@ -525,7 +533,8 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
-				// Handed over, or already confirmed or reported by the seat.
+				// Handed over, or already confirmed (by an entry written
+				// after it was tracked) or reported by the seat.
 				return fmt.Sprintf("held for %s; it reads it when its current turn ends", label), nil
 			} else if errors.As(err, new(*TypingError)) {
 				// It was being typed when it failed: typing it again
@@ -667,9 +676,15 @@ func (s *Seat) typeText(text string) error {
 
 func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
 
+// trackHeld watches for send id's arrival from now on: no entry already
+// written to the transcript is it (see pending.after).
 func (s *Seat) trackHeld(id, text, mode string, held bool) {
 	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), held: held})
+	p := &pending{id: id, text: text, mode: mode, at: time.Now(), held: held}
+	if st, err := os.Stat(s.transcript); err == nil {
+		p.afterIn, p.after = s.transcript, st.Size()
+	}
+	s.pending = append(s.pending, p)
 	s.mu.Unlock()
 }
 
@@ -788,20 +803,28 @@ func (s *Seat) Screen(lines int) (string, error) { return s.host.Capture(s.targe
 
 func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// matchPending confirms the sends one user entry of the transcript shows
-// arriving (see arrivals) and returns their ids, oldest first.
-func (s *Seat) matchPending(text string) []string { return s.matchSends(text, time.Time{}) }
+// matchPending confirms the sends one user entry just written to the
+// transcript shows arriving (see arrivals) and returns their ids, oldest
+// first.
+func (s *Seat) matchPending(text string) []string {
+	return s.matchSends(text, time.Time{}, math.MaxInt64)
+}
 
-// matchSends is matchPending for an entry the transcript stamped at. An
-// entry from before the reattach (history, at set) is the arrival only of
-// a restored send recorded no later than the entry: it may have arrived
+// matchSends is matchPending for an entry that starts at pos in the
+// transcript the seat follows, which the transcript stamped at. An entry
+// written before a send was tracked is not its arrival (pending.after).
+// An entry from before the reattach (history, at set) is the arrival only
+// of a restored send recorded no later than the entry: it may have arrived
 // just before the record's last event, but a send of the same words
 // confirmed earlier, or sent after the reattach, is not it.
-func (s *Seat) matchSends(text string, at time.Time) []string {
+func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cands []int
 	for i, p := range s.pending {
+		if p.afterIn != "" && p.afterIn == s.transcript && pos < p.after {
+			continue
+		}
 		// Antigravity stamps to the whole second, so its entry for a send
 		// can carry a time up to a second before the send's own; Claude and
 		// pi stamp to the millisecond, so theirs up to a millisecond. An
@@ -1150,13 +1173,14 @@ func (s *Seat) watch() {
 		}
 		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
-			lines, err := tail.next()
+			lines, starts, err := tail.next()
 			if err == nil && len(lines) > 0 {
 				s.mu.Lock()
 				s.lastLine = now
 				s.mu.Unlock()
-				for _, line := range lines {
+				for i, line := range lines {
 					for _, o := range p.line(line) {
+						o.pos = starts[i]
 						s.fold(o)
 					}
 				}
@@ -1221,7 +1245,7 @@ func (s *Seat) fold(o obs) {
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
 		if o.kind == "user" {
-			for _, id := range s.matchSends(o.text, o.at) {
+			for _, id := range s.matchSends(o.text, o.at, o.pos) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 		}
@@ -1244,7 +1268,7 @@ func (s *Seat) fold(o obs) {
 		}
 		s.mu.Unlock()
 	case "user":
-		for _, id := range s.matchPending(o.text) {
+		for _, id := range s.matchSends(o.text, time.Time{}, o.pos) {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		}
 	case "working":

@@ -21,6 +21,9 @@ type obs struct {
 	resets     string
 	exhausted  bool
 	tool       bool // activity/image: counts as a tool call
+	// pos is where the line it was read from starts in the transcript
+	// (the watcher sets it).
+	pos int64
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
