@@ -26,7 +26,8 @@ func newClosingSeat(reply string) *closingSeat {
 	return &closingSeat{fakeSeat: newFakeSeat(reply), entered: make(chan string, 8), gone: make(chan struct{})}
 }
 
-func (c *closingSeat) Send(id, text, mode string) (string, error) {
+func (c *closingSeat) Send(id, text, mode string) (_ string, err error) {
+	defer c.sendStart(id)(&err)
 	c.entered <- text
 	<-c.gone
 	return "", relay.ErrClosed

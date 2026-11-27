@@ -19,9 +19,10 @@ type quietSeat struct {
 	ids   []string
 }
 
-func (q *quietSeat) Send(id, text, mode string) (string, error) {
+func (q *quietSeat) Send(id, text, mode string) (_ string, err error) {
+	defer q.sendStart(id)(&err)
 	q.fakeSeat.mu.Lock()
-	err := q.fakeSeat.sendErr
+	err = q.fakeSeat.sendErr
 	q.fakeSeat.mu.Unlock()
 	if err != nil {
 		return "", err

@@ -28,13 +28,13 @@ type sr4CommandSeat struct {
 	once    sync.Once
 }
 
-func (s *sr4CommandSeat) Send(id, text, mode string) (string, error) {
+func (s *sr4CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	first := false
 	s.once.Do(func() { first = true })
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
-	s.typing(id) // not quiet until the seat says the command delivered
+	defer s.sendStart(id)(&err) // as relay.Seat: not quiet from Send's start to its delivered
 	s.entered <- text
 	<-s.gate
 	s.fakeSeat.mu.Lock()

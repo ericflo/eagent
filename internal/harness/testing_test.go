@@ -424,11 +424,16 @@ type fakeSeat struct {
 	// watcher stops; what it would say after that is lost.
 	closed bool
 	// What Snapshot says, as a real seat keeps it: the state and dialog it
-	// last said, the sends typed (typing) and not yet said delivered, and
-	// whether it has said it is quiet (KindQuiet) since its last other news.
+	// last said, the Sends under way (sendStart), the sends sent and not yet
+	// said delivered, and whether it has said it is quiet (KindQuiet) since
+	// its last other news.
 	state, dialog string
+	sending       int
 	unsaid        map[string]bool
 	quietSaid     bool
+	// quietTo, when set, is where a quiet said at a Send's end goes (a
+	// seat whose events go out on a channel of its own: k2FeedSeat).
+	quietTo func(relay.Event)
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -437,25 +442,42 @@ func newFakeSeat(reply string) *fakeSeat {
 
 func (f *fakeSeat) Events() <-chan relay.Event { return f.events }
 
-// typing marks send id as typed and not yet said delivered: the seat is not
-// quiet until it says how the send went, as a real seat tracks a send from
-// before it types it.
-func (f *fakeSeat) typing(id string) {
+// sendStart keeps the seat as relay.Seat keeps itself over a Send: not quiet
+// from the Send's start (its sending count) until the send's outcome is said
+// (delivered: an arrival, a command's held delivered, a hand-over's end). A
+// Send that returns an error waits on nothing more, and the seat says it is
+// quiet again if it is. Every fake Send that types calls it first, as
+// `defer s.sendStart(id)(&err)`.
+func (f *fakeSeat) sendStart(id string) func(*error) {
 	f.mu.Lock()
+	f.sending++
 	if f.unsaid == nil {
 		f.unsaid = map[string]bool{}
 	}
 	f.unsaid[id] = true
 	f.mu.Unlock()
+	return func(err *error) {
+		f.mu.Lock()
+		f.sending--
+		if *err != nil {
+			delete(f.unsaid, id)
+			f.quietSaid = false
+		}
+		due, to := !f.closed && f.quietDueLocked(), f.quietTo
+		if due && to == nil {
+			f.events <- relay.Event{Kind: relay.KindQuiet}
+		}
+		f.mu.Unlock()
+		if due && to != nil {
+			to(relay.Event{Kind: relay.KindQuiet})
+		}
+	}
 }
 
-func (f *fakeSeat) Send(id, text, mode string) (string, error) {
-	f.typing(id)
+func (f *fakeSeat) Send(id, text, mode string) (_ string, err error) {
+	defer f.sendStart(id)(&err)
 	f.mu.Lock()
-	err := f.sendErr
-	if err != nil {
-		delete(f.unsaid, id) // nothing typed: the caller reports it
-	}
+	err = f.sendErr
 	if err == nil {
 		f.sent = append(f.sent, text)
 		f.modes = append(f.modes, mode)
@@ -528,10 +550,10 @@ func (f *fakeSeat) stateLocked() string {
 	return f.state
 }
 
-// quietLocked is Status.Quiet: idle, no dialog, no send it has not said
-// delivered. The caller holds f.mu.
+// quietLocked is Status.Quiet: idle, no dialog, no Send under way, no send
+// it has not said delivered. The caller holds f.mu.
 func (f *fakeSeat) quietLocked() bool {
-	return f.stateLocked() == "idle" && f.dialog == "" && len(f.unsaid) == 0
+	return f.stateLocked() == "idle" && f.dialog == "" && f.sending == 0 && len(f.unsaid) == 0
 }
 func (f *fakeSeat) sentTexts() []string {
 	f.mu.Lock()

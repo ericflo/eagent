@@ -27,14 +27,23 @@ type k2FeedSeat struct {
 
 func newK2FeedSeat(t *testing.T) *k2FeedSeat {
 	s := &k2FeedSeat{fakeSeat: newFakeSeat("one"), feed: make(chan relay.Event), gone: make(chan struct{})}
+	s.quietTo = func(ev relay.Event) {
+		// Nothing more is heard once its events have ended (end) or it is
+		// stopped (Kill).
+		defer func() { _ = recover() }()
+		select {
+		case s.feed <- ev:
+		case <-s.gone:
+		}
+	}
 	t.Cleanup(s.end)
 	return s
 }
 
 func (s *k2FeedSeat) Events() <-chan relay.Event { return s.feed }
 
-func (s *k2FeedSeat) Send(id, text, mode string) (string, error) {
-	s.typing(id)
+func (s *k2FeedSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.modes = append(s.modes, mode)

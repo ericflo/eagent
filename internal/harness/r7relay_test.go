@@ -29,7 +29,8 @@ func newPastingSeat() *pastingSeat {
 		fail: &relay.TypingError{Err: errors.New("send-keys Enter: server exited")}}
 }
 
-func (p *pastingSeat) Send(id, text, mode string) (string, error) {
+func (p *pastingSeat) Send(id, text, mode string) (_ string, err error) {
+	defer p.sendStart(id)(&err)
 	p.entered <- id
 	<-p.gone
 	return "", p.fail
@@ -281,7 +282,8 @@ type heldSendSeat struct {
 	result  chan error
 }
 
-func (s *heldSendSeat) Send(id, text, mode string) (string, error) {
+func (s *heldSendSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.entered <- id
 	if err := <-s.result; err != nil {
 		return "", err

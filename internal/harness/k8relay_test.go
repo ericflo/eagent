@@ -14,11 +14,11 @@ import (
 )
 
 // sr5CommandSeat types one of the agent's own commands as relay.Seat does
-// (relay's TestSR5SeatIsQuietWhileItTypesOneOfTheAgentsOwnCommands): while
-// it is pasted and entered nothing tracks it, so Snapshot says quiet. The
-// fake seats of SR3-1 and SR4-1 call typing(id) here, which the real seat
-// does not do. Enter into a terminal killed meanwhile fails, and the real
-// seat returns a TypingError for a command (Send: command || untrack).
+// (relay's TestSR5SeatIsQuietWhileItTypesOneOfTheAgentsOwnCommands): since
+// ad52f91 its sending count keeps it not quiet for the whole of Send, and
+// the command's held delivered after (sendStart). Enter into a terminal
+// killed meanwhile fails, and the real seat returns a TypingError for a
+// command (Send: command || untrack).
 type sr5CommandSeat struct {
 	*fakeSeat
 	entered chan string
@@ -26,12 +26,13 @@ type sr5CommandSeat struct {
 	once    sync.Once
 }
 
-func (s *sr5CommandSeat) Send(id, text, mode string) (string, error) {
+func (s *sr5CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	first := false
 	s.once.Do(func() { first = true })
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
+	defer s.sendStart(id)(&err)
 	s.entered <- text // pasted; typeSettle, then Enter
 	<-s.gate
 	if s.wasKilled() {
@@ -51,7 +52,6 @@ func (s *sr5CommandSeat) Send(id, text, mode string) (string, error) {
 // typed one of its own commands": typedCommand), and EVENTS.md still
 // promises the change waits while a send is "still being typed".
 func TestSR5AChangeWhileACommandIsTypedRestartsTheAgentUnderIt(t *testing.T) {
-	t.Skip("known, not fixed: SR5-1, the seat's (not quiet for the whole of Send)")
 	seat := &sr5CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{})}
 	next := newFakeSeat("two")
 	g := useGatedLaunches(t, []relaySeat{seat, next}, nil)

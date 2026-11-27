@@ -41,7 +41,8 @@ func TestR14AMovedSendThatDidNotGoIsNotSent(t *testing.T) {
 // can still arrive after it was killed (lingerSeat).
 type r14HeldSeat struct{ *lingerSeat }
 
-func (s r14HeldSeat) Send(id, text, mode string) (string, error) {
+func (s r14HeldSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.mu.Unlock()

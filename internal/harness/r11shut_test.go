@@ -105,7 +105,8 @@ type r11StartingSeat struct {
 	once    sync.Once
 }
 
-func (s *r11StartingSeat) Send(id, text, mode string) (string, error) {
+func (s *r11StartingSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.entered <- id
 	<-s.closed
 	return "", relay.ErrClosed

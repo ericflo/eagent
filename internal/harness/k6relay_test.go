@@ -33,13 +33,13 @@ type sr3CommandSeat struct {
 	movedTo string
 }
 
-func (s *sr3CommandSeat) Send(id, text, mode string) (string, error) {
+func (s *sr3CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	first := false
 	s.once.Do(func() { first = true })
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
-	s.typing(id) // not quiet until the seat says the command delivered
+	defer s.sendStart(id)(&err) // as relay.Seat: not quiet from Send's start to its delivered
 	s.entered <- text
 	<-s.gate
 	s.fakeSeat.mu.Lock()
@@ -163,12 +163,13 @@ type sr3HandSeat struct {
 	spool, file       string
 }
 
-func (s *sr3HandSeat) Send(id, text, mode string) (string, error) {
+func (s *sr3HandSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.entered <- text
 	<-s.gate
 	s.mu.Lock()
 	s.file = filepath.Join(s.spool, fmt.Sprintf("%d-%s.txt", time.Now().UnixNano(), id))
-	err := os.WriteFile(s.file, []byte(text), 0o644)
+	err = os.WriteFile(s.file, []byte(text), 0o644)
 	s.mu.Unlock()
 	s.returned <- id
 	if err != nil {

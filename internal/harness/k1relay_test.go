@@ -19,7 +19,8 @@ type k1QuietSeat struct{ *lingerSeat }
 
 func newK1QuietSeat() k1QuietSeat { return k1QuietSeat{&lingerSeat{newFakeSeat("one")}} }
 
-func (s k1QuietSeat) Send(id, text, mode string) (string, error) {
+func (s k1QuietSeat) Send(id, text, mode string) (_ string, err error) {
+	defer s.sendStart(id)(&err)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.modes = append(s.modes, mode)
