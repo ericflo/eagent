@@ -94,9 +94,23 @@ type keptReply struct {
 	Since   time.Time          `json:"since"`
 }
 
+// lockKept holds the kept file for one process's read and write of it: two
+// watchers (the serve's and `connector run`'s) may stop, or sweep, at once.
+func lockKept(project string) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return filelock.Acquire(ctx, keptFile(project)+".lock")
+}
+
 // writeDown adds the quiet entries, by thread, to those written down that
 // nobody has taken up yet.
 func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
+	unlock, err := lockKept(project)
+	if err != nil {
+		logf("finalechat: could not note the replies kept for the next start: %v", err)
+		return
+	}
+	defer unlock()
 	kept := map[string]keptReply{}
 	if raw, err := os.ReadFile(keptFile(project)); err == nil {
 		_ = json.Unmarshal(raw, &kept)
@@ -118,6 +132,14 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 
 // takeUp keeps, quietly, what an earlier watcher wrote down.
 func (r *replyRetries) takeUp(project string) {
+	if _, err := os.Stat(keptFile(project)); err != nil {
+		return
+	}
+	unlock, err := lockKept(project)
+	if err != nil {
+		return // the next sweep takes it up
+	}
+	defer unlock()
 	raw, err := os.ReadFile(keptFile(project))
 	if err != nil {
 		return

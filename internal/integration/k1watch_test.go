@@ -381,3 +381,32 @@ func TestK1AKeptReplyKeepsItsFirstTimeAcrossARestart(t *testing.T) {
 		t.Fatalf("kept after more than a day: %#v", next.retries.replies)
 	}
 }
+
+// Batch 2, two processes: the serve's watcher and `connector run`'s stop
+// at once, each with a reply kept quietly for a thread of its own. The
+// next watcher takes up both.
+func TestK1TwoWatchersStoppingAtOnceKeepBothReplies(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		project := t.TempDir()
+		var a, b replyRetries
+		a.replies = map[string]pendingReply{"m1": {thread: finalechat.Thread{ExternalID: "eagent:s1"}, msg: finalechat.Message{ID: "m1"}, since: time.Now()}}
+		b.replies = map[string]pendingReply{"m2": {thread: finalechat.Thread{ExternalID: "eagent:s2"}, msg: finalechat.Message{ID: "m2"}, since: time.Now()}}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, r := range []*replyRetries{&a, &b} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				r.writeDown(project, t.Logf)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		next := replyRetries{replies: map[string]pendingReply{}}
+		next.takeUp(project)
+		if _, ok1 := next.replies["m1"]; !ok1 || len(next.replies) != 2 {
+			t.Fatalf("round %d: took up %#v, want both replies", i, next.replies)
+		}
+	}
+}
