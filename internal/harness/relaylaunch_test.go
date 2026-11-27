@@ -152,8 +152,8 @@ func TestRelayRestartRunsOffTheLoop(t *testing.T) {
 	})
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
-		if rel.Model != "gpt-6.2-astra" || len(rt.relayRepick) != 0 {
-			t.Errorf("after the restart: model %q, waiting %v", rel.Model, rt.relayRepick)
+		if _, waiting, _ := rt.nextPick("codex"); rel.Model != "gpt-6.2-astra" || waiting {
+			t.Errorf("after the restart: model %q, waiting %v", rel.Model, rt.relayNext)
 		}
 	})
 
@@ -184,8 +184,8 @@ func TestRelayRestartThatFailsIsExited(t *testing.T) {
 		if rel.State != "exited" || !strings.Contains(rel.Detail, "not on PATH") {
 			t.Errorf("relay after a failed restart: %s %q", rel.State, rel.Detail)
 		}
-		if len(rt.relayRepick) != 0 || rt.relayRoutes()["codex"].Waiting {
-			t.Errorf("the change still waits: %v", rt.relayRepick)
+		if _, ok, _ := rt.nextPick("codex"); ok || rt.relayRoutes()["codex"].Waiting {
+			t.Errorf("the change still waits: %v", rt.relayNext)
 		}
 		if len(rel.Undelivered) != 0 {
 			t.Errorf("held send not settled: %v", rel.Undelivered)
@@ -301,7 +301,7 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 		if rel.Model != "gpt-6.2-astra" {
 			t.Errorf("the launch under way started %q", rel.Model)
 		}
-		if p, ok := rt.relayRepick["codex"]; !ok || p != (relayPick{}) {
+		if p, ok, waiting := rt.nextPick("codex"); !ok || !waiting || p != (relayPick{}) {
 			t.Errorf("the default pick is not waiting after the launch: %v %v", p, ok)
 		}
 	})
@@ -312,8 +312,8 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 	waitRelayStarts(t, rt)
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
-		if rel.Model != "" || len(rt.relayRepick) != 0 {
-			t.Errorf("after the waiting change: model %q, waiting %v", rel.Model, rt.relayRepick)
+		if _, ok, _ := rt.nextPick("codex"); rel.Model != "" || ok {
+			t.Errorf("after the waiting change: model %q, waiting %v", rel.Model, rt.relayNext)
 		}
 	})
 	g.mu.Lock()
@@ -341,8 +341,8 @@ func TestRelayRepickDuringLaunchSamePick(t *testing.T) {
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	rt.sync(func() {
-		if rel := rt.st.Relays["codex"]; rel.Model != "gpt-6.2-astra" || len(rt.relayRepick) != 0 {
-			t.Errorf("after the launch: model %q, waiting %v", rel.Model, rt.relayRepick)
+		if _, ok, _ := rt.nextPick("codex"); rt.st.Relays["codex"].Model != "gpt-6.2-astra" || ok {
+			t.Errorf("after the launch: model %q, waiting %v", rt.st.Relays["codex"].Model, rt.relayNext)
 		}
 	})
 }

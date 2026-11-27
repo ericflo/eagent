@@ -66,7 +66,7 @@ func TestRV16WaitingChangeAppliesWhenTypingFailsWhileIdle(t *testing.T) {
 	if !k2Until(3*time.Second, func() bool { return k1Restarting(rt) }) {
 		var waiting bool
 		var state string
-		rt.sync(func() { _, waiting = rt.relayRepick["codex"]; state = rt.st.Relays["codex"].State })
+		rt.sync(func() { _, _, waiting = rt.nextPick("codex"); state = rt.st.Relays["codex"].State })
 		t.Fatalf("idle (%s), nothing awaited, change still waiting=%v: it is never applied", state, waiting)
 	}
 	feed.waitGone(t)

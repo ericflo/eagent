@@ -24,17 +24,57 @@ func (r *Runtime) relayDefaults(rel *state.Relay) (model, effort string) {
 	return relay.ProfileDefaults(rel.Agent, p.Model, p.Effort)
 }
 
+// nextPick (the entry) is a change of model or effort a relay starts with
+// next: one that waits (for its turn to end, a dialog, a start under way),
+// or, once its agent exited, one kept for its next start (kept).
+type nextPick struct {
+	pick relayPick
+	kept bool
+}
+
+// nextPick says the change relay name starts with next, if any, and whether
+// it waits (else it is kept for its next start). A stopped relay has none:
+// a later start under its name runs what it is asked to. The one reader of
+// relayNext. Loop goroutine.
+func (r *Runtime) nextPick(name string) (pick relayPick, ok, waiting bool) {
+	np, ok := r.relayNext[name]
+	if rel := r.st.Relays[name]; !ok || rel == nil || rel.Ended {
+		return relayPick{}, false, false
+	}
+	return np.pick, true, !np.kept
+}
+
+// setNextPick sets the change relay name starts with next, waiting or kept
+// (keep), or clears it (pick nil). The one writer of relayNext; callers
+// bring the live settings and the thread header up to date. Loop goroutine.
+func (r *Runtime) setNextPick(name string, pick *relayPick, keep bool) {
+	if pick == nil {
+		delete(r.relayNext, name)
+		return
+	}
+	if r.relayNext == nil {
+		r.relayNext = map[string]nextPick{}
+	}
+	r.relayNext[name] = nextPick{*pick, keep}
+}
+
+// runsNext is what relay rel starts with next: the change it starts with
+// (nextPick), else the picks it runs now.
+func (r *Runtime) runsNext(rel *state.Relay) relayPick {
+	if pick, ok, _ := r.nextPick(rel.Name); ok {
+		return pick
+	}
+	return relayPick{rel.Model, rel.Effort}
+}
+
 // relayRoutes are the session's relays as live settings: each one's picks
-// (a change still waiting included) and what leaving them alone gives.
+// (a change still waiting, or kept for its next start, included) and what
+// leaving them alone gives.
 func (r *Runtime) relayRoutes() map[string]runtimecontrol.RelayRoute {
 	out := map[string]runtimecontrol.RelayRoute{}
 	for _, rel := range r.st.ActiveRelays() {
-		pick, waiting := r.relayRepick[rel.Name]
-		if next, ok := r.relayNext[rel.Name]; !waiting && ok {
-			pick = next // what its next start runs
-		} else if !waiting {
-			pick = relayPick{rel.Model, rel.Effort}
-		}
+		_, _, waiting := r.nextPick(rel.Name)
+		pick := r.runsNext(rel)
 		model, effort := r.relayDefaults(rel)
 		out[rel.Name] = runtimecontrol.RelayRoute{Agent: rel.Agent, Model: pick.Model, Effort: pick.Effort, DefaultModel: model, DefaultEffort: effort, Waiting: waiting}
 	}
@@ -87,21 +127,18 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 	if job := r.relays.launch(name); job != nil && job.name == name {
 		// A start of this relay is under way: what it runs next is what
 		// that start launches, not what the record says it runs now.
-		if r.relayRepick == nil {
-			r.relayRepick = map[string]relayPick{}
-		}
 		if pick == job.pick {
 			// Nothing waits beyond the start (finishLaunch clears a pick
 			// equal to the one it started); one waiting already is dropped.
-			if _, waiting := r.relayRepick[name]; waiting {
-				r.relayRepick[name] = pick
+			if _, ok, _ := r.nextPick(name); ok {
+				r.setNextPick(name, &pick, false)
 			}
 			r.syncRelaySettings()
 			r.publishRelayMeta()
 			return rel.Who() + " is already starting again with " + r.pickText(rel, pick) + ".", nil
 		}
 		// Applied once the new agent is idle (applyWaitingRepick).
-		r.relayRepick[name] = pick
+		r.setNextPick(name, &pick, false)
 		r.syncRelaySettings()
 		r.publishRelayMeta()
 		return rel.Who() + " is starting again; it changes to " + r.pickText(rel, pick) + " once it is up.", nil
@@ -110,16 +147,15 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		return "", err
 	}
 	if pick == (relayPick{rel.Model, rel.Effort}) {
-		delete(r.relayRepick, name)
+		// What it runs: a change it would start with next (waiting, or kept
+		// since its agent exited) is taken back.
+		r.setNextPick(name, nil, false)
 		r.syncRelaySettings()
 		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
 	if held := r.heldBack(rel); held != "" {
-		if r.relayRepick == nil {
-			r.relayRepick = map[string]relayPick{}
-		}
-		r.relayRepick[name] = pick
+		r.setNextPick(name, &pick, false)
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
 		then := " it starts again with " + r.pickText(rel, pick)
@@ -178,15 +214,12 @@ func (r *Runtime) pickText(rel *state.Relay, pick relayPick) string {
 func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...heldSend) error {
 	job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, pick)
 	if err != nil {
-		delete(r.relayRepick, rel.Name)
+		r.setNextPick(rel.Name, nil, false)
 		r.syncRelaySettings()
 		r.publishRelayMeta()
 		return err
 	}
-	if r.relayRepick == nil {
-		r.relayRepick = map[string]relayPick{}
-	}
-	r.relayRepick[rel.Name] = pick
+	r.setNextPick(rel.Name, &pick, false)
 	r.beginLaunch(job, rel.Name)
 	if len(held) > 0 {
 		r.relays.mu.Lock()
@@ -271,13 +304,13 @@ func (r *Runtime) busyWith(rel *state.Relay) string {
 // turn to end, unless something still holds it back (heldBack). Loop
 // goroutine.
 func (r *Runtime) applyWaitingRepick(name string) {
-	pick, ok := r.relayRepick[name]
+	pick, ok, waiting := r.nextPick(name)
 	rel := r.st.Relays[name]
-	if !ok || rel == nil {
+	if !ok || !waiting || rel == nil {
 		return
 	}
 	if !rel.Active() {
-		delete(r.relayRepick, name)
+		r.setNextPick(name, nil, false)
 		r.syncRelaySettings()
 		return
 	}
@@ -288,11 +321,7 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		// Not by starting it again: an agent that exited (the user's own
 		// /exit among the ways) stays so. The change is what its next start
 		// runs (relaunch), no longer one that waits, and that start is one.
-		delete(r.relayRepick, name)
-		if r.relayNext == nil {
-			r.relayNext = map[string]relayPick{}
-		}
-		r.relayNext[name] = pick
+		r.setNextPick(name, &pick, true)
 		r.syncRelaySettings()
 		r.publishRelayMeta()
 		return

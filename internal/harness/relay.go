@@ -778,17 +778,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		}
 	}
 	r.startFailed = err != nil
-	if pick, ok := r.relayRepick[job.name]; ok && (err != nil || pick == job.pick) {
-		delete(r.relayRepick, job.name)
-	}
-	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended {
-		// A change still waiting under this name was for the agent that
-		// was stopped (no change can be asked of a stopped relay), not
-		// for the one starting now; so was a pick kept for its next start.
-		delete(r.relayRepick, job.name)
-		delete(r.relayNext, job.name)
-	} else if err == nil {
-		delete(r.relayNext, job.name) // this start ran it
+	// The change this relay was to start with is done with: one waiting
+	// that this start ran or that failed, one kept for its next start once
+	// a start has run, any once the relay was stopped (it was for the agent
+	// stopped: a start under a stopped relay's name runs what it is asked).
+	// A newer one waiting stays, for below; a kept one survives a failure.
+	pick, ok, waiting := r.nextPick(job.name)
+	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended || ok && (waiting && (err != nil || pick == job.pick) || !waiting && err == nil) {
+		r.setNextPick(job.name, nil, false)
 	}
 	if err != nil {
 		var waiting []string // held for the start: reported below
@@ -934,7 +931,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
-	if pick, ok := r.relayRepick[job.name]; ok && job.replaces == job.name {
+	if pick, ok, waiting := r.nextPick(job.name); ok && waiting && job.replaces == job.name {
 		// A newer change waited for this restart (one equal to it was
 		// dropped above): it replaces the agent just started now, and what
 		// waited goes to the agent it brings up, not into this one.
@@ -1059,11 +1056,7 @@ func (r *Runtime) relaunch(name string, check func(*state.Relay) error) (string,
 				return nil, err
 			}
 		}
-		pick, next := r.relayNext[rel.Name]
-		if !next {
-			pick = relayPick{rel.Model, rel.Effort}
-		}
-		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, pick)
+		job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, r.runsNext(rel))
 		if err != nil {
 			return nil, err
 		}
@@ -2136,10 +2129,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				// relay as it is now: a restart since it was looked up
 				// may have changed its picks.
 				cur := r.st.Relays[rel.Name]
-				next := relayPick{cur.Model, cur.Effort}
-				if p, ok := r.relayRepick[rel.Name]; ok {
-					next = p
-				}
+				next := r.runsNext(cur)
 				for _, f := range []struct {
 					in  string
 					out *string
@@ -3106,11 +3096,7 @@ func (r *Runtime) relayCommand(fields []string, client *clientcaps.Caps) {
 				if active := r.st.ActiveRelays(); len(active) > 0 {
 					rel := active[0]
 					agent = rel.Agent
-					pick := relayPick{rel.Model, rel.Effort}
-					if p, ok := r.relayRepick[rel.Name]; ok {
-						pick = p
-					}
-					now = rel.Who() + " runs " + r.pickText(rel, pick) + "."
+					now = rel.Who() + " runs " + r.pickText(rel, r.runsNext(rel)) + "."
 				}
 			})
 			if len(args) == 0 {
@@ -3247,8 +3233,8 @@ func (r *Runtime) relayThreadMeta() any {
 	// waits for its turn to end, in words.
 	profile := r.cfg.Relay.RelayProfiles()[rel.Profile]
 	m["model"], m["effort"] = relay.ProfileDefaults(rel.Agent, firstNonEmpty(rel.Model, profile.Model), firstNonEmpty(rel.Effort, profile.Effort))
-	if pick, waiting := r.relayRepick[rel.Name]; waiting {
-		m["pending"] = r.pickText(rel, pick)
+	if pick, ok, _ := r.nextPick(rel.Name); ok {
+		m["pending"] = r.pickText(rel, pick) // waiting, or kept for its next start
 	}
 	var alternatives []string
 	for _, name := range r.cfg.Relay.RelayProfileNames() {

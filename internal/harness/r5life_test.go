@@ -140,8 +140,8 @@ func TestAWaitingModelChangeDiesWithTheAgentItWasFor(t *testing.T) {
 		if rt.relays.launch("codex") != nil {
 			t.Error("the new agent is being started again with the stopped agent's model change")
 		}
-		if len(rt.relayRepick) != 0 || rt.relayRoutes()["codex"].Waiting {
-			t.Errorf("the stopped agent's change still waits: %v", rt.relayRepick)
+		if _, ok, _ := rt.nextPick("codex"); ok || rt.relayRoutes()["codex"].Waiting {
+			t.Errorf("the stopped agent's change still waits: %v", rt.relayNext)
 		}
 	})
 	if fresh.wasKilled() {
