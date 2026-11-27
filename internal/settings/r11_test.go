@@ -22,7 +22,7 @@ func r11Undo(t *testing.T, project, before string, edits []control.Edit) string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before)
+	inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before, string(desired))
 	if err != nil {
 		t.Fatal(err)
 	}

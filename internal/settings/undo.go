@@ -14,7 +14,8 @@ import (
 
 // ConfigInverse contains only the known fields the original command touched.
 // Unknown local values and unrelated edits never enter the reversal or result.
-func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposal, error) {
+// desiredRaw is the file the command wrote (a journal's desired).
+func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (control.Proposal, error) {
 	inverse := control.Proposal{Operation: "settings.apply"}
 	if original.Operation != "settings.apply" || len(original.Edits) == 0 {
 		return inverse, fmt.Errorf("this command has no reversible settings edits")
@@ -38,6 +39,22 @@ func ConfigInverse(original control.Proposal, beforeRaw string) (control.Proposa
 		}
 		if v, had := pointerValue(before, route); (!had || v == nil) && route == "/summarizer/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Op == "set" && strings.HasPrefix(e.Key, route+"/") }) {
 			extra = routeLeaves
+		}
+		// A preset chosen or unset alone is a pick of the main route, which
+		// can give it fields or take its model out (routePicks): the ones
+		// the command wrote are put back, and no other.
+		if !picked && route == "/model" && slices.ContainsFunc(original.Edits, func(e control.Edit) bool { return e.Key == "/preset" }) {
+			desired, err := fileValues(desiredRaw)
+			if err != nil {
+				return inverse, err
+			}
+			for _, leaf := range append(slices.Clone(routePickFields), "model") {
+				b, hadB := pointerValue(before, route+"/"+leaf)
+				d, hadD := pointerValue(desired, route+"/"+leaf)
+				if hadB != hadD || !reflect.DeepEqual(b, d) {
+					extra = append(extra, leaf)
+				}
+			}
 		}
 		for _, leaf := range extra {
 			if !slices.Contains(keys, route+"/"+leaf) {

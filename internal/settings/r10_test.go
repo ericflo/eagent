@@ -38,7 +38,7 @@ func TestR10UndoKeepsANullClearedField(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before)
+			inverse, err := ConfigInverse(control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Edits: edits}, before, string(desired))
 			if err != nil {
 				t.Fatal(err)
 			}
