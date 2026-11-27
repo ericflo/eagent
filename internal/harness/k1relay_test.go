@@ -4,7 +4,9 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
@@ -222,6 +224,168 @@ func TestK1ABriefAfterARestartHandsOverFromTheAgentThatDidTheWork(t *testing.T) 
 			t.Errorf("typed %v: the brief after a restart:\n%s\nwant, as before it:\n%s", typed, restarted, live)
 		}
 	}
+}
+
+// k1HeldSeat is an agent whose terminal the test can hold blocked (a
+// dialog it reports, or quiet in a turn): Snapshot says what is set.
+type k1HeldSeat struct {
+	*lingerSeat
+	smu   sync.Mutex
+	state string
+}
+
+func newK1HeldSeat() *k1HeldSeat {
+	return &k1HeldSeat{lingerSeat: &lingerSeat{newFakeSeat("one")}, state: "idle"}
+}
+
+func (s *k1HeldSeat) set(state string) {
+	s.smu.Lock()
+	s.state = state
+	s.smu.Unlock()
+}
+
+func (s *k1HeldSeat) Snapshot() relay.Status {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	return relay.Status{State: s.state, Since: time.Now()}
+}
+
+const k1Dialog = "Codex is waiting on a dialog: Allow rm -rf build?; see relay_screen and answer it with relay_control keys"
+
+// k1Relay waits until the Codex relay on the record meets cond.
+func k1Relay(t *testing.T, rt *Runtime, what string, cond func(*state.Relay) bool) {
+	t.Helper()
+	waitFor(t, what, func() (ok bool) {
+		rt.sync(func() { ok = cond(rt.st.Relays["codex"]) })
+		return ok
+	})
+}
+
+// k1Repick asks for another model and returns what it said.
+func k1Repick(t *testing.T, rt *Runtime) string {
+	t.Helper()
+	var msg string
+	var err error
+	rt.sync(func() { msg, err = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}) })
+	if err != nil {
+		t.Fatalf("repick: %v", err)
+	}
+	return msg
+}
+
+func k1Restarting(rt *Runtime) (yes bool) {
+	rt.sync(func() { yes = rt.relays.launch("codex") != nil })
+	return yes
+}
+
+// k1AppliedOnceIdle has the dialog end (the seat says idle) and checks that
+// the waiting change starts the agent again then, and only then.
+func k1AppliedOnceIdle(t *testing.T, rt *Runtime, g *gatedLaunches, seat *k1HeldSeat) {
+	t.Helper()
+	if k1Restarting(rt) {
+		t.Fatal("the agent was started again under its dialog")
+	}
+	k1Applied(t, rt, g, seat)
+}
+
+// k1Applied has the seat say idle and checks the waiting change has
+// started the agent again with the new model.
+func k1Applied(t *testing.T, rt *Runtime, g *gatedLaunches, seat *k1HeldSeat) {
+	t.Helper()
+	seat.set("idle")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "idle"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
+}
+
+// A11. A model change waits for Codex's turn to end. A dialog the agent
+// reports comes up; it still writes progress and ends its turn under it.
+// The record stays blocked through the progress, the turn's end does not
+// start the agent again under its dialog, and the change applies once the
+// seat says the dialog is over.
+func TestK1AWaitingModelChangeIsNotAppliedUnderADialog(t *testing.T) {
+	seat := newK1HeldSeat()
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	seat.set("working")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
+	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
+		t.Fatalf("repick in a turn: %q", msg)
+	}
+	seat.set("blocked")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: k1Dialog}, relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
+	k1Relay(t, rt, "the progress recorded", func(rel *state.Relay) bool { return len(rel.Recent) == 1 })
+	rt.sync(func() {
+		if st := rt.st.Relays["codex"].State; st != "blocked" {
+			t.Errorf("the record says %s under the dialog, want blocked", st)
+		}
+	})
+	seat.emit(relay.Event{Kind: relay.KindTurn, Text: "Done."})
+	k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 })
+	k1AppliedOnceIdle(t, rt, g, seat)
+}
+
+// A11, a change asked while the dialog is up (the earlier fix's case: the
+// record kept blocked through progress, and the change started the agent
+// again at once, mid-turn, under its dialog). It waits, also when the
+// dialog came up between turns, and applies once the dialog is over.
+func TestK1AModelChangeAskedUnderADialogWaits(t *testing.T) {
+	for _, midTurn := range []bool{true, false} {
+		seat := newK1HeldSeat()
+		g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+		rt := newLaunchRuntime(t)
+		if midTurn {
+			seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+		}
+		seat.set("blocked")
+		seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: k1Dialog})
+		if midTurn {
+			seat.emit(relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
+		}
+		k1Relay(t, rt, "the dialog recorded", func(rel *state.Relay) bool {
+			if midTurn {
+				return len(rel.Recent) == 1
+			}
+			return rel.State == "blocked"
+		})
+		if msg := k1Repick(t, rt); k1Restarting(rt) || strings.Contains(msg, "is starting again") {
+			t.Fatalf("mid-turn %v: the change started the agent under its dialog: %q", midTurn, msg)
+		}
+		if midTurn {
+			seat.emit(relay.Event{Kind: relay.KindTurn, Text: "Done."})
+			k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 })
+		}
+		k1AppliedOnceIdle(t, rt, g, seat)
+	}
+}
+
+// A11, its bound: an agent on autopilot blocked for going quiet in a turn
+// ends that turn, and its seat says idle just after (here while the turn
+// is being recorded). A change that waited applies then, and the autopilot
+// idle check is armed at the turn as before.
+func TestK1AQuietAgentsTurnStillAppliesTheChangeAndArmsTheIdleCheck(t *testing.T) {
+	seat := newK1HeldSeat()
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rt.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: "codex", Instruction: "keep going", Decide: true}))
+	})
+	seat.set("working")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
+	k1Repick(t, rt)
+	seat.set("blocked")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n…"}, relay.Event{Kind: relay.KindTurn, Text: "Built it."})
+	k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 && rel.State == "idle" })
+	rt.sync(func() {
+		if rt.autopilotChecks["codex"] == nil {
+			t.Error("the autopilot idle check was not armed at the quiet agent's turn")
+		}
+	})
+	k1Applied(t, rt, g, seat)
 }
 
 // A5, Stop session: it stops the agents as relay_control stop does, and

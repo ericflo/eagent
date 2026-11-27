@@ -13,8 +13,8 @@ import (
 // A relay's model and reasoning effort can change while it runs: from the
 // phone's thread settings (the session's live settings) or when the user
 // asks eagent. The agent starts again on its own conversation with the new
-// flags; while it is in a turn, the change waits for that turn to end so no
-// work is cut off.
+// flags; while it is in a turn, or its terminal holds it blocked, the change
+// waits for that to end so no work is cut off and no dialog killed.
 
 // relayDefaults is what a relay runs when the session picks nothing: its
 // profile's model and effort, else the agent's own configured defaults.
@@ -114,13 +114,16 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
-	if rel.State == "working" {
+	if held := r.seatBlocked(name); rel.State == "working" || held {
 		if r.relayRepick == nil {
 			r.relayRepick = map[string]relayPick{}
 		}
 		r.relayRepick[name] = pick
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
+		if held {
+			return rel.Who() + " is blocked (something on its screen waits for an answer, or it has gone quiet in a turn); it starts again with " + r.pickText(rel, pick) + " once that is over and it is between turns, on the same conversation.", nil
+		}
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
@@ -181,8 +184,18 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
 	return nil
 }
 
+// seatBlocked says whether the relay's terminal holds its agent blocked
+// now: on a dialog (pi's holds it through a turn end it writes under one,
+// which the record takes as idle), quiet in a turn, or a start not yet
+// ready. No change starts it again then: the record's state alone cannot
+// say so. Loop goroutine.
+func (r *Runtime) seatBlocked(name string) bool {
+	seat := r.relays.get(name)
+	return seat != nil && seat.Snapshot().State == "blocked"
+}
+
 // applyWaitingRepick starts a relay again with a change that waited for its
-// turn to end. Loop goroutine.
+// turn to end, unless its seat holds it blocked. Loop goroutine.
 func (r *Runtime) applyWaitingRepick(name string) {
 	pick, ok := r.relayRepick[name]
 	rel := r.st.Relays[name]
@@ -196,6 +209,9 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	}
 	if r.relays.launch(name) != nil {
 		return // a start under way applies it when it is up
+	}
+	if r.seatBlocked(name) {
+		return // applied when its seat says it is idle
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: "relay", Text: "could not start " + rel.Who() + " again with " + r.pickText(rel, pick) + ": " + err.Error()}))

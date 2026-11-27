@@ -982,6 +982,12 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.append(event.New(event.RelayInner, event.ActorHarness, event.RelayInnerData{Name: name, InnerID: ev.InnerID, Transcript: ev.Transcript}))
 	case relay.KindState:
 		if cur := r.st.Relays[name]; cur != nil && cur.State == ev.State && ev.Detail == "" {
+			if ev.State == "idle" {
+				// Idle on the record already (its turn ended while its
+				// seat held it blocked): a change that waited for the
+				// seat applies now.
+				r.applyWaitingRepick(name)
+			}
 			return
 		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000)}))
