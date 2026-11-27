@@ -68,20 +68,28 @@ const AnnounceEnv = "EAGENT_ANNOUNCE_SESSION"
 var (
 	starterMu sync.Mutex
 	starter   SessionStarter = spawnDetachedSession
+	// starterConfig is the configuration the starter starts a project's
+	// sessions on, when its host says (an eagent server's own: its bundle
+	// and preset over the project's); nil, or an error, is the project's.
+	starterConfig func(project string) (config.Config, error)
 )
 
 // SetSessionStarter makes phone-initiated sessions run through fn (an eagent
-// server hosts them in-process). It returns a function that restores the
+// server hosts them in-process), and on cfg's configuration when given (what
+// the phone is offered follows it). It returns a function that restores the
 // previous starter.
-func SetSessionStarter(fn SessionStarter) func() {
+func SetSessionStarter(fn SessionStarter, cfg ...func(project string) (config.Config, error)) func() {
 	starterMu.Lock()
 	defer starterMu.Unlock()
-	previous := starter
-	starter = fn
+	previous, previousConfig := starter, starterConfig
+	starter, starterConfig = fn, nil
+	if len(cfg) > 0 {
+		starterConfig = cfg[0]
+	}
 	return func() {
 		starterMu.Lock()
 		defer starterMu.Unlock()
-		starter = previous
+		starter, starterConfig = previous, previousConfig
 	}
 }
 
@@ -208,7 +216,19 @@ var agentInstalled = relay.Installed
 // relayProfiles describes the agents a session started from the phone may
 // relay to, for the app's agent picker: name, program, and a label.
 func relayProfiles(project string) []map[string]any {
-	cfg, err := config.Load(project, "")
+	// The configuration a phone-started session runs on: its host's, else
+	// the project's.
+	starterMu.Lock()
+	hostConfig := starterConfig
+	starterMu.Unlock()
+	var cfg config.Config
+	err := fmt.Errorf("no host configuration")
+	if hostConfig != nil {
+		cfg, err = hostConfig(project)
+	}
+	if err != nil {
+		cfg, err = config.Load(project, "")
+	}
 	if err != nil {
 		cfg = config.Defaults()
 	}
