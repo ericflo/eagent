@@ -1431,8 +1431,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
 		// No Enter goes while a dialog is up: known ones were answered
-		// above, and one the agent reports holds the seat.
-		if press.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
+		// above, and one the agent reports holds the seat. Nor while it is
+		// blocked for going quiet: it is busy, or shows a dialog the seat
+		// does not know.
+		if press.nudges < 2 && start != "" && strings.Contains(screen, start) && state == "idle" && s.dialogUp == "" {
 			press.nudges++
 			press.at = now
 			s.mu.Unlock()
@@ -1441,7 +1443,11 @@ func (s *Seat) checkScreen(now time.Time) {
 		}
 	}
 	if stuck := report; stuck != nil {
-		if state != "working" && now.Sub(s.stateAt) > 15*time.Second {
+		// A quiet agent whose screen or status still says it works reads
+		// the send at its next step, as a working one does.
+		wr, reports := s.agent.(workReporter)
+		working := state == "working" || s.hung && (s.busy(screen) || reports && wr.reportedWorking(s))
+		if !working && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
