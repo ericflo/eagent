@@ -294,16 +294,19 @@ func (m *imageMemory) accept(paths []string) {
 	}
 }
 
-// about returns which pictures of a refused request the refusal is about.
-// It is about a picture the provider has not taken: one this client never
-// saw go through, and that came after the model's last reply (what stands
-// before a reply went through in the call that produced it, whichever
-// client made it). When there is no such picture, every picture this
-// client never saw go through; when there is none of those either, or all
-// is set, all of them.
-func (m *imageMemory) about(req Request, all bool) []string {
+// refuse remembers which pictures of a refused request the refusal is
+// about, and keeps the new ones to be reported. It is about a picture the
+// provider has not taken: one this client never saw go through, and that
+// came after the model's last reply (what stands before a reply went
+// through in the call that produced it, whichever client made it). When
+// there is no such picture, every picture this client never saw go
+// through; when there is none of those either, or all is set, all of them.
+func (m *imageMemory) refuse(req Request, all bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.refused == nil {
+		m.refused = map[string]bool{}
+	}
 	last := -1
 	for i, msg := range req.Messages {
 		if msg.Role == "assistant" {
@@ -330,17 +333,6 @@ func (m *imageMemory) about(req Request, all bool) []string {
 		fresh = unseen
 	case len(fresh) == 0:
 		fresh = paths
-	}
-	return fresh
-}
-
-// refuse remembers the pictures as refused, and keeps the new ones to be
-// reported.
-func (m *imageMemory) refuse(fresh []string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.refused == nil {
-		m.refused = map[string]bool{}
 	}
 	for _, p := range fresh {
 		if !m.refused[p] {
@@ -748,13 +740,6 @@ var ErrIdle = errors.New("stream idle timeout")
 // signalled completion.
 var ErrTruncatedStream = errors.New("stream ended before completion")
 
-// tooLarge reports a request over the provider's size limit: a 413, or a
-// prompt too long for the model.
-func tooLarge(err error) bool {
-	var ae *APIError
-	return errors.As(err, &ae) && (ae.Status == 413 || ae.ContextOverflow())
-}
-
 // TakeRefusedImages returns the pictures a provider refused that no
 // response has reported: those of a call that left a picture out and then
 // failed for another reason. A caller that keeps a record asks after a
@@ -797,34 +782,16 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 				if c.OnRetry != nil {
 					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
 				}
-				// A request too large may be so for its text alone: the
-				// pictures it leaves out are held, and written down as
-				// refused only once a retry without them is not too large.
-				var held []string
-				if out := c.images.about(req, false); tooLarge(err) {
-					held, req = out, req.WithRefused(out)
-				} else {
-					c.images.refuse(out)
-				}
+				c.images.refuse(req, false)
 				req = c.images.leaveOut(req)
 				obs.reset()
 				resp, err = c.once(callCtx, req, obs)
-				if !tooLarge(err) {
-					c.images.refuse(held)
-				}
 				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
 					// Still refused over pictures: leave them all out.
-					if out := c.images.about(req, true); tooLarge(err) {
-						held, req = append(held, out...), req.WithRefused(out)
-					} else {
-						c.images.refuse(out)
-					}
+					c.images.refuse(req, true)
 					req = c.images.leaveOut(req)
 					obs.reset()
 					resp, err = c.once(callCtx, req, obs)
-					if !tooLarge(err) {
-						c.images.refuse(held)
-					}
 				}
 			} else {
 				if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
