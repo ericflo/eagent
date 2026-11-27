@@ -70,12 +70,13 @@ func TestAntigravityUnknownStateNameFallsTheSafeWay(t *testing.T) {
 	starting := newSeat(Spec{Name: "antigravity"}, antigravityAgent{}, &fakeHost{alive: true, screen: "loading"}, "y", "")
 	starting.stateAt = start.Add(-30 * time.Second)
 	starting.checkScreen(start)
+	starting.checkScreen(start.Add(1500 * time.Millisecond)) // two checks in a row agree
 	if st := starting.Snapshot().State; st != "blocked" {
 		t.Fatalf("slow start: %s", st)
 	}
 	starting.host.(*fakeHost).screen = screen
-	starting.checkScreen(start.Add(1500 * time.Millisecond))
-	starting.checkScreen(start.Add(3000 * time.Millisecond)) // two checks in a row agree
+	starting.checkScreen(start.Add(3000 * time.Millisecond))
+	starting.checkScreen(start.Add(4500 * time.Millisecond)) // and again
 	if st := starting.Snapshot().State; st != "idle" {
 		t.Fatalf("at its prompt after a slow start, with an unknown state name, the seat is %s", st)
 	}

@@ -2193,7 +2193,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		// prompt appears: the start is over once the agent's own screen
 		// has settled (two looks in a row, a screen check apart).
 		s.setState("idle", "")
-	} else if state == "starting" && since > 25*time.Second {
+	} else if state == "starting" && saw == sawOther && since > 25*time.Second {
+		// (Not on a check with no verdict: the first look at a prompt
+		// that came up late, or after a startup dialog was answered,
+		// decides nothing, and the next one finds the start over.)
 		s.mu.Lock()
 		s.stuck = true // set before the event, which a change looks at
 		s.mu.Unlock()
