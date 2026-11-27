@@ -151,6 +151,7 @@ func (r *Runtime) pollInbox() {
 		}
 	}
 	sort.Strings(names)
+	leaving := false // a file was left for the next run in this look
 	for _, name := range names {
 		if r.recordFailed {
 			// Nothing is taken off the inbox that cannot go on the
@@ -190,11 +191,14 @@ func (r *Runtime) pollInbox() {
 			// this one before its first tick. Messages and answers are kept.
 			_ = os.Remove(path)
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
-		case r.loopGone() && (id == "" || !inboxWords(msg, r.ownCommand)):
-			// The run's last look, its loop gone (finish): nothing can be
-			// carried out now, so a command, a stop or a dismissal stays in
-			// the inbox for the next run, as on main. Words are recorded,
-			// kept for the next run (below).
+		case leaving || (r.ending || r.loopGone()) && (id == "" || !inboxWords(msg, r.ownCommand)):
+			// A run that is ending carries out nothing more (its work
+			// would fail, or its answer go unread once the loop has
+			// closed): a command, a stop or a dismissal stays in the inbox
+			// for the next run, as on main, and so does every file after
+			// it, which the next run then takes in the order written.
+			// Words before it are recorded, kept for the next run (below).
+			leaving = true
 			continue
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			if id != "" && (msg.Type == "message" || msg.Type == "") {

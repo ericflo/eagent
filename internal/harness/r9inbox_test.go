@@ -98,9 +98,10 @@ func TestR9InboxWordsWhoseWriteFailedAreTypedOnce(t *testing.T) {
 	}
 }
 
-// A command after a stop in the same poll is carried out by the ending
-// run, as before: only words are left for the next one.
-func TestR9InboxACommandAfterAStopIsNotLeft(t *testing.T) {
+// A command after a stop in the same poll is not taken by the ending run,
+// whose loop is about to stop (its work would fail or its reply be
+// dropped): its file stays, and the next run carries it out.
+func TestR9InboxACommandAfterAStopIsLeftForTheNextRun(t *testing.T) {
 	ui := &r8cHelpUI{}
 	rt := r8cNew(t, ui)
 	ui.dir = InboxDir(rt.sess.Path)
@@ -111,10 +112,17 @@ func TestR9InboxACommandAfterAStopIsNotLeft(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.pollInbox()
-	if !rt.ending || len(ui.files) != 1 {
-		t.Fatalf("ending %v, /help carried out %d times; want the stop and /help once", rt.ending, len(ui.files))
+	if !rt.ending || len(ui.files) != 0 {
+		t.Fatalf("ending %v, /help carried out %d times; want the stop, and /help left", rt.ending, len(ui.files))
 	}
-	if entries, _ := os.ReadDir(ui.dir); len(entries) != 0 {
-		t.Fatalf("files left: %v", entries)
+	if entries, _ := os.ReadDir(ui.dir); len(entries) != 1 {
+		t.Fatalf("files left: %v, want the /help", entries)
+	}
+	ui2 := &r8cHelpUI{}
+	rt2 := k1Next(t, rt, ui2)
+	ui2.dir = InboxDir(rt2.sess.Path)
+	rt2.pollInbox()
+	if len(ui2.files) != 1 {
+		t.Fatalf("/help was carried out %d times by the next run, want once", len(ui2.files))
 	}
 }
