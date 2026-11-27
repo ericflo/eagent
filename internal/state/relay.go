@@ -261,7 +261,10 @@ func (s *State) applyRelay(ev event.Event) {
 		if len(r.Recent) > 8 {
 			r.Recent = r.Recent[len(r.Recent)-8:]
 		}
-		if r.State != "working" {
+		// A blocked agent stays blocked until its relay.state says
+		// otherwise: the seat holds pi blocked while it works under a
+		// dialog it reports, and says working itself when it is not.
+		if r.State != "working" && r.State != "blocked" {
 			r.State, r.StateSince = "working", ev.Time
 		}
 	case event.RelayTurn:

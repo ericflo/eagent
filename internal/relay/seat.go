@@ -1152,6 +1152,7 @@ func (s *Seat) watch() {
 				}
 			}
 		}
+		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
 			lines, err := tail.next()
 			if err == nil && len(lines) > 0 {
@@ -1164,14 +1165,14 @@ func (s *Seat) watch() {
 					}
 				}
 			}
-			if err != nil || tail.atEnd {
-				// Read to the end as it stood (or there is nothing to read):
-				// what the transcript did not show of the restored sends
-				// did not arrive while eagent was down.
-				s.caughtUp(time.Now())
-			}
-		} else {
-			s.caughtUp(time.Now()) // no transcript to catch up on
+			// Read to the end as it stood (or there is nothing to read):
+			// what the transcript did not show of the restored sends did
+			// not arrive while eagent was down.
+			caught = err != nil || tail.atEnd
+		}
+		dr, reports := s.agent.(dialogReporter)
+		if caught && !reports {
+			s.caughtUp(time.Now())
 		}
 		if now.Sub(lastAlive) >= 3*time.Second {
 			lastAlive = now
@@ -1194,8 +1195,18 @@ func (s *Seat) watch() {
 			// message.
 			pl.poll(s, now)
 		}
-		if dr, ok := s.agent.(dialogReporter); ok {
+		if reports {
 			s.reportDialog(dr.reportedDialog(s))
+			// pi's status file says which session it is on and whether a
+			// dialog is up: its catch-up ends once that is read too, and
+			// the session it moved to while eagent was down (follow) is
+			// read to its end.
+			s.mu.Lock()
+			moving := s.refollow
+			s.mu.Unlock()
+			if caught && !moving {
+				s.caughtUp(time.Now())
+			}
 		}
 		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
 			lastDialog = now
@@ -1285,10 +1296,12 @@ func (s *Seat) fold(o obs) {
 		s.mu.Unlock()
 		if !held {
 			s.setState("idle", "")
-			s.mu.Lock()
-			s.turnEndAt = time.Now() // the transcript says the turn is over
-			s.mu.Unlock()
 		}
+		// The transcript says the turn is over, also under a dialog: the
+		// seat goes back to idle when it ends, unless a turn begins first.
+		s.mu.Lock()
+		s.turnEndAt = time.Now()
+		s.mu.Unlock()
 	case "limit":
 		if o.exhausted {
 			s.emit(Event{Kind: KindLimit, Text: o.text, Exhausted: true})
@@ -1431,8 +1444,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		// has stayed idle a while: after an interrupt, whatever it was for
 		// goes first (an agent may put the queued message back in its box).
 		// No Enter goes while a dialog is up: known ones were answered
-		// above, and one the agent reports holds the seat.
-		if press.nudges < 2 && start != "" && strings.Contains(screen, start) && state != "working" && s.dialogUp == "" {
+		// above, and one the agent reports holds the seat. Nor while it is
+		// blocked for going quiet: it is busy, or shows a dialog the seat
+		// does not know.
+		if press.nudges < 2 && start != "" && strings.Contains(screen, start) && state == "idle" && s.dialogUp == "" {
 			press.nudges++
 			press.at = now
 			s.mu.Unlock()
@@ -1441,7 +1456,11 @@ func (s *Seat) checkScreen(now time.Time) {
 		}
 	}
 	if stuck := report; stuck != nil {
-		if state != "working" && now.Sub(s.stateAt) > 15*time.Second {
+		// A quiet agent whose screen or status still says it works reads
+		// the send at its next step, as a working one does.
+		wr, reports := s.agent.(workReporter)
+		working := state == "working" || s.hung && (s.busy(screen) || reports && wr.reportedWorking(s))
+		if !working && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
