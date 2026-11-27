@@ -1029,9 +1029,16 @@ func (r *Runtime) turn(w wake) {
 		if acts == 0 {
 			// A reply that reaches no one. Some are sent back once, off the
 			// record, with the reason; after that it is taken for a hold.
+			// A closing turn whose session stopped ending during the call
+			// sends nothing back: the hold stands, and what came is taken
+			// up as after any turn.
+			closing := true
+			if w.final || w.wait > 0 {
+				r.sync(func() { closing = r.stillClosing() })
+			}
 			var back string
 			switch {
-			case last:
+			case last, !closing:
 			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
 				cut = true
 				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."

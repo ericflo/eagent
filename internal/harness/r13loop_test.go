@@ -120,6 +120,35 @@ func TestR13RestartBeforeTheFirstClosingCallIsNotToldTheSessionEnds(t *testing.T
 	}
 }
 
+// ---- 2. a holding closing call --------------------------------------------
+
+// The user writes while the first call of the closing turn is out, and that
+// call holds. The session is not ending: the hold is not sent back with
+// "the session is ending and the user is owed a last word", and the model
+// obeying it does not send a closing report; the user gets one answer.
+func TestR13MessageDuringAHoldingClosingCallIsNotSentBack(t *testing.T) {
+	var phase atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(lastText(msgs), "Holding is not allowed here"):
+			return say("Session is ending; final report: #42 merged.")
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			r12Write(rt, "is #42 merged?")
+			return hold()
+		case phase.CompareAndSwap(2, 3):
+			return say("Yes, #42 is merged and the tests are green.")
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
+
 // A look about the thread's title alone is started, and the agent ends a
 // turn before its first call goes out. That call is told about the turn
 // end, and the look the turn end asks for is not used up by a call told
