@@ -840,6 +840,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
+	if pick, ok := r.relayRepick[job.name]; ok && job.replaces == job.name {
+		// A newer change waited for this restart (one equal to it was
+		// dropped above): it replaces the agent just started now, and what
+		// waited goes to the agent it brings up, not into this one.
+		if err := r.restartRelayWith(r.st.Relays[job.name], pick, queue...); err == nil {
+			return job.name, nil
+		}
+	}
 	r.enqueueSend(job.name, job.seat, queue...)
 	return job.name, nil
 }

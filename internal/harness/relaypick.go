@@ -152,8 +152,9 @@ func (r *Runtime) pickText(rel *state.Relay, pick relayPick) string {
 // off it, and how the start went is recorded when it is done: started, or
 // exited with the reason (and an error notice) when it could not start.
 // The pick stays the waiting change until then. What is sent to the relay
-// meanwhile waits and is typed into the new agent.
-func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
+// meanwhile waits and is typed into the new agent, after held (what waited
+// for the start before, finishLaunch).
+func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...heldSend) error {
 	job, err := r.prepareLaunch(rel.Profile, rel.Dir, rel.Name, true, pick)
 	if err != nil {
 		delete(r.relayRepick, rel.Name)
@@ -166,6 +167,11 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick) error {
 	}
 	r.relayRepick[rel.Name] = pick
 	r.beginLaunch(job, rel.Name)
+	if len(held) > 0 {
+		r.relays.mu.Lock()
+		job.held = append(held, job.held...)
+		r.relays.mu.Unlock()
+	}
 	who, text := rel.Who(), r.pickText(rel, pick)
 	go func() {
 		job.run()

@@ -268,7 +268,8 @@ func TestRelaySwitchRunsOffTheLoop(t *testing.T) {
 // The reviewer's scenario: a model change starts Codex again; while that
 // launch is under way the user picks the default again. That is not "what
 // it already runs": the launch starts the first pick, so the second waits
-// and is applied once the new agent is idle.
+// and is applied once the new agent is up (at once, review 15 finding 9:
+// nothing is typed into an agent that is to be replaced).
 func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 	first, second := newFakeSeat("two"), newFakeSeat("three")
 	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), first, second}, nil)
@@ -293,7 +294,8 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 		t.Fatalf("repick back to the default during the launch: %q", msg)
 	}
 	g.release <- struct{}{}
-	waitRelayStarts(t, rt)
+	// Up: the waiting change applies.
+	g.waitEntered(t)
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
 		if rel.Model != "gpt-6.2-astra" {
@@ -303,9 +305,9 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 			t.Errorf("the default pick is not waiting after the launch: %v %v", p, ok)
 		}
 	})
-	// Idle: the waiting change applies.
-	first.emit(relay.Event{Kind: relay.KindState, State: "idle"})
-	g.waitEntered(t)
+	if !first.wasKilled() {
+		t.Error("the agent the first change brought up was not replaced")
+	}
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	rt.sync(func() {

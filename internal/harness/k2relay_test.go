@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,4 +175,47 @@ func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
 	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK || k2Outcome(rt, id) != state.SendArrived {
 		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
 	}
+}
+
+// Review 15, finding 9. A model change restarts Codex; while it comes up a
+// second change is asked (it waits for that start) and the user writes
+// (held for it). The agent that start brings up is replaced at once by the
+// second change: the message goes to the agent that change brings up, not
+// to the one in between, and arrives there.
+func TestK2AHeldSendGoesToTheAgentANewerChangeBringsUp(t *testing.T) {
+	between := &heldSendSeat{fakeSeat: newFakeSeat("one"), entered: make(chan string, 4), result: make(chan error, 4)}
+	last := newFakeSeat("three")
+	g := useGatedLaunches(t, []relaySeat{newFakeSeat("zero"), between, last}, nil)
+	rt := newLaunchRuntime(t)
+	k1Repick(t, rt)
+	g.waitEntered(t)
+	var msg string
+	rt.sync(func() { msg, _ = rt.repickRelay("codex", relayPick{}) })
+	if !strings.Contains(msg, "once it is up") {
+		t.Fatalf("second change during the start: %q", msg)
+	}
+	userSays(t, rt, "fix the flaky test")
+	id := lastSendID(rt)
+	g.release <- struct{}{}
+	select {
+	case <-between.entered:
+		// Typed into the agent in between: it says it is ready, and the
+		// waiting change replaces it as the message goes in.
+		between.emit(relay.Event{Kind: relay.KindState, State: "idle"})
+		between.result <- nil
+		g.waitEntered(t)
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("neither the message was typed nor the second change began")
+	}
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	waitFor(t, "the message in the last agent", func() bool { return len(last.sentTexts()) == 1 })
+	if got := last.sentTexts(); got[0] != "fix the flaky test" {
+		t.Fatalf("the last agent got %q", got)
+	}
+	if got := deliveredFor(rt, id); len(got) != 1 || !got[0].OK {
+		t.Fatalf("%s: %+v; want its one outcome, arrived", id, got)
+	}
+	k1Relay(t, rt, "the second change applied", func(rel *state.Relay) bool { return rel.Model == "" })
 }
