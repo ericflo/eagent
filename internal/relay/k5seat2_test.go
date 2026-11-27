@@ -65,6 +65,33 @@ func TestSr4SeatReattachedCodexWithTextInItsComposerRefusesEverySend(t *testing.
 	}
 }
 
+// SR4-3. A typed command's delivered event waits for the watcher's next
+// look (9888cae) and is dropped when the seat closes first: a restart, a
+// stop or eagent's own shutdown within a poll of the typing. The record
+// then settles the command as a send whose arrival cannot be confirmed
+// (goneUnconfirmed), or, after a resume, as one whose typing "cannot be
+// told", though Send typed it and the contract is that typed is delivered.
+func TestSr4SeatTypedCommandIsNotDeliveredWhenTheSeatClosesBeforeItsNextLook(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	h := &fakeHost{alive: true, screen: claudePromptScreen}
+	s := newSeat(Spec{}, claudeAgent{}, h, "sr4-cmd-close", "id")
+	s.state, s.poll = "idle", time.Hour // no look before the close
+	go s.watch()
+	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close() // e.g. relay_control restart right after
+	delivered := false
+	for ev := range s.Events() {
+		delivered = delivered || ev.Kind == KindDelivered && ev.SendID == "c1" && ev.OK
+	}
+	if !delivered {
+		t.Fatalf("typed %q, and the seat closed with no delivered for it; want typed to be delivered", k1Typed(h))
+	}
+}
+
 // quietOrder collects the seat's moves, deliveries and quiet events until
 // a quiet one comes after want, or the deadline.
 func quietOrder(t *testing.T, s *Seat, d time.Duration) []string {

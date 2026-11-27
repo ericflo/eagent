@@ -1313,13 +1313,15 @@ func (s *Seat) watch() {
 		if wait {
 			select {
 			case <-s.stop:
+				s.releaseHeld(math.MaxInt) // typed: delivered, also at a close
 				return
 			case <-tick.C:
 			}
 		} else {
 			select {
 			case <-s.stop:
-				return // closed during a catch-up that reads on without waiting
+				s.releaseHeld(math.MaxInt) // closed during a catch-up that reads on without waiting
+				return
 			default:
 			}
 		}
@@ -1561,6 +1563,30 @@ func (s *Seat) releaseHeld(look int) {
 	}
 	s.mu.Unlock()
 	for _, ev := range due {
+		if look == math.MaxInt {
+			s.emitHeld(ev)
+		} else {
+			s.emitAside(ev)
+		}
+	}
+}
+
+// emitHeld sends a held event as watching ends (an exit or a close): into
+// events if they have room, so a close's stop does not win the race, else
+// as emitAside does.
+func (s *Seat) emitHeld(ev Event) {
+	s.quietSaid.Store(false)
+	s.emitMu.Lock()
+	sent := s.eventsClosed
+	if !sent {
+		select {
+		case s.events <- ev:
+			sent = true
+		default:
+		}
+	}
+	s.emitMu.Unlock()
+	if !sent {
 		s.emitAside(ev)
 	}
 }
