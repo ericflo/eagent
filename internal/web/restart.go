@@ -175,7 +175,7 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 	// taken, before anything else is done: once it is out of the spool
 	// nothing else would say it never went.
 	takeBack := func(rel *state.Relay, waiting []event.RelaySendData, how string) error {
-		spool := relaySpool(path, rel)
+		spool := harness.SpoolOf(path, rel)
 		for _, d := range waiting {
 			if done[d.ID] || d.Mode != "after_turn" || spool == "" || !relay.Unspool(spool, d.ID) {
 				continue
@@ -363,16 +363,6 @@ func unsettled(evs []event.Event, rel *state.Relay) []event.RelaySendData {
 		out = append(out, d)
 	}
 	return out
-}
-
-// relaySpool is where a message held for the end of rel's turn waits, as
-// the harness's relaySpec has it; "" for an agent with none.
-func relaySpool(path string, rel *state.Relay) string {
-	spec := relay.Spec{Profile: config.RelayProfile{Agent: rel.Agent}}
-	if relay.Prepare(&spec, filepath.Join(path, "relays", rel.Name)) != nil {
-		return ""
-	}
-	return spec.Spool
 }
 
 // writeHosted writes the list of sessions to bring back.

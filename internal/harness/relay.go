@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/clientcaps"
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/relay"
@@ -1492,6 +1493,21 @@ func (r *Runtime) settleEnded() {
 	}
 }
 
+// SpoolOf is where a message held for the end of rel's turn waits in the
+// session at path, "" for an agent with none. It goes by the record alone
+// (the relay's agent and name): the profile the agent was started under may
+// be renamed or gone from the configuration that settles its record now,
+// or that configuration may be another's (every resume from eagent serve
+// runs on the server's own). One rule for a run's own take-back (takeBack)
+// and for a stop from outside a run (web stopAgents).
+func SpoolOf(path string, rel *state.Relay) string {
+	spec := relay.Spec{Profile: config.RelayProfile{Agent: rel.Agent}}
+	if relay.Prepare(&spec, filepath.Join(path, "relays", rel.Name)) != nil {
+		return ""
+	}
+	return spec.Spool
+}
+
 // EndedWaiting lists, in name order, the stopped agents a record with no
 // run behind it is still waited on for: eagent ended before a stop's settle
 // (its wait for the stopped agent's last word), and nothing will say how
@@ -1608,8 +1624,8 @@ func (r *Runtime) takeBack(rel *state.Relay, id, mode, how string) bool {
 	if mode != "after_turn" || rel == nil {
 		return false
 	}
-	spec, err := r.relaySpec(rel.Name, rel.Profile, rel.Dir, relayPick{rel.Model, rel.Effort})
-	if err != nil || spec.Spool == "" || !relay.Unspool(spec.Spool, id) {
+	spool := SpoolOf(r.sess.Path, rel)
+	if spool == "" || !relay.Unspool(spool, id) {
 		return false
 	}
 	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
