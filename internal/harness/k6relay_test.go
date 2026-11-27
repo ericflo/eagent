@@ -31,9 +31,6 @@ type sr3CommandSeat struct {
 	gate    chan struct{}
 	once    sync.Once
 	movedTo string
-	// moveLate: the move is said after the delivered (k7): the restart
-	// the delivered set off has already begun when it comes in.
-	moveLate bool
 }
 
 func (s *sr3CommandSeat) Send(id, text, mode string) (string, error) {
@@ -42,19 +39,15 @@ func (s *sr3CommandSeat) Send(id, text, mode string) (string, error) {
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
+	s.typing(id) // not quiet until the seat says the command delivered
 	s.entered <- text
 	<-s.gate
 	s.fakeSeat.mu.Lock()
 	s.fakeSeat.sent = append(s.fakeSeat.sent, text)
 	s.fakeSeat.mu.Unlock()
-	if s.moveLate {
-		s.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true},
-			relay.Event{Kind: relay.KindInner, InnerID: s.movedTo},
-			relay.Event{Kind: relay.KindState, State: "idle"})
-		return "typed the command into pi", nil
-	}
 	// As the seat does since 9888cae: the delivered goes out once a look
-	// has read what pi did with the command, after the move it found.
+	// has read what pi did with the command, after the move it found; it
+	// is quiet (KindQuiet, at the end of emit) only after both.
 	s.emit(relay.Event{Kind: relay.KindInner, InnerID: s.movedTo},
 		relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true},
 		relay.Event{Kind: relay.KindState, State: "idle"})
@@ -90,7 +83,7 @@ func sr3PiRuntime(t *testing.T) *Runtime {
 // conversation /new left (the eighth review's fault, by a new path). The
 // /new is reported delivered and its effect is undone.
 func TestSR3AChangeWaitingOnATypedNewRestartsPiIntoTheSessionItLeft(t *testing.T) {
-	seat := &sr3CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{}), movedTo: "sess-new", moveLate: k7MoveLate}
+	seat := &sr3CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{}), movedTo: "sess-new"}
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	rt := sr3PiRuntime(t)
 	sent := make(chan string, 1)
@@ -125,15 +118,37 @@ func TestSR3AChangeWaitingOnATypedNewRestartsPiIntoTheSessionItLeft(t *testing.T
 	}
 }
 
-// k7MoveLate runs SR3-1 with the move said only after the restart has
-// begun (the old seat's last news): the restart takes the session id once
-// the old seat has drained, so the move counts.
-var k7MoveLate bool
-
+// A restart that does not wait for the seat to be quiet (relay_control
+// restart) while pi runs /new: the replaced seat says the move only in its
+// last look, after the restart has stopped pi. The restart takes the
+// session id once that seat has drained, so the move counts.
 func TestK7AMoveTheReplacedSeatSaysLateIsTheSessionTheRestartOpens(t *testing.T) {
-	k7MoveLate = true
-	t.Cleanup(func() { k7MoveLate = false })
-	TestSR3AChangeWaitingOnATypedNewRestartsPiIntoTheSessionItLeft(t)
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := sr3PiRuntime(t)
+	rt.sync(func() {
+		if err := rt.restartRelayWith(rt.st.Relays["pi"], relayPick{"", "high"}); err != nil {
+			t.Errorf("restart: %v", err)
+		}
+	})
+	seat.waitGone(t)
+	seat.say(relay.Event{Kind: relay.KindInner, InnerID: "sess-new"}) // its last look
+	seat.end()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	var inner string
+	rt.sync(func() {
+		for _, ev := range rt.st.Events {
+			var d event.RelayStartData
+			if ev.Type == event.RelayStart && ev.Decode(&d) == nil {
+				inner = d.InnerID
+			}
+		}
+	})
+	if inner != "sess-new" {
+		t.Errorf("pi was started again with --session-id %q; it had moved to sess-new before it was stopped", inner)
+	}
 }
 
 // sr3HandSeat is Claude's seat handing a held message over: the send waits

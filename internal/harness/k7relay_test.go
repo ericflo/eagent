@@ -34,6 +34,7 @@ func (s *sr4CommandSeat) Send(id, text, mode string) (string, error) {
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
+	s.typing(id) // not quiet until the seat says the command delivered
 	s.entered <- text
 	<-s.gate
 	s.fakeSeat.mu.Lock()
@@ -94,7 +95,6 @@ func TestSR4StopSessionSettlesBeforeTheArrivalTheSeatAlreadyRead(t *testing.T) {
 // its new session. The change waits until some later turn ends; on main a
 // change to an idle agent restarted it at once.
 func TestSR4AfterTurnCommandTypedIntoAnIdleAgentLeavesTheChangeWaitingForEver(t *testing.T) {
-	t.Skip("known, not fixed: SR4-1, waits for the seat's Status.Quiet")
 	seat := &sr4CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{})}
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
 	_ = g
@@ -128,17 +128,21 @@ func TestSR4AfterTurnCommandTypedIntoAnIdleAgentLeavesTheChangeWaitingForEver(t 
 		rt.sync(func() { done = rt.st.SendOutcome(id) == state.SendArrived })
 		return done
 	})
-	// appendOutcome runs applyWaitingRepick in the same loop step as the
-	// delivered, so a restart would be under way now.
+	// The seat says it is quiet right after the delivered (KindQuiet), and
+	// that applies the change: a restart is under way once it is taken.
 	var launching, waiting bool
 	var st string
 	var awaited int
-	rt.sync(func() {
-		launching = rt.relays.launch("pi") != nil
-		_, waiting = rt.relayRepick["pi"]
-		st = rt.st.Relays["pi"].State
-		awaited = rt.st.Relays["pi"].Awaited()
-	})
+	look := func() bool {
+		rt.sync(func() {
+			launching = rt.relays.launch("pi") != nil
+			_, waiting = rt.relayRepick["pi"]
+			st = rt.st.Relays["pi"].State
+			awaited = rt.st.Relays["pi"].Awaited()
+		})
+		return launching || !waiting
+	}
+	k2Until(5*time.Second, look)
 	t.Logf("after the delivered: state %s, awaited %d, launching %v, change waiting %v", st, awaited, launching, waiting)
 	if !launching && waiting {
 		t.Errorf("the command was delivered and pi is idle with nothing on its way, but the change still waits (%q) and nothing will apply it: no turn follows a typed /new", msg)

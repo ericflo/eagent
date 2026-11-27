@@ -90,7 +90,7 @@ func TestR14AnArrivalInTheBatchThatEndsATurnSurvivesAWaitingModelChange(t *testi
 			t.Error("the change started the agent again in the turn the message began")
 		}
 	})
-	old.emit(relay.Event{Kind: relay.KindTurn, Text: "ran the tests", DurationMS: 1000})
+	old.emit(relay.Event{Kind: relay.KindTurn, Text: "ran the tests", DurationMS: 1000}, relay.Event{Kind: relay.KindState, State: "idle"})
 	g.waitEntered(t) // that turn's end starts the agent again
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)

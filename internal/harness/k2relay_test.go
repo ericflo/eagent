@@ -34,6 +34,7 @@ func newK2FeedSeat(t *testing.T) *k2FeedSeat {
 func (s *k2FeedSeat) Events() <-chan relay.Event { return s.feed }
 
 func (s *k2FeedSeat) Send(id, text, mode string) (string, error) {
+	s.typing(id)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.modes = append(s.modes, mode)
@@ -51,10 +52,20 @@ func (s *k2FeedSeat) Kill() error {
 
 func (s *k2FeedSeat) Close() {}
 
-// say hands the seat's watcher one event after another.
+// say hands the seat's watcher one event after another, then, as a real
+// seat at the end of a look, that it is quiet if it has become so.
 func (s *k2FeedSeat) say(evs ...relay.Event) {
 	for _, ev := range evs {
+		s.mu.Lock()
+		s.noteLocked(ev)
+		s.mu.Unlock()
 		s.feed <- ev
+	}
+	s.mu.Lock()
+	due := s.quietDueLocked()
+	s.mu.Unlock()
+	if due {
+		s.feed <- relay.Event{Kind: relay.KindQuiet}
 	}
 }
 
@@ -281,7 +292,7 @@ func TestK2AWaitingChangeDoesNotCutOffTheTurnAHeldMessageStarts(t *testing.T) {
 	if k1Restarting(rt) {
 		t.Fatal("the change started the agent again in the turn the held message began")
 	}
-	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran the linter."})
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran the linter."}, relay.Event{Kind: relay.KindState, State: "idle"})
 	seat.waitGone(t)
 	seat.end()
 	g.release <- struct{}{}

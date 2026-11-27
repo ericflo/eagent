@@ -21,10 +21,14 @@ type rv16FailSeat struct {
 }
 
 func (s *rv16FailSeat) Send(id, text, mode string) (string, error) {
+	s.typing(id)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.mu.Unlock()
 	<-s.release
+	s.mu.Lock()
+	delete(s.unsaid, id) // not typed: the seat waits on it no more
+	s.mu.Unlock()
 	return "", errors.New("Codex's prompt did not come back")
 }
 

@@ -113,7 +113,7 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
-	if held := r.heldBack(rel); rel.State == "working" || held != "" {
+	if held := r.heldBack(rel); held != "" {
 		if r.relayRepick == nil {
 			r.relayRepick = map[string]relayPick{}
 		}
@@ -123,10 +123,8 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		switch {
 		case held == "dialog":
 			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen); it starts again with " + r.pickText(rel, pick) + " once that is answered and it is between turns, on the same conversation.", nil
-		case held == "typing" && rel.State != "working":
-			return rel.Who() + " is being typed one of its own commands; it starts again with " + r.pickText(rel, pick) + " once that is typed, on the same conversation.", nil
 		case rel.State != "working":
-			return rel.Who() + " has a message on its way that it reads next; it starts again with " + r.pickText(rel, pick) + " when the turn that message starts ends, on the same conversation.", nil
+			return rel.Who() + " is not between turns yet (something sent to it is on its way, or it is acting on one of its own commands); it starts again with " + r.pickText(rel, pick) + " once nothing waits on it, on the same conversation.", nil
 		}
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
@@ -204,56 +202,30 @@ func (r *Runtime) restartRelayWith(rel *state.Relay, pick relayPick, held ...hel
 	return nil
 }
 
-// dialogHolds says whether a dialog the agent reports holds it now: its
-// seat says so (relay.Status.Dialog, set only while that dialog holds it
-// blocked). No change starts it again then: the record's state alone
-// cannot say so (a turn the agent ends under it leaves the record idle).
-// An agent blocked for a slow start or for going quiet in a turn is not
-// held: a change starts it again at once, as a stuck agent may need. Loop
-// goroutine.
-func (r *Runtime) dialogHolds(rel *state.Relay) bool {
-	seat := r.relays.get(rel.Name)
-	return seat != nil && seat.Snapshot().Dialog != ""
-}
-
 // heldBack says what holds a model change back from starting the agent
-// again now, "" when nothing does: "dialog" while a dialog the agent
-// reports holds it (dialogHolds), "on its way" while something sent to it
-// is still on its way (a message held for its turn's end, one in its own
-// queue, one typed and not yet shown arriving): it reads that next and
-// starts a turn, which the restart would cut off. The one rule for a change
-// asked now (repickRelay, where a turn the record shows holds it too) and
-// one that waited (applyWaitingRepick). Loop goroutine.
+// again now, "" when nothing does, as the agent's seat says (relay.Status):
+// "dialog" while a dialog the agent reports holds it, "busy" while the seat
+// is not quiet (in a turn, a send on its way or being typed, one of the
+// agent's own commands not yet acted on as far as the seat can tell, a move
+// not yet followed, a catch-up). The record cannot say so: it infers from
+// what it was told, and what it was told runs behind the seat. A stuck seat
+// (blocked with no dialog: a slow start, a turn gone quiet) or one whose
+// agent exited holds nothing, as a stuck agent may need the restart; nor
+// does a relay with no seat watching it. The one rule for a change asked
+// now (repickRelay) and one that waited (applyWaitingRepick, looked at
+// again when the seat says it is quiet). Loop goroutine.
 func (r *Runtime) heldBack(rel *state.Relay) string {
-	if r.dialogHolds(rel) {
-		return "dialog"
-	}
-	if rel.Awaited() == 0 {
+	seat := r.relays.get(rel.Name)
+	if seat == nil {
 		return ""
 	}
-	held := ""
-	for id, text := range rel.Undelivered {
-		// The agent's own command typed into its prompt (/clear, /status)
-		// runs at once and starts no turn: it holds a change back only
-		// until it is typed (its arrival, recorded once typed, looks at the
-		// change again: appendOutcome). One held for its turn's end is
-		// handed over as words, as any message.
-		if !typedCommand(r.st, id, text) {
-			return "on its way"
-		}
-		held = "typing"
+	switch st := seat.Snapshot(); {
+	case st.Dialog != "":
+		return "dialog"
+	case !st.Quiet && st.State != "blocked" && st.State != "exited":
+		return "busy"
 	}
-	return held
-}
-
-// typedCommand says whether send id, waiting with text, is one of the
-// agent's own commands typed into its prompt, not held for a turn's end.
-func typedCommand(st *state.State, id, text string) bool {
-	if !relay.IsAgentCommand(text) || st.SendOutcome(id) == state.SendHeld {
-		return false
-	}
-	d, ok := sendRecord(st, id)
-	return ok && d.Mode != "after_turn"
+	return ""
 }
 
 // applyWaitingRepick starts a relay again with a change that waited for its
@@ -274,7 +246,7 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		return // a start under way applies it when it is up
 	}
 	if r.heldBack(rel) != "" {
-		return // applied when that is over (an idle, a turn's end, an outcome)
+		return // applied once the seat says it is quiet (KindQuiet)
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.repickFailed(rel, pick, err)
