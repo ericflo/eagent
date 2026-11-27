@@ -126,7 +126,7 @@ func (s *Server) listed(id string) bool {
 }
 
 // tellPhoneStopped tells the session's phone thread of a stop stopAgents
-// recorded: its receipts, and the closing note (harness.TellPhoneStopped).
+// recorded, as a run's own stop does (harness.TellPhoneStopped).
 var tellPhoneStopped = harness.TellPhoneStopped
 
 // killAgent stops an agent's terminal; tests replace it.
@@ -139,9 +139,12 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // go), its terminal is killed (not that of one the record shows exited:
 // it is gone, and nothing is said of it), its relay.end is recorded (one
 // that could not be killed too, as stopSession does), and its sends are
-// settled: not sent for one taken back, unconfirmed for the rest. It
-// returns who it stopped, and who it could not kill.
-func stopAgents(path string) (stopped, failed []string, err error) {
+// settled: not sent for one taken back, unconfirmed for the rest. Then,
+// with the lock still held (no run of the session can come in between),
+// the phone is told, by cfg, the configuration the session ran on (nil:
+// not known, and nothing is told). It returns who it stopped, and who it
+// could not kill.
+func stopAgents(path string, cfg *config.Config) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
 	if err != nil {
 		return nil, nil, err
@@ -182,7 +185,21 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 			}
 		}
 	}
+	if cfg != nil {
+		tellPhoneStopped(*cfg, path)
+	}
 	return stopped, failed, nil
+}
+
+// sessionConfig is the configuration this server runs a session it hosts
+// on (host's, with no bundle or preset of the request's), or nil when it
+// cannot be loaded.
+func (s *Server) sessionConfig() *config.Config {
+	cfg, err := s.loadConfig("", "")
+	if err != nil {
+		return nil
+	}
+	return &cfg
 }
 
 // unsettled lists the sends the record still waits on for rel (sent, no
@@ -325,11 +342,10 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			// The user stopped it while the last server was stopping,
 			// which exited before the stop was done: it is finished here,
 			// and the session stays stopped.
-			if stopped, failed, err := stopAgents(info.Path); err != nil {
+			if stopped, failed, err := stopAgents(info.Path, s.sessionConfig()); err != nil {
 				s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 			} else {
 				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
-				tellPhoneStopped(s.Project, info.Path)
 				forget(id)
 			}
 			continue
