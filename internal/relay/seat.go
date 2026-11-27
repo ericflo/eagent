@@ -888,6 +888,10 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 // space or the end. "/home/eric/plan.md has it" is a message.
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
 
+// IsAgentCommand is isAgentCommand for the harness: typed into the agent's
+// prompt, such a command runs at once and starts no turn.
+func IsAgentCommand(text string) bool { return isAgentCommand(text) }
+
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
 
 // Interrupt stops what the agent is doing (Escape, unless the agent says
