@@ -19,11 +19,11 @@ func TestK1AnAddressVariableRefreshesOnlyAWindowNoLayerNames(t *testing.T) {
 		// gives the server's address: the file's window stays.
 		{"the file names the window", `{"model":{"context_tokens":16000}}`, "", map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 16_000, 0, "file"},
 		// The editor's null names none: the server's window.
-		{"the file's null window", `{"model":{"context_tokens":null}}`, "", map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 32_768, 0, "env:EAGENT_BASE_URL"},
+		{"the file's null window", `{"model":{"context_tokens":null}}`, "", map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 32_768, 0, "env"},
 		// A bundle that moves the route the file named a window for drops
 		// that window (followModel); the variable then moves the bundle's
 		// route, whose window no layer names.
-		{"a bundle moves the route the file named a window for", `{"default_config":"local","model":{"model":"other-model","context_tokens":16000}}`, `{"model":{"model":"zai-org/GLM-5.3"}}`, map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 32_768, 0, "env:EAGENT_BASE_URL"},
+		{"a bundle moves the route the file named a window for", `{"default_config":"local","model":{"model":"other-model","context_tokens":16000}}`, `{"model":{"model":"zai-org/GLM-5.3"}}`, map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 32_768, 0, "env"},
 		// A bundle names the window over the file: it stays.
 		{"the bundle names the window", `{"default_config":"local"}`, `{"model":{"context_tokens":20000}}`, map[string]string{"EAGENT_BASE_URL": "http://127.0.0.1:9/v1", "EAGENT_API_KEY_ENV": ""}, 20_000, 0, "bundle:local"},
 		// The summarizer's copy of a route whose window the file names,

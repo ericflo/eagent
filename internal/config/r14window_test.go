@@ -82,15 +82,14 @@ func TestTheWindowFollowsTheAddress(t *testing.T) {
 	}
 }
 
-// A window EAGENT_BASE_URL's server gives, where no layer names one, is
-// that variable's, as one EAGENT_MODEL's model gives is: the editors show
-// it as the shell's and a save does not write it to the file, where it
-// would be the window of the file's own server once the variable is unset.
-// The same address with a trailing slash changes no window and is not
-// marked.
+// A window EAGENT_BASE_URL's server gives, where no layer names one, is the
+// environment's doing ("env"), but no variable's: unlike the window of the
+// model EAGENT_MODEL names, one the file names holds over it, so the
+// editors do not show it as pinned (env:NAME) and it stays editable. The
+// same address with a trailing slash changes no window and is not marked.
 func TestTheWindowAnAddressVariableMovesIsTheVariables(t *testing.T) {
 	for _, c := range []struct{ url, want string }{
-		{"http://127.0.0.1:9/v1", "env:EAGENT_BASE_URL"},
+		{"http://127.0.0.1:9/v1", "env"},
 		{"https://api.together.xyz/v1/", "default"},
 	} {
 		unsetEnv(t, routeEnvNames()...)
