@@ -60,12 +60,12 @@ func k27Outcome(t *testing.T, info store.Info, id string) string {
 }
 
 // The same record, settled by a stop from outside a run (stopAgents) and by
-// a resume (harness settleEnded), which the decided rules say settle it the
-// same way: a held message whose copy is still unclaimed in the spool is
-// not_sent. When the agent's profile is no longer in the configuration (the
-// user renamed or removed it), the resume cannot find the spool (relaySpec
-// fails on the profile) and records it unconfirmed, leaving the copy in the
-// spool; the stop finds it from the agent's kind and records not_sent.
+// a resume (harness settleEnded), settles the same way: a held message
+// whose copy is still unclaimed in the spool is not_sent. Also when the
+// agent's profile is no longer in the configuration (the user renamed or
+// removed it): both find the spool from the record (harness.SpoolOf). (The
+// resume looked it up through the profile, found none, recorded the message
+// unconfirmed and left the copy in the spool.)
 func TestK27AResumeTakesAHeldMessageBackWhenItsProfileIsGone(t *testing.T) {
 	_, project := newTestServer(t)
 	cfg := r11Model(t)

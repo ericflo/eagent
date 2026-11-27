@@ -12,17 +12,16 @@ import (
 )
 
 // The closing turn's reply sets a timer and, in the same reply, tells the
-// user about it with send_message. Nobody wrote and no agent came up: the
-// timer the model itself set made the session stop ending, and the
-// stale-closing-word check (toolcalls.go) drops the message and tells the
-// model "the user wrote, or an agent came up, while you wrote this".
+// user about it with send_message. Nobody wrote: the timer the model itself
+// set made the session stop ending, and the message goes out. (A check on
+// closing words dropped it, and told the model the user had written.)
 func TestK24AClosingReplyThatSetATimerStillTellsTheUser(t *testing.T) {
 	const told = "I set a timer to check that main is still green in a moment."
 	var phase atomic.Int32
 	var refusedTold atomic.Bool
 	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(_ *atomic.Pointer[Runtime], msgs []map[string]any) reply {
 		tail := lastUserText(msgs)
-		if strings.Contains(allText(msgs), "not sent: the session is not ending any more") {
+		if strings.Contains(allText(msgs), "not sent: ") {
 			refusedTold.Store(true)
 		}
 		switch {
@@ -86,8 +85,7 @@ func closed(s *session, phase *atomic.Int32) <-chan struct{} {
 }
 
 // The sibling with relay_start: the closing reply starts an agent and tells
-// the user so in the same reply. The agent the model itself started makes
-// its own message "stale".
+// the user so in the same reply. The message goes out.
 func TestK24AClosingReplyThatStartedAnAgentStillTellsTheUser(t *testing.T) {
 	const told = "I am starting Codex to paint the second coat."
 	first, second := newFakeSeat("First coat on."), newFakeSeat("Second coat on.")
@@ -98,7 +96,7 @@ func TestK24AClosingReplyThatStartedAnAgentStillTellsTheUser(t *testing.T) {
 	once := sync.OnceFunc(func() { close(after) })
 	s, _ := r12Start(t, nil, func(_ *atomic.Pointer[Runtime], msgs []map[string]any) reply {
 		tail := lastUserText(msgs)
-		if strings.Contains(allText(msgs), "not sent: the session is not ending any more") {
+		if strings.Contains(allText(msgs), "not sent: ") {
 			refusedTold.Store(true)
 		}
 		switch {

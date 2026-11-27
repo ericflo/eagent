@@ -84,6 +84,19 @@ type relaySeats struct {
 	// session is recorded whatever the session is doing, until its sends
 	// are settled; after that it is logged, not recorded.
 	retiring map[relaySeat]*retiredSeat
+	// pumping counts the seats' watchers still reading their seats
+	// (watchSeat). lateSaid is what they said of their seats' own sends
+	// once the loop's queue had ended, for finish to record when the seats
+	// are closed (recordLateNews).
+	pumping  int
+	lateSaid []lateNews
+}
+
+// lateNews is how a send went, said by its seat (name's) once the loop's
+// queue had ended (relaySeats.lateSaid).
+type lateNews struct {
+	name string
+	ev   relay.Event
 }
 
 // retiredSeat is a seat taken out of use (relaySeats.retiring).
@@ -1268,11 +1281,12 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 		r.relays.drained = map[relaySeat]chan struct{}{}
 	}
 	r.relays.drained[seat] = drained
+	r.relays.pumping++
 	r.relays.mu.Unlock()
 	go func() {
 		for ev := range seat.Events() {
 			ev := ev
-			r.post(func() {
+			taken := r.enqueue(func() {
 				if r.relays.get(name) == seat {
 					r.onRelayEvent(name, ev)
 					return
@@ -1304,7 +1318,19 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 					r.retiredNews(name, seat, rel, ev)
 				}
 			})
+			if !taken && ev.Kind == relay.KindDelivered {
+				// The loop's queue has ended (the last part of the
+				// session's end, which may still be waiting for a start
+				// or stop of another agent): how a send of the seat's own
+				// went is kept for finish to record (recordLateNews).
+				r.relays.mu.Lock()
+				r.relays.lateSaid = append(r.relays.lateSaid, lateNews{name, ev})
+				r.relays.mu.Unlock()
+			}
 		}
+		r.relays.mu.Lock()
+		r.relays.pumping--
+		r.relays.mu.Unlock()
 		r.post(func() {
 			r.relays.drop(name, seat)
 			r.relays.mu.Lock()
@@ -1326,6 +1352,39 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 			close(drained) // after every event above, in the loop's order
 		})
 	}()
+}
+
+// lastWordGrace bounds the session's end waiting for the watchers of the
+// seats it closed to have said their last (recordLateNews). Tests lower it.
+var lastWordGrace = 5 * time.Second
+
+// recordLateNews records how a send went where its seat said so after the
+// loop's queue had ended: a held message taken back from the spool as its
+// agent's turn ended, an arrival. Nothing else would say it (the message
+// is gone from the spool, and a resume would call it unconfirmed). The
+// seats are closed by now; while a send still has no outcome, their
+// watchers are waited for (bounded), and then each such word is written,
+// once. Finish's goroutine: the loop is no longer running.
+func (r *Runtime) recordLateNews() {
+	waiting := false
+	for _, rel := range r.st.Relays {
+		waiting = waiting || len(rel.Undelivered) > 0
+	}
+	for deadline := time.Now().Add(lastWordGrace); waiting && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		r.relays.mu.Lock()
+		waiting = r.relays.pumping > 0
+		r.relays.mu.Unlock()
+	}
+	r.relays.mu.Lock()
+	said := r.relays.lateSaid
+	r.relays.lateSaid = nil
+	r.relays.mu.Unlock()
+	for _, n := range said {
+		if r.hasOutcome(n.ev.SendID) {
+			continue
+		}
+		r.appendOutcomeDirect(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, n.ev.SendID, n.name), ID: n.ev.SendID, OK: n.ev.OK, Outcome: n.ev.Outcome, Detail: clipRunes(n.ev.Detail, 2000), Read: n.ev.Read}))
+	}
 }
 
 // retiredNews records what a seat taken out of use says of its own sends
@@ -1514,8 +1573,9 @@ func SpoolOf(path string, rel *state.Relay) string {
 // those sends went now. Each is settled as the settle that was cut would
 // have settled it, so a fresh start under the name inherits none of them,
 // but for keep: after a switch, the user's messages stay as the switch left
-// them, since its brief carried them (finishLaunch). One rule for a resume
-// (settleEnded) and for a stop from outside a run (web stopAgents).
+// them, since its brief carried them (finishLaunch), unless that brief
+// certainly did not go. One rule for a resume (settleEnded) and for a stop
+// from outside a run (web stopAgents).
 func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
 	var names []string
 	for name, rel := range st.Relays {
@@ -1528,7 +1588,15 @@ func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
 	for _, name := range names {
 		rel := st.Relays[name]
 		rels = append(rels, rel)
-		_, switched := handed[holder{rel.Name, rel.StartSeq}]
+		to, switched := handed[holder{rel.Name, rel.StartSeq}]
+		if next := st.RelayAt(to.name, to.start); switched && next != nil {
+			// The switch left the user's messages to its brief, which
+			// quotes them. A brief that certainly did not go carried
+			// nothing: they are settled as at a stop.
+			if _, brief := briefedBy(st, next); brief != "" && st.SendOutcome(brief) == state.SendNotSent {
+				switched = false
+			}
+		}
 		for _, s := range unresolvedSends(st, rel) {
 			if d, ok := sendRecord(st, s.ID); switched && (!ok || d.From != "eagent") {
 				keep = append(keep, s.ID)

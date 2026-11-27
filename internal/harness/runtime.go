@@ -1582,6 +1582,8 @@ retired:
 		<-idle
 	}
 	// Direct writes: the loop is no longer running.
+	// What a seat said of its own sends after the queue had ended.
+	r.recordLateNews()
 	// A send held for a start the session's end gave up (abandonLaunch),
 	// or still in a seat's queue (nothing is taken from one now), was never
 	// typed and never will be: it did not go. In the order they were sent.
@@ -1614,17 +1616,7 @@ retired:
 			// since the loop closed is not on the record.
 			gone.Time = rel.LastEventAt
 		}
-		out, err := r.sess.Append(gone)
-		if err != nil {
-			r.ui.Log("append: %v", err)
-			continue
-		}
-		r.st.Apply(out)
-		r.noteWake(out) // the look it is owed, as a resume reads it from the record
-		if r.phone != nil {
-			r.phone.observe(r, out) // its receipt turns to failed, before the closing note
-		}
-		r.ui.Trace(out)
+		r.appendOutcomeDirect(gone)
 	}
 	if r.turns.silent.Count > 0 {
 		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))
@@ -1649,6 +1641,22 @@ retired:
 // session. A start can take a minute on its git pull, and closing a
 // terminal's watcher is bounded at 30 s; this covers both.
 var relayOpsGrace = 2 * time.Minute
+
+// appendOutcomeDirect writes how a send went once the loop is no longer
+// running (finish's goroutine).
+func (r *Runtime) appendOutcomeDirect(ev event.Event) {
+	out, err := r.sess.Append(ev)
+	if err != nil {
+		r.ui.Log("append: %v", err)
+		return
+	}
+	r.st.Apply(out)
+	r.noteWake(out) // the look it is owed, as a resume reads it from the record
+	if r.phone != nil {
+		r.phone.observe(r, out) // its receipt turns to failed, before the closing note
+	}
+	r.ui.Trace(out)
+}
 
 func (r *Runtime) appendDirect(ev event.Event) {
 	ev, err := r.sess.Append(ev)
