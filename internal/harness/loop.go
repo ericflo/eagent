@@ -1677,6 +1677,17 @@ var (
 // goroutine.
 func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endPlan {
 	t := &r.turns
+	if shown < r.st.Moved() {
+		// The call was shown the record as it was before eagent's calls
+		// moved to another model (a pick in the settings or a fallback
+		// while it was out). Like a reply still out then (state OnRoute),
+		// its failure says nothing of the model in use, which starts
+		// clean (newModel): nothing is counted, no restart is asked for,
+		// and the look, still owed, is made again at the loop's next
+		// step, shown the record with the move in it.
+		r.ui.Log("eagent: a call made before the model changed failed (%s); it is not counted against the model in use", shortErr(err))
+		return r.sessionPlan(w, true)
+	}
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
 		// The session is ending: a refusal is final for it
