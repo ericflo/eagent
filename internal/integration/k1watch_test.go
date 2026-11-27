@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -156,5 +158,44 @@ func TestK1AReplyKeptWhileItsSessionRanOutlivesARestartOfTheServe(t *testing.T) 
 	defer stop()
 	if m, ok := k1Next(t, host); !ok || m.ID != "m1" || m.Text != "one more thing" {
 		t.Fatalf("after the restart: resumed %#v (%v), want the reply kept before it", m, ok)
+	}
+}
+
+// B4: two hundred other threads had something written to them after the
+// person replied, from the app, to a stopped session's thread. The thread
+// list, newest first, gives them on its first page and the session's
+// thread on the next. The sweep resumes the session.
+func TestK1ASweepFindsAReplyPastTheNewestTwoHundredThreads(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "m1", "is the deploy done?", stop.Add(time.Minute), nil)
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	var pages atomic.Int32
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/threads" || r.URL.Query().Get("cursor") == "page-2" {
+			proxy.ServeHTTP(w, r)
+			return
+		}
+		pages.Add(1)
+		var others []map[string]any
+		for i := 0; i < 200; i++ {
+			others = append(others, map[string]any{"id": fmt.Sprint("o", i), "external_id": fmt.Sprint("other:", i), "preview_sender": "user", "last_activity_at": time.Now()})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"threads": others, "next_cursor": "page-2"})
+	}))
+	t.Cleanup(front.Close)
+	host := &fakeResumeHost{hosted: map[string]bool{}}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: front.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || pages.Load() != 1 {
+		t.Fatalf("resumed %#v after %d first pages", host.resumed, pages.Load())
 	}
 }

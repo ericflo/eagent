@@ -456,30 +456,50 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 			LastActivityAt time.Time  `json:"last_activity_at"`
 			ArchivedAt     *time.Time `json:"archived_at"`
 		} `json:"threads"`
+		NextCursor string `json:"next_cursor"`
 	}
 	sweepCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
 	w.retries.takeUp(w.project)
 	w.retryPending(sweepCtx)
-	if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", url.Values{"limit": {"200"}}, nil, &page, 0); err != nil {
-		return
+	// The list is newest first: it is read on, page after page, while a
+	// thread in it can be newer than the oldest last write of the
+	// project's sessions.
+	oldest := time.Now()
+	if infos, err := store.List(store.Root(w.project)); err == nil {
+		for _, info := range infos {
+			if info.Modified.Before(oldest) {
+				oldest = info.Modified
+			}
+		}
 	}
-	for _, t := range page.Threads {
-		if sweepCtx.Err() != nil {
+	q := url.Values{"limit": {"200"}}
+	for {
+		page.Threads, page.NextCursor = nil, ""
+		if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", q, nil, &page, 0); err != nil {
 			return
 		}
-		sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
-		if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
-			continue
+		for _, t := range page.Threads {
+			if sweepCtx.Err() != nil {
+				return
+			}
+			sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
+			if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
+				continue
+			}
+			info, ok := w.session(sid)
+			if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
+				continue
+			}
+			if !t.LastActivityAt.After(info.Modified) {
+				continue
+			}
+			w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
 		}
-		info, ok := w.session(sid)
-		if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
-			continue
+		if page.NextCursor == "" || len(page.Threads) == 0 || !page.Threads[len(page.Threads)-1].LastActivityAt.After(oldest) {
+			return
 		}
-		if !t.LastActivityAt.After(info.Modified) {
-			continue
-		}
-		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
+		q.Set("cursor", page.NextCursor)
 	}
 }
 
