@@ -108,3 +108,37 @@ func TestK4AnInterruptedCallIsNotSaidToHaveNotRun(t *testing.T) {
 		}
 	}
 }
+
+// The review's other suspicion: a session with no terminal is ending, and
+// its closing look is refused as too long. No restart is made for an
+// ending session (noRestartNow), so the log must not say one is.
+func TestK4ARefusedClosingLookIsNotLoggedAsARestart(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
+	var passes atomic.Int32
+	var stopped atomic.Bool
+	_, ui, done := k2Batch(t, "@e check the build", func(_ string, m []map[string]any) reply {
+		if dossierRequest(m) != "" {
+			passes.Add(1)
+			return reply{text: "unused"}
+		}
+		switch {
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			return sr2TooLong
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	select {
+	case code := <-done:
+		done <- code
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the session did not end; said %q", ui.said())
+	}
+	logged := strings.Join(ui.logged(), "\n")
+	if strings.Contains(logged, "restarting the conversation from a dossier") && passes.Load() == 0 {
+		t.Fatalf("the log says the conversation is restarted, and no restart was made: %q", ui.logged())
+	}
+}
