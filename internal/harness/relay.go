@@ -198,8 +198,10 @@ type relayLaunch struct {
 	undrained          bool
 	// spooled, for a restart, are the messages the record holds for the
 	// replaced agent's turn end; takenBack those of them run took back,
-	// unclaimed, from the spool the launch clears (relay.Unspool).
+	// unclaimed, from the spool the launch clears (relay.Unspool), under
+	// seats' lock, as finish reads them for a start it no longer waits for.
 	spooled, takenBack []string
+	seats              *relaySeats
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -596,7 +598,7 @@ func (r *Runtime) prepareLaunch(profile, dir, name string, resume bool, pick rel
 	if err != nil {
 		return nil, err
 	}
-	job := &relayLaunch{name: name, profile: profile, dir: dir, resume: resume, pick: pick, spec: spec, launch: launchRelay}
+	job := &relayLaunch{name: name, profile: profile, dir: dir, resume: resume, pick: pick, spec: spec, launch: launchRelay, seats: &r.relays}
 	if prev := r.st.Relays[name]; prev != nil && resume {
 		job.innerID = prev.InnerID
 	}
@@ -687,11 +689,21 @@ func (job *relayLaunch) run() {
 	}
 	// A message held for the old agent's turn end still waiting in the
 	// spool, which the launch clears, was never taken: taken back now, it
-	// is not sent (finishLaunch).
+	// is not sent (finishLaunch, or finish for a start it no longer waits
+	// for). Once finish has stopped waiting for starts (late), nothing
+	// would record that: this start launches nothing, and the message
+	// stays for the next run to find (settleExited).
+	job.seats.mu.Lock()
+	late := job.seats.late
 	for _, id := range job.spooled {
-		if relay.Unspool(job.spec.Spool, id) {
+		if !late && relay.Unspool(job.spec.Spool, id) {
 			job.takenBack = append(job.takenBack, id)
 		}
+	}
+	job.seats.mu.Unlock()
+	if late {
+		job.err = errEnding
+		return
 	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
@@ -934,27 +946,28 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 }
 
 // abandonLaunch is a start whose result the loop could not take because
-// the session ended. One whose agent is up is handed to finish (overtaken),
-// which records it as the loop would have, one at a time and before its
-// own writes; like every agent at a quit it outlives the session, for a
-// resume to reattach to. Any other, or one that comes up after finish has
-// stopped waiting for starts (relayOpsGrace), cannot be recorded: its
-// agent is stopped, as nothing would watch it or know it runs, and whoever
-// waits on a send held for it is told. The held sends stay on the job,
-// which stays among the launches, for finish to record as not sent.
+// the session ended. It is handed to finish (overtaken), which records it
+// as the loop would have, one at a time and before its own writes: an
+// agent that is up, which like every agent at a quit outlives the session,
+// for a resume to reattach to, or a start that failed, with what it took
+// back from the spool. One that ends after finish has stopped waiting for
+// starts (relayOpsGrace) cannot be recorded: its agent is stopped, as
+// nothing would watch it or know it runs, and whoever waits on a send
+// held for it is told. The held sends, and what it took back, stay on the
+// job, which stays among the launches, for finish to record as not sent.
 // Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
+	r.relays.mu.Lock()
+	late := r.relays.late
+	if !late {
+		r.relays.overtaken = append(r.relays.overtaken, job)
+	}
+	r.relays.mu.Unlock()
+	if !late {
+		r.relayOps.Done()
+		return
+	}
 	if job.err == nil {
-		r.relays.mu.Lock()
-		late := r.relays.late
-		if !late {
-			r.relays.overtaken = append(r.relays.overtaken, job)
-		}
-		r.relays.mu.Unlock()
-		if !late {
-			r.relayOps.Done()
-			return
-		}
 		r.ui.Log("relay %s: it came up after the session had ended and is stopped", job.name)
 		_ = job.seat.Kill()
 	}

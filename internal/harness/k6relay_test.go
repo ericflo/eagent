@@ -272,7 +272,6 @@ func TestSR3CtrlCDuringAChangeWithANewerOneWaitingKeepsTheAgent(t *testing.T) {
 // settleExited reports it unconfirmed ("whether it arrived cannot be
 // confirmed"), so relay_forward refuses it, though it never left eagent.
 func TestSR3AMessageTakenBackByARestartTheEndOvertakesIsNotSent(t *testing.T) {
-	t.Skip("known, not fixed: SR3-3, fixed in the next commit")
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, nil}, []error{nil, errors.New("tmux: the server exited")})
 	t.Setenv("EAGENT_TEST_KEY", "x")
@@ -318,6 +317,26 @@ func TestSR3AMessageTakenBackByARestartTheEndOvertakesIsNotSent(t *testing.T) {
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("the restart did not take the message back (%v)", err)
 	}
+	if k6Late {
+		// The launch is still under way when finish stops waiting for
+		// starts: what it took back is recorded before session.end all
+		// the same, and the agent that comes up after is not recorded.
+		evs := r10Quit(t, rt, g, 0, done)
+		r10NotSentBeforeEnd(t, evs, id)
+		g.release <- struct{}{}
+		return
+	}
 	evs := r10Quit(t, rt, g, 1, done)
 	r10NotSentBeforeEnd(t, evs, id)
+}
+
+// k6Late runs SR3-3 with the restart's launch still under way when finish
+// stops waiting for starts (relayOpsGrace).
+var k6Late bool
+
+func TestK6AMessageTakenBackByARestartStillLaunchingAtTheEndIsNotSent(t *testing.T) {
+	saved := relayOpsGrace
+	relayOpsGrace, k6Late = 10*time.Millisecond, true
+	t.Cleanup(func() { relayOpsGrace, k6Late = saved, false })
+	TestSR3AMessageTakenBackByARestartTheEndOvertakesIsNotSent(t)
 }
