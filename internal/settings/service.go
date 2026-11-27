@@ -275,10 +275,24 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// once the variable is unset, and a save of something else must not lose it.
 	var shadowed, skipped, kept []EnvField
 	env := config.EnvOverrides()
-	// A route's window follows the model a variable names, so it is that
-	// variable's too: the window of the environment's model is not written.
+	// A route's window follows a model a variable moved it to, so it is
+	// that variable's too: the window of the environment's model is not
+	// written. A variable naming the model the route already has moved
+	// nothing (Resolve shows the model as the layers'), and the window
+	// stays the user's.
+	var res *config.Resolution
+	resolved := func() *config.Resolution {
+		if res == nil {
+			r := config.Resolve(s.Project, s.Preset, s.Bundle)
+			res = &r
+		}
+		return res
+	}
 	for _, route := range []string{"/model", "/summarizer/model"} {
-		if name, ok := env[route+"/model"]; ok {
+		if _, ok := env[route+"/model"]; !ok {
+			continue
+		}
+		if name, moved := strings.CutPrefix(resolved().Sources[route+"/model"], "env:"); moved {
 			if _, has := env[route+"/context_tokens"]; !has {
 				env[route+"/context_tokens"] = name
 			}
@@ -290,7 +304,6 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// route's model as they are in force writes none, as a value the preset
 	// gives is not written: in the file it would be the window of the
 	// file's own server once the variable is unset.
-	var res *config.Resolution
 	route := func(c *config.Config, ptr string) *config.ModelRoute {
 		if ptr == "/model" {
 			return &c.Model
@@ -302,10 +315,7 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		if _, set := env[ptr+"/base_url"]; model || !set {
 			continue
 		}
-		if res == nil {
-			r := config.Resolve(s.Project, s.Preset, s.Bundle)
-			res = &r
-		}
+		res := resolved()
 		want, now := route(&cfg, ptr), route(&res.Effective, ptr)
 		if res.Sources[ptr+"/context_tokens"] != "env" || want == nil || now == nil || want.Model != now.Model || want.ContextTokens != now.ContextTokens {
 			continue
