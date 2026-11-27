@@ -1195,64 +1195,125 @@ func (r *Runtime) endsAtQuiet() bool {
 	return !kept
 }
 
+// endPlan is what the session does now (sessionPlan).
+type endPlan struct {
+	// waits: a look is due first (a wake, or the failed look of an
+	// ordinary turn, owed again after its wait). kept: something keeps
+	// the session open (keptOpen; agents: an agent). With neither, and no
+	// terminal, the session ends.
+	waits, kept, agents bool
+	ends                bool
+	// down: it ends as one whose model fails: eagent's looks have failed
+	// twice running, whatever came back first in them.
+	down bool
+	// The words still owed to the user before it ends: the closing word
+	// asked of the model (a closing turn, after which the session is
+	// asked again); eagent's own closing words (fallbackFinal), with why
+	// its model fails when down; or why its model fails alone (downWhy),
+	// when the closing word was had and that was not told.
+	askWord, ownWord, why bool
+	// How it ends: "done" (exit 0) for a session whose agent was stopped
+	// with nothing waiting, "awaiting-input" (exit 2) for one that waits
+	// on the user: a question is open or was dismissed and never taken
+	// up, its model fails, or no agent could be started at all.
+	reason string
+	code   int
+}
+
+// sessionPlan says what the session does now, as one answer for all who
+// act on it or speak of it: turnFailed's log and notice, the closing
+// turn's close-out, the closing words and maybeEnd. failed says a call of
+// a turn woken by w has just failed (turnFailed, with failures counting
+// it); maybeEnd asks with no turn out. A session that is not ending and
+// whose look failed keeps trying; down needs two failed looks in a row,
+// no terminal, nothing keeping it open (endsDown) and no word from the
+// user since the last failed call was shown, which is looked at first.
+// A refusal while the session is ending is final for it
+// (refusedWhileClosing): what asked for the look is left. Loop goroutine.
+func (r *Runtime) sessionPlan(w wake, failed bool) endPlan {
+	t := &r.turns
+	var p endPlan
+	p.down = t.failures >= 2 && r.endsDown()
+	// The failed look of an ordinary turn is owed again (its turn's end,
+	// "error", wakes the loop); a closing turn's, or the last title and
+	// summary's, is not.
+	owed := failed && !w.final && w.wait == 0
+	if (owed || r.wakePending()) && !p.down && !r.refusedWhileClosing() {
+		p.waits = true
+		return p
+	}
+	if r.opts.Interactive {
+		return p
+	}
+	if p.kept, p.agents = r.keptOpen(); p.kept {
+		return p
+	}
+	p.ends = true
+	switch {
+	case t.finalAsked:
+		p.why = p.down && !t.failTold
+	case p.down:
+		p.ownWord = true
+	case r.st.Question == nil:
+		p.askWord = true
+	}
+	p.reason, p.code = "done", 0
+	if r.st.Question != nil || p.down || r.st.DismissalStands() || (len(r.st.RelayOrder) == 0 && r.startFailed) {
+		p.reason, p.code = "awaiting-input", 2
+	}
+	return p
+}
+
+// tellDown says why the session ends as down (downWhy), when its closing
+// word was had before its model failed. Loop goroutine.
+func (r *Runtime) tellDown() {
+	text := r.downWhy(r.lastFailedAnswered()) + " This session ends here; `eagent -c` picks it back up."
+	if r.phone != nil {
+		text = r.downWhy(r.lastFailedAnswered()) + " This session ends here; a reply here picks it back up."
+	}
+	r.turns.failTold = true
+	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
+}
+
 func (r *Runtime) maybeEnd() {
 	t := &r.turns
 	if r.ending || t.busy || t.compacting {
 		return
 	}
-	// down: eagent's looks have failed twice running, whatever came back
-	// first in them, and nothing keeps this session with no terminal open
-	// (endsDown): retrying would pay for a look an hour for ever. Unless
-	// the user has written or answered since what the last failed call
-	// was shown: that is looked at first, without the wait (maybeTurn). A
-	// session something keeps open keeps trying. turnFailed's log and
-	// notice ask the same (afterFailure).
-	down := r.afterFailure(wake{}) == failDown
-	// A look refused (4xx) while the session is ending is final for
-	// it: what asked for that look is left, and the session ends.
-	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) && !r.refusedWhileClosing() {
-		return
-	}
-	if r.opts.Interactive {
-		// An interactive session waits for the user.
-		r.ui.Idle(r.st.Waiting())
-		return
-	}
-	if kept, agents := r.keptOpen(); kept {
-		if agents {
+	p := r.sessionPlan(wake{}, false)
+	if !p.ends {
+		switch {
+		case p.waits:
+		case r.opts.Interactive:
+			// An interactive session waits for the user.
+			r.ui.Idle(r.st.Waiting())
+		case p.agents:
 			r.checkIdleAgents()
 		}
 		return
 	}
+	// Every word still owed to the user is said before it ends.
 	switch {
-	case t.finalAsked:
-	case down:
-		// Nothing is running, nobody is at a terminal and the model cannot
-		// be reached: retrying for hours would watch over nothing. The
-		// session closes in eagent's own words; a reply brings it back.
-		t.finalAsked = true
-		r.fallbackFinal()
-	case r.st.Question == nil:
+	case p.askWord:
 		// A session with no terminal does not end in silence: one more
 		// look, for the closing report or to find the last message
 		// already covers it.
 		t.finalAsked = true
 		r.startTurn(wake{final: true})
 		return
+	case p.ownWord:
+		// Nothing is running, nobody is at a terminal and the model
+		// fails: retrying for hours would watch over nothing. The
+		// session closes in eagent's own words; a reply brings it back.
+		t.finalAsked = true
+		r.fallbackFinal(r.downWhy(r.lastFailedAnswered()))
+	case p.why:
+		r.tellDown()
 	}
 	if r.finalSummary() {
 		return // the thread list gets how it ended, then the session ends
 	}
-	// How it ended. "done" is for a session whose agent was stopped with
-	// nothing waiting. One that stopped short of that waits on the user,
-	// and says so (the phone's closing note and the exit code follow the
-	// reason): a question is open or was dismissed and never taken up, the
-	// model could not be reached, or no agent could be started at all.
-	if r.st.Question != nil || down || r.st.DismissalStands() || (len(r.st.RelayOrder) == 0 && r.startFailed) {
-		r.beginShutdown("awaiting-input", 2)
-		return
-	}
-	r.beginShutdown("done", 0)
+	r.beginShutdown(p.reason, p.code)
 }
 
 // freshWord reports that the user has written or answered since what the

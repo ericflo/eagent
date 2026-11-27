@@ -169,8 +169,7 @@ func (s *Service) DeleteBundle(ctx context.Context, name string) error {
 		return err
 	}
 	defer editor.Close()
-	res := config.Resolve(s.Project, s.Preset, s.Bundle)
-	if config.IsDefaultBundle(res, name) {
+	if s.inForce(name) {
 		return &Error{Status: 409, Message: "select a different default before deleting its preset"}
 	}
 	path, err := editor.RelatedPath("bundle", name)

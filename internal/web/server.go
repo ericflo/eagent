@@ -51,6 +51,11 @@ type Server struct {
 	// stops are the stops the shutdown overtook, by session, under way or
 	// done (stopForShutdown). Under mu.
 	stops map[string]*stopAnswer
+	// ran is the configuration the last run here of each session was
+	// built with, kept after the run ends: a stop the shutdown overtakes
+	// tells the session's phone by it, and its mark names it for the next
+	// server (stopAgentsOf, markStop). Under mu.
+	ran map[string]ranOn
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -164,13 +169,14 @@ func alive(sessionPath string) bool { return store.Alive(sessionPath) }
 // Hosted reports whether this process is running the session.
 func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 
-// PhoneWanted reports whether the sessions this server resumes for replies
-// from the phone run with the phone mirror on, by the configuration they
-// run with (the server's bundle and preset over the project's), as their
-// mirror decides. The reply watcher and the restore act only then.
-func (s *Server) PhoneWanted() bool {
+// PhoneConfig is the phone section of the configuration the sessions this
+// server resumes for replies from the phone run with (the server's bundle
+// and preset over the project's): whether their mirror is on, and its
+// account. The reply watcher and the restore watch that phone, and act
+// only when it is on.
+func (s *Server) PhoneConfig() (config.Finalechat, error) {
 	cfg, err := s.loadConfig("", "")
-	return err == nil && cfg.Finalechat.Wanted()
+	return cfg.Finalechat, err
 }
 
 // Resume reopens a session nobody is running with a reply the user sent to
@@ -589,7 +595,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how))
 }
 
 // deliver hands words from the browser to a session: to its inbox when
@@ -637,9 +643,10 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 		// Another process runs it, which may be past its last look at the
 		// inbox: they wait there, watched, until it takes them or lets go
 		// of the session (watchInbox).
+		posted := time.Now()
 		file, err := harness.PostInboxFile(info.Path, msg)
 		if err == nil {
-			go s.watchInbox(info, file)
+			go s.watchInbox(info, file, posted)
 		}
 		return "queued", err
 	}
@@ -652,27 +659,37 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 // inboxWatchEvery is how often watchInbox looks; tests shorten it.
 var inboxWatchEvery = 200 * time.Millisecond
 
-// watchInbox follows words deliver left in the inbox of a session another
-// process runs, until that run takes them (their file goes) or lets go of
-// the session. A run that lets go with the file still there (it was past
-// its last look) leaves them for the next run: the session is resumed here
-// at once, and its run takes the file, the words' only copy, as words left
-// for it. Once this server's shutdown has begun, they are left for the
-// session's next run.
-func (s *Server) watchInbox(info store.Info, file string) {
+// watchInbox follows words deliver left (posted then) in the inbox of a
+// session another process runs. Once a run has taken them as a turn it is
+// done. Otherwise, when that run lets go of the session, one decision is
+// made, from the record and the inbox (wordsWait): words that wait for the
+// next run (kept on the record by a run that was ending, or still a file)
+// get the session resumed here, as words for a run here that is ending
+// do, and its run takes them up; unless the user stopped the session after
+// writing them, when the session stays stopped and they wait for the
+// user's next resume. Once this server's shutdown has begun, they wait for
+// the session's next run.
+func (s *Server) watchInbox(info store.Info, file string, posted time.Time) {
+	id := strings.TrimSuffix(filepath.Base(file), ".json")
 	tick := time.NewTicker(inboxWatchEvery)
 	defer tick.Stop()
+	gone := false
 	for range tick.C {
-		if _, err := os.Stat(file); err != nil || alive(info.Path) {
-			if err != nil {
-				return // taken
+		if !gone {
+			if _, err := os.Stat(file); err != nil {
+				gone = true
+				if answered, _ := inboxTaken(info.Path, id); answered {
+					return
+				}
 			}
+		}
+		if alive(info.Path) {
 			continue
 		}
 		s.resuming.Lock()
-		if _, err := os.Stat(file); err == nil && !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) {
+		if !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) && wordsWait(info.Path, id, posted) {
 			if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true); err != nil {
-				s.logf("web: session %s stopped with words in its inbox, and could not be resumed for them: %v", info.ID, err)
+				s.logf("web: session %s stopped with words waiting for it, and could not be resumed for them: %v", info.ID, err)
 			}
 		}
 		s.resuming.Unlock()
@@ -680,12 +697,91 @@ func (s *Server) watchInbox(info store.Info, file string) {
 	}
 }
 
+// inboxTaken reads the record for the words of inbox submission id:
+// answered when a run took them as a turn (a user.answer, or a
+// user.message not kept for the next run), and the seq of a user.message
+// a run that was ending kept for the next run (0 for none).
+func inboxTaken(path, id string) (answered bool, kept int64) {
+	evs, err := store.Read(path)
+	if err != nil {
+		return false, 0
+	}
+	for _, ev := range evs {
+		var d struct {
+			Inbox string `json:"inbox"`
+			Held  string `json:"held"`
+		}
+		if ev.Type != event.UserMessage && ev.Type != event.UserAnswer || ev.Decode(&d) != nil || d.Inbox != id {
+			continue
+		}
+		if ev.Type == event.UserAnswer || d.Held != harness.HeldWhileEnding {
+			return true, 0
+		}
+		kept = ev.Seq
+	}
+	return false, kept
+}
+
+// wordsWait decides, once the run that had the session has let go of it,
+// whether the words of inbox submission id (posted then) get the session
+// resumed for them: they wait for a run (not answered), and the user did
+// not stop the session after writing them: no stop posted after them is
+// still in the inbox, and the record shows no stop of the user's taken
+// after them (a relay.end it made) nor, for words it does not hold, an end
+// on a quit after they were posted. Words a run kept were kept because it
+// was ending: what ended it came before them, and a stop after them stays
+// in the inbox.
+func wordsWait(path, id string, posted time.Time) bool {
+	answered, kept := inboxTaken(path, id)
+	if answered {
+		return false
+	}
+	dir := harness.InboxDir(path)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() <= id+".json" || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		var msg harness.InboxMessage
+		if err == nil && json.Unmarshal(raw, &msg) == nil && msg.Type == "stop" {
+			return false
+		}
+	}
+	evs, err := store.Read(path)
+	if err != nil {
+		return false
+	}
+	for _, ev := range evs {
+		var d struct {
+			Reason string `json:"reason"`
+		}
+		if ev.Type != event.RelayEnd && ev.Type != event.SessionEnd || ev.Decode(&d) != nil {
+			continue
+		}
+		stop := ev.Type == event.RelayEnd && d.Reason == "the user stopped the session"
+		quit := ev.Type == event.SessionEnd && d.Reason == "quit"
+		if kept > 0 && stop && ev.Seq > kept || kept == 0 && (stop || quit) && ev.Time.After(posted) {
+			return false
+		}
+	}
+	return true
+}
+
 // deliveredAnswer is the answer to words deliver took as how; words left
-// "queued" are said to wait, not to be delivered.
-func deliveredAnswer(how string) map[string]any {
+// "queued" are said to wait, not to be delivered, and, once this server's
+// shutdown has begun (it resumes nothing for them then), to wait for the
+// session's next run.
+func (s *Server) deliveredAnswer(how string) map[string]any {
 	out := map[string]any{"delivered": how}
 	if how == "queued" {
+		s.resuming.Lock()
+		stopping := s.stopping
+		s.resuming.Unlock()
 		out["message"] = "They wait in the session's inbox: it takes them when it next reads it, or when it is resumed for them."
+		if stopping {
+			out["message"] = "They wait in the session's inbox until it next runs."
+		}
 	}
 	return out
 }
@@ -718,7 +814,7 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, deliveredAnswer(how))
+	writeJSON(w, s.deliveredAnswer(how))
 }
 
 // postDismiss closes the session's open question with no answer. Nothing
@@ -891,11 +987,20 @@ func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
 func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	s.mu.Lock()
 	s.markStop(info.ID)
+	on, ranHere := s.ran[info.ID]
+	list, _ := s.readHosted()
 	s.mu.Unlock()
+	// The phone is told by the configuration the session's run here was
+	// built with, or, for one not run here, the one its mark names.
+	cfg := &on.cfg
+	if !ranHere {
+		m, _ := list.mark(info.ID)
+		cfg = s.markConfig(info, m)
+	}
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path, s.sessionConfig())
+	stopped, failed, err := stopAgents(info.Path, cfg)
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
@@ -960,7 +1065,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
-		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
+		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg, s.pickOf(bundle, preset))
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
@@ -991,9 +1096,9 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 }
 
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig plus any browser-picked route overrides),
-// unless the server's shutdown has begun.
-func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
+// configuration (loadConfig, as pick names it, plus any browser-picked
+// route overrides), unless the server's shutdown has begun.
+func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config, pick runPick) (string, error) {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.stopping {
@@ -1004,6 +1109,7 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, er
 	if err != nil {
 		return "", err
 	}
+	s.noteRan(rt.SessionID(), cfg, pick)
 	s.run(rt, ui)
 	return rt.SessionID(), nil
 }
@@ -1020,7 +1126,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
-		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg)
+		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg, s.pickOf("", ""))
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
@@ -1048,6 +1154,7 @@ func (s *Server) host(path string, opts harness.Options, bundle, preset string, 
 	if err != nil {
 		return err
 	}
+	s.noteRan(rt.SessionID(), cfg, s.pickOf(bundle, preset))
 	s.run(rt, ui)
 	return nil
 }

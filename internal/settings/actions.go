@@ -144,11 +144,8 @@ func (s *Service) prepareResource(editor *config.Editor, p control.Proposal, gra
 				change.After = restored // as it was, byte for byte
 			}
 			change.AfterExists = true
-		} else {
-			res := config.Resolve(s.Project, s.Preset, s.Bundle)
-			if config.IsDefaultBundle(res, name) {
-				return change, fmt.Errorf("select a different default before deleting its bundle")
-			}
+		} else if s.inForce(name) {
+			return change, fmt.Errorf("select a different default before deleting its bundle")
 		}
 	default:
 		return change, fmt.Errorf("operation does not target a prompt or bundle")
@@ -182,6 +179,16 @@ func (change ResourceChange) State(editor *config.Editor) (before, after bool, e
 	return exists == change.BeforeExists && digest == artifact.Digest(change.Before), exists == change.AfterExists && digest == artifact.Digest(change.After), nil
 }
 
+// CheckResource holds a prepared change to the guards again when it is
+// written: deleting the saved preset sessions start on is refused, also
+// when the command was prepared before that preset became the default.
+func (s *Service) CheckResource(change ResourceChange) error {
+	if change.Kind == "bundle" && !change.AfterExists && s.inForce(change.Name) {
+		return fmt.Errorf("select a different default before deleting its bundle")
+	}
+	return nil
+}
+
 func (change ResourceChange) Apply(editor *config.Editor) error {
 	before, after, err := change.State(editor)
 	if err != nil || after {
@@ -204,13 +211,9 @@ func ResourceEffect(change ResourceChange) map[string]any {
 }
 
 // relayChoices are the values session.start accepts for relay: the relay
-// profile names.
+// profile names of the configuration sessions start on.
 func (s *Service) relayChoices() []string {
-	cfg, err := config.Load(s.Project, "")
-	if err != nil {
-		cfg = config.Defaults()
-	}
-	return cfg.Relay.RelayProfileNames()
+	return s.Runs().Relay.RelayProfileNames()
 }
 
 // RelayInput names the session.start input for a relay profile's model or
@@ -249,10 +252,7 @@ func RelayModelSuggestions(agent, project string) []control.Suggestion {
 // agent runs what the profile names, else its own configured default; each
 // input's default shows which.
 func (s *Service) relayStartInputs(text func(int) control.Shape, choices func([]string) control.Shape, params map[string]control.Shape) []control.Input {
-	cfg, err := config.Load(s.Project, "")
-	if err != nil {
-		cfg = config.Defaults()
-	}
+	cfg := s.Runs()
 	profiles := cfg.Relay.RelayProfiles()
 	var inputs []control.Input
 	for _, name := range cfg.Relay.RelayProfileNames() {
