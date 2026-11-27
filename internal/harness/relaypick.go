@@ -317,7 +317,11 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	if r.relays.launch(name) != nil {
 		return // a start under way applies it when it is up
 	}
-	if rel.State == "exited" {
+	exited := rel.State == "exited"
+	if seat := r.relays.get(name); seat != nil && seat.Snapshot().State == "exited" {
+		exited = true // its seat says so before the record does (the same look)
+	}
+	if exited {
 		// Not by starting it again: an agent that exited (the user's own
 		// /exit among the ways) stays so. The change is what its next start
 		// runs (relaunch), no longer one that waits, and that start is one.

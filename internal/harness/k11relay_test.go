@@ -2,6 +2,7 @@ package harness
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,4 +188,188 @@ func TestK11AQuitWhileATurnsSwitchTypesItsBrief(t *testing.T) {
 	if o := state.Replay(evs).SendOutcome(id); o != state.SendUnconfirmed {
 		t.Errorf("the brief %s, typed in part as the user quit: %q on the record; want unconfirmed", id, o)
 	}
+}
+
+// The relay reviewer's tests (sr8_relay_test.go), copied.
+
+// sr8SlowSeat is a k2FeedSeat whose first Send is still under way when the
+// seat is killed, as relay.Seat's is while it sleeps out interruptPause
+// (1.5 s) or a dialogPause before it next looks at whether it was closed:
+// it ends when the test lets it, with ErrClosed (nothing typed).
+type sr8SlowSeat struct {
+	*k2FeedSeat
+	entered, release chan struct{}
+	quick            int // sends typed at once before the slow one
+}
+
+func (s *sr8SlowSeat) Send(id, text, mode string) (string, error) {
+	s.fakeSeat.mu.Lock()
+	if s.quick > 0 {
+		s.quick--
+		s.fakeSeat.mu.Unlock()
+		return s.k2FeedSeat.Send(id, text, mode)
+	}
+	s.sent = append(s.sent, text)
+	s.fakeSeat.mu.Unlock()
+	close(s.entered)
+	<-s.release
+	return "", relay.ErrClosed
+}
+
+// SR8-1. relay_control stop settles what the stopped agent was typed once
+// its seat has drained and no send is being typed into it (retire); the
+// settle is settleExited of whatever record holds the relay's name when it
+// runs. The user's first message is still being typed into Codex when it
+// is stopped; the seat drains, the stop returns, and the user restarts
+// Codex (relay_control restart of the stopped relay) and sends a second
+// message, typed into the new Codex. Then the first send's typing ends:
+// the stop's settle runs now, against the new Codex's record, and reports
+// the second message "could not be confirmed: the agent was restarted
+// before its arrival showed" (a wake for eagent, may-not-have-arrived on
+// the phone) while the new agent runs and nothing restarted it; its
+// arrival then gives the send a second outcome.
+func TestSR8AStopsLateSettleReportsTheNewAgentsSend(t *testing.T) {
+	slow := &sr8SlowSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan struct{}), release: make(chan struct{})}
+	two := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{slow, two}, nil)
+	rt := newLaunchRuntime(t)
+	t.Cleanup(func() {
+		select {
+		case <-slow.release:
+		default:
+			close(slow.release)
+		}
+	})
+
+	userSays(t, rt, "run the tests")
+	<-slow.entered // being typed
+	first := lastSendID(rt)
+
+	stopped := relayToolAsync(rt, map[string]any{"action": "stop"})
+	slow.waitGone(t)
+	slow.end() // its watcher ends: drained, with the send still being typed
+	recv(t, stopped, "relay_control stop")
+
+	restarted := relayToolAsync(rt, map[string]any{"action": "restart"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, restarted, "relay_control restart")
+	waitRelayStarts(t, rt)
+
+	userSays(t, rt, "and then the lint")
+	waitFor(t, "the second message typed into the new Codex", func() bool { return len(two.sentTexts()) == 1 })
+	waitFor(t, "the new Codex's queue idle", func() bool {
+		rt.relays.mu.Lock()
+		defer rt.relays.mu.Unlock()
+		return rt.relays.queues[two] == nil
+	})
+	second := lastSendID(rt)
+	if second == first {
+		t.Fatal("the second message was not sent")
+	}
+	if got := deliveredFor(rt, second); len(got) != 0 {
+		t.Fatalf("%s already has an outcome before anything: %+v", second, got)
+	}
+
+	close(slow.release) // the first send's typing ends: nothing was typed
+	waitFor(t, "the first send's outcome", func() bool { return len(deliveredFor(rt, first)) > 0 })
+	rt.sync(func() {})
+	if got := deliveredFor(rt, second); len(got) != 0 {
+		t.Errorf("%s, typed into the new Codex, which runs: %+v; want no outcome yet (nothing stopped or restarted the agent it was typed into)", second, got)
+	}
+	two.say(relay.Event{Kind: relay.KindDelivered, SendID: second, OK: true})
+	rt.sync(func() {})
+	if got := deliveredFor(rt, second); len(got) != 1 || !got[0].OK {
+		t.Errorf("%s after its arrival: %+v; want one outcome, arrived", second, got)
+	}
+}
+
+// SR8-1, the known limit "a fresh start under the name leaves it
+// unresolved", which this pass set out to close: Codex was typed the
+// user's first message (not yet confirmed) and is typing the second when
+// it is stopped. The seat drains, the stop returns, and a fresh Codex is
+// started (relay_start, which takes the stopped relay's name). The second
+// send's typing ends after that: the stop's settle runs then, on the new
+// Codex's record, and the first message, typed into the stopped agent,
+// never gets an outcome: it stays on its way on the record for good (an
+// ended relay is not reattached).
+func TestSR8AStopsLateSettleLeavesTheStoppedAgentsSendUnresolved(t *testing.T) {
+	slow := &sr8SlowSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan struct{}), release: make(chan struct{}), quick: 1}
+	two := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{slow, two}, nil)
+	rt := newLaunchRuntime(t)
+	t.Cleanup(func() {
+		select {
+		case <-slow.release:
+		default:
+			close(slow.release)
+		}
+	})
+	_, typed := k2Forward(t, rt, slow.k2FeedSeat, "run the tests", "queue")
+	userSays(t, rt, "and then the lint")
+	<-slow.entered
+
+	stopped := relayToolAsync(rt, map[string]any{"action": "stop"})
+	slow.waitGone(t)
+	slow.end()
+	recv(t, stopped, "relay_control stop")
+
+	started := make(chan string, 1)
+	go func() {
+		args := map[string]any{"profile": "codex"}
+		text, _ := rt.relayTool("relay_start", argStr(args), argNum(args), argList(args), false)
+		started <- text
+	}()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	recv(t, started, "relay_start")
+	waitRelayStarts(t, rt)
+	rt.sync(func() {
+		if rel := rt.st.Relays["codex"]; rel == nil || rel.Ended {
+			t.Errorf("the fresh start did not take the name codex: %+v", rel)
+		}
+	})
+
+	close(slow.release)
+	waitFor(t, "the stopped agent's queue done", func() bool {
+		rt.relays.mu.Lock()
+		defer rt.relays.mu.Unlock()
+		return rt.relays.queues[slow] == nil
+	})
+	rt.sync(func() {})
+	if got := deliveredFor(rt, typed); len(got) != 1 {
+		t.Errorf("%s, typed into the agent that was stopped: outcomes %+v; want one (unconfirmed: the agent was stopped)", typed, got)
+	}
+}
+
+// The relay reviewer's suspicion: a send's failed outcome and the agent's
+// exit come in the same look while a change waits for its turn. The
+// failed outcome looks at the waiting change (appendOutcome) while the
+// record still says idle; the seat already says exited. The exit rule
+// holds there too: an agent that exited is not started again; the change
+// is what its next start runs.
+func TestK11AFailedOutcomeInTheExitsLookDoesNotRestartTheExitedAgent(t *testing.T) {
+	seat := newFakeSeat("one")
+	useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
+	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
+		t.Fatalf("repick in a turn: %q", msg)
+	}
+	rt.sync(func() { // one look, said at once, before the loop takes any of it
+		seat.emit(relay.Event{Kind: relay.KindState, State: "idle"},
+			relay.Event{Kind: relay.KindDelivered, SendID: "r9", OK: false, Outcome: relay.OutcomeUnconfirmed, Detail: "never showed up"},
+			relay.Event{Kind: relay.KindState, State: "exited", Detail: "$ "})
+	})
+	waitFor(t, "the failed outcome recorded", func() bool { return len(deliveredFor(rt, "r9")) > 0 })
+	rt.sync(func() {}) // and the exit, after it
+	if k1Restarting(rt) {
+		t.Fatal("the agent that exited was started again by the waiting change")
+	}
+	rt.sync(func() {
+		if _, ok, waiting := rt.nextPick("codex"); !ok || waiting {
+			t.Errorf("after the exit: change kept %v, waiting %v; want it kept for the next start", ok, waiting)
+		}
+	})
 }
