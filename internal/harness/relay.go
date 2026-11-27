@@ -412,24 +412,13 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		if res.err != nil && !errors.As(res.err, &half) && r.passOn(q, h) {
 			continue
 		}
-		if res.err != nil && sendErrOutcome(res.err) == event.DeliveryNotSent {
-			r.relays.mu.Lock()
-			select {
-			case <-r.closed:
-				// Nothing settles it now (the loop has closed): never typed,
-				// it is back at the head of the queue, which finish records
-				// not sent.
-				q.items = append([]heldSend{h}, q.items...)
-			default:
-			}
-			r.relays.mu.Unlock()
-		}
+		untyped := res.err != nil && sendErrOutcome(res.err) == event.DeliveryNotSent
 		if errors.Is(res.err, relay.ErrClosed) {
 			// Its terminal was closed under it and no agent took over: the
 			// relay was stopped.
 			res.err = fmt.Errorf("the agent is not running")
 		}
-		r.settleSend(q, h, res)
+		r.settleSend(q, h, res, untyped)
 	}
 }
 
@@ -473,10 +462,12 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 // settleSend ends the typing of a send: on the loop goroutine, in the one
 // step that stops naming it as being typed, a failure is recorded, and so
 // is a send typed into a process that went meanwhile (nothing will confirm
-// it). No exit or restart seen in between can report it too. Then its
-// waiter, if any, is told. Not on the loop goroutine.
-func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult) {
-	r.sync(func() {
+// it). No exit or restart seen in between can report it too. A send never
+// typed (untyped) that the loop did not take, as it has closed, is back at
+// the head of its queue, which finish records not sent. Then its waiter,
+// if any, is told. Not on the loop goroutine.
+func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
+	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
 		gone := q.gone
 		q.typing, q.gone = "", ""
@@ -491,6 +482,11 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult) {
 			r.append(goneUnconfirmed(q.name, h.id, gone))
 		}
 	})
+	if !ran && untyped {
+		r.relays.mu.Lock()
+		q.items = append([]heldSend{h}, q.items...)
+		r.relays.mu.Unlock()
+	}
 	if h.done != nil {
 		h.done <- res
 	}
