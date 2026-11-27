@@ -43,7 +43,7 @@ func TestR10UndoKeepsANullClearedField(t *testing.T) {
 				t.Fatal(err)
 			}
 			inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, after.Snapshot.Version
-			raw, _, _, err := s.PrepareUndo(inverse, string(desired), s.Grant())
+			raw, _, _, err := s.PrepareUndo(inverse, before, string(desired), s.Grant())
 			if err != nil {
 				t.Fatalf("undo: %v (inverse %+v)", err, inverse.Edits)
 			}

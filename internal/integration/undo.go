@@ -109,7 +109,7 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		journal.Resource = &change
 		return nil
 	}
-	desired, etag, _, err := s.PrepareUndo(inverse, original.Desired, grant)
+	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant)
 	if err != nil {
 		return err
 	}

@@ -27,7 +27,7 @@ func r11Undo(t *testing.T, project, before string, edits []control.Edit) string 
 		t.Fatal(err)
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, after.Snapshot.Version
-	raw, _, _, err := s.PrepareUndo(inverse, string(desired), s.Grant())
+	raw, _, _, err := s.PrepareUndo(inverse, before, string(desired), s.Grant())
 	if err != nil {
 		t.Fatalf("undo: %v (inverse %+v)", err, inverse.Edits)
 	}
@@ -67,7 +67,7 @@ func TestR11SummarizerRouteWrittenNull(t *testing.T) {
 func TestR11UndoKeepsANullFallbackOff(t *testing.T) {
 	clearRouteEnv(t)
 	for _, c := range []struct{ name, before, route, skip string }{
-		{"main", `{"preset":"openai-high","model":{"fallback":null}}`, "/model", "known, not fixed: the null is an edit of /model/fallback, which is no field of the descriptor, so validation refuses it"},
+		{"main", `{"preset":"openai-high","model":{"fallback":null}}`, "/model", ""},
 		{"summarizer", `{"preset":"openai-high","summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://openrouter.ai/api/v1","model":"z-ai/glm-5.3-flash","api_key_env":"OPENROUTER_API_KEY","fallback":null}}}`, "/summarizer/model", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {

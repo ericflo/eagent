@@ -113,7 +113,7 @@ func TestRemoteUndoOfFallbackModelPick(t *testing.T) {
 				t.Fatal(err)
 			}
 			inverse.SchemaVersion, inverse.ExpectedVersion = SchemaVersion, after.Snapshot.Version
-			raw, _, _, err := s.PrepareUndo(inverse, string(desired), s.Grant())
+			raw, _, _, err := s.PrepareUndo(inverse, c.before, string(desired), s.Grant())
 			if err != nil {
 				t.Fatalf("undo: %v\nafter the edit:\n%s", err, desired)
 			}

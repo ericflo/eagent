@@ -87,7 +87,8 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 // PrepareUndo compares the affected fields against the original saved result
 // under the caller's project lock, then uses today's ordinary typed writer.
 // Unrelated local edits are preserved; changed affected fields cause conflict.
-func (s *Service) PrepareUndo(inverse control.Proposal, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
+// beforeRaw is the file before the original command (a journal's before_raw).
+func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw string, grant control.Grant) (string, string, RemoteView, error) {
 	var desired map[string]any
 	if err := json.Unmarshal([]byte(desiredRaw), &desired); err != nil {
 		return "", "", RemoteView{}, err
@@ -97,14 +98,44 @@ func (s *Service) PrepareUndo(inverse control.Proposal, desiredRaw string, grant
 	if err != nil {
 		return "", "", RemoteView{}, err
 	}
+	before, err := fileValues(beforeRaw)
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	// A fallback the file had turned off with null, which the command wrote
+	// into, is turned off again: no edit can write the null (no field is a
+	// whole route), and taking the route out would bring a preset's
+	// fallback back on. The route is then affected as a whole.
+	keys := []string{}
 	for _, edit := range inverse.Edits {
-		want, wantExists := pointerValue(desired, edit.Key)
-		got, gotExists := pointerValue(current, edit.Key)
+		keys = append(keys, edit.Key)
+	}
+	v, had := pointerValue(before, "/model/fallback")
+	off := had && v == nil && slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, "/model/fallback/") })
+	if off {
+		keys = append(keys, "/model/fallback")
+	}
+	for _, key := range keys {
+		want, wantExists := pointerValue(desired, key)
+		got, gotExists := pointerValue(current, key)
 		if wantExists != gotExists || !reflect.DeepEqual(want, got) {
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	return s.Prepare(inverse, grant)
+	raw, etag, view, err := s.Prepare(inverse, grant)
+	if err != nil || !off {
+		return raw, etag, view, err
+	}
+	values, err := fileValues(raw)
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	setPointer(values, "/model/fallback", nil, false)
+	out, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	return string(out) + "\n", etag, view, nil
 }
 
 func (change ResourceChange) Inverse() (control.Proposal, error) {
