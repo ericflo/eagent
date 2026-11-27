@@ -12,7 +12,7 @@ import (
 )
 
 // A serve restart restores a session with a reply whose two files are too
-// large (both notices go out, so eagent's is the thread's latest message).
+// large, in a thread whose latest message is eagent's note.
 // `connector run` holds the project's watch: its sweep takes up the
 // restore's entry, marked restored, and leaves the session to the restore.
 // The restore then cannot bring the session back and gives the reply back
@@ -26,9 +26,7 @@ func TestSR2ReleaseAfterAWatcherTookUpTheRestoresEntryIsNotDropped(t *testing.T)
 	if err != nil || !ok || msg.ID != "m1" {
 		t.Fatalf("PendingReply %#v ok=%v err=%v, want m1", msg, ok, err)
 	}
-	if p := r10Preview(f, sid); p != "system" {
-		t.Fatalf("the thread's latest message is from %q, want the notice", p)
-	}
+	k1Hide(f, sid) // eagent's note is the thread's latest: the sweep passes it over
 	// The connector's watcher sweeps while the restore is still starting
 	// the session: it takes up the restore's entry and holds off.
 	connector.sweep(context.Background())

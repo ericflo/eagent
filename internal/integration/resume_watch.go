@@ -662,36 +662,22 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 		return PhoneMessage{}, false, nil
 	}
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
-	var big []finalechat.Attachment
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
 		if errors.Is(err, finalechat.ErrTooLarge) {
-			big = append(big, a)
+			// It will never fit: the session comes back with the rest of
+			// the message and the file refused, as the watcher's resume
+			// passes one; the session records it and its mirror tells the
+			// sender. Nothing is posted here.
+			msg.Refused = append(msg.Refused, RefusedFile{AttachmentID: a.ID, Text: finalechat.RefusedNote(a.Filename, err)})
 			continue
 		}
 		if err != nil {
+			// A failed download posts nothing, so the thread's latest
+			// message is still the reply for the watcher's sweep.
 			return PhoneMessage{}, false, err
 		}
 		msg.Attachments = append(msg.Attachments, saved)
-	}
-	// A file too large will never fit: the session comes back with the
-	// rest of the message, and the sender is told about the file, once
-	// every other file came (a failed download posts nothing, so the
-	// thread's latest message is still the reply for the watcher's sweep).
-	// When a notice cannot be posted, nothing is taken, as for a failed
-	// download.
-	for i, a := range big {
-		if err := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, finalechat.ErrTooLarge); err != nil {
-			if i > 0 {
-				// A notice before it went: eagent's is the thread's latest
-				// message, which hides the reply from the sweep. The
-				// project's reply watcher keeps it quietly, as it keeps
-				// one whose notice it could not post itself. When that
-				// cannot be written either, the restore is told both.
-				err = errors.Join(err, leaveWithWatcher(project, info, last, false))
-			}
-			return PhoneMessage{}, false, err
-		}
 	}
 	// What the session resumed with it does not take in before it stops
 	// again (a /quit ends it before it reads on) is looked for by the
@@ -741,16 +727,6 @@ func ReleaseReply(project string, info store.Info, msg PhoneMessage) error {
 	}
 	r := &replyRetries{replies: map[string]pendingReply{msg.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: finalechat.Message{ID: msg.ID}, since: time.Now(), released: true}}}
 	return r.writeDown(project, func(string, ...any) {})
-}
-
-// tellRefused posts, in the thread, why a file the user sent was not
-// taken. The key, the running mirror's for the same notice, makes it once
-// per file whoever notices first.
-func tellRefused(ctx context.Context, client *finalechat.Client, externalID, msgID string, a finalechat.Attachment, err error) error {
-	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
-	defer stop()
-	_, _, err = client.Post(postCtx, finalechat.Ref(externalID), finalechat.PostRequest{Body: finalechat.RefusedNote(a.Filename, err), Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: externalID + ":refused:" + msgID + ":" + a.ID})
-	return err
 }
 
 // saveAttachment downloads a phone attachment under the session directory,

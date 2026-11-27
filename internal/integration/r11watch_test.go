@@ -49,10 +49,10 @@ func r11Keys(t *testing.T, target string) (front string, keys func() []string) {
 	}
 }
 
-// Finding 14: the notice about a file too large to take is posted under
-// the key the running mirror posts it under (phone.go's p.key("refused",
-// message, file): "eagent:<session>:refused:<message>:<file>"), so the
-// thread shows it once whoever tells the sender first.
+// Finding 14, under the rule that the session taking a message tells the
+// sender: the restore posts no notice about a file too large to take; it
+// passes the file refused, and the resumed session's mirror posts the note
+// under its own key (harness TestK1ARestoredTooLargeFileIsToldOnce).
 func TestR11ARefusalIsPostedUnderTheMirrorsKey(t *testing.T) {
 	big := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	project, sid, _, fr, _, _ := r9Stopped(t, "here it is", big)
@@ -63,8 +63,11 @@ func TestR11ARefusalIsPostedUnderTheMirrorsKey(t *testing.T) {
 	if err != nil || !ok || msg.ID != "m1" {
 		t.Fatalf("msg %#v ok=%v err=%v", msg, ok, err)
 	}
-	if got, want := keys(), "eagent:"+sid+":refused:m1:att-2"; len(got) != 1 || got[0] != want {
-		t.Fatalf("posted under %q, want one post under %q", got, want)
+	if got := keys(); len(got) != 0 {
+		t.Fatalf("the restore posted under %q", got)
+	}
+	if r := msg.Refused; len(r) != 1 || r[0].AttachmentID != "att-2" || !strings.Contains(r[0].Text, "clip.mov") {
+		t.Fatalf("refused %#v, want clip.mov", r)
 	}
 }
 
@@ -121,23 +124,19 @@ func TestR11ARestoreThatCannotFetchALaterFileLeavesTheReplyForTheSweep(t *testin
 	}
 }
 
-// Finding 12, its other case: both files too large, the notice about the
-// first posted and the one about the second not. The restore takes
-// nothing, and the first notice is the thread's latest message by then,
-// which the sweep passes over: the restore leaves the reply with the
-// project's watcher (B11), whose sweeps resume the session once all is
-// well again.
+// Finding 12, its other case: both files too large, while the service
+// refuses a post. The restore posts nothing, so nothing hides the reply
+// and no notice can fail: it takes the reply with both files refused, for
+// the resumed session to tell the sender about each.
 func TestR11ARestoreWhoseSecondNoticeFailedLeavesTheReplyForTheSweep(t *testing.T) {
 	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
-	project, sid, _, fr, host, w := r11Restore(t, big2)
+	project, sid, _, fr, _, _ := r11Restore(t, big2)
 	fr.failPosts(0, http.StatusForbidden)
-	if msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid)); err == nil || ok {
-		t.Fatalf("taken while nobody could be told about clip2.mov: msg %#v ok=%v err=%v", msg, ok, err)
+	msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
+	if err != nil || !ok || msg.ID != "m1" || len(msg.Attachments) != 0 || len(msg.Refused) != 2 {
+		t.Fatalf("msg %#v ok=%v err=%v, want the words with both files refused", msg, ok, err)
 	}
-	for i := 0; i < 3; i++ {
-		w.sweep(context.Background())
-	}
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 0 {
-		t.Fatalf("after all is well again: resumed %#v", host.resumed)
+	if posts := fr.posted(); len(posts) != 0 {
+		t.Fatalf("the restore posted %q", posts)
 	}
 }

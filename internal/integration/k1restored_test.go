@@ -8,10 +8,10 @@ import (
 	"github.com/ericflo/eagent/internal/finalechat"
 )
 
-// A serve restart finds a reply with two files too large to take.
-// PendingReply posts both notices (eagent's is now the thread's latest
-// message) and hands the words to the restore, writing the reply down,
-// marked restored, for the watcher. The restore then cannot bring the
+// A serve restart finds a reply with two files too large to take, in a
+// thread whose latest message is eagent's note. PendingReply hands the
+// words to the restore, the files refused, writing the reply down, marked
+// restored, for the watcher. The restore then cannot bring the
 // session back (restoreSession fails, so nothing resumes it), and gives the
 // reply back (ReleaseReply). The watcher started after it should resume
 // the session with the words; a sweep's look at the thread passes it over
@@ -24,9 +24,7 @@ func TestRV15RestoreThatNeverResumesLeavesTheReplyToTheWatcher(t *testing.T) {
 	if err != nil || !ok || msg.ID != "m1" {
 		t.Fatalf("PendingReply %#v ok=%v err=%v, want m1", msg, ok, err)
 	}
-	if p := r10Preview(f, sid); p != "system" {
-		t.Fatalf("the thread's latest message is from %q, want the notice", p)
-	}
+	k1Hide(f, sid) // eagent's note is the thread's latest: the sweep passes it over
 	// The restore fails here: the session is not resumed with msg.
 	if err := ReleaseReply(project, r6Info(t, project, sid), msg); err != nil {
 		t.Fatal(err)
@@ -71,5 +69,33 @@ func TestK1ATakingUpAnotherEntryKeepsTheRestoresHold(t *testing.T) {
 	r.takeUp(project)
 	if p, ok := r.replies["m1"]; !ok || !p.restored || len(r.replies) != 1 {
 		t.Fatalf("kept %#v, want the restore's entry alone", r.replies)
+	}
+}
+
+// k1Hide makes eagent's note the thread's latest message, as a closing
+// note does, so the sweep's own pass passes the thread over.
+func k1Hide(f *r6Thread, sid string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "note-" + sid, "sender": "system", "origin": "token", "body": "eagent session ended (shutdown).", "created_at": time.Now(), "meta": map[string]any{}})
+}
+
+// A restore finds a reply with two files too large to take, while the
+// service refuses a post. It posts nothing itself: the reply comes back
+// with both files refused, for the resumed session to record and its
+// mirror to tell the sender, once each, as for the watcher's resume.
+func TestK1ARestorePassesItsTooLargeFilesRefused(t *testing.T) {
+	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
+	project, sid, f, fr, _, _ := r11Restore(t, big2)
+	fr.failPosts(0, 403)
+	msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
+	if err != nil || !ok || msg.ID != "m1" || msg.Text != "please look at both" || len(msg.Attachments) != 0 {
+		t.Fatalf("PendingReply %#v ok=%v err=%v, want the words", msg, ok, err)
+	}
+	if !k3Refused(msg, "clip.mov") || !k3Refused(msg, "clip2.mov") || len(msg.Refused) != 2 {
+		t.Fatalf("refused %#v, want both files", msg.Refused)
+	}
+	if posts := fr.posted(); len(posts) != 0 || r10Preview(f, sid) != "user" {
+		t.Fatalf("the restore posted %q", posts)
 	}
 }

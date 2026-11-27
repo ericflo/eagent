@@ -290,34 +290,6 @@ func TestK1AFileWhoseDownloadAlwaysFailsIsRefusedAfterThreeTries(t *testing.T) {
 	}
 }
 
-// B11: a serve restart finds a reply with two files too large to take. The
-// notice about the first goes out, the one about the second cannot: the
-// restore takes nothing, and eagent's notice is the thread's latest
-// message, which the sweep passes over. The reply watcher, started after
-// the restore as the serve starts it, resumes the session with the words,
-// both files refused on the resume for the resumed session to tell (its
-// mirror posts under the keys the restore's notice used).
-func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.T) {
-	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
-	project, sid, f, fr, stopped, _ := r11Restore(t, big2)
-	host := &k1Host{ResumeHost: stopped, next: make(chan PhoneMessage, 4)}
-	fr.failPosts(0, http.StatusForbidden)
-	if msg, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid)); err == nil || ok {
-		t.Fatalf("taken while nobody could be told about clip2.mov: msg %#v ok=%v err=%v", msg, ok, err)
-	}
-	if p := r10Preview(f, sid); p != "system" {
-		t.Fatalf("the thread's latest message is from %q, want the first notice", p)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	stop := StartResumeWatcher(ctx, project, host, t.Logf)
-	defer stop()
-	defer cancel()
-	m, ok := k1Next(t, host)
-	if !ok || m.ID != "m1" || m.Text != "please look at both" || len(m.Attachments) != 0 || !k3Refused(m, "clip.mov") || !k3Refused(m, "clip2.mov") {
-		t.Fatalf("resumed %#v (%v), want the words with both files refused", m, ok)
-	}
-}
-
 // Batch 2, the stream held: a reply comes on the event stream (no
 // deadline of the sweep's) with a file whose download stalls. The
 // message's files hold the stream for at most the time one download gets:
@@ -524,20 +496,6 @@ func TestK1ARestoreWhoseHandOverFailsReturnsTheErrorAndLeavesTheReply(t *testing
 	w.sweep(context.Background())
 	if got := r13Resumed(quit); len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
 		t.Fatalf("resumed %v, want the /quit and then the message after it", got)
-	}
-}
-
-// Batch 2, the same on the other hand-over: the first notice about two
-// files too large goes, the second does not, and the reply cannot be
-// written down either. The error the restore gets says both.
-func TestK1ARestoreWhoseNoticeAndHandOverFailSaysBoth(t *testing.T) {
-	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
-	project, sid, _, fr, _, _ := r11Restore(t, big2)
-	fr.failPosts(0, http.StatusForbidden)
-	k1BlockKept(t, project)
-	_, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
-	if ok || err == nil || !strings.Contains(err.Error(), "not a directory") || !strings.Contains(err.Error(), "refused") || errors.Is(err, ErrHandOver) {
-		t.Fatalf("ok=%v err=%v, want the notice's error and the hand-over's", ok, err)
 	}
 }
 
