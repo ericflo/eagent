@@ -8,6 +8,33 @@ import (
 	"github.com/ericflo/eagent/internal/state"
 )
 
+// Item 3. A message is typed into Codex while it is idle, its arrival not
+// yet shown, and a model change is asked: Codex reads that message next
+// and starts a turn with it. The change waits for that turn's end, as a
+// change waiting for a turn does (c519ce4), instead of cutting it off.
+func TestK3AChangeAskedWithAMessageOnItsWayWaits(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
+	msg := k1Repick(t, rt)
+	if k1Restarting(rt) {
+		t.Fatalf("the change started the agent again with a message on its way: %q", msg)
+	}
+	marker := relay.Event{Kind: relay.KindActivity, Text: "…"}
+	seat.say(relay.Event{Kind: relay.KindState, State: "working"}, relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true}, marker)
+	rt.sync(func() {})
+	if k1Restarting(rt) {
+		t.Fatal("the change started the agent again in the turn the message began")
+	}
+	seat.say(relay.Event{Kind: relay.KindTurn, Text: "Ran them."})
+	seat.waitGone(t)
+	seat.end()
+	g.release <- struct{}{}
+	waitRelayStarts(t, rt)
+	k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
+}
+
 // Item 1, its bound. While the stop waits for the stopped seat's news, a
 // restart is asked for and a message is sent (held for the restart). The
 // stop settles only what the stopped agent was typed; the held message is

@@ -113,15 +113,18 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.publishRelayMeta()
 		return rel.Who() + " already runs that.", nil
 	}
-	if held := r.dialogHolds(rel); rel.State == "working" || held {
+	if held := r.heldBack(rel); rel.State == "working" || held != "" {
 		if r.relayRepick == nil {
 			r.relayRepick = map[string]relayPick{}
 		}
 		r.relayRepick[name] = pick
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
-		if held {
+		switch {
+		case held == "dialog":
 			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen); it starts again with " + r.pickText(rel, pick) + " once that is answered and it is between turns, on the same conversation.", nil
+		case rel.State != "working":
+			return rel.Who() + " has a message on its way that it reads next; it starts again with " + r.pickText(rel, pick) + " when the turn that message starts ends, on the same conversation.", nil
 		}
 		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
 	}
@@ -216,8 +219,27 @@ func (r *Runtime) dialogHolds(rel *state.Relay) bool {
 	return seat != nil && strings.Contains(rel.Detail, dialogMark) && seat.Snapshot().State == "blocked"
 }
 
+// heldBack says what holds a model change back from starting the agent
+// again now, "" when nothing does: "dialog" while a dialog the agent
+// reports holds it (dialogHolds), "on its way" while something sent to it
+// is still on its way (a message held for its turn's end, one in its own
+// queue, one typed and not yet shown arriving): it reads that next and
+// starts a turn, which the restart would cut off. The one rule for a change
+// asked now (repickRelay, where a turn the record shows holds it too) and
+// one that waited (applyWaitingRepick). Loop goroutine.
+func (r *Runtime) heldBack(rel *state.Relay) string {
+	switch {
+	case r.dialogHolds(rel):
+		return "dialog"
+	case rel.Awaited() > 0:
+		return "on its way"
+	}
+	return ""
+}
+
 // applyWaitingRepick starts a relay again with a change that waited for its
-// turn to end, unless a dialog the agent reports holds it. Loop goroutine.
+// turn to end, unless something still holds it back (heldBack). Loop
+// goroutine.
 func (r *Runtime) applyWaitingRepick(name string) {
 	pick, ok := r.relayRepick[name]
 	rel := r.st.Relays[name]
@@ -232,15 +254,8 @@ func (r *Runtime) applyWaitingRepick(name string) {
 	if r.relays.launch(name) != nil {
 		return // a start under way applies it when it is up
 	}
-	if r.dialogHolds(rel) {
-		return // applied when its seat says it is idle
-	}
-	if rel.Awaited() > 0 {
-		// Something sent to it is still on its way (a message held for
-		// this turn's end, one in its own queue): it reads it next and
-		// starts a turn. Applied when that turn ends, or when the send
-		// ends without arriving (onRelayEvent).
-		return
+	if r.heldBack(rel) != "" {
+		return // applied when that is over (an idle, a turn's end, an outcome)
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		r.repickFailed(rel, pick, err)

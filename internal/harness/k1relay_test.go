@@ -114,7 +114,9 @@ func TestK1ASendTypedIntoAnAgentStoppedWhileItRestartsIsSettledOnce(t *testing.T
 				// the restart has taken the seat out of use.
 				seat.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
 			}
-			if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			// The restart a model change makes (a message on its way now
+			// holds a change asked back, item 3).
+			if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
 				t.Errorf("repick: %v", err)
 			}
 		})

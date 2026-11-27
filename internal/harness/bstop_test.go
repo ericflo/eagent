@@ -41,7 +41,9 @@ func TestASendUnconfirmedWhenItsAgentIsRestartedIsReportedOnce(t *testing.T) {
 		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: typed, From: "user", Mode: "queue", Text: "tidy the shelves"}))
 	})
 	rt.sync(func() {
-		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+		// The restart a model change makes (a message on its way now holds
+		// a change asked back, item 3; this test is about the restart).
+		if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
 			t.Errorf("repick: %v", err)
 		}
 	})
