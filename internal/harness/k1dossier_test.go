@@ -507,22 +507,23 @@ func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) 
 }
 
 // k1DownOnThePhone runs a session with no terminal that asks on the phone
-// and stops its agent, and whose model then fails twice running (the user
-// is told it cannot be reached): the question keeps the session open.
-// stall, when set, is what the second failed call waits on before it
-// fails (second says it is out). The model answers again from the moment
-// healthy is set; answered says a call has been shown the user's answer.
+// and stops its agent; then its model cannot be reached, and the next
+// look fails twice running (the user is told it cannot be reached): the
+// question keeps the session open. stall, when set, is what the second
+// failed call waits on before it fails (second says it is out). The model
+// answers again from the moment healthy is set; answered says a call has
+// been shown the user's answer.
 func k1DownOnThePhone(t *testing.T, stall <-chan struct{}) (g *phoneRig, fp *phoneFake, healthy, answered *atomic.Bool, second chan struct{}) {
 	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
 	fp = newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	healthy, answered = new(atomic.Bool), new(atomic.Bool)
 	second = make(chan struct{}, 1)
-	var asked atomic.Bool
+	var failing atomic.Bool
 	var failed atomic.Int32
 	g = phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
 		all, tail := allText(msgs), lastUserText(msgs)
-		if asked.Load() && !healthy.Load() {
+		if failing.Load() && !healthy.Load() {
 			if failed.Add(1) == 2 && stall != nil {
 				second <- struct{}{}
 				return reply{block: stall, status: k1BadRequest.status, body: k1BadRequest.body}
@@ -541,11 +542,22 @@ func k1DownOnThePhone(t *testing.T, stall <-chan struct{}) (g *phoneRig, fp *pho
 			answered.Store(true)
 			return say("Blue it is.")
 		case strings.Contains(tail, "finished a turn") && !strings.Contains(all, "Which colour?"):
-			asked.Store(true)
 			return phoneAskAndStop("Which colour?", "red", "blue")
 		}
 		return hold()
 	}, nil)
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	g.agentStopped()
+	waitFor(t, "the turn that asked to end", func() bool {
+		busy := true
+		g.rt.sync(func() { busy = g.rt.turns.busy || g.rt.wakePending() })
+		return !busy
+	})
+	failing.Store(true)
+	// Something for eagent to look at, as a timer firing is.
+	g.rt.sync(func() {
+		g.rt.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] Look at the agents again."}))
+	})
 	return g, fp, healthy, answered, second
 }
 

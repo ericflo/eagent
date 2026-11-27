@@ -984,7 +984,7 @@ func (r *Runtime) turn(w wake) {
 					closedOut = true
 					return
 				}
-				r.turnFailed(err, covered)
+				r.turnFailed(err, covered, answers)
 				answers = false
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				// The closing turn of a session still ending has had its word
@@ -1578,10 +1578,11 @@ var (
 )
 
 // turnFailed handles a model call that did not come back, which had been
-// shown the record up to shown. What asked for the look is still owed one,
-// so the loop tries again later; a message from the user after shown (one
-// written while the call was out too) tries at once. Loop goroutine.
-func (r *Runtime) turnFailed(err error, shown int64) {
+// shown the record up to shown; answered says a call of its turn came
+// back before it. What asked for the look is still owed one, so the loop
+// tries again later; a message from the user after shown (one written
+// while the call was out too) tries at once. Loop goroutine.
+func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 	t := &r.turns
 	var ae *llm.APIError
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
@@ -1633,8 +1634,50 @@ func (r *Runtime) turnFailed(err error, shown int64) {
 			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("My model refuses my conversation as too long, even after I restarted it from my notes, so I can't tell you what %s is doing. Your messages still go straight to %s. Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings.", who, who)})
 			return
 		}
+		if answered || r.failedAfterAnswers() {
+			// The model answered a call of one of these turns: it can be
+			// reached, and what fails is a call after.
+			who := "the agent"
+			if active := r.st.ActiveRelays(); len(active) > 0 {
+				who = active[0].Who()
+			}
+			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), so I can't tell you what %s is doing. Your messages still go straight to %s. I keep trying and will pick up where I left off.", failingNotice, shortErr(err), who, who)})
+			return
+		}
 		r.recordMessage(r.unreachableNotice(err))
 	}
+}
+
+// failingNotice opens what the user is told after two failed calls in a
+// row when a call of those turns came back first.
+const failingNotice = "My calls to my own model keep failing"
+
+// failedAfterAnswers reports that in the run of failed calls (the newest
+// t.failures on the record) a call came back before one of them: its turn
+// is on the record, which a turn is once a call of it came back and acted,
+// and it ended on the failure ("error", or "error, closing"). A turn whose
+// call is failing now has not ended yet (turnFailed's answered says it).
+// Loop goroutine only.
+func (r *Runtime) failedAfterAnswers() bool {
+	n, ended := r.turns.failures, false
+	for i := len(r.st.Events) - 1; i >= 0 && n > 0; i-- {
+		ev := r.st.Events[i]
+		switch {
+		case ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent && ev.Task == "":
+			var d event.TurnData
+			ended = ended || ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "error")
+		case ev.Type == event.Error:
+			var d event.ErrorData
+			if ev.Decode(&d) != nil || d.Where != event.ActorEagent {
+				continue
+			}
+			if ended {
+				return true
+			}
+			n--
+		}
+	}
+	return false
 }
 
 // unreachableNotice is what the user is told when eagent's model has not
