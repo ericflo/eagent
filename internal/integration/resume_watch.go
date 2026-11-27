@@ -673,6 +673,21 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	return msg, true, nil
 }
 
+// LeftForNextRun is said by a run's phone mirror as it stops: left, when
+// it left a message from the app for the next run (read once the session
+// was ending, behind a /quit say). The project's reply watcher then looks
+// at the thread once the session has stopped, as for a reply it keeps
+// quietly: the run's closing note hides the thread from the sweep.
+func LeftForNextRun(project, sessionID string, left bool, logf func(string, ...any)) {
+	if !left {
+		return
+	}
+	ext := "eagent:" + sessionID
+	if err := leaveWithWatcher(project, store.Info{ID: sessionID}, finalechat.Message{ID: ext}, false); err != nil {
+		logf("finalechat: a message left for the next run could not be noted for the reply watcher: %v", err)
+	}
+}
+
 // ErrHandOver is PendingReply's error when it found the reply but could
 // not leave it for the project's reply watcher: its thread was read, and
 // nothing was taken.

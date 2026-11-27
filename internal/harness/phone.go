@@ -1201,6 +1201,10 @@ var (
 // started is the ledger as this run's first write starts it (startPhone).
 func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
+	// What it leaves for the next run is looked for once the session has
+	// stopped; a poll that returns with its context live left a message
+	// whose fetch the shutdown cut off.
+	defer func() { integration.LeftForNextRun(r.projectPath(), r.sess.ID, p.ctx.Err() == nil || p.left, r.ui.Log) }()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
