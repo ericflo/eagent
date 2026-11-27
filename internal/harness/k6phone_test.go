@@ -2,7 +2,6 @@ package harness
 
 import (
 	"testing"
-	"time"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
@@ -27,11 +26,15 @@ func TestSRPhoneACardAnswerTakenAsAMessageIsNotTakenAgainAtTheNextResume(t *test
 	fp.mu.Lock()
 	fp.questionsDown = true
 	fp.mu.Unlock()
-	g.resume(Options{Prompt: "blue", PromptSource: "finalechat", PromptPhoneID: fp.lastMessageID(), PromptAnswers: card})
+	// Interactive, so the run does not end on its own before the re-ask
+	// has recorded the card (with no card open, a run with no terminal
+	// ends at once).
+	g.ui = &fakeUI{input: make(chan string, 16)}
+	g.resume(Options{Interactive: true, Prompt: "blue", PromptSource: "finalechat", PromptPhoneID: fp.lastMessageID(), PromptAnswers: card})
 	waitFor(t, "the re-ask to record the card", func() bool {
 		return len(g.events(event.PhoneQuestion)) == 2
 	})
-	g.exit(20 * time.Second)
+	g.interrupt()
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
 		t.Fatalf("setup: the tap is recorded %d times as the answer and %d as a message after the second run", a, m)
 	}
@@ -51,9 +54,9 @@ func TestSRPhoneACardAnswerTakenAsAMessageIsNotTakenAgainAtTheNextResume(t *test
 }
 
 // The same rule for the words a session is resumed with: the card was
-// answered while the session was stopped, a resume's re-ask took the
-// card's answer (phone.answer_taken) and the run stopped before its poll
-// read the card's answer message. The reply watcher then resumes the
+// answered while the session was stopped, a resume took the card's answer
+// from the card itself (phone.answer_taken) and the run stopped before its
+// poll read the card's answer message. The reply watcher then resumes the
 // session with that message; its words are the card's answer the record
 // holds already, and are not taken again.
 func TestK6AnAnswerTakenFromItsCardIsNotTakenAgainAsResumingWords(t *testing.T) {
@@ -78,9 +81,10 @@ func TestK6AnAnswerTakenFromItsCardIsNotTakenAgainAsResumingWords(t *testing.T) 
 	g.cfg.Finalechat.BaseURL = svc.srv.URL
 	g.ui = &fakeUI{input: make(chan string, 16)}
 	g.resume(Options{Interactive: true})
-	waitFor(t, "the re-ask to take the card's answer", func() bool {
+	waitFor(t, "the resume to take the card's answer", func() bool {
 		return integration.ReadPhoneLedger(g.log()).Cards[card]
 	})
+	waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) == 2 })
 	g.interrupt()
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
 		t.Fatalf("setup: the tap is recorded %d times as the answer and %d as a message", a, m)
