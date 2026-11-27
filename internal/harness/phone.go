@@ -1680,6 +1680,17 @@ func (r *Runtime) waitingOnPhone() bool {
 // for its next run. Safe from any goroutine.
 func (r *Runtime) Ending() bool { return r.ctx.Err() != nil }
 
+// loopGone reports that the loop has stopped taking work (finish has
+// closed it): nothing posted to it runs any more.
+func (r *Runtime) loopGone() bool {
+	select {
+	case <-r.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 // latestKeys is, for each thread the record knows a card of question qid
 // in, the highest key number among those cards. Cards recorded without a
 // thread (by an older eagent) are left out; the walk then starts at the
