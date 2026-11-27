@@ -56,7 +56,7 @@ const (
 	HarnessMessage = "harness.message" // a notice from the harness in eagent's conversation
 	Route          = "route"
 	PhoneThread    = "phone.thread"   // the session is mirrored to the user's phone
-	PhoneQuestion  = "phone.question" // a question was posted to the phone as a card
+	PhoneQuestion  = "phone.question" // a question was posted to the phone: as a card, or (an empty card_id) as a message
 	PhoneMirror    = "phone.mirror"   // a user message from the terminal or the web was copied to the phone thread
 	ImagesRefused  = "images.refused" // a provider refused pictures of the conversation; they are left out from here on
 	ThreadTitle    = "thread.title"   // the session's title and summary (whole session so far), mirrored to FinaleChat when the phone is on
@@ -359,8 +359,11 @@ type MessageData struct {
 	Auto bool `json:"auto,omitempty"`
 }
 
-// PhoneQuestionData records which phone card carries a question,
-// so a later run can withdraw it when the question is answered elsewhere.
+// PhoneQuestionData records how a question was posted to the phone: the
+// card that carries it, so a later run can withdraw it when the question
+// is answered elsewhere; or, with an empty CardID, a message in ThreadID
+// (the service refused the card and gives no client keys), which a later
+// ask of the question does not post again.
 type PhoneQuestionData struct {
 	QuestionID string `json:"question_id"`
 	CardID     string `json:"card_id"`
