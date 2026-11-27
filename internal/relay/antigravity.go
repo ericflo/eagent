@@ -170,7 +170,10 @@ func (antigravityAgent) locate(spec Spec, _ time.Time, id string) (string, strin
 
 // An interrupted agy turn can end without a final transcript step. Wait for
 // the transcript writer to settle before reporting a turn without a reply.
+// A message handed to agy's queue that a turn's end left there is noted
+// too (reportLeftOvers).
 func (antigravityAgent) poll(s *Seat, now time.Time) {
+	s.reportLeftOvers(now)
 	status := antigravityStatus(s.spec.StatusFile)
 	if status.ID == "" || status.ID != s.innerID() {
 		return

@@ -297,7 +297,6 @@ func TestARemoteAddressEditTakesTheServersWindow(t *testing.T) {
 // file: there it would be the window of the file's own server once the
 // variable is unset.
 func TestASaveUnderAnAddressVariableDoesNotWriteItsWindow(t *testing.T) {
-	t.Skip("known, not fixed: a route an address variable (EAGENT_BASE_URL, EAGENT_SUMMARIZER_BASE_URL) moves to another server keeps the window it had (finding 19 of the fourteenth review, variable half); refreshing it there threw away a window the file names and claimed the window in saves the variable did not move (r14window2_test.go, settings/r14window_test.go)")
 	r14Env(t)
 	project := t.TempDir()
 	url := r14LocalGLM(t, project)

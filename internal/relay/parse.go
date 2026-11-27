@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +22,13 @@ type obs struct {
 	resets     string
 	exhausted  bool
 	tool       bool // activity/image: counts as a tool call
+	// pos is where the line it was read from starts in the transcript
+	// (the watcher sets it).
+	pos int64
+	// again: a user line that records once more a message that arrived at
+	// an earlier line (Claude's prompt for a message it had queued). It
+	// confirms nothing.
+	again bool
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -215,6 +223,12 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
+	// queued are the words of the messages waiting in the queue Claude
+	// keeps while it works (enqueue lines, oldest first, at most 64): a
+	// remove line takes one off, a dequeue line the oldest. ran are the
+	// ones the dequeue lines right before this line took, to run as a
+	// prompt of their own.
+	queued, ran []string
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -237,13 +251,33 @@ func (p *claudeParser) line(raw []byte) []obs {
 	if json.Unmarshal(raw, &ev) != nil || ev.IsSidechain {
 		return nil
 	}
+	defer func() {
+		if ev.Type != "queue-operation" || ev.Operation != "dequeue" {
+			p.ran = nil
+		}
+	}()
 	at := parseTime(ev.Timestamp)
 	switch ev.Type {
 	case "queue-operation":
-		if ev.Operation == "enqueue" {
-			var s string
-			if json.Unmarshal(ev.Content, &s) == nil && s != "" {
+		var s string
+		_ = json.Unmarshal(ev.Content, &s)
+		switch ev.Operation {
+		case "enqueue":
+			// Every enqueue holds a place, so a dequeue takes the right
+			// one; only words are an arrival.
+			if p.queued = append(p.queued, s); len(p.queued) > 64 {
+				p.queued = p.queued[1:]
+			}
+			if s != "" {
 				return []obs{{kind: "user", text: s, at: at}}
+			}
+		case "dequeue":
+			if len(p.queued) > 0 {
+				p.ran, p.queued = append(p.ran, p.queued[0]), p.queued[1:]
+			}
+		case "remove":
+			if i := slices.IndexFunc(p.queued, func(q string) bool { return normalize(q) == normalize(s) }); i >= 0 {
+				p.queued = slices.Delete(p.queued, i, i+1)
 			}
 		}
 		return nil
@@ -354,7 +388,32 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		return nil // the TUI's own bookkeeping
 	}
 	p.held, p.inTurn = "", true
-	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
+	// Right after a dequeue the prompt is what Claude took off its queue:
+	// when its words are those (joined with messages still queued after
+	// them), they arrived at their enqueue lines, and this line records
+	// them again.
+	again := false
+	if len(p.ran) > 0 {
+		if n := queuedPrefix(append(slices.Clone(p.ran), p.queued...), normalize(s)); n > 0 {
+			again = true
+			if n > len(p.ran) {
+				p.queued = p.queued[n-len(p.ran):]
+			}
+		}
+	}
+	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
+}
+
+// queuedPrefix says how many messages from the start of list, joined, have
+// the words got (normalized); 0 when none do.
+func queuedPrefix(list []string, got string) int {
+	run := ""
+	for n := 1; n <= len(list) && len(run) < len(got); n++ {
+		if run = strings.TrimSpace(run + " " + normalize(list[n-1])); run == got {
+			return n
+		}
+	}
+	return 0
 }
 
 func claudeTool(name string, in map[string]any, at time.Time) []obs {

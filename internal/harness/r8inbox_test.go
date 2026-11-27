@@ -216,14 +216,14 @@ func r8cNote(text string) string {
 
 // A script that writes each of its messages under the same name (found by
 // a third reader, when a file was known by its name): each is taken, and
-// none carries an inbox id.
+// none is known by that name (each is given an id of its own).
 func TestR8InboxAFileWithNoIDUnderAReusedNameIsTaken(t *testing.T) {
 	rt := r8cNew(t, &fakeUI{})
 	for _, text := range []string{"r8c first", "r8c second"} {
 		r8cDrop(t, rt.sess.Path, "note.json", r8cNote(text))
 		rt.pollInbox()
-		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] != "" {
-			t.Fatalf("%s: %q, want one with no inbox id", text, got)
+		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] == "" || got[0] == "note" {
+			t.Fatalf("%s: %q, want one with an id of its own", text, got)
 		}
 	}
 }
@@ -295,8 +295,8 @@ func TestR8InboxOnlyAFileThatGivesItsOwnNameHasAnID(t *testing.T) {
 		r8cDrop(t, rt.sess.Path, "note.json", body)
 		rt.pollInbox()
 		text := []string{"r8c numbered", "r8c other", "r8c other again"}[i]
-		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] != "" {
-			t.Fatalf("%s: %q, want one with no inbox id", text, got)
+		if got := r8cWords(rt, event.UserMessage, text); len(got) != 1 || got[0] == "" || got[0] == "note" || got[0] == "other" {
+			t.Fatalf("%s: %q, want one with an id of its own", text, got)
 		}
 	}
 }

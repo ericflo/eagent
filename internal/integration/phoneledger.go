@@ -148,6 +148,12 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 	}
 	l := ReadPhoneLedger(evs)
 	ext := "eagent:" + info.ID
+	gone := false // the thread lists the trigger's message as not to take
+	takeable := func(m finalechat.Message) bool {
+		ok := l.Takeable(m)
+		gone = gone || !ok && trigger != nil && m.ID == trigger.ID
+		return ok
+	}
 	fallback := func(err error) (finalechat.Message, bool, error) {
 		if err != nil && l.Keeps {
 			// An earlier message may wait in the thread we could not read;
@@ -156,15 +162,17 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 			// session in order.
 			return finalechat.Message{}, false, err
 		}
-		if trigger != nil && l.Takeable(*trigger) {
+		if trigger != nil && !gone && l.Takeable(*trigger) {
 			// The thread lists nothing newer (its listing can lag the
-			// stream), or a record without the ledger, as before.
+			// stream), or a record without the ledger, as before. Not
+			// when the thread lists it taken back: a copy held since
+			// knows nothing of that.
 			return *trigger, true, nil
 		}
 		return finalechat.Message{}, false, err
 	}
 	if l.Keeps && l.Cursor != "" {
-		m, _, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, time.Time{}, l.Takeable)
+		m, _, found, unknown, err := firstInThread(ctx, client, ext, l.Cursor, time.Time{}, takeable)
 		if err != nil {
 			return fallback(err)
 		}
@@ -177,7 +185,7 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 		// The thread no longer has the cursor's message (it was taken back,
 		// or the thread was recreated): judge by time.
 	}
-	m, _, found, err := l.Waiting(ctx, client, ext, info.Modified)
+	m, _, found, err := l.waiting(ctx, client, ext, info.Modified, takeable)
 	if err != nil || !found {
 		return fallback(err)
 	}
@@ -194,12 +202,17 @@ func nextPhoneMessage(ctx context.Context, client *finalechat.Client, info store
 // watcher resumes with it; a session resumed with no app message reads on
 // after prev.
 func (l PhoneLedger) Waiting(ctx context.Context, client *finalechat.Client, ext string, lastWrite time.Time) (m finalechat.Message, prev string, found bool, err error) {
+	return l.waiting(ctx, client, ext, lastWrite, l.Takeable)
+}
+
+// waiting is Waiting with takeable in place of l.Takeable.
+func (l PhoneLedger) waiting(ctx context.Context, client *finalechat.Client, ext string, lastWrite time.Time, takeable func(finalechat.Message) bool) (m finalechat.Message, prev string, found bool, err error) {
 	since := lastWrite
 	if l.Keeps {
 		since = l.Since
 	}
 	m, prev, found, _, err = firstInThread(ctx, client, ext, "", since, func(m finalechat.Message) bool {
-		return l.Takeable(m) && m.CreatedAt.After(since)
+		return takeable(m) && m.CreatedAt.After(since)
 	})
 	return m, prev, found, err
 }

@@ -1154,8 +1154,11 @@ func (r *Runtime) maybeEnd() {
 		return
 	}
 	// down: the model has failed twice running, and the user has been told.
+	// Unless the user has written or answered since what the last failed
+	// call was shown: that is looked at first, without the wait (maybeTurn).
 	down := t.failures >= 2
-	if r.wakePending() && (r.opts.Interactive || !down) {
+	fresh := t.wakes[wakeUser] > t.seen && t.wakes[wakeUser] > t.failSeq
+	if r.wakePending() && (r.opts.Interactive || !down || fresh) {
 		return
 	}
 	if r.opts.Interactive {

@@ -39,7 +39,9 @@ type Resolution struct {
 	Layered Config `json:"-"`
 	// Sources maps a JSON pointer ("/model/model") to the layer that
 	// set the effective value: "default", "preset:NAME", "file",
-	// "bundle:NAME", or "env:VAR".
+	// "bundle:NAME", "env:VAR", or "env" for a value the environment
+	// changed that no variable pins (the window of the server an address
+	// variable moves the route to).
 	Sources map[string]string `json:"sources"`
 	Active  Active            `json:"active"`
 	Preset  string            `json:"preset"` // the preset in force before the file, if any
@@ -165,8 +167,9 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.LoadError = fmt.Sprintf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 		}
 	}
+	var n named
 	if fileMap != nil && len(fileMap) > 0 {
-		if err := overlay(project, &cfg, fileMap, path); err != nil {
+		if err := overlay(project, &cfg, fileMap, path, &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -177,7 +180,7 @@ func Resolve(project, preset, bundle string) Resolution {
 		res.LoadError = path + ": " + res.File.ParseError
 	}
 	if bundle != "" && len(bundleMap) > 0 {
-		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle), &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -189,7 +192,7 @@ func Resolve(project, preset, bundle string) Resolution {
 	envVars := EnvOverrides()
 	res.Layered = cfg
 	normalize(&res.Layered)
-	applyEnv(project, &cfg)
+	applyEnv(project, &cfg, n)
 	normalize(&cfg)
 	cur := flatten(cfg)
 	// A key the environment removed (a window an unknown model has none
@@ -206,8 +209,13 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	for k := range changed {
+		_, summarizerModel := envVars["/summarizer/model/model"]
 		if name, ok := envVars[k]; ok {
 			res.Sources[k] = "env:" + name
+		} else if k == "/summarizer/model/context_tokens" && res.Layered.Summarizer.Model != nil && !summarizerModel {
+			// The window of the server an address variable moves the
+			// layers' route to (applyEnv), as for the main route below.
+			res.Sources[k] = "env"
 		} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
 			// The rest of a summarizer route the environment created is
 			// copied from the main model because of that variable.
@@ -216,6 +224,10 @@ func Resolve(project, preset, bundle string) Resolution {
 			// The window follows the model the variable names.
 			res.Sources[k] = "env:" + name
 		} else {
+			// Among them the window of the server an address variable moves
+			// the route to: the environment's doing, but no variable's, as
+			// a window the file names holds over it (applyEnv). So it is
+			// not shown as pinned, and stays editable.
 			res.Sources[k] = "env"
 		}
 	}
@@ -443,7 +455,7 @@ func BundleFromBytes(name string, raw []byte) (Config, error) {
 		Presets[canon](&cfg)
 		preset = canon
 	}
-	if err := overlay("", &cfg, m, "bundle "+name); err != nil {
+	if err := overlay("", &cfg, m, "bundle "+name, &named{}); err != nil {
 		return Config{}, err
 	}
 	normalize(&cfg)
