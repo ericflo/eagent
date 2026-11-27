@@ -809,6 +809,9 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	if err != nil && after.Model.Model == "" {
 		return nil // reported once the edits are applied
 	}
+	// A preset chosen or unset without a model is a pick of the main route:
+	// choosing one sets the model to it, as /preset says.
+	presetPick := after.Preset != prior.Preset && !slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == "/model/model" || e.Key == "/model/base_url" })
 	summarizer := prior.Summarizer.Route(prior.Model)
 	if prior.Summarizer.Model == nil {
 		summarizer.Fallback = nil
@@ -869,7 +872,7 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 				isPick = isPick || leaf == "model" || leaf == "base_url"
 			}
 		}
-		if !isPick {
+		if !isPick && !(presetPick && r.ptr == "/model") {
 			continue
 		}
 		own, _ := pointerValue(values, r.ptr)
@@ -879,6 +882,12 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		}
 		if r.after.Model == r.before.Model && strings.TrimRight(r.after.BaseURL, "/") == strings.TrimRight(r.before.BaseURL, "/") {
 			continue
+		}
+		// A model the file names without an address was the old preset's
+		// provider's: the new preset's model runs at the new address.
+		if presetPick && r.ptr == "/model" && leaves["model"] != nil && leaves["base_url"] == nil && writable["/model/model"] && strings.TrimRight(r.after.BaseURL, "/") != strings.TrimRight(r.before.BaseURL, "/") {
+			setPointer(values, "/model/model", nil, true)
+			return s.routePicks(values, edits, prior, d)
 		}
 		give := func(leaf string, v any) {
 			if !set[leaf] && writable[r.ptr+"/"+leaf] {
