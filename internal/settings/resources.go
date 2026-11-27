@@ -27,7 +27,6 @@ type BundleRequest struct {
 // local forms and remote actions. It has no network or filesystem side effects.
 func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var cfg config.Config
-	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
 		cfg = config.Defaults()
 		// A bundle builds on the preset it names, as it loads (config.BundleFromBytes).
@@ -68,10 +67,13 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
-		cfg, err = config.LoadBundle(s.Project, "", b.From)
-		if err != nil {
-			return cfg, &Error{Status: 400, Message: err.Error()}
+		// What that bundle says over the files, never a value only a
+		// variable gives.
+		res := config.Resolve(s.Project, "", b.From)
+		if res.LoadError != "" {
+			return cfg, &Error{Status: 400, Message: res.LoadError}
 		}
+		cfg = res.Layered
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, &Error{Status: 422, Message: err.Error()}
