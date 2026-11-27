@@ -2148,9 +2148,10 @@ func (s *Seat) checkScreen(now time.Time) {
 		}
 	}
 	if stuck := report; stuck != nil {
-		// A quiet agent whose screen or status still says it works reads
-		// the send at its next step, as a working one does.
-		working := state == "working" || s.hung && saw == sawWork
+		// An agent whose screen or status says it works (a quiet turn, pi
+		// compacting) reads the send at its next step, as a working one
+		// does; so does a run a dialog holds (pi's), once it is answered.
+		working := state == "working" || saw == sawWork || s.dialogUp != "" && s.dialogPrev == "working"
 		if !working && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
