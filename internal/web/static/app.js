@@ -94,7 +94,7 @@ document.addEventListener('click', e => {
 
 // ---- state ------------------------------------------------------------------
 function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
-const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
+const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, queued: [], queuedSeq: 0, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
 
 let lastHash = location.hash;
 function route() {
@@ -186,6 +186,7 @@ function openStream(id, after) {
 }
 function onEvent(ev) {
   if (S.tab === 'chat' && (ev.type === 'user.answer' || ev.type === 'user.dismiss')) closeQuestionCard(ev.data && ev.data.question_id);
+  takeQueued(ev);
   if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const col = $('.chat .col'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; const w = $('#working'); if (w) col.insertBefore(node, w); else col.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
   else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb) { if (passesFilter(ev)) tb.append(tlRow(ev)); tlUpdateCount(); } }
   if (ev.type === 'narrator.message' && document.hidden) notify('eagent: ' + clip(ev.data.text, 80));
@@ -330,6 +331,8 @@ function renderChat(pane) {
   pane.classList.add('chat'); pane.style.padding = '0';
   const col = h('div', {class: 'col'});
   for (const ev of S.events) { const n = chatNode(ev); if (n) col.append(n); }
+  S.queued = S.queued.filter(q => q.sid !== S.sid || !S.events.some(ev => showsWords(ev, q)));
+  for (const q of S.queued) if (q.sid === S.sid) col.append(queuedNode(q));
   col.append(h('div', {class: 'working hidden', id: 'working'}, h('span', {class: 'dots'}, h('i'), h('i'), h('i')), h('span', {class: 'wtext'})));
   const scroll = h('div', {class: 'scroll'}, col);
   if (ARCHIVE) { pane.replaceChildren(scroll); scroll.scrollTop = scroll.scrollHeight; return; }
@@ -372,10 +375,36 @@ async function send() {
   const d = S.detail;
   const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
   if (agent) { showScreen(agent.name); return; }
+  const sid = S.sid, after = S.lastSeq;
   try {
-    if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
-    else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
+    let r;
+    if (S.detail && S.detail.question) r = await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
+    else r = await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
+    if (r && r.delivered === 'queued') showQueued(sid, text, r.message, after);
   } catch (e) { if (!ta.value) ta.value = text; toast(e.message, 'bad'); }
+}
+// Words the server answered "queued" (another process runs the session;
+// they wait in its inbox, not yet on its record) show in the chat with
+// the answer's line under them (S.queued), until the record shows them.
+function showQueued(sid, text, message, after) {
+  if (S.sid === sid && S.events.some(ev => showsWords(ev, {text, after}))) return; // already taken
+  const q = {id: String(++S.queuedSeq), sid, text, message: message || '', after};
+  S.queued.push(q);
+  const col = S.sid === sid && S.tab === 'chat' && $('.chat .col'); if (!col) return;
+  const w = $('#working'); const node = queuedNode(q);
+  if (w) col.insertBefore(node, w); else col.append(node);
+  const sc = $('.chat .scroll'); if (sc) sc.scrollTop = sc.scrollHeight;
+}
+function queuedNode(q) {
+  return h('div', {class: 'msg user', 'data-queued': q.id}, h('div', {class: 'head'}, 'you · waiting'), h('div', {class: 'bubble'}, h('div', {html: md(q.text)})), h('div', {class: 'head'}, q.message));
+}
+// showsWords says whether ev, on the record, shows the waiting words q.
+function showsWords(ev, q) { return ev.seq > q.after && (ev.type === 'user.message' || ev.type === 'user.answer') && !!ev.data && ev.data.text === q.text; }
+// takeQueued drops the waiting copy of the words the record now shows (ev).
+function takeQueued(ev) {
+  const i = S.queued.findIndex(q => q.sid === S.sid && showsWords(ev, q)); if (i < 0) return;
+  const [q] = S.queued.splice(i, 1);
+  const n = document.querySelector(`[data-queued="${q.id}"]`); if (n) n.remove();
 }
 async function dismissQuestion() { try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
 async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }

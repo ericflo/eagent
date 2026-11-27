@@ -120,7 +120,7 @@ func TestK2NothingStartsARunOnceTheServersShutdownHasBegun(t *testing.T) {
 		t.Errorf("a new session from the browser: %d %s", w.Code, w.Body)
 	}
 	// What a new session from the phone runs on (RegisterSessionStarter).
-	if id, err := s.hostNewCfg(harness.Options{Project: project, Interactive: true, Prompt: "a new one from the phone"}, cfg); !errors.Is(err, errStopping) {
+	if id, err := s.hostNewCfg(harness.Options{Project: project, Interactive: true, Prompt: "a new one from the phone"}, cfg, runPick{}); !errors.Is(err, errStopping) {
 		t.Errorf("a new session from the phone: %q, %v", id, err)
 	}
 	s.mu.Lock()
