@@ -247,8 +247,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		return // not a session of this project
 	}
 	if store.Alive(info.Path) || w.host.Hosted(sid) {
-		w.logf("finalechat: reply to session %s left to its running mirror", sid)
 		if trigger.ID != "" {
+			// Said for a reply seen, not for each sweep's look at the
+			// one kept quietly for when the session stops.
+			w.logf("finalechat: reply to session %s left to its running mirror", sid)
 			w.keepUntilStopped(info, thread, trigger)
 		}
 		return

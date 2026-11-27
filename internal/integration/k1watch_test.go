@@ -432,3 +432,22 @@ func TestK1ARestoreLeavesTheQuitsFollowerToWhoeverHoldsTheWatch(t *testing.T) {
 		t.Fatalf("resumed %v, want the /quit and then the message after it", got)
 	}
 }
+
+// Batch 2, the log: a reply reaches a running session, and the terminal
+// says once that it is left to the session's mirror; the sweeps that look
+// at the reply kept for when the session stops say nothing more.
+func TestK1AKeptReplyIsLeftToTheMirrorInOneLogLine(t *testing.T) {
+	_, sid, _, f, _, w := r9Running(t, true)
+	var lines atomic.Int32
+	w.logf = func(format string, args ...any) {
+		if strings.Contains(format, "left to its running mirror") {
+			lines.Add(1)
+		}
+	}
+	r9Says(w, f, sid, "m1", "one more thing")
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if n := lines.Load(); n != 1 || len(w.retries.replies) != 1 {
+		t.Fatalf("%d lines, kept %#v; want one line and the reply kept", n, w.retries.replies)
+	}
+}
