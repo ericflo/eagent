@@ -1641,6 +1641,12 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", failingNotice, shortErr(err), r.whileDown())})
 			return
 		}
+		if r.endsDown() {
+			// A session with no terminal that nothing keeps open ends on
+			// this as one whose model is down, in its own words
+			// (maybeEnd): it does not keep trying, so it does not say so.
+			return
+		}
 		r.recordMessage(r.unreachableNotice(err))
 	}
 }
@@ -1677,7 +1683,14 @@ func (r *Runtime) lastFailedAnswered() bool {
 // answered for a while: automatic, so it is no answer to them. Loop
 // goroutine.
 func (r *Runtime) unreachableNotice(err error) event.MessageData {
-	return event.MessageData{Auto: true, Text: fmt.Sprintf("I can't reach my own model right now (%s), %s I keep trying and will pick up where I left off.", shortErr(err), r.whileDown())}
+	// Out of reach only when nothing answered (no connection, no answer in
+	// time, a server error); a provider that answers 4xx refuses the calls.
+	lead := "I can't reach my own model right now"
+	var ae *llm.APIError
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 {
+		lead = "My model refuses my calls"
+	}
+	return event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", lead, shortErr(err), r.whileDown())}
 }
 
 // whileDown is what a notice that eagent's model is not answering says of

@@ -170,7 +170,7 @@ func TestK2TheDownNoticeWithNoAgentRunningSaysWhereMessagesGo(t *testing.T) {
 			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what now?", Route: "eagent"}) })
 			r6Until(t, "the notice", func() bool { return r4Logged(s, "trying again in") > 0 })
 			for _, m := range s.ui.said() {
-				if strings.Contains(m, "can't reach my own model") || strings.HasPrefix(m, failingNotice) {
+				if strings.Contains(m, "can't reach my own model") || strings.Contains(m, "refuses my calls") || strings.HasPrefix(m, failingNotice) {
 					if strings.Contains(m, "straight to") {
 						t.Fatalf("with no agent running, told: %q", m)
 					}
