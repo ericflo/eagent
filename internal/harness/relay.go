@@ -69,22 +69,6 @@ type relaySeats struct {
 	// name, each closed when it is gone. Both share a terminal name, so a
 	// start under that name waits for it rather than racing the kill.
 	stopping map[string]chan struct{}
-	// briefed are the agents a switch handed the work to with a brief, by
-	// relay name. Loop goroutine only (not under mu). Kept in memory: an
-	// eagent resumed while one is still in its first turn writes the next
-	// brief directly from it, as before.
-	briefed map[string]briefedAgent
-}
-
-// briefedAgent is an agent handed the work by a brief: the agent under its
-// name that started at start, the turns it had finished when the brief was
-// queued, and what the brief was written from. failed: the brief could not
-// be typed, so it was never told the work.
-type briefedAgent struct {
-	start  int64
-	turns  int
-	ho     *handover
-	failed bool
 }
 
 type relayActivity struct {
@@ -311,16 +295,41 @@ func (h *handover) through(rel *state.Relay, told bool) *handover {
 }
 
 // handoverFor is what a switch away from rel writes its brief from: from
-// rel itself, unless rel was handed the work by a brief and has not
-// finished a turn since (it is the same agent and conversation: a restart
-// keeps its first start). Then its own record does not describe the work,
-// and the brief hands over from what rel's brief was written from, with rel
-// in between. Loop goroutine.
+// rel itself, unless rel was handed the work by a switch's brief and has
+// not finished a turn since (it is the same agent and conversation: a
+// restart keeps its first start). Then its own record does not describe the
+// work, and the brief hands over from what rel's brief was written from,
+// with rel in between, told unless its brief certainly did not go. From the
+// record alone (briefedBy), so an eagent resumed meanwhile writes the same
+// brief. Loop goroutine.
 func (r *Runtime) handoverFor(rel *state.Relay) *handover {
-	if b, ok := r.relays.briefed[rel.Name]; ok && b.start == rel.StartSeq && rel.Turns == b.turns {
-		return b.ho.through(rel, !b.failed)
+	if from, brief := briefedBy(r.st, rel); from != nil && from.StartSeq < rel.StartSeq && rel.Turns == 0 {
+		return r.handoverFor(from).through(rel, r.st.SendOutcome(brief) != state.SendNotSent)
 	}
 	return handoverFrom(rel)
+}
+
+// briefedBy is the relay a switch replaced when it started rel, as the
+// record has it, and the id of the brief that switch sent rel; nil when no
+// switch started rel. A switch records the old relay's end, the new one's
+// start and its brief as neighbouring events (finishLaunch).
+func briefedBy(st *state.State, rel *state.Relay) (*state.Relay, string) {
+	for i := 0; i+2 < len(st.Events); i++ {
+		end, start, brief := st.Events[i], st.Events[i+1], st.Events[i+2]
+		if end.Type != event.RelayEnd || start.Type != event.RelayStart || brief.Type != event.RelaySend {
+			continue
+		}
+		var e event.RelayEndData
+		var s event.RelayStartData
+		var b event.RelaySendData
+		if end.Decode(&e) != nil || start.Decode(&s) != nil || brief.Decode(&b) != nil || !strings.HasPrefix(e.Reason, "handed over to ") || strings.Contains(e.Reason, ", which could not start") || b.Name != s.Name || b.From != "eagent" {
+			continue
+		}
+		if to := st.RelayAt(s.Name, start.Seq); to != nil && to.Name == rel.Name && to.StartSeq == rel.StartSeq {
+			return st.RelayAt(e.Name, end.Seq), b.ID
+		}
+	}
+	return nil, ""
 }
 
 // sendResult is how typing one send went.
@@ -779,12 +788,6 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		job.briefID = id
 		r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: job.name, ID: id, From: "eagent", Mode: "queue", Text: job.brief, Auto: job.briefAuto}))
 		queue = append(queue, heldSend{id: id, text: job.brief, mode: "queue", done: job.briefDone, on: job.name, brief: true, handover: job.handover})
-		if rel := r.st.Relays[job.name]; rel != nil {
-			if r.relays.briefed == nil {
-				r.relays.briefed = map[string]briefedAgent{}
-			}
-			r.relays.briefed[job.name] = briefedAgent{start: rel.StartSeq, turns: rel.Turns, ho: job.handover}
-		}
 	}
 	for _, h := range held {
 		if h.brief && job.brief != "" {
@@ -1806,14 +1809,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			if berr != nil {
 				// On the record like any send that failed: it wakes eagent,
 				// and the new relay stops waiting for its arrival.
-				r.sync(func() {
-					r.typingFailed(started, sw.briefID, berr)
-					// It was never told the work: a switch away from it says so.
-					if b, ok := r.relays.briefed[started]; ok && b.ho == sw.handover {
-						b.failed = true
-						r.relays.briefed[started] = b
-					}
-				})
+				r.sync(func() { r.typingFailed(started, sw.briefID, berr) })
 				return "Switched to " + started + ", but the handoff brief could not be typed: " + berr.Error(), true
 			}
 			return r.relayStatusText(started, "Handed over from "+rel.Who()+"; the new agent has the handoff brief (mirrored to the user)."), false

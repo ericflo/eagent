@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,6 +174,53 @@ func TestK1AHeldSendOfAStoppedAgentIsSettledBeforeAFreshStart(t *testing.T) {
 	}
 	if s := fresh.sentTexts(); len(s) != 0 {
 		t.Errorf("typed into the fresh agent: %q", s)
+	}
+}
+
+// A18. Codex does the work and reports; a switch hands it to Claude with a
+// brief, and Claude has finished no turn when eagent restarts. The next
+// switch's brief, written by the restarted eagent from the record, hands
+// over from Codex, with Claude in between (told, or not when its brief
+// could not be typed), as the eagent that made the switch would have.
+func TestK1ABriefAfterARestartHandsOverFromTheAgentThatDidTheWork(t *testing.T) {
+	for _, typed := range []bool{true, false} {
+		var claude relaySeat = newK1QuietSeat()
+		if !typed {
+			failing := newFakeSeat("two")
+			failing.setSendErr(errors.New("the agent is still starting; check relay_screen"))
+			claude = failing
+		}
+		g := useGatedLaunches(t, []relaySeat{newFakeSeat("parsed the config files"), claude}, nil)
+		rt := newLaunchRuntime(t)
+		userSays(t, rt, "build the config parser")
+		waitFor(t, "Codex's report", func() bool {
+			var n int
+			rt.sync(func() { n = rt.st.Relays["codex"].Turns })
+			return n == 1
+		})
+		switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+		g.waitEntered(t)
+		g.release <- struct{}{}
+		if out := recv(t, switched, "switch"); !strings.Contains(out, "claude") {
+			t.Fatalf("switch: %q", out)
+		}
+		var live, restarted string
+		rt.sync(func() {
+			live = rt.writeBrief(rt.handoverFor(rt.st.Relays["claude"]), nil)
+			// What an eagent resumed on this record has: the record alone.
+			fresh := &Runtime{st: state.Replay(slices.Clone(rt.st.Events))}
+			restarted = fresh.writeBrief(fresh.handoverFor(fresh.st.Relays["claude"]), nil)
+		})
+		in := "was told the work in between"
+		if !typed {
+			in = "was started to take over in between"
+		}
+		if !strings.HasPrefix(live, "You are taking over this work from Codex") || !strings.Contains(live, in) || !strings.Contains(live, "parsed the config files") {
+			t.Fatalf("typed %v: the brief before a restart:\n%s", typed, live)
+		}
+		if restarted != live {
+			t.Errorf("typed %v: the brief after a restart:\n%s\nwant, as before it:\n%s", typed, restarted, live)
+		}
 	}
 }
 
