@@ -1220,7 +1220,11 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	// left its message. So what may have waited is looked for by the reply
 	// watcher once the session has stopped; it takes only what the record
 	// shows untaken, so nothing is taken twice.
-	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, r.ui.Log)
+	// Nothing may have been left at all, so a note that cannot be written
+	// is said as what it may mean, not as a message left.
+	defer integration.LeftForNextRun(r.projectPath(), r.sess.ID, true, func(_ string, args ...any) {
+		r.ui.Log("finalechat: the thread could not be noted for the reply watcher (%s), so a message sent from the phone as the session stopped may wait unread until the next one", fmt.Sprint(args...))
+	})
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
