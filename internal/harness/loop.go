@@ -1051,7 +1051,14 @@ func (r *Runtime) turn(w wake) {
 				acts++
 			}
 		}
-		if acts == 0 && mustSpeak && !tc.spoke && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != "" {
+		report := acts == 0 && mustSpeak && !tc.spoke && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != ""
+		if report {
+			// (Not when the session stopped ending during the call: the
+			// user wrote, or an agent came up. Its words were written
+			// before that, for an end that is not happening.)
+			r.sync(func() { report = r.stillClosing() })
+		}
+		if report {
 			// The closing report came as plain text: the text is the report.
 			// (Once the turn has given its report, plain text is a reply
 			// like any other: said to no one.)
