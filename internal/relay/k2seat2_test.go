@@ -2,6 +2,10 @@ package relay
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -52,5 +56,48 @@ func TestK2TurnDurationStillEndsATurnItsPromptDidNotOpen(t *testing.T) {
 	}
 	if n := claudeTurns(claudeUser(time.Now(), "run the build"), apiError, meta, answer, k1TurnEnd()); n != 2 {
 		t.Fatalf("an API error, then a turn a meta line started: %d turns; want 2", n)
+	}
+}
+
+// k2ClosingClaude is Claude whose seat is closed at the watcher's first
+// look (its poll), and which counts the looks.
+type k2ClosingClaude struct {
+	claudeAgent
+	looks atomic.Int32
+}
+
+func (a *k2ClosingClaude) poll(s *Seat, _ time.Time) {
+	if a.looks.Add(1) == 1 {
+		go s.Close()
+		<-s.stop
+	}
+}
+
+// A catch-up reads chunk after chunk without waiting for the next look
+// (c342211); a seat closed meanwhile stops at the next chunk, not at the
+// end of a long transcript.
+func TestK2ACatchUpStopsWhenTheSeatCloses(t *testing.T) {
+	since := time.Now()
+	// Lines no parser reads (cheap to pass over), a megabyte each.
+	line := strings.Repeat("x", 1<<20)
+	var lines []string
+	for i := 0; i < 17; i++ {
+		lines = append(lines, line)
+	}
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	writeLines(t, path, lines...)
+	if st, _ := os.Stat(path); st.Size() < 16<<20 {
+		t.Fatalf("the transcript is %d bytes; want over two of the tailer's 8 MB reads", st.Size())
+	}
+	a := &k2ClosingClaude{}
+	s := attachSeat(Spec{Restore: []Restored{{ID: "r1", Text: "never sent", Mode: "queue", At: since.Add(-2 * time.Hour)}}}, a, &fakeHost{alive: true}, "k2-stop-"+filepath.Base(filepath.Dir(path)), "", path, since)
+	go s.watch()
+	select {
+	case <-s.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the watcher did not stop")
+	}
+	if n := a.looks.Load(); n != 1 {
+		t.Fatalf("the watcher looked %d times after the seat was closed at its first look; want 1", n)
 	}
 }

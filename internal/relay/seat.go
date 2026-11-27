@@ -1171,6 +1171,12 @@ func (s *Seat) watch() {
 				return
 			case <-tick.C:
 			}
+		} else {
+			select {
+			case <-s.stop:
+				return // closed during a catch-up that reads on without waiting
+			default:
+			}
 		}
 		wait = true
 		now := time.Now()
