@@ -134,6 +134,11 @@ func (r *Runtime) pollInbox() {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		if r.recordFailed {
+			// Nothing is taken off the inbox that cannot go on the
+			// record: the next run takes it.
+			return
+		}
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -170,11 +175,17 @@ func (r *Runtime) pollInbox() {
 		case id == "" || !inboxWords(msg, r.ownCommand):
 			if id != "" && (msg.Type == "message" || msg.Type == "") {
 				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id}))
+				if r.recordFailed {
+					return // not taken: its file stays
+				}
 			}
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
 		default:
 			r.handleInboxFile(msg, id)
+			if r.recordFailed {
+				return // not on the record: its file stays
+			}
 			_ = os.Remove(path)
 		}
 		if id != "" {

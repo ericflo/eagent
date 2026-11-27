@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -178,5 +179,76 @@ func TestK2TheDownNoticeWithNoAgentRunningSaysWhereMessagesGo(t *testing.T) {
 			}
 			t.Fatalf("no notice; said %q", s.ui.said())
 		})
+	}
+}
+
+// C11: the session's record can no longer be written, and a message for
+// the agent (or a command) comes in through the inbox (the web page's
+// way in). The session ends on the failure, but the message is not taken
+// off its source before it is on the record: its file is still in the
+// inbox for the next run, where once it was removed and lost.
+func TestK2AnInboxMessageIsNotTakenOffItsSourceWhenTheRecordFails(t *testing.T) {
+	for _, c := range []struct{ name, text string }{
+		{"words", "run the tests"},
+		{"a command", "/restart"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := startSession(t, "", func(string, []map[string]any) reply { return hold() }, nil)
+			s.settled()
+			path := s.rt.sess.Path
+			s.rt.sync(func() { _ = s.rt.sess.Close() })
+			if _, err := s.rt.Take(InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); err != nil {
+				t.Fatal(err)
+			}
+			entries, _ := os.ReadDir(InboxDir(path))
+			n := 0
+			for _, e := range entries {
+				if strings.HasSuffix(e.Name(), ".json") {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d files left in the inbox after the record failed, want the message's one", n)
+			}
+			if r4Logged(s, "FATAL: cannot append") == 0 {
+				t.Fatalf("setup: the record did not fail; logs %q", s.ui.logged())
+			}
+		})
+	}
+}
+
+// C11, the phone: a message for the agent written on the phone while the
+// record cannot be written. It is not on the record, so the run that ends
+// on the failure does not type it, and the next run, which reads the
+// thread on from where the record says, takes it, once: where the ending
+// run once typed it and the next took it again.
+func TestK2APhoneMessageTheRecordCouldNotTakeIsTakenOnce(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "hello", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the thread to exist", func() bool { return fp.postCount() >= 1 })
+	g.rt.sync(func() {})
+	before := len(g.seat.sentTexts())
+	g.rt.sync(func() { _ = g.rt.sess.Close() })
+	fp.userReply("run the tests")
+	g.exit(10 * time.Second)
+	if n := len(g.seat.sentTexts()) - before; n != 0 {
+		t.Fatalf("the run that could not record the message typed it %d times", n)
+	}
+	g.resume(Options{Project: g.project, Interactive: true})
+	taken := func() int {
+		n := 0
+		for _, ev := range g.log() {
+			var d event.UserMessageData
+			if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.Text == "run the tests" {
+				n++
+			}
+		}
+		return n
+	}
+	waitFor(t, "the next run to take it", func() bool { return taken() >= 1 })
+	g.running(10*loopPoll, "after the message was taken")
+	if n := taken(); n != 1 {
+		t.Fatalf("taken %d times, want once", n)
 	}
 }

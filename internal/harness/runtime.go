@@ -196,7 +196,11 @@ type Runtime struct {
 	inboxTaken  map[string]bool
 	relayRepick map[string]relayPick // relay name -> model/effort change waiting for its turn to end
 
-	ending       bool
+	ending bool
+	// recordFailed: an event could not be written to the record (append).
+	// The run ends on it, and takes nothing more off the inbox. Loop
+	// goroutine.
+	recordFailed bool
 	endReason    string
 	shutdownOnce sync.Once
 	exitCode     int
@@ -1014,6 +1018,7 @@ func (r *Runtime) append(ev event.Event) event.Event {
 		// The log is the record; without it nothing can be trusted. End with
 		// a failing exit code and reason rather than a quiet 0.
 		r.ui.Log("FATAL: cannot append to session log: %v", err)
+		r.recordFailed = true
 		r.beginShutdown("error", 1)
 		return ev
 	}
@@ -1403,7 +1408,15 @@ func (r *Runtime) onInputFrom(line, source, phoneID, inbox string, client *clien
 func (r *Runtime) userMessage(d event.UserMessageData) {
 	rel, held := r.routeUserMessage(d)
 	d.Held = held
+	failed := r.recordFailed
 	ev := r.append(event.New(event.UserMessage, event.ActorUser, d))
+	if !failed && r.recordFailed && (d.Inbox != "" || d.PhoneID != "") {
+		// It could not go on the record, and it is still where it came
+		// from (its inbox file, the phone's thread): the next run takes
+		// it from there and passes it on, once. (One typed at the
+		// terminal is kept nowhere else, and still goes to the agent.)
+		return
+	}
 	if held != "" {
 		if r.phone != nil && len(r.st.ActiveRelays()) > 0 {
 			r.phone.setReceipt(r, ev.Seq, "eagent")
