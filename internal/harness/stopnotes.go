@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -71,16 +72,35 @@ func TellPhoneStopped(cfgs []config.Config, sessionPath string, record func(even
 	return nil
 }
 
-// stoppedThread is the thread of a session nobody runs, on the first of
+// stoppedThread is the thread of a session nobody runs, on the one of
 // cfgs' accounts that has it, with that account's client and what its
 // service offers (client keys, the status line, as the mirror learns them
-// when it starts): the thread the record names (its latest phone.thread)
-// on the first account that has it; when none does, the thread under the
-// session's own reference, which is the one a run made again after the
-// user deleted the first (its mirror took the new id; the record still
-// names the old one). Reading a thread makes none. Only "not found" moves
-// on to the next account or reference; any other failure is the answer.
+// when it starts). An account that refuses its token (401, 403) is passed
+// over: that says nothing of the others. Of the rest, it is the first
+// that has the thread the record names (its latest phone.thread); when
+// none does, the one that has a thread under the session's own reference,
+// the thread active last if more than one does: a run made it again there
+// after the user deleted the first (its mirror took the new id; the record
+// still names the old one). Reading a thread makes none. Only an account's
+// own answer that the thread is not its to give (not found, or refused)
+// moves on to the next account or reference; any other failure is the
+// answer, and nothing is told.
 func stoppedThread(cfgs []config.Config, evs []event.Event) (config.Config, *finalechat.Client, finalechat.Me, string, error) {
+	type account struct {
+		cfg    config.Config
+		client *finalechat.Client
+		me     finalechat.Me
+	}
+	none := func(err error) (config.Config, *finalechat.Client, finalechat.Me, string, error) {
+		return config.Config{}, nil, finalechat.Me{}, "", err
+	}
+	status := func(err error) int {
+		var e *finalechat.Error
+		if errors.As(err, &e) {
+			return e.Status
+		}
+		return 0
+	}
 	named, ext := "", ""
 	for _, ev := range evs {
 		var d event.PhoneThreadData
@@ -89,43 +109,65 @@ func stoppedThread(cfgs []config.Config, evs []event.Event) (config.Config, *fin
 		}
 	}
 	if named == "" {
-		return config.Config{}, nil, finalechat.Me{}, "", errors.New("its record names no phone thread")
+		return none(errors.New("its record names no phone thread"))
 	}
-	refs := []string{named}
-	if ext != "" {
-		refs = append(refs, finalechat.Ref(ext))
-	}
-	why := errors.New("there is no phone account to tell it on (no token)")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	for _, ref := range refs {
-		for _, cfg := range cfgs {
-			client, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL)
-			if !ok {
-				continue
-			}
-			client.UserAgent = "eagent/" + Version
-			me, err := client.Me(ctx)
-			if err != nil {
-				return cfg, nil, me, "", err
-			}
-			thread, err := client.Thread(ctx, ref)
-			var gone *finalechat.Error
-			if errors.As(err, &gone) && gone.Status == 404 {
-				why = fmt.Errorf("its thread %s is not on the phone account at %s: %w", named, client.BaseURL, err)
-				continue
-			}
-			if err != nil {
-				return cfg, nil, me, "", err
-			}
-			if ref != named && thread.ID == "" {
-				continue
-			}
-			if ref != named {
-				named = thread.ID
-			}
-			return cfg, client, me, named, nil
+	var accounts []account
+	var why []string // why each account passed over is not the one
+	for _, cfg := range cfgs {
+		client, ok := finalechat.Resolve(cfg.Finalechat.TokenEnvName(), cfg.Finalechat.BaseURL)
+		if !ok {
+			continue
+		}
+		client.UserAgent = "eagent/" + Version
+		me, err := client.Me(ctx)
+		if code := status(err); code == 401 || code == 403 {
+			why = append(why, fmt.Sprintf("the phone account at %s (token from %s) refuses its token: %v", client.BaseURL, client.Source, err))
+			continue
+		}
+		if err != nil {
+			return none(err)
+		}
+		accounts = append(accounts, account{cfg, client, me})
+	}
+	// not: the account's own answer that the thread is not its to give.
+	not := func(err error) bool {
+		code := status(err)
+		return code == 404 || code == 401 || code == 403
+	}
+	for _, a := range accounts {
+		_, err := a.client.Thread(ctx, named)
+		if err == nil {
+			return a.cfg, a.client, a.me, named, nil
+		}
+		if !not(err) {
+			return none(err)
+		}
+		why = append(why, fmt.Sprintf("its thread %s is not on the phone account at %s: %v", named, a.client.BaseURL, err))
+	}
+	var at account
+	var again finalechat.Thread
+	for _, a := range accounts {
+		if ext == "" {
+			break
+		}
+		thread, err := a.client.Thread(ctx, finalechat.Ref(ext))
+		if not(err) {
+			continue
+		}
+		if err != nil {
+			return none(err)
+		}
+		if thread.ID != "" && (again.ID == "" || thread.LastActivityAt.After(again.LastActivityAt)) {
+			at, again = a, thread
 		}
 	}
-	return config.Config{}, nil, finalechat.Me{}, "", why
+	if again.ID != "" {
+		return at.cfg, at.client, at.me, again.ID, nil
+	}
+	if len(why) == 0 {
+		return none(errors.New("there is no phone account to tell it on (no token)"))
+	}
+	return none(errors.New(strings.Join(why, "; ")))
 }

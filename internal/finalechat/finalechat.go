@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,6 +259,8 @@ type Thread struct {
 	Muted             bool       `json:"muted"`
 	PendingQuestions  int        `json:"pending_questions"`
 	Activity          *Status    `json:"activity"` // the live status line, or nil
+	// LastActivityAt is when the thread's newest message was written.
+	LastActivityAt time.Time `json:"last_activity_at"`
 }
 
 // Status is the live status line the app shows as a typing indicator.
@@ -723,12 +726,23 @@ func (c *Client) MessagesPage(ctx context.Context, ref, after, sender string, wa
 // read for a caller that has no message to read on from. (Asked with no
 // cursor at all the service lists the thread's newest page, which is no
 // place to start reading forward from.) The zero time reads from the
-// thread's start.
+// thread's start. The answer is held to that whatever the service made of
+// the request: one that does not know after_time (a FinaleChat from before
+// September 2026) answers with its newest page, newest first, and of that
+// only what was written after since is returned, oldest first.
 func (c *Client) MessagesSince(ctx context.Context, ref string, since time.Time, sender string, limit int) ([]Message, error) {
 	if since.IsZero() {
 		since = time.Unix(0, 0)
 	}
-	return c.window(ctx, ref, url.Values{"after_time": {since.UTC().Format(time.RFC3339Nano)}}, sender, limit)
+	msgs, err := c.window(ctx, ref, url.Values{"after_time": {since.UTC().Format(time.RFC3339Nano)}}, sender, limit)
+	msgs = slices.DeleteFunc(msgs, func(m Message) bool { return !m.CreatedAt.IsZero() && !m.CreatedAt.After(since) })
+	slices.SortStableFunc(msgs, func(a, b Message) int {
+		if n := a.CreatedAt.Compare(b.CreatedAt); n != 0 {
+			return n
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return msgs, err
 }
 
 // MessageBefore is the id of the message listed just before m, "" when m
