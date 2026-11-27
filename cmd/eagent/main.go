@@ -1271,7 +1271,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		defer editor.Close()
 		file := config.Resolve(project, "", "").File
 		edits := map[string]json.RawMessage{}
-		dropped := ""
+		dropped, moved := "", ""
 		switch {
 		case target == "default" || target == "none" || target == "-":
 			edits["default_config"] = nil
@@ -1289,6 +1289,22 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 					}
 					var rest map[string]json.RawMessage
 					rest, dropped = config.DropModelChoice(m)
+					// An effort the preset's model does not offer moves
+					// to the nearest it does, as choosing the preset in a
+					// session moves it.
+					var route map[string]json.RawMessage
+					var kept string
+					if json.Unmarshal(rest["model"], &route) == nil && json.Unmarshal(route["reasoning_effort"], &kept) == nil && kept != "" {
+						cfg := config.Defaults()
+						config.Presets[canon](&cfg)
+						cfg.Model.ReasoningEffort = kept
+						config.OfferedEffort(project, &cfg)
+						if cfg.Model.ReasoningEffort != kept {
+							route["reasoning_effort"], _ = json.Marshal(cfg.Model.ReasoningEffort)
+							rest["model"], _ = json.Marshal(route)
+							moved = kept + " to " + cfg.Model.ReasoningEffort
+						}
+					}
 					edits["model"] = rest["model"]
 				}
 			} else {
@@ -1305,6 +1321,9 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		fmt.Printf("updated %s\n", res.Path)
 		if dropped != "" {
 			fmt.Printf("  the model the file named (%s) was removed, so %s's model runs; the previous file is in %s.bak\n", dropped, target, res.Path)
+		}
+		if moved != "" {
+			fmt.Printf("  the effort moved from %s, the nearest %s's model offers\n", moved, target)
 		}
 		return 0
 	case "show":
