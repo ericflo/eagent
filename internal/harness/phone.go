@@ -350,13 +350,13 @@ func (r *Runtime) startPhone() {
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
 			// The message the session was resumed with, as the user wrote it.
-			m2, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
+			m2, t2, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: prompt, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": promptSeq, "source_anchor": p.sourceAnchor(promptSeq)}, ClientKey: p.key("u", strconv.FormatInt(promptSeq, 10))})
 			if err == nil {
 				// The poll still reads on after the anchor above: a reply
 				// written between that post and this one comes before this
 				// one, which the poll skips as its own.
+				p.rememberIn(m2, t2)
 				p.mu.Lock()
-				p.posted[m2.ID] = true
 				if promptSeq > 0 {
 					p.mirror1(promptSeq, m2.ID)
 				}
@@ -680,9 +680,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				_ = p.client.Cancel(ctx, fid)
 			}
 			if d.Source != "finalechat" && p.mirror {
-				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
+				msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
 				if err == nil {
-					p.remember(msg.ID)
+					p.rememberIn(msg, thread)
 				}
 			}
 		})
@@ -730,9 +730,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			// An agent's post without a status clears the thread's line;
 			// the agent is still at work, so the line rides along.
 			act := p.attach()
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
+			msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_send", "relay": d.Name, "via": "eagent → " + who, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("r", seq), Activity: act})
 			if err == nil {
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -744,9 +744,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		}
 		text := d.Text
 		p.enqueue(func(ctx context.Context) {
-			msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
+			msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("u", seq)})
 			if err == nil {
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.mu.Lock()
 				if p.mirrored == nil {
 					p.mirrored = map[int64]string{}
@@ -1167,9 +1167,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
 					notes = append(notes, func(ctx context.Context) {
 						act := p.attach()
-						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
+						msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
-							p.remember(msg.ID)
+							p.rememberIn(msg, thread)
 							p.markSent(act)
 						}
 					})
