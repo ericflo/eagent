@@ -97,7 +97,9 @@ func TestR11ClosingTurnThatSetsATimerIsTriedAgain(t *testing.T) {
 	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
 		tail, last := lastUserText(msgs), msgs[len(msgs)-1]["role"]
 		switch {
-		case last == "tool" && phase.CompareAndSwap(2, 3):
+		case phase.CompareAndSwap(2, 3):
+			// The call after the timer: the first of the ordinary turn
+			// the closing turn leaves it to.
 			return r10Bad
 		case last == "tool":
 			return hold()
