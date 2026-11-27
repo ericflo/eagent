@@ -1386,8 +1386,24 @@ func (r *Runtime) recordLateNews() {
 		if r.hasOutcome(n.ev.SendID) {
 			continue
 		}
-		r.appendOutcomeDirect(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, n.ev.SendID, n.name), ID: n.ev.SendID, OK: n.ev.OK, Outcome: n.ev.Outcome, Detail: clipRunes(n.ev.Detail, 2000), Read: n.ev.Read}))
+		r.appendOutcomeDirect(r.outcomeAside(sendHolder(r.st, n.ev.SendID, n.name), n.ev))
 	}
+}
+
+// outcomeAside is how a send went, as its seat said it while the rest of
+// what the seat sees is dropped: the session is ending (its agent's turn
+// that ended just before is not recorded), or the seat was taken out of
+// use. It leaves where a reattach reads on from as it was: without the
+// seat's read mark, and dated at the relay's last news, since the mark and
+// that time each say that all before them is on the record
+// (state.Relay.Read, LastEventAt), and a resume has to read the dropped
+// turn again, as on main, where nothing was recorded here.
+func (r *Runtime) outcomeAside(name string, ev relay.Event) event.Event {
+	out := event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)})
+	if rel := r.st.Relays[name]; rel != nil && !rel.LastEventAt.IsZero() {
+		out.Time = rel.LastEventAt
+	}
+	return out
 }
 
 // retiredNews records what a seat taken out of use says of its own sends
@@ -1397,8 +1413,10 @@ func (r *Runtime) recordLateNews() {
 func (r *Runtime) retiredNews(name string, seat relaySeat, rel *state.Relay, ev relay.Event) {
 	switch ev.Kind {
 	case relay.KindDelivered:
-		// Its word on its own send: one outcome, by the send's id.
-		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+		// Its word on its own send: one outcome, by the send's id. The
+		// rest of what it saw is not recorded, and the record of its name
+		// may be a new agent's by now, with a transcript of its own.
+		r.appendOutcome(r.outcomeAside(name, ev))
 	case relay.KindInner:
 		if r.st.Relays[name] != rel {
 			// A start under the name has been recorded since: the move is
@@ -1425,7 +1443,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		// it took back from the spool is gone from there, and a resume
 		// would call it unconfirmed). Nothing more is decided on it.
 		if ev.Kind == relay.KindDelivered && !r.hasOutcome(ev.SendID) {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+			r.append(r.outcomeAside(name, ev))
 		}
 		return
 	}
