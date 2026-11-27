@@ -946,7 +946,16 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 			r.post(func() {
 				// News from a seat that is no longer the relay's (stopped
 				// for a restart, a switch or a stop) is not the new one's.
-				if r.relays.get(name) == seat {
+				ours := r.relays.get(name) == seat
+				if !ours && ev.Kind == relay.KindDelivered && ev.OK {
+					// Except an arrival read from an agent a restart is
+					// replacing, before the new one is up (finishLaunch):
+					// it is this relay's, and the restart then finds the
+					// send settled instead of calling it unconfirmed.
+					job := r.relays.launch(name)
+					ours = job != nil && job.name == name && job.old == seat
+				}
+				if ours {
 					r.onRelayEvent(name, ev)
 				}
 			})
