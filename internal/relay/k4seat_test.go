@@ -258,3 +258,65 @@ func TestK4AHistoryUnderAPiDialogSetsWhatTheSeatGoesBackTo(t *testing.T) {
 		t.Fatalf("after the dialog the seat is %s; the history showed the turn over", st)
 	}
 }
+
+// A typed command's delivered event goes out once the watcher's next look
+// has read what the agent did with it: pi's /new moves it to a new
+// session, and the move (KindInner) comes first, so a model change
+// waiting on the command restarts pi into the session /new opened, not
+// the one it left. It carries no read position (079592e).
+func TestK4ATypedCommandIsDeliveredAfterTheMoveItMade(t *testing.T) {
+	isolatePi(t)
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	dir := t.TempDir()
+	first, second, status := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "second.jsonl"), filepath.Join(dir, "pi-status.json")
+	writeLines(t, first, piHeaderLine("first", time.Now()))
+	writePiStatus(t, status, piStatus{State: "idle", SessionFile: first, SessionID: "first", SessionEntries: entries(0)})
+	h := &k1Host{fakeHost: &fakeHost{alive: true}}
+	h.enter = func() error { // pi runs /new: a new session, and its status says so
+		writeLines(t, second, piHeaderLine("second", time.Now()))
+		writePiStatus(t, status, piStatus{State: "idle", SessionFile: second, SessionID: "second", SessionEntries: entries(0)})
+		return nil
+	}
+	s := newSeat(Spec{StatusFile: status, Dir: dir}, piAgent{name: "pi", label: "Pi", binary: "pi"}, h, "k4-cmd-"+filepath.Base(dir), "first")
+	s.state, s.poll = "idle", piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	var order []string
+	deadline := time.After(5 * time.Second)
+	next := func() Event {
+		select {
+		case ev := <-s.events:
+			return ev
+		case <-deadline:
+			t.Fatalf("timed out; saw %q", order)
+			return Event{}
+		}
+	}
+	for ev := next(); !(ev.Kind == KindInner && ev.Transcript == first); ev = next() {
+	}
+	if _, err := s.Send("c1", "/new", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		ev := next()
+		switch {
+		case ev.Kind == KindInner:
+			order = append(order, "inner "+ev.InnerID)
+		case ev.Kind == KindDelivered && ev.SendID == "c1":
+			order = append(order, "delivered c1")
+			if ev.Read != 0 {
+				t.Errorf("the command's delivered says the transcript was read to %d", ev.Read)
+			}
+		default:
+			continue
+		}
+		if order[len(order)-1] == "delivered c1" {
+			break
+		}
+	}
+	if len(order) < 2 || order[0] != "inner second" {
+		t.Fatalf("events %q; want pi's move to the session /new opened before the command's delivered", order)
+	}
+}

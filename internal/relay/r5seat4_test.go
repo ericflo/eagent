@@ -122,22 +122,30 @@ func TestAgentCommandsAreToldFromPaths(t *testing.T) {
 	}
 }
 
-// The agent's own command typed in is confirmed when typed: it runs, and no
-// message arrives to wait for.
+// The agent's own command typed in is confirmed once typed (at the
+// watcher's next look): it runs, and no message arrives to wait for.
 func TestATypedCommandIsConfirmed(t *testing.T) {
 	t.Parallel()
 	h := &fakeHost{alive: true}
 	s := newSeat(Spec{Name: "codex"}, codexAgent{}, h, "x", "")
-	s.state = "idle"
+	s.state, s.poll = "idle", time.Millisecond
+	go s.watch()
+	t.Cleanup(s.Close)
 	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
 		t.Fatal(err)
 	}
 	var ok bool
-	for _, ev := range drain(s.events) {
-		ok = ok || ev.Kind == KindDelivered && ev.OK && ev.SendID == "c1"
+	deadline := time.After(5 * time.Second)
+	for !ok {
+		select {
+		case ev := <-s.events:
+			ok = ev.Kind == KindDelivered && ev.OK && ev.SendID == "c1"
+		case <-deadline:
+			t.Fatal("typed command not confirmed")
+		}
 	}
-	if !ok || len(s.Snapshot().Pending) != 0 {
-		t.Fatalf("typed command not confirmed; pending %v", s.Snapshot().Pending)
+	if p := s.Snapshot().Pending; len(p) != 0 {
+		t.Fatalf("pending %v", p)
 	}
 }
 

@@ -153,6 +153,13 @@ type Seat struct {
 
 	typing sync.Mutex // one message is pasted and entered at a time
 
+	// looks counts the watcher's looks begun; held are the delivered
+	// events of the agent's own commands typed (Send), each with the look
+	// count when it was typed: it goes out once a look begun after the
+	// typing has read the agent's status and transcript (releaseHeld).
+	looks int
+	held  []heldEvent
+
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
 	// sent on events after that, from any goroutine.
@@ -663,8 +670,12 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	if command {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
-		// delivered.
-		s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
+		// delivered. Said once the watcher's next look has read what the
+		// agent did with it (pi's move to the session /new opens goes out
+		// first), so the record does not take it as acted on before then.
+		s.mu.Lock()
+		s.held = append(s.held, heldEvent{Event{Kind: KindDelivered, SendID: id, OK: true}, s.looks})
+		s.mu.Unlock()
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
 	switch {
@@ -1288,6 +1299,8 @@ func (s *Seat) watch() {
 		wait = true
 		now := time.Now()
 		s.mu.Lock()
+		s.looks++
+		look := s.looks
 		moved, movedTo := s.refollow, s.inner
 		if cut := s.since; moved && tail != nil {
 			// Read the session left to its end once more first: pi may
@@ -1416,6 +1429,7 @@ func (s *Seat) watch() {
 			} else if missed++; missed >= 2 {
 				screen, _ := s.host.Capture(s.target, 15)
 				s.sweepSpool(s.agent.Label() + " exited before it took this message, so it was not delivered; send it again if it is still wanted")
+				s.releaseHeld(math.MaxInt) // typed: delivered, before the exit
 				s.setState("exited", lastLines(screen, 6))
 				return
 			}
@@ -1447,6 +1461,38 @@ func (s *Seat) watch() {
 			lastDialog = now
 			s.checkScreen(now)
 		}
+		s.releaseHeld(look)
+	}
+}
+
+// heldEvent is a command's delivered event waiting for a look (Seat.held).
+type heldEvent struct {
+	ev   Event
+	look int // the looks begun when the command was typed
+}
+
+// releaseHeld sends the held events of commands typed before look began,
+// now that look has read the agent's status and transcript. Not while the
+// seat is about to follow the agent to another session (pi's /new): the
+// next look says that move (KindInner) first. Without a read position, as
+// every event Send makes (emitAside).
+func (s *Seat) releaseHeld(look int) {
+	s.mu.Lock()
+	var due []Event
+	if !s.refollow || look == math.MaxInt {
+		keep := s.held[:0]
+		for _, h := range s.held {
+			if h.look < look {
+				due = append(due, h.ev)
+			} else {
+				keep = append(keep, h)
+			}
+		}
+		s.held = keep
+	}
+	s.mu.Unlock()
+	for _, ev := range due {
+		s.emitAside(ev)
 	}
 }
 
