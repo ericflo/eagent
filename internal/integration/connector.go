@@ -786,7 +786,7 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 					raw = "{}\n"
 				}
 				journal.BeforeRaw = &raw
-				journal.InForce = settings.RoutePairs(res.Effective)
+				journal.InForce = s.RunningPairs(res)
 			}
 		}
 		if prepareErr != nil {

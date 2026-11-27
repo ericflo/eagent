@@ -165,12 +165,16 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 		}
 		return [3]string{}
 	}
-	// A file the undo would write that does not load is refused below.
-	if undone, err := load(undoneValues); err == nil {
+	// Every side is resolved by the loader, as a session runs it (a bundle
+	// in force through EAGENT_CONFIG or default_config included), so they
+	// compare alike. A file the undo would write that does not load is
+	// refused below.
+	running, nowErr := load(current)
+	if undone, err := load(undoneValues); err == nil && nowErr == nil {
 		var wrote, was *config.Config
 		for _, base := range []string{"/model", "/summarizer/model"} {
 			for ptr := base; len(ptr) < len(base)+4*len("/fallback"); ptr += "/fallback" {
-				now, after := resolved(res.Effective, ptr), resolved(undone, ptr)
+				now, after := resolved(running, ptr), resolved(undone, ptr)
 				if now == after {
 					continue
 				}
@@ -236,6 +240,17 @@ func routeAt(cfg config.Config, ptr string) *config.ModelRoute {
 		r = r.Fallback
 	}
 	return r
+}
+
+// RunningPairs are the route pairs of what a session would run now: the
+// configuration as the loader lays it (a bundle in force through
+// EAGENT_CONFIG or default_config included), or as res shows it when that
+// does not load. A command's journal records them as in force.
+func (s *Service) RunningPairs(res config.Resolution) [][2]string {
+	if cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err == nil {
+		return RoutePairs(cfg)
+	}
+	return RoutePairs(res.Effective)
 }
 
 // RoutePairs are the (address, key variable) pairs of a configuration's

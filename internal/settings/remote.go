@@ -795,6 +795,13 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	if values, err = fileValues(res.File.Raw); err != nil {
 		return
 	}
+	// The layers the file builds on, as the loader lays them: a bundle in
+	// force through EAGENT_CONFIG or default_config included, else (one
+	// that does not load, which an edit may be clearing) the file's own.
+	layers := res.Layered
+	if inForce, err := CurrentLayers(s.Project, s.Preset, s.Bundle); err == nil {
+		layers = inForce
+	}
 	// A dedicated summarizer with no route written calls the main model's.
 	// An edit of its route starts from that one, so a model picked alone
 	// keeps the provider it is reached by. A route written as null is none.
@@ -803,7 +810,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	}) {
 		// The route as the layers write it: a variable's value is not the
 		// file's to keep.
-		seed := res.Layered.Model
+		seed := layers.Model
 		seed.Fallback = nil
 		var route map[string]any
 		raw, _ := json.Marshal(seed)
@@ -829,7 +836,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	// summarizer's route above is seeded from: what the environment makes
 	// of a route is not the file's.
 	if picks {
-		if err = s.routePicks(values, p.Edits, res.Layered, before.Descriptor); err != nil {
+		if err = s.routePicks(values, p.Edits, layers, before.Descriptor); err != nil {
 			return
 		}
 	}
