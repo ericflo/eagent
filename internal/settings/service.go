@@ -34,8 +34,9 @@ func SetHost(fn func(project string) (config.Config, error)) func(project string
 }
 
 // Runs is the configuration a session started for the project runs on:
-// its host's, else the project's own. What the phone is offered to start,
-// and the saved preset it may not delete, follow it.
+// its host's, else the project's own (with this service's preset and
+// bundle). What the phone is offered to start, and the saved preset it may
+// not delete, follow it.
 func (s *Service) Runs() config.Config {
 	hostMu.Lock()
 	fn := host
@@ -45,7 +46,7 @@ func (s *Service) Runs() config.Config {
 			return cfg
 		}
 	}
-	if cfg, err := config.Load(s.Project, ""); err == nil {
+	if cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err == nil {
 		return cfg
 	}
 	return config.Defaults()

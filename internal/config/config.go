@@ -772,15 +772,18 @@ func explicitChoice(project, preset, bundle string) (string, string, string) {
 }
 
 // IsDefaultBundle says whether the saved bundle name is in force, so it is
-// not to be deleted: the bundle res laid (the one a caller names, or the one
-// an explicit preset names), EAGENT_PRESET or EAGENT_CONFIG naming it (the
-// loader takes a saved preset EAGENT_PRESET names as the bundle), or the
-// file's default_config.
+// not to be deleted: the bundle loading lays, which is the one res laid (a
+// caller's, else a saved preset an explicit preset or EAGENT_PRESET names:
+// explicitChoice), else EAGENT_CONFIG's; or the file's default_config,
+// which every start naming none takes.
 func IsDefaultBundle(res Resolution, name string) bool {
 	if name == "" {
 		return false
 	}
-	return res.Active.Kind == "bundle" && res.Active.Name == name || os.Getenv("EAGENT_PRESET") == name || os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
+	if res.Active.Kind == "bundle" {
+		return res.Active.Name == name || res.Effective.DefaultConfig == name
+	}
+	return os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
 }
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
