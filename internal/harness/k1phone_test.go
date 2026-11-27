@@ -65,6 +65,71 @@ func k1UserSaid(text string) func(map[string]any) bool {
 	return func(b map[string]any) bool { return b["sender"] == "user" && b["body"] == text }
 }
 
+// k1TwoOpenCards is a session on a service that keeps no client keys
+// whose open question stands on two cards, both still open: the first
+// run's, which the service would not let the second run withdraw, and the
+// second run's. It is stopped, and the service lets cards be withdrawn
+// again. It returns both card ids, the earlier first.
+func k1TwoOpenCards(t *testing.T, fp *phoneFake) (*phoneRig, []string) {
+	t.Helper()
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r5AskedAndStopped(t, fp)
+	var first event.PhoneQuestionData
+	_ = r13Logged(g, event.PhoneQuestion)[0].Decode(&first)
+	keep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/questions/"+first.CardID+"/cancel" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no question"}}`))
+			return
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(keep.Close)
+	normal := g.cfg.Finalechat.BaseURL
+	g.cfg.Finalechat.BaseURL = keep.URL
+	g.resume(Options{})
+	waitFor(t, "the question on a second card", func() bool { return fp.pendingQuestions() == 2 })
+	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	r14Drained(t, g)
+	g.interrupt()
+	g.cfg.Finalechat.BaseURL = normal
+	var second event.PhoneQuestionData
+	_ = r13Logged(g, event.PhoneQuestion)[1].Decode(&second)
+	if s1, s2 := r14Status(fp, first.CardID), r14Status(fp, second.CardID); s1 != "pending" || s2 != "pending" {
+		t.Fatalf("the cards are %q and %q, want both open", s1, s2)
+	}
+	return g, []string{first.CardID, second.CardID}
+}
+
+// B15: the question is answered by the words the session is resumed
+// with. Every card of it that may still be open is withdrawn, not only the
+// newest: a tap on the other would give the answer a second time.
+func TestK1AResumeThatAnswersWithdrawsEveryOpenCard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"words", Options{Interactive: true, Prompt: "blue"}},
+		{"an answer", Options{Interactive: true, Answer: "blue"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			g, cards := k1TwoOpenCards(t, fp)
+			g.resume(tc.opts)
+			waitFor(t, "the answer", func() bool { return len(r13Logged(g, event.UserAnswer)) == 1 })
+			waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) > 0 })
+			r14Drained(t, g)
+			for _, fid := range cards {
+				if s := r14Status(fp, fid); s == "pending" {
+					t.Errorf("card %s of the answered question is still open (cards %v)", fid, cards)
+				}
+			}
+		})
+	}
+}
+
 // B16: every post of eagent's that the service answers with a thread
 // takes that thread's id, so a thread the user deleted and the post
 // recreated is known by its new id (as a narrator message or a question
