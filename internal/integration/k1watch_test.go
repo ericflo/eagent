@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -514,7 +515,7 @@ func TestK1ARestoreWhoseHandOverFailsReturnsTheErrorAndLeavesTheReply(t *testing
 	t.Setenv("FINALECHAT_URL", f.srv.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	k1BlockKept(t, quit.project)
-	if msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid)); err == nil || ok {
+	if msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid)); !errors.Is(err, ErrHandOver) || ok {
 		t.Fatalf("pending reply %#v ok=%v err=%v, want the hand-over's error", msg, ok, err)
 	}
 	if p := r10Preview(f, sid); p != "user" {
@@ -536,7 +537,7 @@ func TestK1ARestoreWhoseNoticeAndHandOverFailSaysBoth(t *testing.T) {
 	fr.failPosts(0, http.StatusForbidden)
 	k1BlockKept(t, project)
 	_, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
-	if ok || err == nil || !strings.Contains(err.Error(), "not a directory") || !strings.Contains(err.Error(), "refused") {
+	if ok || err == nil || !strings.Contains(err.Error(), "not a directory") || !strings.Contains(err.Error(), "refused") || errors.Is(err, ErrHandOver) {
 		t.Fatalf("ok=%v err=%v, want the notice's error and the hand-over's", ok, err)
 	}
 }

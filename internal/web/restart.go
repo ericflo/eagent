@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -101,6 +102,11 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			// FinaleChat says the session has no thread there, so no reply
 			// can be waiting in one: it comes back as it was.
 			reply, err = integration.PhoneMessage{}, nil
+		}
+		if errors.Is(err, integration.ErrHandOver) {
+			// Its thread was read: the reply stays there, untaken.
+			s.logf("session %s: not brought back (%v); the reply stays in its thread", id, err)
+			continue
 		}
 		if err != nil {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)

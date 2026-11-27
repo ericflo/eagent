@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -656,12 +657,17 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// that takes it up before the restore has started the session leaves
 	// the session to the restore (retryPending).
 	if err := leaveWithWatcher(project, info, last, true); err != nil {
-		return PhoneMessage{}, false, err
+		return PhoneMessage{}, false, fmt.Errorf("%w: %v", ErrHandOver, err)
 	}
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
 }
+
+// ErrHandOver is PendingReply's error when it found the reply but could
+// not leave it for the project's reply watcher: its thread was read, and
+// nothing was taken.
+var ErrHandOver = errors.New("could not leave the reply for the reply watcher")
 
 // ReleaseReply gives up the hold a restore's hand-over (PendingReply) put
 // on msg, when the restore could not resume the session with it: the
