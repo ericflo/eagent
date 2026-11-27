@@ -539,9 +539,10 @@ type restartFacts struct {
 //     through, so its opening fits the window, and a restart shrinks it
 //     back to an opening; so it gets one restart past the bound on the
 //     others. A restart made this way counts in the row unless the
-//     conversation took in something new before it reached the window
-//     (startDossier): calls that went through are not growth (a reply sent
-//     back, a read that fills the window, made again after every restart).
+//     conversation took in something new and a turn of it ended before it
+//     reached the window (startDossier): calls that went through are not
+//     growth (a reply sent back, a read that fills the window, made again
+//     after every restart).
 //
 //   - Two rescues in a row already (rescues): the restart that began this
 //     conversation and the one before it were each made because the
@@ -663,6 +664,32 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 	return false
 }
 
+// turnEnded reports that a turn of the conversation in the current file
+// ran to its end: one on the record that ended "done", or a look that
+// left no record but its batch (event.Checks with a SeenSeq; a reply sent
+// back for another try sets none). Loop goroutine only.
+func (r *Runtime) turnEnded() bool {
+	cur := r.st.Current()
+	if cur == nil {
+		return false
+	}
+	for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
+		ev := r.st.Events[i]
+		if ev.Actor != event.ActorEagent || ev.Task != "" {
+			continue
+		}
+		var turn event.TurnData
+		var looks event.ChecksData
+		switch {
+		case ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done":
+			return true
+		case ev.Type == event.Checks && ev.Decode(&looks) == nil && looks.SeenSeq > 0:
+			return true
+		}
+	}
+	return false
+}
+
 // restartDecided reports that, for a conversation a restart began, no
 // restart can make room was found and said (this run, or by the record's
 // full notice), and no call has gone through since. That stands across a
@@ -776,11 +803,13 @@ func (r *Runtime) startDossier() {
 	r.tellRereading()
 	job := dossierJob{covers: r.st.LastSeq(), tokens: r.contextTokens(), lines: r.recordLines(), adopt: t.adopt, moved: r.st.Moved()}
 	job.retry = r.refusedFirst() && r.restartCarried == carriedNothing
-	// It grew to the window: refused after its calls went through, and its
-	// looks took in something that arrived after its briefing. Calls alone
-	// are not growth: a reply sent back, or a read that fills the window,
-	// is made again after every restart.
-	grew := t.overflowed && t.subCalls > 0 && r.recordedSinceOpening(t.seen)
+	// It grew to the window: refused after its calls went through, its
+	// looks took in something that arrived after its briefing, and a turn
+	// of it ended. Calls alone are not growth: a reply sent back, or a read
+	// that fills the window, is made again after every restart, and so is
+	// a first turn that reads what a working agent recorded during the
+	// pass and is refused before it ends.
+	grew := t.overflowed && t.subCalls > 0 && r.recordedSinceOpening(t.seen) && r.turnEnded()
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.overflowed || t.firstPrompt >= r.rolloverTokens()) && !grew {
 		// A rescue: the conversation being replaced was too long from
 		// its start, or refused without growing (restartHelps counts

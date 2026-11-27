@@ -4,10 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 )
 
 // A model on a server registered in the project, whose window only the
@@ -73,5 +75,53 @@ func TestR13AnOpeningTheModelRefusesIsNotToldToCarryOn(t *testing.T) {
 		if strings.Contains(l, "restarting again cannot shrink it") && strings.Contains(l, "rollover_tokens") {
 			t.Fatalf("the log says %q on a refusal of the opening alone", l)
 		}
+	}
+}
+
+// A working agent records progress while every dossier is written, and
+// every conversation's first turn reads it, makes a lookup and has the
+// call after the lookup refused as too long. Reading the progress is not
+// growth: the turn never ended, and the same thing happens after every
+// restart. Each of those restarts counts in the row, so they stop at the
+// bound and the user is told, where each once started the count again: a
+// paid dossier pass after another, without end.
+func TestR13ProgressReadInAFirstTurnThatOverflowsDoesNotRestartWithoutEnd(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{time.Millisecond})
+	var s *session
+	var ready atomic.Bool
+	brain := func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			if ready.Load() {
+				s.rt.sync(func() {
+					s.rt.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: "codex", Text: "running the tests"}))
+				})
+			}
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case !ready.Load():
+			return hold()
+		case m[len(m)-1]["role"] == "tool":
+			return r7TooLong
+		}
+		return reply{calls: []event.ToolCall{tc("session_search", `{"query":"tests"}`)}}
+	}
+	s = startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = 60000, 2048
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	ready.Store(true)
+	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
+	r6Until(t, "the user told the conversation is full, or too many restarts", func() bool {
+		return r6ToldFull(s) > 0 || r6Dossiers(s) > restartRescueMax+4
+	})
+	if n := r6Dossiers(s); n > restartRescueMax+2 {
+		t.Fatalf("%d restarts in a row, each after a first turn that read the progress and was refused after its lookup; want at most %d", n, restartRescueMax+2)
+	}
+	if n := r5Told(s, fullNotice+": after several restarts in a row"); n != 1 {
+		t.Fatalf("told %d times that the restarts stopped as the window was reached again, want once", n)
 	}
 }
