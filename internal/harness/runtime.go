@@ -1274,6 +1274,12 @@ drain:
 			break drain
 		}
 	}
+	// One last look at the inbox, as the loop's own looks take it while the
+	// session ends: words written there since the loop's last look (by the
+	// web UI, for a session a terminal runs) are on the record, kept for
+	// the next run, not left unread. A file written after this waits in the
+	// inbox for the next run, which takes it.
+	r.pollInbox()
 	close(r.closed)
 	// A start still under way stops the agent it brings up (abandonLaunch),
 	// as nothing would watch it. Nothing is under way in an ordinary
