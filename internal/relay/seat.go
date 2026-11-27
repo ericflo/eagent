@@ -328,8 +328,19 @@ func (s *Seat) caughtUp(now time.Time) {
 	if kept {
 		s.state, s.hung = "blocked", true
 	}
+	// Inside a turn whose transcript has been quiet as long as a live seat
+	// waits before calling a working agent blocked (checkScreen): blocked
+	// as it would be (hung), so nothing goes into a dialog that came up
+	// while eagent was down unless the screen shows the agent's own.
+	quiet := false
+	if st, err := os.Stat(s.transcript); !kept && state == "working" && err == nil && now.Sub(st.ModTime()) > 10*time.Minute {
+		s.state, s.stateAt, s.hung, quiet = "blocked", now, true, true
+	}
 	s.mu.Unlock()
-	if !kept && (state != "idle" || ended) {
+	if quiet {
+		screen, _ := s.host.Capture(s.target, 0)
+		s.emit(Event{Kind: KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n" + lastLines(screen, 10)})
+	} else if !kept && (state != "idle" || ended) {
 		s.emit(Event{Kind: KindState, State: state})
 	}
 }
