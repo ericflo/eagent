@@ -365,3 +365,19 @@ func TestK1AStalledFileHoldsTheStreamForOneDownloadAtMost(t *testing.T) {
 		t.Fatalf("resumed %#v with %d notes, want the words and the sender told", host.resumed, notes.Load())
 	}
 }
+
+// Batch 2, the day's cutoff: a reply kept quietly for a session that has
+// run for more than a day is written down at a stop of the serve and taken
+// up by the next serve's watcher. It keeps the time it was first kept, so
+// the cutoff lets it go.
+func TestK1AKeptReplyKeepsItsFirstTimeAcrossARestart(t *testing.T) {
+	project, sid, _, f, host, w := r9Running(t, true)
+	thread := finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}
+	w.retries.replies["m1"] = pendingReply{thread: thread, msg: finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "one more thing"}, since: time.Now().Add(-25 * time.Hour)}
+	w.retries.writeDown(project, t.Logf)
+	next := f.watcher(project, host, t)
+	next.sweep(context.Background())
+	if n := len(next.retries.replies); n != 0 {
+		t.Fatalf("kept after more than a day: %#v", next.retries.replies)
+	}
+}

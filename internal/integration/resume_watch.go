@@ -87,17 +87,24 @@ func keptFile(project string) string {
 	return filepath.Join(stateDir(project), "resume-watch-kept.json")
 }
 
+// keptReply is a reply written down, with the time it was first kept: the
+// day's cutoff (retryPending) counts from then, across restarts.
+type keptReply struct {
+	Message finalechat.Message `json:"message"`
+	Since   time.Time          `json:"since"`
+}
+
 // writeDown adds the quiet entries, by thread, to those written down that
 // nobody has taken up yet.
 func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
-	kept := map[string]finalechat.Message{}
+	kept := map[string]keptReply{}
 	if raw, err := os.ReadFile(keptFile(project)); err == nil {
 		_ = json.Unmarshal(raw, &kept)
 	}
 	r.mu.Lock()
 	for _, p := range r.replies {
 		if !p.told {
-			kept[p.thread.ExternalID] = p.msg
+			kept[p.thread.ExternalID] = keptReply{Message: p.msg, Since: p.since}
 		}
 	}
 	r.mu.Unlock()
@@ -116,10 +123,10 @@ func (r *replyRetries) takeUp(project string) {
 		return
 	}
 	_ = os.Remove(keptFile(project))
-	var kept map[string]finalechat.Message
+	var kept map[string]keptReply
 	_ = json.Unmarshal(raw, &kept)
-	for ext, m := range kept {
-		r.keepQuietly(finalechat.Thread{ExternalID: ext}, m)
+	for ext, k := range kept {
+		r.keepQuietly(finalechat.Thread{ExternalID: ext}, k.Message, k.Since)
 	}
 }
 
@@ -376,11 +383,12 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	if err != nil || !ReadPhoneLedger(evs).Keeps {
 		return
 	}
-	w.retries.keepQuietly(thread, m)
+	w.retries.keepQuietly(thread, m, time.Now())
 }
 
-// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped).
-func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message) {
+// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped),
+// kept since then.
+func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message, since time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, p := range r.replies {
@@ -389,7 +397,7 @@ func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Messag
 		}
 	}
 	if _, kept := r.replies[m.ID]; !kept {
-		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: since}
 	}
 }
 
@@ -572,7 +580,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 				// message, which hides the reply from the sweep. The
 				// project's reply watcher keeps it quietly, as it keeps
 				// one whose notice it could not post itself.
-				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last, time.Now())
 			}
 			return PhoneMessage{}, false, err
 		}
@@ -581,7 +589,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// again (a /quit ends it before it reads on) is looked for by the
 	// project's reply watcher once it has stopped, as after a resume of the
 	// watcher's own: its closing note may hide the thread from the sweep.
-	projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+	projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last, time.Now())
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
