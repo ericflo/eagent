@@ -17,6 +17,7 @@ import (
 // client capabilities), not only its words, so the resumed session can
 // take it as a running one would.
 func TestResumeWatcherHandsOverTheMessagesMeta(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "") // a watcher runs only with the phone on; the gate also runs with it off
 	project := t.TempDir()
 	sid := finishedSession(t, project, time.Now().Add(-time.Minute))
 	host := &fakeResumeHost{hosted: map[string]bool{}}

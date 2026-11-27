@@ -70,6 +70,7 @@ func TestSavedFileOverTheLimitIsRefusedNotCutShort(t *testing.T) {
 // brings the session back with its words, and the sender is told in the
 // thread why the file is missing.
 func TestReplyWatcherTellsThePhoneAFileWasTooLarge(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "") // a watcher runs only with the phone on; the gate also runs with it off
 	var mu sync.Mutex
 	var notes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

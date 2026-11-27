@@ -229,6 +229,7 @@ func (h *flakyResumeHost) Resume(id string, msg PhoneMessage) error {
 // sweep (and the thread hears why once), instead of being dropped until
 // eagent restarts.
 func TestFailedResumeIsRetried(t *testing.T) {
+	t.Setenv("EAGENT_FINALECHAT", "") // a watcher runs only with the phone on; the gate also runs with it off
 	project := t.TempDir()
 	sess, err := store.Create(store.Root(project), time.Now())
 	if err != nil {
