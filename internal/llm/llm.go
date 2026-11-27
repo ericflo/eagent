@@ -294,19 +294,16 @@ func (m *imageMemory) accept(paths []string) {
 	}
 }
 
-// refuse remembers which pictures of a refused request the refusal is
-// about, and keeps the new ones to be reported. It is about a picture the
-// provider has not taken: one this client never saw go through, and that
-// came after the model's last reply (what stands before a reply went
-// through in the call that produced it, whichever client made it). When
-// there is no such picture, every picture this client never saw go
-// through; when there is none of those either, or all is set, all of them.
-func (m *imageMemory) refuse(req Request, all bool) {
+// about returns which pictures of a refused request the refusal is about.
+// It is about a picture the provider has not taken: one this client never
+// saw go through, and that came after the model's last reply (what stands
+// before a reply went through in the call that produced it, whichever
+// client made it). When there is no such picture, every picture this
+// client never saw go through; when there is none of those either, or all
+// is set, all of them.
+func (m *imageMemory) about(req Request, all bool) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.refused == nil {
-		m.refused = map[string]bool{}
-	}
 	last := -1
 	for i, msg := range req.Messages {
 		if msg.Role == "assistant" {
@@ -333,6 +330,17 @@ func (m *imageMemory) refuse(req Request, all bool) {
 		fresh = unseen
 	case len(fresh) == 0:
 		fresh = paths
+	}
+	return fresh
+}
+
+// refuse remembers the pictures as refused, and keeps the new ones to be
+// reported.
+func (m *imageMemory) refuse(fresh []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refused == nil {
+		m.refused = map[string]bool{}
 	}
 	for _, p := range fresh {
 		if !m.refused[p] {
@@ -424,7 +432,8 @@ func (e *APIError) RejectsImages() bool {
 // tokens). It is returned as it is, for the conversation to be made
 // shorter; no picture is left out or written down as refused for it, and
 // the model is not taken for text-only. A 413 is a request over a size
-// limit, which its pictures are most of, and stays a picture refusal.
+// limit, which its pictures are most of: its pictures are held out, and
+// written down as refused only when the call goes through without them.
 func (e *APIError) tooLong() bool {
 	return e.Status != 413 && e.ContextOverflow()
 }
@@ -751,6 +760,13 @@ var ErrIdle = errors.New("stream idle timeout")
 // signalled completion.
 var ErrTruncatedStream = errors.New("stream ended before completion")
 
+// tooLarge reports a request over the provider's size limit: a 413, or a
+// prompt too long for the model.
+func tooLarge(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.Status == 413 || ae.ContextOverflow())
+}
+
 // TakeRefusedImages returns the pictures a provider refused that no
 // response has reported: those of a call that left a picture out and then
 // failed for another reason. A caller that keeps a record asks after a
@@ -758,7 +774,7 @@ var ErrTruncatedStream = errors.New("stream ended before completion")
 func (c *Client) TakeRefusedImages() []string { return c.images.report() }
 
 // Complete performs one model call with retries on transient failures.
-func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Response, error) {
+func (c *Client) Complete(ctx context.Context, in Request, obs *Observer) (*Response, error) {
 	var lastErr error
 	attempts := c.MaxAttempts
 	if attempts <= 0 {
@@ -775,7 +791,9 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		}
 		// In this order on every call: a model found to take no pictures
 		// was found so on a request that already had these notes, and
-		// the next request must render the same.
+		// the next request must render the same. Every attempt starts from
+		// the request asked for, so a picture held out of one is sent again.
+		req := in
 		if hasImages(req) {
 			req = c.images.leaveOut(fitImages(req, c.Endpoint.Protocol))
 		}
@@ -784,23 +802,47 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		}
 		resp, err := c.once(callCtx, req, obs)
 		var ae *APIError
+		// A request too large may be so for its text alone: the pictures
+		// it leaves out are held, and written down as refused only when
+		// the call goes through without them.
+		var held []string
 		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
-			if ae.badImage() || ae.Status == 413 {
+			if ae.badImage() || tooLarge(err) {
 				// A picture was refused (undecodable, too big for a limit
 				// of this provider's own): go on without it, and say why.
 				// The model can see. The one refused is left out of later
-				// calls too; the ones taken before stay.
+				// calls too; the ones taken before stay. A request too
+				// large is never the model refusing pictures, whatever its
+				// wording names.
 				if c.OnRetry != nil {
 					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
 				}
-				c.images.refuse(req, false)
+				if out := c.images.about(req, false); tooLarge(err) {
+					held, req = out, req.WithRefused(out)
+				} else {
+					c.images.refuse(out)
+				}
 				req = c.images.leaveOut(req)
 				obs.reset()
 				resp, err = c.once(callCtx, req, obs)
 				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
-					// Still refused over pictures: leave them all out.
-					c.images.refuse(req, true)
-					req = c.images.leaveOut(req)
+					if ae.badImage() || tooLarge(err) {
+						// Still refused over pictures: leave them all out.
+						if out := c.images.about(req, true); tooLarge(err) {
+							held, req = append(held, out...), req.WithRefused(out)
+						} else {
+							c.images.refuse(out)
+						}
+						req = c.images.leaveOut(req)
+					} else {
+						// A text-only model: none held was refused for
+						// itself, and the request renders as later ones do.
+						held = nil
+						if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+							c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
+						}
+						req = withoutImages(c.images.leaveOut(fitImages(in, c.Endpoint.Protocol)))
+					}
 					obs.reset()
 					resp, err = c.once(callCtx, req, obs)
 				}
@@ -817,6 +859,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			}
 		}
 		if err == nil {
+			c.images.refuse(held)
 			c.images.accept(imagePaths(req))
 			resp.RefusedImages = c.images.report()
 			resp.Elapsed = time.Since(start)

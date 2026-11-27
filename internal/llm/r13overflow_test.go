@@ -38,10 +38,13 @@ func TestR13AnOverflowIsNotAPictureRefusal(t *testing.T) {
 			overflow, withImage := false, 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, _ := io.ReadAll(r.Body)
-				if strings.Contains(string(raw), "image_url") {
+				picture := strings.Contains(string(raw), "image_url")
+				if picture {
 					withImage++
 				}
-				if overflow {
+				// The picture is the margin: the conversation fits
+				// without it, as a retry that leaves it out would find.
+				if overflow && picture {
 					w.WriteHeader(c.status)
 					fmt.Fprint(w, c.body)
 					return
