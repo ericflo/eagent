@@ -213,6 +213,11 @@ type pending struct {
 	// typed send is, but never pressed.
 	restored, dormant, lost bool
 	sentAt                  time.Time
+	// handing: its hand-over for the end of the turn (the spool's file,
+	// the agent's own queue command, which may take a while) has not
+	// answered yet. Until it has, the send is not taken for one the turn's
+	// end left over: a hand-over that then fails is typed (Send).
+	handing bool
 	// after is how far the transcript afterIn was written when the seat
 	// began to watch for the send: an entry of it that starts before that
 	// was written before, and is not the send's arrival. afterIn is ""
@@ -696,9 +701,14 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 			// reported lost on a timer before its turn is over (see
 			// pending.lost). Only Claude's and pi's hand-overs go through
 			// the spool.
-			s.trackHeld(id, text, mode, s.spec.Spool != "")
+			s.trackSend(&pending{id: id, text: text, mode: mode, held: s.spec.Spool != "", handing: true})
 			err := s.agent.afterTurn(s, id, text)
 			s.mu.Lock()
+			for _, p := range s.pending {
+				if p.id == id {
+					p.handing = false
+				}
+			}
 			closed = s.closed
 			s.mu.Unlock()
 			if err == nil && closed && s.spec.Spool != "" && Unspool(s.spec.Spool, id) && s.untrack(id) {
@@ -1022,7 +1032,7 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 			continue
 		}
 		queued := s.spec.Spool == "" && p.mode == "after_turn"
-		if same && (p.held || queued) && !p.dormant && !p.lost && p.at.Before(end) && !holds(names, p.id) {
+		if same && (p.held || queued) && !p.dormant && !p.lost && !p.handing && p.at.Before(end) && !holds(names, p.id) {
 			p.lost, p.at = true, now
 			for _, n := range names {
 				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {

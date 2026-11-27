@@ -2,13 +2,11 @@ package relay
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -178,33 +176,18 @@ func codexMeta(path string) (rolloutMeta, bool) {
 	return rolloutMeta{ID: ev.Payload.ID, Cwd: ev.Payload.Cwd, start: parseTime(ev.Payload.Timestamp)}, true
 }
 
-// codexQueueBound is how long one codex queue command may take. A variable
-// so tests can shorten it.
-var codexQueueBound = time.Minute
-
-// afterTurn uses Codex's own queue: the message becomes the next turn. A
-// command that answers with a failure queued nothing, and the caller types
-// the message. One killed at its bound may have queued it first: that is
-// a hand-over that failed under way (TypingError), which the caller never
-// types again.
+// afterTurn uses Codex's own queue: the message becomes the next turn.
 func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	id := s.innerID()
 	if id == "" {
 		return errors.New("Codex's session id is not known yet")
 	}
 	argv := codexQueueArgs(id, text)
-	cmd, cancel := bounded(codexQueueBound, argv[0], argv[1:]...)
+	cmd, cancel := bounded(time.Minute, argv[0], argv[1:]...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Killed (the bound's kill shows as the signal), not an answer.
-		var exit *exec.ExitError
-		killed := errors.As(err, &exit) && !exit.Exited() || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay)
-		err = fmt.Errorf("codex queue: %w: %s", err, strings.TrimSpace(string(out)))
-		if killed {
-			return &TypingError{fmt.Errorf("%w (it gave no answer within %s, and may have queued the message first)", err, codexQueueBound)}
-		}
-		return err
+		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
