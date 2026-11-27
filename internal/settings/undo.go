@@ -216,7 +216,11 @@ func isRoute(ptr string) bool {
 }
 
 // routeAt is the route of cfg a pointer names (/model or /summarizer/model,
-// and their fallbacks), or nil.
+// and their fallbacks), or nil. A summarizer with no route of its own is
+// nil here, though it runs on the main route: that route is compared as
+// /model, and reading it under the summarizer too would make a person's
+// change of it a conflict for an undo that only gives the summarizer its
+// own route back or takes it out.
 func routeAt(cfg config.Config, ptr string) *config.ModelRoute {
 	r := &cfg.Model
 	rest, ok := strings.CutPrefix(ptr, "/summarizer/model")

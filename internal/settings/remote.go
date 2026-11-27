@@ -715,14 +715,25 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	if err != nil {
 		return
 	}
-	// A reversal's null route is checked as an unset of the route's model:
-	// writable here, in a class the grant has.
+	// A reversal's null route removes the fields the command wrote into it,
+	// which are the ones the file has there now (its conflict check saw the
+	// route as the command left it): it is checked as an unset of each, and
+	// of no other field.
 	checks := p
 	if undo {
-		checks.Edits = slices.Clone(p.Edits)
-		for i, e := range checks.Edits {
-			if e.Op == "set" && e.Value == nil && slices.ContainsFunc(before.Descriptor.Fields, func(f control.Field) bool { return f.Key == e.Key+"/model" }) {
-				checks.Edits[i] = control.Edit{Op: "unset", Key: e.Key + "/model"}
+		current, _ := fileValues(config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw)
+		checks.Edits = nil
+		for _, e := range p.Edits {
+			if e.Op != "set" || e.Value != nil || !isRoute(e.Key) {
+				checks.Edits = append(checks.Edits, e)
+				continue
+			}
+			for _, f := range before.Descriptor.Fields {
+				if v, ok := pointerValue(current, f.Key); ok && strings.HasPrefix(f.Key, e.Key+"/") {
+					if _, object := v.(map[string]any); !object {
+						checks.Edits = append(checks.Edits, control.Edit{Op: "unset", Key: f.Key})
+					}
+				}
 			}
 		}
 	}
