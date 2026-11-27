@@ -1375,6 +1375,9 @@ func (r *Runtime) recordLateNews() {
 		waiting = r.relays.pumping > 0
 		r.relays.mu.Unlock()
 	}
+	if waiting {
+		r.ui.Log("an agent's watcher had not said its last after %s; what it says of its sends now is not recorded", lastWordGrace)
+	}
 	r.relays.mu.Lock()
 	said := r.relays.lateSaid
 	r.relays.lateSaid = nil
