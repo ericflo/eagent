@@ -75,6 +75,7 @@ func TestAntigravityUnknownStateNameFallsTheSafeWay(t *testing.T) {
 	}
 	starting.host.(*fakeHost).screen = screen
 	starting.checkScreen(start.Add(1500 * time.Millisecond))
+	starting.checkScreen(start.Add(3000 * time.Millisecond)) // two checks in a row agree
 	if st := starting.Snapshot().State; st != "idle" {
 		t.Fatalf("at its prompt after a slow start, with an unknown state name, the seat is %s", st)
 	}

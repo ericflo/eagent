@@ -74,7 +74,8 @@ func TestK9AHeldSendIsTakenBackAfterATurnEndSeenOnlyOnTheScreen(t *testing.T) {
 	h.mu.Lock()
 	h.screen = claudePromptScreen
 	h.mu.Unlock()
-	s.checkScreen(time.Now()) // the prompt is back: idle
+	s.checkScreen(time.Now()) // the prompt is back
+	s.checkScreen(time.Now()) // and stays at the next check: idle
 	if st := s.Snapshot().State; st != "idle" {
 		t.Fatalf("state %s; want idle once the screen shows the prompt", st)
 	}

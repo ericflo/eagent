@@ -91,6 +91,7 @@ func TestAQuietAgentStaysBlockedWhileItsScreenSaysItIsBusy(t *testing.T) {
 			h.screen = c.idle
 			h.mu.Unlock()
 			s.checkScreen(start.Add(9 * time.Second))
+			s.checkScreen(start.Add(10500 * time.Millisecond)) // two checks in a row agree
 			if st := s.Snapshot().State; st != "idle" {
 				t.Fatalf("at its prompt again the seat is %s", st)
 			}

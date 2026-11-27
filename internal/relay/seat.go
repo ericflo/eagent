@@ -141,7 +141,6 @@ type Seat struct {
 	turnImages []string
 	limitMark  float64
 	handled    map[string]time.Time // dialog -> when it was last answered
-	readySince time.Time            // when the screen first looked ready while starting
 	refollow   bool                 // the agent moved to another transcript: find it again
 	followed   bool                 // ...and where its news begins is decided when it opens
 	sinceKept  time.Time            // since as it was before the move
@@ -153,7 +152,6 @@ type Seat struct {
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	stuck      bool                 // blocked, and known not to be working (Status.Stuck)
-	stuckNext  bool                 // the last screen check found stuck should change (checkScreen)
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	ownScreen  bool                 // reattached, and a send has once found the agent's own screen (waitReady)
 	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
@@ -187,6 +185,12 @@ type Seat struct {
 	// transcript or a Send began, that found it at rest (sayQuiet).
 	queueHolds bool
 	restLooks  int
+	// saw is the settled verdict of the agent's own evidence (sawWork,
+	// sawRest, sawOther; "" not settled), which every screen-based decision
+	// reads; sawLast is the last look's. saw changes only when two looks in
+	// a row agree, and is unsettled again after the agent writes or a Send
+	// begins (settle).
+	saw, sawLast string
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -412,7 +416,7 @@ func (s *Seat) caughtUp(now time.Time) {
 	// other startup screen, and is not refused (17dffc0 kept blocked). The
 	// record keeps what it says until then.
 	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
-		s.state, s.stateAt, s.readySince = "starting", now, time.Time{}
+		s.state, s.stateAt, s.saw, s.sawLast = "starting", now, "", ""
 	}
 	s.mu.Unlock()
 	if quiet {
@@ -519,7 +523,7 @@ func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	}
 	s.state, s.stateAt = state, time.Now()
 	if state != "blocked" {
-		s.hung, s.stuck, s.stuckNext = false, false, false
+		s.hung, s.stuck = false, false
 	}
 	if state == "working" {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
@@ -609,7 +613,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	// tracked while it is typed. Quiet is said again once it holds.
 	s.mu.Lock()
 	s.sending++
-	s.restLooks = 0 // the agent is looked at again after it
+	s.restLooks, s.saw, s.sawLast = 0, "", "" // the agent is looked at again after it
 	s.quietSaid.Store(false)
 	s.mu.Unlock()
 	defer func() {
@@ -1593,12 +1597,13 @@ type sessionMover interface {
 // move to another session shows (Status.Quiet).
 const quietMoveLooks = 5
 
-// quietRestLooks is how many looks in a row, since the agent last wrote to
-// its transcript, must find it at rest (atRest) before the seat is quiet.
-// quietQueueLooks is how many end a hold from the agent's own queue as the
-// transcript shows it (queueHolder): an agent at rest that long has taken
-// what it queued, whatever the lines said. Tests shorten quietQueueLooks.
-const quietRestLooks = 2
+// quietRestLooks is how many looks, since the agent last wrote to its
+// transcript, must find it settled at rest (atRest: two looks in a row
+// already agreed) before the seat is quiet. quietQueueLooks is how many
+// end a hold from the agent's own queue as the transcript shows it
+// (queueHolder): an agent at rest that long has taken what it queued,
+// whatever the lines said. Tests shorten quietQueueLooks.
+const quietRestLooks = 1
 
 var quietQueueLooks = 30
 
@@ -1609,8 +1614,8 @@ func (s *Seat) settledLocked() bool {
 }
 
 // quietLocked is Status.Quiet: settled, and the agent seen at rest at
-// quietRestLooks looks in a row (quietQueueLooks while the transcript
-// shows its own queue holding a message). The caller holds s.mu.
+// quietRestLooks looks (quietQueueLooks while the transcript shows its own
+// queue holding a message). The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
 	return s.settledLocked() && s.restLooks >= quietRestLooks && (!s.queueHolds || s.restLooks >= quietQueueLooks)
 }
@@ -1622,7 +1627,36 @@ func (s *Seat) quietLocked() bool {
 // Antigravity: the relay status line saying idle).
 func (s *Seat) atRest() bool {
 	screen, err := s.host.Capture(s.target, 0)
-	return err == nil && s.ready(screen) && !s.atWork(screen)
+	return err == nil && s.settle(screen) == sawRest
+}
+
+// The verdicts of a look at the agent's own evidence (settle).
+const (
+	sawWork  = "work"  // at work (atWork)
+	sawRest  = "rest"  // at its own prompt, not at work
+	sawOther = "other" // neither: a shell, a dialog it does not know
+)
+
+// settle takes one look at the agent's own evidence (its status file, its
+// screen) and returns the settled verdict: the look's, once two looks in
+// a row agree; until then the one before ("" when none has settled since
+// the agent last wrote or a Send began). A busy line that flickers for
+// one capture changes nothing.
+func (s *Seat) settle(screen string) string {
+	v := sawOther
+	switch {
+	case s.atWork(screen):
+		v = sawWork
+	case s.ready(screen):
+		v = sawRest
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v == s.sawLast {
+		s.saw = v
+	}
+	s.sawLast = v
+	return s.saw
 }
 
 // atWork is the one judgement of whether the agent's own evidence says it
@@ -1783,7 +1817,7 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 	if err == nil && len(lines) > 0 {
 		s.mu.Lock()
 		s.lastLine = now
-		s.restLooks = 0 // the agent wrote: rest is looked for again after it
+		s.restLooks, s.saw, s.sawLast = 0, "", "" // the agent wrote: looked at again after it
 		s.mu.Unlock()
 		qh, queues := p.(queueHolder)
 		var newest time.Time
@@ -2071,10 +2105,11 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Unlock()
 	if s.answerDialog(screen, now) {
 		s.mu.Lock()
-		s.readySince = time.Time{} // a dialog was up: the screen was not ready
+		s.sawLast = "" // a dialog was up: the looks before and after do not agree
 		s.mu.Unlock()
 		return
 	}
+	saw := s.settle(screen) // what every decision below reads of the screen
 	// A send that never arrived: if its text still sits in the input box,
 	// the Enter was lost; press it again, twice at most.
 	s.mu.Lock()
@@ -2115,8 +2150,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	if stuck := report; stuck != nil {
 		// A quiet agent whose screen or status still says it works reads
 		// the send at its next step, as a working one does.
-		wr, reports := s.agent.(workReporter)
-		working := state == "working" || s.hung && (s.busy(screen) || reports && wr.reportedWorking(s))
+		working := state == "working" || s.hung && saw == sawWork
 		if !working && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
 			s.mu.Unlock()
@@ -2135,38 +2169,29 @@ func (s *Seat) checkScreen(now time.Time) {
 	}
 	since := now.Sub(s.stateAt)
 	s.mu.Unlock()
-	ready := s.ready(screen)
-	if state == "starting" && ready {
+	if state == "starting" && (saw == sawRest || saw == sawWork) {
 		// Codex draws a ready-looking screen for a moment before its trust
-		// prompt appears: ready only counts when it holds across two looks.
-		s.mu.Lock()
-		first := s.readySince.IsZero()
-		if first {
-			s.readySince = now
-		}
-		settled := !first && now.Sub(s.readySince) >= time.Second
-		s.mu.Unlock()
-		if settled {
-			s.setState("idle", "")
-		}
+		// prompt appears: the start is over once the agent's own screen
+		// has settled (two looks in a row, a screen check apart).
+		s.setState("idle", "")
 	} else if state == "starting" && since > 25*time.Second {
 		s.mu.Lock()
 		s.stuck = true // set before the event, which a change looks at
 		s.mu.Unlock()
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
-		work := s.atWork(screen)
 		s.mu.Lock()
-		s.stuck = !work
+		s.stuck = saw != "" && saw != sawWork // not yet settled: not stuck
 		s.mu.Unlock()
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
 		s.mu.Lock()
 		s.hung = s.state == "blocked"
 		s.mu.Unlock()
-	} else if state == "blocked" && ready && !(s.hung && s.atWork(screen)) && !s.dialogShowing() {
+	} else if state == "blocked" && (saw == sawRest || !s.hung && saw == sawWork) && !s.dialogShowing() {
 		// A quiet agent's prompt or status line shows while it works, so
-		// it is idle only if its screen does not also say it is busy. A
-		// slow start is over as soon as the prompt shows. A quiet turn
+		// it is idle only once its screen settles on the prompt with no
+		// busy line. A slow start is over once its screen settles on the
+		// agent's own (its prompt, or its busy line). A quiet turn
 		// (hung) is over too, though no line said so: what was held for
 		// its end is looked at as after a turn end (leftOvers).
 		s.mu.Lock()
@@ -2178,16 +2203,13 @@ func (s *Seat) checkScreen(now time.Time) {
 			s.turnEndAt = now
 		}
 		s.mu.Unlock()
-	} else if state == "blocked" {
-		// Still quiet: stuck as the agent's own evidence says now
-		// (Status.Stuck).
-		work := s.atWork(screen)
+	} else if state == "blocked" && saw != "" {
+		// Still quiet: stuck as the agent's settled evidence says now
+		// (Status.Stuck), said once when it changes: a screen that
+		// flickers never settles, and says nothing new.
+		work := saw == sawWork
 		s.mu.Lock()
-		// Changed, and said once, only when two screen checks in a row
-		// find it: a screen that flickers says nothing new.
-		differs := s.hung && s.state == "blocked" && s.stuck == work
-		changed := differs && s.stuckNext
-		s.stuckNext = differs && !changed
+		changed := s.hung && s.state == "blocked" && s.stuck == work
 		if changed {
 			s.stuck = !work
 		}

@@ -18,6 +18,7 @@ func TestK9SeatSaysWhenABlockedAgentIsStuck(t *testing.T) {
 		s := newSeat(Spec{}, codexAgent{}, h, "k9-stuck", "")
 		s.state, s.stateAt = state, time.Now().Add(-ago)
 		s.checkScreen(time.Now())
+		s.checkScreen(time.Now()) // two checks in a row agree
 		return s
 	}
 	if st := look("working", 11*time.Minute, busy).Snapshot(); st.State != "blocked" || st.Stuck {
@@ -46,6 +47,7 @@ func TestK9SeatSaysWhenABlockedAgentIsStuck(t *testing.T) {
 	h.mu.Lock()
 	h.screen = idle
 	h.mu.Unlock()
+	s.checkScreen(time.Now())
 	s.checkScreen(time.Now())
 	if st := s.Snapshot(); st.State != "idle" || st.Stuck {
 		t.Errorf("at its prompt: %s, stuck %v; want idle", st.State, st.Stuck)

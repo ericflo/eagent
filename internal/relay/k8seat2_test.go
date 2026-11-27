@@ -26,6 +26,7 @@ func TestK8AnAgentIsAtRestOnlyByItsOwnWord(t *testing.T) {
 			h.mu.Lock()
 			h.screen = screen
 			h.mu.Unlock()
+			s.atRest() // the verdict settles on two looks in a row
 			if got := s.atRest(); got != want {
 				t.Errorf("%s at rest %v on %q; want %v", c.agent.Name(), got, screen, want)
 			}
@@ -43,6 +44,7 @@ func TestK8AnAgentIsAtRestOnlyByItsOwnWord(t *testing.T) {
 		{piStatus{State: "idle", Prompt: "Allow the edit?"}, false},
 	} {
 		writePiStatus(t, status, c.st)
+		s.atRest() // the verdict settles on two looks in a row
 		if got := s.atRest(); got != c.want {
 			t.Errorf("pi at rest %v with status %+v; want %v (its footer is always drawn)", got, c.st, c.want)
 		}
