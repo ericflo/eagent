@@ -499,7 +499,16 @@ func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread
 	if tell {
 		postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
 		defer stop()
-		_, _, _ = w.client.Post(postCtx, finalechat.Ref(thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-failed-" + m.ID})
+		if _, _, err := w.client.Post(postCtx, finalechat.Ref(thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-failed-" + m.ID}); err != nil {
+			// Not told after all: the next try that fails tells (the key
+			// makes it once).
+			w.retries.mu.Lock()
+			if q, ok := w.retries.replies[m.ID]; ok {
+				q.told = false
+				w.retries.replies[m.ID] = q
+			}
+			w.retries.mu.Unlock()
+		}
 	}
 }
 
