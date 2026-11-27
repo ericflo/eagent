@@ -698,6 +698,14 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
+	return s.prepare(p, grant, true)
+}
+
+// prepare is Prepare. picks says whether a pick of a route's model, address
+// or preset brings the rest of the route with it (the summarizer's seed and
+// routePicks): a person's proposal does; an undo's reversal names every
+// field it puts back and writes those only.
+func (s *Service) prepare(p control.Proposal, grant control.Grant, picks bool) (raw string, etag string, before RemoteView, err error) {
 	before, err = s.RemoteSnapshot(grant)
 	if err != nil {
 		return
@@ -722,7 +730,7 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	// A dedicated summarizer with no route written calls the main model's.
 	// An edit of its route starts from that one, so a model picked alone
 	// keeps the provider it is reached by. A route written as null is none.
-	if v, written := pointerValue(values, "/summarizer/model"); (!written || v == nil) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
+	if v, written := pointerValue(values, "/summarizer/model"); picks && (!written || v == nil) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
 		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
 	}) {
 		// The route as the layers write it: a variable's value is not the
@@ -752,8 +760,10 @@ func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, 
 	// Picks are compared with the layers the file builds on, which the
 	// summarizer's route above is seeded from: what the environment makes
 	// of a route is not the file's.
-	if err = s.routePicks(values, p.Edits, res.Layered, before.Descriptor); err != nil {
-		return
+	if picks {
+		if err = s.routePicks(values, p.Edits, res.Layered, before.Descriptor); err != nil {
+			return
+		}
 	}
 	var candidate []byte
 	candidate, err = json.MarshalIndent(values, "", "  ")

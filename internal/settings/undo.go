@@ -122,7 +122,7 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	raw, etag, view, err := s.Prepare(inverse, grant)
+	raw, etag, view, err := s.prepare(inverse, grant, false)
 	if err != nil || !off {
 		return raw, etag, view, err
 	}
