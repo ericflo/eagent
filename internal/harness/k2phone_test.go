@@ -474,7 +474,6 @@ func TestK2AMessageTypedAndNeverConfirmedIsSaidSoOnThePhone(t *testing.T) {
 // this serve's restore then resumes the session with the same reply. The
 // reply is taken once.
 func TestK2TwoResumesWithOnePhoneReplyTakeItOnce(t *testing.T) {
-	t.Skip("known, not fixed: the resuming words are taken in Resume (runtime.go), not in this fixer's files; a resume must refuse a phone message the record already holds (integration.ReadPhoneLedger(...).Taken)")
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	g := phoneStart(t, fp, "start work", true, func(_ string, msgs []map[string]any) reply {
