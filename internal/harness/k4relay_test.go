@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // SR-1. The user types one of the agent's own commands (/clear) into an
@@ -57,7 +59,6 @@ func TestSRRelayCommandOnItsWayLeavesAModelChangeWaitingForATurnThatNeverComes(t
 // start is given up (abandonLaunch) and kills the new Codex: the old one
 // was stopped by the restart, so no agent runs after the quit.
 func TestSRRelayQuitDuringAModelChangeLeavesNoAgentRunning(t *testing.T) {
-	t.Skip("known, not fixed: SR-2, fixed in the next commit")
 	one, two := newFakeSeat("one"), newFakeSeat("two")
 	rt, g, done := r10Session(t, one, two)
 	rt.sync(func() {
@@ -72,5 +73,13 @@ func TestSRRelayQuitDuringAModelChangeLeavesNoAgentRunning(t *testing.T) {
 	}
 	if two.wasKilled() {
 		t.Error("the quit killed the Codex the model change brought up: no agent is left running, where main left the restarted one running")
+	}
+	// Recorded as started, for a resume to reattach to.
+	evs, err := store.Read(rt.sess.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel := state.Replay(evs).Relays["codex"]; rel == nil || !rel.Active() || rel.Model != "gpt-6.2-astra" {
+		t.Errorf("after the quit the record has %+v; want the restarted Codex, running gpt-6.2-astra", rel)
 	}
 }

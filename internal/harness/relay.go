@@ -909,10 +909,17 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 // job, which stays among the launches, for finish to record as not sent.
 // Not on the loop goroutine.
 func (r *Runtime) abandonLaunch(job *relayLaunch) {
-	defer r.relayOps.Done()
 	if job.err == nil {
-		_ = job.seat.Kill()
+		// The new agent is up. Like every agent at a quit it outlives the
+		// session (closeRelays only stops watching): it is recorded as
+		// started, as the loop would have, for a resume to reattach to.
+		// The loop has ended and finish writes nothing until this start
+		// is done (relayOps), so it is recorded here. A start Stop session
+		// stopped is still killed there (finishLaunch).
+		_, _ = r.finishLaunch(job)
+		return
 	}
+	defer r.relayOps.Done()
 	r.relays.mu.Lock()
 	held := job.held
 	r.relays.mu.Unlock()
