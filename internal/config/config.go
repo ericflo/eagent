@@ -984,6 +984,14 @@ func overlay(project string, cfg *Config, m map[string]json.RawMessage, source s
 	return nil
 }
 
+// Layer lays a configuration object over cfg as the loader lays the file
+// or a bundle (overlay): a route it moves to another model or address
+// without naming a window gets the window there, and a null clears what
+// lies below (followModel).
+func Layer(project string, cfg *Config, m map[string]json.RawMessage, source string) error {
+	return overlay(project, cfg, m, source, &named{})
+}
+
 // chainRoutes copies a route and each of its fallbacks.
 func chainRoutes(a *ModelRoute) []ModelRoute {
 	var out []ModelRoute
