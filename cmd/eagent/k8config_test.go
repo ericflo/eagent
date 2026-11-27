@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -57,5 +59,33 @@ func sr3PresetsSaveKeeps(t *testing.T, viaEnv bool) {
 	if saved.Model.Model != inForce.Model.Model || saved.Persona != "terse" || saved.RolloverTokens != 77777 {
 		t.Fatalf("saved copy runs model %q persona %q rollover %d; the configuration in force (bundle work) runs %q persona %q rollover %d",
 			saved.Model.Model, saved.Persona, saved.RolloverTokens, inForce.Model.Model, inForce.Persona, inForce.RolloverTokens)
+	}
+}
+
+// `eagent config --write` writes a new config.json from what the files say,
+// never what only the environment gives (FinaleChat turned off, a persona).
+func TestK8ConfigWriteLeavesTheEnvironmentOut(t *testing.T) {
+	r3NoEnv(t)
+	project := t.TempDir()
+	t.Setenv("EAGENT_FINALECHAT", "off")
+	t.Setenv("EAGENT_PERSONA", "pirate")
+	var code int
+	out := captureStdout(t, func() { code = cmdConfig(project, "", "", true, nil) })
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	raw, err := os.ReadFile(config.File(project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written struct {
+		Persona    string `json:"persona"`
+		Finalechat struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"finalechat"`
+	}
+	_ = json.Unmarshal(raw, &written)
+	if written.Persona == "pirate" || written.Finalechat.Enabled != nil && !*written.Finalechat.Enabled {
+		t.Fatalf("config --write wrote persona %q finalechat.enabled %v from the environment\n%s", written.Persona, written.Finalechat.Enabled, raw)
 	}
 }

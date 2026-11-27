@@ -1345,6 +1345,11 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		return fail(err)
 	}
 	if write {
+		// The file holds what the files and a bundle say, as every save
+		// keeps the configuration in force, never what a variable gives.
+		if cfg, err = settings.CurrentLayers(project, preset, bundle); err != nil {
+			return fail(err)
+		}
 		path, err := config.Write(project, cfg)
 		if err != nil {
 			return fail(err)
