@@ -559,11 +559,11 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Nobody running it: resume here with the message as the prompt, from
 	// the web as the inbox message would be.
-	how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
+	how, err := s.deliver(r.Context(), info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverStatus(r, err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": how})
@@ -576,8 +576,10 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // run it started, where it used to fail on the session's lock. A run here
 // that is ending reads its inbox no more: they wait for it to stop (its
 // shutdown is bounded) and resume the session then, and wait again when
-// the run another request resumed it with meanwhile is ending too.
-func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
+// the run another request resumed it with meanwhile is ending too. When
+// the request ends while they wait (the browser went away, or the server
+// is stopping), they are not taken, and that is the error.
+func (s *Server) deliver(ctx context.Context, info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
 	s.resuming.Lock()
 	for {
 		s.mu.Lock()
@@ -587,7 +589,13 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 			break
 		}
 		s.resuming.Unlock()
-		<-h.done
+		select {
+		case <-h.done:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		s.resuming.Lock()
 	}
 	defer s.resuming.Unlock()
@@ -608,14 +616,23 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	how, err := s.deliver(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
+	how, err := s.deliver(r.Context(), info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverStatus(r, err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": how})
+}
+
+// deliverStatus is 503 when deliver gave up because the request ended
+// while the words waited, and 500 for any other failure.
+func deliverStatus(r *http.Request, err error) int {
+	if err == r.Context().Err() {
+		return http.StatusServiceUnavailable
+	}
+	return 500
 }
 
 // postDismiss closes the session's open question with no answer. Nothing
