@@ -1839,7 +1839,9 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 		s.handled[d.name] = now
 		s.mu.Unlock()
 		_ = s.host.Keys(s.target, d.keys...)
-		s.emit(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
+		// No line gave it, and Send's last look sends it from Send's own
+		// goroutine: it says nothing of how far the transcript was read.
+		s.emitAside(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
 		return true
 	}
 	return false

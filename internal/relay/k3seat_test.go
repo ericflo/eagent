@@ -77,6 +77,54 @@ func TestSr2SeatAgyStatusTurnEndAndQuotaAfterAReattachWithAReadMark(t *testing.T
 	}
 }
 
+// sr2DialogOnce shows Claude's folder-trust dialog at the first look only.
+type sr2DialogOnce struct {
+	fakeHost
+	looks int
+}
+
+func (h *sr2DialogOnce) Capture(string, int) (string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.looks++
+	if h.looks == 1 {
+		return "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No, exit", nil
+	}
+	return "> \n  ? for shortcuts", nil
+}
+
+// 079592e's sibling: Send's last look before typing answers a dialog it
+// knows and says so (KindProgress) from Send's goroutine, through emit,
+// which puts the watcher's read position on it. The record then marks the
+// line the watcher is folding as read before that line's own events are
+// recorded (a cut between them makes a reattach take it for history), or
+// moves the mark back past lines whose events are already recorded (a
+// reattach reports them again).
+func TestSr2SeatSendsDialogAnswerCarriesNoReadPosition(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	h := &sr2DialogOnce{fakeHost: fakeHost{alive: true}}
+	s := newSeat(Spec{}, claudeAgent{}, h, "sr2dlg", "")
+	s.state = "idle"
+	s.readTo.Store(4096) // the watcher is folding a line that ends there
+	if _, err := s.Send("r1", "run the tests", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	answered := false
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindProgress {
+			answered = true
+			if ev.Read != 0 {
+				t.Errorf("Send's dialog answer %q says the transcript was read to %d", ev.Text, ev.Read)
+			}
+		}
+	}
+	if !answered {
+		t.Fatal("the dialog was not answered")
+	}
+}
+
 // sr2PasteGate holds a paste until the test lets it go.
 type sr2PasteGate struct {
 	fakeHost
