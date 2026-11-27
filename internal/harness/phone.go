@@ -354,16 +354,25 @@ func (r *Runtime) startPhone() {
 		// The cursor: the poll reads on after anchor, and everything it
 		// takes in is recorded. (That this run keeps the ledger was said in
 		// its first write, on session.start or session.resume.)
-		if !unread || ctx.Err() == nil {
+		if !unread {
 			r.post(func() {
 				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
 			})
 		}
+		given := false
 		if unread && ctx.Err() == nil {
-			// Given up for good: the poll reads on from the session's own
-			// post, past anything sent while it was stopped, and the
-			// cursor above (that post) passes it for good. Said in the
-			// session's log and in the thread, so it is not passed silently.
+			// Given up for good once the cursor (the session's own post)
+			// is on the record: with the loop closed meanwhile nothing is
+			// given up, and the next run reads again.
+			r.sync(func() {
+				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
+				given = true
+			})
+		}
+		if given {
+			// The poll reads on from the session's own post, past anything
+			// sent while it was stopped. Said in the session's log and in
+			// the thread, so it is not passed silently.
 			r.ui.Log("finalechat: could not read what was sent to the thread while the session was stopped (%v); it is not taken", shortErr(unreadErr))
 			if m, th, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: "eagent could not read what was sent here while the session was stopped, and goes on from here without it. Send again anything it should still see.", Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "unread"}, ClientKey: p.key("unread", strconv.Itoa(p.resumes))}); err == nil {
 				p.rememberIn(m, th)
