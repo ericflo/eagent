@@ -696,11 +696,14 @@ func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
+	b, _ := readBody(r)
+	// One at a time with deliver and Resume, so the two never both resume it.
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if alive(info.Path) || s.isHosted(info.ID) {
 		writeErr(w, 409, errors.New("session is already running"))
 		return
 	}
-	b, _ := readBody(r)
 	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
 		writeErr(w, 500, err)
 		return

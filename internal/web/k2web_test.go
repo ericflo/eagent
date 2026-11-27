@@ -1,12 +1,16 @@
 package web
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ericflo/eagent/internal/harness"
 )
 
 // k2Page runs script after the page's send() in node, with what send()
@@ -54,6 +58,41 @@ send().then(() => {
   if (screens.join() !== 'codex' || sent.length !== 0 || ta.value !== '') { console.error('screens ' + JSON.stringify(screens) + ', sent ' + JSON.stringify(sent) + ', box ' + JSON.stringify(ta.value)); process.exit(1); }
 });
 `)
+}
+
+// The Resume button (postResume) for a session a message from the browser
+// is resuming at the same moment waits for that resume, and then finds the
+// session running. It used to resume it too, and one of the two failed on
+// the session's lock.
+func TestK2ResumeButtonWaitsForTheBrowsersResume(t *testing.T) {
+	s, project := newTestServer(t)
+	k1Model(t, s, project)
+	info := r11Session(t, project)
+	entered, gate := make(chan struct{}), make(chan struct{})
+	browser := make(chan error, 1)
+	go func() {
+		_, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: "from the browser", From: "web"}, func() error {
+			close(entered)
+			<-gate // the message's resume is under way
+			return s.host(info.Path, harness.Options{Project: project, Interactive: true, Prompt: "from the browser", PromptSource: "web"}, "", "", true)
+		})
+		browser <- err
+	}()
+	<-entered
+	button, done := make(chan *httptest.ResponseRecorder, 1), make(chan struct{})
+	go func() {
+		button <- do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{}, nil)
+		close(done)
+	}()
+	k1Parked(t, "web.(*Server).postResume", done)
+	close(gate)
+	if err := <-browser; err != nil {
+		w := <-button
+		t.Fatalf("the browser's words were refused (%v): the Resume button resumed the session meanwhile (%d %s)", err, w.Code, w.Body)
+	}
+	if w := <-button; w.Code != http.StatusConflict {
+		t.Fatalf("the Resume button answered %d %s for a session the browser had just resumed", w.Code, w.Body)
+	}
 }
 
 // With no agent running it is sent as before: the session says so in the
