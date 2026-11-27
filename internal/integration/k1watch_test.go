@@ -155,7 +155,6 @@ func TestK1AReplyKeptWhileItsSessionRanOutlivesARestartOfTheServe(t *testing.T) 
 		t.Fatal("the reply never reached the first serve's watcher")
 	}
 	stop()
-	watchRetries.Delete(project) // the next serve is another process
 	r9Ends(t, sess, f, sid)
 	stop = StartResumeWatcher(context.Background(), project, host, t.Logf)
 	defer stop()
@@ -314,5 +313,177 @@ func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.
 	}
 	if n := r11Told(fr, "clip2.mov"); n != 1 {
 		t.Fatalf("%d notices about clip2.mov: %q", n, fr.posted())
+	}
+}
+
+// Batch 2, the stream held: a reply comes on the event stream (no
+// deadline of the sweep's) with a file whose download stalls. The
+// message's files hold the stream for at most the time one download gets:
+// the file is refused, the sender told, and the session comes back with
+// the words.
+func TestK1AStalledFileHoldsTheStreamForOneDownloadAtMost(t *testing.T) {
+	_, sid, f, _, host, w := r9Stopped(t, "see the screenshot", r9Shot())
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	release := make(chan struct{})
+	var notes atomic.Int32
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/files/") {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		if r.Method == http.MethodPost {
+			notes.Add(1)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	w.client = &finalechat.Client{BaseURL: front.URL, Token: "fc_fixture"}
+	defer func(b time.Duration) { fetchBudget = b }(fetchBudget)
+	fetchBudget = 100 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "see the screenshot", CreatedAt: time.Now()})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("a stalled file held the stream past the time of one download")
+	}
+	close(release)
+	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 || notes.Load() != 1 {
+		t.Fatalf("resumed %#v with %d notes, want the words and the sender told", host.resumed, notes.Load())
+	}
+}
+
+// Batch 2, the day's cutoff: a reply kept quietly for a session that has
+// run for more than a day is written down at a stop of the serve and taken
+// up by the next serve's watcher. It keeps the time it was first kept, so
+// the cutoff lets it go.
+func TestK1AKeptReplyKeepsItsFirstTimeAcrossARestart(t *testing.T) {
+	project, sid, _, f, host, w := r9Running(t, true)
+	thread := finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}
+	w.retries.replies["m1"] = pendingReply{thread: thread, msg: finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "one more thing"}, since: time.Now().Add(-25 * time.Hour)}
+	w.retries.writeDown(project, t.Logf)
+	next := f.watcher(project, host, t)
+	next.sweep(context.Background())
+	if n := len(next.retries.replies); n != 0 {
+		t.Fatalf("kept after more than a day: %#v", next.retries.replies)
+	}
+}
+
+// Batch 2, two processes: the serve's watcher and `connector run`'s stop
+// at once, each with a reply kept quietly for a thread of its own. The
+// next watcher takes up both.
+func TestK1TwoWatchersStoppingAtOnceKeepBothReplies(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		project := t.TempDir()
+		var a, b replyRetries
+		a.replies = map[string]pendingReply{"m1": {thread: finalechat.Thread{ExternalID: "eagent:s1"}, msg: finalechat.Message{ID: "m1"}, since: time.Now()}}
+		b.replies = map[string]pendingReply{"m2": {thread: finalechat.Thread{ExternalID: "eagent:s2"}, msg: finalechat.Message{ID: "m2"}, since: time.Now()}}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, r := range []*replyRetries{&a, &b} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				r.writeDown(project, t.Logf)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		next := replyRetries{replies: map[string]pendingReply{}}
+		next.takeUp(project)
+		if _, ok1 := next.replies["m1"]; !ok1 || len(next.replies) != 2 {
+			t.Fatalf("round %d: took up %#v, want both replies", i, next.replies)
+		}
+	}
+}
+
+// Batch 2, the watch held elsewhere: as in B14, a serve restart brings a
+// session back with a /quit and a message after it, but `connector run`
+// holds the project's watch, so the serve's own watcher never sweeps. The
+// connector's watcher resumes the session with the message after the
+// /quit.
+func TestK1ARestoreLeavesTheQuitsFollowerToWhoeverHoldsTheWatch(t *testing.T) {
+	sid, f, quit, _ := r13QuitWaiting(t, "/quit", "actually fix the login bug")
+	t.Setenv("FINALECHAT_URL", f.srv.URL)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid))
+	if err != nil || !ok || msg.ID != "m1" {
+		t.Fatalf("pending reply %#v ok=%v err=%v, want the /quit", msg, ok, err)
+	}
+	if err := quit.Resume(sid, msg); err != nil {
+		t.Fatal(err)
+	}
+	connector := f.watcher(quit.project, quit, t)
+	connector.sweep(context.Background())
+	if got := r13Resumed(quit); len(got) != 2 || got[1] != "m2" {
+		t.Fatalf("resumed %v, want the /quit and then the message after it", got)
+	}
+}
+
+// Batch 2, the log: a reply reaches a running session, and the terminal
+// says once that it is left to the session's mirror; the sweeps that look
+// at the reply kept for when the session stops say nothing more.
+func TestK1AKeptReplyIsLeftToTheMirrorInOneLogLine(t *testing.T) {
+	_, sid, _, f, _, w := r9Running(t, true)
+	var lines atomic.Int32
+	w.logf = func(format string, args ...any) {
+		if strings.Contains(format, "left to its running mirror") {
+			lines.Add(1)
+		}
+	}
+	r9Says(w, f, sid, "m1", "one more thing")
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if n := lines.Load(); n != 1 || len(w.retries.replies) != 1 {
+		t.Fatalf("%d lines, kept %#v; want one line and the reply kept", n, w.retries.replies)
+	}
+}
+
+// Batch 2, the promise: a reply could not resume its session, and the
+// thread was told eagent keeps trying every minute; that note is the
+// thread's latest message, which the sweep passes over. The serve
+// restarts. The next serve's watcher keeps trying, resumes the session
+// with the reply, and does not tell the thread a second time.
+func TestK1AReplyWhoseResumeFailedIsTriedAgainAfterARestart(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	fr := newR10Front(t, f)
+	host := &flakyResumeHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, failures: 1}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if p := w.retries.replies["m1"]; host.calls() != 0 || !p.told || r10Preview(f, sid) != "system" {
+		t.Fatalf("after the failed resume: resumed %#v, kept %#v, latest from %s", host.resumed, w.retries.replies, r10Preview(f, sid))
+	}
+	w.retries.writeDown(project, t.Logf)
+	next := f.watcher(project, host, t)
+	next.client = w.client
+	next.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("after the restart: resumed %#v", host.resumed)
+	}
+	if n := r11Told(fr, "could not resume"); n != 1 {
+		t.Fatalf("told %d times: %q", n, fr.posted())
 	}
 }

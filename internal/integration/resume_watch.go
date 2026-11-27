@@ -52,7 +52,7 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	retries := projectRetries(project)
+	retries := &replyRetries{replies: map[string]pendingReply{}}
 	go func() {
 		defer close(done)
 		lastError := ""
@@ -79,26 +79,48 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 }
 
 // keptFile is where a stopping reply watcher writes down the replies it
-// keeps quietly (keepUntilStopped), and the sweep of whoever holds the
-// watch next takes them up, once: a session that stops meanwhile hides its
-// thread from the sweep behind its closing note. A hard kill writes
-// nothing, as for the serve's list of hosted sessions.
+// keeps (quietly, keepUntilStopped, or told it keeps trying, retryLater),
+// and the sweep of whoever holds the watch next takes them up, once: a
+// session that stops meanwhile hides its thread from the sweep behind its
+// closing note, as eagent's note that it keeps trying does. A hard kill
+// writes nothing, as for the serve's list of hosted sessions.
 func keptFile(project string) string {
 	return filepath.Join(stateDir(project), "resume-watch-kept.json")
 }
 
-// writeDown adds the quiet entries, by thread, to those written down that
-// nobody has taken up yet.
+// keptReply is a reply written down, by its id, with the time it was first
+// kept: the day's cutoff (retryPending) counts from then, across restarts.
+type keptReply struct {
+	Thread  string             `json:"thread"`
+	Message finalechat.Message `json:"message"`
+	Since   time.Time          `json:"since"`
+	Told    bool               `json:"told,omitempty"`
+}
+
+// lockKept holds the kept file for one process's read and write of it: two
+// watchers (the serve's and `connector run`'s) may stop, or sweep, at once.
+func lockKept(project string) (func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return filelock.Acquire(ctx, keptFile(project)+".lock")
+}
+
+// writeDown adds the replies kept to those written down that nobody has
+// taken up yet.
 func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
-	kept := map[string]finalechat.Message{}
+	unlock, err := lockKept(project)
+	if err != nil {
+		logf("finalechat: could not note the replies kept for the next start: %v", err)
+		return
+	}
+	defer unlock()
+	kept := map[string]keptReply{}
 	if raw, err := os.ReadFile(keptFile(project)); err == nil {
 		_ = json.Unmarshal(raw, &kept)
 	}
 	r.mu.Lock()
-	for _, p := range r.replies {
-		if !p.told {
-			kept[p.thread.ExternalID] = p.msg
-		}
+	for id, p := range r.replies {
+		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told}
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
@@ -109,17 +131,35 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 	}
 }
 
-// takeUp keeps, quietly, what an earlier watcher wrote down.
+// takeUp keeps what an earlier watcher wrote down, as it kept it: a reply
+// the thread was told about is not told about again (retryLater).
 func (r *replyRetries) takeUp(project string) {
+	if _, err := os.Stat(keptFile(project)); err != nil {
+		return
+	}
+	unlock, err := lockKept(project)
+	if err != nil {
+		return // the next sweep takes it up
+	}
+	defer unlock()
 	raw, err := os.ReadFile(keptFile(project))
 	if err != nil {
 		return
 	}
 	_ = os.Remove(keptFile(project))
-	var kept map[string]finalechat.Message
+	var kept map[string]keptReply
 	_ = json.Unmarshal(raw, &kept)
-	for ext, m := range kept {
-		r.keepQuietly(finalechat.Thread{ExternalID: ext}, m)
+	for id, k := range kept {
+		thread := finalechat.Thread{ExternalID: k.Thread}
+		if !k.Told {
+			r.keepQuietly(thread, k.Message, k.Since)
+			continue
+		}
+		r.mu.Lock()
+		if _, ok := r.replies[id]; !ok {
+			r.replies[id] = pendingReply{thread: thread, msg: k.Message, since: k.Since, told: true}
+		}
+		r.mu.Unlock()
 	}
 }
 
@@ -149,13 +189,12 @@ type replyRetries struct {
 	replies map[string]pendingReply
 }
 
-// watchRetries holds a project's replyRetries for the life of the process:
-// its reply watcher's, where a restore keeps what PendingReply found.
-var watchRetries sync.Map // project -> *replyRetries
-
-func projectRetries(project string) *replyRetries {
-	r, _ := watchRetries.LoadOrStore(project, &replyRetries{replies: map[string]pendingReply{}})
-	return r.(*replyRetries)
+// leaveWithWatcher writes m down, quietly, for the next sweep of whoever
+// holds the project's watch (this process or another), as a stopping
+// watcher writes down what it keeps.
+func leaveWithWatcher(project string, info store.Info, m finalechat.Message) {
+	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now()}}}
+	r.writeDown(project, func(string, ...any) {})
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
@@ -219,8 +258,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		return // not a session of this project
 	}
 	if store.Alive(info.Path) || w.host.Hosted(sid) {
-		w.logf("finalechat: reply to session %s left to its running mirror", sid)
 		if trigger.ID != "" {
+			// Said for a reply seen, not for each sweep's look at the
+			// one kept quietly for when the session stops.
+			w.logf("finalechat: reply to session %s left to its running mirror", sid)
 			w.keepUntilStopped(info, thread, trigger)
 		}
 		return
@@ -270,16 +311,20 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	}()
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	failed := make([]error, len(m.Attachments))
+	// The message's files, tries again included, get the time one
+	// download gets: a reply from the event stream holds it no longer.
+	fetchCtx, stopFetch := context.WithTimeout(ctx, fetchBudget)
+	defer stopFetch()
 	for i, a := range m.Attachments {
-		saved, err := saveAttachment(ctx, w.client, info.Path, a)
+		saved, err := saveAttachment(fetchCtx, w.client, info.Path, a)
 		// A download that may work later (the service could not be
 		// reached, or answered 429 or 5xx) is tried three times, as the
 		// client tries a post, before the file is refused.
-		for try := 1; try < 3 && err != nil && ctx.Err() == nil && finalechat.Transient(err); try++ {
+		for try := 1; try < 3 && err != nil && fetchCtx.Err() == nil && finalechat.Transient(err); try++ {
 			select {
-			case <-ctx.Done():
+			case <-fetchCtx.Done():
 			case <-time.After(time.Duration(try) * fetchRetryStep):
-				saved, err = saveAttachment(ctx, w.client, info.Path, a)
+				saved, err = saveAttachment(fetchCtx, w.client, info.Path, a)
 			}
 		}
 		if err != nil {
@@ -350,6 +395,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 // before the third; a variable so tests can shorten it.
 var fetchRetryStep = time.Second
 
+// fetchBudget bounds one message's downloads: the limit of one download
+// (finalechat's Download); a variable so tests can shorten it.
+var fetchBudget = 120 * time.Second
+
 // keepUntilStopped keeps, quietly, a reply that reached a running session,
 // for the sweeps to look at once it has stopped: a session shutting down
 // may drop it, and its closing note then hides the thread from the sweep.
@@ -368,11 +417,12 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	if err != nil || !ReadPhoneLedger(evs).Keeps {
 		return
 	}
-	w.retries.keepQuietly(thread, m)
+	w.retries.keepQuietly(thread, m, time.Now())
 }
 
-// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped).
-func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message) {
+// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped),
+// kept since then.
+func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message, since time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, p := range r.replies {
@@ -381,7 +431,7 @@ func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Messag
 		}
 	}
 	if _, kept := r.replies[m.ID]; !kept {
-		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: since}
 	}
 }
 
@@ -564,7 +614,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 				// message, which hides the reply from the sweep. The
 				// project's reply watcher keeps it quietly, as it keeps
 				// one whose notice it could not post itself.
-				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+				leaveWithWatcher(project, info, last)
 			}
 			return PhoneMessage{}, false, err
 		}
@@ -573,7 +623,7 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// again (a /quit ends it before it reads on) is looked for by the
 	// project's reply watcher once it has stopped, as after a resume of the
 	// watcher's own: its closing note may hide the thread from the sweep.
-	projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+	leaveWithWatcher(project, info, last)
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
