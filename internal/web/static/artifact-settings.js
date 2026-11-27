@@ -207,11 +207,18 @@
           if (kept(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
           if (!canEdit(key)) continue;
-          // A route whose model differs from the base's takes the new
-          // model's window unless the file names one (config.Overlay,
+          const route = key.endsWith('/context_tokens') ? key.slice(0, -'context_tokens'.length) : '', routeModel = route && route + 'model';
+          // On a route the shell's variables move (its model or address
+          // shown as set there), a window the form still shows as loaded,
+          // with the model, stays as the file has it: the form shows the
+          // environment's route, not the file's (settings.SaveLocked).
+          const pinned = route && [routeModel, route + 'base_url'].some(k => String(field(k)?.source || '').startsWith('env:'));
+          if (pinned && canonical(form[key]) === canonical(loaded[key]) && canonical(form[routeModel]) === canonical(loaded[routeModel])) continue;
+          // A route the form moves to another model or address takes the
+          // window there unless the file names one (config.Overlay,
           // followModel): the window the form shows is written.
-          const routeModel = key.endsWith('/context_tokens') ? key.slice(0, -'context_tokens'.length) + 'model' : '';
-          if (routeModel && form[key] != null && canonical(form[routeModel]) !== canonical(baseValues[routeModel])) { desired[key] = form[key]; continue; }
+          const trim = value => String(value ?? '').replace(/\/+$/, '');
+          if (route && form[key] != null && (canonical(form[routeModel]) !== canonical(baseValues[routeModel]) || trim(form[route + 'base_url']) !== trim(baseValues[route + 'base_url']))) { desired[key] = form[key]; continue; }
           if (body.mode !== 'pin' && canonical(form[key]) === canonical(loaded[key]) && body.base_preset === (resource.snapshot.saved['/preset'] || '')) continue;
           if (form[key] === undefined || form[key] === null || body.mode !== 'pin' && canonical(form[key]) === canonical(baseValues[key])) delete desired[key];
           else desired[key] = form[key];

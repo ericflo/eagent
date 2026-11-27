@@ -98,6 +98,7 @@ function sourceText(s) {
   if (s.startsWith('preset:')) return 'preset ' + s.slice(7);
   if (s.startsWith('bundle:')) return 'bundle ' + s.slice(7);
   if (s.startsWith('env:')) return '$' + s.slice(4) + ' in this shell';
+  if (s === 'env') return 'the server this shell names';
   return s;
 }
 function envVar(ptr) { const s = source(ptr); return s.startsWith('env:') ? s.slice(4) : ''; }
@@ -795,8 +796,9 @@ async function ownSummarizerRoute() {
   const c = clone(E.cfg.model); delete c.fallback;
   const pinned = Object.keys(c).filter(k => envVar('/model/' + k));
   if (!pinned.length) return c;
-  // A window is its model's: one the environment's model brought goes with it.
-  if (pinned.includes('model') && !pinned.includes('context_tokens')) pinned.push('context_tokens');
+  // A window is its model's: one the environment's model brought goes with
+  // it, and so does one the server a variable moves the route to gave.
+  if ((pinned.includes('model') || pinned.includes('base_url') && source('/model/context_tokens') === 'env') && !pinned.includes('context_tokens')) pinned.push('context_tokens');
   let layered = {};
   try { layered = clone(E.base ? (await api(`/api/config/presets/${encodeURIComponent(E.base)}?kind=preset`)).config.model : E.c.defaults.model); } catch { /* no base to read: the pinned fields are left empty */ }
   if (E.base === E.loadedBase) {
@@ -1025,7 +1027,7 @@ function saveBundleDialog() {
 }
 
 window.addEventListener('beforeunload', ev => { if (E && changes().length) { ev.preventDefault(); ev.returnValue = ''; } });
-window.EagentConfig = {render, stageDraft: () => E && (E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw ? api('/api/config/raw',{method:'PUT',body:JSON.stringify({raw:E.rawDraft,if_match:E.etag})}) : api('/api/config', {method:'PUT',body:JSON.stringify({config:E.cfg,base_preset:E.base,mode:E.mode,if_match:E.etag})})), dirty: () => !!(E && (changes().length || E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw)), reset: () => { E = null; },
+window.EagentConfig = {render, stageDraft: () => E && (E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw ? api('/api/config/raw',{method:'PUT',body:JSON.stringify({raw:E.rawDraft,if_match:E.etag})}) : api('/api/config', {method:'PUT',body:JSON.stringify({config:E.cfg,base_preset:E.base,mode:E.mode,if_match:E.etag,loaded:E.loaded})})), dirty: () => !!(E && (changes().length || E.rawDraft !== undefined && E.rawDraft !== E.c.resolution.file.raw)), reset: () => { E = null; },
   draftToken: () => E ? X.canonical({config: E.cfg, base_preset: E.base, mode: E.mode, if_match: E.etag, raw: E.rawDraft}) : '',
   routeResult: (key, r) => { if (!E) return; E.tests[key + (r.route === 'fallback' ? ':fb' : '')] = {busy: false, result: r}; if (r.base_url && r.model) E.cat.checks[`${trimSlash(r.base_url)}|${r.model}|${r.effort}`] = {status: r.status, ms: r.ms, output: r.usage?.output, reasoning: r.usage?.reasoning, error: r.error, at: r.at}; rerender(); }
 };
