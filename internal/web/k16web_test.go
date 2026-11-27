@@ -109,8 +109,11 @@ func TestSR8AStopTellsThePhoneTheSessionMirroredTo(t *testing.T) {
 	old := tellPhoneStopped
 	t.Cleanup(func() { tellPhoneStopped = old })
 	var told []string
-	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) { told = append(told, cfg.Finalechat.BaseURL) }
-	if _, _, err := stopAgents(info.Path, s.stopConfig(info)); err != nil {
+	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) error {
+		told = append(told, cfg.Finalechat.BaseURL)
+		return nil
+	}
+	if _, _, err := stopAgents(info.Path, s.stopConfig(info), nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, at := range told {
@@ -120,10 +123,10 @@ func TestSR8AStopTellsThePhoneTheSessionMirroredTo(t *testing.T) {
 	}
 }
 
-// k16Work is a session whose record names the bundle "work" and shows its
-// thread on the phone service at a; the server's own configuration has
-// an account at b, and so, while it exists, does "work" at a.
-func k16Work(t *testing.T, project, a, b string, work bool) store.Info {
+// k16Thread is a session whose record shows its thread on the phone
+// service at base; the project's file has its account at b, and the
+// server, run with --config work, at a ("work", spelled another way).
+func k16Thread(t *testing.T, project, a, b, base string) store.Info {
 	t.Helper()
 	t.Setenv("EAGENT_FINALECHAT", "")
 	t.Setenv("FINALECHAT_TOKEN", "fc_test")
@@ -134,16 +137,11 @@ func k16Work(t *testing.T, project, a, b string, work bool) store.Info {
 	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"base_url": "`+b+`"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if work {
-		if err := os.WriteFile(config.BundlePath(project, "work"), []byte(`{"finalechat": {"base_url": "`+a+`/"}}`+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	sess := newSession(t, project)
-	if _, err := sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Config: "work"})); err != nil {
+	if err := os.WriteFile(config.BundlePath(project, "work"), []byte(`{"finalechat": {"base_url": "`+strings.ToUpper(a)+`:443/"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sess.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", ExternalID: "eagent:" + sess.ID, BaseURL: a})); err != nil {
+	sess := newSession(t, project)
+	if _, err := sess.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", ExternalID: "eagent:" + sess.ID, BaseURL: base})); err != nil {
 		t.Fatal(err)
 	}
 	_ = sess.Close()
@@ -154,25 +152,31 @@ func k16Work(t *testing.T, project, a, b string, work bool) store.Info {
 	return info
 }
 
-// With an account on both services (a token), the stop tells the phone on
-// the configuration whose account is on the service the session's thread
-// is on, passing over the ones that are not, and, with none, tells
-// nothing and says why.
+// The stop tells the phone on the account at the address of the session's
+// thread, among the project's file (first) and the server's own
+// configuration, addresses compared as the reply watcher compares them;
+// with neither there, it tells nothing and says why.
 func TestK16AStopTellsThePhoneOnlyOnTheAccountOfTheSessionsThread(t *testing.T) {
-	const a, b = "https://phone-a.invalid", "https://phone-b.invalid"
-	for _, work := range []bool{true, false} {
+	const a, b, c = "https://phone-a.invalid", "https://phone-b.invalid", "https://phone-c.invalid"
+	for _, tc := range []struct{ base, want string }{{a, "work"}, {b, "file"}, {c, ""}} {
 		_, project := newTestServer(t)
 		var logged []string
 		s := New(project, func(f string, args ...any) { logged = append(logged, fmt.Sprintf(f, args...)) })
-		info := k16Work(t, project, a, b, work)
-		s.noteRan(info.ID, runPick{Default: true}) // its last run here: on the server's own, at b
+		s.Bundle = "work"
+		info := k16Thread(t, project, a, b, tc.base)
 		cfg := s.stopConfig(info)
+		got := ""
 		switch {
-		case work && (cfg == nil || cfg.Finalechat.BaseURL != a+"/"):
-			t.Fatalf("with work at a, the stop tells the phone by %+v, want work's account", cfg)
-		case !work && cfg != nil:
-			t.Fatalf("with no configuration at a, the stop tells the phone at %q", cfg.Finalechat.BaseURL)
-		case !work && !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "not told") }):
+		case cfg == nil:
+		case cfg.Finalechat.BaseURL == b:
+			got = "file"
+		default:
+			got = "work"
+		}
+		if got != tc.want {
+			t.Fatalf("thread at %s: the stop tells on %q, want %q", tc.base, got, tc.want)
+		}
+		if tc.want == "" && !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "not told") }) {
 			t.Fatalf("the log does not say why the phone is not told: %q", logged)
 		}
 	}

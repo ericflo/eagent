@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +25,10 @@ import (
 // TellPhoneStopped, but with the server's own configuration
 // (sessionConfig), not the one the session ran on, so a thread the
 // session never had is written to (TestSR7WebAStopDuringTheShutdownOfAPhoneSessionTellsThePhoneNothing
-// is the other way).
+// is the other way). (Adapted when the server went back to one
+// configuration for every session: whether a stop tells a phone is read
+// from the record, and this session's never shows one, so nothing is
+// told.)
 func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRan(t *testing.T) {
 	s, project := newTestServer(t)
 	t.Setenv("EAGENT_FINALECHAT", "")
@@ -52,10 +54,9 @@ func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRa
 	}
 	var told []config.Config
 	old := tellPhoneStopped
-	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) { told = append(told, cfg) }
+	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) error { told = append(told, cfg); return nil }
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := r11Session(t, project)
-	k16Mirrored(t, info) // an earlier run mirrored: a stop tells, by the account of the session's own
 	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {
 		t.Fatalf("resume: %d %s", w.Code, w.Body)
 	}
@@ -77,11 +78,8 @@ func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRa
 	if w := do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil); w.Code != http.StatusOK {
 		t.Fatalf("stop: %d %s", w.Code, w.Body)
 	}
-	if len(told) != 1 {
-		t.Fatalf("setup: the phone was told %d times", len(told))
-	}
-	if told[0].Finalechat.Wanted() {
-		t.Fatalf("the session ran with the phone off (the page's pick, config nophone); the stop told the phone by the server's own configuration, which has it on, so a thread the session never had is written to (header, closing note)")
+	if len(told) != 0 {
+		t.Fatalf("the session ran with the phone off (the page's pick, config nophone) and never mirrored; the stop told the phone %d time(s), so a thread the session never had is written to (header, closing note)", len(told))
 	}
 }
 
@@ -148,100 +146,6 @@ func TestSR7WebAStopDuringTheShutdownOfAPhoneSessionTellsThePhoneNothing(t *test
 	}
 	if got := reasons(); !slices.Contains(got, "quit") {
 		t.Fatalf("the user pressed Stop and was answered %s, but the phone of the session, which mirrored to it, was told nothing: its last word is %q", strings.TrimSpace(w.Body.String()), got)
-	}
-}
-
-// k14Bundles writes the project's file with the phone on and a saved
-// configuration "nophone" that turns it off (no phone is reachable: no
-// token).
-func k14Bundles(t *testing.T, project string) {
-	t.Helper()
-	t.Setenv("EAGENT_FINALECHAT", "")
-	t.Setenv("FINALECHAT_TOKEN", "")
-	cfg := r11Model(t)
-	cfg.Finalechat.Enabled = nil
-	if _, err := config.Write(project, cfg); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "nophone"), []byte(`{"finalechat":{"enabled":false}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if c, err := New(project, nil).loadConfig("", ""); err != nil || !c.Finalechat.Wanted() {
-		t.Fatalf("setup: a server's own configuration does not want the phone: %v", err)
-	}
-}
-
-// k14Told replaces tellPhoneStopped with one that keeps the configurations
-// it is told by.
-func k14Told(t *testing.T) *[]config.Config {
-	t.Helper()
-	var told []config.Config
-	old := tellPhoneStopped
-	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) { told = append(told, cfg) }
-	t.Cleanup(func() { tellPhoneStopped = old })
-	return &told
-}
-
-// A stop the user asked during a shutdown whose server exits before
-// finishing it is finished by the next server, which tells the phone by
-// the configuration the session ran on: the mark names it (the page's
-// pick, "nophone"), not the next server's own (the project's file, phone
-// on).
-func TestK14AMarkTellsThePhoneByTheConfigurationTheSessionRan(t *testing.T) {
-	s, project := newTestServer(t)
-	k14Bundles(t, project)
-	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
-	told := k14Told(t)
-	info := r11Session(t, project)
-	k16Mirrored(t, info)
-	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {
-		t.Fatalf("resume: %d %s", w.Code, w.Body)
-	}
-	s.mu.Lock()
-	h := s.running[info.ID]
-	s.writeHosted([]string{info.ID}, time.Now().UTC())
-	s.markStop(info.ID) // the user's Stop, before this server exits
-	s.mu.Unlock()
-	h.cancel()
-	<-h.done
-	next := New(project, nil)
-	next.restoreHosted(context.Background())
-	if len(*told) != 1 || (*told)[0].Finalechat.Wanted() {
-		t.Fatalf("the next server finished the stop telling the phone %d time(s), the last by a configuration that wants the phone, the session's being nophone", len(*told))
-	}
-}
-
-// A mark made by an eagent from before marks named the session's
-// configuration is finished telling the phone by the configuration the
-// session's record names, and the log says so.
-func TestK14AnOldMarkTellsThePhoneByTheConfigurationTheRecordNames(t *testing.T) {
-	_, project := newTestServer(t)
-	k14Bundles(t, project)
-	told := k14Told(t)
-	sess := newSession(t, project)
-	if _, err := sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project, Config: "nophone"})); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sess.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", ExternalID: "eagent:" + sess.ID})); err != nil {
-		t.Fatal(err)
-	}
-	_ = sess.Close()
-	at := time.Now().UTC()
-	list := fmt.Sprintf(`{"sessions": [], "at": %q, "stop": [{"session": %q, "at": %q}]}`, at.Format(time.RFC3339Nano), sess.ID, at.Format(time.RFC3339Nano))
-	if err := os.WriteFile(hostedFile(project), []byte(list), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var logged []string
-	next := New(project, func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
-	next.restoreHosted(context.Background())
-	if len(*told) != 1 || (*told)[0].Finalechat.Wanted() {
-		t.Fatalf("the stop was finished telling the phone %d time(s), the last by a configuration that wants the phone; the record names nophone", len(*told))
-	}
-	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "record names") }) {
-		t.Fatalf("the log does not say the configuration came from the record: %q", logged)
 	}
 }
 

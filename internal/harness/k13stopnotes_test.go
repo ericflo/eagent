@@ -50,6 +50,10 @@ func sr6StopProject(t *testing.T, fileRaw string) (project, path string, posts *
 	if err != nil {
 		t.Fatal(err)
 	}
+	// It mirrored: the thread a stop is told in.
+	if _, err := sess.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t1", ExternalID: "eagent:" + sess.ID, BaseURL: srv.URL})); err != nil {
+		t.Fatal(err)
+	}
 	path = sess.Path
 	_ = sess.Close()
 	return project, path, posts
@@ -102,8 +106,12 @@ func TestK13AStopToldFromOutsidePaysWhatTheSenderIsOwed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sess.Close()
+	fp.mu.Lock()
+	fp.title = "a session" // its thread is there
+	fp.mu.Unlock()
 	for _, ev := range []event.Event{
 		event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project}),
+		event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t1", ExternalID: "eagent:" + sess.ID, BaseURL: fp.srv.URL}),
 		event.New(phoneRefusedEvent, event.ActorHarness, phoneRefusedData{MessageID: "pm1", AttachmentID: "a1", Text: "IMG_1.png was not taken: it is over 10 MB."}),
 	} {
 		if _, err := sess.Append(ev); err != nil {

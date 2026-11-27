@@ -136,7 +136,10 @@ func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
 	k5Kills(t)
 	var told []string
 	old := tellPhoneStopped
-	tellPhoneStopped = func(_ config.Config, path string, _ func(event.Event)) { told = append(told, filepath.Base(path)) }
+	tellPhoneStopped = func(_ config.Config, path string, _ func(event.Event)) error {
+		told = append(told, filepath.Base(path))
+		return nil
+	}
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := srAgentSession(t, project)
 	k16Mirrored(t, info)

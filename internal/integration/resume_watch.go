@@ -125,6 +125,11 @@ type keptReply struct {
 	Account string `json:"account,omitempty"`
 }
 
+// AccountOf is accountOf, for other packages that compare phone services
+// the way the reply watcher does (a server's stop finding the account of a
+// session's thread).
+func AccountOf(baseURL string) string { return accountOf(baseURL) }
+
 // accountOf is the account a base URL names, as kept replies are compared
 // by it: the scheme and host lower-cased, localhost as 127.0.0.1, the
 // default port filled in, no trailing slash. Two spellings of one service

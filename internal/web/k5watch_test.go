@@ -14,7 +14,6 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
-	"github.com/ericflo/eagent/internal/store"
 )
 
 // sr8Host is the server as the reply watcher sees it, with its resume
@@ -91,14 +90,6 @@ func TestSR8WatcherWatchesThePhoneTheSessionRunsOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = sess.Close()
-	s.noteRan(sess.ID, runPick{Config: "phone", Preset: "-"})
-	info, err := store.Resolve(store.Root(project), sess.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg, _, err := s.runConfig(info); err != nil || !cfg.Finalechat.Wanted() {
-		t.Fatalf("setup: the session runs on %+v (%v), want the phone on", cfg.Finalechat, err)
-	}
 	t.Setenv("FINALECHAT_URL", sr8Phone(t, sess.ID))
 	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	host := &sr8Host{Server: s, resumed: make(chan integration.PhoneMessage, 4)}

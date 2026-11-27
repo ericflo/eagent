@@ -29,6 +29,7 @@ import (
 	"github.com/ericflo/eagent/internal/clientcaps"
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/projection"
@@ -51,13 +52,6 @@ type Server struct {
 	// stops are the stops the shutdown overtook, by session, under way or
 	// done (stopForShutdown). Under mu.
 	stops map[string]*stopAnswer
-	// ran names, by session, the configuration its last run known here was
-	// built with: a run here (kept after it ends), or one the list the
-	// previous server left names (restoreHosted). The session's next run
-	// here, a stop this server finishes, and the list and marks it writes
-	// take it (runConfig, writeHostedList, markStop), unless the record
-	// shows a run begun after it. Under mu.
-	ran map[string]ranEntry
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -189,24 +183,62 @@ func (s *Server) PhoneConfig() (config.Finalechat, error) {
 // taken as it would be had the session been running. It decides one at a
 // time with the browser's deliver, so the two never both resume it.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
+	_, err := s.ResumeMirroring(sessionID, msg)
+	return err
+}
+
+// ResumeMirroring is Resume, which also reports whether the run it started
+// mirrors to the phone: this server's own configuration, which it runs on,
+// wants the phone, nothing turns it off (EAGENT_FINALECHAT), and it has an
+// account (a token). A run that does not mirror tells the thread nothing,
+// refusal notes for the reply included. During this server's shutdown it
+// starts nothing and says the reply is kept (errReplyKept).
+func (s *Server) ResumeMirroring(sessionID string, msg integration.PhoneMessage) (mirrors bool, err error) {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if info.ID != sessionID {
-		return fmt.Errorf("session %s not found", sessionID)
+		return false, fmt.Errorf("session %s not found", sessionID)
 	}
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return ErrRunning
+		return false, ErrRunning
 	}
-	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
+	if err := s.host(info.Path, s.phoneResumeOptions(msg), "", "", true); err != nil {
+		if errors.Is(err, errStopping) {
+			return false, errReplyKept
+		}
+		return false, err
+	}
+	cfg, err := s.loadConfig("", "")
+	if err != nil {
+		return false, nil
+	}
+	fc := cfg.Finalechat
+	_, account := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
+	return fc.Wanted() && !finalechat.Disabled() && account, nil
 }
 
 // ErrRunning is Resume's answer for a session that is already running, here
 // or in another process: the reply is its own mirror's to read.
 var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
+
+// errReplyKept is Resume's answer during this server's shutdown, said to
+// the phone: errStopping (errors.Is), in words true for a reply, which the
+// reply watcher keeps and the session takes when eagent is back
+// (errStopping's words are the page's, which keeps the words for the user
+// to send again).
+var errReplyKept error = replyKept{}
+
+type replyKept struct{}
+
+func (replyKept) Error() string {
+	return "eagent is stopping; your reply is kept, and the session takes it when eagent is back, so there is nothing to send again"
+}
+
+func (replyKept) Unwrap() error { return errStopping }
 
 // phoneResumeOptions are the options a session is resumed with for a
 // message the user sent from the phone.
@@ -888,7 +920,7 @@ func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path, s.stopConfig(info))
+	stopped, failed, err := stopAgents(info.Path, s.stopConfig(info), s.logf)
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
@@ -953,7 +985,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
-		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg, s.pickOf(bundle, preset))
+		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
@@ -984,9 +1016,9 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 }
 
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig, as pick names it, plus any browser-picked
-// route overrides), unless the server's shutdown has begun.
-func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config, pick runPick) (string, error) {
+// configuration (loadConfig plus any browser-picked route overrides),
+// unless the server's shutdown has begun.
+func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.stopping {
@@ -997,7 +1029,6 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config, pick runPic
 	if err != nil {
 		return "", err
 	}
-	s.noteRan(rt.SessionID(), pick)
 	s.run(rt, ui)
 	return rt.SessionID(), nil
 }
@@ -1014,7 +1045,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
-		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg, s.pickOf("", ""))
+		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg)
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
@@ -1029,36 +1060,21 @@ func (s *Server) RegisterSessionStarter() func() {
 
 // host resumes an existing session in this process; its caller holds
 // resuming. Once the server's shutdown has begun it resumes nothing. It
-// runs on the configuration bundle and preset name, or, with none named
-// (every resume but one picked in the browser), on the session's own
-// (runConfig); a resume for a reply from the phone, with the mirror on, on
-// the account of the session's thread (phoneOn).
+// runs on this server's own configuration, or on the bundle and preset the
+// page picked.
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
 	if s.stopping {
 		return errStopping
 	}
-	info := store.Info{ID: filepath.Base(path), Path: path}
-	pick := s.pickOf(bundle, preset)
-	var cfg config.Config
-	var err error
-	if pick.Default {
-		cfg, pick, err = s.runConfig(info)
-	} else {
-		cfg, err = s.loadConfig(bundle, preset)
-	}
+	cfg, err := s.loadConfig(bundle, preset)
 	if err != nil {
 		return err
-	}
-	if opts.PromptPhoneID != "" {
-		// For a reply from the phone: answered in its thread (phoneOn).
-		cfg = s.phoneOn(info, cfg)
 	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.Resume(cfg, opts, ui, path)
 	if err != nil {
 		return err
 	}
-	s.noteRan(rt.SessionID(), pick)
 	s.run(rt, ui)
 	return nil
 }

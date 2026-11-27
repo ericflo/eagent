@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
-	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/llm"
 )
 
@@ -88,9 +87,10 @@ func k15Start(t *testing.T, s *Server, body map[string]any) string {
 }
 
 // A session started in the browser on a picked configuration ("other"),
-// brought back after a restart, runs on that configuration, not on the
-// server's own. It used to come back on the server's own.
-func TestK15ASessionStartedOnAPickedBundleIsRestoredOnIt(t *testing.T) {
+// brought back after a restart, runs on the server's own configuration,
+// as every resume does (main's rule): a pick on the page applies to that
+// run only.
+func TestK15ASessionStartedOnAPickedBundleIsRestoredOnTheServersOwn(t *testing.T) {
 	s, project := newTestServer(t)
 	a, b := k15Project(t, project)
 	id := k15Start(t, s, map[string]any{"prompt": "hello", "config": "other"})
@@ -106,41 +106,7 @@ func TestK15ASessionStartedOnAPickedBundleIsRestoredOnIt(t *testing.T) {
 	if w := do(next, "POST", "/api/sessions/"+id+"/message", map[string]any{"text": "go on"}, nil); w.Code != http.StatusOK {
 		t.Fatalf("send: %d %s", w.Code, w.Body)
 	}
-	k15Calls(t, b, a, "the session brought back after the restart")
-}
-
-// The same session resumed from the phone (a reply in its thread) runs on
-// the configuration it was started on: on the server that ran it.
-func TestK15ASessionStartedOnAPickedBundleIsResumedFromThePhoneOnIt(t *testing.T) {
-	s, project := newTestServer(t)
-	a, b := k15Project(t, project)
-	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
-	id := k15Start(t, s, map[string]any{"prompt": "hello", "config": "other"})
-	s.mu.Lock()
-	h := s.running[id]
-	s.mu.Unlock()
-	h.cancel()
-	<-h.done
-	k15Drain(a, b)
-	if err := s.Resume(id, integration.PhoneMessage{Text: "from the phone"}); err != nil {
-		t.Fatal(err)
-	}
-	k15Calls(t, b, a, "the session resumed from the phone")
-}
-
-// And on the next server, which knows it from the session's record.
-func TestK15ASessionStartedOnAPickedBundleIsResumedFromThePhoneOnItAfterARestart(t *testing.T) {
-	s, project := newTestServer(t)
-	a, b := k15Project(t, project)
-	id := k15Start(t, s, map[string]any{"prompt": "hello", "config": "other"})
-	s.Shutdown(5 * time.Second)
-	k15Drain(a, b)
-	next := New(project, nil)
-	t.Cleanup(func() { next.Shutdown(5 * time.Second) })
-	if err := next.Resume(id, integration.PhoneMessage{Text: "from the phone again"}); err != nil {
-		t.Fatal(err)
-	}
-	k15Calls(t, b, a, "the session resumed from the phone by the next server")
+	k15Calls(t, a, b, "the session brought back after the restart")
 }
 
 // A session started with no configuration picked runs on the server's own

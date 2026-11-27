@@ -80,7 +80,7 @@ func TestSR6WebAStopToldTwiceDoublesThePhonesClosingNote(t *testing.T) {
 	s.mu.Lock()
 	s.markStop(info.ID)
 	s.mu.Unlock()
-	if _, _, err := stopAgents(info.Path, s.sessionConfig()); err != nil {
+	if _, _, err := stopAgents(info.Path, s.sessionConfig(), nil); err != nil {
 		t.Fatal(err)
 	}
 	// The process exits here, before forgetHosted. The next serve starts.

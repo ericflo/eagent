@@ -259,11 +259,8 @@ func TestSR8WebAPhoneReplyResumesTheSessionWithThePhoneOff(t *testing.T) {
 		t.Fatalf("setup: the reply is on the record %d time(s)", n)
 	}
 	got := notes() - before
-	// Control: the same resume on the server's own configuration (as on
-	// main: no configuration known for the session) tells the phone.
-	s.mu.Lock()
-	delete(s.ran, info.ID)
-	s.mu.Unlock()
+	// Control: the same resume again, on the server's own configuration
+	// (as on main), tells the phone.
 	mark := notes()
 	if err := s.Resume(info.ID, integration.PhoneMessage{ID: "reply-2", Text: "and now?"}); err != nil {
 		t.Fatal(err)
@@ -274,33 +271,6 @@ func TestSR8WebAPhoneReplyResumesTheSessionWithThePhoneOff(t *testing.T) {
 	}
 	if got == 0 {
 		t.Fatal("the session was resumed for a reply from the phone, on the configuration the page picked last (the phone off): the run took the reply and told the phone nothing (no closing note; its answers would not go either); on main the phone's resume ran on the server's own configuration, the phone on")
-	}
-}
-
-// A resume for a reply from the phone runs with the mirror on, on the
-// account of the configuration whose account is where the record shows
-// the session's thread (work, at a), not on the one the session runs on
-// (the server's own, at b), whose model and the rest it keeps; with no
-// configuration there, on the server's own account.
-func TestK17APhoneReplyIsAnsweredOnTheAccountOfTheSessionsThread(t *testing.T) {
-	const a, b = "https://phone-a.invalid", "https://phone-b.invalid"
-	for _, work := range []bool{true, false} {
-		s, project := newTestServer(t)
-		info := k16Work(t, project, a, b, work)
-		s.noteRan(info.ID, runPick{Default: true})
-		own, _, err := s.runConfig(info)
-		if err != nil {
-			t.Fatal(err)
-		}
-		own.Model.Model = "the session's model"
-		got := s.phoneOn(info, own)
-		want := b
-		if work {
-			want = a + "/"
-		}
-		if got.Finalechat.BaseURL != want || !got.Finalechat.Wanted() || got.Model.Model != "the session's model" {
-			t.Fatalf("work %v: the reply's resume runs on phone %q (on %v), model %q; want %q, on, the session's model", work, got.Finalechat.BaseURL, got.Finalechat.Wanted(), got.Model.Model, want)
-		}
 	}
 }
 
