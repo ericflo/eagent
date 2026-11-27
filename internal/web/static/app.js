@@ -367,6 +367,11 @@ function updateComposer() {
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
   ta.value = ''; ta.style.height = 'auto';
+  // /screen shows the agent's terminal here, as its Screen button does: the
+  // session itself shows it only at its own terminal and on the phone.
+  const d = S.detail;
+  const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
+  if (agent) { showScreen(agent.name); return; }
   try {
     if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
     else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
