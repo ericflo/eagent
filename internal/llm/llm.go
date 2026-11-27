@@ -418,6 +418,15 @@ func (e *APIError) RejectsImages() bool {
 	return false
 }
 
+// tooLong reports a request refused for its length as a whole (a 413, or a
+// context overflow) with no fault named in a picture: neither a picture the
+// provider will not take nor a model that cannot see. It is returned as it
+// is, for the conversation to be made shorter; no picture is left out or
+// written down as refused for it, and the model is not taken for text-only.
+func (e *APIError) tooLong() bool {
+	return (e.Status == 413 || e.ContextOverflow()) && !e.badImage()
+}
+
 // badImage reports a 4xx about this particular picture (too big, wrong
 // dimensions, undecodable) rather than a model that cannot see at all.
 // Such a refusal must not be remembered: the next picture may be fine.
@@ -773,7 +782,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		}
 		resp, err := c.once(callCtx, req, obs)
 		var ae *APIError
-		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
+		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
 			if ae.badImage() || ae.Status == 413 {
 				// A picture was refused (undecodable, too big for a limit
 				// of this provider's own): go on without it, and say why.
@@ -786,7 +795,7 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 				req = c.images.leaveOut(req)
 				obs.reset()
 				resp, err = c.once(callCtx, req, obs)
-				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
+				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
 					// Still refused over pictures: leave them all out.
 					c.images.refuse(req, true)
 					req = c.images.leaveOut(req)
