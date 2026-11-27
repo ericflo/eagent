@@ -15,7 +15,7 @@ func TestK1ArtifactSettingsSaveTheWindowAsTheServerDoes(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node is not installed")
 	}
-	for _, c := range []string{"moved-address", "pinned-untouched", "pinned-entered"} {
+	for _, c := range []string{"moved-address", "pinned-untouched", "pinned-entered", "slash-pin"} {
 		out, err := exec.Command("node", filepath.Join("testdata", "k1-artifact-settings.mjs"), c).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", c, err, out)

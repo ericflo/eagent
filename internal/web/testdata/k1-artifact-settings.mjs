@@ -45,6 +45,21 @@ const cases = {
       if (windowEdit(proposals)) throw new Error('window written: ' + JSON.stringify(proposals.at(-1)?.edits));
     },
   },
+  // EAGENT_BASE_URL gives the route's own address with a trailing slash:
+  // no move (config's moved), so a pinned save spells the window as it
+  // would without the variable.
+  'slash-pin': {
+    presets: { glm },
+    effective: { '/preset': 'glm', '/model/model': 'glm', '/model/base_url': 'https://api.together.xyz/v1/', '/model/context_tokens': 200000 },
+    saved: { '/preset': 'glm' },
+    fields: { '/model/base_url': { writable: false, source: 'env:EAGENT_BASE_URL' } },
+    body: { config: { model: { model: 'glm', base_url: 'https://api.together.xyz/v1/', context_tokens: 200000 } }, base_preset: 'glm', mode: 'pin' },
+    check(result, proposals, error) {
+      if (error) throw error;
+      const edit = windowEdit(proposals);
+      if (!edit || edit.op !== 'set' || edit.value !== 200000) throw new Error('window not spelled: ' + JSON.stringify(proposals.at(-1)?.edits));
+    },
+  },
   // A window the user enters under it is written.
   'pinned-entered': {
     ...pinned,

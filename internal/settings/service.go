@@ -293,10 +293,11 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		return res
 	}
 	for _, route := range []string{"/model", "/summarizer/model"} {
-		if _, ok := env[route+"/model"]; !ok {
+		name, ok := env[route+"/model"]
+		if !ok {
 			continue
 		}
-		if name, moved := strings.CutPrefix(resolved().Sources[route+"/model"], "env:"); moved {
+		if moved, _ := resolved().EnvMoved(route); moved {
 			if _, has := env[route+"/context_tokens"]; !has {
 				env[route+"/context_tokens"] = name
 			}
@@ -347,11 +348,11 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		if want == nil || then == nil || want.Model != then.Model {
 			continue
 		}
-		unsaid, name := false, ""
-		if !haveLoaded {
+		unsaid, name := false, env[ptr+"/base_url"]
+		if !haveLoaded && addr {
 			res := resolved()
-			name, unsaid = strings.CutPrefix(res.Sources[ptr+"/base_url"], "env:")
-			unsaid = unsaid && route(&res.Layered, ptr) != nil
+			_, moved := res.EnvMoved(ptr)
+			unsaid = moved && route(&res.Layered, ptr) != nil
 		}
 		if want.ContextTokens != then.ContextTokens && !unsaid {
 			continue
