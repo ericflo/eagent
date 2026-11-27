@@ -703,7 +703,10 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		}
 		switch rel := r.st.Relays[job.replaces]; {
 		case job.endOld != "" && rel != nil && rel.Active():
+			// Its agent was stopped for a switch that did not happen: no
+			// brief carries what it was typed, as at a stop.
 			r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld + ", which could not start: " + err.Error()}))
+			r.settleExited(rel, waiting...)
 		case job.endOld == "" && rel != nil && rel.Active() && rel.State != "exited":
 			// Its agent was stopped and no other runs in its place: it is
 			// on the record as exited, so eagent is told and can start it
@@ -1073,10 +1076,10 @@ func (r *Runtime) reattachRelays() []string {
 // part, or typed into the process that is gone). Called where an agent's
 // process ends: an exit seen live or found at a resume, a restart that
 // cannot start, a restart that does (before the new start is recorded; also
-// of a relay stopped before), and a stop (with the end, or where a start
-// the stop cut short ends). A switch to another agent is not one of them:
-// its hand-over brief carries what the old agent was sent. Loop goroutine
-// (or before the loop starts).
+// of a relay stopped before), a stop (with the end, or where a start the
+// stop cut short ends), and a switch whose new agent could not start. A
+// switch that hands over is not one of them: its hand-over brief carries
+// what the old agent was sent. Loop goroutine (or before the loop starts).
 func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 	queued := map[string]bool{}
 	for _, id := range except {

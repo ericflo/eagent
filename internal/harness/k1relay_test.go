@@ -388,6 +388,23 @@ func TestK1AQuietAgentsTurnStillAppliesTheChangeAndArmsTheIdleCheck(t *testing.T
 	k1Applied(t, rt, g, seat)
 }
 
+// A5, a switch whose new agent cannot start: the old agent was stopped for
+// it and its relay ends, with no brief to carry what it was typed. That
+// send is settled once, as at a stop.
+func TestK1ASendTypedIntoAnAgentASwitchStoppedInVainIsSettledOnce(t *testing.T) {
+	seat := newK1QuietSeat()
+	g := useGatedLaunches(t, []relaySeat{seat, nil}, []error{nil, errors.New("claude is not installed (not on PATH)")})
+	rt := newLaunchRuntime(t)
+	id := k1Typed(t, rt, seat)
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	if out := recv(t, switched, "switch"); !strings.Contains(out, "Could not switch") {
+		t.Fatalf("switch: %q", out)
+	}
+	k1StoppedOnce(t, rt, id)
+}
+
 // A5, Stop session: it stops the agents as relay_control stop does, and
 // settles what they were typed the same way.
 func TestK1ASendTypedIntoAnAgentStopSessionStopsIsSettledOnce(t *testing.T) {
