@@ -82,7 +82,7 @@ func r9OnDisk(t *testing.T, project, name, raw string) config.Config {
 }
 
 func r9Plain(cfg config.Config) config.Config {
-	cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", nil
+	cfg.Name, cfg.NameFrom, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
 	return cfg
 }
 

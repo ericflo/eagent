@@ -1003,10 +1003,10 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	} else {
 		fmt.Printf("finalechat: on (token from %s; --live checks it)\n", c.Source)
 	}
-	if cfg.RolloverTokens > 0 {
-		fmt.Printf("conversation restarts at: %d prompt tokens (rollover_tokens)\n", cfg.RolloverTokens)
+	if n, how := cfg.RolloverChosen(); cfg.RolloverTokens > 0 {
+		fmt.Printf("conversation restarts at: %d prompt tokens, %s\n", n, how)
 	} else {
-		fmt.Printf("conversation restarts at: %d prompt tokens, half of the model's context window (rollover_tokens fixes a number)\n", cfg.Rollover())
+		fmt.Printf("conversation restarts at: %d prompt tokens, %s (rollover_tokens fixes a number)\n", n, how)
 	}
 	// Keys and environment variables of the three-model design: what was
 	// carried over, what changed, and what is no longer read.
