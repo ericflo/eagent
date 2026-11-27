@@ -132,15 +132,13 @@ func TestK2AnAnswerOnALostCardIsTakenOnceWhenTheCardCannotBeChecked(t *testing.T
 		}
 		return false
 	})
-	r14Drained(t, g)
-	g.rt.sync(func() {})
+	// No card of the question is open on the phone now: a session with no
+	// terminal does not wait there for ever.
+	g.exit(20 * time.Second)
 	if a, m := r5takenTimes(g, "blue"); a+m != 1 {
 		r5takenDump(g)
 		t.Fatalf("one tap on the card is recorded %d times as the answer and %d times as a message", a, m)
 	}
-	// No card of the question is open on the phone now: a session with no
-	// terminal does not wait there for ever.
-	g.exit(20 * time.Second)
 }
 
 // Finding 4, in a running session: on a service without client keys the
