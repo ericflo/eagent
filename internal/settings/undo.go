@@ -43,7 +43,7 @@ func reversal(order []control.Edit, beforeRaw, desiredRaw string) ([]control.Edi
 			}
 			return
 		}
-		if bObj && !aObj && hadA && a == nil {
+		if bObj && !aObj && hadA && a == nil && isRoute(ptr) {
 			keys, nulls[ptr] = append(keys, ptr), true
 			return
 		}
@@ -115,9 +115,10 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 
 // PrepareUndo writes a reversal under the caller's project lock. It is a
 // conflict when any key of the reversal now differs from the file the
-// command wrote, or, for a route whose model the reversal sets back or
-// whose address it puts back, the route's address or model (as it
-// resolves) does, and nothing else is; the file it writes is checked as a
+// command wrote, or when the reversal changes the model or address a route
+// resolves to and that route resolves otherwise now than the command left
+// it (or would end otherwise than before the command), and nothing else
+// is; the file it writes is checked as a
 // person's save of it would be, except that a route pairing an address and
 // a key variable as a route in force at the command did (inForce, the
 // journal's in_force) passes the key-choice and pairing checks. beforeRaw
@@ -139,33 +140,58 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	// A route's model goes to its address: a reversal that sets a model back,
-	// or puts an address back, conflicts when the other one, as the route
-	// resolves over today's layers, changed since the command.
-	var wrote *config.Config
-	for _, edit := range inverse.Edits {
-		i := strings.LastIndex(edit.Key, "/")
-		route, leaf := edit.Key[:i], edit.Key[i+1:]
-		model := leaf == "model" && edit.Op == "set" && edit.Value != nil
-		if !model && leaf != "base_url" {
-			continue
+	// A route's model goes to its address. Each route is resolved, over
+	// today's layers, as the command left the file (wrote), as it is now, as
+	// the undo would leave it (undone) and as it was before the command
+	// (was). An undo that changes how a route resolves conflicts when the
+	// route resolves otherwise now than the command left it, or when the
+	// undo would leave it otherwise than it was.
+	load := func(values map[string]any) (config.Config, error) {
+		file := map[string]json.RawMessage{}
+		b, _ := json.Marshal(values)
+		_ = json.Unmarshal(b, &file)
+		return config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
+	}
+	undoneValues, err := fileValues(res.File.Raw)
+	if err != nil {
+		return "", "", RemoteView{}, err
+	}
+	for _, e := range inverse.Edits {
+		setPointer(undoneValues, e.Key, e.Value, e.Op == "unset")
+	}
+	resolved := func(cfg config.Config, ptr string) [3]string {
+		if r := routeAt(cfg, ptr); r != nil {
+			return [3]string{"route", r.Model, strings.TrimRight(r.BaseURL, "/")}
 		}
-		if wrote == nil {
-			raw, _ := json.Marshal(desired)
-			var file map[string]json.RawMessage
-			_ = json.Unmarshal(raw, &file)
-			cfg, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
-			if err != nil {
-				break // the file the undo writes is checked below
+		return [3]string{}
+	}
+	// A file the undo would write that does not load is refused below.
+	if undone, err := load(undoneValues); err == nil {
+		var wrote, was *config.Config
+		for _, base := range []string{"/model", "/summarizer/model"} {
+			for ptr := base; len(ptr) < len(base)+4*len("/fallback"); ptr += "/fallback" {
+				now, after := resolved(res.Effective, ptr), resolved(undone, ptr)
+				if now == after {
+					continue
+				}
+				if wrote == nil {
+					cfg, err := load(desired)
+					if err != nil {
+						return "", "", RemoteView{}, fmt.Errorf("this undo cannot tell where it would send the model, because the settings the command wrote no longer load here (%v); nothing was changed, so put those settings back by hand instead", err)
+					}
+					wrote = &cfg
+					// The file before the command is compared when it still
+					// loads here.
+					if values, err := fileValues(beforeRaw); err == nil {
+						if cfg, err := load(values); err == nil {
+							was = &cfg
+						}
+					}
+				}
+				if now != resolved(*wrote, ptr) || was != nil && after != resolved(*was, ptr) {
+					return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
+				}
 			}
-			wrote = &cfg
-		}
-		was, is := routeAt(*wrote, route), routeAt(res.Effective, route)
-		if was == nil || is == nil {
-			continue
-		}
-		if model && strings.TrimRight(was.BaseURL, "/") != strings.TrimRight(is.BaseURL, "/") || !model && was.Model != is.Model {
-			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
 	raw, etag, view, err := s.prepare(inverse, grant, true, inForce)
@@ -174,6 +200,19 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 		err = fmt.Errorf("this undo would write settings that cannot be saved from here now (%v); nothing was changed, so put those settings back by hand instead", err)
 	}
 	return raw, etag, view, err
+}
+
+// isRoute says whether a pointer names a route: /model or
+// /summarizer/model, or a fallback of one.
+func isRoute(ptr string) bool {
+	rest, ok := strings.CutPrefix(ptr, "/summarizer/model")
+	if !ok {
+		rest, ok = strings.CutPrefix(ptr, "/model")
+	}
+	for ok && rest != "" {
+		rest, ok = strings.CutPrefix(rest, "/fallback")
+	}
+	return ok
 }
 
 // routeAt is the route of cfg a pointer names (/model or /summarizer/model,
