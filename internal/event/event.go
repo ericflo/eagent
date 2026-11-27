@@ -357,6 +357,11 @@ type MessageData struct {
 	// reached. They are shown to the model as a notice, since no reply of
 	// its own carries them.
 	Auto bool `json:"auto,omitempty"`
+	// Room, on the notice that no restart can make room, is the room for
+	// input (window less reply ceiling, in tokens) of the model it was found
+	// on: the decision stands only while the room in force is no larger.
+	// Absent on every other message, and on such a notice in older records.
+	Room int `json:"room,omitempty"`
 }
 
 // PhoneQuestionData records how a question was posted to the phone: the

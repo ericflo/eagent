@@ -1,12 +1,15 @@
 package harness
 
 import (
+	"errors"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 )
@@ -318,5 +321,131 @@ func TestK2EachOutcomeSaysWhichMessageItMeans(t *testing.T) {
 	}
 	if !strings.Contains(both, "typed into") || !strings.Contains(both, "did not go") {
 		t.Fatalf("setup: %q", both)
+	}
+}
+
+// A call is out on the model eagent is on when the person picks another;
+// the old one then refuses it, as too long or with a failure of its own.
+// That is the old model's answer: it counts no failure against the new
+// one and decides nothing about restarting the conversation on it. (The
+// call is made again on the new model, complete's own rule for a route
+// that moved while a call was out; its answer is what counts.)
+func TestK2AFailureFromTheModelMovedOffCountsNothingOnTheNewOne(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		rep  reply
+	}{{"too long", r7TooLong}, {"a failure", k1BadRequest}} {
+		t.Run(c.name, func(t *testing.T) {
+			gate := make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(gate) }) }
+			t.Cleanup(release)
+			var ready atomic.Bool
+			out := make(chan struct{}, 1)
+			s := startSession(t, "", func(_ string, m []map[string]any) reply {
+				if ready.Load() && m[len(m)-1]["role"] != "tool" {
+					select {
+					case out <- struct{}{}:
+					default:
+					}
+					r := c.rep
+					r.block = gate
+					return r
+				}
+				return hold()
+			}, nil)
+			r5LogOnFailure(s)
+			s.settled()
+			ready.Store(true)
+			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "@e status?", Route: "eagent"}) })
+			<-out
+			var newCalls atomic.Int32
+			k1Swap(t, s, 200_000, 2048, func(string, []map[string]any) reply { newCalls.Add(1); return hold() })
+			release()
+			r6Until(t, "the turn to end", func() bool {
+				busy := true
+				s.rt.sync(func() { busy = s.rt.turns.busy })
+				return !busy && newCalls.Load() > 0 || r4Logged(s, "model call failed") > 0 || r4Logged(s, "refused the prompt") > 0
+			})
+			s.settled()
+			var failures int
+			var overflowed bool
+			s.rt.sync(func() { failures, overflowed = s.rt.turns.failures, s.rt.turns.overflowed })
+			if failures != 0 || overflowed || r6Dossiers(s) != 0 {
+				t.Fatalf("the old model's answer counted on the new one: %d failures, refused %v, %d restarts; logs %q", failures, overflowed, r6Dossiers(s), s.ui.logged())
+			}
+			if newCalls.Load() == 0 {
+				t.Fatal("the call was not made again on the new model")
+			}
+		})
+	}
+}
+
+// Two agents are on the record: the first has exited (its terminal is
+// gone), the second runs. When eagent's model is not answering, the notice
+// names the one still running, as eagent's own closing words do
+// (fallbackFinal), and does not say the user's messages go straight to an
+// agent: with two on the record they are kept for eagent (routeUserMessage).
+func TestK2TheDownNoticeNamesTheAgentsStillRunning(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("ok"))
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.sess.Close()
+	rt.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Profile: "claude", Agent: "claude", AgentLabel: "Claude", Label: "Claude"}))
+	rt.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "codex", State: "exited"}))
+	text := rt.unreachableNotice(errors.New("timeout")).Text
+	if strings.Contains(text, "Codex") || strings.Contains(text, "straight to") || !strings.Contains(text, "Claude") {
+		t.Fatalf("with Codex exited and Claude running, told: %q", text)
+	}
+}
+
+// C2, the edited window: no restart could make room on a 60k window. The
+// session is stopped, the same model's window is raised in the config,
+// and it is resumed. The user pastes more than the new window holds: the
+// conversation as it is is refused, and a restart, which gives the paste
+// by place, would fit. The decision was found on less room than is in
+// force now, so it does not stand: the restart is made and the user is
+// answered.
+func TestK2ADecisionFoundOnLessRoomDoesNotStandAfterTheWindowIsRaised(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
+	route := &r5PictureRoute{window: 60000, ceiling: 2048, picture: 80000}
+	inner := route.brain()
+	var raised atomic.Bool
+	brain := func(model string, m []map[string]any) reply {
+		r := inner(model, m)
+		if raised.Load() && r.status == 0 && dossierRequest(m) == "" && m[len(m)-1]["role"] != "tool" {
+			return say("Here it is.")
+		}
+		return r
+	}
+	s := startSession(t, "", brain, func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	route.refuseAll.Store(true)
+	r5SendPicture(s, "@e what does this screenshot show?")
+	r4Until(t, "the user to be told no restart can make room", func() bool { return r5Told(s, fullNotice) > 0 })
+	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	cfg.Model.ContextTokens = 70000
+	route.mu.Lock()
+	route.window = 70000
+	route.mu.Unlock()
+	route.refuseAll.Store(false)
+	raised.Store(true)
+	s2 := audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, s.model)
+	r5LogOnFailure(s2)
+	paste := "the log: " + strings.Repeat("a line of the build log ", 12000) // ~82k tokens by the estimate
+	s2.rt.sync(func() { s2.rt.userMessage(event.UserMessageData{Text: paste, Route: "eagent"}) })
+	r4Until(t, "an answer, or the message told it waits", func() bool {
+		return r5Told(s2, "Here it is.") > 0 || r5Told(s2, stillFullNotice+`"the log:`) > 0
+	})
+	if r5Told(s2, "Here it is.") == 0 {
+		t.Fatalf("on the raised window: %d restarts, and the user was told their message waits; a restart there makes room", r6Dossiers(s2))
 	}
 }

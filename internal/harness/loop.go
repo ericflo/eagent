@@ -1681,18 +1681,29 @@ func (r *Runtime) unreachableNotice(err error) event.MessageData {
 }
 
 // whileDown is what a notice that eagent's model is not answering says of
-// the user's messages: with an agent running they still go straight to it;
-// with none (none started, stopped, or its terminal gone, as fallbackFinal
-// counts it) they wait for eagent. Loop goroutine.
+// the agents and the user's messages. The agents named are the ones still
+// running, as fallbackFinal counts them (not stopped, terminal not gone).
+// The messages go straight to an agent only when it is the one on the
+// record (routeUserMessage); otherwise they wait for eagent. Loop
+// goroutine.
 func (r *Runtime) whileDown() string {
 	active := r.st.ActiveRelays()
+	var who []string
 	for _, rel := range active {
 		if rel.State != "exited" {
-			who := active[0].Who()
-			return fmt.Sprintf("so I can't tell you what %s is doing. Your messages still go straight to %s.", who, who)
+			who = append(who, rel.Who())
 		}
 	}
-	return "so I can't answer you for now. What you write to me is kept, and I'll answer it when my model does."
+	kept := "What you write to me is kept, and I'll answer it when my model does."
+	switch {
+	case len(who) == 0:
+		return "so I can't answer you for now. " + kept
+	case len(active) == 1:
+		return fmt.Sprintf("so I can't tell you what %s is doing. Your messages still go straight to %s.", who[0], who[0])
+	case len(who) == 1:
+		return fmt.Sprintf("so I can't tell you what %s is doing. %s", who[0], kept)
+	}
+	return fmt.Sprintf("so I can't tell you what %s are doing. %s", strings.Join(who, " and "), kept)
 }
 
 // stopTimers stops the loop's timers at the end of a run.
