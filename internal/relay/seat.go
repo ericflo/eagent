@@ -404,8 +404,8 @@ func (s *Seat) setState(state, detail string) {
 	if state != "blocked" {
 		s.hung = false
 	}
-	if state != "idle" {
-		s.turnEndAt = time.Time{}
+	if state == "working" {
+		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
 	s.mu.Unlock()
 	s.emit(Event{Kind: KindState, State: state, Detail: detail})
