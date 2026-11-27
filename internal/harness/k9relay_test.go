@@ -112,6 +112,7 @@ func TestK9StopSessionSettlesASendBeingTypedBeforeTheEnd(t *testing.T) {
 				o += " (after session.end)"
 			}
 			outcomes = append(outcomes, o)
+			t.Logf("%s: %s %q", id, d.Outcome, d.Detail)
 		}
 	}
 	if len(outcomes) != 1 || outcomes[0] != event.DeliveryUnconfirmed {

@@ -170,7 +170,7 @@ func TestK8AWaitingChangeAppliesWhenTheAgentIsStuckOrExits(t *testing.T) {
 	waitRelayStarts(t, rt)
 	k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
 	rt.sync(func() {
-		if _, waiting := rt.relayRepick["codex"]; waiting {
+		if _, _, waiting := rt.nextPick("codex"); waiting {
 			t.Error("the change still waits after it was applied")
 		}
 	})
@@ -195,7 +195,7 @@ func TestK8AWaitingChangeIsTheNextStartOfAnAgentThatExited(t *testing.T) {
 		t.Fatal("the agent that exited was started again by the waiting change")
 	}
 	rt.sync(func() {
-		_, waiting := rt.relayRepick["codex"]
+		_, _, waiting := rt.nextPick("codex")
 		route := rt.relayRoutes()["codex"]
 		if waiting || route.Waiting || route.Model != "gpt-6.2-astra" {
 			t.Errorf("after the exit: waiting %v, live settings %+v; want gpt-6.2-astra as what its next start runs, not waiting", waiting, route)
