@@ -18,7 +18,12 @@ func (r *Runtime) startRuntimeSettings() {
 		return
 	}
 	c.Stop = r.acceptRemoteStop
-	c.Routes = r.runningRoutes
+	c.Routes = func(routes map[string]runtimecontrol.Route) (map[string]config.ModelRoute, error) {
+		return r.runningRoutes(routes)
+	}
+	c.ChosenRoutes = func(routes map[string]runtimecontrol.Route, chosen string) (map[string]config.ModelRoute, error) {
+		return r.runningRoutes(routes, chosen)
+	}
 	r.runtimeControl = c
 	r.append(event.New("settings.runtime_started", event.ActorHarness, map[string]any{"format": runtimecontrol.Schema, "generation": c.Generation, "values": r.activeSettings, "persistence": "this process only"}))
 }
@@ -74,11 +79,12 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	// Resolve every changed route before recording anything, so a route
 	// that cannot run fails the change instead of being reported as applied.
 	// A configuration chosen in this change (/config) runs its routes as it
-	// defines them; values.Config otherwise only names where they came from.
+	// defines them. Its name is the edit's: values.Config names a preset
+	// saved in the same change instead.
 	chosen := ""
 	for _, e := range q.Proposal.Edits {
 		if e.Key == "/config" {
-			chosen = values.Config
+			chosen, _ = e.Value.(string)
 		}
 	}
 	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes, chosen)
@@ -246,7 +252,7 @@ func (r *Runtime) resolvePick(who string, pick runtimecontrol.Route, chosen ...s
 // on, so a session on a fallback is saved as that fallback and those
 // after it), or, for a pick this change makes, the one it will run once
 // the change is applied. Loop goroutine (the controller's poll).
-func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route) (map[string]config.ModelRoute, error) {
+func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route, chosen ...string) (map[string]config.ModelRoute, error) {
 	out := map[string]config.ModelRoute{}
 	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
 		pick, ok := routes[who]
@@ -262,7 +268,7 @@ func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route) (map[str
 			}
 			continue
 		}
-		a, err := r.resolvePick(who, pick)
+		a, err := r.resolvePick(who, pick, chosen...)
 		if err != nil {
 			return nil, err
 		}

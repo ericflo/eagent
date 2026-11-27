@@ -12,9 +12,9 @@ import (
 // A preset saved in the same proposal that chooses a configuration holds
 // that configuration's routes as it defines them, as the session will run
 // them: the controller's save path (controller.go) asks runningRoutes for
-// the routes and builds the preset from them.
+// the routes, through ChosenRoutes with the configuration's name when the
+// change chooses one, and builds the preset from them.
 func TestK5APresetSavedWithAChosenConfigurationHoldsItsRoutes(t *testing.T) {
-	t.Skip("known, not fixed: the controller hands runningRoutes only the routes (Controller.Routes, internal/runtimecontrol/controller.go:231), not the chosen configuration; outside this fixer's files")
 	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_MODEL", "EAGENT_BASE_URL"} {
 		t.Setenv(n, "")
 	}
@@ -41,7 +41,10 @@ func TestK5APresetSavedWithAChosenConfigurationHoldsItsRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	running, err := rt.runningRoutes(after.Routes)
+	running, err := rt.runningRoutes(after.Routes, "openai-high") // as ChosenRoutes hands them over: the /config edit's name
+	if after.Config == "openai-high" {
+		t.Fatal("setup: the values name the chosen configuration, not the preset saved")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +93,7 @@ func TestK5AChosenConfigurationRunsItsRoutesAsDefined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	swaps, err := rt.routeChanges(before.Routes, after.Routes, after.Config)
+	swaps, err := rt.routeChanges(before.Routes, after.Routes, "openai-high") // the /config edit's name
 	if err != nil || len(swaps) != 1 {
 		t.Fatalf("swaps %+v %v", swaps, err)
 	}
