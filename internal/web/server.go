@@ -170,11 +170,10 @@ func alive(sessionPath string) bool { return store.Alive(sessionPath) }
 // Hosted reports whether this process is running the session.
 func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 
-// PhoneConfig is the phone section of the configuration the sessions this
-// server resumes for replies from the phone run with (the server's bundle
-// and preset over the project's): whether their mirror is on, and its
-// account. The reply watcher and the restore watch that phone, and act
-// only when it is on.
+// PhoneConfig is the phone section of this server's own configuration (its
+// bundle and preset over the project's): the account the reply watcher
+// watches besides the project file's, and the one the restore reads a
+// waiting reply on first.
 func (s *Server) PhoneConfig() (config.Finalechat, error) {
 	cfg, err := s.loadConfig("", "")
 	return cfg.Finalechat, err
