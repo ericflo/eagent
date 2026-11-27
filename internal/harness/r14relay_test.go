@@ -48,18 +48,6 @@ func (s r14HeldSeat) Send(id, text, mode string) (string, error) {
 	return "held for Codex to read when its turn ends", nil
 }
 
-// r14RelayUntil polls cond for at most two seconds and says whether it held.
-func r14RelayUntil(cond func() bool) bool {
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	return false
-}
-
 // Finding 6. A model change waits for the agent's turn to end. The turn
 // ends and the next one starts in one batch of news (Claude's Stop hook
 // handing over the message held for it): the turn, idle, the held

@@ -2,6 +2,7 @@ package runtimecontrol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,6 +21,14 @@ type Request struct {
 	Grant    control.Grant    `json:"grant"`
 	Proposal control.Proposal `json:"proposal"`
 }
+
+// Refusal is an error Apply returns when it refuses a change before it
+// records anything: the controller reports the change rejected, with the
+// refusal's message, not as one that may or may not have been made.
+type Refusal struct{ Err error }
+
+func (e Refusal) Error() string { return e.Err.Error() }
+func (e Refusal) Unwrap() error { return e.Err }
 
 type Outcome struct {
 	ID     string         `json:"command_id"`
@@ -255,6 +264,13 @@ func (c *Controller) process(q Request) error {
 		}
 	}
 	if err := c.Apply(q, values, result); err != nil {
+		if refusal := (Refusal{}); errors.As(err, &refusal) {
+			msg := refusal.Error()
+			if presetName != "" {
+				msg += fmt.Sprintf(" (The preset %q was saved.)", presetName)
+			}
+			return finish("rejected", map[string]any{"message": msg})
+		}
 		return finish("unknown", map[string]any{"message": "The runtime could not durably acknowledge this change.", "detail": err.Error()})
 	}
 	c.Values = values

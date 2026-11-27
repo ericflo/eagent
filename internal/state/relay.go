@@ -23,8 +23,12 @@ type Relay struct {
 	InnerID, Transcript string
 	State               string // starting | working | idle | blocked | exited | stopped
 	Detail              string
-	StateSince          time.Time
-	StartSeq            int64
+	// Dialog is the title of the dialog the agent reports holding it
+	// blocked, from its last relay.state ("" for any other state, and in
+	// records written before relay.state said it).
+	Dialog     string
+	StateSince time.Time
+	StartSeq   int64
 	// PrevEnded is when the agent that held this name before stopped, zero
 	// for the name's first agent: what the harness saw before then was
 	// that agent's, not this one's.
@@ -49,6 +53,11 @@ type Relay struct {
 	// LastEventAt is the time of the newest relay event, so a reattaching
 	// eagent knows which transcript lines are already on the record.
 	LastEventAt time.Time
+	// Read is how far the transcript ReadIn was read, from the newest relay
+	// event that says (`read`); a reattach to the same transcript reads on
+	// from there in place of LastEventAt. 0 in records written before.
+	Read   int64
+	ReadIn string
 }
 
 // Who names the agent for people: the short name relay.start recorded,
@@ -215,6 +224,12 @@ func (s *State) applyRelay(ev event.Event) {
 		return
 	}
 	r.LastEventAt = ev.Time
+	var pos struct {
+		Read int64 `json:"read"`
+	}
+	if ev.Decode(&pos) == nil && pos.Read > 0 {
+		r.Read, r.ReadIn = pos.Read, r.Transcript
+	}
 	switch ev.Type {
 	case event.RelayInner:
 		var d event.RelayInnerData
@@ -253,7 +268,7 @@ func (s *State) applyRelay(ev event.Event) {
 	case event.RelayState:
 		var d event.RelayStateData
 		_ = ev.Decode(&d)
-		r.State, r.Detail, r.StateSince = d.State, d.Detail, ev.Time
+		r.State, r.Detail, r.Dialog, r.StateSince = d.State, d.Detail, d.Dialog, ev.Time
 	case event.RelayProgress:
 		var d event.RelayProgressData
 		_ = ev.Decode(&d)
@@ -274,7 +289,13 @@ func (s *State) applyRelay(ev event.Event) {
 		r.Turns++
 		r.LastTurn, r.LastTurnAt = d.Text, ev.Time
 		r.Recent = nil
-		r.State, r.StateSince = "idle", ev.Time
+		// A turn that ends under a dialog the agent reports leaves it
+		// blocked: the dialog still holds it, and its seat says when it no
+		// longer does (relay.state). Any other turn makes it idle, a quiet
+		// agent's among them (its idle, which follows, is not recorded).
+		if r.State != "blocked" || r.Dialog == "" {
+			r.State, r.StateSince = "idle", ev.Time
+		}
 	case event.RelayLimit:
 		var d event.RelayLimitData
 		_ = ev.Decode(&d)

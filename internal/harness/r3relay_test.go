@@ -93,7 +93,9 @@ func TestSendCutOffByARestartGoesToTheNewAgent(t *testing.T) {
 	old.waitEntered(t, "A:")
 	id := lastSendID(rt)
 	rt.sync(func() {
-		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+		// The restart a model change makes (a message on its way now holds
+		// a change asked back, item 3; this test is about the restart).
+		if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
 			t.Errorf("repick: %v", err)
 		}
 	})

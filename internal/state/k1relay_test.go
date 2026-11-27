@@ -55,16 +55,35 @@ func TestK1AQuietAgentGoesWorkingAndIdleAsBefore(t *testing.T) {
 	}
 }
 
-// A11, its turn half: a turn that ends under the dialog leaves the record
-// idle while the seat stays blocked.
+// A11, its turn half: a turn that ends under a dialog the agent reports
+// (the blocked relay.state names it) leaves the record blocked, the turn
+// counted, as the seat stays blocked; the seat's idle when the dialog is
+// over makes it idle.
 func TestK1ATurnUnderADialogLeavesTheRelayBlocked(t *testing.T) {
-	t.Skip("known, not fixed: a relay.turn does not say whether a dialog still holds the agent, and a quiet agent's turn, which comes before its idle, must make it idle (records already written have no idle after it)")
+	b := newBuilder()
+	b.startClaude()
+	k1state(b, "working", "")
+	b.add(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "blocked", Detail: "Pi is waiting on a dialog: Allow rm -rf build?; see relay_screen and answer it with relay_control keys", Dialog: "Allow rm -rf build?"}))
+	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "Done."}))
+	if rel := Replay(b.events).Relays["claude"]; rel.State != "blocked" || rel.Turns != 1 || rel.LastTurn != "Done." {
+		t.Errorf("after a turn under the dialog: %s, %d turns, last %q; want blocked, the turn counted", rel.State, rel.Turns, rel.LastTurn)
+	}
+	k1state(b, "idle", "")
+	if rel := Replay(b.events).Relays["claude"]; rel.State != "idle" || rel.Dialog != "" {
+		t.Errorf("after the dialog: %s, dialog %q; want idle, none", rel.State, rel.Dialog)
+	}
+}
+
+// A11, its bound: a record written before relay.state named the dialog
+// (its blocked state has only the detail) replays a turn under it as it
+// always did, idle.
+func TestK1ATurnUnderADialogInAnOlderRecordReplaysAsBefore(t *testing.T) {
 	b := newBuilder()
 	b.startClaude()
 	k1state(b, "working", "")
 	k1state(b, "blocked", "Pi is waiting on a dialog: Allow rm -rf build?; see relay_screen and answer it with relay_control keys")
 	b.add(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "Done."}))
-	if rel := Replay(b.events).Relays["claude"]; rel.State != "blocked" || rel.Turns != 1 {
-		t.Errorf("after a turn under the dialog: %s, %d turns; want blocked, the turn counted", rel.State, rel.Turns)
+	if rel := Replay(b.events).Relays["claude"]; rel.State != "idle" || rel.Turns != 1 {
+		t.Errorf("an older record's turn under the dialog: %s, %d turns; want idle, as before", rel.State, rel.Turns)
 	}
 }

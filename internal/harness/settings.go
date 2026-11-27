@@ -65,27 +65,30 @@ func (r *Runtime) acceptRemoteStop(q runtimecontrol.Request) error {
 }
 
 func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimecontrol.Values, result map[string]any) error {
+	// What is refused before anything is recorded is a refusal: the app is
+	// told the change was rejected, and why (runtimecontrol.Refusal).
+	refuse := func(err error) error { return runtimecontrol.Refusal{Err: err} }
 	if r.ending || r.ctx.Err() != nil || !q.Expires.After(time.Now()) || r.runtimeControl == nil || q.Proposal.Generation != r.runtimeControl.Generation {
-		return fmt.Errorf("the targeted runtime stopped before applying the change")
+		return refuse(fmt.Errorf("the targeted runtime stopped before applying the change"))
 	}
 	// Resolve every changed route before recording anything, so a route
 	// that cannot run fails the change instead of being reported as applied.
 	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes)
 	if err != nil {
-		return err
+		return refuse(err)
 	}
 	// So is a relay pick its agent cannot take.
 	repicks := relayRepicks(r.activeSettings.Relays, values.Relays)
 	for name, pick := range repicks {
 		rel := r.st.Relays[name]
 		if rel == nil || !rel.Active() {
-			return fmt.Errorf("relay %s is no longer running", name)
+			return refuse(fmt.Errorf("relay %s is no longer running", name))
 		}
 		if err := r.beingReplaced(rel); err != nil {
-			return err
+			return refuse(err)
 		}
 		if err := r.checkRelayPick(rel.Profile, pick); err != nil {
-			return err
+			return refuse(err)
 		}
 	}
 	previousSeq := r.st.LastSeq()

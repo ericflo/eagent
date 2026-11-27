@@ -114,7 +114,9 @@ func TestK1ASendTypedIntoAnAgentStoppedWhileItRestartsIsSettledOnce(t *testing.T
 				// the restart has taken the seat out of use.
 				seat.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
 			}
-			if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+			// The restart a model change makes (a message on its way now
+			// holds a change asked back, item 3).
+			if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
 				t.Errorf("repick: %v", err)
 			}
 		})
@@ -228,11 +230,12 @@ func TestK1ABriefAfterARestartHandsOverFromTheAgentThatDidTheWork(t *testing.T) 
 }
 
 // k1HeldSeat is an agent whose terminal the test can hold blocked (a
-// dialog it reports, or quiet in a turn): Snapshot says what is set.
+// dialog it reports, or quiet in a turn): Snapshot says what is set, the
+// dialog's title among it while one holds it, as a real seat's does.
 type k1HeldSeat struct {
 	*lingerSeat
-	smu   sync.Mutex
-	state string
+	smu           sync.Mutex
+	state, dialog string
 }
 
 func newK1HeldSeat() *k1HeldSeat {
@@ -241,17 +244,31 @@ func newK1HeldSeat() *k1HeldSeat {
 
 func (s *k1HeldSeat) set(state string) {
 	s.smu.Lock()
-	s.state = state
+	s.state, s.dialog = state, ""
+	s.smu.Unlock()
+}
+
+// setDialog holds the seat blocked on a dialog the agent reports.
+func (s *k1HeldSeat) setDialog(title string) {
+	s.smu.Lock()
+	s.state, s.dialog = "blocked", title
 	s.smu.Unlock()
 }
 
 func (s *k1HeldSeat) Snapshot() relay.Status {
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	return relay.Status{State: s.state, Since: time.Now()}
+	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog}
 }
 
-const k1Dialog = "Codex is waiting on a dialog: Allow rm -rf build?; see relay_screen and answer it with relay_control keys"
+const (
+	k1DialogTitle = "Allow rm -rf build?"
+	k1Dialog      = "Codex is waiting on a dialog: Allow rm -rf build?; see relay_screen and answer it with relay_control keys"
+)
+
+// k1DialogUp is the blocked state a seat says as a dialog the agent
+// reports comes up.
+var k1DialogUp = relay.Event{Kind: relay.KindState, State: "blocked", Detail: k1Dialog, Dialog: k1DialogTitle}
 
 // k1Relay waits until the Codex relay on the record meets cond.
 func k1Relay(t *testing.T, rt *Runtime, what string, cond func(*state.Relay) bool) {
@@ -316,8 +333,8 @@ func TestK1AWaitingModelChangeIsNotAppliedUnderADialog(t *testing.T) {
 	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
 		t.Fatalf("repick in a turn: %q", msg)
 	}
-	seat.set("blocked")
-	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: k1Dialog}, relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
+	seat.setDialog(k1DialogTitle)
+	seat.emit(k1DialogUp, relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
 	k1Relay(t, rt, "the progress recorded", func(rel *state.Relay) bool { return len(rel.Recent) == 1 })
 	rt.sync(func() {
 		if st := rt.st.Relays["codex"].State; st != "blocked" {
@@ -341,8 +358,8 @@ func TestK1AModelChangeAskedUnderADialogWaits(t *testing.T) {
 		if midTurn {
 			seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
 		}
-		seat.set("blocked")
-		seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: k1Dialog})
+		seat.setDialog(k1DialogTitle)
+		seat.emit(k1DialogUp)
 		if midTurn {
 			seat.emit(relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
 		}

@@ -121,7 +121,13 @@ func TestK2ANotSentFromTheSeatARestartReplacesIsKept(t *testing.T) {
 		seq, id := k2Forward(t, rt, seat, "then run the linter", "after_turn")
 		var switched <-chan string
 		if how == "restart" {
-			k1Repick(t, rt)
+			// The restart a model change makes (a message on its way now
+			// holds a change asked back, item 3).
+			rt.sync(func() {
+				if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
+					t.Errorf("restart: %v", err)
+				}
+			})
 		} else {
 			switched = relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
 		}
@@ -162,7 +168,9 @@ func TestK2AnArrivalTheReplacedSeatStillHadIsKept(t *testing.T) {
 	g.release <- struct{}{} // the new agent comes up at once
 	unblock := make(chan struct{})
 	rt.post(func() {
-		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
+		// The restart a model change makes (a message on its way now holds
+		// a change asked back, item 3).
+		if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
 			t.Errorf("repick: %v", err)
 		}
 		<-unblock // the loop is busy: what reaches it now waits, in order

@@ -188,8 +188,13 @@ type relayLaunch struct {
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
 	// oldDrained is closed once all the old seat saw is on the record
-	// (watchSeat), closed the loop's end.
+	// (watchSeat), closed the loop's end. undrained: run went on without it.
 	oldDrained, closed <-chan struct{}
+	undrained          bool
+	// spooled, for a restart, are the messages the record holds for the
+	// replaced agent's turn end; takenBack those of them run took back,
+	// unclaimed, from the spool the launch clears (relay.Unspool).
+	spooled, takenBack []string
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -494,7 +499,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 			// meanwhile passed it on to the new agent.
 			r.typingFailed(sendHolder(r.st, h.id, q.name), h.id, res.err)
 		case gone != "" && !r.hasOutcome(h.id):
-			r.append(goneUnconfirmed(q.name, h.id, gone))
+			r.appendOutcome(goneUnconfirmed(q.name, h.id, gone))
 		}
 	})
 	if !ran && untyped {
@@ -529,7 +534,23 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 	if r.hasOutcome(id) {
 		return
 	}
-	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
+	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
+}
+
+// appendOutcome records how a send ended (relay.delivered); every outcome
+// the harness writes goes through here. One that did not arrive, of a
+// relay between turns whose terminal is up, may have been the last thing
+// on its way to the agent, and no turn starts with it: a change waiting
+// for the relay is looked at again (applyWaitingRepick). Loop goroutine.
+func (r *Runtime) appendOutcome(ev event.Event) {
+	r.append(ev)
+	var d event.RelayDeliveredData
+	if ev.Decode(&d) != nil || d.OK {
+		return
+	}
+	if rel := r.st.Relays[d.Name]; rel != nil && rel.State == "idle" && r.relays.get(d.Name) != nil {
+		r.applyWaitingRepick(d.Name)
+	}
 }
 
 // prepareLaunch settles what a start launches. Loop goroutine (or before
@@ -577,6 +598,13 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	job.replaces = replaces
 	if rel := r.st.Relays[replaces]; replaces != "" && rel != nil && rel.Active() {
 		job.wasActive = true
+		if replaces == job.name {
+			for _, s := range unresolvedSends(r.st, rel) {
+				if s.Mode == "after_turn" {
+					job.spooled = append(job.spooled, s.ID)
+				}
+			}
+		}
 	}
 	// Waited for at the session's end (finish), which must not exit while
 	// an agent is coming up; finishLaunch or abandonLaunch marks it done.
@@ -637,18 +665,31 @@ func (job *relayLaunch) run() {
 		// What the old seat saw before it closed (an arrival, a held message
 		// taken back) is recorded before the new agent starts: how its sends
 		// ended is its word, and finishLaunch settles only what is left.
+		// Bounded as the wait above: a watcher stuck past it is gone on from.
 		select {
 		case <-job.oldDrained:
 		case <-job.closed:
+		case <-time.After(oldSendSettle):
+			job.undrained = true
+		}
+	}
+	// A message held for the old agent's turn end still waiting in the
+	// spool, which the launch clears, was never taken: taken back now, it
+	// is not sent (finishLaunch).
+	for _, id := range job.spooled {
+		if relay.Unspool(job.spec.Spool, id) {
+			job.takenBack = append(job.takenBack, id)
 		}
 	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
 }
 
 // oldSendSettle bounds how long a start waits for the send the agent it
-// replaces was typing to give up. Once the old terminal is closed that send
-// fails at its next step, which takes well under a second.
-const oldSendSettle = 15 * time.Second
+// replaces was typing to give up, and a start or a stop for all the old
+// seat saw to be recorded. Once the old terminal is closed that send fails
+// at its next step, and its watcher ends, well under a second. A variable
+// so tests can shorten it.
+var oldSendSettle = 15 * time.Second
 
 // finishLaunch records how a start went and returns the relay's name. The
 // sends that waited for it are queued for the new seat, after a switch's
@@ -666,6 +707,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	held, job.held = job.held, nil
 	stopped := job.stopped
 	r.relays.mu.Unlock()
+	if job.undrained {
+		r.ui.Log("relay %s: the agent it replaces had not said all it saw after %s; what it said after that is not recorded", firstNonEmpty(job.replaces, job.name), oldSendSettle)
+	}
+	for _, id := range job.takenBack {
+		if !r.hasOutcome(id) {
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, job.replaces), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
+		}
+	}
 	err = job.err
 	if err == nil {
 		rel := r.st.Relays[job.replaces]
@@ -748,7 +797,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: failed}
 				continue
 			}
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -844,9 +893,11 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		// A newer change waited for this restart (one equal to it was
 		// dropped above): it replaces the agent just started now, and what
 		// waited goes to the agent it brings up, not into this one.
-		if err := r.restartRelayWith(r.st.Relays[job.name], pick, queue...); err == nil {
+		rerr := r.restartRelayWith(r.st.Relays[job.name], pick, queue...)
+		if rerr == nil {
 			return job.name, nil
 		}
+		r.repickFailed(r.st.Relays[job.name], pick, rerr)
 	}
 	r.enqueueSend(job.name, job.seat, queue...)
 	return job.name, nil
@@ -994,12 +1045,16 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				if !ours && ev.Kind == relay.KindDelivered {
 					// Except how a send ended, as the agent a restart or a
 					// switch is replacing saw it, before the new one is up
-					// (finishLaunch): an arrival, or a held message taken
-					// back unread. It is this relay's word on its own send,
-					// and the start then finds the send settled instead of
+					// (finishLaunch), or one a stop is closing saw it: an
+					// arrival, or a held message taken back unread. It is
+					// this relay's word on its own send, and the start or
+					// the stop then finds the send settled instead of
 					// calling it unconfirmed.
 					job := r.relays.launch(name)
-					ours = job != nil && job.old == seat
+					r.relays.mu.Lock()
+					stopping := r.relays.stopping[name] != nil
+					r.relays.mu.Unlock()
+					ours = job != nil && job.old == seat || stopping
 				}
 				if ours {
 					r.onRelayEvent(name, ev)
@@ -1036,22 +1091,30 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			}
 			return
 		}
-		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000)}))
+		dialog := ""
+		if cur := r.st.Relays[name]; cur != nil {
+			dialog = cur.Dialog
+		}
+		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog, Read: ev.Read}))
 		if ev.State == "idle" {
 			r.applyWaitingRepick(name)
+			if dialog != "" {
+				// A dialog the agent reports held it, through a turn's end
+				// that left the record blocked: idle now, as at that end.
+				r.armAutopilotCheck(name)
+			}
 		}
 		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
 			r.settleExited(rel)
 		}
 	case relay.KindDelivered:
-		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
-		if rel := r.st.Relays[name]; !ev.OK && rel != nil && rel.State == "idle" {
-			// A send a change waited for ended without arriving, and no
-			// turn started with it: the change applies now.
-			r.applyWaitingRepick(name)
-		}
+		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+	case relay.KindRead:
+		// How far the transcript was read, after a read the record has
+		// nothing else of (a reattach reads on from there).
+		r.append(event.New(event.RelayRead, event.ActorHarness, event.RelayReadData{Name: name, Read: ev.Read}))
 	case relay.KindProgress:
-		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
+		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000), Read: ev.Read}))
 	case relay.KindTurn:
 		// A turn that answered eagent's own message and ran nothing is an
 		// agent waiting on work of its own; nudging it again only starts
@@ -1060,7 +1123,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		if cur := r.st.Relays[name]; cur != nil {
 			idle = ev.Tools == 0 && !ev.Interrupted && cur.LastSendFrom == "eagent" && cur.LastSendAt.After(cur.LastTurnAt)
 		}
-		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, maxRecordedReport), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle}))
+		r.append(event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: name, Text: clipRunes(ev.Text, maxRecordedReport), DurationMS: ev.DurationMS, Tools: ev.Tools, Images: ev.Images, Interrupted: ev.Interrupted, Idle: idle, Read: ev.Read}))
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
@@ -1068,7 +1131,7 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.applyWaitingRepick(name)
 		r.armAutopilotCheck(name)
 	case relay.KindLimit:
-		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted}))
+		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted, Read: ev.Read}))
 	case relay.KindActivity:
 		r.relays.mu.Lock()
 		if r.relays.activity == nil {
@@ -1101,6 +1164,11 @@ func (r *Runtime) reattachRelays() []string {
 			// The new seat confirms what the record still waits on from the
 			// transcript, as the old one would have; nothing is typed again.
 			spec.Restore, spec.State = unresolvedSends(r.st, rel), rel.State
+			if rel.Read > 0 && rel.ReadIn == rel.Transcript {
+				// How far the record says this transcript was read: what
+				// follows is news, whenever it was written.
+				spec.Read = rel.Read
+			}
 			var seat relaySeat
 			if seat, err = attachRelay(spec, rel.Host, rel.Target, rel.InnerID, rel.Transcript, rel.LastEventAt); err == nil {
 				r.watchSeat(rel.Name, seat)
@@ -1157,7 +1225,7 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		if queued[s.ID] {
 			continue
 		}
-		r.append(goneUnconfirmed(rel.Name, s.ID, how))
+		r.appendOutcome(goneUnconfirmed(rel.Name, s.ID, how))
 	}
 }
 
@@ -1532,7 +1600,7 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 	seat := r.relays.get(name)
 	if seat == nil {
 		if !r.holdSend(name, heldSend{id: id, text: text, mode: mode}) {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 		}
 		return
 	}
@@ -1698,7 +1766,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				return
 			}
 			if held = r.holdSend(rel.Name, heldSend{id: id, text: text, mode: mode}); !held {
-				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 			}
 		})
 		if !ran {
@@ -1914,6 +1982,8 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// end is never recorded over the agent that restart brings up.
 			var current relaySeat
 			var killed chan struct{}
+			var drained <-chan struct{}
+			settleLater := false
 			if !r.onLoop(func() {
 				if current = r.relays.get(rel.Name); current != nil {
 					r.relays.drop(rel.Name, current)
@@ -1927,16 +1997,18 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 						r.relays.stopping = map[string]chan struct{}{}
 					}
 					r.relays.stopping[rel.Name] = killed
+					drained = r.relays.drained[current]
 					r.relays.mu.Unlock()
 				}
 				// What the stopped agent was typed and not yet shown to
-				// read is settled with the end (settleExited); with a start
-				// under way for the name, where that start ends.
+				// read is settled (settleExited): once all its seat saw is
+				// on the record, below, or now when it had none; with a
+				// start under way for the name, where that start ends.
 				cur := r.st.Relays[rel.Name]
 				settle := cur.Active() && r.relays.launch(rel.Name) == nil
 				r.stopLaunches(rel.Name, "stopped")
 				r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: firstNonEmpty(str("reason"), "stopped")}))
-				if settle {
+				if settleLater = settle && current != nil; settle && current == nil {
 					r.settleExited(cur)
 				}
 				r.armAutopilots()
@@ -1945,6 +2017,34 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			}
 			if current != nil {
 				_ = current.Kill()
+				if drained != nil {
+					select {
+					case <-drained:
+					case <-r.closed:
+					case <-time.After(oldSendSettle):
+						r.ui.Log("relay %s: the stopped agent had not said all it saw after %s; what it said after that is not recorded", rel.Name, oldSendSettle)
+					}
+				}
+				r.onLoop(func() {
+					// From this step on nothing more of the stopped seat is
+					// taken, so nothing it says later follows the settle. A
+					// start asked for meanwhile waits for this stop
+					// (stopping): what it holds is its to type.
+					var held []string
+					r.relays.mu.Lock()
+					if r.relays.stopping[rel.Name] == killed {
+						delete(r.relays.stopping, rel.Name)
+					}
+					if job := r.relays.launching[rel.Name]; job != nil {
+						for _, h := range job.held {
+							held = append(held, h.id)
+						}
+					}
+					r.relays.mu.Unlock()
+					if settleLater {
+						r.settleExited(r.st.Relays[rel.Name], held...)
+					}
+				})
 				r.relays.mu.Lock()
 				if r.relays.stopping[rel.Name] == killed {
 					delete(r.relays.stopping, rel.Name)
