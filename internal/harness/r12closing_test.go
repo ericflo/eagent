@@ -254,3 +254,36 @@ func TestR12RestartDuringAFailingClosingCallGetsNoClosingWords(t *testing.T) {
 		t.Fatalf("said %q with the agent restarted", s.ui.said())
 	}
 }
+
+// ---- 3. the closing reminder ----------------------------------------------
+
+// The first call of the closing turn sets the title and says nothing, and
+// the user writes while it is out. The call after it is the user's: it is
+// not told that the session is ending and that they are owed a last word,
+// and no call has that reminder taken back out of its prompt.
+func TestR12ClosingTurnTheUserWritesDuringIsNotRemindedOfTheEnd(t *testing.T) {
+	const ending = "The session is ending and the user is owed a last word"
+	var phase atomic.Int32
+	s, model := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			r12Write(rt, "is #42 merged?")
+			return reply{calls: []event.ToolCall{tc("update_thread", `{"title":"Merge #42","summary":"#42 is merged; the tests are green."}`)}}
+		case phase.CompareAndSwap(2, 3):
+			return say("Yes, #42 is merged and the tests are green.")
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	for _, msgs := range audit2Requests(model) {
+		if strings.Contains(allText(msgs), "is #42 merged?") && strings.Contains(lastText(msgs), ending) {
+			t.Fatalf("a call made after the user wrote ends %q", lastText(msgs))
+		}
+	}
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
