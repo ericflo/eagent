@@ -51,6 +51,11 @@ type Server struct {
 	// stops are the stops the shutdown overtook, by session, under way or
 	// done (stopForShutdown). Under mu.
 	stops map[string]*stopAnswer
+	// ran is the configuration the last run here of each session was
+	// built with, kept after the run ends: a stop the shutdown overtakes
+	// tells the session's phone by it, and its mark names it for the next
+	// server (stopAgentsOf, markStop). Under mu.
+	ran map[string]ranOn
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -972,11 +977,20 @@ func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
 func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	s.mu.Lock()
 	s.markStop(info.ID)
+	on, ranHere := s.ran[info.ID]
+	list, _ := s.readHosted()
 	s.mu.Unlock()
+	// The phone is told by the configuration the session's run here was
+	// built with, or, for one not run here, the one its mark names.
+	cfg := &on.cfg
+	if !ranHere {
+		m, _ := list.mark(info.ID)
+		cfg = s.markConfig(info, m)
+	}
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path, s.sessionConfig())
+	stopped, failed, err := stopAgents(info.Path, cfg)
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}
@@ -1041,7 +1055,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
-		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
+		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg, s.pickOf(bundle, preset))
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
@@ -1072,9 +1086,9 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 }
 
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig plus any browser-picked route overrides),
-// unless the server's shutdown has begun.
-func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
+// configuration (loadConfig, as pick names it, plus any browser-picked
+// route overrides), unless the server's shutdown has begun.
+func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config, pick runPick) (string, error) {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.stopping {
@@ -1085,6 +1099,7 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, er
 	if err != nil {
 		return "", err
 	}
+	s.noteRan(rt.SessionID(), cfg, pick)
 	s.run(rt, ui)
 	return rt.SessionID(), nil
 }
@@ -1101,7 +1116,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
-		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg)
+		id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: req.Prompt, StartDir: req.Dir, Relay: req.Relay, RelayModel: req.RelayModel, RelayEffort: req.RelayEffort}, cfg, s.pickOf("", ""))
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
@@ -1129,6 +1144,7 @@ func (s *Server) host(path string, opts harness.Options, bundle, preset string, 
 	if err != nil {
 		return err
 	}
+	s.noteRan(rt.SessionID(), cfg, s.pickOf(bundle, preset))
 	s.run(rt, ui)
 	return nil
 }
