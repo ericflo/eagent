@@ -579,6 +579,18 @@ func pinnedBy(key, model string) string {
 
 // SavePresetName returns the trimmed preset name when a proposal sets
 // /save_preset, or "" otherwise.
+// ChosenConfig is the configuration a change chooses (/config), by the
+// edit's name, or "": with a preset saved in the same change, the values'
+// Config names that preset instead.
+func ChosenConfig(p control.Proposal) string {
+	for _, e := range p.Edits {
+		if name, ok := e.Value.(string); ok && e.Key == "/config" && e.Op == "set" {
+			return name
+		}
+	}
+	return ""
+}
+
 func SavePresetName(p control.Proposal) string {
 	for _, edit := range p.Edits {
 		if edit.Key == "/save_preset" && edit.Op == "set" {
@@ -599,20 +611,13 @@ func SavePresetName(p control.Proposal) string {
 // from the catalog.
 func ConfigFromRoutes(project string, values Values, running map[string]config.ModelRoute) (config.Config, error) {
 	// What the session runs with from its files and bundle: the layers of
-	// the configuration its routes were set from, below the environment,
-	// whose values are the session process's own, not the preset's.
+	// the configuration values.Config names (the controller passes the one
+	// the session started from), below the environment, whose values are
+	// the session process's own, not the preset's.
 	preset, bundle := values.Config, ""
 	if name, ok := strings.CutPrefix(values.Config, "bundle:"); ok {
 		preset, bundle = "", name
 	}
-	res := config.Resolve(project, preset, bundle)
-	cfg := res.Layered
-	if res.LoadError != "" {
-		cfg = config.Defaults()
-	}
-	// Values.Config names the configuration the routes were last set from,
-	// which after a choice in the session is not the one it started with:
-	// the saved preset says where its other settings came from.
 	source := "the built-in defaults"
 	switch {
 	case bundle != "":
@@ -620,7 +625,18 @@ func ConfigFromRoutes(project string, values Values, running map[string]config.M
 	case preset != "":
 		source = "preset " + preset
 	}
-	cfg.Description = fmt.Sprintf("Saved from a running session: its models as it ran them; its other settings from %s and the project file, without environment variables.", source)
+	res := config.Resolve(project, preset, bundle)
+	cfg, from := res.Layered, source+" and the project file"
+	if res.LoadError != "" {
+		// That configuration cannot be read now: the project file and the
+		// defaults, below the environment, and the description says so.
+		res = config.Resolve(project, "", "")
+		cfg, from = res.Layered, "the project file ("+source+" could not be read)"
+		if res.LoadError != "" {
+			cfg, from = config.Defaults(), "the built-in defaults (neither "+source+" nor the project file could be read)"
+		}
+	}
+	cfg.Description = fmt.Sprintf("Saved from a running session: its models as it ran them; its other settings from %s, without environment variables.", from)
 	var err error
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
 	if values.TickSeconds > 0 {

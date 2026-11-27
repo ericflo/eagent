@@ -56,14 +56,19 @@ type Controller struct {
 	// ChosenRoutes is Routes for a preset saved in a change that chooses a
 	// configuration (/config, named by chosen): a pick that names that
 	// configuration's route is the route as it defines it. Nil uses Routes.
-	ChosenRoutes                       func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
+	ChosenRoutes func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
+	// base is the configuration the session started from (its first
+	// Values.Config): a choice in the session changes only its routes, so a
+	// preset saved from it takes its other settings from this one, never
+	// from the name being saved.
+	base                               string
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
 }
 
 func New(project, session string, values Values, apply func(Request, Values, map[string]any) error) (*Controller, error) {
-	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply}
+	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply, base: values.Config}
 	var err error
 	c.status, err = openDirectory(project, session, true, "status")
 	if err != nil {
@@ -214,7 +219,16 @@ func (c *Controller) process(q Request) error {
 	if q.Proposal.Generation != c.Generation || q.Proposal.ExpectedVersion != view.Snapshot.Version {
 		return finish("conflicted", map[string]any{"message": "The runtime generation or settings version changed."})
 	}
-	values, err := applyValues(c.Project, c.Values, q.Proposal, view, q.Grant, c.Routes)
+	// The routes the session runs or will run: with a configuration chosen
+	// in this change, a pick of its route is that route as it defines it
+	// (ChosenRoutes), for the key check and a preset saved here alike.
+	routes := c.Routes
+	if chosen := ChosenConfig(q.Proposal); chosen != "" && c.ChosenRoutes != nil {
+		routes = func(picks map[string]Route) (map[string]config.ModelRoute, error) {
+			return c.ChosenRoutes(picks, chosen)
+		}
+	}
+	values, err := applyValues(c.Project, c.Values, q.Proposal, view, q.Grant, routes)
 	if err != nil {
 		return finish("rejected", map[string]any{"message": err.Error()})
 	}
@@ -231,22 +245,14 @@ func (c *Controller) process(q Request) error {
 	var presetCfg config.Config
 	if presetName != "" {
 		var running map[string]config.ModelRoute
-		chosen := ""
-		for _, e := range q.Proposal.Edits {
-			if e.Key == "/config" {
-				chosen, _ = e.Value.(string) // values.Config then names the preset saved
+		if routes != nil {
+			if running, err = routes(values.Routes); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
 			}
 		}
-		switch {
-		case chosen != "" && c.ChosenRoutes != nil:
-			running, err = c.ChosenRoutes(values.Routes, chosen)
-		case c.Routes != nil:
-			running, err = c.Routes(values.Routes)
-		}
-		if err != nil {
-			return finish("rejected", map[string]any{"message": err.Error()})
-		}
-		presetCfg, err = ConfigFromRoutes(c.Project, values, running)
+		layers := values
+		layers.Config = c.base
+		presetCfg, err = ConfigFromRoutes(c.Project, layers, running)
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
