@@ -86,8 +86,9 @@ type relaySeats struct {
 	retiring map[relaySeat]*retiredSeat
 	// pumping counts the seats' watchers still reading their seats
 	// (watchSeat). lateSaid is what they said of their seats' own sends
-	// once the loop's queue had ended, for finish to record when the seats
-	// are closed (recordLateNews).
+	// once the loop's queue had ended, each while its seat's sends were
+	// not settled, for finish to record: before that seat's settle
+	// (settleRetired), or when the seats are closed (recordLateNews).
 	pumping  int
 	lateSaid []lateNews
 }
@@ -96,6 +97,7 @@ type relaySeats struct {
 // queue had ended (relaySeats.lateSaid).
 type lateNews struct {
 	name string
+	seat relaySeat
 	ev   relay.Event
 }
 
@@ -183,7 +185,18 @@ func (r *Runtime) settleRetired(seat relaySeat) {
 		delete(r.relays.retiring, seat)
 	}
 	settle := e.settle
+	// What the seat said of its sends once the loop's queue had ended goes
+	// on the record first, so the settle finds those sends with their
+	// outcome. (None while the loop runs: it records them itself.)
+	var said []lateNews
+	r.relays.lateSaid = slices.DeleteFunc(r.relays.lateSaid, func(n lateNews) bool {
+		if n.seat == seat {
+			said = append(said, n)
+		}
+		return n.seat == seat
+	})
 	r.relays.mu.Unlock()
+	r.writeLateNews(said)
 	if settle != nil {
 		settle()
 	}
@@ -1321,7 +1334,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				switch {
 				case e == nil:
 				case settled:
-					r.ui.Log("relay %s: the stopped agent said %s %s after its sends were settled; not recorded", name, ev.Kind, firstNonEmpty(ev.SendID, ev.InnerID))
+					r.logAfterSettle(name, ev)
 				default:
 					r.retiredNews(name, seat, rel, ev)
 				}
@@ -1330,10 +1343,20 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				// The loop's queue has ended (the last part of the
 				// session's end, which may still be waiting for a start
 				// or stop of another agent): how a send of the seat's own
-				// went is kept for finish to record (recordLateNews).
+				// went is kept for finish to record (settleRetired,
+				// recordLateNews). A seat whose sends are settled is
+				// logged here as above: a send it was settled with has
+				// that one outcome.
 				r.relays.mu.Lock()
-				r.relays.lateSaid = append(r.relays.lateSaid, lateNews{name, ev})
+				e := r.relays.retiring[seat]
+				settled := e != nil && e.settled
+				if !settled {
+					r.relays.lateSaid = append(r.relays.lateSaid, lateNews{name, seat, ev})
+				}
 				r.relays.mu.Unlock()
+				if settled {
+					r.logAfterSettle(name, ev)
+				}
 			}
 		}
 		r.relays.mu.Lock()
@@ -1391,12 +1414,25 @@ func (r *Runtime) recordLateNews() {
 	said := r.relays.lateSaid
 	r.relays.lateSaid = nil
 	r.relays.mu.Unlock()
+	r.writeLateNews(said)
+}
+
+// writeLateNews writes what seats said of their own sends once the loop's
+// queue had ended, each word the record does not have yet. Finish's
+// goroutine: the loop is no longer running.
+func (r *Runtime) writeLateNews(said []lateNews) {
 	for _, n := range said {
 		if r.sameWord(n.ev) {
 			continue
 		}
 		r.appendOutcomeDirect(r.outcomeAside(sendHolder(r.st, n.ev.SendID, n.name), n.ev))
 	}
+}
+
+// logAfterSettle notes what a seat taken out of use said once its sends
+// were settled: it is not recorded.
+func (r *Runtime) logAfterSettle(name string, ev relay.Event) {
+	r.ui.Log("relay %s: the stopped agent said %s %s after its sends were settled; not recorded", name, ev.Kind, firstNonEmpty(ev.SendID, ev.InnerID))
 }
 
 // outcomeAside is how a send went, as its seat said it while the rest of
