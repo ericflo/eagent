@@ -842,11 +842,18 @@ function rolloverField() {
     onchange: ev => { const v = parseInt(ev.target.value, 10); E.cfg.rollover_tokens = isNaN(v) ? 0 : v; rerender(); }});
   return field('Context rollover', [input], [srcNode(ptr), h('span', {class: 'src'}, 'at this prompt size eagent writes a dossier and continues from it in a fresh conversation; blank follows the model'), ...problemNodes(ptr)]);
 }
-// autoRollover is config.AutoRollover (internal/config/config.go): half the
-// window in whole thousands, less where the reply ceiling leaves no room.
+// autoRollover is config.AutoRolloverWithin(window, max_tokens, 0)
+// (internal/config/config.go), what Config.Rollover gives: half the window
+// in whole thousands, less where the reply ceiling leaves no room, at
+// least 20,000, and held inside what the route can take as input.
 function autoRollover(win, maxTok) {
   const w = win > 0 ? win : 200000;
-  return Math.max(Math.floor(Math.min(w / 2, w - (maxTok || 0) - 33000) / 1000) * 1000, 20000);
+  const n = Math.max(Math.floor(Math.min(w / 2, w - (maxTok || 0) - 33000) / 1000) * 1000, 20000);
+  const room = w - (maxTok > 0 ? maxTok : 16384);
+  if (room <= 0) return n;
+  let limit = Math.trunc(room * 3 / 4);
+  if (Math.trunc(limit / 100) * 100 > 0) limit = Math.trunc(limit / 100) * 100;
+  return Math.min(Math.max(n, Math.trunc(room / 4)), limit);
 }
 // agentCard picks the coding agent a session starts when it is not told
 // which.
