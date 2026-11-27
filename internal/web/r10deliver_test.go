@@ -79,7 +79,7 @@ func TestR10WordsForAnEndingSessionResumeItOnceItHasStopped(t *testing.T) {
 	resumed := 0
 	go func() {
 		close(entered)
-		how, err := s.deliver(context.Background(), info, harness.InboxMessage{Type: "message", Text: "one more thing", From: "web"}, func() error {
+		how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: "one more thing", From: "web"}, func() error {
 			resumed++
 			return nil
 		})

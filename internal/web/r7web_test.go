@@ -1,7 +1,6 @@
 package web
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,12 +50,12 @@ func TestTwoMessagesAtOnceToAStoppedSessionAreBothDelivered(t *testing.T) {
 	}
 	first, second := make(chan result, 1), make(chan result, 1)
 	go func() {
-		how, err := s.deliver(context.Background(), info, harness.InboxMessage{Type: "message", Text: "one", From: "web"}, resume)
+		how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: "one", From: "web"}, resume)
 		first <- result{how, err}
 	}()
 	<-entered
 	go func() {
-		how, err := s.deliver(context.Background(), info, harness.InboxMessage{Type: "message", Text: "two", From: "web"}, resume)
+		how, err := s.deliver(info, harness.InboxMessage{Type: "message", Text: "two", From: "web"}, resume)
 		second <- result{how, err}
 	}()
 	select {
