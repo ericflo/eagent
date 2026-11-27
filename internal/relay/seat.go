@@ -442,9 +442,10 @@ func (s *Seat) emit(ev Event) {
 	s.emitAside(ev)
 }
 
-// emitAside is emit for an event no line of the transcript gave, from a
-// goroutine other than the watcher's (Send): it never carries how far the
-// watcher has read, which is that goroutine's own business.
+// emitAside is emit for an event that says nothing of how far the record
+// has read: one no line gave, from a goroutine other than the watcher's
+// (Send), or one from a line before the record's mark (history), whose
+// end would move that mark back.
 func (s *Seat) emitAside(ev Event) {
 	select {
 	case s.events <- ev:
@@ -1461,7 +1462,7 @@ func (s *Seat) fold(o obs) {
 		// record still waits on arrived just before the record ends.
 		if o.kind == "user" && !o.again {
 			for _, id := range s.matchSends(o.text, o.at, o.pos, false) {
-				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 		}
 		s.foldHistory(o)
