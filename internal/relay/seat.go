@@ -2292,10 +2292,11 @@ func (s *Seat) ready(screen string) bool {
 // spinnerLine matches the line Claude and Codex draw while they work: one of
 // the agent's own spinner glyphs, a few words, and at the end of the line a
 // parenthesis that says how to interrupt ("✻ Thinking… (12s · esc to
-// interrupt)", "• Working (3s • esc to interrupt)"). A markdown bullet ("-",
-// "1.") or a sentence that quotes the words is not it.
+// interrupt)", "• Working (3s • esc to interrupt)"); its words may hold
+// parentheses of their own (Claude shows the active task's words there). A
+// markdown bullet ("-", "1.") or a sentence that quotes the words is not it.
 func spinnerLine(glyphs string) *regexp.Regexp {
-	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^()\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
 }
 
 // The spinner glyphs each agent draws: Claude cycles through these frames,

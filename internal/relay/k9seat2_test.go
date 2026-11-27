@@ -24,6 +24,27 @@ func TestK9AReattachedBlockFoundStuckIsSaid(t *testing.T) {
 	}
 }
 
+// A busy line whose words hold parentheses of their own (Claude shows the
+// active task's words there, "Fixing the parser (step 2)") is still the
+// busy line: what makes it one is its glyph and the closing "(… esc to
+// interrupt)".
+func TestK9ABusyLineWithParenthesesInItsWordsIsBusy(t *testing.T) {
+	for _, c := range []struct {
+		agent  busyScreen
+		screen string
+		busy   bool
+	}{
+		{claudeAgent{}, "✶ Fixing the parser (step 2)… (3m 12s · ↓ 4.1k tokens · esc to interrupt)\n> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)", true},
+		{codexAgent{}, "• Running go test (./internal/...) (12m 03s • esc to interrupt)\n› ", true},
+		{claudeAgent{}, "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)", false},
+		{claudeAgent{}, "- press (esc to interrupt) to stop it (later)\n> ", false},
+	} {
+		if got := c.agent.busy(c.screen); got != c.busy {
+			t.Errorf("%T busy %v on %q; want %v", c.agent, got, c.screen, c.busy)
+		}
+	}
+}
+
 // piCompactDriver runs the extension and calls its compaction handlers as
 // pi 1.6.1 does (session_before_compact, then session_compact or, on any
 // failure, a cancel by a later extension among them, session_compact_failed),
