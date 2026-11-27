@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -186,7 +187,9 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 	cmd, cancel := bounded(time.Minute, argv[0], argv[1:]...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
-	if err != nil {
+	// (ErrWaitDelay: the command exited with success, and something it
+	// started still holds its output. The message is queued.)
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return fmt.Errorf("codex queue: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

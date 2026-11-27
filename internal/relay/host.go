@@ -110,9 +110,13 @@ func (Tmux) Name() string { return "tmux" }
 func bounded(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = pipeWait
 	return cmd, cancel
 }
+
+// pipeWait is how long a helper command's output is waited for once the
+// command itself has exited. A variable so tests can shorten it.
+var pipeWait = 2 * time.Second
 
 // helperTimeout bounds one tmux or screen command.
 const helperTimeout = 15 * time.Second
