@@ -185,12 +185,11 @@ type Seat struct {
 	// transcript or a Send began, that found it at rest (sayQuiet).
 	queueHolds bool
 	restLooks  int
-	// saw is the settled verdict of the agent's own evidence (sawWork,
-	// sawRest, sawOther; "" not settled), which every screen-based decision
-	// reads; sawLast is the last look's. saw changes only when two looks in
-	// a row agree, and is unsettled again after the agent writes, a Send
-	// begins or a dialog is answered (settle).
-	saw, sawLast string
+	// sawLast is what the last screen check made of the agent's own
+	// evidence (sawWork, sawRest, sawOther); "" when the check before this
+	// one made nothing of it (none ran at the last look, or it answered a
+	// dialog). Two checks in a row that agree are a verdict (settle).
+	sawLast string
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -416,7 +415,7 @@ func (s *Seat) caughtUp(now time.Time) {
 	// other startup screen, and is not refused (17dffc0 kept blocked). The
 	// record keeps what it says until then.
 	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
-		s.state, s.stateAt, s.saw, s.sawLast = "starting", now, "", ""
+		s.state, s.stateAt, s.sawLast = "starting", now, ""
 	}
 	s.mu.Unlock()
 	if quiet {
@@ -613,7 +612,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	// tracked while it is typed. Quiet is said again once it holds.
 	s.mu.Lock()
 	s.sending++
-	s.restLooks, s.saw, s.sawLast = 0, "", "" // the agent is looked at again after it
+	s.restLooks = 0 // the agent is looked at again after it
 	s.quietSaid.Store(false)
 	s.mu.Unlock()
 	defer func() {
@@ -1587,7 +1586,13 @@ func (s *Seat) watch() {
 				s.caughtUp(time.Now())
 			}
 		}
-		if now.Sub(lastDialog) >= screenEvery && s.wantsDialogCheck(now) {
+		if !s.wantsDialogCheck(now) {
+			// No screen check is wanted: the next one, whenever it comes,
+			// has none right before it (settle).
+			s.mu.Lock()
+			s.sawLast = ""
+			s.mu.Unlock()
+		} else if now.Sub(lastDialog) >= screenEvery {
 			lastDialog = now
 			s.checkScreen(now)
 		}
@@ -1608,13 +1613,12 @@ type sessionMover interface {
 // move to another session shows (Status.Quiet).
 const quietMoveLooks = 5
 
-// quietRestLooks is how many looks, since the agent last wrote to its
-// transcript, must find it settled at rest (atRest: two looks in a row
-// already agreed) before the seat is quiet. quietQueueLooks is how many
-// end a hold from the agent's own queue as the transcript shows it
-// (queueHolder): an agent at rest that long has taken what it queued,
-// whatever the lines said. Tests shorten quietQueueLooks.
-const quietRestLooks = 1
+// quietRestLooks is how many looks in a row, since the agent last wrote to
+// its transcript, must find it at rest (atRest) before the seat is quiet.
+// quietQueueLooks is how many end a hold from the agent's own queue as the
+// transcript shows it (queueHolder): an agent at rest that long has taken
+// what it queued, whatever the lines said. Tests shorten quietQueueLooks.
+const quietRestLooks = 2
 
 var quietQueueLooks = 30
 
@@ -1625,8 +1629,8 @@ func (s *Seat) settledLocked() bool {
 }
 
 // quietLocked is Status.Quiet: settled, and the agent seen at rest at
-// quietRestLooks looks (quietQueueLooks while the transcript shows its own
-// queue holding a message). The caller holds s.mu.
+// quietRestLooks looks in a row (quietQueueLooks while the transcript
+// shows its own queue holding a message). The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
 	return s.settledLocked() && s.restLooks >= quietRestLooks && (!s.queueHolds || s.restLooks >= quietQueueLooks)
 }
@@ -1638,21 +1642,22 @@ func (s *Seat) quietLocked() bool {
 // Antigravity: the relay status line saying idle).
 func (s *Seat) atRest() bool {
 	screen, err := s.host.Capture(s.target, 0)
-	return err == nil && s.settle(screen) == sawRest
+	return err == nil && s.ready(screen) && !s.atWork(screen)
 }
 
-// The verdicts of a look at the agent's own evidence (settle).
+// What a screen check makes of the agent's own evidence (settle).
 const (
 	sawWork  = "work"  // at work (atWork)
 	sawRest  = "rest"  // at its own prompt, not at work
 	sawOther = "other" // neither: a shell, a dialog it does not know
 )
 
-// settle takes one look at the agent's own evidence (its status file, its
-// screen) and returns the settled verdict: the look's, once two looks in
-// a row agree; until then the one before ("" when none has settled since
-// the agent last wrote or a Send began). A busy line that flickers for
-// one capture changes nothing.
+// settle is the screen check's verdict of the agent's own evidence (its
+// status file, its screen): what this check and the one before it both
+// made of it, "" when they differ or no check came right before this one.
+// Every decision of the screen check reads it, and decides nothing on "":
+// a busy line that flickers for one capture changes nothing, and neither
+// does what a check saw before a time when none ran.
 func (s *Seat) settle(screen string) string {
 	v := sawOther
 	switch {
@@ -1663,11 +1668,12 @@ func (s *Seat) settle(screen string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if v == s.sawLast {
-		s.saw = v
-	}
+	before := s.sawLast
 	s.sawLast = v
-	return s.saw
+	if v != before {
+		return ""
+	}
+	return v
 }
 
 // atWork is the one judgement of whether the agent's own evidence says it
@@ -1828,7 +1834,7 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 	if err == nil && len(lines) > 0 {
 		s.mu.Lock()
 		s.lastLine = now
-		s.restLooks, s.saw, s.sawLast = 0, "", "" // the agent wrote: looked at again after it
+		s.restLooks = 0 // the agent wrote: rest is looked for again after it
 		s.mu.Unlock()
 		qh, queues := p.(queueHolder)
 		var newest time.Time
@@ -2116,7 +2122,7 @@ func (s *Seat) checkScreen(now time.Time) {
 	s.mu.Unlock()
 	if s.answerDialog(screen, now) {
 		s.mu.Lock()
-		s.saw, s.sawLast = "", "" // a dialog was up: the agent is looked at again after it
+		s.sawLast = "" // a dialog was up: this check made nothing of the agent
 		s.mu.Unlock()
 		return
 	}
@@ -2162,7 +2168,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		// An agent whose screen or status says it works (a quiet turn, pi
 		// compacting) reads the send at its next step, as a working one
 		// does; so does a run a dialog holds (pi's), once it is answered.
-		// Nothing is decided on a look that has not settled.
+		// Nothing is decided on a check with no verdict.
 		working := state == "working" || saw == sawWork || s.dialogUp != "" && s.dialogPrev == "working"
 		if !working && saw != "" && now.Sub(s.stateAt) > 15*time.Second {
 			s.pending = removePending(s.pending, stuck)
@@ -2194,7 +2200,7 @@ func (s *Seat) checkScreen(now time.Time) {
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
 		s.mu.Lock()
-		s.stuck = saw != "" && saw != sawWork // not yet settled: not stuck
+		s.stuck = saw != "" && saw != sawWork // no verdict yet: not stuck
 		s.mu.Unlock()
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
 		s.mu.Lock()

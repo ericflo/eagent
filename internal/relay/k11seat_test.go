@@ -41,20 +41,16 @@ func TestK11CodexCommandsThatMoveItAreNotTyped(t *testing.T) {
 	}
 }
 
-// A send that has waited 45 s is judged on the settled verdict of the
-// agent's screen, never on one look: a Send that began meanwhile (or the
-// agent writing, or a dialog answered) unsettles the verdict, and the look
-// right after it, alone, reported a send unconfirmed though the agent was
-// at work on a quiet turn and took it at its next step.
-func TestK11AnUnsettledLookDecidesNothingOfASendThatWaited(t *testing.T) {
+// A send that has waited 45 s is judged on what two screen checks in a row
+// make of the agent, never on one: a single capture without the busy line
+// reported a send unconfirmed though the agent was at work on a quiet turn
+// and took it at its next step.
+func TestK11OneLookDecidesNothingOfASendThatWaited(t *testing.T) {
 	now := time.Now()
 	busy := "✻ Thinking… (12m · esc to interrupt)\n\n> \n  ? for shortcuts\n"
 	s, h := hungSeat(busy, now.Add(-46*time.Second))
 	s.checkScreen(now.Add(-3 * time.Second))
 	s.checkScreen(now.Add(-1500 * time.Millisecond)) // settled: at work
-	s.mu.Lock()
-	s.saw, s.sawLast = "", "" // as another Send's start leaves it
-	s.mu.Unlock()
 	h.mu.Lock()
 	h.screen = claudePromptScreen // one capture without the busy line
 	h.mu.Unlock()
