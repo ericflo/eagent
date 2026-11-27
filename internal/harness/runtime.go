@@ -1358,6 +1358,9 @@ drain:
 		for _, h := range job.held {
 			untyped[h.id] = !h.barrier
 		}
+		for _, id := range job.takenBack { // a start not recorded (late)
+			untyped[id] = true
+		}
 	}
 	for _, q := range r.relays.queues {
 		for _, h := range q.items {
