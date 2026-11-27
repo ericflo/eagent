@@ -96,10 +96,9 @@ func TestATooLargeRequestThatStaysTooLargeWithoutItsPicturesRefusesNone(t *testi
 	}
 }
 
-// A request too large with its pictures that goes through without them
-// had its pictures refused: they are reported, the ones of both passes
-// when it took leaving them all out. (One that then fails otherwise
-// reports none: r13images_test.go.)
+// A request too large with its pictures that goes through without them,
+// or meets another failure without them, had its pictures refused: they
+// are reported, the ones of both passes when it took leaving them all out.
 func TestATooLargeRequestThatGetsPastWithoutItsPicturesRefusesThem(t *testing.T) {
 	const tooLarge = `{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}`
 	for _, tc := range []struct {
@@ -107,6 +106,7 @@ func TestATooLargeRequestThatGetsPastWithoutItsPicturesRefusesThem(t *testing.T)
 		then int // the status once a is left out; 0 goes through
 	}{
 		{"goes through", 0},
+		{"then fails", 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
