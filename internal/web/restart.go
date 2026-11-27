@@ -28,12 +28,13 @@ import (
 // the user's next message, as before.
 //
 // The list is serve-hosted.json: {"sessions": [...], "at": ..., "stop":
-// [{"session": ..., "at": ...}]}. "stop" marks the listed sessions the
-// user stopped while a server was stopping, whose stop had not been
-// finished (its agents stopped and recorded) when the list was last
-// written, each with when the mark was made: the next server finishes it
-// and does not bring the session back, unless the session's record shows
-// a run begun after the mark. A mark stays on the list, through the next
+// [{"session": ..., "at": ...}]}. "stop" marks the sessions the user
+// stopped while a server was stopping, whose stop had not been finished
+// (its agents stopped and recorded) when the list was last written, each
+// with when the mark was last made; a marked session is not among
+// "sessions". The next server finishes such a stop and does not bring the
+// session back; a mark the session's record shows a run begun after is
+// just dropped. A mark stays on the list, through the next
 // servers' starts and shutdowns, until its stop is finished or no longer
 // holds. A list written before "stop" existed has none.
 
@@ -77,39 +78,37 @@ func (s *Server) rememberHosted() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, _ := s.readHosted()
-	ids := make([]string, 0, len(s.running)+len(prev.Stop))
+	ids := make([]string, 0, len(s.running))
 	for id := range s.running {
 		ids = append(ids, id)
-	}
-	for _, m := range prev.Stop {
-		if !slices.Contains(ids, m.Session) {
-			ids = append(ids, m.Session)
-		}
 	}
 	sort.Strings(ids)
 	s.writeHostedList(ids, time.Now().UTC(), prev.Stop)
 }
 
 // forgetHosted takes a session the user stopped off the list, so the next
-// server does not bring it back. Under mu.
+// server does not bring it back, and its mark with it. Under mu.
 func (s *Server) forgetHosted(id string) {
 	list, ok := s.readHosted()
-	if !ok || !slices.Contains(list.Sessions, id) {
+	if _, marked := list.mark(id); !ok || !slices.Contains(list.Sessions, id) && !marked {
 		return
 	}
 	list.Stop = slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id })
 	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, list.Stop)
 }
 
-// markStop notes on the list that the user stopped a listed session, so
-// that the next server finishes the stop rather than bring it back, should
-// this one exit before it has. Under mu.
+// markStop notes on the list that the user stopped a listed (or marked)
+// session, so that the next server finishes the stop rather than bring it
+// back, should this one exit before it has: the session moves from the
+// sessions to bring back to the marks, its mark made now (a mark it had
+// is made again). Under mu.
 func (s *Server) markStop(id string) {
 	list, ok := s.readHosted()
-	if _, marked := list.mark(id); !ok || !slices.Contains(list.Sessions, id) || marked {
+	if _, marked := list.mark(id); !ok || !slices.Contains(list.Sessions, id) && !marked {
 		return
 	}
-	s.writeHostedList(list.Sessions, list.At, append(list.Stop, stopMark{Session: id, At: time.Now().UTC()}))
+	marks := append(slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id }), stopMark{Session: id, At: time.Now().UTC()})
+	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, marks)
 }
 
 // readHosted reads the list. Under mu.
@@ -119,10 +118,12 @@ func (s *Server) readHosted() (hostedList, bool) {
 	return list, err == nil && json.Unmarshal(raw, &list) == nil
 }
 
-// listed reports whether the list names the session. Under mu.
+// listed reports whether the list names the session, to bring back or as
+// marked. Under mu.
 func (s *Server) listed(id string) bool {
 	list, ok := s.readHosted()
-	return ok && slices.Contains(list.Sessions, id)
+	_, marked := list.mark(id)
+	return ok && (slices.Contains(list.Sessions, id) || marked)
 }
 
 // tellPhoneStopped tells the session's phone thread of a stop stopAgents
@@ -242,7 +243,7 @@ func (s *Server) writeHosted(ids []string, at time.Time) { s.writeHostedList(ids
 // writeHostedList writes the list with the sessions whose stop is asked.
 func (s *Server) writeHostedList(ids []string, at time.Time, stop []stopMark) {
 	path := hostedFile(s.Project)
-	if len(ids) == 0 {
+	if len(ids) == 0 && len(stop) == 0 {
 		_ = os.Remove(path)
 		return
 	}
@@ -301,17 +302,43 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	// The list is used once, but a marked stop stays on it until it is
 	// finished or no longer holds (forgetHosted below): one that fails, or
 	// a cut partway, leaves it for the next start.
-	keep := make([]string, 0, len(list.Stop))
-	for _, m := range list.Stop {
-		keep = append(keep, m.Session)
-	}
 	s.mu.Lock()
-	s.writeHostedList(keep, list.At, list.Stop)
+	s.writeHostedList(nil, list.At, list.Stop)
 	s.mu.Unlock()
 	forget := func(id string) {
 		s.mu.Lock()
 		s.forgetHosted(id)
 		s.mu.Unlock()
+	}
+	// The marks first. The user stopped each of these while a server was
+	// stopping, which exited before the stop was done: it is finished
+	// here, and the session stays stopped. A mark the session has run
+	// since (resumed elsewhere after the mark was made) no longer says
+	// what the user wants of it, and is just dropped.
+	stopping := map[string]bool{}
+	for _, m := range list.Stop {
+		id := m.Session
+		info, err := store.Resolve(store.Root(s.Project), id)
+		if err != nil || info.ID != id {
+			s.logf("session %s is gone; not finishing the stop asked for it", id)
+			forget(id)
+			continue
+		}
+		if ranSince(info.Path, m.At) {
+			s.logf("session %s: the stop asked before the restart no longer holds: the session has run since", id)
+			forget(id)
+			continue
+		}
+		stopping[id] = true
+		if alive(info.Path) || s.isHosted(id) {
+			continue
+		}
+		if stopped, failed, err := stopAgents(info.Path, s.sessionConfig()); err != nil {
+			s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
+		} else {
+			s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
+			forget(id)
+		}
 	}
 	// Reading the threads waits on the network; it gets a bounded time,
 	// and a session whose thread cannot be read is left to the reply
@@ -320,34 +347,15 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	defer cancel()
 	back := 0
 	for _, id := range list.Sessions {
+		if stopping[id] {
+			continue
+		}
 		info, err := store.Resolve(store.Root(s.Project), id)
 		if err != nil || info.ID != id {
 			s.logf("session %s is gone; not bringing it back", id)
-			forget(id)
 			continue
-		}
-		mark, marked := list.mark(id)
-		if marked && ranSince(info.Path, mark.At) {
-			// The mark was for a run before one since (the session was
-			// resumed elsewhere after the mark was made): it no longer
-			// says what the user wants of the session as it is now.
-			s.logf("session %s: the stop asked before the restart no longer holds: the session has run since", id)
-			forget(id)
-			marked = false
 		}
 		if alive(info.Path) || s.isHosted(id) {
-			continue
-		}
-		if marked {
-			// The user stopped it while the last server was stopping,
-			// which exited before the stop was done: it is finished here,
-			// and the session stays stopped.
-			if stopped, failed, err := stopAgents(info.Path, s.sessionConfig()); err != nil {
-				s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
-			} else {
-				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
-				forget(id)
-			}
 			continue
 		}
 		reply, _, err := pendingReply(ctx, s.Project, info)

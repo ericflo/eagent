@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // sr6Phone is a FinaleChat that keeps one copy of a post per client key,
@@ -86,5 +88,104 @@ func TestSR6WebAStopToldTwiceDoublesThePhonesClosingNote(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.notes) != 1 {
 		t.Fatalf("the phone's thread shows %d closing notes for one stop, want 1: %v", len(f.notes), f.notes)
+	}
+}
+
+// A mark an earlier start could not finish stays on the list (as
+// TestK11AMarkedStopThatFailsStaysMarked pins). The user then resumes the
+// session in this server, and presses Stop on it while this server is
+// stopping; the server exits before the run lets go. markStop finds the
+// session marked already and keeps the old mark's time, from before the
+// resume, so the next start judges the user's Stop by it: the session has
+// run since, the stop "no longer holds", and the session the user just
+// stopped is brought back, its agent left running.
+func TestSR6WebAStopPressedOnAMarkedSessionKeepsTheOldMarksTime(t *testing.T) {
+	s, project := newTestServer(t)
+	killed := k5Kills(t)
+	info := srAgentSession(t, project)
+	old := time.Now().Add(-time.Hour).UTC()
+	s.mu.Lock()
+	s.writeHostedList([]string{info.ID}, old, k12Marks(old, info.ID))
+	s.mu.Unlock()
+	// Resumed here since: the record shows the run, and this server hosts it.
+	sess, _, err := store.Open(info.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: true})); err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Close()
+	s.mu.Lock()
+	s.running[info.ID] = fakeHosted()
+	s.mu.Unlock()
+	t.Cleanup(func() { s.mu.Lock(); delete(s.running, info.ID); s.mu.Unlock() })
+	s.rememberHosted() // this server's shutdown begins
+	// The user presses Stop now: stopAgentsOf marks the stop first...
+	s.mu.Lock()
+	s.markStop(info.ID)
+	s.mu.Unlock()
+	// ...and the process exits before the run lets go of the session.
+	var restored []string
+	oldRestore := restoreSession
+	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage) error {
+		restored = append(restored, id)
+		return nil
+	}
+	t.Cleanup(func() { restoreSession = oldRestore })
+	oldPending := pendingReply
+	pendingReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
+		return integration.PhoneMessage{}, false, nil
+	}
+	t.Cleanup(func() { pendingReply = oldPending })
+	New(project, nil).restoreHosted(context.Background())
+	if len(restored) != 0 || len(*killed) == 0 {
+		t.Fatalf("the Stop pressed during the shutdown was judged by a mark made before the resume: brought back %q, killed %q; want it kept stopped and its agent stopped", restored, *killed)
+	}
+}
+
+// The same kept mark, the session resumed in this server and then ended
+// by itself (finished, or stopped on a question: not "quit", so nothing
+// takes the mark off) before this server stops. rememberHosted listed the
+// marked session beside the ones it hosts, so the next start, finding the
+// mark stale, brought back a session that was not running when the server
+// stopped.
+func TestSR6WebAStaleMarkBringsBackASessionThatWasNotRunning(t *testing.T) {
+	s, project := newTestServer(t)
+	k5Kills(t)
+	info := srAgentSession(t, project)
+	old := time.Now().Add(-time.Hour).UTC()
+	s.mu.Lock()
+	s.writeHostedList([]string{info.ID}, old, k12Marks(old, info.ID))
+	s.mu.Unlock()
+	sess, _, err := store.Open(info.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []event.Event{
+		event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: true}),
+		event.New(event.SessionEnd, event.ActorHarness, event.SessionEndData{Reason: "awaiting-input"}),
+	} {
+		if _, err := sess.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = sess.Close()
+	s.rememberHosted() // this server stops, hosting nothing
+	var restored []string
+	oldRestore := restoreSession
+	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage) error {
+		restored = append(restored, id)
+		return nil
+	}
+	t.Cleanup(func() { restoreSession = oldRestore })
+	oldPending := pendingReply
+	pendingReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
+		return integration.PhoneMessage{}, false, nil
+	}
+	t.Cleanup(func() { pendingReply = oldPending })
+	New(project, nil).restoreHosted(context.Background())
+	if len(restored) != 0 {
+		t.Fatalf("brought back %q, which was not running when the server stopped", restored)
 	}
 }
