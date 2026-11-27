@@ -1658,13 +1658,21 @@ func (s *Seat) onSession(now time.Time) {
 // the old session (it switched after that), less a millisecond for
 // transcripts that stamp to the millisecond; never earlier than what the
 // seat already ignored. Without that sighting, news is from now on.
-func (s *Seat) follow(id string) {
+//
+// idle is the agent's own word that it waits at its prompt there with no
+// dialog up (pi's status file). A reattached seat whose history ends inside
+// a turn on the session left then ends its catch-up idle: that turn is
+// over, as a turn end in the history would say (foldHistory).
+func (s *Seat) follow(id string, idle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.followed {
 		s.sinceKept = s.since
 	}
 	s.refollow, s.followed, s.inner, s.since, s.onAt = true, true, id, s.moveCut(), time.Time{}
+	if idle && s.catchingUp && s.state == "working" {
+		s.state, s.stateAt, s.turnEndAt = "idle", time.Now(), time.Now()
+	}
 }
 
 // moveCut is where news begins in a transcript the agent moved to, when the

@@ -501,7 +501,7 @@ func (piAgent) poll(s *Seat, now time.Time) {
 	case inner == st.SessionID:
 		s.onSession(now)
 	case inner != "":
-		s.follow(st.SessionID)
+		s.follow(st.SessionID, st.State == "idle" && strings.TrimSpace(st.Prompt) == "")
 	}
 }
 
