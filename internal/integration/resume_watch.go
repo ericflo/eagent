@@ -91,6 +91,10 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	return func() { cancel(); <-done; retries.writeDown(project, logf) }
 }
 
+// sweepEvery is how often the watcher sweeps the thread list. A variable so
+// tests can shorten it.
+var sweepEvery = time.Minute
+
 // keptFile is where a stopping reply watcher writes down the replies it
 // keeps (quietly, keepUntilStopped, or told it keeps trying, retryLater),
 // and the sweep of whoever holds the watch next takes them up, once: a
@@ -262,15 +266,23 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 	w := &resumeWatcher{project: project, host: host, client: client, logf: logf, retries: retries, handled: map[string]time.Time{}}
 	w.sweep(ctx)
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
-	defer stopSweeps()
+	// The sweeps have ended when this returns: one that ran on after the
+	// watcher stopped would take up, and remove, the replies the stop
+	// then writes down (takeUp), into a watcher that is gone.
+	swept := make(chan struct{})
+	defer func() { stopSweeps(); <-swept }()
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		defer close(swept)
+		ticker := time.NewTicker(sweepEvery)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-sweepCtx.Done():
 				return
 			case <-ticker.C:
+				if sweepCtx.Err() != nil {
+					return
+				}
 				w.sweep(sweepCtx)
 			}
 		}
