@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -243,7 +244,7 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 	// lays another preset in its place, that difference would be laid over
 	// the wrong preset and run as neither. Nothing is written instead.
 	own, _ := config.ResolvePreset(res.File.Preset)
-	if laid, who := presetAbove(project, res.File.DefaultConfig); laid != "" && laid != own {
+	if laid, who := presetAbove(project, res.File.DefaultConfig); laid != "" && presetsDiffer(laid, own) {
 		return fail(fmt.Errorf("%s names the preset %s here, in place of the file's own, so a model written to the file would not run as written; unset it first", who, laid))
 	}
 	cfg := res.Effective
@@ -302,7 +303,15 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return 0
 	}
 	fmt.Printf("updated %s\n", saveRes.Saved.Path)
-	if now, err := config.Load(project, ""); err == nil && now.Name != "" && otherRoute(now.Model, cfg.Model) {
+	// The line that says what eagent runs is what loading says runs here,
+	// whatever else is laid over the file.
+	now, err := config.Load(project, "")
+	switch {
+	case err != nil:
+		fmt.Printf("  written: %s @ %s (%s). The configuration does not load here, so no session starts until that is put right: %v\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol, err)
+	case !otherRoute(now.Model, cfg.Model):
+		fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
+	case now.Name != "":
 		// A saved preset laid over the file names its own model: what
 		// was written runs where none is laid over it.
 		how := now.NameFrom + " lays it here: unset it"
@@ -310,9 +319,9 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 			how = "the project's default_config lays it here: `eagent presets use default` clears that"
 		}
 		fmt.Printf("  the saved preset %q is laid over the project file here and names its own model, so eagent still runs %s @ %s. What was written (%s @ %s) runs where no saved preset is laid over the file; %s.\n", now.Name, now.Model.Model, now.Model.BaseURL, cfg.Model.Model, cfg.Model.BaseURL, how)
-		return 0
+	default:
+		fmt.Printf("  eagent still runs %s @ %s here: a setting outside the project file names its model. What was written (%s @ %s) runs where none does.\n", now.Model.Model, now.Model.BaseURL, cfg.Model.Model, cfg.Model.BaseURL)
 	}
-	fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
 	return 0
 }
 
@@ -396,6 +405,20 @@ func modelMetaLine(m config.Model) string {
 // key variable.
 func otherRoute(a, b config.ModelRoute) bool {
 	return a.Model != b.Model || strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/") || a.Protocol != b.Protocol || a.APIKeyEnv != b.APIKeyEnv
+}
+
+// presetsDiffer says whether two built-in presets give different settings.
+// The empty name is the defaults, which a preset can be too.
+func presetsDiffer(a, b string) bool {
+	lay := func(name string) []byte {
+		c := config.Defaults()
+		if preset, ok := config.Presets[name]; ok {
+			preset(&c)
+		}
+		raw, _ := json.Marshal(c)
+		return raw
+	}
+	return !bytes.Equal(lay(a), lay(b))
 }
 
 // presetAbove is the built-in preset that something above the file's own

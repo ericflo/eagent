@@ -1337,7 +1337,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 							if now.Name != "" {
 								why = append(why, fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name))
 							}
-							if laid, who := presetAbove(project, ""); laid != "" && laid != canon {
+							if laid, who := presetAbove(project, ""); laid != "" && presetsDiffer(laid, canon) {
 								why = append(why, fmt.Sprintf("%s names the preset %s here", who, laid))
 							}
 							if len(why) == 0 {

@@ -104,6 +104,7 @@ func TestK18ServersUseUnderAPresetVariableNamesIt(t *testing.T) {
 		{`{"finalechat":{"enabled":false}}`, true},
 		{`{"preset":"glm","finalechat":{"enabled":false}}`, true},
 		{`{"preset":"openai-high","finalechat":{"enabled":false}}`, false},
+		{`{"preset":"astra","finalechat":{"enabled":false}}`, false}, // another name of the same preset
 	} {
 		project := sr12Clean(t)
 		t.Setenv("DEEPINFRA_API_KEY", "x")
@@ -128,6 +129,70 @@ func TestK18ServersUseUnderAPresetVariableNamesIt(t *testing.T) {
 		cfg, err := config.Load(project, "")
 		if err != nil || code != 0 || !strings.Contains(out, "eagent -> "+cfg.Model.Model+" @ "+cfg.Model.BaseURL) || cfg.Model.Model != "zai-org/GLM-5.3" {
 			t.Fatalf("%s: exit %d (%v), said %q %q; a session runs %s @ %s", c.file, code, err, out, said, cfg.Model.Model, cfg.Model.BaseURL)
+		}
+	}
+}
+
+// The defaults are a preset too (glm). A variable that names it over a
+// file with no preset of its own lays nothing else: `servers use` writes
+// the file, and a session runs what it says.
+func TestK18ServersUseUnderAVariableNamingTheDefaultsIsWritten(t *testing.T) {
+	relay.OfflineCatalogs()
+	project := sr12Clean(t)
+	t.Setenv("DEEPINFRA_API_KEY", "x")
+	if err := os.WriteFile(config.File(project), []byte(`{"finalechat":{"enabled":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EAGENT_PRESET", "glm")
+	var code int
+	var out string
+	said := k18Stderr(t, func() {
+		out = captureStdout(t, func() {
+			code = cmdServersUse(context.Background(), project, []string{"deepinfra", "zai-org/GLM-5.3"}, serverCLIOpts{})
+		})
+	})
+	cfg, err := config.Load(project, "")
+	if err != nil || code != 0 || cfg.Model.BaseURL != "https://api.deepinfra.com/v1/openai" || !strings.Contains(out, "eagent -> zai-org/GLM-5.3 @ https://api.deepinfra.com/v1/openai") {
+		t.Fatalf("exit %d (%v), said %q %q; a session runs %s @ %s", code, err, out, said, cfg.Model.Model, cfg.Model.BaseURL)
+	}
+}
+
+// The line that says what eagent runs is never one for a model no session
+// runs: with the preset variable naming another name of the file's own
+// preset the file is written, and what is printed is what loads.
+func TestK18ServersUseSaysWhatLoads(t *testing.T) {
+	relay.OfflineCatalogs()
+	for _, env := range []string{"", "openai-high", "astra", "glm"} {
+		for _, file := range []string{`{"finalechat":{"enabled":false}}`, `{"preset":"openai-high","finalechat":{"enabled":false}}`, `{"preset":"glm","finalechat":{"enabled":false}}`} {
+			project := sr12Clean(t)
+			t.Setenv("DEEPINFRA_API_KEY", "x")
+			if err := os.WriteFile(config.File(project), []byte(file), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if env != "" {
+				t.Setenv("EAGENT_PRESET", env)
+			}
+			var code int
+			var out string
+			said := k18Stderr(t, func() {
+				out = captureStdout(t, func() {
+					code = cmdServersUse(context.Background(), project, []string{"deepinfra", "zai-org/GLM-5.3"}, serverCLIOpts{})
+				})
+			})
+			raw, _ := os.ReadFile(config.File(project))
+			if code != 0 {
+				if string(raw) != file || !strings.Contains(said, "EAGENT_PRESET names the preset") {
+					t.Errorf("EAGENT_PRESET=%q over %s: exit %d, said %q, file %s", env, file, code, said, raw)
+				}
+				continue
+			}
+			cfg, err := config.Load(project, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if i := strings.Index(out, "eagent -> "); i < 0 || !strings.HasPrefix(out[i:], "eagent -> "+cfg.Model.Model+" @ "+cfg.Model.BaseURL+" ") || cfg.Model.BaseURL != "https://api.deepinfra.com/v1/openai" {
+				t.Errorf("EAGENT_PRESET=%q over %s: said %q; a session runs %s @ %s", env, file, out, cfg.Model.Model, cfg.Model.BaseURL)
+			}
 		}
 	}
 }
