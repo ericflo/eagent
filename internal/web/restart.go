@@ -25,6 +25,13 @@ import (
 // up again on resume; the agents themselves run in terminals of their own
 // and never stopped. A hard kill writes nothing: those sessions come back on
 // the user's next message, as before.
+//
+// The list is serve-hosted.json: {"sessions": [...], "at": ..., "stop":
+// [...]}. "stop" names the listed sessions the user stopped while the
+// server was stopping, whose stop had not been finished (its agents
+// stopped and recorded) when the list was last written: the next server
+// finishes it (finishStop) and does not bring the session back. A list
+// written before "stop" existed has none.
 
 // hostedFile is where a stopping server lists the sessions it was hosting.
 func hostedFile(project string) string {
@@ -34,6 +41,7 @@ func hostedFile(project string) string {
 type hostedList struct {
 	Sessions []string  `json:"sessions"`
 	At       time.Time `json:"at"`
+	Stop     []string  `json:"stop,omitempty"`
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
@@ -58,75 +66,80 @@ func (s *Server) rememberHosted() {
 // forgetHosted takes a session the user stopped off the list, so the next
 // server does not bring it back. Under mu.
 func (s *Server) forgetHosted(id string) {
+	list, ok := s.readHosted()
+	if !ok || !slices.Contains(list.Sessions, id) {
+		return
+	}
+	list.Stop = slices.DeleteFunc(list.Stop, func(x string) bool { return x == id })
+	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, list.Stop)
+}
+
+// markStop notes on the list that the user stopped a listed session, so
+// that the next server finishes the stop rather than bring it back, should
+// this one exit before it has. Under mu.
+func (s *Server) markStop(id string) {
+	list, ok := s.readHosted()
+	if !ok || !slices.Contains(list.Sessions, id) || slices.Contains(list.Stop, id) {
+		return
+	}
+	s.writeHostedList(list.Sessions, list.At, append(list.Stop, id))
+}
+
+// readHosted reads the list. Under mu.
+func (s *Server) readHosted() (hostedList, bool) {
 	raw, err := os.ReadFile(hostedFile(s.Project))
-	if err != nil {
-		return
-	}
 	var list hostedList
-	if json.Unmarshal(raw, &list) != nil || !slices.Contains(list.Sessions, id) {
-		return
-	}
-	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
+	return list, err == nil && json.Unmarshal(raw, &list) == nil
 }
 
 // listed reports whether the list names the session. Under mu.
 func (s *Server) listed(id string) bool {
-	raw, err := os.ReadFile(hostedFile(s.Project))
-	var list hostedList
-	return err == nil && json.Unmarshal(raw, &list) == nil && slices.Contains(list.Sessions, id)
+	list, ok := s.readHosted()
+	return ok && slices.Contains(list.Sessions, id)
 }
 
 // killAgent stops an agent's terminal; tests replace it.
 var killAgent = func(host, target string) error { return relay.HostByName(host).Kill(target) }
 
-// killAgents kills the terminals of the agents a session's record (evs)
-// shows running, as a stop the session takes does (stopSession), but not
-// one it shows exited (its terminal is gone, and nothing is said of it),
-// nor one in killed, where it notes each. It needs no lock: the terminals'
-// names are on the record. It returns who was stopped, and who could not
-// be killed.
-func killAgents(evs []event.Event, killed map[string]bool) (stopped, failed []string) {
-	for _, rel := range state.Replay(evs).ActiveRelays() {
-		if rel.State == "exited" || killed[rel.Name] {
-			continue
-		}
-		killed[rel.Name] = true
-		if rel.Target != "" {
-			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
-				failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
-			}
-		}
-		stopped = append(stopped, rel.Who())
-	}
-	return stopped, failed
-}
-
-// stopAgents records the stop of the agents the record of a session nobody
-// runs shows running, under the session's lock: any not in killed is
-// killed first (killAgents), then each has its relay.end recorded (one
-// that could not be killed too, as stopSession does) and its sends
-// settled. It returns who it stopped, and who it could not kill.
-func stopAgents(path string, killed map[string]bool) (stopped, failed []string, err error) {
+// stopAgents stops the agents the record of a session nobody runs shows
+// running, as a stop the session takes does (stopSession), under the
+// session's lock and from the record as it then stands: for each one, a
+// message still unclaimed in its spool is taken back first (it did not
+// go), its terminal is killed (not that of one the record shows exited:
+// it is gone, and nothing is said of it), its relay.end is recorded (one
+// that could not be killed too, as stopSession does), and its sends are
+// settled: not sent for one taken back, unconfirmed for the rest. It
+// returns who it stopped, and who it could not kill.
+func stopAgents(path string) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer sess.Close()
-	stopped, failed = killAgents(evs, killed)
 	for _, rel := range state.Replay(evs).ActiveRelays() {
 		waiting := unsettled(evs, rel)
+		spool := relaySpool(path, rel)
+		takenBack := map[string]bool{}
+		for _, d := range waiting {
+			if d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
+				takenBack[d.ID] = true
+			}
+		}
+		if rel.State != "exited" {
+			if rel.Target != "" {
+				if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
+					failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
+				}
+			}
+			stopped = append(stopped, rel.Who())
+		}
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
-		// What it was sent and had not shown arriving is settled as
-		// stopSession's settleExited settles it: a message still unclaimed
-		// in its spool is taken back and did not go; the rest is
-		// unconfirmed.
-		spool := relaySpool(path, rel)
 		for _, d := range waiting {
 			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
 				Detail: "the agent was stopped before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
-			if d.Mode == "after_turn" && spool != "" && relay.Unspool(spool, d.ID) {
+			if takenBack[d.ID] {
 				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent was stopped"
 			}
 			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
@@ -172,13 +185,16 @@ func relaySpool(path string, rel *state.Relay) string {
 }
 
 // writeHosted writes the list of sessions to bring back.
-func (s *Server) writeHosted(ids []string, at time.Time) {
+func (s *Server) writeHosted(ids []string, at time.Time) { s.writeHostedList(ids, at, nil) }
+
+// writeHostedList writes the list with the sessions whose stop is asked.
+func (s *Server) writeHostedList(ids []string, at time.Time, stop []string) {
 	path := hostedFile(s.Project)
 	if len(ids) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at}, "", "  ")
+	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at, Stop: stop}, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)
@@ -228,6 +244,17 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			continue
 		}
 		if alive(info.Path) || s.isHosted(id) {
+			continue
+		}
+		if slices.Contains(list.Stop, id) {
+			// The user stopped it while the last server was stopping,
+			// which exited before the stop was done: it is finished here,
+			// and the session stays stopped.
+			if stopped, failed, err := stopAgents(info.Path); err != nil {
+				s.logf("session %s: could not finish the stop asked before the restart: %v", id, err)
+			} else {
+				s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))
+			}
 			continue
 		}
 		reply, _, err := pendingReply(ctx, s.Project, info)

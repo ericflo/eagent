@@ -1,20 +1,22 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
 
 // A Stop during the shutdown for a session whose run here is slow to
-// finish kills the agents before it waits for the run (their terminals
-// are named on the record already): if the process exits during the wait,
-// they are stopped. Their relay.end is recorded once the run has let go.
-// The kill used to come after the wait.
-func TestK9AStopKillsTheAgentsBeforeItWaitsForTheRun(t *testing.T) {
+// finish kills the agents only once the run has let go, from the record as
+// it then stands, each once. (Changed with the stop's redesign: it used to
+// pin a kill before the wait, which killed an agent a restart was
+// replacing and let a still-watching seat sweep the spool.)
+func TestK9AStopKillsTheAgentsOnceTheRunHasLetGo(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := k1Model(t, s, project)
 	kills := make(chan string, 8)
@@ -41,9 +43,8 @@ func TestK9AStopKillsTheAgentsBeforeItWaitsForTheRun(t *testing.T) {
 		close(stopDone)
 	}()
 	k7Waiting(t, "web.(*Server).stopAgentsOf", stopDone) // it waits for the run
-	var before []string
-	for len(kills) > 0 {
-		before = append(before, <-kills)
+	if len(kills) != 0 {
+		t.Fatalf("killed %q before the run let go", <-kills)
 	}
 	_ = lock.Close() // the run lets go at last
 	s.mu.Lock()
@@ -53,11 +54,45 @@ func TestK9AStopKillsTheAgentsBeforeItWaitsForTheRun(t *testing.T) {
 	if c := <-code; c != http.StatusOK {
 		t.Fatalf("stop: %d", c)
 	}
-	if !slices.Equal(before, []string{"tmux eagent-sr-claude"}) {
-		t.Fatalf("killed %q before waiting for the run, want the agent", before)
+	var after []string
+	for len(kills) > 0 {
+		after = append(after, <-kills)
 	}
-	if len(kills) != 0 {
-		t.Fatalf("killed %q again after the run let go, want each agent once", <-kills)
+	if !slices.Equal(after, []string{"tmux eagent-sr-claude"}) {
+		t.Fatalf("killed %q once the run let go, want the agent once", after)
+	}
+	if got := srActiveAgents(t, info); len(got) != 0 {
+		t.Fatalf("the record still shows %q running", got)
+	}
+}
+
+// When the server exits while such a Stop waits, the list it leaves marks
+// the stop, and the next server finishes it (the agents the record shows
+// running stopped and recorded) and does not bring the session back.
+func TestK9TheNextServerFinishesAStopTheLastOneLeft(t *testing.T) {
+	s, project := newTestServer(t)
+	kills := make(chan string, 8)
+	old := killAgent
+	killAgent = func(host, target string) error { kills <- host + " " + target; return nil }
+	t.Cleanup(func() { killAgent = old })
+	info := srAgentSession(t, project)
+	s.mu.Lock()
+	s.writeHostedList([]string{info.ID}, time.Now(), []string{info.ID})
+	s.mu.Unlock()
+	var resumed []string
+	oldRestore := restoreSession
+	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage) error {
+		resumed = append(resumed, id)
+		return nil
+	}
+	t.Cleanup(func() { restoreSession = oldRestore })
+	next := New(project, nil)
+	next.restoreHosted(context.Background())
+	if len(resumed) != 0 {
+		t.Fatalf("the next server brought back %q, which the user had stopped", resumed)
+	}
+	if len(kills) != 1 || <-kills != "tmux eagent-sr-claude" {
+		t.Fatalf("the agent was not stopped")
 	}
 	if got := srActiveAgents(t, info); len(got) != 0 {
 		t.Fatalf("the record still shows %q running", got)
