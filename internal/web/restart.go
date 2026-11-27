@@ -146,10 +146,15 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // settled: not sent for one taken back, unconfirmed for the rest. Then,
 // with the lock still held (no run of the session can come in between),
 // the phone is told, if the record shows the session mirrored to it
-// (mirrored), on the account of cfg (stopConfig; nil: none, and nothing is
-// told), in the thread the record names; logf says why nothing was told.
+// (mirrored), on the account of cfgs that has the session's thread
+// (stopConfigs; none: nothing is told); logf says why nothing was told.
+// A thread that was told is left with project's reply watcher, as a run's
+// own mirror leaves it when it stops (integration.LeftForNextRun): the
+// closing note hides the thread from the watcher's sweep, and a reply
+// sent before it while nothing watched (eagent serve was down, and this
+// is the next one finishing the stop) is still to be found.
 // It returns who it stopped, and who it could not kill.
-func stopAgents(path string, cfg *config.Config, logf func(string, ...any)) (stopped, failed []string, err error) {
+func stopAgents(project, path string, cfgs []config.Config, logf func(string, ...any)) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
 	if err != nil {
 		return nil, nil, err
@@ -190,11 +195,16 @@ func stopAgents(path string, cfg *config.Config, logf func(string, ...any)) (sto
 			}
 		}
 	}
-	if cfg != nil && mirrored(evs) {
+	if len(cfgs) > 0 && mirrored(evs) {
 		// A note the sender is still owed, once posted, is recorded posted
 		// here, in the record this holds, so no later run posts it again.
-		if err := tellPhoneStopped(*cfg, path, func(ev event.Event) { _, _ = sess.Append(ev) }); err != nil && logf != nil {
+		if logf == nil {
+			logf = func(string, ...any) {}
+		}
+		if err := tellPhoneStopped(cfgs, path, func(ev event.Event) { _, _ = sess.Append(ev) }); err != nil {
 			logf("session %s: its phone is not told of the stop: %v", filepath.Base(path), err)
+		} else {
+			integration.LeftForNextRun(project, filepath.Base(path), true, logf)
 		}
 	}
 	return stopped, failed, nil
@@ -215,29 +225,22 @@ func mirrored(evs []event.Event) bool {
 	return false
 }
 
-// sessionConfig is this server's own configuration, or nil when it cannot
-// be loaded.
-func (s *Server) sessionConfig() *config.Config {
-	cfg, err := s.loadConfig("", "")
-	if err != nil {
-		return nil
-	}
-	return &cfg
-}
-
-// stopConfig is the configuration whose phone account a stop this server
-// finishes tells the session's phone on (whether it tells at all is the
-// record's: stopAgents): the project's file, or else this server's own,
-// whichever has its account at the address the record shows the session's
-// thread on (its latest phone.thread; addresses compared as the reply
-// watcher compares accounts, integration.AccountOf); the project's file
-// for a record that names no address. With neither there, nil: nothing is
-// told, and the log says why. (TellPhoneStopped posts only to the thread
-// the record names, and tells nothing when it is not on that account.)
-func (s *Server) stopConfig(info store.Info) *config.Config {
+// stopConfigs are the configurations on whose phone account a stop this
+// server finishes may tell the session's phone (whether it tells at all is
+// the record's: stopAgents): the project's file, then this server's own,
+// each of them whose account is at the address the record shows the
+// session's thread on (its latest phone.thread; addresses compared with
+// integration.AccountOf), one account once; for a record that names no
+// address, the project's file (this server's own when that cannot be
+// loaded). Two of them may name one service with different tokens: the
+// stop tells on the one that has the thread (harness.TellPhoneStopped).
+// With none, nothing is told, and the log says why.
+func (s *Server) stopConfigs(info store.Info) []config.Config {
 	base := threadBase(info.Path)
 	file, fileErr := config.Load(s.Project, "")
 	own, ownErr := s.loadConfig("", "")
+	var out []config.Config
+	seen := map[string]bool{}
 	for _, c := range []struct {
 		cfg config.Config
 		err error
@@ -245,17 +248,20 @@ func (s *Server) stopConfig(info store.Info) *config.Config {
 		if c.err != nil {
 			continue
 		}
-		if base != "" {
-			client, ok := finalechat.Resolve(c.cfg.Finalechat.TokenEnvName(), c.cfg.Finalechat.BaseURL)
-			if !ok || integration.AccountOf(client.BaseURL) != integration.AccountOf(base) {
-				continue
-			}
+		if base == "" {
+			return []config.Config{c.cfg}
 		}
-		cfg := c.cfg
-		return &cfg
+		client, ok := finalechat.Resolve(c.cfg.Finalechat.TokenEnvName(), c.cfg.Finalechat.BaseURL)
+		if !ok || integration.AccountOf(client.BaseURL) != integration.AccountOf(base) || seen[client.Token] {
+			continue
+		}
+		seen[client.Token] = true
+		out = append(out, c.cfg)
 	}
-	s.logf("session %s: its phone is not told of the stop: neither the project's file nor this server's configuration has a phone account at %s, where its thread is", info.ID, base)
-	return nil
+	if len(out) == 0 {
+		s.logf("session %s: its phone is not told of the stop: neither the project's file nor this server's configuration has a phone account at %s, where its thread is", info.ID, base)
+	}
+	return out
 }
 
 // threadBase is the address of the phone service the session's record
@@ -405,7 +411,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 		if alive(info.Path) || s.isHosted(id) {
 			continue
 		}
-		if stopped, failed, err := stopAgents(info.Path, s.stopConfig(info), s.logf); err != nil {
+		if stopped, failed, err := stopAgents(s.Project, info.Path, s.stopConfigs(info), s.logf); err != nil {
 			s.logf("session %s: could not finish the stop asked before the restart (left marked on the list): %v", id, err)
 		} else {
 			s.logf("session %s: finished the stop asked before the restart (stopped %d agent(s), could not kill %d)", id, len(stopped), len(failed))

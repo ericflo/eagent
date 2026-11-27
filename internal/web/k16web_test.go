@@ -109,11 +109,11 @@ func TestSR8AStopTellsThePhoneTheSessionMirroredTo(t *testing.T) {
 	old := tellPhoneStopped
 	t.Cleanup(func() { tellPhoneStopped = old })
 	var told []string
-	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) error {
-		told = append(told, cfg.Finalechat.BaseURL)
+	tellPhoneStopped = func(cfgs []config.Config, _ string, _ func(event.Event)) error {
+		told = append(told, cfgs[0].Finalechat.BaseURL)
 		return nil
 	}
-	if _, _, err := stopAgents(info.Path, s.stopConfig(info), nil); err != nil {
+	if _, _, err := stopAgents(project, info.Path, s.stopConfigs(info), nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, at := range told {
@@ -164,11 +164,11 @@ func TestK16AStopTellsThePhoneOnlyOnTheAccountOfTheSessionsThread(t *testing.T) 
 		s := New(project, func(f string, args ...any) { logged = append(logged, fmt.Sprintf(f, args...)) })
 		s.Bundle = "work"
 		info := k16Thread(t, project, a, b, tc.base)
-		cfg := s.stopConfig(info)
+		cfgs := s.stopConfigs(info)
 		got := ""
 		switch {
-		case cfg == nil:
-		case cfg.Finalechat.BaseURL == b:
+		case len(cfgs) == 0:
+		case cfgs[0].Finalechat.BaseURL == b:
 			got = "file"
 		default:
 			got = "work"

@@ -895,7 +895,7 @@ func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path, s.stopConfig(info), s.logf)
+	stopped, failed, err := stopAgents(s.Project, info.Path, s.stopConfigs(info), s.logf)
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}

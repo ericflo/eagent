@@ -136,7 +136,7 @@ func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
 	k5Kills(t)
 	var told []string
 	old := tellPhoneStopped
-	tellPhoneStopped = func(_ config.Config, path string, _ func(event.Event)) error {
+	tellPhoneStopped = func(_ []config.Config, path string, _ func(event.Event)) error {
 		told = append(told, filepath.Base(path))
 		return nil
 	}

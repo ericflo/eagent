@@ -54,7 +54,10 @@ func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRa
 	}
 	var told []config.Config
 	old := tellPhoneStopped
-	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) error { told = append(told, cfg); return nil }
+	tellPhoneStopped = func(cfgs []config.Config, _ string, _ func(event.Event)) error {
+		told = append(told, cfgs[0])
+		return nil
+	}
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := r11Session(t, project)
 	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {

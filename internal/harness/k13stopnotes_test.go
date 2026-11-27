@@ -72,7 +72,7 @@ func TestSR6TellPhoneStoppedFollowsTheConfigurationTheSessionRan(t *testing.T) {
 	if err != nil || !ran.Finalechat.Wanted() {
 		t.Fatalf("setup: the session's configuration does not want the phone: %v", err)
 	}
-	TellPhoneStopped(ran, filepath.Clean(path), nil)
+	TellPhoneStopped([]config.Config{ran}, filepath.Clean(path), nil)
 	if posts.Load() == 0 {
 		t.Fatalf("a session that ran with the phone on (saved preset phone, the server's --config) was stopped from outside its run: the phone was told nothing (no receipt, no closing note)")
 	}
@@ -86,7 +86,7 @@ func TestSR6TellPhoneStoppedControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	TellPhoneStopped(cfg, path, nil)
+	TellPhoneStopped([]config.Config{cfg}, path, nil)
 	if posts.Load() == 0 {
 		t.Fatalf("control: the phone was told nothing")
 	}
@@ -123,7 +123,7 @@ func TestK13AStopToldFromOutsidePaysWhatTheSenderIsOwed(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	TellPhoneStopped(cfg, sess.Path, record)
+	TellPhoneStopped([]config.Config{cfg}, sess.Path, record)
 	var kinds []string
 	for _, p := range fp.postsWhere(func(map[string]any) bool { return true }) {
 		meta, _ := p["meta"].(map[string]any)
@@ -141,7 +141,7 @@ func TestK13AStopToldFromOutsidePaysWhatTheSenderIsOwed(t *testing.T) {
 	if owed := owedRefusals(evs); len(owed) != 0 {
 		t.Fatalf("the record still owes %+v after the note was posted", owed)
 	}
-	TellPhoneStopped(cfg, sess.Path, record)
+	TellPhoneStopped([]config.Config{cfg}, sess.Path, record)
 	if n, m := len(fp.postsWhere(k1Kind("attachment_refused"))), len(fp.postsWhere(k1Kind("session_end"))); n != 1 || m != 1 {
 		t.Fatalf("told twice: %d owed note(s), %d closing note(s), want one each", n, m)
 	}
@@ -197,7 +197,7 @@ func TestSR6PhoneStopFromOutsideLeavesTheStoppedAgentInTheHeader(t *testing.T) {
 	t.Setenv("FINALECHAT_URL", fp.srv.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_test")
 	closes := len(fp.postsWhere(k1Kind("session_end")))
-	TellPhoneStopped(g.rt.cfg, g.rt.sess.Path, nil)
+	TellPhoneStopped([]config.Config{g.rt.cfg}, g.rt.sess.Path, nil)
 	if n := len(fp.postsWhere(k1Kind("session_end"))); n != closes+1 {
 		t.Fatalf("setup: TellPhoneStopped posted %d closing notes", n-closes)
 	}

@@ -250,10 +250,10 @@ func TestSR9WebAStopOnTheProjectsAccountTellsIt(t *testing.T) {
 	}
 	s.Bundle = "work"
 	info := sr9Session(t, project, a)
-	stop := s.stopConfig(info)
+	stop := s.stopConfigs(info)
 	stopAt := "nothing"
-	if stop != nil {
-		stopAt = stop.Finalechat.BaseURL
+	if len(stop) > 0 {
+		stopAt = stop[0].Finalechat.BaseURL
 	}
 	if stopAt != a {
 		t.Fatalf("thread at %s (the project file's account): the stop tells %s; want %s", a, stopAt, a)
@@ -283,10 +283,10 @@ func TestSR9WebTwoTokensOnOneServiceStopOnTheWorkAccount(t *testing.T) {
 	}
 	s.Bundle = "personal"
 	info := sr9Session(t, project, u)
-	stop := s.stopConfig(info)
+	stop := s.stopConfigs(info)
 	stopTok := "nothing"
-	if stop != nil {
-		stopTok = stop.Finalechat.TokenEnvName()
+	if len(stop) > 0 {
+		stopTok = stop[0].Finalechat.TokenEnvName()
 	}
 	if stopTok != "SR9_WORK" {
 		t.Fatalf("thread on the work account: the stop tells with %s; want $SR9_WORK", stopTok)
@@ -316,23 +316,24 @@ func TestSR9WebAStopOfAMirroredSessionWithThePhoneOffTellsNothing(t *testing.T) 
 	k5Kills(t)
 	info := srAgentSession(t, project)
 	k16Mirrored(t, info)
-	cfg := s.stopConfig(info)
-	if cfg == nil {
+	cfg := s.stopConfigs(info)
+	if len(cfg) == 0 {
 		t.Fatal("setup: no configuration for the stop")
 	}
-	if _, _, err := stopAgents(info.Path, cfg, nil); err != nil {
+	if _, _, err := stopAgents(project, info.Path, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.notes) != 1 {
-		t.Fatalf("a stop of a session whose record shows it mirrored posted %d closing notes, want 1 (the configuration's phone is off: %v)", len(f.notes), !cfg.Finalechat.Wanted())
+		t.Fatalf("a stop of a session whose record shows it mirrored posted %d closing notes, want 1 (the configuration's phone is off: %v)", len(f.notes), !cfg[0].Finalechat.Wanted())
 	}
 }
 
 // k18Accounts is a phone service with two accounts (tokens fc_work and
-// fc_personal) on which only the work account has the thread "t". It
-// keeps each request's method, path and token.
+// fc_personal) on which only the work account has the thread "t" (by its
+// id, and under the session's reference). It keeps each request's method,
+// path and token.
 type k18Accounts struct {
 	mu   sync.Mutex
 	seen []string
@@ -347,7 +348,7 @@ func (f *k18Accounts) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/me"):
 		_, _ = w.Write([]byte(`{"features":["idempotency","activity"]}`))
-	case strings.HasPrefix(r.URL.Path, "/api/v1/threads/t") && tok != "fc_work":
+	case strings.HasPrefix(r.URL.Path, "/api/v1/threads/") && tok != "fc_work":
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no thread"}}`))
 	case r.Method == http.MethodPost:
@@ -383,14 +384,14 @@ func TestK18AStopNeverMakesAThread(t *testing.T) {
 		}
 		return out
 	}
-	on := func(env string) *config.Config {
+	on := func(env string) []config.Config {
 		cfg := config.Defaults()
 		cfg.Finalechat.TokenEnv = env
-		return &cfg
+		return []config.Config{cfg}
 	}
 	var logged []string
 	logf := func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
-	if _, _, err := stopAgents(info.Path, on("K18_PERSONAL"), logf); err != nil {
+	if _, _, err := stopAgents(project, info.Path, on("K18_PERSONAL"), logf); err != nil {
 		t.Fatal(err)
 	}
 	if got := posts("fc_personal"); len(got) != 0 {
@@ -401,7 +402,7 @@ func TestK18AStopNeverMakesAThread(t *testing.T) {
 	}) {
 		t.Fatalf("the log does not say why the phone is not told: %q", logged)
 	}
-	if _, _, err := stopAgents(info.Path, on("K18_WORK"), logf); err != nil {
+	if _, _, err := stopAgents(project, info.Path, on("K18_WORK"), logf); err != nil {
 		t.Fatal(err)
 	}
 	got := posts("fc_work")
