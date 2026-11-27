@@ -69,7 +69,7 @@ type phone struct {
 	posted     map[string]bool   // message ids we created (skipped on poll)
 	questions  map[string]string // eagent question id -> finalechat question id
 	fromPhone  map[string]string // finalechat question id -> eagent question id
-	open       map[string]string // cards being watched: finalechat question id -> eagent question id
+	open       map[string]string // cards that may be open (watched, or an earlier run's): finalechat question id -> eagent question id
 	lastID     string            // newest message id seen, for the poll
 	mirrored   map[int64]string  // user message seq -> the thread message mirroring it
 	receipts   []relayReceipt    // what became of the user's recent messages in a relay (relay_phone.go)
@@ -158,6 +158,13 @@ func (r *Runtime) startPhone() {
 		// a session with no terminal does not end before the card is up.
 		p.mu.Lock()
 		p.reask, p.reaskBy = q.ID, time.Now().Add(phoneReaskWait)
+		// Its cards that earlier runs put up and that may still be open
+		// are checked before a plain message is taken, as a watched card
+		// is: none is watched until it is asked again, and on a service
+		// without client keys none ever is (settleDismissals).
+		for _, fid := range liveCards(r.st, q.ID) {
+			p.open[fid] = q.ID
+		}
 		p.mu.Unlock()
 	}
 	// The message the session was started or resumed with. It was appended
@@ -871,8 +878,14 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			// dismissed before this is their dismissal.
 			for _, fid := range earlier {
 				_ = p.client.Cancel(ctx, fid)
-				if c, err := p.client.Question(ctx, fid, 0); err == nil && c.Status == "dismissed" {
+				c, err := p.client.Question(ctx, fid, 0)
+				if err == nil && c.Status == "dismissed" {
 					p.dismissed(r, qid)
+				}
+				if err == nil && c.Status != "pending" {
+					p.mu.Lock()
+					delete(p.open, fid) // closed for good: nothing to check
+					p.mu.Unlock()
 				}
 			}
 		}

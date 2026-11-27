@@ -14,7 +14,6 @@ import (
 // writes. Their words must not become the answer to the question they
 // just dismissed.
 func TestR14RVEDismissedEarlierCardThenWordsWhileTheAskIsInFlight(t *testing.T) {
-	t.Skip("known, not fixed: on a service without idempotency, the earlier card of a question asked again on resume is withdrawn and checked only once the ask returns; a dismissal of it and a message written meanwhile take the message as the answer (a window left in finding 14 of the fourteenth review; at ecf0cf8 it lasted as long as the earlier card stayed open)")
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	fp.features = []string{"activity", "dismiss", "attachments"}
