@@ -95,11 +95,13 @@ func TestAnAnswerThatIsAPathIsKeptWhileTheSessionRuns(t *testing.T) {
 				}
 				return out
 			}
-			// One of eagent's own commands is still a command.
-			give("/status")
+			// One of eagent's own commands is still a command (/status,
+			// which shows only in eagent's terminal, is words from the
+			// phone: r14inbox_test).
+			give("/kill")
 			s.settled()
 			if got := answers(); len(got) != 0 {
-				t.Fatalf("/status was taken as the answer: %q", got)
+				t.Fatalf("/kill was taken as the answer: %q", got)
 			}
 			give("/home/u/notes.txt")
 			s.waitFor("the answer on the record", func() bool { return len(answers()) == 1 })

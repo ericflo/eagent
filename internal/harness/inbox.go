@@ -214,7 +214,7 @@ func (r *Runtime) handleInboxFile(msg InboxMessage, file string) {
 			return
 		}
 		if r.ownCommand(text, msg.From) {
-			r.slashCommandFrom(text, msg.Client)
+			r.slashCommandFrom(text, msg.From, msg.Client)
 			return
 		}
 		if msg.Route != "" || msg.Delivery != "" || msg.PhoneID != "" {
@@ -235,11 +235,24 @@ func (r *Runtime) handleInboxFile(msg InboxMessage, file string) {
 // terminal and no question is open. Otherwise anything that is not one of
 // eagent's commands is words for eagent's model (or the answer), which may
 // well begin with a slash (a path): "try /help" would show only in a
-// terminal, and the phone or the web would see the message vanish. Loop
+// terminal, and the phone or the web would see the message vanish. For the
+// same reason a command whose output shows only in eagent's terminal, and
+// /dismiss with no question open, are words when they come from the phone
+// or the web, with an agent running (relayPassthrough) or not. Loop
 // goroutine.
 func (r *Runtime) ownCommand(line, source string) bool {
 	if !strings.HasPrefix(line, "/") || r.relayPassthrough(line, source) {
 		return false
+	}
+	if source != "" {
+		switch strings.ToLower(strings.Fields(line)[0]) {
+		case "/status", "/s", "/schedules", "/help", "/?", "/tasks", "/procs":
+			return false
+		case "/dismiss":
+			if r.st.Question == nil {
+				return false
+			}
+		}
 	}
 	if (r.st.Question != nil || source != "") && len(r.st.ActiveRelays()) == 0 && !eagentCommand(line) {
 		return false
