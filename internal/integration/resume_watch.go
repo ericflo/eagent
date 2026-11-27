@@ -215,34 +215,43 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 	}()
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
-	for _, a := range m.Attachments {
+	failed := make([]error, len(m.Attachments))
+	for i, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
 			if errors.Is(ctx.Err(), context.Canceled) {
 				// The watcher is stopping (the serve is), which cut the
-				// fetch off: nobody is told anything and nothing is
-				// taken; the next sweep, or the next serve, reads it.
+				// fetch off: nobody is told anything, about this file or
+				// one before it, and nothing is taken, so the reply is
+				// still the thread's latest message; the next sweep, or
+				// the next serve, reads it.
 				return
 			}
-			// As the running mirror does: the sender is told, and the
-			// session comes back with the rest of the message. The note
-			// gets its own time, as the fetch may have used up the
-			// sweep's. When it cannot be posted nobody would know: the
-			// reply is not taken in, and is kept, quietly, for the sweeps
-			// to read the thread for (an earlier notice may have made
-			// eagent's the thread's latest message).
-			if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, a, err) != nil {
-				w.retries.mu.Lock()
-				if _, kept := w.retries.replies[m.ID]; !kept {
-					w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
-				}
-				w.retries.mu.Unlock()
-				return
-			}
+			failed[i] = err
 			continue
 		}
 		msg.Attachments = append(msg.Attachments, saved)
+	}
+	for i, err := range failed {
+		if err == nil {
+			continue
+		}
+		// As the running mirror does: the sender is told, and the
+		// session comes back with the rest of the message. The note
+		// gets its own time, as the fetch may have used up the
+		// sweep's. When it cannot be posted nobody would know: the
+		// reply is not taken in, and is kept, quietly, for the sweeps
+		// to read the thread for (an earlier notice may have made
+		// eagent's the thread's latest message).
+		if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err) != nil {
+			w.retries.mu.Lock()
+			if _, kept := w.retries.replies[m.ID]; !kept {
+				w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+			}
+			w.retries.mu.Unlock()
+			return
+		}
 	}
 	// A message whose files were all refused (the person was told) still
 	// resumes the session: it takes the message in, so the ones after it

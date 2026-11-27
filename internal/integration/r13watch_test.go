@@ -118,3 +118,38 @@ func TestR13AReplyKeptWhileAQuitsResumeRunsIsNotForgotten(t *testing.T) {
 		t.Fatalf("resumed %v, want the /quit and then the message kept while it ran", got)
 	}
 }
+
+// Finding 16: a reply whose first file is too large to take and whose
+// second is being fetched when the watcher stops (the serve stopping, or
+// the event stream dropping). Nobody is told anything yet and nothing is
+// taken, so the reply is still the thread's latest message; the next
+// sweep takes it with the second file, the sender told once about the
+// first.
+func TestR13AFetchCutOffAfterARefusedFileLeavesTheReplyForTheSweep(t *testing.T) {
+	_, sid, f, fr, host, w := r11Restore(t, r10File("att-2", "shot.png"))
+	front, stall, started := r12Stall(t, fr.srv.URL)
+	w.client = &finalechat.Client{BaseURL: front, Token: "fc_fixture"}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.consider(ctx, finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{}) // as a sweep does
+	}()
+	<-started
+	stop() // the watcher stops while shot.png is being fetched
+	<-done
+	if host.calls() != 0 || len(fr.posted()) != 0 {
+		t.Fatalf("after the stop cut the download off: resumed %#v, posted %q", host.resumed, fr.posted())
+	}
+	if p := r10Preview(f, sid); p != "user" {
+		t.Fatalf("the thread's latest message is from %q, want the reply", p)
+	}
+	stall.Store(false)
+	w.sweep(context.Background())
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 1 {
+		t.Fatalf("the next sweep: resumed %#v", host.resumed)
+	}
+	if n := r11Told(fr, "clip.mov"); n != 1 {
+		t.Fatalf("%d notices about clip.mov: %q", n, fr.posted())
+	}
+}
