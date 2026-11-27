@@ -413,6 +413,12 @@ func (r *Runtime) needsDossier() bool {
 					}
 				case fullAgain:
 					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting for that. I carry on with a conversation longer than it should be, which makes each answer slower and dearer, and restart it from my notes when it reaches my model's window. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
+					if !restartHelps(restartFacts{refusedAfterCalls: true, rescues: facts.rescues}) {
+						// The restarts in a row are past the bound even
+						// for one at the window (restartHelps): none is
+						// made there either.
+						text = fullNotice + ": after several restarts in a row, the new conversation was again past my restart size on its very first call, so I've stopped restarting. I carry on with a conversation longer than it should be, which makes each answer slower and dearer. When it reaches my model's window I can't restart it again; a model with a larger context, picked in this thread's settings, would take it then. Raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help too."
+					}
 				}
 				r.recordMessage(event.MessageData{Auto: true, Important: true, Text: text})
 			}
@@ -421,6 +427,29 @@ func (r *Runtime) needsDossier() bool {
 		return false
 	}
 	return true
+}
+
+// restartRuns reports that needsDossier, asked now, would restart the
+// conversation: the same questions in the same order, with nothing said or
+// logged (that is needsDossier's to do when it is asked). Loop goroutine
+// only.
+func (r *Runtime) restartRuns() bool {
+	t := &r.turns
+	if t.compacting || time.Since(t.dossierFailedAt) < dossierRetry {
+		return false
+	}
+	if t.adopt || r.st.Unfinished() {
+		return true
+	}
+	if r.restartDecided() {
+		return false
+	}
+	limit := r.rolloverTokens()
+	if !t.overflowed && r.contextTokens() < limit {
+		return false
+	}
+	cur := r.st.Current()
+	return !(cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || t.overflowed) && r.restartFull(limit))
 }
 
 // restartFull reports, once the first call after a restart was already too
@@ -665,9 +694,9 @@ func (r *Runtime) recordedSinceOpening(through int64) bool {
 }
 
 // turnEnded reports that a turn of the conversation in the current file
-// ran to its end: one on the record that ended "done", or a look that
-// left no record but its batch (event.Checks with a SeenSeq; a reply sent
-// back for another try sets none). Loop goroutine only.
+// ran to its end: one on the record that ended "done". A look that left
+// no record but its batch (event.Checks) is not one: it added nothing to
+// the conversation. Loop goroutine only.
 func (r *Runtime) turnEnded() bool {
 	cur := r.st.Current()
 	if cur == nil {
@@ -679,11 +708,7 @@ func (r *Runtime) turnEnded() bool {
 			continue
 		}
 		var turn event.TurnData
-		var looks event.ChecksData
-		switch {
-		case ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done":
-			return true
-		case ev.Type == event.Checks && ev.Decode(&looks) == nil && looks.SeenSeq > 0:
+		if ev.Type == event.TurnEnd && ev.Decode(&turn) == nil && turn.Reason == "done" {
 			return true
 		}
 	}
