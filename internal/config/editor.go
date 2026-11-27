@@ -253,6 +253,27 @@ func Resolve(project, preset, bundle string) Resolution {
 	return res
 }
 
+// EnvMoved says what the environment did to the route at ptr ("/model" or
+// "/summarizer/model"), by the loader's own rule: whether it named another
+// model (model), and whether it moved the route to another model or
+// address (route, moved: a trailing slash is no move). A summarizer route
+// the environment makes is measured from the main route it copies.
+func (r Resolution) EnvMoved(ptr string) (model, route bool) {
+	before, after := r.Layered.Model, r.Effective.Model
+	if ptr == "/summarizer/model" {
+		if r.Effective.Summarizer.Model == nil {
+			return false, false
+		}
+		after = *r.Effective.Summarizer.Model
+		if r.Layered.Summarizer.Model != nil {
+			before = *r.Layered.Summarizer.Model
+		} else {
+			before = r.Effective.Model
+		}
+	}
+	return after.Model != before.Model, moved(before, after)
+}
+
 // fileSetsRoutes reports whether the project file decides the model or the
 // summarizer.
 func fileSetsRoutes(sources map[string]string) bool {
