@@ -76,6 +76,7 @@ type phone struct {
 	sendSeq    map[string]int64  // relay send id -> the user message it forwarded
 	gone       map[string]bool   // eagent question ids dismissed, cancelled or expired on the phone
 	taken      map[string]bool   // cards whose answer has been taken (handOver, markAnswerTaken, the record)
+	asMessage  map[string]bool   // eagent question ids this run's ask found sent to the thread as a message
 	threadID   string
 	threadSeen bool
 	dropping   bool // the last enqueue found the queue full
@@ -176,6 +177,7 @@ func (r *Runtime) startPhone() {
 	// answer) must be withdrawn: the mirror did not exist to do it then.
 	cards := map[string]string{}
 	var closedCards []string
+	settled := map[string]string{} // of those, ones the thread was sent as a message: question id -> text
 	for _, ev := range r.st.Events {
 		var d event.PhoneQuestionData
 		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.CardID != "" {
@@ -216,6 +218,9 @@ func (r *Runtime) startPhone() {
 					_ = ev.Decode(&d)
 					if d.Source != "finalechat" {
 						prompt, promptSeq = d.Text, ev.Seq
+						if len(postedAsMessage(r.st, d.QuestionID)) > 0 {
+							settled[d.QuestionID] = askedText(r.st, d.QuestionID)
+						}
 					}
 					if fid := cards[d.QuestionID]; fid != "" {
 						closedCards = append(closedCards, fid)
@@ -392,6 +397,9 @@ func (r *Runtime) startPhone() {
 		for _, fid := range closedCards {
 			_ = p.client.Cancel(ctx, fid) // already resolved is fine
 		}
+		for qid, text := range settled {
+			p.settledNote(ctx, qid, text, "answered")
+		}
 		if pending != nil {
 			// A resumed session still waiting on a question asks it again,
 			// since the earlier phone question expired or was never posted.
@@ -538,6 +546,31 @@ func (p *phone) enqueue(fn func(context.Context)) bool {
 		}
 		return false
 	}
+}
+
+// settledNote tells the thread that a question it was sent as a message
+// (the service refused the card) was answered or dismissed elsewhere: a
+// message cannot be withdrawn as a card is. text is the question as asked.
+func (p *phone) settledNote(ctx context.Context, qid, text, how string) {
+	act := p.attach()
+	body := fmt.Sprintf("The question %q was %s elsewhere.", clipLabel(text, 120), how)
+	msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Sender: "system", Format: "text", Notify: boolPtr(false), Meta: map[string]any{"eagent": "notice", "kind": "question_settled", "question_id": qid}, ClientKey: p.key("settled", qid), Activity: act})
+	if err == nil {
+		p.rememberIn(msg, thread)
+		p.markSent(act)
+	}
+}
+
+// askedText is the text question qid was asked with, "" when the record
+// does not hold it.
+func askedText(st *state.State, qid string) string {
+	for i := len(st.Events) - 1; i >= 0; i-- {
+		var d event.QuestionData
+		if ev := st.Events[i]; ev.Type == event.Question && ev.Decode(&d) == nil && d.ID == qid {
+			return d.Text
+		}
+	}
+	return ""
 }
 
 // saidDropped tells the thread that updates to it were dropped (enqueue).
@@ -721,12 +754,15 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				return
 			}
 		}
+		// Sent to the thread as a message in an earlier run (this run's ask
+		// says so itself, on the worker).
+		asked, earlier := askedText(r.st, qid), len(postedAsMessage(r.st, qid)) > 0
 		// Answered elsewhere: withdraw the phone question and show the choice.
 		p.enqueue(func(ctx context.Context) {
 			// Read the phone's id here, not at enqueue time: the ask call that
 			// learns it runs on this same queue, just ahead of us.
 			p.mu.Lock()
-			fid := p.questions[qid]
+			fid, asMessage := p.questions[qid], p.asMessage[qid] || earlier
 			p.mu.Unlock()
 			if fid != "" && fid != d.CardID {
 				_ = p.client.Cancel(ctx, fid)
@@ -735,6 +771,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				if c != fid {
 					_ = p.client.Cancel(ctx, c) // already resolved is fine
 				}
+			}
+			if asMessage && d.Source != "finalechat" {
+				p.settledNote(ctx, qid, asked, "answered")
 			}
 			if d.Source != "finalechat" && p.mirror {
 				msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
@@ -754,9 +793,10 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		p.gone[qid] = true
 		p.mu.Unlock()
 		recorded := liveCards(r.st, qid) // an earlier run's card among them, as for an answer
+		asked, earlier := askedText(r.st, qid), len(postedAsMessage(r.st, qid)) > 0
 		p.enqueue(func(ctx context.Context) {
 			p.mu.Lock()
-			fid := p.questions[qid]
+			fid, asMessage := p.questions[qid], p.asMessage[qid] || earlier
 			p.mu.Unlock()
 			if fid != "" {
 				_ = p.client.Dismiss(ctx, fid)
@@ -765,6 +805,9 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				if c != fid {
 					_ = p.client.Dismiss(ctx, c)
 				}
+			}
+			if asMessage && d.Source != "finalechat" {
+				p.settledNote(ctx, qid, asked, "dismissed")
 			}
 		})
 	case event.RelayStart, event.RelayState, event.RelayTurn, event.RelayAutopilot, event.RelayEnd:
@@ -906,23 +949,31 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			p.mu.Lock()
 			here := p.threadID
 			p.mu.Unlock()
+			sent := func() {
+				p.mu.Lock()
+				if p.asMessage == nil {
+					p.asMessage = map[string]bool{}
+				}
+				p.asMessage[qid] = true // settled elsewhere, the thread is told (settledNote)
+				p.mu.Unlock()
+			}
 			if key == "" && asMessage[here] {
+				sent()
 				return
 			}
 			// It carries the waiting line, as the card would have.
 			if m, thread, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text"), Activity: act}); perr == nil {
 				p.rememberIn(m, thread)
 				p.markSent(act)
-				if key == "" {
-					p.mu.Lock()
-					in := p.threadID
-					p.mu.Unlock()
-					r.post(func() {
-						if !r.ending {
-							r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, ThreadID: in}))
-						}
-					})
-				}
+				sent()
+				p.mu.Lock()
+				in := p.threadID
+				p.mu.Unlock()
+				r.post(func() {
+					if !r.ending {
+						r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, ThreadID: in}))
+					}
+				})
 				return
 			}
 		}
