@@ -205,6 +205,21 @@ func (s *Server) writeHostedList(ids []string, at time.Time, stop []string) {
 	}
 }
 
+// ranSince reports whether the session's record shows a run that began
+// after at (a session.resume written later).
+func ranSince(path string, at time.Time) bool {
+	evs, err := store.Read(path)
+	if err != nil {
+		return false
+	}
+	for _, ev := range evs {
+		if ev.Type == event.SessionResume && ev.Time.After(at) {
+			return true
+		}
+	}
+	return false
+}
+
 // restoreSession resumes one session, with the reply that came while it was
 // down if there is one; tests substitute it.
 var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error { return s.Resume(id, reply) }
@@ -246,7 +261,12 @@ func (s *Server) restoreHosted(ctx context.Context) {
 		if alive(info.Path) || s.isHosted(id) {
 			continue
 		}
-		if slices.Contains(list.Stop, id) {
+		if slices.Contains(list.Stop, id) && ranSince(info.Path, list.At) {
+			// The mark was for a run before one since (the session was
+			// resumed elsewhere after the list was written): it no longer
+			// says what the user wants of the session as it is now.
+			s.logf("session %s: the stop asked before the restart no longer holds: the session has run since", id)
+		} else if slices.Contains(list.Stop, id) {
 			// The user stopped it while the last server was stopping,
 			// which exited before the stop was done: it is finished here,
 			// and the session stays stopped.
