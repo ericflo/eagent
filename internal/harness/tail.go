@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -370,17 +371,34 @@ func (r *Runtime) userTail(who string) string {
 	// What a message typed into the agent's terminal is said to have done
 	// follows its send's outcome on the record.
 	var passed, waiting, failed, unsure int
-	for _, id := range r.passedSends() {
-		switch r.st.SendOutcome(id) {
+	// When the messages ended differently, each sentence names the ones
+	// it is about, quoted, in the order they were written.
+	sends := r.passedSends()
+	seqs := make([]int64, 0, len(sends))
+	for seq := range sends {
+		seqs = append(seqs, seq)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+	named := map[*int][]string{}
+	for _, seq := range seqs {
+		n := &failed // not_sent, or no send recorded
+		switch r.st.SendOutcome(sends[seq]) {
 		case state.SendArrived:
-			passed++
+			n = &passed
 		case state.SendWaiting, state.SendHeld:
-			waiting++
+			n = &waiting
 		case state.SendUnconfirmed:
-			unsure++
-		default: // not_sent, or no send recorded
-			failed++
+			n = &unsure
 		}
+		*n++
+		text, _, _ := userEventText(r.st, seq)
+		named[n] = append(named[n], fmt.Sprintf("%q", clipRunes(oneLine(text, 80), 80)))
+	}
+	which := func(n *int) string {
+		if len(named) < 2 {
+			return ""
+		}
+		return " (" + strings.Join(named[n], ", ") + ")"
 	}
 	var parts []string
 	if answered > 0 {
@@ -397,16 +415,16 @@ func (r *Runtime) userTail(who string) string {
 		parts = append(parts, s)
 	}
 	if passed > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and the message was typed into %s's terminal as written the moment it arrived. Say in one short line that it reached %s (and, if %s was in the middle of a turn, that it reads it at its next step); do not repeat the message back or answer it. Hold instead if %s has already answered it. Beyond that it needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs (add that with relay_send).", who, who, who, who, who, who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message%s was typed into %s's terminal as written the moment it arrived. Say in one short line that it reached %s (and, if %s was in the middle of a turn, that it reads it at its next step); do not repeat the message back or answer it. Hold instead if %s has already answered it. Beyond that it needs something from you only if it sets a standing order to keep %s going, says how often they want to hear from you, or lacks something %s needs (add that with relay_send).", which(&passed), who, who, who, who, who, who))
 	}
 	if waiting > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and the message was passed to %s as written; it waits to be taken up. Say in one short line that it was passed on and waits to be taken up; do not repeat the message back or answer it. Hold instead if %s has already answered it.", who, who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message%s was passed to %s as written; it waits to be taken up. Say in one short line that it was passed on and waits to be taken up; do not repeat the message back or answer it. Hold instead if %s has already answered it.", which(&waiting), who, who))
 	}
 	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and the message to %s did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong.", who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and the message%s to %s did not go; nothing of it reached it. Send it again (relay_forward sends a message of the user's again as written) or say what is wrong.", which(&failed), who))
 	}
 	if unsure > 0 {
-		parts = append(parts, fmt.Sprintf("The user wrote, and whether the message reached %s could not be confirmed. Look at relay_screen, then send it again or say what is wrong.", who))
+		parts = append(parts, fmt.Sprintf("The user wrote, and whether the message%s reached %s could not be confirmed. Look at relay_screen, then send it again or say what is wrong.", which(&unsure), who))
 	}
 	if len(parts) == 0 {
 		return "The user wrote."

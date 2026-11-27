@@ -249,3 +249,44 @@ func TestK2APhoneMessageTheRecordCouldNotTakeIsTakenOnce(t *testing.T) {
 		t.Fatalf("taken %d times, want once", n)
 	}
 }
+
+// B18: two messages for the agent since the last look ended differently,
+// one typed into its terminal and one that did not go. Each outcome's
+// sentence names the message it means, so the model can tell which to
+// send again; with one outcome among them the sentences read as before.
+func TestK2EachOutcomeSaysWhichMessageItMeans(t *testing.T) {
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	useFakeRelays(t, newFakeSeat("ok"))
+	rt, err := New(testConfig("http://127.0.0.1:1"), Options{Project: t.TempDir(), Relay: "codex"}, &fakeUI{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.sess.Close()
+	send := func(text, id string, ok bool) {
+		m := rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: text}))
+		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: id, From: "user", Seq: m.Seq, Mode: "queue", Text: text, Auto: true}))
+		d := event.RelayDeliveredData{Name: "codex", ID: id, OK: ok}
+		if !ok {
+			d.Outcome = event.DeliveryNotSent
+		}
+		rt.append(event.New(event.RelayDelivered, event.ActorHarness, d))
+	}
+	send("run the tests", "k2a", true)
+	one := rt.userTail("Codex")
+	send("and update the docs", "k2b", false)
+	both := rt.userTail("Codex")
+	if strings.Contains(one, `"run the tests"`) {
+		t.Fatalf("with one outcome the sentence names its message: %q", one)
+	}
+	for _, s := range strings.SplitAfter(both, ". ") {
+		switch {
+		case strings.Contains(s, "typed into") && !strings.Contains(s, `"run the tests"`):
+			t.Fatalf("the sentence for the message that arrived does not say which it is: %q", both)
+		case strings.Contains(s, "did not go") && !strings.Contains(s, `"and update the docs"`):
+			t.Fatalf("the sentence for the message that did not go does not say which it is: %q", both)
+		}
+	}
+	if !strings.Contains(both, "typed into") || !strings.Contains(both, "did not go") {
+		t.Fatalf("setup: %q", both)
+	}
+}
