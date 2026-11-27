@@ -285,7 +285,8 @@ func (s *Seat) restore(list []Restored) {
 //
 // The state the history left the seat in (foldHistory) is said here, once:
 // working, or idle when the history showed a turn end. A history that ends
-// inside a turn leaves a relay the record says is blocked blocked.
+// inside a turn leaves a relay the record says is blocked blocked; one
+// with no turn in it leaves a relay starting or blocked as the record says.
 func (s *Seat) caughtUp(now time.Time) {
 	s.mu.Lock()
 	if !s.catchingUp {
@@ -319,6 +320,12 @@ func (s *Seat) caughtUp(now time.Time) {
 	kept := s.attached && state == "working" && s.spec.State == "blocked"
 	if kept {
 		s.state, s.hung = "blocked", true
+	}
+	// No turn begun or ended in the history (none read yet, or no
+	// transcript): a record that said starting or blocked still does, and
+	// the screen settles it (wantsDialogCheck) as for the seat that said it.
+	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
+		s.state = s.spec.State
 	}
 	s.mu.Unlock()
 	if !kept && (state != "idle" || ended) {
@@ -613,12 +620,18 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 	deadline := time.Now().Add(limit)
 	for {
 		s.mu.Lock()
-		state, closed, hung := s.state, s.closed, s.hung
+		state, closed, hung, catching := s.state, s.closed, s.hung, s.catchingUp
 		s.mu.Unlock()
 		if closed {
 			// Nothing watches this seat any more, so its state is stale and
 			// it is no longer the relay's terminal.
 			return state, ErrClosed
+		}
+		if catching && state != "exited" {
+			// Reattached: what the agent is doing is known once the watcher
+			// has read the transcript to its end (caughtUp). Until then a send
+			// waits as for a start.
+			state = "starting"
 		}
 		switch state {
 		case "starting":
@@ -1061,12 +1074,18 @@ func (s *Seat) watch() {
 	lastAlive := time.Now()
 	lastDialog := time.Time{}
 	missed := 0 // liveness checks in a row that found no pane
+	s.mu.Lock()
+	wait := !s.catchingUp // a reattached seat looks at once: a send waits for its catch-up (waitReady)
+	s.mu.Unlock()
 	for {
-		select {
-		case <-s.stop:
-			return
-		case <-tick.C:
+		if wait {
+			select {
+			case <-s.stop:
+				return
+			case <-tick.C:
+			}
 		}
+		wait = true
 		now := time.Now()
 		s.mu.Lock()
 		moved, movedTo := s.refollow, s.inner
@@ -1500,10 +1519,13 @@ func (s *Seat) reportDialog(title string) {
 	}
 	s.dialogUp = title
 	if title != "" {
-		s.hung = false // a dialog holds it now: nothing is typed into it
 		if prev == "" {
 			s.dialogPrev = state
+			if state == "blocked" && s.hung {
+				s.dialogPrev = "working" // blocked only for going quiet in a turn
+			}
 		}
+		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
 		s.setState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys")
 		return
@@ -1516,6 +1538,9 @@ func (s *Seat) reportDialog(title string) {
 	}
 	if back == "" || back == "blocked" {
 		back = "idle"
+		if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
+			back = "working" // its own status says it is in a turn
+		}
 	}
 	s.setState(back, "")
 }
