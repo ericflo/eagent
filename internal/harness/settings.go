@@ -73,7 +73,15 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	}
 	// Resolve every changed route before recording anything, so a route
 	// that cannot run fails the change instead of being reported as applied.
-	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes)
+	// A configuration chosen in this change (/config) runs its routes as it
+	// defines them; values.Config otherwise only names where they came from.
+	chosen := ""
+	for _, e := range q.Proposal.Edits {
+		if e.Key == "/config" {
+			chosen = values.Config
+		}
+	}
+	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes, chosen)
 	if err != nil {
 		return refuse(err)
 	}
@@ -133,15 +141,17 @@ type routeSwap struct {
 // routeChanges resolves the models whose pick changed. One whose pick did
 // not change keeps its routes, including a fallback it switched to. A
 // changed pick starts from the configured route (see config.PickRoute:
-// limits stay, another model drops the old model's fallback chain).
-func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([]routeSwap, error) {
+// limits stay, another model drops the old model's fallback chain), or,
+// with a configuration chosen in the same change (chosen: the values'
+// Config), from that configuration's route as it defines it.
+func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route, chosen ...string) ([]routeSwap, error) {
 	var out []routeSwap
 	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
 		pick, ok := after[who]
 		if !ok || pick == before[who] || pick.Model == "" || r.models[who] == nil {
 			continue
 		}
-		a, err := r.resolvePick(who, pick)
+		a, err := r.resolvePick(who, pick, chosen...)
 		if err != nil {
 			return nil, err
 		}
@@ -170,9 +180,28 @@ func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([
 // chain the pick names (the first route picked again is that route, with
 // its fallbacks), else the one of the routes a settings pick put in place.
 // A pick of another model has none: it starts from the configured route.
-func (r *Runtime) pickBase(who string, pick runtimecontrol.Route) (config.ModelRoute, bool) {
+// A configuration chosen in the change comes first: a pick that names its
+// route runs that route as the configuration defines it (fallback, reply
+// ceiling and key variable included).
+func (r *Runtime) pickBase(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, bool) {
 	project := r.opts.Project
 	m := r.models[who]
+	if len(chosen) > 0 && chosen[0] != "" {
+		var cfg config.Config
+		var err error
+		if b, isBundle := strings.CutPrefix(chosen[0], "bundle:"); isBundle {
+			cfg, err = config.LoadBundle(project, "", b)
+		} else {
+			cfg, err = config.ChosenPreset(project, chosen[0])
+		}
+		route := cfg.Model
+		if who == runtimecontrol.RouteSummarizer {
+			route = cfg.Summarizer.Route(cfg.Model)
+		}
+		if entry, ok := runtimecontrol.ChainEntry(project, route, pick); err == nil && ok {
+			return entry, true
+		}
+	}
 	if cur := m.confAt(); cur != nil && runtimecontrol.Names(project, *cur, pick) {
 		return *cur, true
 	}
@@ -187,9 +216,9 @@ func (r *Runtime) pickBase(who string, pick runtimecontrol.Route) (config.ModelR
 // resolvePick is the configured route a changed pick of who's model
 // starts from: the entry of a chain the session has that the pick names
 // (pickBase), else the configured route picked from the catalog.
-func (r *Runtime) resolvePick(who string, pick runtimecontrol.Route) (config.ModelRoute, error) {
+func (r *Runtime) resolvePick(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, error) {
 	var a config.ModelRoute
-	base, known := r.pickBase(who, pick)
+	base, known := r.pickBase(who, pick, chosen...)
 	switch {
 	case known && pick.Provider == "":
 		// An address no provider knows has no catalog to pick from:
