@@ -278,7 +278,13 @@ func (s *State) applyRelay(ev event.Event) {
 		r.Turns++
 		r.LastTurn, r.LastTurnAt = d.Text, ev.Time
 		r.Recent = nil
-		r.State, r.StateSince = "idle", ev.Time
+		// A turn that ends under a dialog the agent reports leaves it
+		// blocked: the dialog still holds it, and its seat says when it no
+		// longer does (relay.state). Any other turn makes it idle, a quiet
+		// agent's among them (its idle, which follows, is not recorded).
+		if r.State != "blocked" || r.Dialog == "" {
+			r.State, r.StateSince = "idle", ev.Time
+		}
 	case event.RelayLimit:
 		var d event.RelayLimitData
 		_ = ev.Decode(&d)

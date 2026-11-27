@@ -1067,9 +1067,18 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 			}
 			return
 		}
+		dialog := ""
+		if cur := r.st.Relays[name]; cur != nil {
+			dialog = cur.Dialog
+		}
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog}))
 		if ev.State == "idle" {
 			r.applyWaitingRepick(name)
+			if dialog != "" {
+				// A dialog the agent reports held it, through a turn's end
+				// that left the record blocked: idle now, as at that end.
+				r.armAutopilotCheck(name)
+			}
 		}
 		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
 			r.settleExited(rel)

@@ -8,6 +8,41 @@ import (
 	"github.com/ericflo/eagent/internal/state"
 )
 
+// A11, its turn half. pi on autopilot ends a turn under a dialog it
+// reports: the record stays blocked (the dialog still holds it), so the
+// autopilot idle check is not armed while the dialog is up; when the seat
+// says the dialog is over (idle), the record is idle and the check is
+// armed for that turn.
+func TestK3ATurnUnderADialogKeepsTheRecordBlockedAndArmsTheIdleCheckAfter(t *testing.T) {
+	seat := newK1HeldSeat()
+	useGatedLaunches(t, []relaySeat{seat}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		rt.append(event.New(event.RelayAutopilot, event.ActorHarness, event.RelayAutopilotData{Name: "codex", Instruction: "keep going", Decide: true}))
+	})
+	seat.set("working")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	seat.setDialog(k1DialogTitle)
+	seat.emit(k1DialogUp, relay.Event{Kind: relay.KindTurn, Text: "Built it."})
+	k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 })
+	rt.sync(func() {
+		if st := rt.st.Relays["codex"].State; st != "blocked" {
+			t.Errorf("the record says %s after a turn under the dialog, want blocked", st)
+		}
+		if rt.autopilotChecks["codex"] != nil {
+			t.Error("the idle check was armed while the dialog is up")
+		}
+	})
+	seat.set("idle")
+	seat.emit(relay.Event{Kind: relay.KindState, State: "idle"})
+	k1Relay(t, rt, "idle after the dialog", func(rel *state.Relay) bool { return rel.State == "idle" })
+	rt.sync(func() {
+		if rt.autopilotChecks["codex"] == nil {
+			t.Error("the idle check was not armed once the dialog was over")
+		}
+	})
+}
+
 // The dialog check (ef3d293) reads the seat's own word that a dialog holds
 // it, not the blocked state's text: an agent quiet for ten minutes whose
 // screen, quoted in that text, happens to show the words a dialog's notice
