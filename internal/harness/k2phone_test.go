@@ -230,12 +230,10 @@ func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
 }
 
 // B10: a file from the phone cannot be fetched, and the service refuses
-// the note that would tell the sender, every time. The message is held
-// back a bounded number of reads; then the words are taken once, and the
-// session's log says the file was dropped and that the sender could not
-// be told.
+// the note that would tell the sender. The words are taken once, as
+// before; the session's log says the file was dropped and that the
+// sender could not be told.
 func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
-	setFor(t, &phoneRetryStep, 5*time.Millisecond)
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
