@@ -1507,10 +1507,13 @@ func (s *Seat) reportDialog(title string) {
 	}
 	s.dialogUp = title
 	if title != "" {
-		s.hung = false // a dialog holds it now: nothing is typed into it
 		if prev == "" {
 			s.dialogPrev = state
+			if state == "blocked" && s.hung {
+				s.dialogPrev = "working" // blocked only for going quiet in a turn
+			}
 		}
+		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
 		s.setState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys")
 		return
@@ -1523,6 +1526,9 @@ func (s *Seat) reportDialog(title string) {
 	}
 	if back == "" || back == "blocked" {
 		back = "idle"
+		if wr, ok := s.agent.(workReporter); ok && wr.reportedWorking(s) {
+			back = "working" // its own status says it is in a turn
+		}
 	}
 	s.setState(back, "")
 }

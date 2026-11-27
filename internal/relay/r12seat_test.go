@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"os"
+	"slices"
 	"testing"
 	"time"
 )
@@ -51,6 +53,69 @@ func TestR12AReattachWithNothingInTheHistoryKeepsTheRecordedState(t *testing.T) 
 		}
 		if len(said) != 1 || said[0] != "idle" || s.Snapshot().State != "idle" {
 			t.Errorf("record %s: at the prompt said %v and the seat is %s; want idle", recorded, said, s.Snapshot().State)
+		}
+	}
+}
+
+// stateEvents is the states a seat said, in order.
+func stateEvents(s *Seat) []string {
+	var said []string
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindState {
+			said = append(said, ev.State)
+		}
+	}
+	return said
+}
+
+// Finding 9: pi went quiet for ten minutes in a turn (blocked, hung), then
+// its extension reports a dialog, which is answered with no transcript
+// line in between. pi is still in its turn: the seat goes back to working,
+// not idle, whether pi's status says it works (closed) or says nothing
+// any more (gone).
+func TestR12APiDialogOverAQuietTurnGoesBackToWorking(t *testing.T) {
+	t.Parallel()
+	pi := piAgent{label: "Pi"}
+	for _, end := range []string{"closed", "gone"} {
+		s, status := piReadySeat(t, piFooterScreen, &piStatus{State: "working", SessionFile: "/x.jsonl", SessionID: "id"})
+		now := time.Now()
+		s.state, s.stateAt, s.lastLine = "working", now.Add(-11*time.Minute), now.Add(-11*time.Minute)
+		s.checkScreen(now)
+		if st := s.Snapshot().State; st != "blocked" || !s.hung {
+			t.Fatalf("%s: not marked quiet: %s", end, st)
+		}
+		drain(s.events)
+		writePiStatus(t, status, piStatus{State: "working", Prompt: "Allow rm -rf build?", SessionFile: "/x.jsonl", SessionID: "id"})
+		s.reportDialog(pi.reportedDialog(s))
+		if end == "closed" {
+			writePiStatus(t, status, piStatus{State: "working", SessionFile: "/x.jsonl", SessionID: "id"})
+		} else if err := os.Remove(status); err != nil {
+			t.Fatal(err)
+		}
+		s.reportDialog(pi.reportedDialog(s))
+		if said := stateEvents(s); !slices.Equal(said, []string{"blocked", "working"}) || s.Snapshot().State != "working" {
+			t.Errorf("%s: said %v and the seat is %s; want blocked, working", end, said, s.Snapshot().State)
+		}
+	}
+}
+
+// Finding 9, the dialog over a seat blocked for another reason (here the
+// record's blocked kept on a reattach with no turn in the history): when it
+// closes and pi's status says pi works, the seat says working; when pi is
+// idle, idle as before.
+func TestR12APiDialogClosingOnAWorkingPiSaysWorking(t *testing.T) {
+	t.Parallel()
+	pi := piAgent{label: "Pi"}
+	for _, after := range []string{"working", "idle"} {
+		status := t.TempDir() + "/pi-status.json"
+		writePiStatus(t, status, piStatus{State: "idle", Prompt: "Resume the goal?"})
+		s := attachSeat(Spec{State: "blocked", StatusFile: status}, pi, &fakeHost{alive: true, screen: piFooterScreen}, "x", "", "", time.Now().Add(-time.Minute))
+		s.caughtUp(time.Now())
+		s.reportDialog(pi.reportedDialog(s))
+		writePiStatus(t, status, piStatus{State: after})
+		s.reportDialog(pi.reportedDialog(s))
+		if said := stateEvents(s); !slices.Equal(said, []string{"blocked", after}) || s.Snapshot().State != after {
+			t.Errorf("pi %s: said %v and the seat is %s; want blocked, %s", after, said, s.Snapshot().State, after)
 		}
 	}
 }
