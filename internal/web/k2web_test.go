@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,8 +10,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/integration"
 )
 
 // k2Page runs script after the page's send() in node, with what send()
@@ -92,6 +95,36 @@ func TestK2ResumeButtonWaitsForTheBrowsersResume(t *testing.T) {
 	}
 	if w := <-button; w.Code != http.StatusConflict {
 		t.Fatalf("the Resume button answered %d %s for a session the browser had just resumed", w.Code, w.Body)
+	}
+}
+
+// No run starts here once the server's shutdown has begun, whatever asks
+// for it: the Resume button, a new session from the browser or from the
+// phone, a reply from the phone. Each used to start a run after Shutdown
+// had taken its list of runs to stop, which the process exit then killed.
+func TestK2NothingStartsARunOnceTheServersShutdownHasBegun(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := k1Model(t, s, project)
+	info := r11Session(t, project)
+	s.Shutdown(5 * time.Second)
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{}, nil); w.Code != http.StatusServiceUnavailable || s.isHosted(info.ID) {
+		t.Errorf("the Resume button: %d %s, hosted %v", w.Code, w.Body, s.isHosted(info.ID))
+	}
+	if err := s.Resume(info.ID, integration.PhoneMessage{ID: "m1", Text: "from the phone"}); !errors.Is(err, errStopping) || s.isHosted(info.ID) {
+		t.Errorf("a reply from the phone: %v, hosted %v", err, s.isHosted(info.ID))
+	}
+	if w := do(s, "POST", "/api/sessions", map[string]any{"prompt": "a new one"}, nil); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("a new session from the browser: %d %s", w.Code, w.Body)
+	}
+	// What a new session from the phone runs on (RegisterSessionStarter).
+	if id, err := s.hostNewCfg(harness.Options{Project: project, Interactive: true, Prompt: "a new one from the phone"}, cfg); !errors.Is(err, errStopping) {
+		t.Errorf("a new session from the phone: %q, %v", id, err)
+	}
+	s.mu.Lock()
+	n := len(s.running)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d run(s) started after the server's shutdown", n)
 	}
 }
 

@@ -53,7 +53,7 @@ type Server struct {
 	// phone decides whether to resume it (Resume).
 	resuming sync.Mutex
 	// stopping is set, under resuming, once Shutdown has begun: from then
-	// on deliver starts no run.
+	// on no run starts here (host, hostNewCfg).
 	stopping bool
 	mux      *http.ServeMux
 	logf     func(string, ...any)
@@ -705,7 +705,7 @@ func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -739,7 +739,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
 		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
@@ -768,8 +768,14 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 }
 
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig plus any browser-picked route overrides).
+// configuration (loadConfig plus any browser-picked route overrides),
+// unless the server's shutdown has begun.
 func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	if s.stopping {
+		return "", errStopping
+	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.New(cfg, opts, ui)
 	if err != nil {
@@ -799,8 +805,12 @@ func (s *Server) RegisterSessionStarter() func() {
 	})
 }
 
-// host resumes an existing session in this process.
+// host resumes an existing session in this process; its caller holds
+// resuming. Once the server's shutdown has begun it resumes nothing.
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
+	if s.stopping {
+		return errStopping
+	}
 	cfg, err := s.loadConfig(bundle, preset)
 	if err != nil {
 		return err
@@ -831,8 +841,9 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 	}()
 }
 
-// Shutdown stops hosted sessions cleanly. A run deliver started before it
-// set stopping is among them, and deliver starts none after.
+// Shutdown stops hosted sessions cleanly. A run started here before it set
+// stopping is among them (every start holds resuming), and none starts
+// after.
 func (s *Server) Shutdown(timeout time.Duration) {
 	s.resuming.Lock()
 	s.stopping = true
