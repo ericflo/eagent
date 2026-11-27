@@ -209,3 +209,40 @@ func TestSr5SeatClaudeQuietWhileItsQueueHoldsAMessage(t *testing.T) {
 		t.Fatalf("events %q: quiet with r1 still in Claude's queue (no dequeue yet); want not quiet until Claude has taken it", got)
 	}
 }
+
+// SR5-5. A move the seat has seen but not yet followed (refollow: the next
+// look says it, KindInner) does not keep the seat from quiet. EVENTS.md:
+// quiet is "no move to another session not yet followed". Here Claude
+// ends a turn and its SessionStart hook names the session /clear started
+// (typed at Claude's own terminal) before the same look: the seat says
+// quiet in that look, before the move, so a waiting model change starts
+// Claude again on the session it left.
+func TestSr5SeatQuietBeforeAMoveItHasSeenIsSaid(t *testing.T) {
+	s, spool, _, b := sr5ClaudeSeat(t, &fakeHost{alive: true, screen: claudePromptScreen}, "sr5-seen", claudeTurnLines("sort the shelves", "Sorted.", time.Now())...)
+	s.state = "working"
+	sr4ClaudeHook(t, spool, "b-id", b, "clear") // before the first look
+	go s.watch()
+	t.Cleanup(s.Close)
+	var order []string
+	deadline := time.After(5 * time.Second)
+	for len(order) == 0 || order[len(order)-1] != "inner b-id" {
+		select {
+		case ev := <-s.events:
+			switch ev.Kind {
+			case KindInner:
+				order = append(order, "inner "+ev.InnerID)
+			case KindTurn:
+				order = append(order, "turn")
+			case KindQuiet:
+				order = append(order, "quiet")
+			}
+		case <-deadline:
+			t.Fatalf("events %q; never followed b-id", order)
+		}
+	}
+	for _, o := range order {
+		if o == "quiet" {
+			t.Fatalf("events %q: quiet before the move to b-id was said", order)
+		}
+	}
+}

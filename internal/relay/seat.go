@@ -560,7 +560,8 @@ type Status struct {
 	// Quiet: nothing waits on the agent. It is idle, no dialog holds it,
 	// the seat waits to confirm no send, holds no command's delivered, and
 	// none of the agent's own commands is pending (until a move to another
-	// session is seen, or quietMoveLooks looks after the agent is idle).
+	// session is seen, or quietMoveLooks looks after the agent is idle),
+	// and no move it has seen is still to be said (refollow).
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 }
@@ -1562,7 +1563,7 @@ const quietMoveLooks = 5
 
 // quietLocked is Status.Quiet. The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
-	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && s.sending == 0 && !s.queueHolds && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && !s.refollow && s.sending == 0 && !s.queueHolds && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
 }
 
 // queueHolder is a parser that follows the agent's own queue of messages
