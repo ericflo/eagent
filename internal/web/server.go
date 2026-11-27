@@ -823,17 +823,23 @@ func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
 	return true
 }
 
-// stopAgentsOf takes a session the shutdown ends off the list, first (the
-// process may exit while its run finishes), and stops its agents once its
-// run here (h, if any) has let go of it.
+// stopAgentsOf takes a session the shutdown ends off the list and kills
+// its agents, first (the process may exit while its run finishes), and
+// records their stop once its run here (h, if any) has let go of it.
 func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
 	s.mu.Lock()
 	s.forgetHosted(info.ID)
 	s.mu.Unlock()
+	killed := map[string]bool{}
+	var stopped, failed []string
+	if evs, err := store.Read(info.Path); err == nil {
+		stopped, failed = killAgents(evs, killed)
+	}
 	if h != nil {
 		<-h.done
 	}
-	stopped, failed, err := stopAgents(info.Path)
+	more, moreFailed, err := stopAgents(info.Path, killed)
+	stopped, failed = append(stopped, more...), append(failed, moreFailed...)
 	if err != nil {
 		return "", fmt.Errorf("could not stop the session's agents: %w", err)
 	}

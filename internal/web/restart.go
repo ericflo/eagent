@@ -79,27 +79,42 @@ func (s *Server) listed(id string) bool {
 // killAgent stops an agent's terminal; tests replace it.
 var killAgent = func(host, target string) error { return relay.HostByName(host).Kill(target) }
 
-// stopAgents stops the agents the record of a session nobody runs shows
-// running, as a stop the session takes does (stopSession): each one's
-// terminal is killed and its relay.end recorded, under the session's lock.
-// It returns who was stopped, and who could not be killed (recorded as
-// stopped all the same, as stopSession does).
-func stopAgents(path string) (stopped, failed []string, err error) {
+// killAgents kills the terminals of the agents a session's record (evs)
+// shows running, as a stop the session takes does (stopSession), but not
+// one it shows exited (its terminal is gone, and nothing is said of it),
+// nor one in killed, where it notes each. It needs no lock: the terminals'
+// names are on the record. It returns who was stopped, and who could not
+// be killed.
+func killAgents(evs []event.Event, killed map[string]bool) (stopped, failed []string) {
+	for _, rel := range state.Replay(evs).ActiveRelays() {
+		if rel.State == "exited" || killed[rel.Name] {
+			continue
+		}
+		killed[rel.Name] = true
+		if rel.Target != "" {
+			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
+				failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
+			}
+		}
+		stopped = append(stopped, rel.Who())
+	}
+	return stopped, failed
+}
+
+// stopAgents records the stop of the agents the record of a session nobody
+// runs shows running, under the session's lock: any not in killed is
+// killed first (killAgents), then each has its relay.end recorded (one
+// that could not be killed too, as stopSession does) and its sends
+// settled. It returns who it stopped, and who it could not kill.
+func stopAgents(path string, killed map[string]bool) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
 	if err != nil {
 		return nil, nil, err
 	}
 	defer sess.Close()
+	stopped, failed = killAgents(evs, killed)
 	for _, rel := range state.Replay(evs).ActiveRelays() {
-		// One the record shows exited has no terminal to kill: its
-		// relay.end is recorded, and nothing is said of it.
 		waiting := unsettled(evs, rel)
-		exited := rel.State == "exited"
-		if rel.Target != "" && !exited {
-			if kerr := killAgent(rel.Host, rel.Target); kerr != nil {
-				failed = append(failed, rel.Who()+" ("+kerr.Error()+")")
-			}
-		}
 		if _, err := sess.Append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: rel.Name, Reason: "the user stopped the session"})); err != nil {
 			return stopped, failed, err
 		}
@@ -117,9 +132,6 @@ func stopAgents(path string) (stopped, failed []string, err error) {
 			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {
 				return stopped, failed, err
 			}
-		}
-		if !exited {
-			stopped = append(stopped, rel.Who())
 		}
 	}
 	return stopped, failed, nil
