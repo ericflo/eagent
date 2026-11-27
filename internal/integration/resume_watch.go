@@ -227,26 +227,52 @@ func leaveWithWatcher(project string, info store.Info, m finalechat.Message, res
 	return r.writeDown(project, func(string, ...any) {})
 }
 
-// phoneWanted says whether the sessions host resumes for project run with
-// the phone mirror on (finalechat.enabled), as their mirror decides: by the
-// host's own configuration when it says (web.Server's PhoneWanted, which
-// counts the serve's bundle and preset), else the project's.
-func phoneWanted(project string, host ResumeHost) bool {
-	if h, ok := host.(interface{ PhoneWanted() bool }); ok {
-		return h.PhoneWanted()
+// hostPhone is the phone section of the configuration the sessions host
+// resumes for project run with, as their mirror reads it (whether it is
+// wanted, its server, its token): the host's own when it gives one
+// (web.Server's PhoneConfig, which counts the serve's bundle and preset),
+// else the project's.
+func hostPhone(project string, host ResumeHost) (config.Finalechat, error) {
+	if h, ok := host.(interface {
+		PhoneConfig() (config.Finalechat, error)
+	}); ok {
+		return h.PhoneConfig()
 	}
 	cfg, err := config.Load(project, "")
-	return err == nil && cfg.Finalechat.Wanted()
+	return cfg.Finalechat, err
+}
+
+// phoneWanted says whether those sessions run with the phone mirror on
+// (finalechat.enabled), as their mirror decides.
+func phoneWanted(project string, host ResumeHost) bool {
+	fc, err := hostPhone(project, host)
+	return err == nil && fc.Wanted()
+}
+
+// phoneAccount is the phone's account fc names, as a run's mirror finds it.
+func phoneAccount(fc config.Finalechat) (*finalechat.Client, error) {
+	if finalechat.Disabled() {
+		return nil, finalechat.ErrDisabled
+	}
+	client, ok := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL)
+	if !ok {
+		return nil, fmt.Errorf("FinaleChat is not connected")
+	}
+	return client, nil
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
 // then every minute while it lasts, since the stream has no replay and a
 // busy server may drop an event for a subscriber.
 func watchResumes(ctx context.Context, project string, host ResumeHost, retries *replyRetries, logf func(string, ...any)) error {
-	if !phoneWanted(project, host) {
+	fc, err := hostPhone(project, host)
+	if err != nil {
+		return err
+	}
+	if !fc.Wanted() {
 		return errors.New("the phone is off for the sessions it would resume (finalechat.enabled is false)")
 	}
-	client, err := settingsAccount(project)
+	client, err := phoneAccount(fc)
 	if err != nil {
 		return err
 	}
@@ -664,12 +690,24 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 // the reply watcher picks it): a reply sent while nothing ran the session.
 // Whoever resumes the session passes it as the prompt; the session's poll
 // reads on after it and takes the rest in order. ok is false when there is
-// none, or no phone; err when the thread could not be read.
+// none, or no phone; err when the thread could not be read. The phone is
+// the project's own (PendingReplyIn takes the one the session resumes on).
 func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMessage, bool, error) {
-	if finalechat.Disabled() {
+	cfg, err := config.Load(project, "")
+	if err != nil {
+		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
+	}
+	return PendingReplyIn(ctx, cfg.Finalechat, project, info)
+}
+
+// PendingReplyIn is PendingReply on the phone of fc, the configuration the
+// session is resumed with (the serve's bundle or preset over the project's):
+// its account, and none at all when that phone is off, as for its mirror.
+func PendingReplyIn(ctx context.Context, fc config.Finalechat, project string, info store.Info) (PhoneMessage, bool, error) {
+	if !fc.Wanted() {
 		return PhoneMessage{}, false, nil
 	}
-	client, err := settingsAccount(project)
+	client, err := phoneAccount(fc)
 	if err != nil {
 		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
 	}

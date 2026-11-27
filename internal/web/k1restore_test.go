@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/integration"
@@ -95,15 +98,76 @@ func TestK4ARestoreWithThePhoneOffTakesNoReply(t *testing.T) {
 	}
 	sess := newSession(t, project)
 	_ = sess.Close()
+	t.Setenv("FINALECHAT_URL", k4Phone(t))
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
 	s.running[sess.ID] = fakeHosted()
 	s.rememberHosted()
-	got := stubRestore(t, map[string]string{sess.ID: "are you still there?"}, nil)
-	next := New(project, nil)
-	if next.PhoneWanted() {
-		t.Fatal("the phone is wanted though the project turns it off")
+	replies := k4Restores(t)
+	New(project, nil).restoreHosted(context.Background())
+	if len(*replies) != 1 || (*replies)[0] != "" {
+		t.Fatalf("brought back with %q, want the session with no reply", *replies)
 	}
+}
+
+// k4Phone is a FinaleChat with one reply waiting in every thread, written
+// after the session stopped; it answers the token fc_fixture.
+func k4Phone(t *testing.T) string {
+	t.Helper()
+	at := time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)
+	phone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "Bearer fc_fixture" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && r.URL.Query().Get("before") == "" {
+			_, _ = w.Write([]byte(`{"messages":[{"id":"m1","sender":"user","origin":"session","body":"are you still there?","created_at":"` + at + `","meta":{}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"messages":[]}`))
+	}))
+	t.Cleanup(phone.Close)
+	return phone.URL
+}
+
+// k4Restores stubs only the resume of a restore (the reply is read for
+// real) and returns the words each session came back with.
+func k4Restores(t *testing.T) *[]string {
+	t.Helper()
+	old := restoreSession
+	t.Cleanup(func() { restoreSession = old })
+	var replies []string
+	restoreSession = func(_ *Server, _ string, reply integration.PhoneMessage) error {
+		replies = append(replies, reply.Text)
+		return nil
+	}
+	return &replies
+}
+
+// The server runs a bundle that names the phone's server and token
+// variable; the project's own file names none. A restart brings a session
+// back with the reply that waited in its thread on that account.
+func TestK4ARestoreReadsTheThreadOnTheServesAccount(t *testing.T) {
+	s, project := newTestServer(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("FINALECHAT_URL", "")
+	t.Setenv("FINALECHAT_TOKEN", "")
+	t.Setenv("K4_PHONE_TOKEN", "fc_fixture")
+	sess := newSession(t, project)
+	_ = sess.Close()
+	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.BundlePath(project, "phone2"), []byte(`{"finalechat": {"base_url": "`+k4Phone(t)+`", "token_env": "K4_PHONE_TOKEN"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.running[sess.ID] = fakeHosted()
+	s.rememberHosted()
+	replies := k4Restores(t)
+	next := New(project, nil)
+	next.Bundle = "phone2"
 	next.restoreHosted(context.Background())
-	if len(*got) != 1 || (*got)[0].reply != "" {
-		t.Fatalf("brought back %+v, want the session with no reply", *got)
+	if len(*replies) != 1 || (*replies)[0] != "are you still there?" {
+		t.Fatalf("brought back with %q, want the reply on the serve's account", *replies)
 	}
 }

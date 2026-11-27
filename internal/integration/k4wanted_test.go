@@ -12,14 +12,16 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
-// k4OffHost is a serve whose own configuration says whether it wants the
-// phone, as web.Server says (PhoneWanted).
+// k4OffHost is a serve whose own configuration turns the phone off, as
+// web.Server says (PhoneConfig).
 type k4OffHost struct {
 	fakeResumeHost
-	wanted bool
 }
 
-func (h *k4OffHost) PhoneWanted() bool { return h.wanted }
+func (h *k4OffHost) PhoneConfig() (config.Finalechat, error) {
+	off := false
+	return config.Finalechat{Enabled: &off}, nil
+}
 
 // k4Watch starts the project's reply watcher against a stopped session
 // with a reply waiting, and returns once the watcher has either resumed it
@@ -86,5 +88,54 @@ func TestK4AWatcherLeavesAServeWhosePhoneIsOff(t *testing.T) {
 	h := k4Watch(t, host, func(string) {})
 	if n := h.calls(); n != 0 {
 		t.Fatalf("resumed %d times with the serve's phone off", n)
+	}
+}
+
+// k4AccountHost is a serve whose own configuration (its bundle) names the
+// phone's account: a server and a token variable of its own.
+type k4AccountHost struct {
+	fakeResumeHost
+	fc config.Finalechat
+}
+
+func (h *k4AccountHost) PhoneConfig() (config.Finalechat, error) { return h.fc, nil }
+
+// The serve's bundle names the phone's server and token variable, and the
+// project's own file names none: the reply watcher watches the account the
+// sessions it resumes are mirrored to, and resumes the session.
+func TestK4AWatcherWatchesTheAccountTheServeRuns(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	f := newR6Thread(t)
+	f.say(sid, "m1", "are you still there?", r6Info(t, project, sid).Modified.Add(time.Minute), nil)
+	t.Setenv("FINALECHAT_URL", "")
+	t.Setenv("FINALECHAT_TOKEN", "")
+	t.Setenv("K4_PHONE_TOKEN", "fc_fixture")
+	host := &k4AccountHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, fc: config.Finalechat{BaseURL: f.srv.URL, TokenEnv: "K4_PHONE_TOKEN"}}
+	said := make(chan string, 4)
+	logf := func(format string, args ...any) {
+		line := fmt.Sprintf(format, args...)
+		t.Log(line)
+		if strings.Contains(line, "resumed with your reply") || strings.Contains(line, "not connected") {
+			select {
+			case said <- line:
+			default:
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := StartResumeWatcher(ctx, project, host, logf)
+	defer stop()
+	defer cancel()
+	select {
+	case line := <-said:
+		if !strings.Contains(line, "resumed with your reply") {
+			t.Fatalf("the watcher said %q, want the session resumed", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the watcher neither resumed the session nor said why")
+	}
+	if host.calls() != 1 || host.resumed[0].ID != "m1" {
+		t.Fatalf("resumed %#v", host.resumed)
 	}
 }
