@@ -277,8 +277,21 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	env := config.EnvOverrides()
 	// A route's window follows the model a variable names, so it is that
 	// variable's too: the window of the environment's model is not written.
+	// So is the window of the server an address variable moves a route the
+	// layers give to, where no layer names one: the editor shows it as the
+	// variable's (the window changed under the environment).
+	var res *config.Resolution
 	for _, route := range []string{"/model", "/summarizer/model"} {
-		if name, ok := env[route+"/model"]; ok {
+		name, ok := env[route+"/model"]
+		if url, set := env[route+"/base_url"]; !ok && set {
+			if res == nil {
+				r := config.Resolve(s.Project, s.Preset, s.Bundle)
+				res = &r
+			}
+			layers := route == "/model" || res.Layered.Summarizer.Model != nil
+			name, ok = url, layers && strings.HasPrefix(res.Sources[route+"/context_tokens"], "env:")
+		}
+		if ok {
 			if _, has := env[route+"/context_tokens"]; !has {
 				env[route+"/context_tokens"] = name
 			}

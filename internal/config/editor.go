@@ -165,8 +165,9 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.LoadError = fmt.Sprintf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 		}
 	}
+	var n named
 	if fileMap != nil && len(fileMap) > 0 {
-		if err := overlay(project, &cfg, fileMap, path); err != nil {
+		if err := overlay(project, &cfg, fileMap, path, &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -177,7 +178,7 @@ func Resolve(project, preset, bundle string) Resolution {
 		res.LoadError = path + ": " + res.File.ParseError
 	}
 	if bundle != "" && len(bundleMap) > 0 {
-		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle), &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -189,7 +190,7 @@ func Resolve(project, preset, bundle string) Resolution {
 	envVars := EnvOverrides()
 	res.Layered = cfg
 	normalize(&res.Layered)
-	applyEnv(project, &cfg)
+	applyEnv(project, &cfg, n)
 	normalize(&cfg)
 	cur := flatten(cfg)
 	// A key the environment removed (a window an unknown model has none
@@ -214,6 +215,9 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.Sources[k] = "env:" + name
 		} else if name, ok := envVars["/model/model"]; ok && k == "/model/context_tokens" {
 			// The window follows the model the variable names.
+			res.Sources[k] = "env:" + name
+		} else if name, ok := envVars["/model/base_url"]; ok && k == "/model/context_tokens" {
+			// Or the server the variable moves the route to.
 			res.Sources[k] = "env:" + name
 		} else {
 			res.Sources[k] = "env"
@@ -443,7 +447,7 @@ func BundleFromBytes(name string, raw []byte) (Config, error) {
 		Presets[canon](&cfg)
 		preset = canon
 	}
-	if err := overlay("", &cfg, m, "bundle "+name); err != nil {
+	if err := overlay("", &cfg, m, "bundle "+name, &named{}); err != nil {
 		return Config{}, err
 	}
 	normalize(&cfg)
