@@ -52,7 +52,11 @@ type Controller struct {
 	// it, will run once the change is applied, as configured (address, key
 	// variable, window, reply ceiling, fallbacks). A preset saved from the
 	// session is built from it. Called on the goroutine that polls.
-	Routes                             func(routes map[string]Route) (map[string]config.ModelRoute, error)
+	Routes func(routes map[string]Route) (map[string]config.ModelRoute, error)
+	// ChosenRoutes is Routes for a preset saved in a change that chooses a
+	// configuration (/config, named by chosen): a pick that names that
+	// configuration's route is the route as it defines it. Nil uses Routes.
+	ChosenRoutes                       func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
@@ -227,10 +231,20 @@ func (c *Controller) process(q Request) error {
 	var presetCfg config.Config
 	if presetName != "" {
 		var running map[string]config.ModelRoute
-		if c.Routes != nil {
-			if running, err = c.Routes(values.Routes); err != nil {
-				return finish("rejected", map[string]any{"message": err.Error()})
+		chosen := ""
+		for _, e := range q.Proposal.Edits {
+			if e.Key == "/config" {
+				chosen, _ = e.Value.(string) // values.Config then names the preset saved
 			}
+		}
+		switch {
+		case chosen != "" && c.ChosenRoutes != nil:
+			running, err = c.ChosenRoutes(values.Routes, chosen)
+		case c.Routes != nil:
+			running, err = c.Routes(values.Routes)
+		}
+		if err != nil {
+			return finish("rejected", map[string]any{"message": err.Error()})
 		}
 		presetCfg, err = ConfigFromRoutes(c.Project, values, running)
 		if err != nil {
