@@ -892,7 +892,13 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		if !ok {
 			continue
 		}
-		picked, err := config.PickRoute(s.Project, r.before, pr.ID, r.after.Model, "")
+		// A preset chosen in the same proposal brings its own effort, as
+		// its suggestion implies: the old preset's is not carried over.
+		seed := r.before
+		if after.Preset != prior.Preset {
+			seed.ReasoningEffort = r.after.ReasoningEffort
+		}
+		picked, err := config.PickRoute(s.Project, seed, pr.ID, r.after.Model, "")
 		if err != nil {
 			// A model no list knows keeps the rest of the route at the same
 			// provider. At a new address it takes that provider's protocol
