@@ -152,6 +152,12 @@ type Seat struct {
 	closed     bool
 
 	typing sync.Mutex // one message is pasted and entered at a time
+
+	// emitMu: every event goes out under it (emitAside), and the watcher
+	// closes events under it once it is done (eventsClosed), so nothing is
+	// sent on events after that, from any goroutine.
+	emitMu       sync.Mutex
+	eventsClosed bool
 }
 
 type pending struct {
@@ -447,17 +453,24 @@ func (s *Seat) emit(ev Event) {
 // (Send), or one from a line before the record's mark (history), whose
 // end would move that mark back.
 func (s *Seat) emitAside(ev Event) {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if s.eventsClosed {
+		return // watching is over: nobody reads events any more
+	}
 	select {
 	case s.events <- ev:
 	case <-s.stop:
 	}
 }
 
-func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "") }
+func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "", s.emit) }
 
 // setDialogState is setState for blocked by a dialog the agent reports
-// (reportDialog), whose title goes with the event (Event.Dialog).
-func (s *Seat) setDialogState(state, detail, dialog string) {
+// (reportDialog), whose title goes with the event (Event.Dialog), sent
+// with send (emitAside for a state history says, which says nothing of
+// how far the record has read).
+func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	s.mu.Lock()
 	if s.state == state && detail == "" {
 		s.mu.Unlock()
@@ -471,7 +484,7 @@ func (s *Seat) setDialogState(state, detail, dialog string) {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
 	s.mu.Unlock()
-	s.emit(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
+	send(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
 }
 
 // Close stops watching. The agent keeps running.
@@ -1198,7 +1211,14 @@ var tailBackfill int64 = 4 << 20
 
 func (s *Seat) watch() {
 	defer close(s.done)
-	defer close(s.events)
+	defer func() {
+		// Under the lock every event goes out under: a send that comes
+		// after (Send's, from its own goroutine) finds it closed.
+		s.emitMu.Lock()
+		s.eventsClosed = true
+		close(s.events)
+		s.emitMu.Unlock()
+	}()
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
 	// agent can follow it. Held, it made a restarted Codex deaf until
@@ -1360,11 +1380,13 @@ func (s *Seat) watch() {
 			}
 		}
 		_, starter := s.agent.(sessionStarter)
-		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) {
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) && caught {
 			// An agent that moves between sessions of its own (pi) is
 			// polled before any transcript is found too: a sighting on the
 			// session it was started on dates a move made before its first
-			// message.
+			// message. Not while a transcript has more to read than one
+			// look reads (a long catch-up): the session is read to its end
+			// before the seat follows pi to another.
 			pl.poll(s, now)
 		}
 		if reports {
@@ -1450,9 +1472,12 @@ func (s *Seat) fold(o obs) {
 	s.mu.Lock()
 	since := s.since
 	history := !since.IsZero() && !o.at.IsZero() && !o.at.After(since)
-	if s.readFrom > 0 && s.transcript == s.readIn {
+	if s.readFrom > 0 && s.transcript == s.readIn && s.readTo.Load() != 0 {
 		// The record says how far this transcript was read: what starts
-		// before that is history, whenever it was written.
+		// before that is history, whenever it was written. Only for what a
+		// line of it gave (readTail is folding one: readTo is its end); what
+		// the agent's status file says (Antigravity's turn end and quota)
+		// is judged by time, as on main.
 		history = o.pos < s.readFrom
 	}
 	s.mu.Unlock()
@@ -1603,7 +1628,10 @@ func (s *Seat) foldHistory(o obs) {
 	}
 	s.mu.Unlock()
 	if state != "" {
-		s.setState(state, "")
+		// Said by a line before the record's mark (history): without its
+		// end, which would move that mark back (as a confirmation from
+		// history, b5dff3e).
+		s.setDialogState(state, "", "", s.emitAside)
 	}
 }
 
@@ -1782,7 +1810,7 @@ func (s *Seat) reportDialog(title string) {
 		}
 		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
-		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title)
+		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title, s.emit)
 		return
 	}
 	back := s.dialogPrev
@@ -1818,7 +1846,9 @@ func (s *Seat) answerDialog(screen string, now time.Time) bool {
 		s.handled[d.name] = now
 		s.mu.Unlock()
 		_ = s.host.Keys(s.target, d.keys...)
-		s.emit(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
+		// No line gave it, and Send's last look sends it from Send's own
+		// goroutine: it says nothing of how far the transcript was read.
+		s.emitAside(Event{Kind: KindProgress, Text: "(" + d.what + ")"})
 		return true
 	}
 	return false
