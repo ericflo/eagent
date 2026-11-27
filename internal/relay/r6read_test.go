@@ -57,13 +57,14 @@ func lowTail(t *testing.T) {
 	t.Cleanup(func() { tailBackfill = saved })
 }
 
-// What a reattached seat reports from a transcript, less the confirmations.
+// What a reattached seat reports from a transcript, less the confirmations
+// (and whether nothing waits on the agent, which a restored send changes).
 func (w *reattachedSeat) news() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var out []string
 	for _, ev := range w.events {
-		if ev.Kind != KindDelivered {
+		if ev.Kind != KindDelivered && ev.Kind != KindQuiet {
 			out = append(out, ev.Kind+"/"+ev.State+"/"+ev.Text)
 		}
 	}
