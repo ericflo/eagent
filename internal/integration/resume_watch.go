@@ -490,7 +490,7 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if p.restored && !w.holds(p) {
+		if p.restored && w.restoring(p) {
 			// The restore that left it has not resumed the session with
 			// it yet: resumed from here too, the message would be taken
 			// twice.
@@ -507,15 +507,17 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 	}
 }
 
-// holds reports whether p's session's record holds p's message (its
-// ledger has taken it in).
-func (w *resumeWatcher) holds(p pendingReply) bool {
+// restoring reports whether the restore that left p is still to resume its
+// session with p's message: the record neither holds the message nor was
+// written since p was kept. A run that came and went without taking it
+// ends the hold, as a restore that failed does (ReleaseReply).
+func (w *resumeWatcher) restoring(p pendingReply) bool {
 	info, ok := w.session(strings.TrimPrefix(p.thread.ExternalID, "eagent:"))
-	if !ok {
+	if !ok || info.Modified.After(p.since) {
 		return false
 	}
 	evs, err := store.Read(info.Path)
-	return err == nil && ReadPhoneLedger(evs).Taken[p.msg.ID]
+	return err == nil && !ReadPhoneLedger(evs).Taken[p.msg.ID]
 }
 
 func (w *resumeWatcher) session(id string) (store.Info, bool) {
@@ -659,6 +661,17 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
+}
+
+// ReleaseReply gives up the hold a restore's hand-over (PendingReply) put
+// on msg, when the restore could not resume the session with it: the
+// project's reply watcher then looks at the thread for it, as for any
+// reply it keeps quietly.
+func ReleaseReply(project string, info store.Info, msg PhoneMessage) error {
+	if msg.ID == "" {
+		return nil
+	}
+	return leaveWithWatcher(project, info, finalechat.Message{ID: msg.ID}, false)
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not
