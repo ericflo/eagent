@@ -190,3 +190,94 @@ func TestK1AnEntryWrittenBeforeAnAfterTurnSendIsNotItsArrival(t *testing.T) {
 		}
 	})
 }
+
+// k1Host runs paste in place of the paste, when set, and enter as Enter
+// goes: what the agent writes to its transcript then, and the watcher reads
+// before Send returns.
+type k1Host struct {
+	*fakeHost
+	paste, enter func() error
+}
+
+func (h *k1Host) Paste(target, text string) error {
+	if h.paste != nil {
+		return h.paste()
+	}
+	return h.fakeHost.Paste(target, text)
+}
+
+func (h *k1Host) Keys(target string, keys ...string) error {
+	err := h.fakeHost.Keys(target, keys...)
+	if slices.Contains(keys, "Enter") && h.enter != nil {
+		return h.enter()
+	}
+	return err
+}
+
+// A15: a typed send is tracked before it is typed, so its arrival, read
+// while its Enter goes, confirms it (also when the Enter's command then
+// reports a failure: the message arrived). An entry written before the send
+// was tracked, read then or during a paste that fails, confirms nothing: a
+// failed paste goes back to the caller, untracked.
+func TestK1AnArrivalReadWhileEnterGoesIsConfirmed(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	const text = "count the chairs"
+	user := func(s string) string { return claudeUser(time.Now(), s) }
+	start := func(t *testing.T) (*k1Paused, *k1Host, *Seat, string) {
+		a := k1Pause(claudeAgent{})
+		h := &k1Host{fakeHost: &fakeHost{alive: true}}
+		s, path := k1Watched(t, Spec{}, a, h, user("sort the shelves"))
+		return a, h, s, path
+	}
+	for _, c := range []struct {
+		name string
+		err  error // what Enter's command returns
+	}{
+		{"enter_returns", nil},
+		{"enter_goes_then_fails", errors.New("tmux: lost server")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, h, s, path := start(t)
+			h.enter = func() error {
+				appendLines(t, path, user(text))
+				a.readNow(t)
+				return c.err
+			}
+			if _, err := s.Send("r1", text, "queue"); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if ok, p := okDeliveries(drain(s.events)), s.Snapshot().Pending; !slices.Equal(ok, []string{"r1"}) || len(p) != 0 {
+				t.Fatalf("confirmed %v, still pending %v; want r1 confirmed", ok, p)
+			}
+		})
+	}
+	t.Run("earlier_entry_read_while_enter_goes", func(t *testing.T) {
+		a, h, s, path := start(t)
+		appendLines(t, path, user("then "+text))
+		h.enter = func() error { a.readNow(t); return nil }
+		if _, err := s.Send("r1", text, "queue"); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if ok, p := okDeliveries(drain(s.events)), s.Snapshot().Pending; len(ok) != 0 || len(p) != 1 {
+			t.Fatalf("confirmed %v, pending %v; want r1 pending", ok, p)
+		}
+		appendLines(t, path, user(text))
+		a.readNow(t)
+		if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, []string{"r1"}) {
+			t.Fatalf("its arrival confirmed %v; want r1", ok)
+		}
+	})
+	t.Run("earlier_entry_read_while_the_paste_fails", func(t *testing.T) {
+		a, h, s, path := start(t)
+		appendLines(t, path, user("then "+text))
+		h.paste = func() error { a.readNow(t); return errors.New("no such pane") }
+		if _, err := s.Send("r1", text, "queue"); !errors.As(err, new(*TypingError)) {
+			t.Fatalf("Send returned %v; the paste failed", err)
+		}
+		if ok, p := okDeliveries(drain(s.events)), s.Snapshot().Pending; len(ok) != 0 || len(p) != 0 {
+			t.Fatalf("confirmed %v, pending %v; want neither", ok, p)
+		}
+	})
+}

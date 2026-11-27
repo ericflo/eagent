@@ -55,7 +55,8 @@ func okDeliveries(evs []Event) []string {
 }
 
 // Round 14, finding 7: a send whose hand-over or paste failed is never
-// confirmed by an entry the watcher reads meanwhile, and its failure goes
+// confirmed by an entry written before it that the watcher reads
+// meanwhile, and its failure goes
 // where it went on main: a failed hand-over is typed instead, a failed
 // paste is returned to the caller.
 func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
@@ -107,6 +108,9 @@ func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
 		s := newSeat(Spec{}, claudeAgent{}, h, "r14s-paste", "")
 		h.seat = s
 		s.state = "idle"
+		// As above: the earlier entry is the transcript's first line.
+		s.transcript = filepath.Join(t.TempDir(), "transcript.jsonl")
+		writeLines(t, s.transcript, claudeUser(time.Now(), entry))
 		msg, err := s.Send("r2", text, "queue")
 		if err == nil {
 			t.Fatalf("Send said %q; the paste failed", msg)

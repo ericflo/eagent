@@ -554,24 +554,27 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// Stopped during the last look or the interrupt's pause: nothing typed.
 		return "", ErrClosed
 	}
-	if err := s.typeText(text); err != nil {
-		// Not tracked: the caller reports it.
+	command := isAgentCommand(text)
+	if !command {
+		// Tracked before it is typed, so an arrival read while Enter goes
+		// is found; an entry already written is not its arrival. An
+		// after-turn send typed here (the agent idle, or the hand-over
+		// failed) is held by nothing: it is timed from the start, never
+		// pressed.
+		s.trackSend(&pending{id: id, text: text, mode: mode, lost: mode == "after_turn"})
+	}
+	if err := s.typeText(text); err != nil && (command || s.untrack(id)) {
+		// Not tracked any more: the caller reports it. (One the
+		// transcript already showed arriving is reported delivered.)
 		return "", &TypingError{err}
 	}
-	if isAgentCommand(text) {
+	if command {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
 		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
-	// Tracked once typed, as on main: no entry read before it went in is
-	// its arrival. An after-turn send typed here (the agent idle, or the
-	// hand-over failed) is held by nothing: it is timed from the start,
-	// never pressed.
-	s.mu.Lock()
-	s.pending = append(s.pending, &pending{id: id, text: text, mode: mode, at: time.Now(), lost: mode == "after_turn"})
-	s.mu.Unlock()
 	switch {
 	case mode == "interrupt" && state == "working":
 		return fmt.Sprintf("interrupted %s and typed the message", label), nil
@@ -676,11 +679,15 @@ func (s *Seat) typeText(text string) error {
 
 func (s *Seat) track(id, text, mode string) { s.trackHeld(id, text, mode, false) }
 
-// trackHeld watches for send id's arrival from now on: no entry already
-// written to the transcript is it (see pending.after).
 func (s *Seat) trackHeld(id, text, mode string, held bool) {
+	s.trackSend(&pending{id: id, text: text, mode: mode, held: held})
+}
+
+// trackSend watches for send p's arrival from now on: no entry already
+// written to the transcript is it (see pending.after).
+func (s *Seat) trackSend(p *pending) {
 	s.mu.Lock()
-	p := &pending{id: id, text: text, mode: mode, at: time.Now(), held: held}
+	p.at = time.Now()
 	if st, err := os.Stat(s.transcript); err == nil {
 		p.afterIn, p.after = s.transcript, st.Size()
 	}
