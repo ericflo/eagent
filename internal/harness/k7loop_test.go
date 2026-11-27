@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -103,13 +105,38 @@ func TestK7AnEndingSessionRateLimitedEndsAsDown(t *testing.T) {
 	}
 }
 
+// k7HookUI is a fakeUI that runs onLog with each line it logs, on the
+// goroutine that logs it (the loop's, for eagent's own lines).
+type k7HookUI struct {
+	*fakeUI
+	onLog func(string)
+}
+
+func (u *k7HookUI) Log(format string, args ...any) {
+	u.fakeUI.Log(format, args...)
+	if u.onLog != nil {
+		u.onLog(fmt.Sprintf(format, args...))
+	}
+}
+
 // The closing word of a batch session is refused (400), which is final
 // for a session that is ending, and during its last title and summary
 // (refused too) a timer keeps the session open: it stops ending, and no
-// call comes back. When the timer fires, the session is ending again, and
-// the refusal kept from before (closingRefused) ended it at once: the
-// timer's notice never got its look. The refusal was final for the closing
-// it came in; the notice is looked at once the retry's wait is over.
+// call comes back. The timer fires as that refusal is handled, before the
+// turn ends, so no tick ever sees the session not ending: the stop and
+// the return to ending are both inside the turn. The session is ending
+// again, and the refusal kept from before (closingRefused) ended it at
+// once: the timer's notice never got its look, and the session ended with
+// a title and summary still due (an invariant line). The refusal was final
+// for the closing it came in; the notice is looked at.
+//
+// The fire is made at that point, on the loop, as turnFailed logs the
+// failure: the order a loaded machine gave once (c418cd2's test appended
+// it from outside after the log line, racing the turn's end). The wait
+// after that failure is the session's own back-off: while it runs no last
+// title and summary is asked for (a call of theirs would be shown the
+// notice and, coming back, clear what was kept), and the timer's look is
+// made when it is over.
 func TestK7ARefusalFromAClosingThatStoppedDoesNotEndTheNextOne(t *testing.T) {
 	coreSummariesOn(t, false)
 	setFor(t, &errorRetryDelays, []time.Duration{300 * time.Millisecond, time.Hour})
@@ -128,6 +155,10 @@ func TestK7ARefusalFromAClosingThatStoppedDoesNotEndTheNextOne(t *testing.T) {
 				r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: "s1", Kind: "once", Spec: "1h", Note: "check the build again", Next: time.Now().Add(time.Hour)}))
 			})
 			return k1BadRequest
+		case summary && phase.Load() >= 3:
+			// The title and summary keep failing: no call of theirs comes
+			// back to clear what the session kept.
+			return k1BadRequest
 		case fired.Load() && phase.CompareAndSwap(3, 4):
 			return hold() // the timer's look
 		case msgs[len(msgs)-1]["role"] == "tool":
@@ -137,20 +168,26 @@ func TestK7ARefusalFromAClosingThatStoppedDoesNotEndTheNextOne(t *testing.T) {
 		}
 		return hold()
 	})
-	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief}, newFakeSeat("The build is green."), model, func(r *Runtime) { rt.Store(r) })
-	r6Until(t, "the last summary's refusal", func() bool {
-		for _, l := range s.ui.logged() {
-			if strings.Contains(l, "model call failed") {
-				return true
-			}
+	t.Setenv("EAGENT_TEST_KEY", "x")
+	seat := newFakeSeat("The build is green.")
+	useFakeRelays(t, seat)
+	ui := &k7HookUI{fakeUI: &fakeUI{input: make(chan string, 16)}}
+	ui.onLog = func(line string) {
+		// On the loop, inside turnFailed: the summary's refusal.
+		if strings.Contains(line, "model call failed") && fired.CompareAndSwap(false, true) {
+			r := rt.Load()
+			r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "check the build again"}))
 		}
-		return false
-	})
-	r := rt.Load()
-	r.sync(func() {
-		r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "check the build again"}))
-	})
-	fired.Store(true)
+	}
+	r0, err := New(testConfig(model.srv.URL), Options{Project: t.TempDir(), Prompt: brief}, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.Store(r0)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	s := &session{t: t, rt: r0, ui: ui.fakeUI, seat: seat, model: model, cancel: cancel, done: make(chan int, 1)}
+	go func() { s.done <- r0.Run(ctx) }()
+	t.Cleanup(s.stop)
 	code := coreExit(s)
 	if p := phase.Load(); p != 4 || code != 0 {
 		t.Fatalf("phase %d, exit %d: the timer's notice got no look; want its look (phase 4) and exit 0; logged %q", p, code, s.ui.logged())

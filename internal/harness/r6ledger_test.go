@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -75,20 +77,42 @@ func TestASessionResumedAtTheTerminalTakesTheMessagesThatWaited(t *testing.T) {
 // the words that resume the session (here the answer: the card is open
 // and known), and the second arrives while it runs (a message, the
 // question being answered).
+//
+// The session is kept from ending until the poll has handled the second:
+// one that answers and ends before the poll's first read (as it did with
+// one CPU) leaves the second to the reply watcher for a run of its own
+// (phone.go, poll), which is not what this test is about.
 func TestTwoMessagesWaitingOnAnOpenQuestionAreTheAnswerThenAMessage(t *testing.T) {
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
-	g := r5AskedAndStopped(t, fp)
+	var second atomic.Value // the id of the message after the answer, once sent
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	ask := r5AskBrain()
+	g := phoneStart(t, fp, "paint it", false, func(model string, msgs []map[string]any) reply {
+		rep := ask(model, msgs)
+		if second.Load() != nil && phoneEnding(msgs) {
+			rep.block = gate // the closing word waits for the poll
+		}
+		return rep
+	}, nil)
+	waitFor(t, "the first phone question", func() bool { return fp.pendingQuestions() == 1 })
+	waitFor(t, "the card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) > 0 })
+	g.interrupt()
 	fp.userReply("red")
 	firstID := fp.lastMessageID()
 	fp.userReply("and make it bold")
+	secondID := fp.lastMessageID()
+	second.Store(secondID)
 	g.resume(Options{Prompt: "red", PromptSource: "finalechat", PromptPhoneID: firstID})
-	waitFor(t, "the answer and the message", func() bool {
-		a, _ := r5takenTimes(g, "red")
-		_, m := r5takenTimes(g, "and make it bold")
-		return a == 1 && m == 1
+	t.Cleanup(func() {
+		if t.Failed() {
+			r5takenDump(g)
+		}
 	})
-	g.rt.sync(func() {})
+	g.phoneWeighed(secondID)
+	release()
 	if a, m := r5takenTimes(g, "red"); a != 1 || m != 0 {
 		r5takenDump(g)
 		t.Fatalf("\"red\": %d answers, %d messages", a, m)

@@ -1675,6 +1675,11 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endP
 		r.ui.Log("eagent: the model refused the call (%s); the session is ending, and ends without this look", shortErr(err))
 		return r.sessionPlan(w, true)
 	}
+	// The last call was not refused while the session was ending: a
+	// refusal kept from a closing that stopped since (with no tick to see
+	// it stop, the stop and the return to ending both inside this turn)
+	// is not final for the one to come (refusedWhileClosing).
+	r.closingRefused = false
 	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
 		// The prompt no longer fits: restart the conversation from a
 		// dossier before anything else. If it does not fit even then, the
