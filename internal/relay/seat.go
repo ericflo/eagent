@@ -1468,9 +1468,12 @@ func (s *Seat) fold(o obs) {
 	s.mu.Lock()
 	since := s.since
 	history := !since.IsZero() && !o.at.IsZero() && !o.at.After(since)
-	if s.readFrom > 0 && s.transcript == s.readIn {
+	if s.readFrom > 0 && s.transcript == s.readIn && s.readTo.Load() != 0 {
 		// The record says how far this transcript was read: what starts
-		// before that is history, whenever it was written.
+		// before that is history, whenever it was written. Only for what a
+		// line of it gave (readTail is folding one: readTo is its end); what
+		// the agent's status file says (Antigravity's turn end and quota)
+		// is judged by time, as on main.
 		history = o.pos < s.readFrom
 	}
 	s.mu.Unlock()
