@@ -566,6 +566,21 @@ func (w *resumeWatcher) retryLater(ctx context.Context, thread finalechat.Thread
 
 // retryPending tries the replies that could not resume their sessions
 // before. A day after the first try a reply is let go.
+// stoppedTrying tells p's thread, which was told eagent keeps trying to
+// resume its session, that it stopped: the phone was turned off for the
+// project's sessions. Once said, p is let go; the next sweep tries again.
+func (w *resumeWatcher) stoppedTrying(ctx context.Context, p pendingReply) {
+	postCtx, stop := context.WithTimeout(ctx, 30*time.Second)
+	defer stop()
+	note := "eagent stopped trying to resume this session for your reply: the phone was turned off for its sessions (finalechat.enabled). Resume it from the terminal or the web."
+	if _, _, err := w.client.Post(postCtx, finalechat.Ref(p.thread.ExternalID), finalechat.PostRequest{Body: note, Sender: "system", Format: "text", ClientKey: "resume-stopped-" + p.msg.ID}); err != nil {
+		return
+	}
+	w.retries.mu.Lock()
+	delete(w.retries.replies, p.msg.ID)
+	w.retries.mu.Unlock()
+}
+
 func (w *resumeWatcher) retryPending(ctx context.Context) {
 	w.retries.mu.Lock()
 	pending := make([]pendingReply, 0, len(w.retries.replies))
@@ -577,9 +592,19 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		pending = append(pending, p)
 	}
 	w.retries.mu.Unlock()
+	wanted := phoneWanted(w.project, w.host)
 	for _, p := range pending {
 		if ctx.Err() != nil {
 			return
+		}
+		if !wanted {
+			// The phone was turned off for these sessions: nothing is
+			// resumed, and a thread told eagent keeps trying is told it
+			// stopped (the entry goes once that is said).
+			if p.told {
+				w.stoppedTrying(ctx, p)
+			}
+			continue
 		}
 		if p.restored && w.restoring(p) {
 			// The restore that left it has not resumed the session with

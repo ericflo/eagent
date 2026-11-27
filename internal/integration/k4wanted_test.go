@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/finalechat"
 )
 
 // k4OffHost is a serve whose own configuration turns the phone off, as
@@ -137,5 +138,41 @@ func TestK4AWatcherWatchesTheAccountTheServeRuns(t *testing.T) {
 	}
 	if host.calls() != 1 || host.resumed[0].ID != "m1" {
 		t.Fatalf("resumed %#v", host.resumed)
+	}
+}
+
+// A reply could not resume its session, and the thread was told eagent
+// keeps trying every minute. The phone is then turned off for the
+// project's sessions while the watcher is connected: it stops trying, and
+// says so in the thread, once.
+func TestK4AWatcherThatStopsTryingSaysSo(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	fr := newR10Front(t, f)
+	host := &flakyResumeHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, failures: 1}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.sweep(context.Background())
+	if n := r11Told(fr, "keeps trying every minute"); n != 1 {
+		t.Fatalf("setup: told %d times: %q", n, fr.posted())
+	}
+	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"enabled": false}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if n := r11Told(fr, "stopped trying"); n != 1 || host.calls() != 0 || len(w.retries.replies) != 0 {
+		t.Fatalf("after the phone was turned off: told %q, resumed %d, kept %#v", fr.posted(), host.calls(), w.retries.replies)
 	}
 }
