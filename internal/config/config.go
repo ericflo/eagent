@@ -658,8 +658,8 @@ func DeleteBundle(project, name string) error {
 		return err
 	}
 	defer editor.Close()
-	if IsDefaultBundle(Resolve(project, "", ""), name) {
-		return fmt.Errorf("select a different default before deleting %q", name)
+	if why := KeptBy(Resolve(project, "", ""), "", "", name); len(why) > 0 {
+		return fmt.Errorf("%q is in force: %s", name, strings.Join(why, "; "))
 	}
 	if _, err := os.Stat(BundlePath(project, name)); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("no saved preset %q in %s", name, BundlesDir(project))
@@ -772,18 +772,38 @@ func explicitChoice(project, preset, bundle string) (string, string, string) {
 }
 
 // IsDefaultBundle says whether the saved bundle name is in force, so it is
-// not to be deleted: the bundle loading lays, which is the one res laid (a
-// caller's, else a saved preset an explicit preset or EAGENT_PRESET names:
-// explicitChoice), else EAGENT_CONFIG's; or the file's default_config,
-// which every start naming none takes.
+// not to be deleted (KeptBy).
 func IsDefaultBundle(res Resolution, name string) bool {
+	return len(KeptBy(res, "", "", name)) > 0
+}
+
+// FlagKeeps is why a saved preset eagent was started on (--config, or
+// --preset naming it) is in force, and what frees it.
+const FlagKeeps = "this eagent was started on it (--config or --preset); it can be deleted once eagent runs on another"
+
+// KeptBy says what keeps the saved bundle name in force, so it is not to be
+// deleted, each with what would free it; none when nothing does. res is
+// Resolve's for the caller's preset and bundle. The bundle loading lays is
+// kept: the one res laid (the caller's, else a saved preset its preset or
+// EAGENT_PRESET names: explicitChoice), else EAGENT_CONFIG's; and so is the
+// file's default_config, which every start naming none takes.
+func KeptBy(res Resolution, preset, bundle, name string) []string {
 	if name == "" {
-		return false
+		return nil
 	}
-	if res.Active.Kind == "bundle" {
-		return res.Active.Name == name || res.Effective.DefaultConfig == name
+	var why []string
+	if res.Effective.DefaultConfig == name {
+		why = append(why, "it is the project's default (default_config); select a different default first")
 	}
-	return os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
+	switch {
+	case res.Active.Kind == "bundle" && res.Active.Name == name && (preset != "" || bundle != ""):
+		why = append(why, FlagKeeps)
+	case res.Active.Kind == "bundle" && res.Active.Name == name:
+		why = append(why, "EAGENT_PRESET names it in eagent's environment; it can be deleted once that variable names another")
+	case res.Active.Kind != "bundle" && os.Getenv("EAGENT_CONFIG") == name:
+		why = append(why, "EAGENT_CONFIG names it in eagent's environment; it can be deleted once that variable names another")
+	}
+	return why
 }
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {

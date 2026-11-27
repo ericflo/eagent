@@ -52,10 +52,21 @@ func (s *Service) Runs() config.Config {
 	return config.Defaults()
 }
 
-// inForce says whether sessions start on the saved preset name, so it is
-// not to be deleted: by the loader's rule, or as the host's bundle.
-func (s *Service) inForce(name string) bool {
-	return config.IsDefaultBundle(config.Resolve(s.Project, s.Preset, s.Bundle), name) || name != "" && s.Runs().Name == name
+// inForce refuses to delete the saved preset name while sessions start on
+// it, saying what keeps it and what would free it: the loader's rule
+// (config.KeptBy), or the host's bundle where this service's own loading
+// lays another (the server's --config or --preset).
+func (s *Service) inForce(name string) error {
+	why := config.KeptBy(config.Resolve(s.Project, s.Preset, s.Bundle), s.Preset, s.Bundle, name)
+	if name != "" && s.Runs().Name == name {
+		if own, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err != nil || own.Name != name {
+			why = append(why, config.FlagKeeps)
+		}
+	}
+	if len(why) == 0 {
+		return nil
+	}
+	return fmt.Errorf("saved preset %s is in force: %s", name, strings.Join(why, "; "))
 }
 
 type Error struct {
