@@ -779,7 +779,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// dead ones to the card still open (reused, not doubled) or to the
 	// first free key. A resume costs one call, or two when the newest card
 	// died, plus one for each card the record lost.
-	newest, earlier := latestKeys(r.st, qid), liveCards(r.st, qid)
+	newest, earlier, asMessage := latestKeys(r.st, qid), liveCards(r.st, qid), postedAsMessage(r.st, qid)
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -837,10 +837,29 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			for i, o := range options {
 				body += fmt.Sprintf("\n%d. %s", i+1, o)
 			}
+			// A message stays in its thread: on a service that keeps no
+			// client keys, one an earlier run posted in this thread is not
+			// posted again, and the record says where each went.
+			p.mu.Lock()
+			here := p.threadID
+			p.mu.Unlock()
+			if key == "" && asMessage[here] {
+				return
+			}
 			// It carries the waiting line, as the card would have.
 			if m, thread, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text"), Activity: act}); perr == nil {
 				p.rememberIn(m, thread)
 				p.markSent(act)
+				if key == "" {
+					p.mu.Lock()
+					in := p.threadID
+					p.mu.Unlock()
+					r.post(func() {
+						if !r.ending {
+							r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, ThreadID: in}))
+						}
+					})
+				}
 				return
 			}
 		}
@@ -1467,6 +1486,20 @@ func latestKeys(st *state.State, qid string) map[string]int {
 		var d event.PhoneQuestionData
 		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.ThreadID != "" && d.Key > out[d.ThreadID] {
 			out[d.ThreadID] = d.Key
+		}
+	}
+	return out
+}
+
+// postedAsMessage is each thread the record says question qid went to as
+// a message, the service having refused it as a card, on a service that
+// keeps no client keys: a phone.question with no card.
+func postedAsMessage(st *state.State, qid string) map[string]bool {
+	out := map[string]bool{}
+	for _, ev := range st.Events {
+		var d event.PhoneQuestionData
+		if ev.Type == event.PhoneQuestion && ev.Decode(&d) == nil && d.QuestionID == qid && d.CardID == "" {
+			out[d.ThreadID] = true
 		}
 	}
 	return out

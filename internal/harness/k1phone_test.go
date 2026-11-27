@@ -130,6 +130,79 @@ func TestK1AResumeThatAnswersWithdrawsEveryOpenCard(t *testing.T) {
 	}
 }
 
+// k1AskedAsMessage is how many times the question went to the thread as a
+// message.
+func k1AskedAsMessage(fp *phoneFake, question string) int {
+	return len(fp.postsWhere(func(p map[string]any) bool {
+		body, _ := p["body"].(string)
+		return strings.Contains(body, question) && p["sender"] != "user"
+	}))
+}
+
+// B5: on a service that keeps no client keys, a question the service
+// refused as a card went to the thread as a message, and the session
+// stopped with it open. A message does not expire or close as a card
+// does, so the resume does not post it a second time; the session still
+// waits for the reply, which answers it.
+func TestK1AQuestionPostedAsAMessageIsNotPostedAgainOnResume(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r8AskSession(t, fp, "Which branch?", r8Choices(21))
+	waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
+	g.agentStopped()
+	r14Drained(t, g)
+	g.rt.sync(func() {})
+	g.interrupt()
+	fp.mu.Lock()
+	asks := len(fp.asks)
+	fp.mu.Unlock()
+	g.resume(Options{})
+	waitFor(t, "the question to be asked again", func() bool { fp.mu.Lock(); defer fp.mu.Unlock(); return len(fp.asks) > asks })
+	r14Drained(t, g)
+	if n := k1AskedAsMessage(fp, "Which branch?"); n != 1 {
+		t.Fatalf("the question was posted %d times", n)
+	}
+	g.running(5*loopPoll, "while its question waits on the phone")
+	fp.userReply("21")
+	if code := g.exit(25 * time.Second); code != 0 {
+		t.Fatalf("exit %d logs=%v", code, g.ui.logged())
+	}
+	var answers []string
+	for _, ev := range r13Logged(g, event.UserAnswer) {
+		var d event.UserAnswerData
+		_ = ev.Decode(&d)
+		answers = append(answers, d.Text)
+	}
+	if len(answers) != 1 || answers[0] != "branch-21" {
+		t.Fatalf("answers = %q", answers)
+	}
+}
+
+// B5, the thread deleted meanwhile: the question's message went with it,
+// and the resume posts it in the thread its first post recreated.
+func TestK1AQuestionPostedAsAMessageIsPostedAgainInARecreatedThread(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	svc := newR13Service(t, fp)
+	choices := r8Choices(21)
+	g := phoneStart(t, fp, "pick the branch to ship", false, func(_ string, msgs []map[string]any) reply {
+		if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "Which branch?") {
+			return phoneAskAndStop("Which branch?", choices...)
+		}
+		return hold()
+	}, func(c *config.Config) { c.Finalechat.BaseURL = svc.srv.URL })
+	waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
+	g.agentStopped()
+	r14Drained(t, g)
+	g.rt.sync(func() {})
+	g.interrupt()
+	svc.deleteThread("t2")
+	g.resume(Options{})
+	waitFor(t, "the question in the recreated thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 2 })
+}
+
 // B16: every post of eagent's that the service answers with a thread
 // takes that thread's id, so a thread the user deleted and the post
 // recreated is known by its new id (as a narrator message or a question
