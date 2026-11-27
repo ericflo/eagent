@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
 )
@@ -43,21 +44,15 @@ func (h *k1ResumingHost) Resume(_ string, msg integration.PhoneMessage) error {
 }
 
 // A reply sent while the session was stopped carries two files, neither of
-// which can be fetched; on the watcher's service the first refusal note
-// could be posted and the second, once, not. The reply watcher resumes the
-// session with the words, once; the resumed session records both files
-// refused, and its mirror tells the sender about each, once.
+// which can be fetched; the service refuses the first refusal note about
+// the second once. The reply watcher resumes the session with the words,
+// once; the resumed session records both files refused, and its mirror
+// tells the sender about each, once. The session and the watcher use the
+// same service, as they do when both read the same configuration.
 func TestK1AWatcherResumeTellsEveryRefusedFileOnce(t *testing.T) {
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
-	g := phoneStart(t, fp, "first ask", false, phoneStopAndClose("Nothing to do."), nil)
-	if code := g.exit(20 * time.Second); code != 0 {
-		t.Fatalf("first run exit %d", code)
-	}
-	ids := r10Says(fp, r10Msg("see both",
-		map[string]any{"id": "att-x", "kind": "image", "content_type": "image/png", "filename": "one.png", "size": 3, "url": "/api/v1/attachments/att-x"},
-		map[string]any{"id": "att-y", "kind": "image", "content_type": "image/png", "filename": "two.png", "size": 3, "url": "/api/v1/attachments/att-y"}))
-	// The watcher's service: the first note about two.png is refused.
+	// The service: the first note about two.png is refused.
 	u, err := url.Parse(fp.srv.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +74,13 @@ func TestK1AWatcherResumeTellsEveryRefusedFileOnce(t *testing.T) {
 		proxy.ServeHTTP(w, r)
 	}))
 	t.Cleanup(front.Close)
+	g := phoneStart(t, fp, "first ask", false, phoneStopAndClose("Nothing to do."), func(c *config.Config) { c.Finalechat.BaseURL = front.URL })
+	if code := g.exit(20 * time.Second); code != 0 {
+		t.Fatalf("first run exit %d", code)
+	}
+	ids := r10Says(fp, r10Msg("see both",
+		map[string]any{"id": "att-x", "kind": "image", "content_type": "image/png", "filename": "one.png", "size": 3, "url": "/api/v1/attachments/att-x"},
+		map[string]any{"id": "att-y", "kind": "image", "content_type": "image/png", "filename": "two.png", "size": 3, "url": "/api/v1/attachments/att-y"}))
 	t.Setenv("FINALECHAT_URL", front.URL)
 	t.Setenv("FINALECHAT_TOKEN", "fc_test")
 	host := &k1ResumingHost{g: g}

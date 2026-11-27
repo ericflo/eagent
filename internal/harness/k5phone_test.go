@@ -82,7 +82,7 @@ func TestSRPhoneAReplyReadAfterTheLoopClosedIsLeftForTheNextRun(t *testing.T) {
 	_, keptErr := os.Stat(srPhoneKept(g.project))
 	// What the person sees: the project's reply watcher, started now, is
 	// to resume the session with the reply (as in TestK1AMessageLeftBehind…).
-	t.Setenv("FINALECHAT_URL", fp.srv.URL)
+	t.Setenv("FINALECHAT_URL", srv.URL) // the service the session mirrored to, as its configuration names it
 	t.Setenv("FINALECHAT_TOKEN", "fc_test")
 	host := &k1LeftHost{next: make(chan integration.PhoneMessage, 4)}
 	ctx, cancel := context.WithCancel(context.Background())
