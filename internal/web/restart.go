@@ -275,9 +275,10 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // that could not be killed too, as stopSession does), and its sends are
 // settled: not sent for one taken back, unconfirmed for the rest. Then,
 // with the lock still held (no run of the session can come in between),
-// the phone is told, by cfg, the configuration the session ran on (nil:
-// not known, and nothing is told). It returns who it stopped, and who it
-// could not kill.
+// the phone is told, if the record shows the session mirrored to it
+// (mirrored), on the account of cfg, the configuration the session runs on
+// (nil: none loads, and nothing is told). It returns who it stopped, and
+// who it could not kill.
 func stopAgents(path string, cfg *config.Config) (stopped, failed []string, err error) {
 	sess, evs, err := store.Open(path, time.Now())
 	if err != nil {
@@ -319,12 +320,27 @@ func stopAgents(path string, cfg *config.Config) (stopped, failed []string, err 
 			}
 		}
 	}
-	if cfg != nil {
+	if cfg != nil && mirrored(evs) {
 		// A note the sender is still owed, once posted, is recorded posted
 		// here, in the record this holds, so no later run posts it again.
 		tellPhoneStopped(*cfg, path, func(ev event.Event) { _, _ = sess.Append(ev) })
 	}
 	return stopped, failed, nil
+}
+
+// mirrored reports whether a session's record shows it mirrored to the
+// phone: a phone.* event (phone.thread, once its mirror began). Whether a
+// stop tells a phone at all is read from this; the configuration gives
+// only the account. The phone_ledger flag on session.start and
+// session.resume does not show it: every run writes it, the phone on or
+// off.
+func mirrored(evs []event.Event) bool {
+	for _, ev := range evs {
+		if strings.HasPrefix(ev.Type, "phone.") {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionConfig is this server's own configuration, or nil when it cannot

@@ -71,6 +71,7 @@ func TestSR6WebAStopToldTwiceDoublesThePhonesClosingNote(t *testing.T) {
 	t.Setenv("FINALECHAT_URL", srv.URL)
 	k5Kills(t)
 	info := srAgentSession(t, project)
+	k16Mirrored(t, info)
 	s.writeHosted([]string{info.ID}, time.Now().UTC())
 	s.resuming.Lock()
 	s.stopping = true

@@ -139,6 +139,7 @@ func TestK11TheNextServerFinishingAStopTellsThePhone(t *testing.T) {
 	tellPhoneStopped = func(_ config.Config, path string, _ func(event.Event)) { told = append(told, filepath.Base(path)) }
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := srAgentSession(t, project)
+	k16Mirrored(t, info)
 	s.mu.Lock()
 	s.writeHostedList([]string{info.ID}, time.Now().UTC(), k12Marks(time.Now().UTC(), info.ID))
 	s.mu.Unlock()
@@ -219,6 +220,7 @@ func TestSR5WebAPhoneMessageTheShutdownStopTakesBackStaysHeldOnThePhone(t *testi
 	killAgent = func(string, string) error { return nil }
 	t.Cleanup(func() { killAgent = old })
 	info := srAgentSession(t, project)
+	k16Mirrored(t, info)
 	sess, _, err := store.Open(info.Path, time.Now())
 	if err != nil {
 		t.Fatal(err)

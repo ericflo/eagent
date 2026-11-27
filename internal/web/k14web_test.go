@@ -55,6 +55,7 @@ func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRa
 	tellPhoneStopped = func(cfg config.Config, _ string, _ func(event.Event)) { told = append(told, cfg) }
 	t.Cleanup(func() { tellPhoneStopped = old })
 	info := r11Session(t, project)
+	k16Mirrored(t, info) // an earlier run mirrored: a stop tells, by the account of the session's own
 	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {
 		t.Fatalf("resume: %d %s", w.Code, w.Body)
 	}
@@ -195,6 +196,7 @@ func TestK14AMarkTellsThePhoneByTheConfigurationTheSessionRan(t *testing.T) {
 	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
 	told := k14Told(t)
 	info := r11Session(t, project)
+	k16Mirrored(t, info)
 	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {
 		t.Fatalf("resume: %d %s", w.Code, w.Body)
 	}
@@ -221,6 +223,9 @@ func TestK14AnOldMarkTellsThePhoneByTheConfigurationTheRecordNames(t *testing.T)
 	told := k14Told(t)
 	sess := newSession(t, project)
 	if _, err := sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Session: sess.ID, Cwd: project, Config: "nophone"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.PhoneThread, event.ActorHarness, event.PhoneThreadData{ThreadID: "t", ExternalID: "eagent:" + sess.ID})); err != nil {
 		t.Fatal(err)
 	}
 	_ = sess.Close()
