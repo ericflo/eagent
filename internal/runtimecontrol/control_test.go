@@ -274,9 +274,10 @@ func TestApplyValuesRoutes(t *testing.T) {
 			{Op: "set", Key: "/routes/eagent/effort", Value: effort},
 		}
 	}
-	// A pick whose key is not set where the session runs is rejected.
+	// A pick whose key is not set where the session runs is rejected by
+	// the session, which knows its routes.
 	t.Setenv("OPENROUTER_API_KEY", "")
-	if _, err := ApplyValues(project, c.Values, proposal(routeEdits("openrouter", "reflection/beam-1.0-501b-a23b", "xhigh")...), view, grant); err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
+	if _, err := applyValues(project, c.Values, proposal(routeEdits("openrouter", "reflection/beam-1.0-501b-a23b", "xhigh")...), view, grant, r14Routes(project, config.Defaults())); err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
 		t.Fatalf("keyless pick: %v", err)
 	}
 	t.Setenv("OPENROUTER_API_KEY", "test")
@@ -357,7 +358,7 @@ func TestApplyValuesConfiguration(t *testing.T) {
 	}
 	choose := control.Edit{Op: "set", Key: "/config", Value: "anthropic-high"}
 	t.Setenv("ANTHROPIC_API_KEY", "")
-	if _, err := ApplyValues(project, c.Values, proposal(choose), view, grant); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+	if _, err := applyValues(project, c.Values, proposal(choose), view, grant, r14Routes(project, config.Defaults())); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 		t.Fatalf("keyless configuration: %v", err)
 	}
 	t.Setenv("ANTHROPIC_API_KEY", "test")

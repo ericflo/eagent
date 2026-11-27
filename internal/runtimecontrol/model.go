@@ -3,6 +3,7 @@
 package runtimecontrol
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -337,7 +338,18 @@ func View(project, session, generation string, values Values, available bool) (s
 			Details: map[string]any{"session_id": session, "thread_external_id": "eagent:" + session, "persistence": "This process only. Project defaults and future or resumed sessions are unchanged."}}}, nil
 }
 
+// ApplyValues is the session's values with proposal applied, for a caller
+// that does not have the session's routes (the connector): the key a
+// route needs and a route at an address no provider knows are left to the
+// session (applyValues).
 func ApplyValues(project string, before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant) (Values, error) {
+	return applyValues(project, before, proposal, view, grant, nil)
+}
+
+// applyValues is ApplyValues where running (Controller.Routes) gives the
+// routes the session will run the picks on, as configured: their key
+// variables are the ones checked.
+func applyValues(project string, before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant, running func(map[string]Route) (map[string]config.ModelRoute, error)) (Values, error) {
 	if proposal.Generation != view.Generation || proposal.ExpectedVersion != view.Snapshot.Version || !view.Snapshot.RuntimeKnown {
 		return before, fmt.Errorf("runtime generation, version or availability changed")
 	}
@@ -499,8 +511,13 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	for key := range touched {
 		rt := routes[key]
 		label := routeNames[key]
-		if rt.Provider == "" || rt.Model == "" {
+		if rt.Model == "" {
 			return before, fmt.Errorf("%s needs both a provider and a model", label)
+		}
+		if rt.Provider == "" {
+			// An address no provider knows has no catalog to check the
+			// pick against; the session has it or refuses it (running).
+			continue
 		}
 		// The same rule as the project settings' (config.PickRoute with no
 		// effort named): an effort the new model lacks becomes the nearest
@@ -517,8 +534,18 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		}
 		rt.Effort = picked.ReasoningEffort
 		routes[key] = rt
-		if picked.APIKeyEnv != "" && os.Getenv(picked.APIKeyEnv) == "" {
-			return before, fmt.Errorf("%s is not set where this session runs, so %s cannot use %s", picked.APIKeyEnv, label, rt.Provider)
+	}
+	// The key is the one of the route the session runs the pick on (a
+	// fallback's or a saved preset's own variable), not the provider's.
+	if running != nil && len(touched) > 0 {
+		run, err := running(routes)
+		if err != nil {
+			return before, err
+		}
+		for key := range touched {
+			if a := run[key]; a.APIKeyEnv != "" && os.Getenv(a.APIKeyEnv) == "" {
+				return before, fmt.Errorf("%s is not set where this session runs, so %s cannot use %s", a.APIKeyEnv, routeNames[key], cmp.Or(routes[key].Provider, a.BaseURL))
+			}
 		}
 	}
 	before.Routes = routes
