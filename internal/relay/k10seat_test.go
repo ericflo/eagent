@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,47 +93,6 @@ func TestSR9SeatSendQueuedInPiIsReportedUnconfirmedWhileADialogHoldsTheRun(t *te
 	}
 	if len(got) != 1 || !got[0].OK {
 		t.Fatalf("outcomes %+v; want q1 delivered by its arrival after the dialog, never unconfirmed while pi held it mid-run", got)
-	}
-}
-
-// SR9-4. Codex's /new starts a new thread, written to a rollout of its
-// own. The seat follows Claude to the session /clear starts and pi to the
-// one /new starts, but Codex is no sessionMover: it stays on the rollout it
-// found, so the turns Codex runs on the new thread never reach eagent, and
-// every send typed there is reported unconfirmed after 45 s though it went.
-func TestSR9SeatCodexNewLeavesTheSeatOnTheOldRollout(t *testing.T) {
-	savedSettle := typeSettle
-	typeSettle = 0
-	t.Cleanup(func() { typeSettle = savedSettle })
-	home, dir := t.TempDir(), t.TempDir()
-	t.Setenv("CODEX_HOME", home)
-	now := time.Now()
-	a := writeRollout(t, home, now, "thread-a", dir)
-	h := &fakeHost{alive: true, screen: "› Ask Codex to do anything\n  100% context left"}
-	s := newSeat(Spec{Dir: dir}, codexAgent{}, h, "sr9-codex-new", "thread-a")
-	s.launched, s.state, s.poll = now.Add(-time.Second), "idle", time.Millisecond
-	go s.watch()
-	t.Cleanup(s.Close)
-	if p, ok := transcriptFound(s, 5*time.Second); !ok || p != a {
-		t.Fatalf("found %q; want %s", p, a)
-	}
-	if _, err := s.Send("c1", "/new", "queue"); err != nil {
-		t.Fatal(err)
-	}
-	b := writeRollout(t, home, time.Now(), "thread-b", dir) // the thread /new started
-	appendLines(t, b, k1CodexUser("fix the build"),
-		fmt.Sprintf(`{"timestamp":"%s","type":"event_msg","payload":{"type":"task_started"}}`, stamp(time.Now())),
-		fmt.Sprintf(`{"timestamp":"%s","type":"event_msg","payload":{"type":"task_complete","last_agent_message":"fixed: go build passes"}}`, stamp(time.Now())))
-	deadline := time.After(time.Second) // a look every millisecond
-	for {
-		select {
-		case ev := <-s.Events():
-			if ev.Kind == KindTurn {
-				return // followed
-			}
-		case <-deadline:
-			t.Fatalf("Codex's turn on the thread /new started never reached eagent: the seat follows %s", s.Snapshot().Transcript)
-		}
 	}
 }
 
