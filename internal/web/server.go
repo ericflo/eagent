@@ -664,11 +664,38 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": "inbox"})
+}
+
+var errEnding = errors.New("the session is stopping and takes nothing more")
+
+// hand gives a dismissal or a stop to a session that is running: to a run
+// here on its own loop (Take), so it is taken before the answer, and not
+// at all once that run is ending (errEnding); to its inbox when another
+// process runs it.
+func (s *Server) hand(info store.Info, msg harness.InboxMessage) error {
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if h == nil || h.rt == nil {
+		return harness.PostInbox(info.Path, msg)
+	}
+	took, err := h.rt.Take(msg)
+	if err == nil && !took {
+		err = errEnding
+	}
+	return err
+}
+
+func handCode(err error) int {
+	if errors.Is(err, errEnding) {
+		return http.StatusConflict
+	}
+	return 500
 }
 
 func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
@@ -683,8 +710,8 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("session is not running"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})

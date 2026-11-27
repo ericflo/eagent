@@ -12,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // k2Page runs script after the page's send() in node, with what send()
@@ -125,6 +128,98 @@ func TestK2NothingStartsARunOnceTheServersShutdownHasBegun(t *testing.T) {
 	s.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("%d run(s) started after the server's shutdown", n)
+	}
+}
+
+// k2Hosted runs the session here with a terminal the test types into, once
+// its first look at its inbox is behind it.
+func k2Hosted(t *testing.T, s *Server, cfg config.Config, project string, info store.Info) (k1Terminal, *hosted) {
+	t.Helper()
+	ui := k1Terminal{newWebUI(func(string, ...any) {}), make(chan string, 1), make(chan struct{}, 1)}
+	rt, err := harness.Resume(cfg, harness.Options{Project: project, Interactive: true}, ui, info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.run(rt, ui.webUI)
+	<-ui.looked
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	return ui, h
+}
+
+// k2Types counts the events of type typ on record.
+func k2Types(t *testing.T, info store.Info, typ string) int {
+	t.Helper()
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, ev := range evs {
+		if ev.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// A dismissal or a stop from the browser for a session this server runs,
+// which then ends before its next look at its inbox, is taken first: the
+// dismissal is on record, and nothing is left in the inbox. They used to
+// stay there, answered as delivered: a dismissal left so let the next
+// resume's message answer the question the user had dismissed.
+func TestK2ADismissalOrAStopForARunHereThatThenEndsIsTaken(t *testing.T) {
+	for _, what := range []string{"dismiss", "stop"} {
+		t.Run(what, func(t *testing.T) {
+			s, project := newTestServer(t)
+			cfg := k1Model(t, s, project)
+			info := r11Session(t, project)
+			sess, _, err := store.Open(info.Path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sess.Append(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Merge it?"})); err != nil {
+				t.Fatal(err)
+			}
+			_ = sess.Close()
+			ui, h := k2Hosted(t, s, cfg, project, info)
+			if w := do(s, "POST", "/api/sessions/"+info.ID+"/"+what, map[string]any{"question_id": "q1"}, nil); w.Code != http.StatusOK {
+				t.Fatalf("answered %d %s", w.Code, w.Body)
+			}
+			ui.in <- "/quit" // before the run's next look at its inbox
+			<-h.done
+			if left, _ := os.ReadDir(harness.InboxDir(info.Path)); len(left) != 0 {
+				t.Fatalf("the %s was left unread in the inbox of a run that has ended (%d file(s))", what, len(left))
+			}
+			if n := k2Types(t, info, event.UserDismiss); what == "dismiss" && n != 1 {
+				t.Fatalf("%d dismissals on record", n)
+			}
+		})
+	}
+}
+
+// One for a run here that is ending is not given to it, and the browser is
+// told: the run reads its inbox no more.
+func TestK2ADismissalForAnEndingRunHereIsRefused(t *testing.T) {
+	s, project := newTestServer(t)
+	cfg := k1Model(t, s, project)
+	info := r11Session(t, project)
+	rt, ui := r11Ended(t, cfg, project, info)
+	lock, _, err := store.Open(info.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	s.mu.Lock()
+	s.running[info.ID] = &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
+	s.mu.Unlock()
+	t.Cleanup(func() { s.mu.Lock(); delete(s.running, info.ID); s.mu.Unlock() })
+	for _, what := range []string{"dismiss", "stop"} {
+		w := do(s, "POST", "/api/sessions/"+info.ID+"/"+what, map[string]any{"question_id": "q1"}, nil)
+		if left, _ := os.ReadDir(harness.InboxDir(info.Path)); w.Code != http.StatusConflict || len(left) != 0 {
+			t.Fatalf("%s: answered %d %s, %d file(s) left in the inbox of a run that reads it no more", what, w.Code, w.Body, len(left))
+		}
 	}
 }
 
