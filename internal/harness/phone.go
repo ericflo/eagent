@@ -135,8 +135,15 @@ func (r *Runtime) startPhone() {
 	if before < len(r.st.Events) {
 		started = integration.ReadPhoneLedger(r.st.Events[:before+1])
 	}
-	for card := range integration.ReadPhoneLedger(r.st.Events).Cards {
+	whole := integration.ReadPhoneLedger(r.st.Events)
+	for card := range whole.Cards {
 		p.taken[card] = true
+	}
+	// The poll skips every id in posted: eagent's own posts, and every app
+	// message the session has taken in, so a page that lists one again
+	// (after an anchor the service no longer knows) does not take it twice.
+	for id := range whole.Taken {
+		p.posted[id] = true
 	}
 	r.phone = p
 	p.wg.Add(1)
@@ -643,11 +650,19 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
+		qid, text := d.QuestionID, d.Text
 		if d.Source == "finalechat" {
-			return
+			// The phone's own words are not mirrored back to it. Typed in
+			// the thread, not on the card this run put up for the question,
+			// they withdraw that card as an answer given anywhere else does.
+			p.mu.Lock()
+			fid, asked := p.questions[qid]
+			p.mu.Unlock()
+			if !asked || (fid != "" && fid == d.CardID) {
+				return
+			}
 		}
 		// Answered elsewhere: withdraw the phone question and show the choice.
-		qid, text := d.QuestionID, d.Text
 		p.enqueue(func(ctx context.Context) {
 			// Read the phone's id here, not at enqueue time: the ask call that
 			// learns it runs on this same queue, just ahead of us.
@@ -657,7 +672,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			if fid != "" {
 				_ = p.client.Cancel(ctx, fid)
 			}
-			if p.mirror {
+			if d.Source != "finalechat" && p.mirror {
 				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
 				if err == nil {
 					p.remember(msg.ID)
@@ -757,7 +772,7 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 	// dead ones to the card still open (reused, not doubled) or to the
 	// first free key. A resume costs one call, or two when the newest card
 	// died, plus one for each card the record lost.
-	newest := latestKeys(r.st, qid)
+	newest, earlier := latestKeys(r.st, qid), liveCards(r.st, qid)
 	p.mu.Lock()
 	p.questions[qid] = "" // asked; the phone's id arrives when the call returns
 	p.reask = ""
@@ -815,8 +830,10 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			for i, o := range options {
 				body += fmt.Sprintf("\n%d. %s", i+1, o)
 			}
-			if m, _, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text")}); perr == nil {
-				p.remember(m.ID)
+			// It carries the waiting line, as the card would have.
+			if m, thread, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text"), Activity: act}); perr == nil {
+				p.rememberIn(m, thread)
+				p.markSent(act)
 				return
 			}
 		}
@@ -847,6 +864,18 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			}
 			r.append(event.New(event.PhoneQuestion, event.ActorHarness, event.PhoneQuestionData{QuestionID: qid, CardID: cardID, ThreadID: cardThread, Key: cardKey}))
 		})
+		if key == "" {
+			// Asked with no client key, the question stands on a new card
+			// beside those the record holds: they are withdrawn, so one card
+			// of it is open, as on a service that keeps keys. One the person
+			// dismissed before this is their dismissal.
+			for _, fid := range earlier {
+				_ = p.client.Cancel(ctx, fid)
+				if c, err := p.client.Question(ctx, fid, 0); err == nil && c.Status == "dismissed" {
+					p.dismissed(r, qid)
+				}
+			}
+		}
 		if q.Status == "answered" {
 			// Answered on the phone while the session was stopped, and the
 			// answer did not reach the session as the answer (it came with
@@ -1098,31 +1127,32 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				// a tombstone is a message the user took back.
 				continue
 			}
+			// Read once: its step on the loop takes it, or finds the session
+			// ending and nothing more is taken. A later page that lists it
+			// again before or after that step skips it.
+			p.remember(m.ID)
 			body := strings.TrimSpace(m.Body)
 			var atts []event.Attachment
+			var notes []func(context.Context)
 			for _, a := range m.Attachments {
 				saved, err := r.downloadAttachment(p.client, a)
 				if err != nil {
 					r.ui.Log("finalechat: could not fetch %s: %v", a.Filename, shortErr(err))
 					if r.ctx.Err() != nil {
 						// The session is shutting down, which failed the
-						// fetch: the message is left for the next run.
-						return
-					}
-					// Nor is the sender told anything by a session that is
-					// ending (a /quit before it in the page, say): its step
-					// would not take the message, which is left for the
-					// next run.
-					ending := true
-					r.sync(func() { ending = r.ending })
-					if ending {
+						// fetch: the message is left for the next run, and
+						// nobody is told anything, about this file or one
+						// before it.
 						return
 					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
-					// without a word.
+					// without a word. Only once every fetch has finished,
+					// in the step that takes the message: a session that
+					// is ending (a /quit before it in the page, say) does
+					// not take it, and says nothing.
 					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
-					p.enqueue(func(ctx context.Context) {
+					notes = append(notes, func(ctx context.Context) {
 						act := p.attach()
 						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
@@ -1134,6 +1164,11 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				}
 				atts = append(atts, saved)
 			}
+			tell := func() {
+				for _, n := range notes {
+					p.enqueue(n)
+				}
+			}
 			// Every message the poll takes in is recorded in the loop step
 			// that takes it (tookPhoneMessage), so a resume after any stop
 			// goes on after the last one, neither taking one twice nor
@@ -1143,6 +1178,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			if body == "" && len(atts) == 0 {
 				r.post(func() {
 					if !r.ending {
+						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
 					}
 				})
@@ -1156,6 +1192,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// Its answer was taken already (handOver claims it).
 					r.post(func() {
 						if !r.ending {
+							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
 						}
 					})
@@ -1179,6 +1216,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					if r.ending {
 						return
 					}
+					tell()
 					from := len(r.st.Events)
 					r.handOver(p, fid, InboxMessage{Type: "answer", Text: body, QuestionID: qid, From: "finalechat", Client: caps, Attachments: atts, PhoneID: phoneID, CardID: fid})
 					r.tookPhoneMessage(phoneID, from)
@@ -1192,6 +1230,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				if r.ending {
 					return
 				}
+				tell()
 				from := len(r.st.Events)
 				if r.ownCommand(body, "finalechat") {
 					// A command is recorded as taken before it runs: lost
