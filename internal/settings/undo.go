@@ -110,6 +110,14 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 	for _, edit := range inverse.Edits {
 		keys = append(keys, edit.Key)
 	}
+	// A route's model put back goes to the address the route has then: a
+	// change of that address since the command is a change of what the
+	// reversal restores.
+	for _, edit := range inverse.Edits {
+		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && !slices.Contains(keys, route+"/base_url") {
+			keys = append(keys, route+"/base_url")
+		}
+	}
 	v, had := pointerValue(before, "/model/fallback")
 	off := had && v == nil && slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, "/model/fallback/") })
 	if off {
@@ -122,7 +130,7 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	raw, etag, view, err := s.prepare(inverse, grant, false)
+	raw, etag, view, err := s.prepare(inverse, grant, before)
 	if err != nil || !off {
 		return raw, etag, view, err
 	}
