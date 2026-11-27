@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -36,10 +37,13 @@ func TestK8ADismissDuringAStopInTheShutdownIsRefused(t *testing.T) {
 }
 
 // A Stop during the shutdown for a session whose run here is slow to
-// finish takes the session off the list before it waits for the run: the
-// process may exit first, and the next serve must not bring it back. It
-// used to wait first.
-func TestK8AStopWaitingOnASlowRunTakesTheSessionOffTheListFirst(t *testing.T) {
+// finish marks the stop on the list before it waits for the run: the
+// process may exit first, and the next serve must then finish the stop,
+// not bring the session back. Once the stop is done the session is off the
+// list. It used to wait first, with the session listed as running.
+// (Changed with the stop's redesign: the session stays listed, marked, in
+// the wait; it used to be taken off the list then.)
+func TestK8AStopWaitingOnASlowRunMarksTheStopFirst(t *testing.T) {
 	s, project := newTestServer(t)
 	cfg := k1Model(t, s, project)
 	info := r11Session(t, project)
@@ -60,7 +64,9 @@ func TestK8AStopWaitingOnASlowRunTakesTheSessionOffTheListFirst(t *testing.T) {
 		close(stopDone)
 	}()
 	k7Waiting(t, "web.(*Server).stopAgentsOf", stopDone) // it waits for the run
-	listed := k3Listed(t, project)
+	s.mu.Lock()
+	during, _ := s.readHosted()
+	s.mu.Unlock()
 	_ = lock.Close() // the run lets go at last
 	s.mu.Lock()
 	delete(s.running, info.ID)
@@ -69,8 +75,11 @@ func TestK8AStopWaitingOnASlowRunTakesTheSessionOffTheListFirst(t *testing.T) {
 	if code := <-stopped; code != http.StatusOK {
 		t.Fatalf("stop: %d", code)
 	}
-	if len(listed) != 0 {
-		t.Fatalf("while the Stop waited for the run, the next server would have brought back %q", listed)
+	if slices.Contains(during.Sessions, info.ID) && !slices.Contains(during.Stop, info.ID) {
+		t.Fatalf("while the Stop waited for the run, the next server would have brought the session back: %+v", during)
+	}
+	if got := k3Listed(t, project); len(got) != 0 {
+		t.Fatalf("after the stop the list still holds %q", got)
 	}
 }
 
