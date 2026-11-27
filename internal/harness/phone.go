@@ -1205,7 +1205,27 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	// What it leaves for the next run is looked for once the session has
 	// stopped; a poll that returns with its context live left a message
 	// whose fetch the shutdown cut off.
-	defer func() { integration.LeftForNextRun(r.projectPath(), r.sess.ID, p.ctx.Err() == nil || p.left, r.ui.Log) }()
+	// A message read is handed to the loop in a step; one whose step never
+	// ran (dropped once the loop had closed, or still queued when it
+	// closed) was neither taken in nor seen to be left, and counts as left.
+	unrun := 0 // guarded by p.mu
+	step := func(fn func()) {
+		p.mu.Lock()
+		unrun++
+		p.mu.Unlock()
+		r.post(func() {
+			p.mu.Lock()
+			unrun--
+			p.mu.Unlock()
+			fn()
+		})
+	}
+	defer func() {
+		p.mu.Lock()
+		left := p.left || unrun > 0
+		p.mu.Unlock()
+		integration.LeftForNextRun(r.projectPath(), r.sess.ID, p.ctx.Err() == nil || left, r.ui.Log)
+	}()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
@@ -1364,7 +1384,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			// session is ending, leaves its message for the next run.
 			phoneID := m.ID
 			if body == "" && len(atts) == 0 {
-				r.post(func() {
+				step(func() {
 					if !r.ending {
 						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
@@ -1380,7 +1400,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 				p.mu.Unlock()
 				if p.isTaken(fid) {
 					// Its answer was taken already (handOver claims it).
-					r.post(func() {
+					step(func() {
 						if !r.ending {
 							tell()
 							r.tookPhoneMessage(phoneID, len(r.st.Events))
@@ -1412,7 +1432,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					}
 				}
 				caps := capsFromMeta(m.Meta)
-				r.post(func() {
+				step(func() {
 					if r.ending {
 						p.left = true
 						return
@@ -1427,7 +1447,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			p.settleDismissals(r)
 			caps := capsFromMeta(m.Meta)
 			route, delivery := routeFromMeta(m.Meta)
-			r.post(func() {
+			step(func() {
 				if r.ending {
 					// A command is not run by a session that is ending, and
 					// left for the next run it would have the reply watcher
@@ -1722,7 +1742,17 @@ func liveCards(st *state.State, qid string) []string {
 			out = append(out, d.CardID)
 		}
 	}
-	return out
+	// A card whose answer the record holds as taken is answered, and its
+	// answer is the session's already: it is not live, and nothing reads it
+	// again (a resume, a re-ask, a withdrawal).
+	taken := integration.ReadPhoneLedger(st.Events).Cards
+	live := out[:0]
+	for _, c := range out {
+		if !taken[c] {
+			live = append(live, c)
+		}
+	}
+	return live
 }
 
 // handOver gives the session a card's answer, once, whoever comes first:
