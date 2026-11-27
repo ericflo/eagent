@@ -120,13 +120,20 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 		r.relayRepick[name] = pick
 		r.syncRelaySettings()
 		r.publishRelayMeta() // the thread header says a change is waiting
-		switch {
+		then := " it starts again with " + r.pickText(rel, pick)
+		switch why := r.busyWith(rel); {
 		case held == "dialog":
-			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen); it starts again with " + r.pickText(rel, pick) + " once that is answered and it is between turns, on the same conversation.", nil
-		case rel.State != "working":
-			return rel.Who() + " is not between turns yet (something sent to it is on its way, or it is acting on one of its own commands); it starts again with " + r.pickText(rel, pick) + " once nothing waits on it, on the same conversation.", nil
+			return rel.Who() + " is waiting on a dialog on its screen (see relay_screen);" + then + " once that is answered and it is between turns, on the same conversation.", nil
+		case why == "starting":
+			return rel.Who() + " is still starting;" + then + " once it is ready, on the same conversation.", nil
+		case why == "working":
+			return rel.Who() + " is in a turn;" + then + " when the turn ends, on the same conversation.", nil
+		case why == "message":
+			return rel.Who() + " has a message on its way that it reads next;" + then + " when the turn that message starts ends, on the same conversation.", nil
+		case why == "command":
+			return rel.Who() + " is acting on one of its own commands;" + then + " once it has, on the same conversation.", nil
 		}
-		return rel.Who() + " is in a turn; it starts again with " + r.pickText(rel, pick) + " when the turn ends, on the same conversation.", nil
+		return rel.Who() + " is not between turns yet;" + then + " once nothing waits on it, on the same conversation.", nil
 	}
 	if err := r.restartRelayWith(rel, pick); err != nil {
 		return "", err
@@ -226,6 +233,32 @@ func (r *Runtime) heldBack(rel *state.Relay) string {
 		return "busy"
 	}
 	return ""
+}
+
+// busyWith says what keeps a relay from between turns, for the words a
+// waiting change is told (the seat decides whether it waits: heldBack):
+// "starting", "working" (a turn), "message" (one sent to it, on its way),
+// "command" (one of its own commands, sent to it and not yet acted on), or
+// "" when neither the seat nor the record can say. Loop goroutine.
+func (r *Runtime) busyWith(rel *state.Relay) string {
+	st := relay.Status{State: rel.State}
+	if seat := r.relays.get(rel.Name); seat != nil {
+		st = seat.Snapshot()
+	}
+	switch {
+	case st.State == "starting" || rel.State == "starting":
+		return "starting"
+	case st.State == "working" || rel.State == "working":
+		return "working"
+	}
+	why := ""
+	for _, text := range rel.Undelivered {
+		if !relay.IsAgentCommand(text) {
+			return "message"
+		}
+		why = "command"
+	}
+	return why
 }
 
 // applyWaitingRepick starts a relay again with a change that waited for its
