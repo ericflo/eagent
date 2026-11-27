@@ -1051,18 +1051,19 @@ func (r *Runtime) turn(w wake) {
 				acts++
 			}
 		}
-		report := acts == 0 && mustSpeak && !tc.spoke && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != ""
-		if report {
-			// (Not when the session stopped ending during the call: the
-			// user wrote, or an agent came up. Its words were written
-			// before that, for an end that is not happening.)
-			r.sync(func() { report = r.stillClosing() })
-		}
-		if report {
+		if acts == 0 && mustSpeak && !tc.spoke && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != "" {
 			// The closing report came as plain text: the text is the report.
 			// (Once the turn has given its report, plain text is a reply
-			// like any other: said to no one.)
+			// like any other: said to no one.) Not when the session
+			// stopped ending during the call (the user wrote, or an agent
+			// came up): its words were written before that, for an end
+			// that is not happening. Asked and recorded in one step of
+			// the loop, so nothing is taken in between.
+			report := true
 			r.sync(func() {
+				if report = r.stillClosing(); !report {
+					return
+				}
 				r.flushSilent()
 				if !recorded {
 					r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
@@ -1078,9 +1079,11 @@ func (r *Runtime) turn(w wake) {
 				answers = true
 				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
 			})
-			recorded, tailKept, tc.spoke = true, true, true
-			tc.handle()
-			break
+			if report {
+				recorded, tailKept, tc.spoke = true, true, true
+				tc.handle()
+				break
+			}
 		}
 		// last: no call is left in this turn. A reply sent back now would
 		// never be answered, and the wake would stay unsettled, so the next

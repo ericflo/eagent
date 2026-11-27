@@ -122,12 +122,23 @@ func (r *Runtime) runTool(ctx context.Context, tc *turnCalls, c event.ToolCall) 
 		important, _ := args["important"].(bool)
 		// The closing word of a session always buzzes.
 		important = important || tc.wake.final
+		// A closing word written for an end that is not happening any
+		// more (the user wrote, or an agent came up, while the call was
+		// out) is not sent, as plain text for it is not (stillClosing):
+		// asked in the step that records it.
+		stale := false
 		r.sync(func() {
+			if stale = tc.wake.final && !r.stillClosing(); stale {
+				return
+			}
 			r.recordMessage(event.MessageData{Text: text, Important: important, Attachments: atts})
 			if n := len(r.st.Events); n > 0 && r.st.Events[n-1].Type == event.Message {
 				tc.own = append(tc.own, r.st.Events[n-1].Seq)
 			}
 		})
+		if stale {
+			return "not sent: the session is not ending any more (the user wrote, or an agent came up, while you wrote this), so no closing word goes out. What came is looked at next.", true, false
+		}
 		tc.spoke, tc.said = true, true
 		tc.handle()
 		if len(atts) > 0 {
