@@ -698,19 +698,34 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
-	return s.prepare(p, grant, true)
+	return s.prepare(p, grant, nil)
 }
 
-// prepare is Prepare. picks says whether a pick of a route's model, address
-// or preset brings the rest of the route with it (the summarizer's seed and
-// routePicks): a person's proposal does; an undo's reversal names every
-// field it puts back and writes those only.
-func (s *Service) prepare(p control.Proposal, grant control.Grant, picks bool) (raw string, etag string, before RemoteView, err error) {
+// prepare is Prepare. undoing is nil for a person's proposal, and for an
+// undo's reversal the file before the command it undoes. A person's pick of
+// a route's model, address or preset brings the rest of the route with it
+// (the summarizer's seed and routePicks); a reversal names every field it
+// puts back and writes those only. A reversal puts back what that file
+// held: a value it held is accepted where the choices offered now no
+// longer list it, and so is a route that pairs an address and a key
+// variable as that file or the configuration now does.
+func (s *Service) prepare(p control.Proposal, grant control.Grant, undoing map[string]any) (raw string, etag string, before RemoteView, err error) {
+	picks := undoing == nil
 	before, err = s.RemoteSnapshot(grant)
 	if err != nil {
 		return
 	}
-	if err = p.Validate(before.Descriptor, grant); err != nil {
+	d := before.Descriptor
+	if !picks {
+		d.Fields = slices.Clone(d.Fields)
+		for i, f := range d.Fields {
+			v, held := pointerValue(undoing, f.Key)
+			if held && len(f.Shape.Enum) > 0 && slices.ContainsFunc(p.Edits, func(e control.Edit) bool { return e.Key == f.Key && e.Op == "set" && reflect.DeepEqual(e.Value, v) }) {
+				d.Fields[i].Shape.Enum = append(slices.Clone(f.Shape.Enum), v)
+			}
+		}
+	}
+	if err = p.Validate(d, grant); err != nil {
 		return
 	}
 	if p.ExpectedVersion != before.Snapshot.Version || p.Generation != "" {
@@ -781,7 +796,10 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, picks bool) (
 	if err != nil {
 		return
 	}
-	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil {
+	if err = s.CheckRemoteRoutes(cfg, res.Effective); err != nil && !picks && s.pairedAsHeld(cfg, res.Effective, undoing) {
+		err = nil
+	}
+	if err != nil {
 		return
 	}
 	for _, problem := range cfg.Problems() {
@@ -792,6 +810,33 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, picks bool) (
 	}
 	raw = string(candidate)
 	return
+}
+
+// pairedAsHeld says whether every route of cfg pairs its address and key
+// variable as a route of now, or of the file held (loaded over today's
+// layers), does.
+func (s *Service) pairedAsHeld(cfg, now config.Config, held map[string]any) bool {
+	raw, _ := json.Marshal(held)
+	var file map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &file)
+	prior, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
+	if err != nil {
+		return false
+	}
+	pairs := map[[2]string]bool{}
+	each := func(c config.Config, f func([2]string) bool) bool {
+		for _, a := range configRoutes(c) {
+			for cur := &a; cur != nil; cur = cur.Fallback {
+				if !f([2]string{strings.TrimRight(cur.BaseURL, "/"), cur.APIKeyEnv}) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	each(now, func(k [2]string) bool { pairs[k] = true; return true })
+	each(prior, func(k [2]string) bool { pairs[k] = true; return true })
+	return each(cfg, func(k [2]string) bool { return pairs[k] })
 }
 
 // routePicks gives a route whose model or base_url a proposal changes the
