@@ -29,8 +29,11 @@ func (claudeAgent) Binary() string      { return "claude" }
 func (claudeAgent) newParser(Spec) parser { return &claudeParser{} }
 func (claudeAgent) chooseID() string      { return newUUID() }
 
+// ready: Claude Code's mode line, the last line it draws while its prompt
+// shows (foot). A dialog is drawn in its place.
 func (claudeAgent) ready(screen string) bool {
-	return strings.Contains(screen, "bypass permissions on") || strings.Contains(screen, "for shortcuts")
+	f := foot(screen)
+	return strings.Contains(f, "bypass permissions on") || strings.Contains(f, "for shortcuts")
 }
 
 // busy: Claude's footer stays while it works; its spinner line, drawn just

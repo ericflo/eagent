@@ -2220,8 +2220,8 @@ type dialog struct {
 	match []string
 	// end is on the dialog's closing line (its hint of the keys), and
 	// under is how many lines the agent draws below that line while the
-	// dialog shows: Antigravity its status line, pi the rule that closes
-	// the dialog's box.
+	// dialog shows, at most: Antigravity its status line, pi the rule that
+	// closes the dialog's box.
 	end   string
 	under int
 	keys  []string
@@ -2234,8 +2234,9 @@ const dialogReach = 5
 
 // shows reports whether the screen ends with the dialog, as the agent draws
 // it: its words are on the screen, its closing line is where the screen
-// ends (under lines from the last), and a line of its choices stands just
-// above that. The dialog's words alone do not say so: an agent at work on
+// ends (the last line, or with what the agent draws under it below: at
+// most under lines, as Antigravity's status line may not be drawn yet),
+// and a line of its choices stands just above that. The dialog's words alone do not say so: an agent at work on
 // eagent's own source, or shown a capture of the dialog, has them in its
 // output, and its keys must not be pressed at that. Output is never where
 // the screen ends: each agent draws its prompt and its footer below it
@@ -2252,14 +2253,16 @@ func (d dialog) shows(screen string) bool {
 			lines = append(lines, line)
 		}
 	}
-	last := len(lines) - 1 - d.under
-	if last < 0 || !strings.Contains(lines[last], d.end) {
-		return false
-	}
 	choice := d.match[len(d.match)-1]
-	for _, line := range lines[max(0, last-dialogReach):last] {
-		if strings.Contains(line, choice) {
-			return true
+	for under := 0; under <= d.under; under++ {
+		last := len(lines) - 1 - under
+		if last < 0 || !strings.Contains(lines[last], d.end) {
+			continue
+		}
+		for _, line := range lines[max(0, last-dialogReach):last] {
+			if strings.Contains(line, choice) {
+				return true
+			}
 		}
 	}
 	return false
@@ -2652,6 +2655,18 @@ func containsAll(s string, subs []string) bool {
 	}
 	return true
 }
+
+// promptFoot is how far up from the foot of its screen Claude Code, Codex
+// and Antigravity draw the prompt they are known by: Claude Code's mode
+// line and Antigravity's status line are the last line drawn, Codex's
+// composer the third from last. The same words further up are output (the
+// agent at work on eagent's own source, or reading a capture of a screen),
+// and under them a dialog the seat does not know may stand where the
+// prompt would be: typed into, it would be answered by the message.
+const promptFoot = 5
+
+// foot is the part of a screen an agent's own prompt is looked for in.
+func foot(screen string) string { return lastLines(screen, promptFoot) }
 
 func lastLines(s string, n int) string {
 	var lines []string

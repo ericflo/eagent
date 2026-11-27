@@ -33,9 +33,18 @@ func (antigravityAgent) newParser(Spec) parser { return antigravityParser{} }
 // interruptKeys: agy stops a turn on Ctrl+C.
 func (antigravityAgent) interruptKeys() []string { return []string{"C-c"} }
 
-// ready matches the status line the relay-agy-status hook prints.
+// ready matches the status line the relay-agy-status hook prints, at the
+// foot of the screen. agy draws that line under its own dialogs too (its
+// folder-trust prompt): one that closes on the line above it, with the
+// hint its dialogs end on, is a dialog and no prompt.
 func (antigravityAgent) ready(screen string) bool {
-	return strings.Contains(screen, "Antigravity relay ·")
+	lines := strings.Split(foot(screen), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "Antigravity relay ·") {
+			return i == 0 || !strings.Contains(lines[i-1], "enter Confirm")
+		}
+	}
+	return false
 }
 
 // busy: the relay line is drawn whatever agy does, and names its state.

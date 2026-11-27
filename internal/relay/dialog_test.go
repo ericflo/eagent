@@ -155,6 +155,9 @@ func TestEachDialogIsAnsweredAsTheRealProgramDrawsIt(t *testing.T) {
 		{antigravityAgent{}, "antigravity-trust", agyTrustScreen},
 		// Without a status-line command of the seat's, agy draws its own.
 		{antigravityAgent{}, "antigravity-trust", strings.Join(agyTrustLines, "\n") + "\n" + strings.Repeat(" ", 160) + "auto · Gemini 4 Neon · xhigh\n"},
+		// Its status line not drawn yet (the seat's command printed
+		// nothing): the dialog's hint is the last line.
+		{antigravityAgent{}, "antigravity-trust", strings.Join(agyTrustLines, "\n") + "\n\n"},
 		{piAgent{}, "pi-trust", piTrustScreen},
 	} {
 		var want *dialog
