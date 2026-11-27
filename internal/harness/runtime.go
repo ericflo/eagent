@@ -1442,6 +1442,36 @@ func (r *Runtime) turnHeldBy() string {
 	return "a model call did not stop in time"
 }
 
+// awaitRetired runs what the loop's queue takes until no seat taken out of
+// use is waited for any more (retiringPendingLocked), settling each as it
+// falls due, or until limit fires. What the queue held at that moment was
+// said before the bound: it is run first, so the settle that follows (as
+// they stand, settleRestRetired) finds a word a seat had already said.
+// Finish's goroutine.
+func (r *Runtime) awaitRetired(limit <-chan time.Time) {
+	for {
+		r.relays.mu.Lock()
+		pending := r.retiringPendingLocked()
+		r.relays.mu.Unlock()
+		if !pending {
+			return
+		}
+		select {
+		case fn := <-r.loop:
+			fn()
+		case <-limit:
+			for n := len(r.loop); n > 0; n-- {
+				fn := <-r.loop // finish alone reads the queue now
+				fn()
+			}
+			r.settleDueRetired()
+			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
+			return
+		}
+		r.settleDueRetired()
+	}
+}
+
 // settleRestRetired settles every seat taken out of use that has a settle
 // and is not settled yet, as it stands (finish, past its bound).
 func (r *Runtime) settleRestRetired() {
@@ -1511,23 +1541,7 @@ queued:
 	// settled as they stand. A start under way settles its own (below).
 	r.settleDueRetired()
 	limit := time.NewTimer(oldSendSettle)
-retired:
-	for {
-		r.relays.mu.Lock()
-		pending := r.retiringPendingLocked()
-		r.relays.mu.Unlock()
-		if !pending {
-			break
-		}
-		select {
-		case fn := <-r.loop:
-			fn()
-		case <-limit.C:
-			r.ui.Log("a stopped agent had not said all it saw after %s; what it said after that is not recorded", oldSendSettle)
-			break retired
-		}
-		r.settleDueRetired()
-	}
+	r.awaitRetired(limit.C)
 	limit.Stop()
 	r.settleRestRetired()
 	// The queue's end: what it took is run; from here a post is refused

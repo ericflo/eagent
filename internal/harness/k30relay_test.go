@@ -106,3 +106,27 @@ func TestK30ASeatsWordSaidBeforeItsSettleIsRecordedFirst(t *testing.T) {
 		t.Fatalf("the record has %+v for the send; want one outcome, arrived, as the seat said before its sends were settled", got)
 	}
 }
+
+// The session's end waits a bound for the seats taken out of use and then
+// settles the rest as they stand. A word a seat had said before the bound,
+// still in the loop's queue when the bound fires, is run before that
+// settle. (The wait chose between the queue and the bound at random when
+// both were ready, so the settle could come first and the word be logged
+// as said after it.)
+func TestK30WhatTheQueueHoldsAtTheBoundIsRunBeforeTheSettle(t *testing.T) {
+	fired := make(chan time.Time)
+	close(fired)
+	for i := 0; i < 40; i++ {
+		rt := &Runtime{loop: make(chan func(), 8), ui: &fakeUI{}}
+		seat := newFakeSeat("one")
+		var order []string
+		rt.retire("codex", seat, nil, func() { order = append(order, "settle") })
+		rt.loop <- func() { order = append(order, "word") }
+		rt.loop <- func() { order = append(order, "second word") }
+		rt.awaitRetired(fired)
+		rt.settleRestRetired()
+		if len(order) != 3 || order[2] != "settle" {
+			t.Fatalf("run %d: %v; want both words run, then the settle", i, order)
+		}
+	}
+}
