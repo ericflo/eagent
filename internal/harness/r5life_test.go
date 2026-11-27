@@ -223,13 +223,14 @@ func TestASlashMessageFromThePhoneWithNoAgentRunningIsKept(t *testing.T) {
 	if !slices.Equal(got, []string{words, "/compact"}) {
 		t.Fatalf("user messages on the record: %q", got)
 	}
-	// One of eagent's own commands is still carried out.
+	// One of eagent's own commands is still carried out (/status, which
+	// shows only in eagent's terminal, is words from the web: r14inbox_test).
 	rt.sync(func() {
 		n := len(rt.st.Events)
-		rt.handleInbox(InboxMessage{Type: "message", Text: "/status", From: "web"})
+		rt.handleInbox(InboxMessage{Type: "message", Text: "/kill", From: "web"})
 		for _, ev := range rt.st.Events[n:] {
 			if ev.Type == event.UserMessage {
-				t.Error("/status was recorded as words")
+				t.Error("/kill was recorded as words")
 			}
 		}
 	})

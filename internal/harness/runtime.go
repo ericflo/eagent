@@ -1379,7 +1379,7 @@ func (r *Runtime) onInputFrom(line, source, phoneID, inbox string, client *clien
 		return
 	}
 	if r.ownCommand(line, source) {
-		r.slashCommandFrom(line, client)
+		r.slashCommandFrom(line, source, client)
 		return
 	}
 	r.ui.Idle(false)
@@ -1456,10 +1456,11 @@ func optionIndex(line string, options []string) int {
 	return -1
 }
 
-// slashCommandFrom runs a command; client is what the sending client
-// declared (its time zone reads "/autopilot until 10:00" in the user's time,
-// not the machine's).
-func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
+// slashCommandFrom runs a command; source is where it was typed ("" for
+// eagent's terminal) and client is what the sending client declared (its
+// time zone reads "/autopilot until 10:00" in the user's time, not the
+// machine's).
+func (r *Runtime) slashCommandFrom(line, source string, client *clientcaps.Caps) {
 	fields := strings.Fields(line)
 	// Phone keyboards capitalise the first letter: "/Interrupt" is /interrupt.
 	fields[0] = strings.ToLower(fields[0])
@@ -1494,7 +1495,14 @@ func (r *Runtime) slashCommandFrom(line string, client *clientcaps.Caps) {
 		r.ui.Log("the agent: /relay /screen /notify-done /interrupt /restart /model <model> [effort] /upgrade /switch <profile> [model] [effort] /autopilot [until 10:00] [order] | off  /stop-relay")
 	case "/tasks", "/procs", "/kill":
 		// Commands of the eagent that ran its own tasks and processes.
-		r.ui.Log("%s went with eagent's own tasks and processes: the agent does the work now. /relay shows the agent, /screen its terminal, /interrupt stops its turn and /stop-relay stops it.", fields[0])
+		// From the phone or the web only /kill comes here (ownCommand),
+		// and it is answered there, in the conversation.
+		note := fields[0] + " went with eagent's own tasks and processes: the agent does the work now. /relay shows the agent, /screen its terminal, /interrupt stops its turn and /stop-relay stops it."
+		if source == "" {
+			r.ui.Log("%s", note)
+		} else {
+			r.recordMessage(event.MessageData{Text: note, Auto: true})
+		}
 	default:
 		r.ui.Log("unknown command %s (try /help)", fields[0])
 	}
