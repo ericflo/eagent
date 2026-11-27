@@ -3,6 +3,7 @@ package state
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -145,6 +146,44 @@ func (s *State) noteSend(d event.RelaySendData) {
 	if d.Mode == "after_turn" {
 		s.sendOutcomes[d.ID] = SendHeld
 	}
+}
+
+// HeldNeverTyped is how a send in NeverTyped went (relay.delivered's detail).
+const HeldNeverTyped = "it was held for a start of the agent, and eagent stopped before the agent came up: it was never typed"
+
+// NeverTyped are the sends without an outcome that the record itself shows
+// were never typed, in the order they were sent: each was held for a start
+// of its agent (relay.send's held), and the record has neither a start
+// under its name after it nor its passing on to the agent taking over
+// (relay.moved), so whoever wrote the record stopped before that agent
+// came up. It is the one thing the record says of when a send is typed.
+func NeverTyped(evs []event.Event) []event.RelaySendData {
+	var held []event.RelaySendData
+	drop := func(match func(event.RelaySendData) bool) {
+		held = slices.DeleteFunc(held, match)
+	}
+	for _, ev := range evs {
+		switch ev.Type {
+		case event.RelaySend:
+			var d event.RelaySendData
+			if ev.Decode(&d) == nil && d.Held {
+				held = append(held, d)
+			}
+		case event.RelayMoved, event.RelayDelivered:
+			var d struct {
+				ID string `json:"id"`
+			}
+			if ev.Decode(&d) == nil {
+				drop(func(h event.RelaySendData) bool { return h.ID == d.ID })
+			}
+		case event.RelayStart:
+			var d event.RelayStartData
+			if ev.Decode(&d) == nil {
+				drop(func(h event.RelaySendData) bool { return h.Name == d.Name })
+			}
+		}
+	}
+	return held
 }
 
 // NextRelaySendID allocates a send id that continues after replay.

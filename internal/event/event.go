@@ -601,6 +601,10 @@ type RelaySendData struct {
 	// Auto marks a user message the harness forwarded the moment it
 	// arrived, with no model call.
 	Auto bool `json:"auto,omitempty"`
+	// Held marks a send accepted while its agent was starting (again): it
+	// is typed once the start is on the record (a relay.start under its
+	// name, or its relay.moved to the agent taking over), never before.
+	Held bool `json:"held,omitempty"`
 }
 
 // RelayMovedData is a send that waited for a switch (or was waiting to be

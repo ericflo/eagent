@@ -143,7 +143,8 @@ var killAgent = func(host, target string) error { return relay.HostByName(host).
 // go), its terminal is killed (not that of one the record shows exited:
 // it is gone, and nothing is said of it), its relay.end is recorded (one
 // that could not be killed too, as stopSession does), and its sends are
-// settled: not sent for one taken back, unconfirmed for the rest. Then,
+// settled: not sent for one taken back or held for a start that never
+// came up (state.NeverTyped), unconfirmed for the rest. Then,
 // with the lock still held (no run of the session can come in between),
 // the phone is told, if the record shows the session mirrored to it
 // (mirrored), on the account of cfgs that has the session's thread
@@ -160,6 +161,12 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		return nil, nil, err
 	}
 	defer sess.Close()
+	// What the record shows was held for a start that never came up was
+	// never typed (as a resume settles it: harness reattachRelays).
+	never := map[string]bool{}
+	for _, d := range state.NeverTyped(evs) {
+		never[d.ID] = true
+	}
 	for _, rel := range state.Replay(evs).ActiveRelays() {
 		waiting := unsettled(evs, rel)
 		spool := relaySpool(path, rel)
@@ -187,7 +194,10 @@ func stopAgents(project, path string, cfgs []config.Config, logf func(string, ..
 		for _, d := range waiting {
 			out := event.RelayDeliveredData{Name: rel.Name, ID: d.ID, OK: false, Outcome: event.DeliveryUnconfirmed,
 				Detail: "the agent " + how + " before its arrival showed in its transcript, so whether it arrived cannot be confirmed"}
-			if takenBack[d.ID] {
+			switch {
+			case never[d.ID]:
+				out.Outcome, out.Detail = event.DeliveryNotSent, state.HeldNeverTyped
+			case takenBack[d.ID]:
 				out.Outcome, out.Detail = event.DeliveryNotSent, "it was held for the end of the agent's turn and taken back unread when the agent "+how
 			}
 			if _, err := sess.Append(event.New(event.RelayDelivered, event.ActorHarness, out)); err != nil {

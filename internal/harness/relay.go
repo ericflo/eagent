@@ -1066,7 +1066,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			// is the new agent's from now on: who sent it last, what the
 			// user sent it and its arrival are the new relay's.
 			if d, ok := sendRecord(r.st, h.id); ok {
-				d.Name = job.name
+				d.Name, d.Held = job.name, false
 				r.append(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: d, Prev: h.on}))
 			}
 		}
@@ -1412,6 +1412,11 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 // resume, before the loop starts.
 func (r *Runtime) reattachRelays() []string {
 	var lost []string
+	// What the record shows was held for a start that never came up was
+	// never typed, whatever became of its agent.
+	for _, d := range state.NeverTyped(r.st.Events) {
+		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: d.Name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: state.HeldNeverTyped}))
+	}
 	r.settleEnded()
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "exited" {
@@ -1447,11 +1452,11 @@ func (r *Runtime) reattachRelays() []string {
 // on for: eagent ended before the stop's settle (its wait for the stopped
 // agent's last word), and nothing will say how those sends went now. Each
 // as the settle that was cut would have settled it, so a fresh start under
-// the name inherits none of them: a send recorded after the stop was held
-// for a start that never came up, and was never typed (not sent); after a
-// switch, the user's messages stay as the switch left them, since its
-// brief carried them (finishLaunch); the rest are settled as for an agent
-// that is gone (settleExited). Called from resume, before the loop starts.
+// the name inherits none of them: after a switch, the user's messages stay
+// as the switch left them, since its brief carried them (finishLaunch);
+// the rest are settled as for an agent that is gone (settleExited). (What
+// was held for a start that never came up is settled before this:
+// reattachRelays.) Called from resume, before the loop starts.
 func (r *Runtime) settleEnded() {
 	var names []string
 	for name, rel := range r.st.Relays {
@@ -1464,21 +1469,9 @@ func (r *Runtime) settleEnded() {
 	for _, name := range names {
 		rel := r.st.Relays[name]
 		_, switched := handed[holder{rel.Name, rel.StartSeq}]
-		// Its end is the name's last: rel is who holds the name now.
-		var ended int64
-		for i := len(r.st.Events) - 1; i >= 0 && ended == 0; i-- {
-			var d event.RelayEndData
-			if ev := r.st.Events[i]; ev.Type == event.RelayEnd && ev.Decode(&d) == nil && d.Name == name {
-				ended = ev.Seq
-			}
-		}
-		except := sentAfter(r.st, name, ended)
+		var except []string
 		for _, s := range unresolvedSends(r.st, rel) {
-			d, ok := sendRecord(r.st, s.ID)
-			switch {
-			case slices.Contains(except, s.ID):
-				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: s.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for a start of the agent, and eagent stopped before the agent came up: it was never typed"}))
-			case switched && (!ok || d.From != "eagent"):
+			if d, ok := sendRecord(r.st, s.ID); switched && (!ok || d.From != "eagent") {
 				except = append(except, s.ID)
 			}
 		}
@@ -1960,8 +1953,9 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 		mode = d.Delivery
 	}
 	name, id := rel.Name, r.st.NextRelaySendID()
-	r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: name, ID: id, From: "user", Seq: seq, Mode: mode, Text: text, Auto: true}))
 	seat := r.relays.get(name)
+	// (Held: with no agent up, it waits for the start under way, if any.)
+	r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: name, ID: id, From: "user", Seq: seq, Mode: mode, Text: text, Auto: true, Held: seat == nil && r.relays.launch(name) != nil}))
 	if seat == nil {
 		if !r.holdSend(name, heldSend{id: id, text: text, mode: mode}) {
 			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
@@ -2122,10 +2116,12 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				mode = "queue"
 			}
 			id = r.st.NextRelaySendID()
-			r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: rel.Name, ID: id, From: from, Seq: seq, Mode: mode, Text: text, Auto: auto}))
+			seat = r.relays.get(rel.Name)
+			// (Held: with no agent up, it waits for the start under way, if any.)
+			r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: rel.Name, ID: id, From: from, Seq: seq, Mode: mode, Text: text, Auto: auto, Held: seat == nil && r.relays.launch(rel.Name) != nil}))
 			// Queued (or held) as it is recorded, so it is typed in the
 			// order sends were accepted.
-			if seat = r.relays.get(rel.Name); seat != nil {
+			if seat != nil {
 				r.enqueueSend(rel.Name, seat, heldSend{id: id, text: text, mode: mode, done: done})
 				return
 			}
