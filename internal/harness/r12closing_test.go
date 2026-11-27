@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // Findings 1-5 of the twelfth review: a closing turn (the closing word, or
@@ -165,5 +166,91 @@ func TestR12LastSummaryTheUserWritesDuringHasNoTimeLimit(t *testing.T) {
 	}
 	if ends := r12Ends(t, s, "timeout"); len(ends) > 0 || r5Told(s, "Yes, coat 2") != 1 || code != 0 {
 		t.Fatalf("exit %d, turn ends %q, said %q; want the answer from the first call made for it, no call cut off", code, ends, s.ui.said())
+	}
+}
+
+// ---- 2. eagent's own closing words ----------------------------------------
+
+// The user writes while the first call of the closing turn is out, and that
+// call fails. The session is not ending: eagent does not say it is, and the
+// user gets one answer.
+func TestR12MessageDuringAFailingClosingCallGetsNoClosingWords(t *testing.T) {
+	var phase atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			r12Write(rt, "is #42 merged?")
+			return r10Bad
+		case phase.CompareAndSwap(2, 3):
+			return say("Yes, #42 is merged and the tests are green.")
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
+
+// The user writes while the first call of the closing turn is out, and that
+// call holds, as does the one after it. The turn ends with nothing said;
+// the session is not ending, so eagent does not close in its own words.
+func TestR12MessageDuringAHoldingClosingCallGetsNoClosingWords(t *testing.T) {
+	var phase atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; the tests are green."), func(rt *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		switch {
+		case strings.Contains(lastText(msgs), "Holding is not allowed here"):
+			return hold()
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			r12Write(rt, "is #42 merged?")
+			return hold()
+		case phase.CompareAndSwap(2, 3):
+			return say("Yes, #42 is merged and the tests are green.")
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if said := s.ui.said(); code != 0 || len(said) != 1 || !strings.HasPrefix(said[0], "Yes, #42") {
+		t.Fatalf("exit %d, said %q; want exit 0 and the answer alone", code, said)
+	}
+}
+
+// The user restarts the stopped agent (/restart) while the first call of
+// the closing turn is out, and that call fails once the agent is back. An
+// agent is running: eagent does not say that nothing is.
+func TestR12RestartDuringAFailingClosingCallGetsNoClosingWords(t *testing.T) {
+	useRelayFactory(t, "Coat one is on.")
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	var phase atomic.Int32
+	s, _ := r12Start(t, nil, func(_ *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail, last := lastUserText(msgs), msgs[len(msgs)-1]["role"]
+		switch {
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			return reply{block: gate, status: r10Bad.status, body: r10Bad.body}
+		case strings.Contains(tail, "finished a turn") && last != "tool" && phase.CompareAndSwap(0, 1):
+			return stopsWhenDone()
+		}
+		return hold()
+	})
+	s.waitFor("the closing turn's call", func() bool { return phase.Load() == 2 })
+	s.rt.sync(func() { s.rt.onInputFrom("/restart", "web", "", "", nil) })
+	s.waitFor("the agent back", func() bool {
+		n := 0
+		s.read(func(st *state.State) { n = len(st.ActiveRelays()) })
+		return n == 1
+	})
+	release()
+	s.waitFor("the failed call", func() bool { return len(s.events(event.Error)) > 0 })
+	s.settled()
+	if r5Told(s, "This session is ending") != 0 {
+		t.Fatalf("said %q with the agent restarted", s.ui.said())
 	}
 }

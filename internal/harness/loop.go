@@ -950,7 +950,8 @@ func (r *Runtime) turn(w wake) {
 				break
 			}
 			r.sync(func() {
-				if w.wait > 0 && !w.event && !w.final && r.summary.final {
+				closing := r.stillClosing()
+				if w.wait > 0 && !w.event && closing {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
 					// (summary.go). Taken for an outage it would be tried
@@ -964,13 +965,12 @@ func (r *Runtime) turn(w wake) {
 				}
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
-				if w.final && mustSpeak && !tc.spoke {
-					// The user must still get something.
+				// The closing turn of a session still ending has had its
+				// word (the model's report, or eagent's own here): nothing
+				// is owed after it. One that is not ending is owed as any.
+				if closedOut = w.final && closing; closedOut && mustSpeak && !tc.spoke {
 					r.fallbackFinal()
 				}
-				// The closing turn has had its word (the model's report,
-				// or eagent's own above): nothing is owed after it.
-				closedOut = w.final
 			})
 			end = "error"
 			break
