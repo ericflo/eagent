@@ -815,8 +815,10 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 			for i, o := range options {
 				body += fmt.Sprintf("\n%d. %s", i+1, o)
 			}
-			if m, _, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text")}); perr == nil {
-				p.remember(m.ID)
+			// It carries the waiting line, as the card would have.
+			if m, thread, perr := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Importance: "important", Meta: map[string]any{"eagent": "question", "question_id": qid}, ClientKey: p.key("q", qid, "text"), Activity: act}); perr == nil {
+				p.rememberIn(m, thread)
+				p.markSent(act)
 				return
 			}
 		}
