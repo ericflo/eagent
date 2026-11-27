@@ -222,7 +222,15 @@ func TestK2AnInboxMessageIsNotTakenOffItsSourceWhenTheRecordFails(t *testing.T) 
 func TestK2APhoneMessageTheRecordCouldNotTakeIsTakenOnce(t *testing.T) {
 	fp := newPhoneFake(false)
 	t.Cleanup(fp.srv.Close)
-	g := phoneStart(t, fp, "hello", true, func(string, []map[string]any) reply { return hold() }, nil)
+	// Every look acts, so the record holds what the run saw: a look that
+	// left no record yet (its batch is written at the end, which cannot be
+	// written here) would differ from the record by nothing of this test's.
+	g := phoneStart(t, fp, "hello", true, func(_ string, m []map[string]any) reply {
+		if phoneLastIsTool(m) {
+			return hold()
+		}
+		return say("Noted.")
+	}, nil)
 	waitFor(t, "the thread to exist", func() bool { return fp.postCount() >= 1 })
 	g.rt.sync(func() {})
 	before := len(g.seat.sentTexts())
