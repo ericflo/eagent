@@ -59,7 +59,9 @@ func newR6Thread(t *testing.T) *r6Thread {
 			out := []map[string]any{}
 			if !unknown {
 				for _, m := range msgs[start:] {
-					if s := r.URL.Query().Get("sender"); s == "" || m["sender"] == s {
+					// As the service lists: under a sender filter only
+					// live messages, no tombstone of one taken back.
+					if s := r.URL.Query().Get("sender"); s == "" || m["sender"] == s && m["deleted"] != true {
 						out = append(out, m)
 					}
 				}
