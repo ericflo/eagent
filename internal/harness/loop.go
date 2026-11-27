@@ -800,6 +800,11 @@ func (r *Runtime) turn(w wake) {
 	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
 	end := "done"
 	closedOut := false // a closing turn whose call failed: it owes nothing
+	// answers: a call of this turn came back (looked) and no call failed
+	// after it (turnFailed). Only then does the turn's end clear the
+	// model's failures: one whose next call failed after one went through
+	// is a failure more, so the waits between such turns grow.
+	answers := false
 	// stoppedClosing: a check in this turn found the session no longer
 	// ending (stillClosing). The turn's end goes by that, not by a check of
 	// its own made after what kept it open has gone.
@@ -980,6 +985,7 @@ func (r *Runtime) turn(w wake) {
 					return
 				}
 				r.turnFailed(err)
+				answers = false
 				r.turns.threadDue = r.turns.threadDue || w.thread
 				// The closing turn of a session still ending has had its word
 				// (the model's, or eagent's own here): nothing is owed after it.
@@ -1017,6 +1023,7 @@ func (r *Runtime) turn(w wake) {
 					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 				}))
 				r.looked(covered, resp, w)
+				answers = true
 				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
 			})
 			recorded, tailKept, tc.spoke = true, true, true
@@ -1061,6 +1068,7 @@ func (r *Runtime) turn(w wake) {
 			}
 			r.sync(func() {
 				r.noteSilent(resp, covered, w)
+				answers = true
 				if fits {
 					tc.threaded = true
 					r.threadKept()
@@ -1096,6 +1104,7 @@ func (r *Runtime) turn(w wake) {
 				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
 			}))
 			r.looked(covered, resp, w)
+			answers = true
 		})
 		recorded, tailKept, extra, refresh = true, true, nil, true
 		again := false
@@ -1151,6 +1160,10 @@ func (r *Runtime) turn(w wake) {
 		}
 	}
 	r.sync(func() {
+		if t := &r.turns; answers && t.failures > 0 {
+			t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+			r.ui.Log("eagent: the model answers again")
+		}
 		if recorded {
 			reason := end
 			if closedOut {
@@ -1470,20 +1483,9 @@ func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
 	// still out when the model changed counted the old one's (promptOf). A
 	// resumed session reads it the same from the record (turnState.init).
 	r.called(r.promptOf(resp))
-	refused := t.overflowed
 	t.overflowed = false
 	if w.look {
 		t.lookSteps = w.steps
-	}
-	switch {
-	case refused:
-		// The last call was refused as too long and no restart followed
-		// (turnFailed): this shorter one coming back does not show the
-		// conversation fits, so the failures count on. Its wait is over.
-		t.retryAt = time.Time{}
-	case t.failures > 0:
-		t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
-		r.ui.Log("eagent: the model answers again")
 	}
 }
 
