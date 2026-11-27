@@ -152,6 +152,12 @@ type Seat struct {
 	closed     bool
 
 	typing sync.Mutex // one message is pasted and entered at a time
+
+	// emitMu: every event goes out under it (emitAside), and the watcher
+	// closes events under it once it is done (eventsClosed), so nothing is
+	// sent on events after that, from any goroutine.
+	emitMu       sync.Mutex
+	eventsClosed bool
 }
 
 type pending struct {
@@ -447,6 +453,11 @@ func (s *Seat) emit(ev Event) {
 // (Send), or one from a line before the record's mark (history), whose
 // end would move that mark back.
 func (s *Seat) emitAside(ev Event) {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	if s.eventsClosed {
+		return // watching is over: nobody reads events any more
+	}
 	select {
 	case s.events <- ev:
 	case <-s.stop:
@@ -1198,7 +1209,14 @@ var tailBackfill int64 = 4 << 20
 
 func (s *Seat) watch() {
 	defer close(s.done)
-	defer close(s.events)
+	defer func() {
+		// Under the lock every event goes out under: a send that comes
+		// after (Send's, from its own goroutine) finds it closed.
+		s.emitMu.Lock()
+		s.eventsClosed = true
+		close(s.events)
+		s.emitMu.Unlock()
+	}()
 	// However watching ends (the pane died, a restart, an upgrade, the
 	// session stopping), the transcript is let go, so the next seat for this
 	// agent can follow it. Held, it made a restarted Codex deaf until
