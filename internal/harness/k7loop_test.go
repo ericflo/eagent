@@ -156,3 +156,68 @@ func TestK7ARefusalFromAClosingThatStoppedDoesNotEndTheNextOne(t *testing.T) {
 		t.Fatalf("phase %d, exit %d: the timer's notice got no look; want its look (phase 4) and exit 0; logged %q", p, code, s.ui.logged())
 	}
 }
+
+// An ending batch session whose notice's look gets its first call answered
+// (a lookup) and its next one rate-limited, look after look. Each failed
+// look came back first, so the session was never down: it told the user
+// it keeps trying, and paid for a look on every retry (up to one an hour)
+// for as long as the process lived. An ending session ends as down once
+// its look has failed twice in a row, whatever came back before the
+// failure, and says nothing that promises a retry.
+func TestK7AnEndingSessionWhoseLooksFailAfterALookupEndsAsDown(t *testing.T) {
+	setFor(t, &errorRetryDelays, []time.Duration{0, time.Millisecond})
+	var after atomic.Int32
+	var rt atomic.Pointer[Runtime]
+	var injected, stopped atomic.Bool
+	model := audit2Model(t, func(_ string, m []map[string]any) reply {
+		switch {
+		case injected.Load():
+			after.Add(1)
+			if m[len(m)-1]["role"] == "tool" {
+				return k7RateLimited
+			}
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"build"}`)}}
+		case m[len(m)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(lastUserText(m), "The session is ending now"):
+			if r := rt.Load(); r != nil && !injected.Load() {
+				r.sync(func() {
+					r.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] A note of your own came due."}))
+				})
+				injected.Store(true)
+			}
+			return hold()
+		case stopped.CompareAndSwap(false, true):
+			return stopsAndReports("The build is green; stopping Codex.")
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: "@e check the build"}, newFakeSeat("ok"), model, func(r *Runtime) {
+		r.models[event.ActorEagent].client.MaxAttempts = 1 // no 5 s waits of the client's own
+		rt.Store(r)
+	})
+	r6Until(t, "the session to end, or forty calls after the notice", func() bool {
+		select {
+		case code := <-s.done:
+			s.done <- code
+			return true
+		default:
+		}
+		return after.Load() >= 40
+	})
+	var code int
+	select {
+	case code = <-s.done:
+		s.done <- code
+	default:
+		t.Fatalf("an ending session made %d calls after the notice, every other one rate-limited, and still runs; said %q", after.Load(), s.ui.said())
+	}
+	if n := after.Load(); code != 2 || n != 4 {
+		t.Fatalf("exit %d after %d calls; want exit 2 after the two looks (4 calls)", code, n)
+	}
+	for _, m := range s.ui.said() {
+		if strings.Contains(m, "I keep trying") {
+			t.Fatalf("told %q, and the session ended", m)
+		}
+	}
+}

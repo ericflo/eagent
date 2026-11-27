@@ -1191,8 +1191,10 @@ func (r *Runtime) maybeEnd() {
 	// of that turn coming back first (lastFailedAnswered), and the user has
 	// been told. Unless the user has written or answered since what the
 	// last failed call was shown: that is looked at first, without the
-	// wait (maybeTurn).
-	down := t.failures >= 2 && !r.lastFailedAnswered()
+	// wait (maybeTurn). A session that is ending (stillClosing) is down
+	// after two failed looks in a row whatever came back first: nothing
+	// keeps it open, and retrying would pay for a look an hour for ever.
+	down := t.failures >= 2 && (!r.lastFailedAnswered() || r.stillClosing())
 	// A look refused (4xx) while the session is ending is final for
 	// it: what asked for that look is left, and the session ends.
 	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) && !r.refusedWhileClosing() {

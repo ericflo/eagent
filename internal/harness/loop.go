@@ -1659,11 +1659,12 @@ func (r *Runtime) turnFailed(err error, shown int64, answered bool) {
 		// The user's messages still reach the agent; they should know why
 		// nobody is telling them what it does.
 		t.failTold = true
-		if !answered && r.endsDown() {
+		if (!answered || r.stillClosing()) && r.endsDown() {
 			// A session with no terminal that nothing keeps open ends on
 			// this as one whose model is down, in its own words
 			// (maybeEnd): it does not keep trying, nor keep what is
-			// written for an answer, so it does not say so.
+			// written for an answer, so it does not say so. One that is
+			// ending does so whatever came back first (maybeEnd's down).
 			return
 		}
 		// Unless the restart could not be made (its file could not be
