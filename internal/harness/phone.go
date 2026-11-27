@@ -946,6 +946,15 @@ func (p *phone) ask(r *Runtime, qid, text string, options []string) {
 				if r.ending {
 					return // the card holds it for the next run
 				}
+				if p.isTaken(fid) {
+					// Its answer reached the session already, as a message
+					// (whose card it was could not be learned then): no card
+					// of the question is open, and none waits on the phone.
+					p.mu.Lock()
+					p.gone[qid] = true
+					p.mu.Unlock()
+					return
+				}
 				r.handOver(p, fid, InboxMessage{Type: "answer", Text: answer, QuestionID: qid, From: "finalechat", CardID: fid})
 			})
 			return
