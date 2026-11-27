@@ -56,3 +56,30 @@ func TestK1ARestoreWithAQuitFirstLeavesNothingBehind(t *testing.T) {
 		t.Fatalf("after the restore's /quit: resumed %v, want the message after it", r13Resumed(quit))
 	}
 }
+
+// B8: a reply whose resume failed (the thread was told) is taken back in
+// the app before the next sweep. The thread lists it as deleted; the copy
+// kept at the failed try does not know. The next sweep resumes nothing and
+// forgets the reply.
+func TestK1AReplyDeletedAfterItsResumeFailedIsNotResumed(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	host := &flakyResumeHost{fakeResumeHost: fakeResumeHost{hosted: map[string]bool{}}, failures: 1}
+	w := f.watcher(project, host, t)
+	w.sweep(context.Background())
+	if p := w.retries.replies["m1"]; host.calls() != 0 || !p.told {
+		t.Fatalf("after the failed resume: resumed %#v, kept %#v", host.resumed, w.retries.replies)
+	}
+	f.mu.Lock()
+	f.threads[sid][1]["deleted"] = true
+	f.mu.Unlock()
+	w.sweep(context.Background())
+	if host.calls() != 0 || len(w.retries.replies) != 0 {
+		t.Fatalf("after the reply was deleted: resumed %#v, kept %#v", host.resumed, w.retries.replies)
+	}
+}
