@@ -1400,10 +1400,13 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 		s.lastLine = now
 		s.mu.Unlock()
 		var newest time.Time
+		// The end of the last whole line read: the tailer has also read
+		// the start of a line still being written (rest), which is not read.
+		whole := tail.offset - int64(len(tail.rest))
 		for i, line := range lines {
 			// What this line gives is said with how far the transcript was
 			// read: to its end (where the next line starts).
-			end := tail.offset
+			end := whole
 			if i+1 < len(starts) {
 				end = starts[i+1]
 			}
@@ -1428,7 +1431,7 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 			// record: say how far it was read, so a reattach does not take
 			// it for news.
 			s.silentUser = false
-			s.emit(Event{Kind: KindRead, Read: tail.offset})
+			s.emit(Event{Kind: KindRead, Read: whole})
 		}
 	}
 	return err
