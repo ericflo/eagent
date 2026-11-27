@@ -1742,7 +1742,17 @@ func liveCards(st *state.State, qid string) []string {
 			out = append(out, d.CardID)
 		}
 	}
-	return out
+	// A card whose answer the record holds as taken is answered, and its
+	// answer is the session's already: it is not live, and nothing reads it
+	// again (a resume, a re-ask, a withdrawal).
+	taken := integration.ReadPhoneLedger(st.Events).Cards
+	live := out[:0]
+	for _, c := range out {
+		if !taken[c] {
+			live = append(live, c)
+		}
+	}
+	return live
 }
 
 // handOver gives the session a card's answer, once, whoever comes first:
