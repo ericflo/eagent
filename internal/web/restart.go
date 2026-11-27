@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -32,20 +33,41 @@ type hostedList struct {
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
+// One the user stops after that is taken off again (forgetHosted): the
+// list is written under mu, as a run's end is recorded.
 func (s *Server) rememberHosted() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	ids := make([]string, 0, len(s.running))
 	for id := range s.running {
 		ids = append(ids, id)
 	}
-	s.mu.Unlock()
+	sort.Strings(ids)
+	s.writeHosted(ids, time.Now().UTC())
+}
+
+// forgetHosted takes a session the user stopped off the list, so the next
+// server does not bring it back. Under mu.
+func (s *Server) forgetHosted(id string) {
+	raw, err := os.ReadFile(hostedFile(s.Project))
+	if err != nil {
+		return
+	}
+	var list hostedList
+	if json.Unmarshal(raw, &list) != nil || !slices.Contains(list.Sessions, id) {
+		return
+	}
+	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
+}
+
+// writeHosted writes the list of sessions to bring back.
+func (s *Server) writeHosted(ids []string, at time.Time) {
 	path := hostedFile(s.Project)
 	if len(ids) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	sort.Strings(ids)
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: time.Now().UTC()}, "", "  ")
+	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at}, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)

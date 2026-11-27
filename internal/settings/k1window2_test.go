@@ -27,7 +27,8 @@ func TestRV15AWindowTheUserEntersUnderAMovingAddressIsWritten(t *testing.T) {
 	cfg := before.Effective
 	cfg.Model.ContextTokens = 16_000
 	raw, _ := json.Marshal(cfg)
-	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw})
+	loaded, _ := json.Marshal(before.Effective) // as the editor sends it (since baa575e)
+	res, err := (&Service{Project: project}).Save(context.Background(), Request{Config: raw, Loaded: loaded})
 	if err != nil {
 		t.Fatal(err)
 	}
