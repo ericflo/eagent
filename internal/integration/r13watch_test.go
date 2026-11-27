@@ -123,8 +123,8 @@ func TestR13AReplyKeptWhileAQuitsResumeRunsIsNotForgotten(t *testing.T) {
 // second is being fetched when the watcher stops (the serve stopping, or
 // the event stream dropping). Nobody is told anything yet and nothing is
 // taken, so the reply is still the thread's latest message; the next
-// sweep takes it with the second file, the sender told once about the
-// first.
+// sweep takes it with the second file, the first refused on the resume
+// for the resumed session to tell.
 func TestR13AFetchCutOffAfterARefusedFileLeavesTheReplyForTheSweep(t *testing.T) {
 	_, sid, f, fr, host, w := r11Restore(t, r10File("att-2", "shot.png"))
 	front, stall, started := r12Stall(t, fr.srv.URL)
@@ -146,10 +146,10 @@ func TestR13AFetchCutOffAfterARefusedFileLeavesTheReplyForTheSweep(t *testing.T)
 	}
 	stall.Store(false)
 	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 1 {
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 1 || !k3Refused(host.resumed[0], "clip.mov") {
 		t.Fatalf("the next sweep: resumed %#v", host.resumed)
 	}
-	if n := r11Told(fr, "clip.mov"); n != 1 {
-		t.Fatalf("%d notices about clip.mov: %q", n, fr.posted())
+	if posts := fr.posted(); len(posts) != 0 {
+		t.Fatalf("the watcher posted %q", posts)
 	}
 }

@@ -123,79 +123,60 @@ func r9Taken(t *testing.T, project, sid, id string) bool {
 	return ReadPhoneLedger(evs).Taken[id]
 }
 
-// Finding 2: a screenshot sent alone whose download fails, when the note
-// that tells the sender cannot be posted either, is not taken in (nobody
-// would know what became of it): the next sweep looks again. Once the
-// note goes, the session comes back with the message as the running
-// mirror takes one: without the file, the sender told why.
+// Finding 2: a screenshot sent alone whose download fails, while the
+// service refuses posts. The session comes back with the message as the
+// running mirror takes one, without the file, and the resume carries the
+// file refused: the resumed session records it and its mirror tells the
+// sender until the note goes out (harness
+// TestK1AWatcherResumeTellsEveryRefusedFileOnce). The watcher itself posts
+// nothing, so no notice is said for a reply not taken.
 func TestAFileThatCouldNotBeFetchedIsNotDroppedUntold(t *testing.T) {
-	project, sid, _, fr, host, w := r9Stopped(t, "", r9Shot())
+	_, _, _, fr, host, w := r9Stopped(t, "", r9Shot())
 	fr.files.Store(http.StatusBadGateway)
 	fr.posts.Store(http.StatusForbidden) // not retried by the client, unlike a 502
 	w.sweep(context.Background())
-	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
-		t.Fatalf("taken in while nobody could be told: %#v", host.resumed)
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 0 || !k3Refused(host.resumed[0], "shot.png") {
+		t.Fatalf("resumed %#v, want the message with shot.png refused", host.resumed)
 	}
-	fr.posts.Store(0)
-	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || len(host.resumed[0].Attachments) != 0 {
-		t.Fatalf("once the note can go: %#v", host.resumed)
-	}
-	told := false
-	for _, n := range fr.posted() {
-		told = told || strings.Contains(n, "shot.png")
-	}
-	if !told {
-		t.Fatalf("the sender was not told: %q", fr.posted())
+	if posts := fr.posted(); len(posts) != 0 {
+		t.Fatalf("the watcher posted %q", posts)
 	}
 }
 
 // Finding 2's first correction made every failed download wait; an
 // independent read proved a file that can never be fetched (404, 403)
 // then held the session back for good. As the running mirror does, the
-// sender is told and the session comes back with the words.
+// session comes back with the words, the file refused on the resume for
+// the resumed session to tell the sender.
 func TestWordsAndAFileThatCannotBeFetchedComeBackWithTheWords(t *testing.T) {
 	for _, status := range []int32{http.StatusNotFound, http.StatusForbidden, http.StatusBadGateway} {
 		t.Run(http.StatusText(int(status)), func(t *testing.T) {
 			_, _, _, fr, host, w := r9Stopped(t, "see the screenshot", r9Shot())
 			fr.files.Store(status)
 			w.sweep(context.Background())
-			if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 {
-				t.Fatalf("resumed %#v, want once with the words", host.resumed)
+			if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 || !k3Refused(host.resumed[0], "shot.png") {
+				t.Fatalf("resumed %#v, want once with the words and shot.png refused", host.resumed)
 			}
-			told := false
-			for _, n := range fr.posted() {
-				told = told || strings.Contains(n, "shot.png")
-			}
-			if !told {
-				t.Fatalf("the sender was not told: %q", fr.posted())
+			if posts := fr.posted(); len(posts) != 0 {
+				t.Fatalf("the watcher posted %q", posts)
 			}
 		})
 	}
 }
 
-// Finding 2: a file too large to take is left out once the sender is told;
-// when the notice cannot be posted, the session is not resumed without the
-// file yet (nobody would know why it is missing).
+// Finding 2: a file too large to take is left out, refused on the resume
+// for the resumed session to tell the sender, whether or not the service
+// takes posts.
 func TestAFileTooLargeIsLeftOutOnlyOnceTheSenderIsTold(t *testing.T) {
 	big := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
 	_, _, _, fr, host, w := r9Stopped(t, "here it is", big)
 	fr.posts.Store(http.StatusForbidden)
 	w.sweep(context.Background())
-	if host.calls() != 0 {
-		t.Fatalf("resumed without the file and nobody told: %#v", host.resumed)
+	if host.calls() != 1 || host.resumed[0].Text != "here it is" || len(host.resumed[0].Attachments) != 0 || !k3Refused(host.resumed[0], "clip.mov") {
+		t.Fatalf("resumed %#v, want the words with clip.mov refused", host.resumed)
 	}
-	fr.posts.Store(0)
-	w.sweep(context.Background())
-	if host.calls() != 1 || host.resumed[0].Text != "here it is" || len(host.resumed[0].Attachments) != 0 {
-		t.Fatalf("after the notice could be posted: %#v", host.resumed)
-	}
-	told := false
-	for _, n := range fr.posted() {
-		told = told || strings.Contains(n, "clip.mov")
-	}
-	if !told {
-		t.Fatalf("the sender was not told: %q", fr.posted())
+	if posts := fr.posted(); len(posts) != 0 {
+		t.Fatalf("the watcher posted %q", posts)
 	}
 }
 

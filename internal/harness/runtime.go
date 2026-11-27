@@ -70,6 +70,10 @@ type Options struct {
 	// the phone, the card's id (the message's meta says so): the Prompt is
 	// that question's answer.
 	PromptAnswers string
+	// PromptRefused are, for a Prompt from the phone, the message's files
+	// that could not be fetched: recorded refused (phone.refused) in the
+	// step that takes the message, so the mirror tells the sender.
+	PromptRefused []integration.RefusedFile
 	// StartDir, when set, is the folder the session works in instead of the
 	// project root: where its agent starts.
 	StartDir string
@@ -359,6 +363,7 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		for _, o := range []*Options{&opts, &r.opts} {
 			o.Prompt, o.PromptSource, o.PromptAttachments, o.PromptClient = "", "", nil, nil
 			o.PromptPhoneID, o.PromptRoute, o.PromptDelivery, o.PromptAnswers = "", "", "", ""
+			o.PromptRefused = nil
 		}
 	}
 	// What the cards of an open question say, and so what the resuming
@@ -422,6 +427,11 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 	// when it held nothing (its files all refused): the ledger goes on
 	// after it, and the poll reads on from it.
 	r.tookPhoneMessage(opts.PromptPhoneID, wordsFrom)
+	// Its files that could not be fetched, after it, as the poll records
+	// a message's: the mirror owes their notes until they go out.
+	for _, f := range opts.PromptRefused {
+		r.append(event.New(phoneRefusedEvent, event.ActorHarness, phoneRefusedData{MessageID: opts.PromptPhoneID, AttachmentID: f.AttachmentID, Text: f.Text}))
+	}
 	if plan.WordsCard != "" {
 		r.markAnswerTaken(plan.WordsCard) // now that the words are recorded
 	}
