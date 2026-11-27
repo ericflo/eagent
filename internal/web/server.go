@@ -975,6 +975,11 @@ func (s *Server) RegisterSessionStarter() func() {
 			return integration.SessionStart{}, err
 		}
 		return integration.SessionStart{ID: id, Host: "in_process", Interactive: true, Message: "Running in the eagent server; keep talking to it from this thread."}, nil
+	}, func(project string) (config.Config, error) {
+		if project != s.Project {
+			return config.Config{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
+		}
+		return s.loadConfig("", "") // the configuration it starts sessions on
 	})
 }
 
