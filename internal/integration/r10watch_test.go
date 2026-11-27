@@ -113,7 +113,7 @@ func TestR10AReplyWhoseSecondNoticeFailedIsKeptForTheSweeps(t *testing.T) {
 	f.mu.Unlock()
 	fr := newR10Front(t, f)
 	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
-	fr.files.Store(http.StatusNotFound) // for good, so the sender is told
+	fr.files.Store(http.StatusBadGateway)
 	fr.failPosts(0, http.StatusForbidden)
 	w.sweep(context.Background())
 	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
@@ -150,7 +150,7 @@ func TestR10AnEarlierReplyBehindAKeptOneLosesNeither(t *testing.T) {
 	w.retries.replies["m2"] = pendingReply{thread: thread, msg: finalechat.Message{ID: "m2", Sender: "user", Origin: "session", Body: "second task", CreatedAt: at}, since: at, told: true}
 	fr := newR10Front(t, f)
 	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
-	fr.files.Store(http.StatusNotFound) // for good, so the sender is told
+	fr.files.Store(http.StatusBadGateway)
 	fr.failPosts(http.StatusForbidden)
 	w.sweep(context.Background())
 	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {

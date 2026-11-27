@@ -215,19 +215,34 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 	}()
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
-	// The notes about files left out get their own time, as the fetches
-	// may have used up the sweep's.
-	msg.Attachments, err = takeFiles(ctx, context.WithoutCancel(ctx), w.client, info, m, w.logf)
-	if err != nil {
-		// Nothing is taken in. The reply is kept, quietly, for the sweeps
-		// to read the thread for (an earlier notice may have made
-		// eagent's the thread's latest message).
-		w.retries.mu.Lock()
-		if _, kept := w.retries.replies[m.ID]; !kept {
-			w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+	for _, a := range m.Attachments {
+		saved, err := saveAttachment(ctx, w.client, info.Path, a)
+		if err != nil {
+			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				// The watcher is stopping (the serve is), which cut the
+				// fetch off: nobody is told anything and nothing is
+				// taken; the next sweep, or the next serve, reads it.
+				return
+			}
+			// As the running mirror does: the sender is told, and the
+			// session comes back with the rest of the message. The note
+			// gets its own time, as the fetch may have used up the
+			// sweep's. When it cannot be posted nobody would know: the
+			// reply is not taken in, and is kept, quietly, for the sweeps
+			// to read the thread for (an earlier notice may have made
+			// eagent's the thread's latest message).
+			if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, a, err) != nil {
+				w.retries.mu.Lock()
+				if _, kept := w.retries.replies[m.ID]; !kept {
+					w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+				}
+				w.retries.mu.Unlock()
+				return
+			}
+			continue
 		}
-		w.retries.mu.Unlock()
-		return
+		msg.Attachments = append(msg.Attachments, saved)
 	}
 	// A message whose files were all refused (the person was told) still
 	// resumes the session: it takes the message in, so the ones after it
@@ -416,46 +431,32 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 		return PhoneMessage{}, false, nil
 	}
 	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
-	msg.Attachments, err = takeFiles(ctx, ctx, client, info, last, func(string, ...any) {})
-	if err != nil {
-		return PhoneMessage{}, false, err
+	var big []finalechat.Attachment
+	for _, a := range last.Attachments {
+		saved, err := saveAttachment(ctx, client, info.Path, a)
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			big = append(big, a)
+			continue
+		}
+		if err != nil {
+			return PhoneMessage{}, false, err
+		}
+		msg.Attachments = append(msg.Attachments, saved)
+	}
+	// A file too large will never fit: the session comes back with the
+	// rest of the message, and the sender is told about the file, once
+	// every other file came (a failed download posts nothing, so the
+	// thread's latest message is still the reply for the watcher's sweep).
+	// When a notice cannot be posted, nothing is taken, as for a failed
+	// download.
+	for _, a := range big {
+		if err := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, finalechat.ErrTooLarge); err != nil {
+			return PhoneMessage{}, false, err
+		}
 	}
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
-}
-
-// takeFiles fetches the files of m, the reply a session is resumed with,
-// for the reply watcher and the restore alike. A download that may work
-// later (the service could not be reached, or answered 429 or 5xx) or
-// that the caller's stop cut off, or a notice that could not be posted, is
-// the error: nothing is taken, and as nothing was posted the reply is
-// still the thread's latest. Any other failed file (too large, a 404 or
-// 403, or a fetch the caller's deadline cut off, which the next one would
-// cut off too) is left out, and its sender told on note under the running
-// mirror's key, only once every other file came.
-func takeFiles(ctx, note context.Context, client *finalechat.Client, info store.Info, m finalechat.Message, logf func(string, ...any)) ([]event.Attachment, error) {
-	var saved []event.Attachment
-	var left []finalechat.Attachment
-	var why []error
-	for _, a := range m.Attachments {
-		s, err := saveAttachment(ctx, client, info.Path, a)
-		if err == nil {
-			saved = append(saved, s)
-			continue
-		}
-		logf("finalechat: could not fetch %s for session %s: %v", a.Filename, info.ID, err)
-		if errors.Is(ctx.Err(), context.Canceled) || ctx.Err() == nil && finalechat.Transient(err) {
-			return nil, err
-		}
-		left, why = append(left, a), append(why, err)
-	}
-	for i, a := range left {
-		if err := tellRefused(note, client, "eagent:"+info.ID, m.ID, a, why[i]); err != nil {
-			return nil, err
-		}
-	}
-	return saved, nil
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not

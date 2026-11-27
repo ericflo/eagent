@@ -130,7 +130,7 @@ func r9Taken(t *testing.T, project, sid, id string) bool {
 // mirror takes one: without the file, the sender told why.
 func TestAFileThatCouldNotBeFetchedIsNotDroppedUntold(t *testing.T) {
 	project, sid, _, fr, host, w := r9Stopped(t, "", r9Shot())
-	fr.files.Store(http.StatusNotFound)  // for good: a 502 waits, unrefused (TestR12AFileThatCannotBeFetchedForNowIsNotRefused)
+	fr.files.Store(http.StatusBadGateway)
 	fr.posts.Store(http.StatusForbidden) // not retried by the client, unlike a 502
 	w.sweep(context.Background())
 	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
@@ -155,7 +155,7 @@ func TestAFileThatCouldNotBeFetchedIsNotDroppedUntold(t *testing.T) {
 // then held the session back for good. As the running mirror does, the
 // sender is told and the session comes back with the words.
 func TestWordsAndAFileThatCannotBeFetchedComeBackWithTheWords(t *testing.T) {
-	for _, status := range []int32{http.StatusNotFound, http.StatusForbidden} { // a 502 waits: TestR12AFileThatCannotBeFetchedForNowIsNotRefused
+	for _, status := range []int32{http.StatusNotFound, http.StatusForbidden, http.StatusBadGateway} {
 		t.Run(http.StatusText(int(status)), func(t *testing.T) {
 			_, _, _, fr, host, w := r9Stopped(t, "see the screenshot", r9Shot())
 			fr.files.Store(status)
