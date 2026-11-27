@@ -171,6 +171,7 @@ func (r *Runtime) startPhone() {
 	// before the mirror existed, so observe() never saw it; it is posted
 	// here, as the user, so the phone shows the conversation whole.
 	prompt, promptSeq := "", int64(0)
+	var stoppedAt int64 // where the run before stopped (session.resume's after)
 	// Cards of questions the resume itself answered (its prompt was the
 	// answer) must be withdrawn: the mirror did not exist to do it then.
 	cards := map[string]string{}
@@ -197,6 +198,10 @@ func (r *Runtime) startPhone() {
 			case event.SessionResume:
 				resumeSeq = ev.Seq
 				prompt, promptSeq = "", 0
+				var d event.SessionResumeData
+				if ev.Decode(&d) == nil {
+					stoppedAt = d.After
+				}
 			case event.UserMessage:
 				if ev.Seq > resumeSeq && resumeSeq > 0 {
 					var d event.UserMessageData
@@ -418,6 +423,21 @@ func (r *Runtime) startPhone() {
 			if ev.Seq > promptSeq && (ev.Type == event.RelaySend || ev.Type == event.RelayDelivered) {
 				p.observeRelay(r, ev)
 			}
+		}
+	}
+	// The message the run before stopped at, taken up by this resume and
+	// kept for eagent (loadReceipts reads that from the record): its
+	// receipt is shown now, not at the next change of another.
+	if stoppedAt > 0 {
+		p.loadReceipts(r)
+		p.mu.Lock()
+		kept := false
+		for _, rc := range p.receipts {
+			kept = kept || (rc.seq == stoppedAt && rc.status == "eagent")
+		}
+		p.mu.Unlock()
+		if kept {
+			p.setReceipt(r, stoppedAt, "eagent")
 		}
 	}
 }

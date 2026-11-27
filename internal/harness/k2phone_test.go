@@ -2,6 +2,8 @@ package harness
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // k2LoseCard makes the record lose the open question's card, as a stop
@@ -179,5 +182,83 @@ func TestK2AnAnswerWithdrawsAnEarlierCardWhoseWithdrawalFailed(t *testing.T) {
 	r14Drained(t, g)
 	if s := r14Status(fp, first); s == "pending" {
 		t.Fatalf("the earlier run's card is still open after the answer at the terminal")
+	}
+}
+
+// k2CutAfter rewrites a stopped session's record to end at the first event
+// cut picks, as a stop right after writing it leaves it.
+func k2CutAfter(t *testing.T, g *phoneRig, cut func(event.Event) bool) {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(g.rt.sess.Path, "*.jsonl"))
+	if len(files) != 1 {
+		t.Fatalf("the record is in %d files", len(files))
+	}
+	raw, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []byte
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			t.Fatal(err)
+		}
+		out = append(append(out, line...), '\n')
+		if cut(ev) {
+			if err := os.WriteFile(files[0], out, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+	}
+	t.Fatal("no event to cut after")
+}
+
+// k2Receipt is the receipt the thread meta last showed under message id,
+// in the patches after the first from.
+func k2Receipt(fp *phoneFake, id string, from int) string {
+	got := ""
+	for _, m := range fp.metaPatches()[from:] {
+		if rs, ok := m["relay_receipts"].(map[string]any); ok {
+			if s, ok := rs[id].(string); ok {
+				got = s
+			}
+		}
+	}
+	return got
+}
+
+// B7: a message from the phone was recorded and the session stopped
+// before its send was; at the resume the agent is gone, so the message is
+// kept for eagent. The phone's receipt under it says so, as it does for
+// a message kept for eagent while the session runs.
+func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	waitFor(t, "the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
+	id := r10Says(fp, r10Msg("now run the tests"))[0]
+	waitFor(t, "its send", func() bool { return len(g.seat.sentTexts()) == 2 })
+	g.interrupt()
+	k2CutAfter(t, g, func(ev event.Event) bool {
+		var d event.UserMessageData
+		return ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id
+	})
+	old := attachRelay
+	attachRelay = func(relay.Spec, string, string, string, string, time.Time) (relaySeat, error) {
+		return nil, errors.New("no such terminal")
+	}
+	t.Cleanup(func() { attachRelay = old })
+	// What the first run showed went with the record's tail.
+	before := len(fp.metaPatches())
+	g.resume(Options{Interactive: true})
+	waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) == 2 })
+	r14Drained(t, g)
+	if got := k2Receipt(fp, id, before); got != "eagent" {
+		t.Fatalf("the receipt under the message is %q, want it kept for eagent", got)
 	}
 }

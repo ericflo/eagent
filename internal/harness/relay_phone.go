@@ -45,6 +45,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 	phoneIDs := map[int64]string{}
 	mirrored := map[int64]string{} // terminal and web messages: the thread message showing each
 	active := map[string]bool{}
+	unsent := map[int64]bool{} // user messages not kept for eagent, with no send so far
 	set := func(seq int64, status string) {
 		for i := range receipts {
 			if receipts[i].seq == seq {
@@ -80,11 +81,22 @@ func (p *phone) loadReceipts(r *Runtime) {
 			if d.Held != "" && len(active) > 0 {
 				set(ev.Seq, "eagent") // as userMessage marks it
 			}
+			unsent[ev.Seq] = d.Held == ""
+		case event.SessionResume:
+			// A resume takes up a message the run before recorded and
+			// stopped before sending (closeInterrupted): forwarded, its
+			// send is recorded before this event; with none, it was kept
+			// for eagent, as userMessage marks one.
+			var d event.SessionResumeData
+			if ev.Decode(&d) == nil && unsent[d.After] && len(active) > 0 {
+				set(d.After, "eagent")
+			}
 		case event.RelaySend:
 			var d event.RelaySendData
 			if ev.Decode(&d) != nil || d.From != "user" || d.Seq == 0 {
 				continue
 			}
+			delete(unsent, d.Seq)
 			sendSeq[d.ID] = d.Seq
 			// From every send of the message, as the live path does.
 			set(d.Seq, sendsReceipt(r.st, sendSeq, d.Seq))
