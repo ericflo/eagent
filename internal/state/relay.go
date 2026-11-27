@@ -303,7 +303,12 @@ func (s *State) applyRelay(ev event.Event) {
 	case event.RelayDelivered:
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
+		// A send has one outcome, whichever agent under the name it was
+		// sent to: none that held the name waits for it any more.
 		delete(r.Undelivered, d.ID)
+		for _, h := range s.relayHolders[r.Name] {
+			delete(h.Undelivered, d.ID)
+		}
 		if _, known := s.sendOutcomes[d.ID]; known {
 			// The newest word on a send is how it ended: a late
 			// confirmation after one that gave up means it arrived.
@@ -389,7 +394,10 @@ func (s *State) keepHeld(r, prev *Relay) {
 			return
 		}
 		if text, ok := prev.Undelivered[d.ID]; ok {
+			// The new agent's from here on: the stopped one no longer
+			// waits for it (Holders).
 			r.Undelivered[d.ID] = text
+			delete(prev.Undelivered, d.ID)
 			if ev.Seq < r.StartSeq {
 				// Held for a new agent under the name (a restart on its own
 				// conversation holds it from its first start already): the
@@ -431,6 +439,21 @@ func (s *State) RelayAt(name string, seq int64) *Relay {
 		return h[0]
 	}
 	return s.Relays[name]
+}
+
+// Holders are the relays that held a name in turn, oldest first: the one
+// that holds it now (Relays) last, and before it each one a new agent was
+// started in place of after it was stopped. Each still waits (Undelivered)
+// for what it was sent itself and has no outcome; what was held for the
+// start after it is that start's.
+func (s *State) Holders(name string) []*Relay {
+	if h := s.relayHolders[name]; len(h) > 0 {
+		return h
+	}
+	if r := s.Relays[name]; r != nil {
+		return []*Relay{r}
+	}
+	return nil
 }
 
 func (s *State) relayWho(name string, seq int64) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -1635,32 +1636,35 @@ func SpoolOf(path string, rel *state.Relay) string {
 
 // EndedWaiting lists, in name order, the stopped agents a record with no
 // run behind it is still waited on for: eagent ended before a stop's settle
-// (its wait for the stopped agent's last word), and nothing will say how
+// (its wait for the stopped agent's last word), or a switch's brief that
+// was to carry the user's messages did not go, and nothing will say how
 // those sends went now. Each is settled as the settle that was cut would
-// have settled it, so a fresh start under the name inherits none of them,
-// but for keep: after a switch, the user's messages stay as the switch left
+// have settled it, whether its name is free or a fresh start has taken it
+// since (state Holders), so that start inherits none of them, but for
+// keep: after a switch, the user's messages stay as the switch left
 // them, since its brief carried them (finishLaunch), unless that brief
 // certainly did not go. One rule for a resume (settleEnded) and for a stop
 // from outside a run (web stopAgents).
 func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
-	var names []string
-	for name, rel := range st.Relays {
-		if rel.Ended && len(rel.Undelivered) > 0 {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
+	names := slices.Sorted(maps.Keys(st.Relays))
 	handed := handedOver(st)
 	for _, name := range names {
-		rel := st.Relays[name]
-		rels = append(rels, rel)
-		// A switch left the user's messages to a brief that quotes them.
-		// Where none that does can have gone, they are settled as at a
-		// stop.
-		carried := briefCarried(st, handed, holder{rel.Name, rel.StartSeq})
-		for _, s := range unresolvedSends(st, rel) {
-			if d, ok := sendRecord(st, s.ID); carried && (!ok || d.From != "eagent") {
-				keep = append(keep, s.ID)
+		// Each agent that held the name in turn (oldest first), not only
+		// the newest: one stopped before a fresh start under its name is
+		// still waited on for what it was sent itself.
+		for _, rel := range st.Holders(name) {
+			if !rel.Ended || len(rel.Undelivered) == 0 {
+				continue
+			}
+			rels = append(rels, rel)
+			// A switch left the user's messages to a brief that quotes
+			// them. Where none that does can have gone, they are settled
+			// as at a stop.
+			carried := briefCarried(st, handed, holder{rel.Name, rel.StartSeq})
+			for _, s := range unresolvedSends(st, rel) {
+				if d, ok := sendRecord(st, s.ID); carried && (!ok || d.From != "eagent") {
+					keep = append(keep, s.ID)
+				}
 			}
 		}
 	}
