@@ -29,8 +29,10 @@ func (codexAgent) Binary() string      { return "codex" }
 
 func (codexAgent) newParser(Spec) parser { return codexParser{} }
 
+// ready: Codex's composer, empty (its placeholder) or holding text (the
+// footer under it says how much context is left, as Codex 0.171 draws it).
 func (codexAgent) ready(screen string) bool {
-	return strings.Contains(screen, "Ask Codex to do anything")
+	return strings.Contains(screen, "Ask Codex to do anything") || strings.Contains(screen, "% context left")
 }
 
 // busy: Codex's working line, drawn just above its composer, says how to

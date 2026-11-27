@@ -148,6 +148,7 @@ type Seat struct {
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
+	ownScreen  bool                 // reattached, and a send has once found the agent's own screen (waitReady)
 	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
 	closed     bool
 
@@ -763,9 +764,13 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 			return state, errors.New("the agent has exited")
 		}
 		s.mu.Lock()
-		attached := s.attached
+		attached := s.attached && !s.ownScreen
 		s.mu.Unlock()
-		if attached && !s.atOwnScreen() {
+		if attached && s.atOwnScreen() {
+			s.mu.Lock()
+			s.ownScreen = true // the agent's own screen seen once: no more looks
+			s.mu.Unlock()
+		} else if attached {
 			// Reattached, and nothing the agent wrote read since: a dialog
 			// that came up while eagent was down shows on the screen alone.
 			// A message goes once the screen shows the agent's own prompt
