@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -485,5 +488,130 @@ func TestK1AReplyWhoseResumeFailedIsTriedAgainAfterARestart(t *testing.T) {
 	}
 	if n := r11Told(fr, "could not resume"); n != 1 {
 		t.Fatalf("told %d times: %q", n, fr.posted())
+	}
+}
+
+// k1BlockKept makes the project's kept file impossible to write: its
+// directory is a plain file.
+func k1BlockKept(t *testing.T, project string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(stateDir(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir(project), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Batch 2, the hand-over that fails: a serve restart finds /quit and a
+// message after it, and the reply cannot be written down for the watcher.
+// The restore gets the error (and says so at the terminal) instead of
+// resuming the session with nothing left to look again; nothing was
+// posted, so the reply is still the thread's latest message, and the
+// watcher's sweeps resume the session with the /quit and then with the
+// message after it.
+func TestK1ARestoreWhoseHandOverFailsReturnsTheErrorAndLeavesTheReply(t *testing.T) {
+	sid, f, quit, w := r13QuitWaiting(t, "/quit", "actually fix the login bug")
+	t.Setenv("FINALECHAT_URL", f.srv.URL)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	k1BlockKept(t, quit.project)
+	if msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid)); !errors.Is(err, ErrHandOver) || ok {
+		t.Fatalf("pending reply %#v ok=%v err=%v, want the hand-over's error", msg, ok, err)
+	}
+	if p := r10Preview(f, sid); p != "user" {
+		t.Fatalf("the thread's latest message is from %q, want the reply", p)
+	}
+	w.sweep(context.Background())
+	w.sweep(context.Background())
+	if got := r13Resumed(quit); len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("resumed %v, want the /quit and then the message after it", got)
+	}
+}
+
+// Batch 2, the same on the other hand-over: the first notice about two
+// files too large goes, the second does not, and the reply cannot be
+// written down either. The error the restore gets says both.
+func TestK1ARestoreWhoseNoticeAndHandOverFailSaysBoth(t *testing.T) {
+	big2 := map[string]any{"id": "att-2", "kind": "file", "content_type": "video/quicktime", "filename": "clip2.mov", "size": finalechat.MaxAttachmentSize + 1, "url": "/files/att-2"}
+	project, sid, _, fr, _, _ := r11Restore(t, big2)
+	fr.failPosts(0, http.StatusForbidden)
+	k1BlockKept(t, project)
+	_, ok, err := PendingReply(context.Background(), project, r6Info(t, project, sid))
+	if ok || err == nil || !strings.Contains(err.Error(), "not a directory") || !strings.Contains(err.Error(), "refused") || errors.Is(err, ErrHandOver) {
+		t.Fatalf("ok=%v err=%v, want the notice's error and the hand-over's", ok, err)
+	}
+}
+
+// Batch 2, the window: a serve restart finds /quit and a message after it
+// in a thread whose latest message is eagent's (the sweep's own pass does
+// not look at it), and `connector run` holds the watch. Its watcher sweeps
+// after PendingReply has handed the reply over and before the restore
+// starts the session: it leaves the session to the restore, which resumes
+// it with the /quit, and then resumes it with the message after it. The
+// /quit is taken once.
+func TestK1AWatcherElsewhereLeavesARestoredReplyToTheRestore(t *testing.T) {
+	sid, f, quit, _ := r13QuitWaiting(t, "/quit", "actually fix the login bug")
+	f.mu.Lock()
+	f.threads[sid] = append(f.threads[sid], map[string]any{"id": "note", "sender": "system", "origin": "token", "body": "eagent session ended (shutdown).", "created_at": time.Now(), "meta": map[string]any{}})
+	f.mu.Unlock()
+	t.Setenv("FINALECHAT_URL", f.srv.URL)
+	t.Setenv("FINALECHAT_TOKEN", "fc_fixture")
+	msg, ok, err := PendingReply(context.Background(), quit.project, r6Info(t, quit.project, sid))
+	if err != nil || !ok || msg.ID != "m1" {
+		t.Fatalf("pending reply %#v ok=%v err=%v, want the /quit", msg, ok, err)
+	}
+	connector := f.watcher(quit.project, quit, t)
+	connector.sweep(context.Background())
+	if err := quit.Resume(sid, msg); err != nil {
+		t.Fatal(err)
+	}
+	connector.sweep(context.Background())
+	if got := r13Resumed(quit); len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("resumed %v, want the /quit once and then the message after it", got)
+	}
+}
+
+// k1BrowserFirst is the serve when the browser resumed the session first:
+// by the time the watcher's resume comes, the session is hosted, and the
+// serve answers that it is running (web.ErrRunning).
+type k1BrowserFirst struct{ fakeResumeHost }
+
+func (h *k1BrowserFirst) Resume(id string, msg PhoneMessage) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hosted[id] = true
+	return errors.New("the session is running; its own mirror reads the thread")
+}
+
+// Batch 2, the browser first: a reply reaches a stopped session's thread
+// as the browser resumes the session. The watcher's resume finds it
+// running: as when its own check finds a session running, the reply is
+// left to that run's mirror and kept quietly for when it stops; the thread
+// is not told eagent could not resume the session, and the reply is not
+// claimed.
+func TestK1AReplyToASessionTheBrowserResumedFirstIsLeftToItsMirror(t *testing.T) {
+	project := t.TempDir()
+	sid := finishedSession(t, project, time.Now().Add(-time.Hour))
+	r6Record(t, project, sid, r6Run(), r6Read("start"))
+	f := newR6Thread(t)
+	stop := r6Info(t, project, sid).Modified
+	f.say(sid, "start", "", stop.Add(-time.Hour), nil)
+	f.mu.Lock()
+	f.threads[sid][0]["origin"] = "token"
+	f.mu.Unlock()
+	f.say(sid, "m1", "please deploy the fix", stop.Add(time.Minute), nil)
+	fr := newR10Front(t, f)
+	host := &k1BrowserFirst{fakeResumeHost{hosted: map[string]bool{}}}
+	w := f.watcher(project, host, t)
+	w.client = &finalechat.Client{BaseURL: fr.srv.URL, Token: "fc_fixture"}
+	w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "please deploy the fix", CreatedAt: time.Now()})
+	if notes := fr.posted(); len(notes) != 0 {
+		t.Fatalf("posted %q", notes)
+	}
+	if p, kept := w.retries.replies["m1"]; !kept || p.told {
+		t.Fatalf("kept %#v, want the reply kept quietly", w.retries.replies)
+	}
+	if _, claimed := w.handled["m1"]; claimed {
+		t.Fatal("the reply is claimed")
 	}
 }

@@ -530,6 +530,13 @@ func applyValues(project string, before Values, proposal control.Proposal, view 
 		}
 		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, effort)
 		if err != nil {
+			// A provider that does not list the model a variable gives the
+			// route: no catalog fetch helps.
+			if pin := pinnedBy(key, rt.Model); pin != "" {
+				if _, _, listed := config.ResolveLiveModel(project, rt.Provider, rt.Model); !listed {
+					err = fmt.Errorf("%s would run %q at provider %q, which does not list it, because %s is set where this session runs", label, rt.Model, rt.Provider, pin)
+				}
+			}
 			return before, err
 		}
 		rt.Effort = picked.ReasoningEffort
@@ -555,6 +562,19 @@ func applyValues(project string, before Values, proposal control.Proposal, view 
 	}
 	before.Revision++
 	return before, nil
+}
+
+// pinnedBy names the variable that gives the route key model where this
+// process runs, or "" when none does (the user named it, say).
+func pinnedBy(key, model string) string {
+	ptr := "/model/model"
+	if key == RouteSummarizer {
+		ptr = "/summarizer/model/model"
+	}
+	if name := config.EnvOverrides()[ptr]; name != "" && os.Getenv(name) == model {
+		return name
+	}
+	return ""
 }
 
 // SavePresetName returns the trimmed preset name when a proposal sets

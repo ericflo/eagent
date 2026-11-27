@@ -109,18 +109,19 @@ func TestK1ASendTypedIntoAnAgentStoppedWhileItRestartsIsSettledOnce(t *testing.T
 		rt := newLaunchRuntime(t)
 		id := k1Typed(t, rt, seat)
 		rt.sync(func() {
+			if arrives {
+				// Said before the kill ends the old seat's events, read once
+				// the restart has taken the seat out of use.
+				seat.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
+			}
 			if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
 				t.Errorf("repick: %v", err)
 			}
 		})
 		g.waitEntered(t)
 		k1Stop(t, rt)
-		if got := deliveredFor(rt, id); len(got) != 0 {
-			t.Fatalf("arrives %v: %s settled while the restart still takes the old agent's news: %+v", arrives, id, got)
-		}
-		if arrives {
-			seat.emit(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
-			waitFor(t, "the arrival recorded", func() bool { return len(deliveredFor(rt, id)) == 1 })
+		if got := deliveredFor(rt, id); !arrives && len(got) != 0 {
+			t.Fatalf("%s settled while the restart is still under way: %+v", id, got)
 		}
 		g.release <- struct{}{}
 		waitRelayStarts(t, rt)

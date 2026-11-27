@@ -180,10 +180,12 @@ func TestK2TheDownNoticeWithNoAgentRunningSaysWhereMessagesGo(t *testing.T) {
 }
 
 // C11: the session's record can no longer be written, and a message for
-// the agent (or a command) comes in through the inbox (the web page's
-// way in). The session ends on the failure, but the message is not taken
-// off its source before it is on the record: its file is still in the
-// inbox for the next run, where once it was removed and lost.
+// the agent (or a command) comes in through an inbox file (as eagent
+// serve writes one). The session ends on the failure, but the message is
+// not taken off its source before it is on the record: its file is still
+// in the inbox for the next run, where once it was removed and lost. One
+// handed over by Take (the web page's way in) is taken back out and
+// refused, so the browser keeps the words (1c2d297).
 func TestK2AnInboxMessageIsNotTakenOffItsSourceWhenTheRecordFails(t *testing.T) {
 	for _, c := range []struct{ name, text string }{
 		{"words", "run the tests"},
@@ -194,9 +196,13 @@ func TestK2AnInboxMessageIsNotTakenOffItsSourceWhenTheRecordFails(t *testing.T) 
 			s.settled()
 			path := s.rt.sess.Path
 			s.rt.sync(func() { _ = s.rt.sess.Close() })
-			if _, err := s.rt.Take(InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); err != nil {
+			if took, err := s.rt.Take(InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); took || err == nil {
+				t.Fatalf("Take of words the record could not hold: took %v, err %v; want refused", took, err)
+			}
+			if err := PostInbox(path, InboxMessage{Type: "message", Text: c.text, From: "web", Route: "agent"}); err != nil {
 				t.Fatal(err)
 			}
+			s.rt.sync(func() { s.rt.pollInbox() })
 			entries, _ := os.ReadDir(InboxDir(path))
 			n := 0
 			for _, e := range entries {

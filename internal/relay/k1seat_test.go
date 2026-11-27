@@ -345,7 +345,7 @@ func TestK1ClaudesQueuedMessageConfirmsOneSend(t *testing.T) {
 			[][2]string{{"r1", "continue"}, {"r2", "continue"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", ""), claudeUser(time.Now(), "continue"), k1TurnEnd(), k1Queue("dequeue", "")},
 			[][2]string{{"r3", "continue"}}, claudeUser(time.Now(), "continue"), []string{"r1", "r2"}},
 		{"two_queued_run_joined",
-			[][2]string{{"r1", "continue"}, {"r2", "continue"}, {"r3", "check the logs"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "check the logs"), k1TurnEnd(), k1Queue("dequeue", "")},
+			[][2]string{{"r1", "continue"}, {"r2", "continue"}, {"r3", "check the logs"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "check the logs"), k1TurnEnd(), k1Queue("dequeue", ""), k1Queue("dequeue", "")},
 			nil, claudeUser(time.Now(), "continue\n\ncheck the logs"), []string{"r1", "r3"}},
 	} {
 		t.Run(c.name, c.run)

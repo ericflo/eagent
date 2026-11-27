@@ -53,7 +53,7 @@ type Server struct {
 	// phone decides whether to resume it (Resume).
 	resuming sync.Mutex
 	// stopping is set, under resuming, once Shutdown has begun: from then
-	// on deliver starts no run.
+	// on no run starts here (host, hostNewCfg).
 	stopping bool
 	mux      *http.ServeMux
 	logf     func(string, ...any)
@@ -180,10 +180,14 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	s.resuming.Lock()
 	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return errors.New("the session is running; its own mirror reads the thread")
+		return ErrRunning
 	}
 	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
 }
+
+// ErrRunning is Resume's answer for a session that is already running, here
+// or in another process: the reply is its own mirror's to read.
+var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
 
 // phoneResumeOptions are the options a session is resumed with for a
 // message the user sent from the phone.
@@ -664,11 +668,38 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": "inbox"})
+}
+
+var errEnding = errors.New("the session is stopping and takes nothing more")
+
+// hand gives a dismissal or a stop to a session that is running: to a run
+// here on its own loop (Take), so it is taken before the answer, and not
+// at all once that run is ending (errEnding); to its inbox when another
+// process runs it.
+func (s *Server) hand(info store.Info, msg harness.InboxMessage) error {
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if h == nil || h.rt == nil {
+		return harness.PostInbox(info.Path, msg)
+	}
+	took, err := h.rt.Take(msg)
+	if err == nil && !took {
+		err = errEnding
+	}
+	return err
+}
+
+func handCode(err error) int {
+	if errors.Is(err, errEnding) {
+		return http.StatusConflict
+	}
+	return 500
 }
 
 func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
@@ -678,16 +709,40 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !alive(info.Path) && !s.isHosted(info.ID) {
+		if s.stopForShutdown(w, info.ID) {
+			return
+		}
 		// A stop for a session nobody runs would sit in the inbox and quit
 		// the next resume before its first tick.
 		writeErr(w, 409, errors.New("session is not running"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
+		if errors.Is(err, errEnding) && s.stopForShutdown(w, info.ID) {
+			return
+		}
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// stopForShutdown honours a stop the server's shutdown has overtaken (the
+// run is ending, or has ended, with the server): the session comes off the
+// list the next server brings back, and the answer says it is stopped. It
+// reports false, doing nothing, when the shutdown has not begun.
+func (s *Server) stopForShutdown(w http.ResponseWriter, id string) bool {
+	s.resuming.Lock()
+	stopping := s.stopping
+	s.resuming.Unlock()
+	if !stopping {
+		return false
+	}
+	s.mu.Lock()
+	s.forgetHosted(id)
+	s.mu.Unlock()
+	writeJSON(w, map[string]any{"ok": true, "message": "Stopped: eagent is shutting down, and will not bring this session back when it starts again."})
+	return true
 }
 
 func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
@@ -696,13 +751,16 @@ func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
+	b, _ := readBody(r)
+	// One at a time with deliver and Resume, so the two never both resume it.
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if alive(info.Path) || s.isHosted(info.ID) {
 		writeErr(w, 409, errors.New("session is already running"))
 		return
 	}
-	b, _ := readBody(r)
 	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -736,7 +794,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
 		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
@@ -765,8 +823,14 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 }
 
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig plus any browser-picked route overrides).
+// configuration (loadConfig plus any browser-picked route overrides),
+// unless the server's shutdown has begun.
 func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	if s.stopping {
+		return "", errStopping
+	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.New(cfg, opts, ui)
 	if err != nil {
@@ -796,8 +860,12 @@ func (s *Server) RegisterSessionStarter() func() {
 	})
 }
 
-// host resumes an existing session in this process.
+// host resumes an existing session in this process; its caller holds
+// resuming. Once the server's shutdown has begun it resumes nothing.
 func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
+	if s.stopping {
+		return errStopping
+	}
 	cfg, err := s.loadConfig(bundle, preset)
 	if err != nil {
 		return err
@@ -822,14 +890,20 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		h.code = rt.Run(ctx)
 		s.mu.Lock()
 		delete(s.running, rt.SessionID())
+		if rt.State().EndReason == "quit" {
+			// The user stopped it (a stop, /quit): a list rememberHosted
+			// wrote must not bring it back.
+			s.forgetHosted(rt.SessionID())
+		}
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
 	}()
 }
 
-// Shutdown stops hosted sessions cleanly. A run deliver started before it
-// set stopping is among them, and deliver starts none after.
+// Shutdown stops hosted sessions cleanly. A run started here before it set
+// stopping is among them (every start holds resuming), and none starts
+// after.
 func (s *Server) Shutdown(timeout time.Duration) {
 	s.resuming.Lock()
 	s.stopping = true

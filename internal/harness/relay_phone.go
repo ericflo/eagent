@@ -9,6 +9,7 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
+	"github.com/ericflo/eagent/internal/state"
 )
 
 // What a relay thread on the phone shows beyond the narrator: a receipt
@@ -45,6 +46,7 @@ func (p *phone) loadReceipts(r *Runtime) {
 	phoneIDs := map[int64]string{}
 	mirrored := map[int64]string{} // terminal and web messages: the thread message showing each
 	active := map[string]bool{}
+	unsent := map[int64]bool{} // user messages not kept for eagent, with no send so far
 	set := func(seq int64, status string) {
 		for i := range receipts {
 			if receipts[i].seq == seq {
@@ -80,11 +82,22 @@ func (p *phone) loadReceipts(r *Runtime) {
 			if d.Held != "" && len(active) > 0 {
 				set(ev.Seq, "eagent") // as userMessage marks it
 			}
+			unsent[ev.Seq] = d.Held == ""
+		case event.SessionResume:
+			// A resume takes up a message the run before recorded and
+			// stopped before sending (closeInterrupted): forwarded, its
+			// send is recorded before this event; with none, it was kept
+			// for eagent, as userMessage marks one.
+			var d event.SessionResumeData
+			if ev.Decode(&d) == nil && unsent[d.After] && len(active) > 0 {
+				set(d.After, "eagent")
+			}
 		case event.RelaySend:
 			var d event.RelaySendData
 			if ev.Decode(&d) != nil || d.From != "user" || d.Seq == 0 {
 				continue
 			}
+			delete(unsent, d.Seq)
 			sendSeq[d.ID] = d.Seq
 			// From every send of the message, as the live path does.
 			set(d.Seq, sendsReceipt(r.st, sendSeq, d.Seq))
@@ -140,12 +153,19 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 			p.receipts = p.receipts[len(p.receipts)-maxReceipts:]
 		}
 	}
+	// Of the "sent" ones, those typed and never confirmed, none still on
+	// its way: they may not have arrived. Their receipt stays "sent" (the
+	// app's Retry would type them again); relay_unconfirmed says which.
+	unsure := map[int64]bool{}
+	for _, rc := range p.receipts {
+		unsure[rc.seq] = rc.status == "sent" && typedUnconfirmed(r.st, p.sendSeq, rc.seq)
+	}
 	p.mu.Unlock()
 	p.enqueue(func(ctx context.Context) {
 		// On the worker, after the mirror post for a terminal message
 		// (queued earlier) has learned that message's id.
 		p.mu.Lock()
-		out := map[string]any{}
+		out, maybe := map[string]any{}, map[string]any{}
 		for _, rc := range p.receipts {
 			id := rc.phoneID
 			if id == "" {
@@ -153,13 +173,35 @@ func (p *phone) setReceipt(r *Runtime, seq int64, status string) {
 			}
 			if id != "" {
 				out[id] = rc.status
+				if unsure[rc.seq] {
+					maybe[id] = true
+				}
 			}
 		}
 		p.mu.Unlock()
 		if len(out) > 0 {
-			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: map[string]any{"relay_receipts": out}})
+			_, _ = p.client.Patch(ctx, p.ref, finalechat.PatchRequest{Meta: map[string]any{"relay_receipts": out, "relay_unconfirmed": maybe}})
 		}
 	})
+}
+
+// typedUnconfirmed reports that the user message at seq was typed into an
+// agent and its arrival never confirmed, and no send of it is still on its
+// way. Loop goroutine.
+func typedUnconfirmed(st *state.State, sendSeq map[string]int64, seq int64) bool {
+	unsure := false
+	for id, s := range sendSeq {
+		if s != seq {
+			continue
+		}
+		switch st.SendOutcome(id) {
+		case state.SendUnconfirmed:
+			unsure = true
+		case state.SendWaiting, state.SendHeld, "":
+			return false
+		}
+	}
+	return unsure
 }
 
 // observeRelay keeps receipts in step with sends and confirmations, and
@@ -260,14 +302,14 @@ func (p *phone) observeRelay(r *Runtime, ev event.Event) {
 				req.ClientKey = p.key("rt", keys[i])
 				act := p.attach()
 				req.Activity = act
-				msg, _, err := p.client.Post(ctx, p.ref, req)
+				msg, thread, err := p.client.Post(ctx, p.ref, req)
 				if err != nil {
 					if len(reqs) > 1 {
 						p.say("finalechat: %s's report (event %d) reached the phone in %d of %d parts: %v; the whole report is in the session's record", agent, ev.Seq, i, len(reqs), shortErr(err))
 					}
 					return
 				}
-				p.remember(msg.ID)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -409,8 +451,8 @@ func (p *phone) postRelayScreen(name, screen string) {
 		// Without a status the post would clear the thread's line, which
 		// may be saying the agent needs the user.
 		act := p.attach()
-		if msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}, Activity: act}); err == nil {
-			p.remember(msg.ID)
+		if msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: body, Notify: boolPtr(false), Meta: map[string]any{"eagent": "relay", "kind": "relay_screen", "relay": name}, Activity: act}); err == nil {
+			p.rememberIn(msg, thread)
 			p.markSent(act)
 		}
 	})

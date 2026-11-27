@@ -341,6 +341,15 @@ func Resume(cfg config.Config, opts Options, ui UI, sessionPath string) (*Runtim
 		return nil, err
 	}
 	r.closeInterrupted()
+	if id := opts.PromptPhoneID; id != "" && integration.ReadPhoneLedger(r.st.Events).Taken[id] {
+		// A phone message the record already holds (another process's
+		// watcher resumed the session with it first): the session resumes
+		// as with no words, and it is not taken or typed a second time.
+		for _, o := range []*Options{&opts, &r.opts} {
+			o.Prompt, o.PromptSource, o.PromptAttachments, o.PromptClient = "", "", nil, nil
+			o.PromptPhoneID, o.PromptRoute, o.PromptDelivery, o.PromptAnswers = "", "", "", ""
+		}
+	}
 	// What the cards of an open question say, and so what the resuming
 	// words become, is decided in one place (resumecards.go).
 	// What the resume records from here on closes the question's cards on
@@ -1268,6 +1277,12 @@ drain:
 			break drain
 		}
 	}
+	// One last look at the inbox, as the loop's own looks take it while the
+	// session ends: words written there since the loop's last look (by the
+	// web UI, for a session a terminal runs) are on the record, kept for
+	// the next run, not left unread. A file written after this waits in the
+	// inbox for the next run, which takes it.
+	r.pollInbox()
 	close(r.closed)
 	// A start still under way stops the agent it brings up (abandonLaunch),
 	// as nothing would watch it. Nothing is under way in an ordinary

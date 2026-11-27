@@ -13,16 +13,13 @@ import (
 )
 
 // lingerSeat is a fake agent whose news can still arrive after it was
-// killed (its events stay open), as a real seat's queued events can.
+// killed: what it said before its events ended at the kill, as a real
+// seat's watcher closes them once it is killed, is still read after. A
+// Close alone (the session's end) leaves them open.
 type lingerSeat struct{ *fakeSeat }
 
-func (l *lingerSeat) Kill() error {
-	l.mu.Lock()
-	l.killed = true
-	l.mu.Unlock()
-	return nil
-}
-func (l *lingerSeat) Close() {}
+func (l *lingerSeat) Kill() error { return l.fakeSeat.Kill() }
+func (l *lingerSeat) Close()      {}
 
 // gatedLaunches hands out seats in order. The first launch (the session's
 // own start) is immediate; each later one waits for release and then
@@ -124,7 +121,12 @@ func TestRelayRestartRunsOffTheLoop(t *testing.T) {
 
 	var msg string
 	var err error
-	rt.sync(func() { msg, err = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}) })
+	rt.sync(func() {
+		// The old agent's late news: said before the kill ends its events,
+		// read once the restart has taken its seat out of use.
+		old.emit(relay.Event{Kind: relay.KindState, State: "exited", Detail: "pane gone"})
+		msg, err = rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""})
+	})
 	if err != nil || !strings.Contains(msg, "starting again") {
 		t.Fatalf("repick: %q %v", msg, err)
 	}
@@ -155,9 +157,6 @@ func TestRelayRestartRunsOffTheLoop(t *testing.T) {
 		}
 	})
 
-	// The old agent's late news.
-	old.emit(relay.Event{Kind: relay.KindState, State: "exited", Detail: "pane gone"})
-	time.Sleep(200 * time.Millisecond)
 	rt.sync(func() {
 		if st := rt.st.Relays["codex"].State; st == "exited" {
 			t.Errorf("the killed seat's exit marked the new relay %s", st)
@@ -269,7 +268,8 @@ func TestRelaySwitchRunsOffTheLoop(t *testing.T) {
 // The reviewer's scenario: a model change starts Codex again; while that
 // launch is under way the user picks the default again. That is not "what
 // it already runs": the launch starts the first pick, so the second waits
-// and is applied once the new agent is idle.
+// and is applied once the new agent is up (at once, review 15 finding 9:
+// nothing is typed into an agent that is to be replaced).
 func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 	first, second := newFakeSeat("two"), newFakeSeat("three")
 	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), first, second}, nil)
@@ -294,7 +294,8 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 		t.Fatalf("repick back to the default during the launch: %q", msg)
 	}
 	g.release <- struct{}{}
-	waitRelayStarts(t, rt)
+	// Up: the waiting change applies.
+	g.waitEntered(t)
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
 		if rel.Model != "gpt-6.2-astra" {
@@ -304,9 +305,9 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 			t.Errorf("the default pick is not waiting after the launch: %v %v", p, ok)
 		}
 	})
-	// Idle: the waiting change applies.
-	first.emit(relay.Event{Kind: relay.KindState, State: "idle"})
-	g.waitEntered(t)
+	if !first.wasKilled() {
+		t.Error("the agent the first change brought up was not replaced")
+	}
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	rt.sync(func() {

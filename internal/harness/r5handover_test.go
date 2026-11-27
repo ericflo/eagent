@@ -73,7 +73,13 @@ func TestACardAnswerTheReaskFindsAfterAnAnswerElsewhereIsKeptAsAMessage(t *testi
 		t.Fatal("no card to answer")
 	}
 	// The resume cannot check the card (rule 5: the phone words are a
-	// message and the question stays open); the re-ask then finds it.
+	// message and the question stays open); the re-ask then finds it. The
+	// poll reads the thread only once the terminal answer is in: read
+	// first, the card's answer would be the question's (the poll knows the
+	// card's question from the record).
+	svc := newR13Service(t, fp)
+	svc.hold = make(chan struct{})
+	g.cfg.Finalechat.BaseURL = svc.srv.URL
 	fp.mu.Lock()
 	fp.questionsDown = true
 	var once sync.Once
@@ -90,6 +96,11 @@ func TestACardAnswerTheReaskFindsAfterAnAnswerElsewhereIsKeptAsAMessage(t *testi
 				}
 				return false
 			})
+			svc.mu.Lock()
+			held := svc.hold
+			svc.hold = nil
+			svc.mu.Unlock()
+			close(held)
 		})
 	}
 	fp.mu.Unlock()

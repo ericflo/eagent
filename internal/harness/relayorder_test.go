@@ -12,7 +12,8 @@ import (
 
 // gateSeat is a fake agent whose first send waits for the test to let it
 // through, as a real send waits for the agent's startup screens. It stays
-// usable after Kill so a send let through late cannot panic.
+// usable after Kill so a send let through late cannot panic; its events
+// end at the kill, as a real seat's do.
 type gateSeat struct {
 	*fakeSeat
 	gmu     sync.Mutex
@@ -47,6 +48,7 @@ func (g *gateSeat) Kill() error {
 	g.fakeSeat.mu.Lock()
 	g.fakeSeat.killed = true
 	g.fakeSeat.mu.Unlock()
+	g.fakeSeat.Close()
 	return nil
 }
 func (g *gateSeat) Close() {}

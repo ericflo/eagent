@@ -231,16 +231,10 @@ func (r *Runtime) planResume(opts Options) resumePlan {
 		r.markAnswerTaken(c.ID)
 	}
 	// The words are recorded next, as the answer or as a message; once they
-	// are, the card they were written on is taken (Resume marks it), unless
-	// whose card it is could not be learned (then a re-ask that finds it
-	// the open question's, answered, closes the question with it).
-	if card := opts.PromptAnswers; card != "" {
-		for _, c := range cards {
-			if c.ID == card && (c.Status != "unknown" || c.OfOpen) {
-				plan.WordsCard = card
-			}
-		}
-	}
+	// are, the card they were written on is taken (Resume marks it), also
+	// when whose card it is could not be learned: a re-ask that then finds
+	// it answered must not take the same words again.
+	plan.WordsCard = opts.PromptAnswers
 	return plan
 }
 

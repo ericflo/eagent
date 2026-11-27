@@ -69,6 +69,9 @@ type relaySeats struct {
 	// name, each closed when it is gone. Both share a terminal name, so a
 	// start under that name waits for it rather than racing the kill.
 	stopping map[string]chan struct{}
+	// drained holds, for each seat watched, what is closed once all it saw
+	// is on the record: its events have ended and the last was recorded.
+	drained map[relaySeat]chan struct{}
 }
 
 type relayActivity struct {
@@ -184,6 +187,9 @@ type relayLaunch struct {
 	// is closed once that send is settled: a send cut off by the old
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
+	// oldDrained is closed once all the old seat saw is on the record
+	// (watchSeat), closed the loop's end.
+	oldDrained, closed <-chan struct{}
 	// afterStop, when a stop of the relay with this name is still closing
 	// its terminal, is closed once it is gone.
 	afterStop <-chan struct{}
@@ -586,6 +592,9 @@ func (r *Runtime) beginLaunch(job *relayLaunch, replaces string) {
 	if replaces != "" {
 		r.relays.launching[replaces] = job
 		job.old = r.relays.seats[replaces]
+		if job.old != nil {
+			job.oldDrained, job.closed = r.relays.drained[job.old], r.closed
+		}
 		delete(r.relays.seats, replaces)
 		// What was still waiting to be typed into the agent being stopped
 		// goes to the new one, ahead of what arrives during the launch.
@@ -622,6 +631,15 @@ func (job *relayLaunch) run() {
 		select {
 		case <-job.oldIdle:
 		case <-time.After(oldSendSettle):
+		}
+	}
+	if job.oldDrained != nil {
+		// What the old seat saw before it closed (an arrival, a held message
+		// taken back) is recorded before the new agent starts: how its sends
+		// ended is its word, and finishLaunch settles only what is left.
+		select {
+		case <-job.oldDrained:
+		case <-job.closed:
 		}
 	}
 	job.seat, job.started, job.err = job.launch(job.spec, job.innerID, job.resume && job.innerID != "")
@@ -822,6 +840,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
 	}
+	if pick, ok := r.relayRepick[job.name]; ok && job.replaces == job.name {
+		// A newer change waited for this restart (one equal to it was
+		// dropped above): it replaces the agent just started now, and what
+		// waited goes to the agent it brings up, not into this one.
+		if err := r.restartRelayWith(r.st.Relays[job.name], pick, queue...); err == nil {
+			return job.name, nil
+		}
+	}
 	r.enqueueSend(job.name, job.seat, queue...)
 	return job.name, nil
 }
@@ -951,6 +977,13 @@ func (r *Runtime) startRelay(profile, dir, name string, resume bool, pick relayP
 // watchSeat pumps a seat's observations into the log.
 func (r *Runtime) watchSeat(name string, seat relaySeat) {
 	r.relays.put(name, seat)
+	drained := make(chan struct{})
+	r.relays.mu.Lock()
+	if r.relays.drained == nil {
+		r.relays.drained = map[relaySeat]chan struct{}{}
+	}
+	r.relays.drained[seat] = drained
+	r.relays.mu.Unlock()
 	go func() {
 		for ev := range seat.Events() {
 			ev := ev
@@ -958,20 +991,30 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				// News from a seat that is no longer the relay's (stopped
 				// for a restart, a switch or a stop) is not the new one's.
 				ours := r.relays.get(name) == seat
-				if !ours && ev.Kind == relay.KindDelivered && ev.OK {
-					// Except an arrival read from an agent a restart is
-					// replacing, before the new one is up (finishLaunch):
-					// it is this relay's, and the restart then finds the
-					// send settled instead of calling it unconfirmed.
+				if !ours && ev.Kind == relay.KindDelivered {
+					// Except how a send ended, as the agent a restart or a
+					// switch is replacing saw it, before the new one is up
+					// (finishLaunch): an arrival, or a held message taken
+					// back unread. It is this relay's word on its own send,
+					// and the start then finds the send settled instead of
+					// calling it unconfirmed.
 					job := r.relays.launch(name)
-					ours = job != nil && job.name == name && job.old == seat
+					ours = job != nil && job.old == seat
 				}
 				if ours {
 					r.onRelayEvent(name, ev)
 				}
 			})
 		}
-		r.post(func() { r.relays.drop(name, seat) })
+		r.post(func() {
+			r.relays.drop(name, seat)
+			r.relays.mu.Lock()
+			if r.relays.drained[seat] == drained {
+				delete(r.relays.drained, seat)
+			}
+			r.relays.mu.Unlock()
+			close(drained) // after every event above, in the loop's order
+		})
 	}()
 }
 
@@ -986,9 +1029,9 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 	case relay.KindState:
 		if cur := r.st.Relays[name]; cur != nil && cur.State == ev.State && ev.Detail == "" {
 			if ev.State == "idle" {
-				// Idle on the record already (its turn ended while its
-				// seat held it blocked): a change that waited for the
-				// seat applies now.
+				// Idle on the record already (its turn ended while a
+				// dialog it reports held it): a change that waited for
+				// the dialog applies now.
 				r.applyWaitingRepick(name)
 			}
 			return
@@ -1002,6 +1045,11 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		}
 	case relay.KindDelivered:
 		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000)}))
+		if rel := r.st.Relays[name]; !ev.OK && rel != nil && rel.State == "idle" {
+			// A send a change waited for ended without arriving, and no
+			// turn started with it: the change applies now.
+			r.applyWaitingRepick(name)
+		}
 	case relay.KindProgress:
 		r.append(event.New(event.RelayProgress, event.ActorHarness, event.RelayProgressData{Name: name, Text: clipRunes(ev.Text, 2000)}))
 	case relay.KindTurn:

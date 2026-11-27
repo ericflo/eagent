@@ -46,6 +46,9 @@ type Event struct {
 	Window      string
 	ResetsAt    string
 	Exhausted   bool
+	// Dialog, on a state event blocked by a dialog the agent reports (pi's
+	// extension), is its title; "" on every other event.
+	Dialog string
 }
 
 // Spec describes one relay.
@@ -118,6 +121,7 @@ type Seat struct {
 	followed   bool                 // ...and where its news begins is decided when it opens
 	sinceKept  time.Time            // since as it was before the move
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
+	readAt     time.Time            // the newest stamp read from a transcript (readTail)
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
@@ -328,8 +332,28 @@ func (s *Seat) caughtUp(now time.Time) {
 	if kept {
 		s.state, s.hung = "blocked", true
 	}
+	// Inside a turn whose transcript has been quiet as long as a live seat
+	// waits before calling a working agent blocked (checkScreen): blocked
+	// as it would be (hung), so nothing goes into a dialog that came up
+	// while eagent was down unless the screen shows the agent's own.
+	quiet := false
+	if st, err := os.Stat(s.transcript); !kept && state == "working" && err == nil && now.Sub(st.ModTime()) > 10*time.Minute {
+		s.state, s.stateAt, s.hung, quiet = "blocked", now, true, true
+	}
+	// No turn begun or ended in the history (none read, or no transcript
+	// yet): a record that said starting or blocked is starting again, as a
+	// launched seat is, and the screen check says idle once the agent's
+	// prompt shows. A send waits for that rather than going into a login or
+	// other startup screen, and is not refused (17dffc0 kept blocked). The
+	// record keeps what it says until then.
+	if s.attached && state == "idle" && !ended && (s.spec.State == "starting" || s.spec.State == "blocked") {
+		s.state, s.stateAt, s.readySince = "starting", now, time.Time{}
+	}
 	s.mu.Unlock()
-	if !kept && (state != "idle" || ended) {
+	if quiet {
+		screen, _ := s.host.Capture(s.target, 0)
+		s.emit(Event{Kind: KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n" + lastLines(screen, 10)})
+	} else if !kept && (state != "idle" || ended) {
 		s.emit(Event{Kind: KindState, State: state})
 	}
 }
@@ -394,7 +418,11 @@ func (s *Seat) emit(ev Event) {
 	}
 }
 
-func (s *Seat) setState(state, detail string) {
+func (s *Seat) setState(state, detail string) { s.setDialogState(state, detail, "") }
+
+// setDialogState is setState for blocked by a dialog the agent reports
+// (reportDialog), whose title goes with the event (Event.Dialog).
+func (s *Seat) setDialogState(state, detail, dialog string) {
 	s.mu.Lock()
 	if s.state == state && detail == "" {
 		s.mu.Unlock()
@@ -404,11 +432,11 @@ func (s *Seat) setState(state, detail string) {
 	if state != "blocked" {
 		s.hung = false
 	}
-	if state != "idle" {
-		s.turnEndAt = time.Time{}
+	if state == "working" {
+		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
 	}
 	s.mu.Unlock()
-	s.emit(Event{Kind: KindState, State: state, Detail: detail})
+	s.emit(Event{Kind: KindState, State: state, Detail: detail, Dialog: dialog})
 }
 
 // Close stops watching. The agent keeps running.
@@ -445,6 +473,9 @@ type Status struct {
 	Transcript string
 	Target     string
 	Pending    []string
+	// Dialog is the title of the dialog the agent reports holding it
+	// blocked (pi's extension), "" when none does.
+	Dialog string
 }
 
 // Snapshot describes the seat now.
@@ -452,6 +483,9 @@ func (s *Seat) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target}
+	if s.state == "blocked" {
+		st.Dialog = s.dialogUp
+	}
 	for _, p := range s.pending {
 		st.Pending = append(st.Pending, fmt.Sprintf("%s (%s, %s ago): %s", p.id, p.mode, time.Since(p.at).Round(time.Second), oneLine(p.text, 80)))
 	}
@@ -719,6 +753,28 @@ func (s *Seat) untrack(id string) bool {
 // still in the spool counts as left over (the Stop hook had its chance).
 // Tests shorten it.
 var heldGrace = 5 * time.Second
+
+// aliveEvery is how often the watcher checks that the agent's pane is still
+// there. Tests shorten it.
+var aliveEvery = 3 * time.Second
+
+// sweepSpool takes every message still waiting unclaimed in the spool, with
+// the rename a hook claims one with, and reports each not sent with detail:
+// the agent that would have taken it is gone. One a hook claimed may have
+// gone in, and is left to be reported as a send that may have.
+func (s *Seat) sweepSpool(detail string) {
+	if s.spec.Spool == "" {
+		return
+	}
+	taken, _ := takeSpool(s.spec.Spool)
+	for _, path := range taken {
+		_ = os.Remove(path)
+		if _, id, ok := strings.Cut(strings.TrimSuffix(filepath.Base(path), ".txt.taken"), "-"); ok {
+			s.untrack(id)
+			s.emit(Event{Kind: KindDelivered, SendID: id, OK: false, Outcome: OutcomeNotSent, Detail: detail})
+		}
+	}
+}
 
 // reportLeftOvers reports undelivered every message still in the spool
 // heldGrace after the transcript showed the agent's turn over: the Stop
@@ -1128,6 +1184,12 @@ func (s *Seat) watch() {
 				return
 			case <-tick.C:
 			}
+		} else {
+			select {
+			case <-s.stop:
+				return // closed during a catch-up that reads on without waiting
+			default:
+			}
 		}
 		wait = true
 		now := time.Now()
@@ -1142,12 +1204,6 @@ func (s *Seat) watch() {
 			s.refollow, s.transcript, tail = false, "", nil
 		}
 		s.mu.Unlock()
-		if moved {
-			// Recorded now: pi writes no file for a new session until its
-			// first prompt, and a restart meanwhile must open this session,
-			// not the one left. The path follows when the file is found.
-			s.emit(Event{Kind: KindInner, InnerID: movedTo})
-		}
 		if tail == nil {
 			s.mu.Lock()
 			path, inner := s.transcript, s.inner
@@ -1190,10 +1246,13 @@ func (s *Seat) watch() {
 					}
 				}
 				since := s.since
+				restoring := slices.ContainsFunc(s.pending, func(p *pending) bool { return p.dormant })
 				s.mu.Unlock()
-				if !since.IsZero() && !exact {
+				if !since.IsZero() && !exact && !restoring {
 					// Reattached or resumed: the history is already on the
-					// record; read only the end of a long transcript.
+					// record; read only the end of a long transcript. With
+					// sends the record still waits on, all of it: their
+					// arrival may lie anywhere after they were recorded.
 					if st, err := os.Stat(path); err == nil && st.Size() > tailBackfill {
 						tail.offset, tail.skipPartial = st.Size()-tailBackfill, true
 					}
@@ -1203,6 +1262,14 @@ func (s *Seat) watch() {
 				}
 			}
 		}
+		if moved && tail == nil {
+			// Recorded now, when its file is not there yet: pi writes none
+			// for a new session until its first prompt, and a restart
+			// meanwhile must open this session, not the one left. The path
+			// follows when the file is found. One found at once is recorded
+			// once, with its path, above.
+			s.emit(Event{Kind: KindInner, InnerID: movedTo})
+		}
 		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
 			err := s.readTail(tail, p, now)
@@ -1210,12 +1277,16 @@ func (s *Seat) watch() {
 			// what the transcript did not show of the restored sends did
 			// not arrive while eagent was down.
 			caught = err != nil || tail.atEnd
+			// A catch-up reads on at once, not a chunk a look.
+			s.mu.Lock()
+			wait = caught || !s.catchingUp
+			s.mu.Unlock()
 		}
 		dr, reports := s.agent.(dialogReporter)
 		if caught && !reports {
 			s.caughtUp(time.Now())
 		}
-		if now.Sub(lastAlive) >= 3*time.Second {
+		if now.Sub(lastAlive) >= aliveEvery {
 			lastAlive = now
 			// One failed check can be a slow or busy tmux; two in a row,
 			// three seconds apart, mean the pane is gone. Marked exited by
@@ -1224,6 +1295,7 @@ func (s *Seat) watch() {
 				missed = 0
 			} else if missed++; missed >= 2 {
 				screen, _ := s.host.Capture(s.target, 15)
+				s.sweepSpool(s.agent.Label() + " exited before it took this message, so it was not delivered; send it again if it is still wanted")
 				s.setState("exited", lastLines(screen, 6))
 				return
 			}
@@ -1276,12 +1348,21 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 		s.mu.Lock()
 		s.lastLine = now
 		s.mu.Unlock()
+		var newest time.Time
 		for i, line := range lines {
 			for _, o := range p.line(line) {
 				o.pos = starts[i]
 				s.fold(o)
+				if o.at.After(newest) {
+					newest = o.at
+				}
 			}
 		}
+		s.mu.Lock()
+		if newest.After(s.readAt) {
+			s.readAt = newest
+		}
+		s.mu.Unlock()
 	}
 	return err
 }
@@ -1613,7 +1694,7 @@ func (s *Seat) reportDialog(title string) {
 		}
 		s.hung = false // a dialog holds it now: nothing is typed into it
 		s.mu.Unlock()
-		s.setState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys")
+		s.setDialogState("blocked", s.agent.Label()+" is waiting on a dialog: "+oneLine(title, 120)+"; see relay_screen and answer it with relay_control keys", title)
 		return
 	}
 	back := s.dialogPrev
@@ -1751,8 +1832,8 @@ func (s *Seat) follow(id string, idle bool) {
 
 // moveCut is where news begins in a transcript the agent moved to, when the
 // agent cannot say: just before it was last seen on the session it left,
-// never earlier than sinceKept, "now" without a sighting. The caller holds
-// s.mu and has set sinceKept.
+// never earlier than sinceKept or the newest stamp read so far, "now"
+// without a sighting. The caller holds s.mu and has set sinceKept.
 func (s *Seat) moveCut() time.Time {
 	cut := time.Now()
 	if !s.onAt.IsZero() && s.onAt.Before(cut) {
@@ -1760,6 +1841,11 @@ func (s *Seat) moveCut() time.Time {
 	}
 	if cut.Before(s.sinceKept) {
 		cut = s.sinceKept
+	}
+	if cut.Before(s.readAt) {
+		// What the seat read from the session left is no news: a fork
+		// copies the turns it keeps with their own stamps.
+		cut = s.readAt
 	}
 	return cut
 }
