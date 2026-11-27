@@ -117,7 +117,6 @@ func TestSrSeatCodexReportHalfWrittenAtTheReadIsLostOnAReattach(t *testing.T) {
 // the cut by time (a restored send is confirmed only by a line stamped no
 // earlier than it) both refuse it.
 func TestSrSeatRestoredSendIsNotConfirmedByALineWrittenBeforeIt(t *testing.T) {
-	t.Skip("known, not fixed: fixed in the next commit")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 	at := time.Now().Add(-time.Minute)

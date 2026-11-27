@@ -919,7 +919,7 @@ func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 // transcript shows arriving (see arrivals) and returns their ids, oldest
 // first.
 func (s *Seat) matchPending(text string) []string {
-	return s.matchSends(text, time.Time{}, math.MaxInt64)
+	return s.matchSends(text, time.Time{}, math.MaxInt64, false)
 }
 
 // matchSends is matchPending for an entry that starts at pos in the
@@ -928,8 +928,11 @@ func (s *Seat) matchPending(text string) []string {
 // An entry from before the reattach (history, at set) is the arrival only
 // of a restored send recorded no later than the entry: it may have arrived
 // just before the record's last event, but a send of the same words
-// confirmed earlier, or sent after the reattach, is not it.
-func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
+// confirmed earlier, or sent after the reattach, is not it. A newer entry
+// (news) is no restored send's arrival when stamped before that send was
+// recorded: the record's read mark makes such an entry news, and it was
+// written before the send.
+func (s *Seat) matchSends(text string, at time.Time, pos int64, news bool) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cands []int
@@ -947,7 +950,11 @@ func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
 		} else if at.Nanosecond()%int(time.Millisecond) == 0 {
 			sent = sent.Truncate(time.Millisecond)
 		}
-		if at.IsZero() || p.restored && !at.Before(sent) {
+		ok := at.IsZero() || p.restored && !at.Before(sent)
+		if news {
+			ok = !p.restored || at.IsZero() || !at.Before(sent)
+		}
+		if ok {
 			cands = append(cands, i)
 		}
 	}
@@ -1453,7 +1460,7 @@ func (s *Seat) fold(o obs) {
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
 		if o.kind == "user" && !o.again {
-			for _, id := range s.matchSends(o.text, o.at, o.pos) {
+			for _, id := range s.matchSends(o.text, o.at, o.pos, false) {
 				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 		}
@@ -1478,7 +1485,7 @@ func (s *Seat) fold(o obs) {
 	case "user":
 		var ids []string
 		if !o.again {
-			ids = s.matchSends(o.text, time.Time{}, o.pos)
+			ids = s.matchSends(o.text, o.at, o.pos, true)
 		}
 		for _, id := range ids {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
