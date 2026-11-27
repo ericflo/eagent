@@ -1784,6 +1784,11 @@ func (s *Seat) checkScreen(now time.Time) {
 			detail := "never showed up in the agent's transcript; the screen ends:\n" + lastLines(screen, 8)
 			if stuck.restored {
 				detail = "was recorded before eagent restarted, and the agent's transcript does not show it arriving; it was not typed again, so send it again if it is still wanted. The screen ends:\n" + lastLines(screen, 8)
+				if isAgentCommand(stuck.text) {
+					// A command shows nothing in a transcript (typed is
+					// delivered): it may have run.
+					detail = "is the agent's own command, recorded before eagent restarted; a command shows nothing in the transcript, so whether it was typed and ran cannot be told. Check relay_screen before sending it again. The screen ends:\n" + lastLines(screen, 8)
+				}
 			}
 			s.emit(Event{Kind: KindDelivered, SendID: stuck.id, OK: false, Outcome: OutcomeUnconfirmed, Detail: detail})
 			return

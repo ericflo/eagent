@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,5 +207,36 @@ func TestSr3SeatPiMoveRightAfterAReadLosesTheEndOfTheSessionLeft(t *testing.T) {
 	s.mu.Unlock()
 	if !confirmed || !turn || state != "idle" {
 		t.Errorf("send confirmed %v (still watched: %d), turn reported %v, seat state %q; want the arrival and the turn pi wrote in the session it left, and idle", confirmed, waiting, turn, state)
+	}
+}
+
+// The reader's suspicion: the agent's own command (/compact) is confirmed
+// once typed, and that event can be lost at a quit (the watcher has
+// closed the seat's events). The next run restores it as a send the
+// record still waits on; a command never shows arriving in a transcript,
+// so after the wait it is reported unconfirmed. Not with a send's words
+// ("does not show it arriving … send it again"): it may have run, and the
+// words would have it run twice.
+func TestK4ARestoredAgentCommandIsNotCalledLostForNotShowing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sess.jsonl")
+	since := time.Now().Add(-time.Minute)
+	writeLines(t, path, claudeTurnLines("sort the shelves", "Sorted.", since.Add(-time.Hour))...)
+	w := reattach(t, claudeAgent{}, Spec{Dir: dir, State: "idle"}, path, since, Restored{ID: "r1", Text: "/compact", Mode: "queue", At: since.Add(-time.Second)})
+	w.caughtUp(t)
+	w.h.mu.Lock()
+	w.h.screen = "> \n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+	w.h.mu.Unlock()
+	start := time.Now()
+	w.s.mu.Lock()
+	w.s.stateAt = start.Add(-time.Minute)
+	w.s.mu.Unlock()
+	w.s.checkScreen(start.Add(time.Hour))
+	if !eventually(func() bool { _, failed := w.delivered(); return len(failed) > 0 }) {
+		t.Fatal("never reported")
+	}
+	_, failed := w.delivered()
+	if strings.Contains(failed[0], "does not show it arriving") || strings.Contains(failed[0], "send it again") {
+		t.Errorf("the restored command is reported as a message that never arrived: %q", failed[0])
 	}
 }
