@@ -100,13 +100,14 @@ func r10File(id, name string) map[string]any {
 	return map[string]any{"id": id, "kind": "image", "content_type": "image/png", "filename": name, "size": 3, "url": "/files/" + id}
 }
 
-// Finding 12A: a reply with two files, neither of which can be fetched.
-// The notice about the first goes (the thread's latest message is then
-// eagent's), the notice about the second cannot: the reply is not taken
-// in, and is kept for the sweeps, which read the thread for it although
-// its preview is no longer the user's. Once all is well again the session
-// comes back with the reply, once.
-func TestR10AReplyWhoseSecondNoticeFailedIsKeptForTheSweeps(t *testing.T) {
+// Finding 12A, under the rule that notices come only from the step that
+// takes the reply (a later review proved that keeping the reply here made
+// the notice about one.png false once the files came): a reply with two
+// files, neither of which can be fetched. The notice about the first goes,
+// the notice about the second cannot: the step that posted the first takes
+// the reply, without either file (the terminal says two.png's sender could
+// not be told), once.
+func TestR10AReplyWhoseSecondNoticeFailedIsTakenWithoutItsFiles(t *testing.T) {
 	project, sid, f, _, host, w := r9Stopped(t, "please fix the login crash", r9Shot())
 	f.mu.Lock()
 	f.threads[sid][1]["attachments"] = []map[string]any{r10File("att-1", "one.png"), r10File("att-2", "two.png")}
@@ -116,18 +117,15 @@ func TestR10AReplyWhoseSecondNoticeFailedIsKeptForTheSweeps(t *testing.T) {
 	fr.files.Store(http.StatusBadGateway)
 	fr.failPosts(0, http.StatusForbidden)
 	w.sweep(context.Background())
-	if host.calls() != 0 || r9Taken(t, project, sid, "m1") {
-		t.Fatalf("taken in while nobody could be told about two.png: %#v", host.resumed)
-	}
-	if p := r10Preview(f, sid); p != "system" {
-		t.Fatalf("the thread's latest message is from %q, want the notice about one.png", p)
-	}
 	fr.files.Store(0)
 	for i := 0; i < 3; i++ {
 		w.sweep(context.Background())
 	}
-	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please fix the login crash" || len(host.resumed[0].Attachments) != 2 {
-		t.Fatalf("after all is well again: resumed %#v, kept %#v", host.resumed, w.retries.replies)
+	if host.calls() != 1 || host.resumed[0].ID != "m1" || host.resumed[0].Text != "please fix the login crash" || len(host.resumed[0].Attachments) != 0 || !r9Taken(t, project, sid, "m1") {
+		t.Fatalf("resumed %#v, kept %#v; want the words once, without the files", host.resumed, w.retries.replies)
+	}
+	if n := r11Told(fr, "one.png"); n != 1 {
+		t.Fatalf("%d notices about one.png: %q", n, fr.posted())
 	}
 	// One quiet entry stays, for when the session stops again; the thread
 	// is told nothing more.

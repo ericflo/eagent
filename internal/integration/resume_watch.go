@@ -99,6 +99,9 @@ type keptReply struct {
 	// Restored: a restore is resuming the session with it (PendingReply);
 	// the thread is looked at only once the record holds it.
 	Restored bool `json:"restored,omitempty"`
+	// Released: the restore gave it back (ReleaseReply); only this ends a
+	// hold on the same message.
+	Released bool `json:"released,omitempty"`
 }
 
 // lockKept holds the kept file for one process's read and write of it: two
@@ -124,10 +127,10 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) erro
 	}
 	r.mu.Lock()
 	for id, p := range r.replies {
-		if old, ok := kept[id]; ok && p.restored && !old.Restored && !old.Told {
+		if old, ok := kept[id]; ok && p.restored && old.Released {
 			continue // given back by its restore (ReleaseReply): the hold is over
 		}
-		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored}
+		kept[id] = keptReply{Thread: p.thread.ExternalID, Message: p.msg, Since: p.since, Told: p.told, Restored: p.restored, Released: p.released}
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
@@ -161,7 +164,7 @@ func (r *replyRetries) takeUp(project string) {
 	for id, k := range kept {
 		thread := finalechat.Thread{ExternalID: k.Thread}
 		if !k.Told {
-			if !k.Restored && r.held(k.Thread, id) {
+			if !k.Restored && r.held(k.Thread, id, k.Released) {
 				continue // a restore's hold on the thread stays; its entry looks at the thread too
 			}
 			r.keepQuietly(pendingReply{thread: thread, msg: k.Message, since: k.Since, restored: k.Restored})
@@ -193,6 +196,7 @@ type pendingReply struct {
 	since    time.Time
 	told     bool
 	restored bool // keptReply.Restored
+	released bool // keptReply.Released, as ReleaseReply writes it down
 }
 
 // replyRetries outlives one connection to the event stream: a reply that
@@ -357,6 +361,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
+	told := false
 	for i, err := range failed {
 		if err == nil {
 			continue
@@ -364,11 +369,17 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 		// As the running mirror does: the sender is told, and the
 		// session comes back with the rest of the message. The note
 		// gets its own time, as the fetch may have used up the
-		// sweep's. When it cannot be posted nobody would know: the
-		// reply is not taken in, and is kept, quietly, for the sweeps
-		// to read the thread for (an earlier notice may have made
-		// eagent's the thread's latest message).
-		if tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err) != nil {
+		// sweep's. Notices come only from the step that takes the
+		// reply: when the first cannot be posted nobody would know, so
+		// the reply is not taken in, and is kept, quietly, for the
+		// sweeps, with nothing said; once one went, this step takes the
+		// reply, and a file whose notice cannot go is left out with the
+		// terminal told.
+		if nerr := tellRefused(context.WithoutCancel(ctx), w.client, thread.ExternalID, m.ID, m.Attachments[i], err); nerr != nil {
+			if told {
+				w.logf("finalechat: %s was left out of the reply to session %s, and its sender could not be told: %v", m.Attachments[i].Filename, sid, nerr)
+				continue
+			}
 			w.retries.mu.Lock()
 			if _, kept := w.retries.replies[m.ID]; !kept {
 				w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
@@ -376,6 +387,7 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			w.retries.mu.Unlock()
 			return
 		}
+		told = true
 	}
 	// A message whose files were all refused (the person was told) still
 	// resumes the session: it takes the message in, so the ones after it
@@ -446,13 +458,13 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 }
 
 // held reports whether the thread's quiet entry is a restore's (restored)
-// for another message than id: for the same one, an entry not marked is
-// the restore giving it back (ReleaseReply), which ends the hold.
-func (r *replyRetries) held(ext, id string) bool {
+// that an entry for id does not end: only the restore giving the same
+// message back (released, ReleaseReply) ends the hold.
+func (r *replyRetries) held(ext, id string, released bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for pid, p := range r.replies {
-		if p.restored && !p.told && p.thread.ExternalID == ext && pid != id {
+		if p.restored && !p.told && p.thread.ExternalID == ext && !(pid == id && released) {
 			return true
 		}
 	}
@@ -732,7 +744,8 @@ func ReleaseReply(project string, info store.Info, msg PhoneMessage) error {
 	if msg.ID == "" {
 		return nil
 	}
-	return leaveWithWatcher(project, info, finalechat.Message{ID: msg.ID}, false)
+	r := &replyRetries{replies: map[string]pendingReply{msg.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: finalechat.Message{ID: msg.ID}, since: time.Now(), released: true}}}
+	return r.writeDown(project, func(string, ...any) {})
 }
 
 // tellRefused posts, in the thread, why a file the user sent was not
