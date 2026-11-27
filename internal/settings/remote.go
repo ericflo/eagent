@@ -698,21 +698,33 @@ func (s *Service) ApplyServerEdits(ctx context.Context, serverEdits []control.Ed
 // Prepare produces the exact intended file bytes while the caller holds the
 // project lock. A connector journals these bytes before performing the write.
 func (s *Service) Prepare(p control.Proposal, grant control.Grant) (raw string, etag string, before RemoteView, err error) {
-	return s.prepare(p, grant, false, nil, nil)
+	return s.prepare(p, grant, false, nil)
 }
 
 // prepare is Prepare. A person's pick of a route's model, address or preset
 // brings the rest of the route with it (the summarizer's seed and
-// routePicks); an undo's reversal (undo) writes the fields it names and the
-// routes it puts back to null (nulls), and no other. Either file is checked
-// as a person's save of it is, except that for a reversal a route pairing
-// an address and a key variable as a route in force at the command did
-// (inForce, RoutePairs) passes the key-choice and pairing checks.
-func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nulls []string, inForce [][2]string) (raw string, etag string, before RemoteView, err error) {
+// routePicks); an undo's reversal (undo) writes what it names and no other,
+// and may set a route with no value, which writes it as null (a fallback
+// turned off). Either file is checked as a person's save of it is, except
+// that for a reversal a route pairing an address and a key variable as a
+// route in force at the command did (inForce, RoutePairs) passes the
+// key-choice and pairing checks.
+func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, inForce [][2]string) (raw string, etag string, before RemoteView, err error) {
 	picks := !undo
 	before, err = s.RemoteSnapshot(grant)
 	if err != nil {
 		return
+	}
+	// A reversal's null route is checked as an unset of the route's model:
+	// writable here, in a class the grant has.
+	checks := p
+	if undo {
+		checks.Edits = slices.Clone(p.Edits)
+		for i, e := range checks.Edits {
+			if e.Op == "set" && e.Value == nil && slices.ContainsFunc(before.Descriptor.Fields, func(f control.Field) bool { return f.Key == e.Key+"/model" }) {
+				checks.Edits[i] = control.Edit{Op: "unset", Key: e.Key + "/model"}
+			}
+		}
 	}
 	d := before.Descriptor
 	if undo && len(inForce) > 0 {
@@ -729,7 +741,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nu
 			}
 		}
 	}
-	if err = p.Validate(d, grant); err != nil {
+	if err = checks.Validate(d, grant); err != nil {
 		return
 	}
 	if p.ExpectedVersion != before.Snapshot.Version || p.Generation != "" {
@@ -775,9 +787,6 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, nu
 			continue
 		}
 		setPointer(values, e.Key, e.Value, e.Op == "unset")
-	}
-	for _, key := range nulls {
-		setPointer(values, key, nil, false)
 	}
 	// Picks are compared with the layers the file builds on, which the
 	// summarizer's route above is seeded from: what the environment makes

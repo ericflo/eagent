@@ -67,6 +67,12 @@ func TestK1ReversalRules(t *testing.T) {
 		{name: "2: a model set back conflicts on a local move of its address", before: `{"preset":"openai-high","model":{"model":"gpt-6.1-sol"}}`, edits: []control.Edit{{Op: "set", Key: "/model/model", Value: "gpt-6-astra"}}, local: func(m map[string]any) {
 			m["model"].(map[string]any)["base_url"] = "https://openrouter.ai/api/v1"
 		}, want: "conflict"},
+		{name: "2: a model set back conflicts when a local preset change moved its address", before: `{"preset":"openai-high","model":{"model":"gpt-6.1-sol"}}`, edits: []control.Edit{{Op: "set", Key: "/model/model", Value: "gpt-6-astra"}}, local: func(m map[string]any) {
+			m["preset"] = "glm"
+		}, want: "conflict"},
+		{name: "2: an address moved back conflicts on a local change of the model", before: `{"preset":"openai-high"}`, edits: []control.Edit{{Op: "set", Key: "/model/base_url", Value: "https://api.together.xyz/v1"}}, local: func(m map[string]any) {
+			m["model"].(map[string]any)["model"] = "zai-org/GLM-5.3"
+		}, want: "conflict"},
 		{name: "2: a model taken out does not conflict on a local move of its address", before: `{"preset":"openai-high"}`, edits: model, local: func(m map[string]any) {
 			m["model"].(map[string]any)["base_url"] = "https://api.openai.com/v1/"
 		}, want: "ok", check: func(t *testing.T, c config.Config) {

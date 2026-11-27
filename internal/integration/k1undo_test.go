@@ -11,6 +11,30 @@ import (
 	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
+// The review an undo offers is what it writes: a fallback the file had
+// turned off with null, which a remote edit wrote into, is reviewed as a set
+// of the fallback to null, and the undo writes that null.
+func TestK2TheReviewShowsAFallbackPutBackToNull(t *testing.T) {
+	s, g, _ := fixtureCommand(t)
+	if _, err := config.SaveRaw(s.Project, `{"preset":"openai-high","model":{"fallback":null}}`, "", true); err != nil {
+		t.Fatal(err)
+	}
+	q := reviewedCommand(t, s, g, control.Proposal{Operation: "settings.apply", Edits: []control.Edit{{Op: "set", Key: "/model/fallback/model", Value: "openai/gpt-6.1-sol"}}})
+	first := executeExpected(t, s, g, q, "succeeded")
+	offer, _ := first.Result["undo"].(map[string]any)
+	raw, _ := json.Marshal(offer["edits"])
+	if string(raw) != `[{"key":"/model/fallback","op":"set","value":null}]` {
+		t.Fatalf("review %s, want the fallback set to null", raw)
+	}
+	executeExpected(t, s, g, reviewedUndo(t, s, g, first), "succeeded")
+	var file map[string]map[string]json.RawMessage
+	b, _ := os.ReadFile(config.File(s.Project))
+	_ = json.Unmarshal(b, &file)
+	if string(file["model"]["fallback"]) != "null" {
+		t.Fatalf("undo wrote\n%s", b)
+	}
+}
+
 // A command's journal records the (address, key variable) pairs in force
 // when it is applied, so the undo of a remote /preset change over a route
 // with a key variable of its own puts that variable back, which today's
