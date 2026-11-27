@@ -612,7 +612,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 				msg, thread, err = p.client.Post(ctx, p.ref, req)
 			}
 			if err == nil {
-				p.rememberIn(r, msg, thread)
+				p.rememberIn(msg, thread)
 				p.markSent(act)
 			}
 		})
@@ -891,18 +891,16 @@ func (p *phone) remember(id string) {
 }
 
 // rememberIn records a post and, when the thread that answered is not the
-// one we knew (the user deleted it from the app and this post recreated it
-// under the same id), moves the reply anchor to this post so the poll does
-// not wait forever on an id the new thread never had.
-func (p *phone) rememberIn(r *Runtime, msg finalechat.Message, thread finalechat.Thread) {
+// one we knew (the user deleted it from the app and a post recreated it
+// under the same id), takes the new thread's id, as ask does. The reply
+// anchor stays where it is: the poll's next read says the anchor is
+// unknown and reads the new thread from its first message, so what the
+// user wrote there before this post is taken too.
+func (p *phone) rememberIn(msg finalechat.Message, thread finalechat.Thread) {
 	p.mu.Lock()
 	p.posted[msg.ID] = true
 	if thread.ID != "" && p.threadID != "" && thread.ID != p.threadID {
 		p.threadID = thread.ID
-		p.lastID = msg.ID
-		p.mu.Unlock()
-		r.ui.Log("finalechat: the thread was recreated; replies are read from here on")
-		return
 	}
 	p.mu.Unlock()
 }
