@@ -130,6 +130,51 @@ func TestK1ASendTypedIntoAnAgentStoppedWhileItRestartsIsSettledOnce(t *testing.T
 	}
 }
 
+// A17. A message held for the end of Codex's turn when Codex is stopped:
+// a fresh Codex under the name clears the spool it waited in, and the
+// record does not leave it held for ever. It is settled with the stop,
+// once, and the fresh start is not typed it.
+func TestK1AHeldSendOfAStoppedAgentIsSettledBeforeAFreshStart(t *testing.T) {
+	seat := newK1QuietSeat()
+	fresh := newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{seat, fresh}, nil)
+	rt := newLaunchRuntime(t)
+	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
+	waitFor(t, "the agent in a turn", func() bool {
+		var s string
+		rt.sync(func() { s = rt.st.Relays["codex"].State })
+		return s == "working"
+	})
+	if out, isErr := rt.relayTool("relay_send", argStr(map[string]any{"text": "then run the linter", "mode": "after_turn"}), argNum(nil), argList(nil), false); isErr {
+		t.Fatalf("relay_send: %s", out)
+	}
+	id := lastSendID(rt)
+	var o state.SendOutcome
+	rt.sync(func() { o = rt.st.SendOutcome(id) })
+	if o != state.SendHeld {
+		t.Fatalf("%s before the stop: %q, want held", id, o)
+	}
+	k1Stop(t, rt)
+	started := make(chan string, 1)
+	go func() {
+		out, _ := rt.relayTool("relay_start", argStr(map[string]any{"profile": "codex"}), argNum(nil), argList(nil), false)
+		started <- out
+	}()
+	g.waitEntered(t)
+	g.release <- struct{}{}
+	if out := recv(t, started, "relay_start"); !strings.Contains(out, "Started.") {
+		t.Fatalf("relay_start: %q", out)
+	}
+	k1StoppedOnce(t, rt, id)
+	rt.sync(func() { o = rt.st.SendOutcome(id) })
+	if o != state.SendUnconfirmed {
+		t.Errorf("%s after the fresh start: %q, want unconfirmed", id, o)
+	}
+	if s := fresh.sentTexts(); len(s) != 0 {
+		t.Errorf("typed into the fresh agent: %q", s)
+	}
+}
+
 // A5, Stop session: it stops the agents as relay_control stop does, and
 // settles what they were typed the same way.
 func TestK1ASendTypedIntoAnAgentStopSessionStopsIsSettledOnce(t *testing.T) {
