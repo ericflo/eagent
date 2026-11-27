@@ -375,7 +375,6 @@ func (r *Runtime) needsDossier() bool {
 		// the same place.
 		if !t.futileLogged {
 			t.futileLogged = true
-			r.decidedWindow, _ = r.inputRoom()
 			if span, _, _ := r.smallBudget(); r.smallRoute() && span <= 0 {
 				input, fixed := r.inputRoom()
 				if at := provTokens(r.cfg.RolloverTokens); at > 0 && at < input && input > r.provider(fixed) {
@@ -469,13 +468,9 @@ func (r *Runtime) restartFull(limit provTokens) bool {
 // ordinary route the most a restart carries whole (dossierUnseenBytes).
 // Loop goroutine only.
 func (r *Runtime) restartFactsNow(limit provTokens) restartFacts {
-	// The full notice in the record was found on the room for input this
-	// run found it on (decidedWindow), or, when this run did not, on the
-	// room it resumed on: a model with more room picked since is asked
-	// afresh.
-	room, _ := r.inputRoom()
-	told := r.toldFullHere() && (r.decidedWindow == 0 || room <= r.decidedWindow)
-	f := restartFacts{refused: r.refusedFirst(), decided: r.turns.futileLogged || told}
+	// The full notice in the record decides on the model it was found on
+	// (toldFullHere).
+	f := restartFacts{refused: r.refusedFirst(), decided: r.turns.futileLogged || r.toldFullHere()}
 	f.carried, f.retried, f.rescues = r.restartOf()
 	f.refusedAfterCalls = r.turns.overflowed && r.turns.subCalls > 0
 	// The opening: the system prompt, the tools and the briefing. Every
@@ -513,28 +508,12 @@ const (
 	carriedNothing
 )
 
-// dossierRecord is the dossier event as finishDossier writes it: with how
-// the restart stands in the run of restarts (restartFacts), so that a
-// resumed run counts on where the stopped one was (restartOf).
-type dossierRecord struct {
-	event.DossierData
-	Restart *restartRecord `json:"restart,omitempty"`
-}
-
-// restartRecord is the dossier event's `restart`: what the restart carried
-// whole, whether it was the one more try, and how many restarts in a row,
-// this one included, were rescues (dossierJob).
-type restartRecord struct {
-	Carried bool `json:"carried,omitempty"`
-	Retried bool `json:"retried,omitempty"`
-	Rescues int  `json:"rescues,omitempty"`
-}
-
-// restartOf reads, from the dossier that opens the conversation in use,
-// what the restart that began it carried, whether it was the one more try,
-// and the restarts in a row up to it. A move to another model since then
-// starts the count again (newModel), and a dossier that does not say (or
-// none) leaves them unknown. Loop goroutine only.
+// restartOf reads, from the dossier that opens the conversation in use
+// (its `restart`, which finishDossier writes), what the restart that began
+// it carried, whether it was the one more try, and the restarts in a row
+// up to it, so that a resumed run counts on where the stopped one was. A
+// move to another model since then starts the count again, and a dossier
+// that does not say (or none) leaves them unknown. Loop goroutine only.
 func (r *Runtime) restartOf() (carried, bool, int) {
 	cur := r.st.Current()
 	for i := len(r.st.Events) - 1; cur != nil && i >= 0 && r.st.Events[i].Seq >= cur.StartSeq; i-- {
@@ -542,7 +521,7 @@ func (r *Runtime) restartOf() (carried, bool, int) {
 		if ev.Type != event.Dossier {
 			continue
 		}
-		var d dossierRecord
+		var d event.DossierData
 		if ev.Decode(&d) != nil || d.Restart == nil {
 			break
 		}
@@ -762,28 +741,16 @@ func (r *Runtime) turnEnded() bool {
 }
 
 // restartDecided reports that, for a conversation a restart began, no
-// restart can make room was found and said (this run, or by the record's
-// full notice), and no call has gone through since. That stands across a
-// model picked in the thread's settings, unless the new model has more
-// room for input (inputRoom: its window less its reply ceiling) than the
-// one it was found on: then the conversation is sent to it as it is
-// (needsDossier asks the size of the new window as usual). Nor does one
-// found on what arrived during the passes (toldFullHere). The room it was
-// found on is kept by this run; a resumed run takes the room it resumes
-// on. Loop goroutine only.
+// restart can make room was found and said on the model in use (this
+// run, or by the record's full notice), and no call has gone through
+// since. On a model picked after it the conversation is sent as it is,
+// and needsDossier asks afresh (toldFullHere). Loop goroutine only.
 func (r *Runtime) restartDecided() bool {
 	cur := r.st.Current()
 	if cur == nil || (cur.Reason != "rollover" && cur.Reason != "upgrade") || r.turns.subCalls > 0 {
 		return false
 	}
-	if !r.turns.futileLogged && !r.toldFullHere() {
-		return false
-	}
-	room, _ := r.inputRoom()
-	if r.decidedWindow == 0 {
-		r.decidedWindow = room
-	}
-	return room <= r.decidedWindow
+	return r.turns.futileLogged || r.toldFullHere()
 }
 
 // refusedFirst reports that the conversation was begun by a restart and
@@ -811,16 +778,14 @@ func (r *Runtime) toldFull() bool {
 	return told
 }
 
-// toldFullHere is toldFull for the decision it records: one found on what
-// arrived during the passes stands on the model it was found on, not on
-// one picked after it. It was decided by the one more try and the
-// restarts in a row, and those were the old model's (newModel). Loop
-// goroutine only.
+// toldFullHere is toldFull for the decision it records, which stands on
+// the model it was found on and on no other: one picked after it (in the
+// thread's settings, a fallback, or the model a resumed run is configured
+// with) has its own one more try and restarts in a row (restartOf), and
+// is asked afresh. Loop goroutine only.
 func (r *Runtime) toldFullHere() bool {
 	ev, told := r.fullNoticeSaid()
-	var d event.MessageData
-	_ = ev.Decode(&d)
-	return told && (ev.Seq > r.st.Moved() || !strings.HasPrefix(d.Text, burstNotice))
+	return told && ev.Seq > r.st.Moved()
 }
 
 // fullNoticeSaid returns the newest full notice since the conversation was
@@ -1430,7 +1395,7 @@ func (r *Runtime) writeDossier(job dossierJob) (res dossierResult) {
 					// What it just read back was too much: those results
 					// go, and it writes with what it had before them.
 					dropped, last = true, true
-					msgs = append(msgs[:lookedAt:lookedAt], llm.Message{Role: "user", Text: "[eagent] What you looked up last did not fit in the model's context window with the rest, so those results were taken out again. Do not look anything else up. Write the briefing now from what is above, as your whole reply, with no tool call."})
+					msgs = withNote(msgs[:lookedAt:lookedAt], "[eagent] What you looked up last did not fit in the model's context window with the rest, so those results were taken out again. Do not look anything else up. Write the briefing now from what is above, as your whole reply, with no tool call.")
 					r.ui.Log("dossier: the last lookups did not fit; asking for the briefing without them")
 					continue
 				case !job.fresh:
@@ -1627,16 +1592,15 @@ func (r *Runtime) finishDossier(job dossierJob, res dossierResult) {
 	if res.usage != (event.Usage{}) || len(res.earlier) > 0 {
 		d.Usage, d.Host, d.Asked, d.Earlier = &res.usage, res.host, res.asked, res.earlier
 	}
-	rec := dossierRecord{DossierData: d, Restart: &restartRecord{Carried: job.carry}}
+	d.Restart = &event.DossierRestart{Carried: job.carry}
 	if r.st.Moved() == job.moved {
 		// Unless eagent moved to another model during the pass: the
 		// restarts in a row were the old model's, and the new one
-		// started with none (newModel).
-		rec.Restart.Retried, rec.Restart.Rescues = job.retry, job.rescues
+		// starts with none.
+		d.Restart.Retried, d.Restart.Rescues = job.retry, job.rescues
 	}
-	r.append(event.New(event.Dossier, event.ActorHarness, rec))
+	r.append(event.New(event.Dossier, event.ActorHarness, d))
 	t.promptTokens, t.firstPrompt, t.subCalls, t.overflowed, t.adopt = 0, 0, 0, false, false
-	r.decidedWindow = 0
 	// A new conversation: if this one turns out too long from its first
 	// call as well, the user is told again.
 	t.futileLogged = false

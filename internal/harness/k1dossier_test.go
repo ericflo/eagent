@@ -155,7 +155,7 @@ func k1Swap(t *testing.T, s *session, window, ceiling int, brain func(string, []
 // The burst of pictures keeps coming during both passes on the first
 // model, so the one more try is spent and no restart can make room there.
 // The person then picks a model with the same room: the restarts in a row
-// and the one more try were the old model's (newModel), so the new one
+// and the one more try were the old model's (restartOf), so the new one
 // gets its own restart, which sets the burst aside by place, and the
 // person's message is answered. The decision found on the old model does
 // not stand on it, as one found on the opening alone would.
@@ -465,7 +465,6 @@ func TestK1TheOneMoreTryIsTheLastAcrossAResume(t *testing.T) {
 // decision found on less room does not stand on it: one restart on it
 // makes room, and the message is answered.
 func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) {
-	t.Skip("known, not fixed: the record does not hold the room a decision that no restart can make room was found on, so a run resumed on a model with more room keeps it (C2)")
 	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
 	route := &r5PictureRoute{window: 60000, ceiling: 2048, picture: 80000}
 	var restarted atomic.Bool
@@ -508,22 +507,23 @@ func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) 
 }
 
 // k1DownOnThePhone runs a session with no terminal that asks on the phone
-// and stops its agent, and whose model then fails twice running (the user
-// is told it cannot be reached): the question keeps the session open.
-// stall, when set, is what the second failed call waits on before it
-// fails (second says it is out). The model answers again from the moment
-// healthy is set; answered says a call has been shown the user's answer.
+// and stops its agent; then its model cannot be reached, and the next
+// look fails twice running (the user is told it cannot be reached): the
+// question keeps the session open. stall, when set, is what the second
+// failed call waits on before it fails (second says it is out). The model
+// answers again from the moment healthy is set; answered says a call has
+// been shown the user's answer.
 func k1DownOnThePhone(t *testing.T, stall <-chan struct{}) (g *phoneRig, fp *phoneFake, healthy, answered *atomic.Bool, second chan struct{}) {
 	setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
 	fp = newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	healthy, answered = new(atomic.Bool), new(atomic.Bool)
 	second = make(chan struct{}, 1)
-	var asked atomic.Bool
+	var failing atomic.Bool
 	var failed atomic.Int32
 	g = phoneStart(t, fp, "paint it", false, func(_ string, msgs []map[string]any) reply {
 		all, tail := allText(msgs), lastUserText(msgs)
-		if asked.Load() && !healthy.Load() {
+		if failing.Load() && !healthy.Load() {
 			if failed.Add(1) == 2 && stall != nil {
 				second <- struct{}{}
 				return reply{block: stall, status: k1BadRequest.status, body: k1BadRequest.body}
@@ -542,11 +542,22 @@ func k1DownOnThePhone(t *testing.T, stall <-chan struct{}) (g *phoneRig, fp *pho
 			answered.Store(true)
 			return say("Blue it is.")
 		case strings.Contains(tail, "finished a turn") && !strings.Contains(all, "Which colour?"):
-			asked.Store(true)
 			return phoneAskAndStop("Which colour?", "red", "blue")
 		}
 		return hold()
 	}, nil)
+	waitFor(t, "the question on the phone", func() bool { return fp.pendingQuestions() == 1 })
+	g.agentStopped()
+	waitFor(t, "the turn that asked to end", func() bool {
+		busy := true
+		g.rt.sync(func() { busy = g.rt.turns.busy || g.rt.wakePending() })
+		return !busy
+	})
+	failing.Store(true)
+	// Something for eagent to look at, as a timer firing is.
+	g.rt.sync(func() {
+		g.rt.append(event.New(event.HarnessMessage, event.ActorEagent, event.HarnessMessageData{Text: "[eagent] Look at the agents again."}))
+	})
 	return g, fp, healthy, answered, second
 }
 

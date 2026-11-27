@@ -53,10 +53,11 @@ func TestR9InboxWordsAfterAStopAreKeptNotPassedOn(t *testing.T) {
 	}
 }
 
-// A message for the running agent taken while the record cannot be
-// written: the ending run still types it, so its file goes as before and
-// the next run does not type it again (a reader proved that keeping the
-// file typed it twice).
+// A message for the running agent read while the record cannot be
+// written: it is not on the record, so the ending run does not pass it on,
+// and its file stays for the next run, which takes it and types it once.
+// (At 00ec5b3 the ending run typed it and the file went; keeping the file
+// while the ending run typed it typed it twice.)
 func TestR9InboxWordsWhoseWriteFailedAreTypedOnce(t *testing.T) {
 	t.Setenv("EAGENT_TEST_KEY", "x")
 	seat := newFakeSeat("ok")
@@ -75,10 +76,12 @@ func TestR9InboxWordsWhoseWriteFailedAreTypedOnce(t *testing.T) {
 	if !rt.ending {
 		t.Fatalf("a failed write did not end the session")
 	}
-	waitFor(t, "the ending run to type it", func() bool { return len(seat.sentTexts()) == 1 })
 	close(rt.closed)
-	if entries, _ := os.ReadDir(InboxDir(path)); len(entries) != 0 {
-		t.Fatalf("inbox after the failed write: %v, want it empty", entries)
+	if n := len(seat.sentTexts()); n != 0 {
+		t.Fatalf("the ending run typed %d messages it could not record", n)
+	}
+	if entries, _ := os.ReadDir(InboxDir(path)); len(entries) != 1 {
+		t.Fatalf("inbox after the failed write: %v, want the message's file", entries)
 	}
 	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, &fakeUI{}, path)
 	if err != nil {
@@ -86,8 +89,12 @@ func TestR9InboxWordsWhoseWriteFailedAreTypedOnce(t *testing.T) {
 	}
 	defer rt2.sess.Close()
 	rt2.pollInbox()
-	if got := r8cWords(rt2, event.UserMessage, text); len(got) != 0 {
-		t.Fatalf("the next run took the message again: %q", got)
+	if got := r8cWords(rt2, event.UserMessage, text); len(got) != 1 {
+		t.Fatalf("the next run took the message %d times, want once: %q", len(got), got)
+	}
+	waitFor(t, "the next run to type it", func() bool { return len(seat.sentTexts()) == 1 })
+	if entries, _ := os.ReadDir(InboxDir(path)); len(entries) != 0 {
+		t.Fatalf("inbox after the next run took it: %v, want it empty", entries)
 	}
 }
 

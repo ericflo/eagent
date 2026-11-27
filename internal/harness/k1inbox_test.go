@@ -154,19 +154,44 @@ func TestK1InboxCommandWhoseFileStaysIsNotCarriedOutByTheNextRun(t *testing.T) {
 // D1, what is left: a command recorded as taken whose run is cut before it
 // carries it out is not carried out by the next run, as for a command from
 // the phone (recorded as taken before it runs: lost in a kill between the
-// two, it can be typed again; run twice, it may not be undone).
-func TestK1InboxCommandCutBeforeItIsCarriedOutIsCarriedOut(t *testing.T) {
-	t.Skip("known, not fixed: a command cut between its record and its running is lost, as a phone command is; carried out again it could run twice")
-	rt := r8cNew(t, &fakeUI{})
-	name := r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
-	// What a cut leaves: the command recorded as taken, its file still
-	// there, and nothing carried out.
-	rt.append(event.New("inbox.taken", event.ActorHarness, map[string]string{"inbox": strings.TrimSuffix(name, ".json")}))
-	ui2 := &r8cHelpUI{}
-	rt2 := k1Next(t, rt, ui2)
-	ui2.dir = InboxDir(rt2.sess.Path)
-	rt2.pollInbox()
-	if len(ui2.files) != 1 {
-		t.Fatalf("/help was carried out %d times by the next run, want once", len(ui2.files))
+// two, it can be typed again; run twice, it may not be undone). The next
+// run says which command may not have run, naming it from the record
+// (inbox.taken's text) or, for a record from before that, its file.
+func TestK1InboxCommandCutBeforeItIsCarriedOutIsSaidMayNotHaveRun(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(map[bool]string{false: "its file still there", true: "its file removed"}[gone], func(t *testing.T) {
+			rt := r8cNew(t, &fakeUI{})
+			name := r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
+			if gone {
+				// The run takes the command as it does (inbox.taken, then
+				// the file removed): /help records nothing more, so the
+				// record ends where a cut just after the removal leaves it.
+				rt.pollInbox()
+				if last := rt.st.Events[len(rt.st.Events)-1]; last.Type != "inbox.taken" {
+					t.Fatalf("the record ends at %s", last.Type)
+				}
+			} else {
+				// A cut just after the record: the file still there, and
+				// nothing carried out.
+				rt.append(event.New("inbox.taken", event.ActorHarness, map[string]string{"inbox": strings.TrimSuffix(name, ".json")}))
+			}
+			ui2 := &r8cHelpUI{}
+			rt2 := k1Next(t, rt, ui2)
+			ui2.dir = InboxDir(rt2.sess.Path)
+			rt2.pollInbox()
+			if len(ui2.files) != 0 {
+				t.Fatalf("/help was carried out %d times by the next run, want none", len(ui2.files))
+			}
+			said := ""
+			for _, ev := range rt2.st.Events {
+				var d event.SessionResumeData
+				if ev.Type == event.SessionResume && ev.Decode(&d) == nil {
+					said = strings.Join(d.Closed, "; ")
+				}
+			}
+			if !strings.Contains(said, "may not have run") || !strings.Contains(said, `"/help"`) {
+				t.Fatalf("the resume says %q", said)
+			}
+		})
 	}
 }

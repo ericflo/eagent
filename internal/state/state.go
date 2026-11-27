@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
 )
 
@@ -305,7 +306,7 @@ func (s *State) servedBy(actor, host, asked string) RouteKey {
 // when the route changed did not: its prompt size is the old model's
 // count, not the new one's. A reply that names no route is taken to be.
 func (s *State) OnRoute(actor, host, asked string) bool {
-	return host == "" || asked == "" || (host == s.Hosts[actor] && asked == s.Models[actor])
+	return host == "" || asked == "" || (llm.SameBaseURL(host, s.Hosts[actor]) && asked == s.Models[actor])
 }
 
 // Moved is the seq of the newest route event that put eagent on another
@@ -383,7 +384,9 @@ func (s *State) Apply(ev event.Event) {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		if d.Actor != "" {
-			if d.Actor == event.ActorEagent && ((d.Model != "" && d.Model != s.Models[d.Actor]) || (d.BaseURL != "" && d.BaseURL != s.Hosts[d.Actor])) {
+			// The same address with or without a trailing slash is no move
+			// (llm.SameBaseURL), as the loop has it (harness sameRoute).
+			if d.Actor == event.ActorEagent && ((d.Model != "" && d.Model != s.Models[d.Actor]) || (d.BaseURL != "" && !llm.SameBaseURL(d.BaseURL, s.Hosts[d.Actor]))) {
 				s.moved = ev.Seq
 			}
 			if d.Model != "" {

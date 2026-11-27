@@ -201,6 +201,7 @@ func (r *Runtime) startPhone() {
 			case event.SessionResume:
 				resumeSeq = ev.Seq
 				prompt, promptSeq = "", 0
+				settled = map[string]string{} // only this resume's answers: an earlier one told the thread then
 				var d event.SessionResumeData
 				if ev.Decode(&d) == nil {
 					stoppedAt = d.After
@@ -1201,6 +1202,10 @@ var (
 // started is the ledger as this run's first write starts it (startPhone).
 func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
+	// What it leaves for the next run is looked for once the session has
+	// stopped; a poll that returns with its context live left a message
+	// whose fetch the shutdown cut off.
+	defer func() { integration.LeftForNextRun(r.projectPath(), r.sess.ID, p.ctx.Err() == nil || p.left, r.ui.Log) }()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
 	saidRecreated := false
@@ -1432,6 +1437,9 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					if !p.left && r.ownCommand(body, "finalechat") {
 						tell()
 						r.tookPhoneMessage(phoneID, len(r.st.Events))
+						// Said in the log too: the phone's note may not go
+						// out before the mirror closes.
+						p.say("finalechat: eagent did not run %q from the phone: the session was already ending", clipLabel(body, 80))
 						p.enqueue(func(ctx context.Context) { p.notRun(ctx, phoneID, body) })
 						return
 					}

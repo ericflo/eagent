@@ -209,25 +209,34 @@ func TestAModelWithALargerWindowTakesWhatNoRestartCouldFit(t *testing.T) {
 	}
 }
 
-// A model with a smaller window refuses the same opening: nothing changes,
-// no restart is made and the full notice is not said again. The person who
-// writes is told once that their message waits, naming it.
+// A model with a smaller window, picked after no restart could make room,
+// refuses the same opening. The decision was the old model's and does not
+// stand on it: it gets its own restart, one, after which no restart can
+// make room on it either. The person is told that once more, on the new
+// model, and their message is kept in its conversation.
 func TestAModelWithASmallerWindowStaysWhereNoRestartCanMakeRoom(t *testing.T) {
 	s, _ := r5FullSession(t)
+	// The refused calls are retried after an hour from here on (set on
+	// the loop, which reads it), so none is out on the old model when the
+	// switch comes.
+	s.rt.sync(func() { errorRetryDelays = []time.Duration{time.Hour} })
+	r4Until(t, "the full notice decided and no call out", func() bool {
+		ok := false
+		s.rt.sync(func() { ok = s.rt.turns.futileLogged && !s.rt.turns.busy && s.rt.turns.failures > 0 })
+		return ok
+	})
+	s.rt.sync(func() { errorRetryDelays = []time.Duration{5 * time.Millisecond} })
 	before := len(s.events(event.Dossier))
 	small := r5Swap(t, s, 30_000, func(string, []map[string]any) reply {
 		return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
 	})
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
-	r4Until(t, "refused calls on the smaller model", func() bool { return small.count("other-model") > 20 })
-	if n := len(s.events(event.Dossier)); n != before {
-		t.Fatalf("%d restarts on the smaller model, want none", n-before)
+	r4Until(t, "refused calls on the smaller model", func() bool { return small.count("other-model") > 40 })
+	if n := len(s.events(event.Dossier)) - before; n != 1 {
+		t.Fatalf("%d restarts on the smaller model, want its own one", n)
 	}
-	if n := r5Told(s, fullNotice); n != 1 {
-		t.Fatalf("the full notice was said %d times, want once", n)
-	}
-	if n := r5Told(s, stillFullNotice+`"still there?"`); n != 1 {
-		t.Fatalf("the user was told %d times that their message waits, want once", n)
+	if n := r5Told(s, fullNotice); n != 2 {
+		t.Fatalf("the full notice was said %d times, want twice (once on each model, after its restart)", n)
 	}
 }
 
@@ -252,18 +261,18 @@ func TestEachMessageAfterNoRestartCanMakeRoomIsToldItWaits(t *testing.T) {
 	}
 }
 
-// Right after a switch to a model with a smaller window, before any call
-// has gone to it, the conversation is past the new model's restart size.
-// That door leads to the same decision: no restart can make room. With a
-// larger window, the decision no longer stands and the size of the new
-// window is asked as usual.
+// Right after a switch to another model, before any call has gone to it,
+// the decision found on the old one does not stand, whatever the new
+// window: the size of the new window is asked as usual. On a smaller one
+// or the same, the conversation is past the new model's restart size, so
+// it gets its own restart; on a larger one it is not, and none is asked.
 func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
 	refuse := func(string, []map[string]any) reply {
 		return reply{status: 400, body: `{"error":{"message":"prompt is too long for the model's context window","type":"invalid_request_error"}}`}
 	}
 	for _, c := range []struct {
-		window  int
-		decided bool
+		window int
+		past   bool // the conversation is past the new model's restart size
 	}{{30_000, true}, {60_000, true}, {200_000, false}} {
 		s, _ := r5FullSession(t)
 		// The refused calls are retried after an hour from here on (set on
@@ -291,14 +300,14 @@ func TestNoRestartCanMakeRoomIsAskedAtTheSizeDoorAfterASwitch(t *testing.T) {
 			needs = s.rt.needsDossier()
 			prompt, size = int(s.rt.contextTokens()), int(s.rt.rolloverTokens())
 		})
-		if c.decided && prompt < size {
-			t.Fatalf("window %d: the prompt (%d) is under the new restart size (%d), so the size door is not tested", c.window, prompt, size)
+		if c.past != (prompt >= size) {
+			t.Fatalf("window %d: the prompt (%d) against the new restart size (%d) is not the case tested", c.window, prompt, size)
 		}
-		if decided != c.decided {
-			t.Errorf("window %d: decided %v, want %v", c.window, decided, c.decided)
+		if decided {
+			t.Errorf("window %d: the decision found on the old model stands on the new one", c.window)
 		}
-		if c.decided && needs {
-			t.Errorf("window %d: a restart is asked for right after the switch, and no restart can make room", c.window)
+		if needs != c.past {
+			t.Errorf("window %d: a restart asked for %v, want %v", c.window, needs, c.past)
 		}
 		s.stop()
 	}

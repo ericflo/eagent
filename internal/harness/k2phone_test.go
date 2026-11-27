@@ -2,7 +2,6 @@ package harness
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -18,6 +17,7 @@ import (
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // k2LoseCard makes the record lose the open question's card, as a stop
@@ -185,38 +185,6 @@ func TestK2AnAnswerWithdrawsAnEarlierCardWhoseWithdrawalFailed(t *testing.T) {
 	}
 }
 
-// k2CutAfter rewrites a stopped session's record to end at the first event
-// cut picks, as a stop right after writing it leaves it.
-func k2CutAfter(t *testing.T, g *phoneRig, cut func(event.Event) bool) {
-	t.Helper()
-	files, _ := filepath.Glob(filepath.Join(g.rt.sess.Path, "*.jsonl"))
-	if len(files) != 1 {
-		t.Fatalf("the record is in %d files", len(files))
-	}
-	raw, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []byte
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var ev event.Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			t.Fatal(err)
-		}
-		out = append(append(out, line...), '\n')
-		if cut(ev) {
-			if err := os.WriteFile(files[0], out, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			return
-		}
-	}
-	t.Fatal("no event to cut after")
-}
-
 // k2Receipt is the receipt the thread meta last showed under message id,
 // in the patches after the first from.
 func k2Receipt(fp *phoneFake, id string, from int) string {
@@ -241,13 +209,18 @@ func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
 	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, nil)
 	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
 	waitFor(t, "the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
-	id := r10Says(fp, r10Msg("now run the tests"))[0]
-	waitFor(t, "its send", func() bool { return len(g.seat.sentTexts()) == 2 })
 	g.interrupt()
-	k2CutAfter(t, g, func(ev event.Event) bool {
-		var d event.UserMessageData
-		return ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.PhoneID == id
-	})
+	// The run took a message from the phone and stopped before its send
+	// was recorded: the record ends at the message.
+	id := r10Says(fp, r10Msg("now run the tests"))[0]
+	sess, _, err := store.Open(g.rt.sess.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.Append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "now run the tests", Source: "finalechat", PhoneID: id})); err != nil {
+		t.Fatal(err)
+	}
+	sess.Close()
 	old := attachRelay
 	attachRelay = func(relay.Spec, string, string, string, string, time.Time) (relaySeat, error) {
 		return nil, errors.New("no such terminal")
@@ -474,7 +447,6 @@ func TestK2AMessageTypedAndNeverConfirmedIsSaidSoOnThePhone(t *testing.T) {
 // this serve's restore then resumes the session with the same reply. The
 // reply is taken once.
 func TestK2TwoResumesWithOnePhoneReplyTakeItOnce(t *testing.T) {
-	t.Skip("known, not fixed: the resuming words are taken in Resume (runtime.go), not in this fixer's files; a resume must refuse a phone message the record already holds (integration.ReadPhoneLedger(...).Taken)")
 	fp := newPhoneFake(true)
 	t.Cleanup(fp.srv.Close)
 	g := phoneStart(t, fp, "start work", true, func(_ string, msgs []map[string]any) reply {
@@ -490,6 +462,7 @@ func TestK2TwoResumesWithOnePhoneReplyTakeItOnce(t *testing.T) {
 	opts := Options{Interactive: true, Prompt: "run the tests", PromptSource: "finalechat", PromptPhoneID: id}
 	g.resume(opts)
 	waitFor(t, "the first resume to take the reply", func() bool { return r14Taken(g, id) == 1 })
+	waitFor(t, "the first resume's phone", func() bool { return len(g.events(event.PhoneThread)) == 2 })
 	g.interrupt()
 	g.resume(opts)
 	waitFor(t, "the second resume's phone", func() bool { return len(g.events(event.PhoneThread)) == 3 })

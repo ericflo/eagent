@@ -15,7 +15,7 @@ import (
 // A model is picked in the thread's settings while the dossier of a
 // restart made for a conversation too long from its start is written. The
 // new model starts with no restarts in a row counted against it
-// (newModel), and the pass that lands after the move does not write the
+// (restartOf), and the pass that lands after the move does not write the
 // old model's count back over that.
 func TestAMoveDuringAPassKeepsTheNewModelsCleanCount(t *testing.T) {
 	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
@@ -177,11 +177,14 @@ func TestAModelWithMoreRoomForInputGetsItsOwnRestart(t *testing.T) {
 }
 
 // After no restart could make room, the person picks a model with no more
-// room, which refuses the conversation too. The decision stands, and the
-// person who writes is told their message waits; they are not told again
-// that the conversation is refused "even after I restarted it from my
-// notes": the model in use made no restart, and they were told that once,
-// on the model before.
+// room, which refuses the conversation too. The decision was the old
+// model's and does not stand on the new one: the new model gets its own
+// restart, one, after which no restart can make room on it either and the
+// restarts stop. Each time the person hears that no restart can make room,
+// or that the conversation is refused "even after I restarted it from my
+// notes", a restart was made on the model in use: once on each. (What they
+// wrote after the move is in the new model's conversation, and the full
+// notice there says it is kept.)
 func TestAMoveDoesNotRepeatTheRefusedAfterARestartNotice(t *testing.T) {
 	s, _ := r5FullSession(t)
 	r12Failed(t, s)
@@ -201,13 +204,15 @@ func TestAMoveDoesNotRepeatTheRefusedAfterARestartNotice(t *testing.T) {
 		s.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"})
 	})
 	r12Failed(t, s)
-	if n := r6Dossiers(s) - before; n != 0 {
-		t.Fatalf("%d restarts on a model with no more room, want none", n)
+	calls := small.count("other-model")
+	r4Until(t, "more refused calls on the new model", func() bool { return small.count("other-model") > calls+4 })
+	if n := r6Dossiers(s) - before; n != 1 {
+		t.Fatalf("%d restarts on a model with no more room, want its own one", n)
 	}
-	if n := r5Told(s, stillFullNotice+`"still there?"`); n != 1 {
-		t.Fatalf("the user was told %d times that their message waits, want once", n)
+	if n := r5Told(s, fullNotice); n != 2 {
+		t.Fatalf("the user was told %d times that no restart can make room, want twice (once on each model, after its restart)", n)
 	}
-	if n := r5Told(s, afterNotesNotice); n != 1 {
-		t.Fatalf("the user was told %d times that the conversation is refused after a restart, want once (on the model that made it)", n)
+	if n := r5Told(s, afterNotesNotice); n != 2 {
+		t.Fatalf("the user was told %d times that the conversation is refused after a restart, want twice (once on each model, after its restart)", n)
 	}
 }
