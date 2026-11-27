@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -58,5 +59,59 @@ func TestK1TakeIsTakenAtOnceOrNotAtAll(t *testing.T) {
 	}
 	if ids := k1Words(rt, "k1 and another"); len(ids) != 0 {
 		t.Fatalf("the ending run took the words %d times", len(ids))
+	}
+}
+
+// k1Next is the next run of rt's session, with ui; rt's store is closed.
+func k1Next(t *testing.T, rt *Runtime, ui UI) *Runtime {
+	t.Helper()
+	path := rt.sess.Path
+	rt.sess.Close()
+	rt2, err := Resume(testConfig("http://127.0.0.1:1"), Options{Project: rt.opts.Project}, ui, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt2.sess.Close() })
+	return rt2
+}
+
+// D1: an eagent command from the inbox whose file cannot be removed is
+// carried out once, not once in each run: the next run finds the file
+// still there and the record says it was taken.
+func TestK1InboxCommandWhoseFileStaysIsNotCarriedOutByTheNextRun(t *testing.T) {
+	ui := &r8cHelpUI{}
+	rt := r8cNew(t, ui)
+	ui.dir = InboxDir(rt.sess.Path)
+	r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
+	r8cLock(t, rt)
+	rt.pollInbox()
+	if len(ui.files) != 1 {
+		t.Fatalf("/help was carried out %d times, want once", len(ui.files))
+	}
+	ui2 := &r8cHelpUI{dir: ui.dir}
+	rt2 := k1Next(t, rt, ui2)
+	rt2.pollInbox()
+	if len(ui2.files) != 0 {
+		t.Fatal("/help was carried out again by the next run, whose inbox still held its file")
+	}
+}
+
+// D1, what is left: a command recorded as taken whose run is cut before it
+// carries it out is not carried out by the next run, as for a command from
+// the phone (recorded as taken before it runs: lost in a kill between the
+// two, it can be typed again; run twice, it may not be undone).
+func TestK1InboxCommandCutBeforeItIsCarriedOutIsCarriedOut(t *testing.T) {
+	t.Skip("known, not fixed: a command cut between its record and its running is lost, as a phone command is; carried out again it could run twice")
+	rt := r8cNew(t, &fakeUI{})
+	name := r8cPost(t, rt, InboxMessage{Type: "message", Text: "/help"})
+	// What a cut leaves: the command recorded as taken, its file still
+	// there, and nothing carried out.
+	rt.append(event.New("inbox.taken", event.ActorHarness, map[string]string{"inbox": strings.TrimSuffix(name, ".json")}))
+	ui2 := &r8cHelpUI{}
+	rt2 := k1Next(t, rt, ui2)
+	ui2.dir = InboxDir(rt2.sess.Path)
+	rt2.pollInbox()
+	if len(ui2.files) != 1 {
+		t.Fatalf("/help was carried out %d times by the next run, want once", len(ui2.files))
 	}
 }

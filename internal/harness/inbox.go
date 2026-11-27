@@ -130,12 +130,14 @@ func (r *Runtime) pollInbox() {
 		bad := json.Unmarshal(raw, &msg) != nil
 		// A file with no id is handled as every inbox file was before
 		// files had ids: removed, then taken, and nothing is remembered of
-		// it. With an id, a command, a stop or a dismissal still has its
-		// file removed first (it leaves no event to know it by, so a cut in
-		// between loses it and never repeats it), and words are recorded,
-		// with the id, before their file is removed: a file still here
-		// whose id this run handled, or that an earlier run left and the
-		// record holds, is not taken again.
+		// it. With an id, a stop or a dismissal still has its file removed
+		// first (it leaves no event to know it by, so a cut in between
+		// loses it and never repeats it); a command is recorded as taken
+		// (inbox.taken) before that, as a command from the phone is, so a
+		// cut after the record loses it and never repeats it; and words
+		// are recorded, with the id, before their file is removed: a file
+		// still here whose id this run handled, or that an earlier run
+		// left and the record holds, is not taken again.
 		switch {
 		case bad:
 			_ = os.Remove(path)
@@ -148,6 +150,9 @@ func (r *Runtime) pollInbox() {
 			_ = os.Remove(path)
 			r.ui.Log("inbox: ignoring a stop left by an earlier run")
 		case id == "" || !inboxWords(msg, r.ownCommand):
+			if id != "" && (msg.Type == "message" || msg.Type == "") {
+				r.append(event.New(inboxTakenEvent, event.ActorHarness, map[string]string{"inbox": id}))
+			}
 			_ = os.Remove(path)
 			r.handleInboxFile(msg, id)
 		default:
@@ -191,14 +196,19 @@ func inboxWords(msg InboxMessage, command func(line, source string) bool) bool {
 	return false
 }
 
+// inboxTakenEvent records an eagent command from an inbox file as taken,
+// before it is carried out.
+const inboxTakenEvent = "inbox.taken"
+
 // inboxRecorded reports whether the record holds the user.message or
-// user.answer that the inbox submission id became. Loop goroutine only.
+// user.answer that the inbox submission id became, or its inbox.taken.
+// Loop goroutine only.
 func (r *Runtime) inboxRecorded(id string) bool {
 	for _, ev := range r.st.Events {
 		var d struct {
 			Inbox string `json:"inbox"`
 		}
-		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer) && ev.Decode(&d) == nil && d.Inbox == id {
+		if (ev.Type == event.UserMessage || ev.Type == event.UserAnswer || ev.Type == inboxTakenEvent) && ev.Decode(&d) == nil && d.Inbox == id {
 			return true
 		}
 	}
