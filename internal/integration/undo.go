@@ -84,7 +84,7 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		return err
 	}
 	if p.Parameters["restore_sha256"] != inverseDigest(inverse) {
-		return fmt.Errorf("the reviewed undo no longer matches its original command")
+		return fmt.Errorf("this undo was reviewed as a different change from the one it would make now (an undo offered by an earlier eagent can differ); nothing was changed, so put those settings back by hand instead")
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion, inverse.Generation = p.SchemaVersion, p.ExpectedVersion, p.Generation
 	journal.Applied = &inverse
@@ -109,15 +109,17 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		journal.Resource = &change
 		return nil
 	}
-	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant)
+	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant, original.InForce...)
 	if err != nil {
 		return err
 	}
 	journal.Desired, journal.BeforeETag, journal.DesiredETag = desired, etag, artifact.Digest([]byte(desired))
-	before := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	before := res.File.Raw
 	if before == "" {
 		before = "{}\n"
 	}
 	journal.BeforeRaw = &before
+	journal.InForce = settings.RoutePairs(res.Effective)
 	return nil
 }
