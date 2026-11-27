@@ -6,8 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -201,6 +205,61 @@ func TestK1AQuestionPostedAsAMessageIsPostedAgainInARecreatedThread(t *testing.T
 	svc.deleteThread("t2")
 	g.resume(Options{})
 	waitFor(t, "the question in the recreated thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 2 })
+}
+
+// B2: a session last run without the ledger is resumed at the terminal
+// while two app messages wait, and the read that finds them fails for
+// good (the service answers 400) the first time. A message the person
+// writes after the resume is not taken past them: they are taken first,
+// in order, once the thread can be read.
+func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T) {
+	setFor(t, &phoneRetryStep, 10*time.Millisecond)
+	cfg, project, path, fp := stoppedRelaySession(t)
+	bphoneOlder(t, path)
+	first := fp.userSays("the checklist is A, B, C", nil)
+	second := fp.userSays("are you still there?", nil)
+	u, err := url.Parse(fp.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	var failed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && failed.CompareAndSwap(false, true) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"bad_request","message":"not now"}}`))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	cfg.Finalechat.BaseURL = srv.URL
+	rt, stop := bphoneRun(t, func() *Runtime {
+		useFakeRelays(t, newFakeSeat("Done."))
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rt
+	})
+	waitFor(t, "the resumed session's first post", func() bool {
+		fp.mu.Lock()
+		defer fp.mu.Unlock()
+		for _, p := range fp.posts {
+			if p["body"] == "eagent session resumed here." {
+				return true
+			}
+		}
+		return false
+	})
+	later := fp.userSays("run the tests", nil)
+	waitFor(t, "the later message in the record", func() bool { return slices.Contains(r6PhoneIDs(path), later) })
+	rt.sync(func() {})
+	stop()
+	if got := r6PhoneIDs(path); !slices.Equal(got, []string{first, second, later}) {
+		t.Fatalf("recorded %v, want %v", got, []string{first, second, later})
+	}
 }
 
 // B16: every post of eagent's that the service answers with a thread
