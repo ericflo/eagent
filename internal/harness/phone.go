@@ -467,17 +467,28 @@ func (r *Runtime) startPhone() {
 	}
 	// The message the run before stopped at, taken up by this resume and
 	// kept for eagent (loadReceipts reads that from the record): its
-	// receipt is shown now, not at the next change of another.
+	// receipt is shown now, not at the next change of another. So are the
+	// receipts of the user's messages whose sends the resume itself
+	// settled, before this mirror existed (one held for a start that
+	// never came up, the sends of an agent found gone: reattachRelays).
 	if stoppedAt > 0 {
 		p.loadReceipts(r)
 		p.mu.Lock()
-		kept := false
+		kept, outcomes := false, false
 		for _, rc := range p.receipts {
 			kept = kept || (rc.seq == stoppedAt && rc.status == "eagent")
+		}
+		for i := len(r.st.Events) - 1; i >= 0 && r.st.Events[i].Seq > stoppedAt && !outcomes; i-- {
+			var d event.RelayDeliveredData
+			ev := r.st.Events[i]
+			outcomes = ev.Type == event.RelayDelivered && ev.Decode(&d) == nil && p.sendSeq[d.ID] != 0
 		}
 		p.mu.Unlock()
 		if kept {
 			p.setReceipt(r, stoppedAt, "eagent")
+		} else if outcomes {
+			p.mu.Lock()
+			p.publishReceipts(r) // it lets go of the lock
 		}
 	}
 }
