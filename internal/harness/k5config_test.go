@@ -12,10 +12,9 @@ import (
 // Choosing a configuration for a running session (/config) runs its routes
 // as it defines them: openai-high's model with its own reply ceiling, key
 // variable and fallback, not the session's old route with the new model's
-// name. (Known, not fixed: the pick is built from the session's own route
-// through PickRoute in resolvePick, which this fixer may not change.)
+// name. (applyRuntimeSettings passes the chosen name when the change has a
+// /config edit, as here.)
 func TestK5AChosenConfigurationRunsItsRoutesAsDefined(t *testing.T) {
-	t.Skip("known, not fixed: /config keeps only provider, model and effort; the fix is in internal/harness/settings.go (resolvePick), outside this fixer's files")
 	for _, n := range []string{"EAGENT_PRESET", "EAGENT_CONFIG", "EAGENT_MODEL", "EAGENT_BASE_URL"} {
 		t.Setenv(n, "")
 	}
@@ -42,7 +41,7 @@ func TestK5AChosenConfigurationRunsItsRoutesAsDefined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	swaps, err := rt.routeChanges(before.Routes, after.Routes)
+	swaps, err := rt.routeChanges(before.Routes, after.Routes, after.Config)
 	if err != nil || len(swaps) != 1 {
 		t.Fatalf("swaps %+v %v", swaps, err)
 	}

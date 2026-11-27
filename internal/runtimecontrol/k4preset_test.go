@@ -3,6 +3,7 @@ package runtimecontrol
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -39,5 +40,18 @@ func TestK4ASavedPresetHoldsTheSessionsBundleNotItsEnvironment(t *testing.T) {
 	}
 	if saved.Persona != "concise" || saved.RolloverTokens != 123456 || saved.Relay.Default == "claude" {
 		t.Fatalf("saved persona %q rollover %d default relay %q, want the bundle's concise and 123456 and no relay from the environment", saved.Persona, saved.RolloverTokens, saved.Relay.Default)
+	}
+	if !strings.Contains(saved.Description, "bundle mine") {
+		t.Fatalf("description %q does not say the settings came from bundle mine", saved.Description)
+	}
+	// After a configuration is chosen, the routes and the other settings
+	// say they were set from it: the description names it.
+	values.Config = "openai-high"
+	saved, err = ConfigFromRoutes(project, values, map[string]config.ModelRoute{RouteEagent: session.Model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(saved.Description, "preset openai-high") {
+		t.Fatalf("description %q does not say the settings came from preset openai-high", saved.Description)
 	}
 }

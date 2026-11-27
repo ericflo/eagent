@@ -610,6 +610,17 @@ func ConfigFromRoutes(project string, values Values, running map[string]config.M
 	if res.LoadError != "" {
 		cfg = config.Defaults()
 	}
+	// Values.Config names the configuration the routes were last set from,
+	// which after a choice in the session is not the one it started with:
+	// the saved preset says where its other settings came from.
+	source := "the built-in defaults"
+	switch {
+	case bundle != "":
+		source = "bundle " + bundle
+	case preset != "":
+		source = "preset " + preset
+	}
+	cfg.Description = fmt.Sprintf("Saved from a running session: its models as it ran them; its other settings from %s and the project file, without environment variables.", source)
 	var err error
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
 	if values.TickSeconds > 0 {
