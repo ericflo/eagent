@@ -1279,6 +1279,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		file := config.Resolve(project, "", "").File
 		edits := map[string]json.RawMessage{}
 		dropped, moved := "", ""
+		var unloadable error // the file as left does not load here
 		switch {
 		case target == "default" || target == "none" || target == "-":
 			edits["default_config"] = nil
@@ -1311,13 +1312,17 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 						delete(after, "default_config")
 						want := config.Defaults()
 						config.Presets[canon](&want)
-						if now, err := config.LoadBundleWithFile(project, "", "", after); err == nil && otherRoute(now.Model, want.Model) {
-							// What stands in the way: a variable that sets
-							// a part of the route that differs, else the
-							// saved preset laid over the file, else the
-							// preset the environment names.
-							why := "another setting names eagent's model here"
-							var differs []string
+						now, err := config.LoadBundleWithFile(project, "", "", after)
+						if err != nil {
+							// (Said in place of "the preset's model runs".)
+							unloadable = err
+						} else if otherRoute(now.Model, want.Model) {
+							// All that stands in the way, so that one pass
+							// clears it: each variable that sets a part of
+							// the route that differs, the saved preset laid
+							// over the file, and another preset that a
+							// variable names.
+							var why []string
 							for field, d := range map[string]bool{
 								"model":       now.Model.Model != want.Model.Model,
 								"base_url":    strings.TrimRight(now.Model.BaseURL, "/") != strings.TrimRight(want.Model.BaseURL, "/"),
@@ -1325,19 +1330,20 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 								"api_key_env": now.Model.APIKeyEnv != want.Model.APIKeyEnv,
 							} {
 								if name, ok := config.EnvOverrides()["/model/"+field]; ok && d {
-									differs = append(differs, fmt.Sprintf("%s sets eagent's %s here", name, field))
+									why = append(why, fmt.Sprintf("%s sets eagent's %s here", name, field))
 								}
 							}
-							slices.Sort(differs)
-							switch {
-							case len(differs) > 0:
-								why = strings.Join(differs, ", and ")
-							case now.Name != "":
-								why = fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name)
-							case os.Getenv("EAGENT_PRESET") != "":
-								why = "EAGENT_PRESET names the preset here"
+							slices.Sort(why)
+							if now.Name != "" {
+								why = append(why, fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name))
 							}
-							return fail(fmt.Errorf("%s, so %s would not run as the preset has it (%s at %s with $%s would); nothing was changed. Unset it first", why, target, now.Model.Model, now.Model.BaseURL, now.Model.APIKeyEnv))
+							if laid, who := presetAbove(project, ""); laid != "" && laid != canon {
+								why = append(why, fmt.Sprintf("%s names the preset %s here", who, laid))
+							}
+							if len(why) == 0 {
+								why = []string{"another setting names eagent's model here"}
+							}
+							return fail(fmt.Errorf("%s, so %s would not run as the preset has it (%s at %s with $%s would); nothing was changed. Unset that first", strings.Join(why, ", and "), target, now.Model.Model, now.Model.BaseURL, now.Model.APIKeyEnv))
 						}
 					}
 					// An effort the preset's model does not offer moves
@@ -1370,7 +1376,9 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			return fail(err)
 		}
 		fmt.Printf("updated %s\n", res.Path)
-		if dropped != "" {
+		if dropped != "" && unloadable != nil {
+			fmt.Printf("  the model the file named (%s) was removed; the previous file is in %s.bak. The configuration does not load here, so no session starts until that is put right: %v\n", dropped, res.Path, unloadable)
+		} else if dropped != "" {
 			fmt.Printf("  the model the file named (%s) was removed, so %s's model runs; the previous file is in %s.bak\n", dropped, target, res.Path)
 		}
 		if moved != "" {

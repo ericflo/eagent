@@ -238,6 +238,14 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 			return fail(fmt.Errorf("%s sets eagent's %s here, so the model cannot be changed in the file; unset it first", name, field))
 		}
 	}
+	// The save writes the route as its difference from the preset the file
+	// names. Where a variable (or a built-in named as the file's default)
+	// lays another preset in its place, that difference would be laid over
+	// the wrong preset and run as neither. Nothing is written instead.
+	own, _ := config.ResolvePreset(res.File.Preset)
+	if laid, who := presetAbove(project, res.File.DefaultConfig); laid != "" && laid != own {
+		return fail(fmt.Errorf("%s names the preset %s here, in place of the file's own, so a model written to the file would not run as written; unset it first", who, laid))
+	}
 	cfg := res.Effective
 	a := &cfg.Model
 	picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)
@@ -388,4 +396,32 @@ func modelMetaLine(m config.Model) string {
 // key variable.
 func otherRoute(a, b config.ModelRoute) bool {
 	return a.Model != b.Model || strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(b.BaseURL, "/") || a.Protocol != b.Protocol || a.APIKeyEnv != b.APIKeyEnv
+}
+
+// presetAbove is the built-in preset that something above the file's own
+// "preset" key lays here, and what names it: a variable, or the file's
+// default_config (defaultConfig) when that names a built-in. Both "" when
+// nothing does, or when what is laid is a saved preset's own. Loading says
+// which preset that is: a file that names none of its own is loaded, and
+// the preset it comes back with is the one laid in its place. (A loaded
+// configuration's Preset is the file's own key where the file has one,
+// whatever was laid.)
+func presetAbove(project, defaultConfig string) (laid, who string) {
+	probe := map[string]json.RawMessage{}
+	if defaultConfig != "" {
+		probe["default_config"], _ = json.Marshal(defaultConfig)
+	}
+	cfg, err := config.LoadBundleWithFile(project, "", "", probe)
+	if err != nil || cfg.Preset == "" {
+		return "", ""
+	}
+	for _, v := range []string{"EAGENT_CONFIG", "EAGENT_PRESET"} {
+		if canon, ok := config.ResolvePreset(os.Getenv(v)); ok && canon == cfg.Preset {
+			return cfg.Preset, v
+		}
+	}
+	if canon, ok := config.ResolvePreset(defaultConfig); ok && canon == cfg.Preset {
+		return cfg.Preset, "the file's default_config"
+	}
+	return "", ""
 }
