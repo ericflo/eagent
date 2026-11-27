@@ -316,3 +316,52 @@ func TestK1ARestoreWhoseSecondNoticeFailedLeavesTheReplyToTheWatcher(t *testing.
 		t.Fatalf("%d notices about clip2.mov: %q", n, fr.posted())
 	}
 }
+
+// Batch 2, the stream held: a reply comes on the event stream (no
+// deadline of the sweep's) with a file whose download stalls. The
+// message's files hold the stream for at most the time one download gets:
+// the file is refused, the sender told, and the session comes back with
+// the words.
+func TestK1AStalledFileHoldsTheStreamForOneDownloadAtMost(t *testing.T) {
+	_, sid, f, _, host, w := r9Stopped(t, "see the screenshot", r9Shot())
+	u, err := url.Parse(f.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	release := make(chan struct{})
+	var notes atomic.Int32
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/files/") {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		if r.Method == http.MethodPost {
+			notes.Add(1)
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	w.client = &finalechat.Client{BaseURL: front.URL, Token: "fc_fixture"}
+	defer func(b time.Duration) { fetchBudget = b }(fetchBudget)
+	fetchBudget = 100 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.consider(context.Background(), finalechat.Thread{ID: "t-" + sid, ExternalID: "eagent:" + sid}, finalechat.Message{ID: "m1", Sender: "user", Origin: "session", Body: "see the screenshot", CreatedAt: time.Now()})
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-done
+		t.Fatal("a stalled file held the stream past the time of one download")
+	}
+	close(release)
+	if host.calls() != 1 || host.resumed[0].Text != "see the screenshot" || len(host.resumed[0].Attachments) != 0 || notes.Load() != 1 {
+		t.Fatalf("resumed %#v with %d notes, want the words and the sender told", host.resumed, notes.Load())
+	}
+}

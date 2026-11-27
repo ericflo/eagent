@@ -270,16 +270,20 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	}()
 	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
 	failed := make([]error, len(m.Attachments))
+	// The message's files, tries again included, get the time one
+	// download gets: a reply from the event stream holds it no longer.
+	fetchCtx, stopFetch := context.WithTimeout(ctx, fetchBudget)
+	defer stopFetch()
 	for i, a := range m.Attachments {
-		saved, err := saveAttachment(ctx, w.client, info.Path, a)
+		saved, err := saveAttachment(fetchCtx, w.client, info.Path, a)
 		// A download that may work later (the service could not be
 		// reached, or answered 429 or 5xx) is tried three times, as the
 		// client tries a post, before the file is refused.
-		for try := 1; try < 3 && err != nil && ctx.Err() == nil && finalechat.Transient(err); try++ {
+		for try := 1; try < 3 && err != nil && fetchCtx.Err() == nil && finalechat.Transient(err); try++ {
 			select {
-			case <-ctx.Done():
+			case <-fetchCtx.Done():
 			case <-time.After(time.Duration(try) * fetchRetryStep):
-				saved, err = saveAttachment(ctx, w.client, info.Path, a)
+				saved, err = saveAttachment(fetchCtx, w.client, info.Path, a)
 			}
 		}
 		if err != nil {
@@ -349,6 +353,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 // fetchRetryStep is the wait before the second try of a download, twice it
 // before the third; a variable so tests can shorten it.
 var fetchRetryStep = time.Second
+
+// fetchBudget bounds one message's downloads: the limit of one download
+// (finalechat's Download); a variable so tests can shorten it.
+var fetchBudget = 120 * time.Second
 
 // keepUntilStopped keeps, quietly, a reply that reached a running session,
 // for the sweeps to look at once it has stopped: a session shutting down
