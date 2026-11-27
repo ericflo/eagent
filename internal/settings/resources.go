@@ -30,6 +30,15 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
 		cfg = config.Defaults()
+		// A bundle builds on the preset it names, as it loads (config.BundleFromBytes).
+		var named struct {
+			Preset string `json:"preset"`
+		}
+		if json.Unmarshal(b.Config, &named) == nil {
+			if canon, ok := config.ResolvePreset(named.Preset); ok {
+				config.Presets[canon](&cfg)
+			}
+		}
 		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
