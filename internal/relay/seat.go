@@ -1152,6 +1152,7 @@ func (s *Seat) watch() {
 				}
 			}
 		}
+		caught := tail == nil // no transcript to catch up on
 		if tail != nil {
 			lines, err := tail.next()
 			if err == nil && len(lines) > 0 {
@@ -1164,14 +1165,14 @@ func (s *Seat) watch() {
 					}
 				}
 			}
-			if err != nil || tail.atEnd {
-				// Read to the end as it stood (or there is nothing to read):
-				// what the transcript did not show of the restored sends
-				// did not arrive while eagent was down.
-				s.caughtUp(time.Now())
-			}
-		} else {
-			s.caughtUp(time.Now()) // no transcript to catch up on
+			// Read to the end as it stood (or there is nothing to read):
+			// what the transcript did not show of the restored sends did
+			// not arrive while eagent was down.
+			caught = err != nil || tail.atEnd
+		}
+		dr, reports := s.agent.(dialogReporter)
+		if caught && !reports {
+			s.caughtUp(time.Now())
 		}
 		if now.Sub(lastAlive) >= 3*time.Second {
 			lastAlive = now
@@ -1194,8 +1195,18 @@ func (s *Seat) watch() {
 			// message.
 			pl.poll(s, now)
 		}
-		if dr, ok := s.agent.(dialogReporter); ok {
+		if reports {
 			s.reportDialog(dr.reportedDialog(s))
+			// pi's status file says which session it is on and whether a
+			// dialog is up: its catch-up ends once that is read too, and
+			// the session it moved to while eagent was down (follow) is
+			// read to its end.
+			s.mu.Lock()
+			moving := s.refollow
+			s.mu.Unlock()
+			if caught && !moving {
+				s.caughtUp(time.Now())
+			}
 		}
 		if now.Sub(lastDialog) >= 1500*time.Millisecond && s.wantsDialogCheck(now) {
 			lastDialog = now

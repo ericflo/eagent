@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -96,5 +97,115 @@ func TestR13SPiTurnEndUnderADialogCountsForAHeldSend(t *testing.T) {
 		if got := deliveredEvents(s); len(got) != 1 || got[0].SendID != "r1" || got[0].Outcome != OutcomeUnconfirmed {
 			t.Errorf("%s: reported %+v, pending %v; want r1 unconfirmed", kind, got, s.Snapshot().Pending)
 		}
+	}
+}
+
+// piUserLine is a message pi records from the user, stamped at.
+func piUserLine(id, text string, at time.Time) string {
+	return fmt.Sprintf(`{"type":"message","id":"%s-u","parentId":null,"timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":%q}]}}`, id, at.UTC().Format("2006-01-02T15:04:05.000Z"), text)
+}
+
+// Finding 11: while eagent was down, pi moved to another session of its
+// own (/new, /resume) and is in a turn there. The reattached seat's first
+// look reads the session on the record (its turn over) and only then pi's
+// status file, which names the other one. A send made then waits until
+// the seat has read the session pi is on: held for the end of pi's turn,
+// with an Escape first for an interrupt, and not confirmed by a line pi
+// wrote there while eagent was down.
+func TestR13SPiReattachReadsTheSessionPiMovedToFirst(t *testing.T) {
+	isolatePi(t)
+	savedSettle, savedPause := typeSettle, interruptPause
+	typeSettle, interruptPause = 0, 0
+	t.Cleanup(func() { typeSettle, interruptPause = savedSettle, savedPause })
+	since := time.Now().Add(-time.Minute)
+	seat := func(t *testing.T) (*Seat, *fakeHost, string) {
+		dir := t.TempDir()
+		first, second, status := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "second.jsonl"), filepath.Join(dir, "pi-status.json")
+		writeLines(t, first, append([]string{piHeaderLine("first", since.Add(-time.Hour))}, piTurnLines("f1", "sort the shelves", "Sorted.", since.Add(-time.Minute))...)...)
+		writeLines(t, second, piHeaderLine("second", since.Add(5*time.Second)), piUserLine("s1", "run the tests", since.Add(10*time.Second)))
+		writePiStatus(t, status, piStatus{State: "working", SessionFile: second, SessionID: "second", SessionEntries: entries(0)})
+		spool := filepath.Join(dir, "after_turn")
+		h := &fakeHost{alive: true, screen: piFooterScreen}
+		s := attachSeat(Spec{StatusFile: status, Dir: dir, Spool: spool, Hook: filepath.Join(dir, "eagent-relay.ts")}, piAgent{label: "Pi"}, h, "r13s-"+filepath.Base(dir), "first", first, since)
+		s.poll = 200 * time.Millisecond
+		go s.watch()
+		t.Cleanup(s.Close)
+		// The first look has read pi's status file.
+		if !within(time.Second, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.refollow }) {
+			t.Fatal("the first look never read pi's status file")
+		}
+		return s, h, spool
+	}
+	t.Run("after_turn", func(t *testing.T) {
+		t.Parallel()
+		s, h, spool := seat(t)
+		msg, err := sendNow(t, s, "a1", "then run the linter", "after_turn")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if len(h.typed) != 0 || len(spoolNames(spool)) != 1 {
+			t.Errorf("send: %q; typed %q, spool %v; want it held", msg, h.typed, spoolNames(spool))
+		}
+	})
+	t.Run("interrupt", func(t *testing.T) {
+		t.Parallel()
+		s, h, _ := seat(t)
+		if _, err := sendNow(t, s, "i1", "STOP now", "interrupt"); err != nil {
+			t.Fatal(err)
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if len(h.keys) == 0 || h.keys[0] != "Escape" {
+			t.Errorf("typed %q, pressed %q; want Escape before the message", h.typed, h.keys)
+		}
+	})
+	t.Run("downtime", func(t *testing.T) {
+		t.Parallel()
+		s, _, _ := seat(t)
+		if _, err := sendNow(t, s, "r9", "run the tests", "queue"); err != nil {
+			t.Fatal(err)
+		}
+		// The seat says working once it has read the line in the session pi
+		// is on: any confirmation that line gives comes before.
+		var seen []Event
+		for deadline := time.After(2 * time.Second); len(seen) == 0 || seen[len(seen)-1].State != "working"; {
+			select {
+			case ev := <-s.events:
+				seen = append(seen, ev)
+			case <-deadline:
+				t.Fatalf("never read the session pi is on; saw %+v", seen)
+			}
+		}
+		for _, ev := range seen {
+			if ev.Kind == KindDelivered && ev.SendID == "r9" && ev.OK {
+				t.Errorf("r9 confirmed by the line pi wrote while eagent was down")
+			}
+		}
+	})
+}
+
+// Finding 11, the dialog: pi's status file says a dialog is up when the
+// seat reattaches. The catch-up ends with the seat blocked on it; it never
+// says idle first, which let a send made then go into the dialog.
+func TestR13SPiReattachUnderADialogNeverSaysIdle(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	first, status := filepath.Join(dir, "first.jsonl"), filepath.Join(dir, "pi-status.json")
+	since := time.Now().Add(-time.Minute)
+	writeLines(t, first, append([]string{piHeaderLine("first", since.Add(-time.Hour))}, piTurnLines("f1", "sort the shelves", "Sorted.", since.Add(-time.Minute))...)...)
+	writePiStatus(t, status, piStatus{State: "idle", Prompt: "Allow rm -rf build?", SessionFile: first, SessionID: "first"})
+	s := attachSeat(Spec{StatusFile: status, Dir: dir}, piAgent{label: "Pi"}, &fakeHost{alive: true, screen: piFooterScreen}, "r13s-dialog", "first", first, since)
+	s.poll = time.Hour
+	go s.watch()
+	t.Cleanup(s.Close)
+	select {
+	case ev := <-s.events:
+		if ev.Kind != KindState || ev.State != "blocked" {
+			t.Errorf("the seat said %+v first; want blocked", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the seat said nothing")
 	}
 }
