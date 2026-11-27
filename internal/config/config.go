@@ -327,6 +327,12 @@ func presetEffort(baseURL, model string) string {
 // written in. A small window with a large reply ceiling gets less than
 // half, so that pass still fits; nothing gets under 20,000.
 func AutoRollover(window, maxTokens int) int {
+	n, _ := autoRollover(window, maxTokens)
+	return n
+}
+
+// autoRollover is AutoRollover, and whether its number is half the window.
+func autoRollover(window, maxTokens int) (int, bool) {
 	if window <= 0 {
 		window = 200_000
 	}
@@ -334,7 +340,8 @@ func AutoRollover(window, maxTokens int) int {
 	if room := window - maxTokens - rolloverReserve; n > room {
 		n = room
 	}
-	return max(n/1000*1000, 20_000)
+	n = max(n/1000*1000, 20_000)
+	return n, n == window/2/1000*1000
 }
 
 // AutoRolloverWithin is AutoRollover held inside what the route can take
@@ -351,7 +358,14 @@ func AutoRollover(window, maxTokens int) int {
 // number is AutoRollover's. A window too small to hold the fixed part at
 // all is left at AutoRollover's: no restart can make room there.
 func AutoRolloverWithin(window, maxTokens, fixed int) int {
-	n := AutoRollover(window, maxTokens)
+	n, _ := autoRolloverWithin(window, maxTokens, fixed)
+	return n
+}
+
+// autoRolloverWithin is AutoRolloverWithin, and whether its number is half
+// the window.
+func autoRolloverWithin(window, maxTokens, fixed int) (int, bool) {
+	n, half := autoRollover(window, maxTokens)
 	if window <= 0 {
 		window = 200_000
 	}
@@ -360,7 +374,7 @@ func AutoRolloverWithin(window, maxTokens, fixed int) int {
 	}
 	room := window - maxTokens - max(fixed, 0)
 	if room <= 0 {
-		return n
+		return n, half
 	}
 	// In hundreds: on a window this small a thousand is a good part of
 	// the room the conversation has.
@@ -369,7 +383,8 @@ func AutoRolloverWithin(window, maxTokens, fixed int) int {
 		limit = limit / 100 * 100
 	}
 	least := max(fixed, 0) + room/4
-	return min(max(n, least), limit)
+	held := min(max(n, least), limit)
+	return held, half && held == n
 }
 
 // rolloverReserve is what a restart needs beside the conversation and the
@@ -380,12 +395,24 @@ const rolloverReserve = 8_000 + 25_000
 // Rollover is the prompt size at which this configuration's conversation
 // restarts: the number it sets, or AutoRollover for its model.
 func (c Config) Rollover() int {
+	n, _ := c.RolloverChosen()
+	return n
+}
+
+// RolloverChosen is Rollover and how it was chosen, in words: the number
+// rollover_tokens sets, half of the model's context window, or the
+// small-window rule.
+func (c Config) RolloverChosen() (int, string) {
 	if c.RolloverTokens > 0 {
-		return c.RolloverTokens
+		return c.RolloverTokens, "set by rollover_tokens"
 	}
 	// The system prompt is not known here; a running session takes it off
 	// too, so on a small window it restarts a little later than this says.
-	return AutoRolloverWithin(c.Model.ContextTokens, c.Model.MaxTokens, 0)
+	n, half := autoRolloverWithin(c.Model.ContextTokens, c.Model.MaxTokens, 0)
+	if half {
+		return n, "half of the model's context window"
+	}
+	return n, "not half of the model's context window: the small-window rule, which keeps room for the reply and the dossier pass beside the conversation"
 }
 
 // glmDescription describes the built-in defaults, which the "glm" preset names.
