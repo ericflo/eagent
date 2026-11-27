@@ -169,6 +169,7 @@ type Seat struct {
 	moveFrom  string
 	moveLook  int
 	quietSaid atomic.Bool
+	sending   int // Sends under way (Send, until it returns)
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -575,6 +576,18 @@ func (s *Seat) Snapshot() Status {
 // after_turn (hold it until the current turn ends). Delivery is confirmed
 // later, from the transcript, as a KindDelivered event.
 func (s *Seat) Send(id, text, mode string) (string, error) {
+	// Not quiet from here until the send's outcome is settled in the seat
+	// (tracked, its delivered held, or returned failed): a command is not
+	// tracked while it is typed. Quiet is said again once it holds.
+	s.mu.Lock()
+	s.sending++
+	s.mu.Unlock()
+	s.quietSaid.Store(false)
+	defer func() {
+		s.mu.Lock()
+		s.sending--
+		s.mu.Unlock()
+	}()
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
 		return "", errors.New("nothing to send")
@@ -973,10 +986,6 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 // name (letters, digits, "_", "-", ":" for a plugin's namespace), then a
 // space or the end. "/home/eric/plan.md has it" is a message.
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
-
-// IsAgentCommand is isAgentCommand for the harness: typed into the agent's
-// prompt, such a command runs at once and starts no turn.
-func IsAgentCommand(text string) bool { return isAgentCommand(text) }
 
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
 
@@ -1534,7 +1543,7 @@ const quietMoveLooks = 5
 
 // quietLocked is Status.Quiet. The caller holds s.mu.
 func (s *Seat) quietLocked() bool {
-	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && s.sending == 0 && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
 }
 
 // sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
