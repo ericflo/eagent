@@ -240,3 +240,21 @@ func TestK4ARestoredAgentCommandIsNotCalledLostForNotShowing(t *testing.T) {
 		t.Errorf("the restored command is reported as a message that never arrived: %q", failed[0])
 	}
 }
+
+// The reader's suspicion: fold leaves a turn's start or end for the end
+// of a dialog pi reports (heldByDialog), and the history a reattached seat
+// re-reads did not. pi's dialog came up mid-turn (the history so far says
+// working); the rest of the history shows the turn ending. When the dialog
+// closes, the seat goes back to what the history last said (idle), not to
+// what it said when the dialog opened (working).
+func TestK4AHistoryUnderAPiDialogSetsWhatTheSeatGoesBackTo(t *testing.T) {
+	since := time.Now()
+	s := attachSeat(Spec{}, piAgent{name: "pi", label: "Pi", binary: "pi"}, &fakeHost{alive: true}, "k4-hist-dialog", "id", "", since)
+	s.fold(obs{kind: "working", at: since.Add(-time.Minute)})
+	s.reportDialog("Allow rm -rf build?")
+	s.fold(obs{kind: "turn", text: "Done.", at: since.Add(-time.Second)})
+	s.reportDialog("")
+	if st := s.Snapshot().State; st != "idle" {
+		t.Fatalf("after the dialog the seat is %s; the history showed the turn over", st)
+	}
+}

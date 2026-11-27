@@ -1660,10 +1660,14 @@ func (s *Seat) foldHistory(o obs) {
 		s.turnEndAt = time.Time{}
 		if s.state == "idle" {
 			state, s.turnStart, s.turnTools, s.turnImages = "working", o.at, 0, nil
+		} else {
+			s.heldByDialog("working") // under pi's dialog: what it goes back to, as fold
 		}
 	case "turn", "aborted":
 		if s.state == "working" {
 			state = "idle"
+		} else {
+			s.heldByDialog("idle")
 		}
 		s.turnEndAt = time.Now() // the history says the agent's turn is over
 	}
