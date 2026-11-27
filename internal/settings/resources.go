@@ -67,13 +67,12 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
-		// What that bundle says over the files, never a value only a
-		// variable gives.
-		res := config.Resolve(s.Project, "", b.From)
-		if res.LoadError != "" {
-			return cfg, &Error{Status: 400, Message: res.LoadError}
+		// That bundle, or with none named the configuration in force, as
+		// every save keeps it (CurrentLayers).
+		var err error
+		if cfg, err = CurrentLayers(s.Project, "", b.From); err != nil {
+			return cfg, &Error{Status: 400, Message: err.Error()}
 		}
-		cfg = res.Layered
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, &Error{Status: 422, Message: err.Error()}
