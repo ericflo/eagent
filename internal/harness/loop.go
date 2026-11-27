@@ -442,6 +442,11 @@ func (r *Runtime) maybeTurn() {
 	if t.busy || r.ending {
 		return
 	}
+	if r.closingRefused && !r.stillClosing() {
+		// The session stopped ending: the refusal was final for that
+		// closing, not for one that comes later (refusedWhileClosing).
+		r.closingRefused = false
+	}
 	if r.refusedWhileClosing() {
 		// Final for an ending session: only the last title and summary,
 		// if the end waits on it, is still asked for (one attempt).

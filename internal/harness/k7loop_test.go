@@ -102,3 +102,57 @@ func TestK7AnEndingSessionRateLimitedEndsAsDown(t *testing.T) {
 		t.Fatalf("exit %d after %d rate-limited calls; want exit 2 after 2 (tried again, then down)", code, n)
 	}
 }
+
+// The closing word of a batch session is refused (400), which is final
+// for a session that is ending, and during its last title and summary
+// (refused too) a timer keeps the session open: it stops ending, and no
+// call comes back. When the timer fires, the session is ending again, and
+// the refusal kept from before (closingRefused) ended it at once: the
+// timer's notice never got its look. The refusal was final for the closing
+// it came in; the notice is looked at once the retry's wait is over.
+func TestK7ARefusalFromAClosingThatStoppedDoesNotEndTheNextOne(t *testing.T) {
+	coreSummariesOn(t, false)
+	setFor(t, &errorRetryDelays, []time.Duration{300 * time.Millisecond, time.Hour})
+	var phase atomic.Int32
+	var fired atomic.Bool
+	var rt atomic.Pointer[Runtime]
+	model := audit2Model(t, func(_ string, msgs []map[string]any) reply {
+		tail := lastUserText(msgs)
+		summary := strings.Contains(tail, "this look is only about the thread's title and summary")
+		switch {
+		case strings.Contains(tail, "The session is ending now") && phase.CompareAndSwap(1, 2):
+			return k1BadRequest
+		case summary && phase.CompareAndSwap(2, 3):
+			r := rt.Load()
+			r.sync(func() {
+				r.append(event.New(event.ScheduleCreate, event.ActorEagent, event.ScheduleCreateData{ID: "s1", Kind: "once", Spec: "1h", Note: "check the build again", Next: time.Now().Add(time.Hour)}))
+			})
+			return k1BadRequest
+		case fired.Load() && phase.CompareAndSwap(3, 4):
+			return hold() // the timer's look
+		case msgs[len(msgs)-1]["role"] == "tool":
+			return hold()
+		case strings.Contains(tail, "finished a turn") && phase.CompareAndSwap(0, 1):
+			return stopsAndReports("Done: the build is green.")
+		}
+		return hold()
+	})
+	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief}, newFakeSeat("The build is green."), model, func(r *Runtime) { rt.Store(r) })
+	r6Until(t, "the last summary's refusal", func() bool {
+		for _, l := range s.ui.logged() {
+			if strings.Contains(l, "model call failed") {
+				return true
+			}
+		}
+		return false
+	})
+	r := rt.Load()
+	r.sync(func() {
+		r.append(event.New(event.ScheduleFire, event.ActorHarness, event.ScheduleFireData{ID: "s1", Note: "check the build again"}))
+	})
+	fired.Store(true)
+	code := coreExit(s)
+	if p := phase.Load(); p != 4 || code != 0 {
+		t.Fatalf("phase %d, exit %d: the timer's notice got no look; want its look (phase 4) and exit 0; logged %q", p, code, s.ui.logged())
+	}
+}
