@@ -52,7 +52,7 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	retries := &replyRetries{replies: map[string]pendingReply{}}
+	retries := projectRetries(project)
 	go func() {
 		defer close(done)
 		lastError := ""
@@ -75,7 +75,52 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 			}
 		}
 	}()
-	return func() { cancel(); <-done }
+	return func() { cancel(); <-done; retries.writeDown(project, logf) }
+}
+
+// keptFile is where a stopping reply watcher writes down the replies it
+// keeps quietly (keepUntilStopped), and the sweep of whoever holds the
+// watch next takes them up, once: a session that stops meanwhile hides its
+// thread from the sweep behind its closing note. A hard kill writes
+// nothing, as for the serve's list of hosted sessions.
+func keptFile(project string) string {
+	return filepath.Join(stateDir(project), "resume-watch-kept.json")
+}
+
+// writeDown adds the quiet entries, by thread, to those written down that
+// nobody has taken up yet.
+func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
+	kept := map[string]finalechat.Message{}
+	if raw, err := os.ReadFile(keptFile(project)); err == nil {
+		_ = json.Unmarshal(raw, &kept)
+	}
+	r.mu.Lock()
+	for _, p := range r.replies {
+		if !p.told {
+			kept[p.thread.ExternalID] = p.msg
+		}
+	}
+	r.mu.Unlock()
+	if len(kept) == 0 {
+		return
+	}
+	if err := writeJSONAtomic(keptFile(project), kept); err != nil {
+		logf("finalechat: could not note the replies kept for the next start: %v", err)
+	}
+}
+
+// takeUp keeps, quietly, what an earlier watcher wrote down.
+func (r *replyRetries) takeUp(project string) {
+	raw, err := os.ReadFile(keptFile(project))
+	if err != nil {
+		return
+	}
+	_ = os.Remove(keptFile(project))
+	var kept map[string]finalechat.Message
+	_ = json.Unmarshal(raw, &kept)
+	for ext, m := range kept {
+		r.keepQuietly(finalechat.Thread{ExternalID: ext}, m)
+	}
 }
 
 type resumeWatcher struct {
@@ -102,6 +147,15 @@ type pendingReply struct {
 type replyRetries struct {
 	mu      sync.Mutex
 	replies map[string]pendingReply
+}
+
+// watchRetries holds a project's replyRetries for the life of the process:
+// its reply watcher's, where a restore keeps what PendingReply found.
+var watchRetries sync.Map // project -> *replyRetries
+
+func projectRetries(project string) *replyRetries {
+	r, _ := watchRetries.LoadOrStore(project, &replyRetries{replies: map[string]pendingReply{}})
+	return r.(*replyRetries)
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
@@ -218,6 +272,16 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	failed := make([]error, len(m.Attachments))
 	for i, a := range m.Attachments {
 		saved, err := saveAttachment(ctx, w.client, info.Path, a)
+		// A download that may work later (the service could not be
+		// reached, or answered 429 or 5xx) is tried three times, as the
+		// client tries a post, before the file is refused.
+		for try := 1; try < 3 && err != nil && ctx.Err() == nil && finalechat.Transient(err); try++ {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Duration(try) * fetchRetryStep):
+				saved, err = saveAttachment(ctx, w.client, info.Path, a)
+			}
+		}
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
 			if errors.Is(ctx.Err(), context.Canceled) {
@@ -282,6 +346,10 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
 }
 
+// fetchRetryStep is the wait before the second try of a download, twice it
+// before the third; a variable so tests can shorten it.
+var fetchRetryStep = time.Second
+
 // keepUntilStopped keeps, quietly, a reply that reached a running session,
 // for the sweeps to look at once it has stopped: a session shutting down
 // may drop it, and its closing note then hides the thread from the sweep.
@@ -300,15 +368,20 @@ func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thre
 	if err != nil || !ReadPhoneLedger(evs).Keeps {
 		return
 	}
-	w.retries.mu.Lock()
-	defer w.retries.mu.Unlock()
-	for id, p := range w.retries.replies {
+	w.retries.keepQuietly(thread, m)
+}
+
+// keepQuietly keeps m as the thread's one quiet entry (keepUntilStopped).
+func (r *replyRetries) keepQuietly(thread finalechat.Thread, m finalechat.Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, p := range r.replies {
 		if !p.told && p.thread.ExternalID == thread.ExternalID {
-			delete(w.retries.replies, id)
+			delete(r.replies, id)
 		}
 	}
-	if _, kept := w.retries.replies[m.ID]; !kept {
-		w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+	if _, kept := r.replies[m.ID]; !kept {
+		r.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
 	}
 }
 
@@ -397,29 +470,50 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 			LastActivityAt time.Time  `json:"last_activity_at"`
 			ArchivedAt     *time.Time `json:"archived_at"`
 		} `json:"threads"`
+		NextCursor string `json:"next_cursor"`
 	}
 	sweepCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
+	w.retries.takeUp(w.project)
 	w.retryPending(sweepCtx)
-	if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", url.Values{"limit": {"200"}}, nil, &page, 0); err != nil {
-		return
+	// The list is newest first: it is read on, page after page, while a
+	// thread in it can be newer than the oldest last write of the
+	// project's sessions.
+	oldest := time.Now()
+	if infos, err := store.List(store.Root(w.project)); err == nil {
+		for _, info := range infos {
+			if info.Modified.Before(oldest) {
+				oldest = info.Modified
+			}
+		}
 	}
-	for _, t := range page.Threads {
-		if sweepCtx.Err() != nil {
+	q := url.Values{"limit": {"200"}}
+	for {
+		page.Threads, page.NextCursor = nil, ""
+		if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", q, nil, &page, 0); err != nil {
 			return
 		}
-		sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
-		if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
-			continue
+		for _, t := range page.Threads {
+			if sweepCtx.Err() != nil {
+				return
+			}
+			sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
+			if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
+				continue
+			}
+			info, ok := w.session(sid)
+			if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
+				continue
+			}
+			if !t.LastActivityAt.After(info.Modified) {
+				continue
+			}
+			w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
 		}
-		info, ok := w.session(sid)
-		if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
-			continue
+		if page.NextCursor == "" || len(page.Threads) == 0 || !page.Threads[len(page.Threads)-1].LastActivityAt.After(oldest) {
+			return
 		}
-		if !t.LastActivityAt.After(info.Modified) {
-			continue
-		}
-		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
+		q.Set("cursor", page.NextCursor)
 	}
 }
 
@@ -463,11 +557,23 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// thread's latest message is still the reply for the watcher's sweep).
 	// When a notice cannot be posted, nothing is taken, as for a failed
 	// download.
-	for _, a := range big {
+	for i, a := range big {
 		if err := tellRefused(ctx, client, "eagent:"+info.ID, last.ID, a, finalechat.ErrTooLarge); err != nil {
+			if i > 0 {
+				// A notice before it went: eagent's is the thread's latest
+				// message, which hides the reply from the sweep. The
+				// project's reply watcher keeps it quietly, as it keeps
+				// one whose notice it could not post itself.
+				projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
+			}
 			return PhoneMessage{}, false, err
 		}
 	}
+	// What the session resumed with it does not take in before it stops
+	// again (a /quit ends it before it reads on) is looked for by the
+	// project's reply watcher once it has stopped, as after a resume of the
+	// watcher's own: its closing note may hide the thread from the sweep.
+	projectRetries(project).keepQuietly(finalechat.Thread{ExternalID: "eagent:" + info.ID}, last)
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil

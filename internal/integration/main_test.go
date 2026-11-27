@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/relay"
@@ -20,5 +21,6 @@ func TestMain(m *testing.M) {
 	// Sessions started here run on scripted models; their own summary
 	// call (harness/summary.go) is covered in the harness package.
 	os.Setenv("EAGENT_SUMMARIES", "off")
+	fetchRetryStep = time.Millisecond
 	os.Exit(m.Run())
 }
