@@ -49,8 +49,12 @@ type Server struct {
 	mu      sync.Mutex
 	running map[string]*hosted
 	// resuming is held while a request from the browser decides between a
-	// session's inbox and resuming it (deliver).
+	// session's inbox and resuming it (deliver), and while a reply from the
+	// phone decides whether to resume it (Resume).
 	resuming sync.Mutex
+	// stopping is set, under resuming, once Shutdown has begun: from then
+	// on deliver starts no run.
+	stopping bool
 	mux      *http.ServeMux
 	logf     func(string, ...any)
 
@@ -163,7 +167,8 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // question it stopped on); its source keeps the mirror from echoing it. It
 // carries what a running session reads off the message too (its id, the
 // composer's route and delivery, the client's capabilities), so it is
-// taken as it would be had the session been running.
+// taken as it would be had the session been running. It decides one at a
+// time with the browser's deliver, so the two never both resume it.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
@@ -172,6 +177,8 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if info.ID != sessionID {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return errors.New("the session is running; its own mirror reads the thread")
 	}
@@ -563,7 +570,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": how})
@@ -574,19 +581,27 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 // (resume). One at a time: of two requests for a stopped session the
 // second waits for the first's resume and then goes to the inbox of the
 // run it started, where it used to fail on the session's lock. A run here
-// that is ending reads its inbox no more: they wait for it to stop (its
-// shutdown is bounded) and resume the session then, and wait again when
-// the run another request resumed it with meanwhile is ending too.
+// takes them on its own loop (Take), so they are on its record before the
+// answer; one that is ending reads its inbox no more: they wait for it to
+// stop (its shutdown is bounded) and resume the session then, and wait
+// again when the run another request resumed it with meanwhile is ending
+// too. Once the server's shutdown has begun they resume nothing (the exit
+// would kill the run): that is errStopping, and the page keeps the words.
 func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
 	s.resuming.Lock()
 	for {
 		s.mu.Lock()
 		h := s.running[info.ID]
 		s.mu.Unlock()
-		if h == nil || h.rt == nil || !h.rt.Ending() {
+		if h == nil || h.rt == nil {
 			break
 		}
 		s.resuming.Unlock()
+		if !h.rt.Ending() {
+			if took, err := h.rt.Take(msg); took || err != nil {
+				return "inbox", err
+			}
+		}
 		<-h.done
 		s.resuming.Lock()
 	}
@@ -594,7 +609,20 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 	if alive(info.Path) || s.isHosted(info.ID) {
 		return "inbox", harness.PostInbox(info.Path, msg)
 	}
+	if s.stopping {
+		return "", errStopping
+	}
 	return "resumed", resume()
+}
+
+var errStopping = errors.New("eagent is stopping; send it again once it is back")
+
+// deliverCode is the status of a failed deliver.
+func deliverCode(err error) int {
+	if errors.Is(err, errStopping) {
+		return http.StatusServiceUnavailable
+	}
+	return 500
 }
 
 func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
@@ -612,7 +640,7 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true)
 	})
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": how})
@@ -800,8 +828,12 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 	}()
 }
 
-// Shutdown stops hosted sessions cleanly.
+// Shutdown stops hosted sessions cleanly. A run deliver started before it
+// set stopping is among them, and deliver starts none after.
 func (s *Server) Shutdown(timeout time.Duration) {
+	s.resuming.Lock()
+	s.stopping = true
+	s.resuming.Unlock()
 	s.mu.Lock()
 	hs := make([]*hosted, 0, len(s.running))
 	for _, h := range s.running {
