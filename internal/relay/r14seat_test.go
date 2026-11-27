@@ -1,10 +1,117 @@
 package relay
 
 import (
+	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
+
+// handOverFails is an agent whose after-turn hand-over fails, while the
+// watcher reads an earlier user entry that holds the send's words. Codex's
+// own queue is not run (no real agent program): it fails as `codex queue`
+// exiting 1 would.
+type handOverFails struct {
+	Agent
+	entry string
+}
+
+func (a handOverFails) afterTurn(s *Seat, id, text string) error {
+	s.fold(obs{kind: "user", text: a.entry})
+	if _, codex := a.Agent.(codexAgent); codex {
+		return errors.New("codex queue: exit status 1")
+	}
+	return a.Agent.afterTurn(s, id, text)
+}
+
+// handOverWorks is Codex whose queue takes the message (not run).
+type handOverWorks struct{ codexAgent }
+
+func (handOverWorks) afterTurn(*Seat, string, string) error { return nil }
+
+// pasteFailsAsAnEntryIsRead fails the paste (nothing pasted) while the
+// watcher reads an earlier user entry that holds the send's words.
+type pasteFailsAsAnEntryIsRead struct {
+	*fakeHost
+	seat  *Seat
+	entry string
+}
+
+func (h *pasteFailsAsAnEntryIsRead) Paste(string, string) error {
+	h.seat.fold(obs{kind: "user", text: h.entry})
+	return errors.New("no such pane")
+}
+
+// okDeliveries are the sends a seat said arrived.
+func okDeliveries(evs []Event) []string {
+	var ids []string
+	for _, ev := range deliveries(evs) {
+		if ev.OK {
+			ids = append(ids, ev.SendID)
+		}
+	}
+	return ids
+}
+
+// Round 14, finding 7: a send whose hand-over or paste failed is never
+// confirmed by an entry the watcher reads meanwhile, and its failure goes
+// where it went on main: a failed hand-over is typed instead, a failed
+// paste is returned to the caller.
+func TestR14FailedHandOverOrPasteIsNeverConfirmed(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	const entry, text = "fix the build and run the tests", "run the tests"
+	for _, c := range []struct {
+		name  string
+		agent Agent
+		spec  Spec
+	}{
+		{"codex_queue_fails", codexAgent{}, Spec{}},
+		{"claude_without_its_hook", claudeAgent{}, Spec{Spool: filepath.Join(t.TempDir(), "after_turn")}},
+	} {
+		t.Run("after_turn/"+c.name, func(t *testing.T) {
+			h := &fakeHost{alive: true}
+			s := newSeat(c.spec, handOverFails{Agent: c.agent, entry: entry}, h, "r14s-"+c.name, "thread-1")
+			s.state = "working"
+			if _, err := s.Send("r2", text, "after_turn"); err != nil {
+				t.Fatal(err)
+			}
+			h.mu.Lock()
+			typed := slices.Clone(h.typed)
+			h.mu.Unlock()
+			if ok := okDeliveries(drain(s.events)); len(ok) != 0 || !slices.Equal(typed, []string{text}) {
+				t.Fatalf("confirmed %v, typed %q; want nothing confirmed and the message typed", ok, typed)
+			}
+		})
+	}
+	t.Run("after_turn/handed_over_then_arrives", func(t *testing.T) {
+		// A hand-over that works is confirmed by the entry that follows it.
+		s := newSeat(Spec{}, handOverWorks{codexAgent{}}, &fakeHost{alive: true}, "r14s-works", "thread-1")
+		s.state = "working"
+		if _, err := s.Send("r2", text, "after_turn"); err != nil {
+			t.Fatal(err)
+		}
+		s.fold(obs{kind: "user", text: text})
+		if ok := okDeliveries(drain(s.events)); !slices.Equal(ok, []string{"r2"}) {
+			t.Fatalf("confirmed %v; want r2", ok)
+		}
+	})
+	t.Run("typed/paste_fails", func(t *testing.T) {
+		h := &pasteFailsAsAnEntryIsRead{fakeHost: &fakeHost{alive: true}, entry: entry}
+		s := newSeat(Spec{}, claudeAgent{}, h, "r14s-paste", "")
+		h.seat = s
+		s.state = "idle"
+		msg, err := s.Send("r2", text, "queue")
+		if err == nil {
+			t.Fatalf("Send said %q; the paste failed", msg)
+		}
+		if ok := okDeliveries(drain(s.events)); len(ok) != 0 || len(s.Snapshot().Pending) != 0 {
+			t.Fatalf("confirmed %v, pending %v", ok, s.Snapshot().Pending)
+		}
+	})
+}
 
 // Round 14, finding 9: eagent stopped while pi was in a turn on one
 // session; pi then moved to another (/new, /resume) and is idle there with
