@@ -456,3 +456,53 @@ func TestK1TheOneMoreTryIsTheLastAcrossAResume(t *testing.T) {
 		t.Fatalf("told %d times after the resume that what arrived during the passes is too much, want once", n)
 	}
 }
+
+// No restart could make room on a model whose reply ceiling takes a large
+// part of its window. The session is stopped, its config is edited to a
+// model with the same window and a smaller ceiling (more room for the
+// conversation), and it is resumed. As when that model is picked in the
+// thread's settings (TestAModelWithMoreRoomForInputGetsItsOwnRestart), the
+// decision found on less room does not stand on it: one restart on it
+// makes room, and the message is answered.
+func TestK1ADecisionFoundOnLessRoomDoesNotStandAfterAResumeOnMore(t *testing.T) {
+	t.Skip("known, not fixed: the record does not hold the room a decision that no restart can make room was found on, so a run resumed on a model with more room keeps it (C2)")
+	setFor(t, &errorRetryDelays, []time.Duration{5 * time.Millisecond})
+	route := &r5PictureRoute{window: 60000, ceiling: 2048, picture: 80000}
+	var restarted atomic.Bool
+	other := newScripted(func(_ string, m []map[string]any) reply {
+		if ask := dossierRequest(m); ask != "" {
+			restarted.Store(true)
+			p := places(ask)
+			return reply{text: briefing(p[max(0, len(p)-3):])}
+		}
+		switch {
+		case !restarted.Load():
+			return r7TooLong
+		case m[len(m)-1]["role"] != "tool":
+			return say("Here it is.")
+		}
+		return hold()
+	})
+	t.Cleanup(other.srv.Close)
+	s := startSession(t, "", route.brain(), func(c *config.Config) {
+		c.RolloverTokens = 0
+		c.Model.ContextTokens, c.Model.MaxTokens = route.window, route.ceiling
+	})
+	r5LogOnFailure(s)
+	s.settled()
+	route.refuseAll.Store(true)
+	r5SendPicture(s, "@e what does this screenshot show?")
+	r4Until(t, "the user to be told no restart can make room", func() bool { return r5Told(s, fullNotice) > 0 })
+	cfg, path, project := s.rt.cfg, s.rt.sess.Path, s.rt.opts.Project
+	s.stop()
+	cfg.Model.BaseURL, cfg.Model.Model, cfg.Model.MaxTokens = other.srv.URL, "other-model", 1024
+	s2 := audit2Resume(t, cfg, Options{Project: project, Interactive: true}, path, s.seat, other)
+	r5LogOnFailure(s2)
+	s2.rt.sync(func() { s2.rt.userMessage(event.UserMessageData{Text: "still there?", Route: "eagent"}) })
+	r4Until(t, "an answer, or the message told it waits", func() bool {
+		return r5Told(s2, "Here it is.") > 0 || r5Told(s2, stillFullNotice+`"still there?"`) > 0
+	})
+	if r5Told(s2, "Here it is.") == 0 {
+		t.Fatalf("resumed on more room for the conversation: %d restarts, and the user was told their message waits; one restart there makes room", r6Dossiers(s2))
+	}
+}
