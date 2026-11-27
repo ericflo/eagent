@@ -345,12 +345,11 @@ func wakeFor(ev event.Event) (wakeKind, bool) {
 		}
 	case event.TurnEnd:
 		// A turn that acted, asked for another call (to use what it read,
-		// or for what it still owed) and had that call fail: refused as
-		// too long, or not answered. The call is still owed, and is made
-		// when the failure lets it (the retry, the restart, a resumed run),
-		// on the record as it stands: what the turn did is not done again.
+		// or for what it still owed) and had that call fail, or ended as
+		// its session stopped ending ("not closing"). The call is still
+		// owed, and is made when it can be, on the record as it stands.
 		var d event.TurnData
-		if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && d.Reason == "error" {
+		if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && (d.Reason == "error" || d.Reason == "not closing") {
 			return wakeNotice, true
 		}
 	}
@@ -886,11 +885,9 @@ func (r *Runtime) turn(w wake) {
 				// Only something that asks for a look gets a tail of its
 				// own. Anything else that came (a remark from the agent,
 				// what this turn's own calls put on the record) is in the
-				// conversation the call is given, and counts as seen. A
-				// session the user writes to is not ending (noteWake): from
-				// here on the turn is not its closing turn.
+				// conversation the call is given, and counts as seen.
 				if k, ok := r.dueWake(); ok {
-					w = wake{kind: k, event: true, final: w.final && k != wakeUser, thread: asked && !tc.threaded, wait: w.wait}
+					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
@@ -951,7 +948,8 @@ func (r *Runtime) turn(w wake) {
 				break
 			}
 			r.sync(func() {
-				if w.wait > 0 && !w.event && !w.final && r.summary.final {
+				closing := r.stillClosing()
+				if w.wait > 0 && !w.event && closing {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
 					// (summary.go). Taken for an outage it would be tried
@@ -965,13 +963,11 @@ func (r *Runtime) turn(w wake) {
 				}
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
-				if w.final && mustSpeak && !tc.spoke {
-					// The user must still get something.
+				// The closing turn of a session still ending has had its word
+				// (the model's, or eagent's own here): nothing is owed after it.
+				if closedOut = w.final && closing; closedOut && mustSpeak && !tc.spoke {
 					r.fallbackFinal()
 				}
-				// The closing turn has had its word (the model's report,
-				// or eagent's own above): nothing is owed after it.
-				closedOut = w.final
 			})
 			end = "error"
 			break
@@ -1098,17 +1094,17 @@ func (r *Runtime) turn(w wake) {
 		if tc.stamped && len(tc.own) > 0 {
 			r.sync(func() { r.coverOwnWords(tc.own) })
 		}
-		if w.final {
-			// The closing word belongs to a session that is ending. One
-			// that started an agent or set a timer in this very turn is
-			// not: from here on the turn is not its closing turn, no
-			// closing word is owed, nothing may say "nothing is running
-			// now", and a call that fails is owed as any turn's is.
-			r.sync(func() {
-				if len(r.st.ActiveRelays()) > 0 || len(r.st.ActiveSchedules()) > 0 {
-					w.final, tc.wake.final, mustSpeak = false, false, false
+		if w.final || w.wait > 0 {
+			// A closing turn whose session stopped ending ends here. A call
+			// it still wanted is owed (wakeFor) to an ordinary turn.
+			closing := true
+			r.sync(func() { closing = r.stillClosing() })
+			if !closing && call < maxCalls {
+				if end == "timeout" || again && end == "done" {
+					end = "not closing"
 				}
-			})
+				break
+			}
 		}
 		if !again && end == "done" && call < maxCalls {
 			// The turn would end here. A reply that did something else
@@ -1176,7 +1172,7 @@ func (r *Runtime) turn(w wake) {
 		if asked && end != "error" && end != "interrupted" && end != "timeout" {
 			r.threadAsked(tc.threaded)
 		}
-		if w.final && mustSpeak && !tc.spoke && end != "error" {
+		if w.final && mustSpeak && !tc.spoke && end != "error" && r.stillClosing() {
 			r.fallbackFinal()
 		}
 	})
@@ -1370,6 +1366,18 @@ func (r *Runtime) afterCallLimit(maxCalls int) {
 		return
 	}
 	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", stuck.Who(), stuck.Name)})
+}
+
+// stillClosing reports whether the session a closing turn was made for is
+// still ending, as maybeEnd has it: no agent, timer (unless a question nobody
+// can answer is open), phone question or word from the user keeps it going.
+// Loop goroutine.
+func (r *Runtime) stillClosing() bool {
+	r.relays.mu.Lock()
+	starting := len(r.relays.launching) > 0
+	r.relays.mu.Unlock()
+	kept := (len(r.st.ActiveRelays()) > 0 || starting || len(r.st.ActiveSchedules()) > 0) && (r.st.Question == nil || r.phone != nil)
+	return (r.turns.finalAsked || r.summary.final) && !kept && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
 // fallbackFinal makes sure a session with no terminal does not end in

@@ -1167,8 +1167,8 @@ func (r *Runtime) maybeEnd() {
 	// session runs: there is no terminal and no phone. eagent was told
 	// that asking ends such a session until the user resumes it (the
 	// prompt, and ask_user's own result), so it ends even with an agent
-	// running. The agent keeps running in its own terminal, and the
-	// resumed session picks it up.
+	// running or a timer set. The agent keeps running in its own terminal,
+	// and the resumed session picks it up and sets the timer again.
 	unanswerable := r.st.Question != nil && r.phone == nil
 	// An agent being started (a command's /restart of a stopped one, say)
 	// counts as running, as for the check on idle agents: a session that
@@ -1180,7 +1180,7 @@ func (r *Runtime) maybeEnd() {
 		r.checkIdleAgents()
 		return
 	}
-	if len(r.st.ActiveSchedules()) > 0 {
+	if len(r.st.ActiveSchedules()) > 0 && !unanswerable {
 		return // a timer is set: the session stays to keep it
 	}
 	if r.waitingOnPhone() {
