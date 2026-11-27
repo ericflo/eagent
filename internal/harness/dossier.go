@@ -363,8 +363,11 @@ func (r *Runtime) needsDossier() bool {
 		return false
 	}
 	if cur := r.st.Current(); cur != nil && (cur.Reason == "rollover" || cur.Reason == "upgrade") && (t.firstPrompt >= limit || t.overflowed) && r.restartFull(limit) {
-		// What was too large, for the words below (causeOf).
-		cause := causeOf(r.restartFactsNow(limit))
+		// What was too large, for the words below (causeOf), and whether
+		// the provider refused it: then no call goes through, and a
+		// restart size is not what to change.
+		facts := r.restartFactsNow(limit)
+		cause := causeOf(facts)
 		// The conversation was this long on its first call after the last
 		// restart: the dossier and the standing prompt alone are too much.
 		// Restarting again would only rebuild the same prompt. A session
@@ -388,6 +391,8 @@ func (r *Runtime) needsDossier() bool {
 				r.ui.Log("the conversation reached the window again after %d restarts in a row; stopping the restarts", r.restartRescues)
 			} else if cause == fullAgain {
 				r.ui.Log("the conversation was past the restart size on its first call after %d restarts in a row; stopping the restarts", restartRescueMax+1)
+			} else if facts.refused {
+				r.ui.Log("the model refuses the conversation as too long right after a restart, so restarting again cannot shrink it; pick a model with a larger window or shorten .agents/eagent/INSTRUCTIONS.md")
 			} else {
 				r.ui.Log("the conversation is too long right after a restart, so restarting again cannot shrink it; raise rollover_tokens or shorten .agents/eagent/INSTRUCTIONS.md")
 			}
@@ -402,6 +407,10 @@ func (r *Runtime) needsDossier() bool {
 					text = fullNotice + ": while I was rereading the session, more came in than my model's window can hold, and more kept coming during the restart after that, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now, and so would sending large pastes as files."
 				case fullGrew:
 					text = fullNotice + ": after several restarts in a row, the newest conversation reached my model's window too, so I've stopped restarting. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now."
+				case fullOpening:
+					if facts.refused {
+						text = fullNotice + " from my notes: my model refuses the notes and this project's standing instructions alone as too long, so another restart cannot make room. Everything you sent is kept in the record. I'll answer as soon as the conversation fits; a model with a larger context, picked in this thread's settings, would take it now. Shortening .agents/eagent/INSTRUCTIONS.md would help too."
+					}
 				case fullAgain:
 					text = fullNotice + ": three times in a row, the new conversation was already past my restart size on its very first call, so I've stopped restarting for that. I carry on with a conversation longer than it should be, which makes each answer slower and dearer, and restart it from my notes when it reaches my model's window. If this keeps happening, raising `rollover_tokens` in .agents/eagent/config.json or shortening .agents/eagent/INSTRUCTIONS.md would help."
 				}

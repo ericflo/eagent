@@ -3,6 +3,7 @@ package harness
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,5 +47,31 @@ func TestR13WindowOfARegisteredServersModelComesFromTheLiveList(t *testing.T) {
 	_, fixed := rt.inputRoom()
 	if got, want := int(rt.rolloverTokens()), config.AutoRolloverWithin(32768, 0, int(fixed)); got != want {
 		t.Fatalf("restarts at %d, want %d (a 32,768-token window's, inside its input room)", got, want)
+	}
+}
+
+// The provider refuses even the opening of a conversation a restart began
+// (the notes and the standing instructions), with rollover_tokens unset.
+// No call goes through, so the user is not told that eagent carries on,
+// nor to raise a restart size that is not what was refused: they are told
+// the model refuses it, and what would take it.
+func TestR13AnOpeningTheModelRefusesIsNotToldToCarryOn(t *testing.T) {
+	s, _ := r5FullSession(t)
+	var full []string
+	for _, m := range s.ui.said() {
+		if strings.HasPrefix(m, fullNotice) {
+			full = append(full, m)
+		}
+	}
+	if len(full) != 1 {
+		t.Fatalf("told %d times that the conversation is full, want once: %q", len(full), s.ui.said())
+	}
+	if m := full[0]; strings.Contains(m, "carry on") || strings.Contains(m, "rollover_tokens") || !strings.Contains(m, "refuses") || !strings.Contains(m, "larger context") {
+		t.Fatalf("on a refusal of the opening alone the user was told %q; want that the model refuses it and that a model with a larger context would take it, with no carrying on and no rollover_tokens", m)
+	}
+	for _, l := range s.ui.logged() {
+		if strings.Contains(l, "restarting again cannot shrink it") && strings.Contains(l, "rollover_tokens") {
+			t.Fatalf("the log says %q on a refusal of the opening alone", l)
+		}
 	}
 }
