@@ -26,6 +26,7 @@ const (
 	KindTurn      = "turn"      // the agent finished a turn
 	KindLimit     = "limit"     // usage budget news
 	KindActivity  = "activity"  // what the agent is doing right now (not logged)
+	KindQuiet     = "quiet"     // nothing waits on the agent any more (Status.Quiet became true)
 	// KindRead says how far the transcript was read (Read) after a read
 	// whose only news was a user line that confirmed nothing: so the record
 	// knows that line was read too (Spec.Read).
@@ -142,12 +143,14 @@ type Seat struct {
 	followed   bool                 // ...and where its news begins is decided when it opens
 	sinceKept  time.Time            // since as it was before the move
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
+	leftAt     map[string]int64     // transcripts this seat read and left, and how far it read them
 	readAt     time.Time            // the newest stamp read from a transcript (readTail)
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
+	ownScreen  bool                 // reattached, and a send has once found the agent's own screen (waitReady)
 	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
 	closed     bool
 
@@ -159,6 +162,13 @@ type Seat struct {
 	// typing has read the agent's status and transcript (releaseHeld).
 	looks int
 	held  []heldEvent
+	// moveFrom, moveLook: a command that moves the agent to another
+	// session (sessionMover) was typed at look moveLook (0: none) on
+	// session moveFrom. quietSaid: KindQuiet was sent, and no other event
+	// since (emitAside clears it).
+	moveFrom  string
+	moveLook  int
+	quietSaid atomic.Bool
 
 	// emitMu: every event goes out under it (emitAside), and the watcher
 	// closes events under it once it is done (eventsClosed), so nothing is
@@ -460,6 +470,11 @@ func (s *Seat) emit(ev Event) {
 // (Send), or one from a line before the record's mark (history), whose
 // end would move that mark back.
 func (s *Seat) emitAside(ev Event) {
+	if ev.Kind != KindQuiet && ev.Kind != KindActivity {
+		// Something the agent did or the seat saw: quiet is said again
+		// once it holds after this (sayQuiet).
+		s.quietSaid.Store(false)
+	}
 	s.emitMu.Lock()
 	defer s.emitMu.Unlock()
 	if s.eventsClosed {
@@ -531,13 +546,19 @@ type Status struct {
 	// Dialog is the title of the dialog the agent reports holding it
 	// blocked (pi's extension), "" when none does.
 	Dialog string
+	// Quiet: nothing waits on the agent. It is idle, no dialog holds it,
+	// the seat waits to confirm no send, holds no command's delivered, and
+	// no move a command started is pending (a command that moves the
+	// session: pending until the move is seen, or quietMoveLooks looks).
+	// KindQuiet says when it becomes true. A blocked seat is not quiet.
+	Quiet bool
 }
 
 // Snapshot describes the seat now.
 func (s *Seat) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target}
+	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target, Quiet: s.quietLocked()}
 	if s.state == "blocked" {
 		st.Dialog = s.dialogUp
 	}
@@ -675,6 +696,9 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// first), so the record does not take it as acted on before then.
 		s.mu.Lock()
 		s.held = append(s.held, heldEvent{Event{Kind: KindDelivered, SendID: id, OK: true}, s.looks})
+		if m, ok := s.agent.(sessionMover); ok && m.movesSession(text) {
+			s.moveFrom, s.moveLook = s.inner, s.looks+1
+		}
 		s.mu.Unlock()
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
@@ -763,9 +787,13 @@ func (s *Seat) waitReady(limit time.Duration) (string, error) {
 			return state, errors.New("the agent has exited")
 		}
 		s.mu.Lock()
-		attached := s.attached
+		attached := s.attached && !s.ownScreen
 		s.mu.Unlock()
-		if attached && !s.atOwnScreen() {
+		if attached && s.atOwnScreen() {
+			s.mu.Lock()
+			s.ownScreen = true // the agent's own screen seen once: no more looks
+			s.mu.Unlock()
+		} else if attached {
 			// Reattached, and nothing the agent wrote read since: a dialog
 			// that came up while eagent was down shows on the screen alone.
 			// A message goes once the screen shows the agent's own prompt
@@ -1286,13 +1314,15 @@ func (s *Seat) watch() {
 		if wait {
 			select {
 			case <-s.stop:
+				s.releaseHeld(math.MaxInt) // typed: delivered, also at a close
 				return
 			case <-tick.C:
 			}
 		} else {
 			select {
 			case <-s.stop:
-				return // closed during a catch-up that reads on without waiting
+				s.releaseHeld(math.MaxInt) // closed during a catch-up that reads on without waiting
+				return
 			default:
 			}
 		}
@@ -1322,6 +1352,14 @@ func (s *Seat) watch() {
 			// let the old one go and find the new one.
 			if s.transcript != "" {
 				claimed.CompareAndDelete(s.transcript, s.target)
+			}
+			if tail != nil {
+				// Where this seat stopped reading it: a move back reads on
+				// from there.
+				if s.leftAt == nil {
+					s.leftAt = map[string]int64{}
+				}
+				s.leftAt[tail.path] = tail.offset - int64(len(tail.rest))
 			}
 			s.refollow, s.transcript, tail = false, "", nil
 		}
@@ -1353,7 +1391,13 @@ func (s *Seat) watch() {
 				}
 				s.transcript, s.inner = path, inner
 				exact := false
-				if s.followed {
+				if back, again := s.leftAt[path]; again {
+					// A transcript this seat read and left (Claude's /resume
+					// of the conversation /clear left): read on from where
+					// it stopped, never from the record's older mark, so
+					// nothing already read is read, reported or matched again.
+					tail.offset, exact, s.followed = back, true, false
+				} else if s.followed {
 					// The agent moved here itself. If it says how much the
 					// transcript held when it opened it, exactly that is
 					// history; news written before this look is still news.
@@ -1435,9 +1479,12 @@ func (s *Seat) watch() {
 			}
 		}
 		_, starter := s.agent.(sessionStarter)
-		if pl, ok := s.agent.(poller); ok && (tail != nil || starter) && caught {
-			// An agent that moves between sessions of its own (pi) is
-			// polled before any transcript is found too: a sighting on the
+		_, mover := s.agent.(sessionMover)
+		if pl, ok := s.agent.(poller); ok && (tail != nil || starter || mover) && caught {
+			// An agent that moves between sessions of its own (pi, and
+			// Claude, whose /clear starts a session with no file until its
+			// first prompt) is polled before any transcript is found too,
+			// so a move made meanwhile is seen; a sighting on the
 			// session it was started on dates a move made before its first
 			// message. Not while a transcript has more to read than one
 			// look reads (a long catch-up): the session is read to its end
@@ -1462,6 +1509,48 @@ func (s *Seat) watch() {
 			s.checkScreen(now)
 		}
 		s.releaseHeld(look)
+		s.sayQuiet()
+	}
+}
+
+// sessionMover is an agent with commands of its own that move it to
+// another session (pi's /new, Claude's /clear): until the move is seen,
+// nothing that waits on the agent being quiet goes ahead.
+type sessionMover interface {
+	movesSession(command string) bool
+}
+
+// commandName is a command's first word ("/resume" of "/resume abc").
+func commandName(text string) string {
+	if f := strings.Fields(text); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
+// quietMoveLooks is how many looks a command that moves the session is
+// waited for when no move shows (Status.Quiet).
+const quietMoveLooks = 5
+
+// quietLocked is Status.Quiet. The caller holds s.mu.
+func (s *Seat) quietLocked() bool {
+	return s.state == "idle" && s.dialogUp == "" && !s.catchingUp && len(s.pending) == 0 && len(s.held) == 0 && s.moveLook == 0
+}
+
+// sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
+// look: after what the look read, and the moves and deliveries it sent. A
+// move a command started is seen once the seat is on another session and
+// has said so; one that does not show is given up after quietMoveLooks.
+func (s *Seat) sayQuiet() {
+	s.mu.Lock()
+	if s.moveLook > 0 && (s.inner != s.moveFrom && !s.refollow || s.looks-s.moveLook >= quietMoveLooks) {
+		s.moveFrom, s.moveLook = "", 0
+	}
+	q := s.quietLocked()
+	s.mu.Unlock()
+	if q && !s.quietSaid.Load() {
+		s.emitAside(Event{Kind: KindQuiet})
+		s.quietSaid.Store(true)
 	}
 }
 
@@ -1492,6 +1581,30 @@ func (s *Seat) releaseHeld(look int) {
 	}
 	s.mu.Unlock()
 	for _, ev := range due {
+		if look == math.MaxInt {
+			s.emitHeld(ev)
+		} else {
+			s.emitAside(ev)
+		}
+	}
+}
+
+// emitHeld sends a held event as watching ends (an exit or a close): into
+// events if they have room, so a close's stop does not win the race, else
+// as emitAside does.
+func (s *Seat) emitHeld(ev Event) {
+	s.quietSaid.Store(false)
+	s.emitMu.Lock()
+	sent := s.eventsClosed
+	if !sent {
+		select {
+		case s.events <- ev:
+			sent = true
+		default:
+		}
+	}
+	s.emitMu.Unlock()
+	if !sent {
 		s.emitAside(ev)
 	}
 }
@@ -2048,6 +2161,17 @@ func (s *Seat) follow(id string, idle bool) {
 	if idle && s.catchingUp && s.state == "working" {
 		s.state, s.stateAt, s.turnEndAt = "idle", time.Now(), time.Now()
 	}
+}
+
+// followNew is follow for a session the agent has just started (Claude's
+// /clear): it holds no history, so what it holds is news from where news
+// began before the move, also a message the agent wrote there before the
+// seat learned of the move (Claude's hook can say it late).
+func (s *Seat) followNew(id string) {
+	s.follow(id, false)
+	s.mu.Lock()
+	s.since = s.sinceKept
+	s.mu.Unlock()
 }
 
 // moveCut is where news begins in a transcript the agent moved to, when the
