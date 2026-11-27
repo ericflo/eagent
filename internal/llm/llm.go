@@ -789,11 +789,13 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 		resp, err := c.once(callCtx, req, obs)
 		var ae *APIError
 		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) {
-			if ae.badImage() || ae.Status == 413 {
+			if ae.badImage() || tooLarge(err) {
 				// A picture was refused (undecodable, too big for a limit
 				// of this provider's own): go on without it, and say why.
 				// The model can see. The one refused is left out of later
-				// calls too; the ones taken before stay.
+				// calls too; the ones taken before stay. A request too
+				// large is never the model refusing pictures, whatever its
+				// wording names.
 				if c.OnRetry != nil {
 					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
 				}
