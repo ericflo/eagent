@@ -573,7 +573,7 @@ func TestK1AnAnswerAfterTheModelWasDownIsLookedAtBeforeTheEnd(t *testing.T) {
 	g, fp, healthy, answered, _ := k1DownOnThePhone(t, nil)
 	waitFor(t, "the user told the model cannot be reached", func() bool {
 		for _, m := range g.ui.said() {
-			if strings.HasPrefix(m, "I can't reach my own model") {
+			if strings.HasPrefix(m, "My model refuses my calls") { // a 400: it answers, refusing
 				return true
 			}
 		}

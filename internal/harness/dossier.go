@@ -876,6 +876,18 @@ func countCalls(us []event.RouteUsage) int {
 // until it lands. Loop goroutine only.
 func (r *Runtime) startDossier() {
 	t := &r.turns
+	// The next file is made before the pass, as main made it before it
+	// asked for a dossier: a restart whose file cannot be made (a full
+	// disk, a directory it may no longer write) pays for no pass, and the
+	// conversation goes on as it is until dossierRetry has passed. The
+	// file made here is let go when finishDossier makes the one it opens
+	// (CreateSubsession lets go of the one before), at the session's
+	// close, or, left empty by a run that stopped, by the next run's open.
+	if _, err := r.sess.CreateSubsession(time.Now()); err != nil {
+		r.ui.Log("dossier: %v; the conversation continues as it is for now (no briefing was written)", err)
+		t.dossierFailedAt = time.Now()
+		return
+	}
 	t.busy, t.compacting, t.callAt, t.rereadTold = true, true, time.Now(), false
 	r.flushSilent()
 	// Said before the place the dossier covers is fixed: a restart that

@@ -1171,8 +1171,7 @@ func (r *Runtime) maybeEnd() {
 	// last failed call was shown: that is looked at first, without the
 	// wait (maybeTurn).
 	down := t.failures >= 2 && !r.lastFailedAnswered()
-	fresh := t.wakes[wakeUser] > t.seen && t.wakes[wakeUser] > t.failSeq
-	if r.wakePending() && (r.opts.Interactive || !down || fresh) {
+	if r.wakePending() && (r.opts.Interactive || !down || r.freshWord()) {
 		return
 	}
 	if r.opts.Interactive {
@@ -1215,6 +1214,24 @@ func (r *Runtime) maybeEnd() {
 		return
 	}
 	r.beginShutdown("done", 0)
+}
+
+// freshWord reports that the user has written or answered since what the
+// last failed call was shown (failSeq), and no call has seen it: it is
+// looked at first, without the wait after the failures (maybeTurn), and a
+// session whose model is down stays open for it (maybeEnd). Loop
+// goroutine.
+func (r *Runtime) freshWord() bool {
+	t := &r.turns
+	return t.wakes[wakeUser] > t.seen && t.wakes[wakeUser] > t.failSeq
+}
+
+// endsDown reports that a session with no terminal whose model is down
+// ends at its next step (maybeEnd): nothing keeps it open, and no word
+// from the user waits for a look. Loop goroutine.
+func (r *Runtime) endsDown() bool {
+	kept, _ := r.keptOpen()
+	return !r.opts.Interactive && !kept && !r.freshWord()
 }
 
 // keptOpen reports that something keeps a session with no terminal from

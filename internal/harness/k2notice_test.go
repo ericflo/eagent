@@ -33,7 +33,8 @@ func TestRV15UnreachableNoticeWhileTheModelAnswersEachTurn(t *testing.T) {
 	ready.Store(true)
 	s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
 	r6Until(t, "a wait of an hour", func() bool {
-		return r4Logged(s, "trying again in") > 0 || r4Logged(s, "model call failed") > 30
+		// The wait is logged before the notice is written: wait for both.
+		return r4Logged(s, "trying again in") > 0 && s.ui.messageCount() > 0 || r4Logged(s, "model call failed") > 30
 	})
 	var told []string
 	s.rt.sync(func() {
@@ -54,8 +55,9 @@ func TestRV15UnreachableNoticeWhileTheModelAnswersEachTurn(t *testing.T) {
 
 // The first turn's first call comes back, or not, and its next one fails;
 // the turn after it fails on its first call. Since that first failure
-// nothing came back, so in both cases the user is told the model cannot
-// be reached: the notice goes by the turn that failed second, as
+// nothing came back, so in both cases the user is told the model refuses
+// its calls (each a 400), not that they keep failing after one went
+// through: the notice goes by the turn that failed second, as
 // TestRV15UnreachableNoticeWhileTheModelAnswersEachTurn has it when that
 // turn's first call came back.
 func TestK2TheFailingNoticeGoesByTheTurnThatFailedSecond(t *testing.T) {
@@ -64,8 +66,8 @@ func TestK2TheFailingNoticeGoesByTheTurnThatFailedSecond(t *testing.T) {
 		lookup bool // the first turn's first call comes back
 		want   string
 	}{
-		{"one came back before the first failure", true, "I can't reach my own model right now"},
-		{"none came back", false, "I can't reach my own model right now"},
+		{"one came back before the first failure", true, "My model refuses my calls"},
+		{"none came back", false, "My model refuses my calls"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			setFor(t, &errorRetryDelays, []time.Duration{0, time.Hour})
@@ -85,10 +87,13 @@ func TestK2TheFailingNoticeGoesByTheTurnThatFailedSecond(t *testing.T) {
 			s.settled()
 			ready.Store(true)
 			s.rt.sync(func() { s.rt.userMessage(event.UserMessageData{Text: "what is the status?", Route: "eagent"}) })
-			r6Until(t, "a wait of an hour", func() bool { return r4Logged(s, "trying again in") > 0 })
+			// The wait is logged before the notice is written: wait for both.
+			r6Until(t, "a wait of an hour and the notice", func() bool {
+				return r4Logged(s, "trying again in") > 0 && s.ui.messageCount() > 0
+			})
 			told := 0
 			for _, m := range s.ui.said() {
-				if strings.Contains(m, "keep failing") || strings.Contains(m, "can't reach my own model") {
+				if strings.Contains(m, "keep failing") || strings.Contains(m, "can't reach my own model") || strings.Contains(m, "refuses my calls") {
 					told++
 					if !strings.HasPrefix(m, c.want) {
 						t.Fatalf("told %q, want %q", m, c.want)

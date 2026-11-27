@@ -52,7 +52,7 @@ func TestRefusedAfterAFailedRestartIsNotCalledRestarted(t *testing.T) {
 	release()
 	told := func() string {
 		for _, m := range s.ui.said() {
-			if strings.Contains(m, "refuses my conversation") || strings.Contains(m, "can't reach my own model") {
+			if strings.Contains(m, "refuses my conversation") || strings.Contains(m, "can't reach my own model") || strings.Contains(m, "refuses my calls") {
 				return m
 			}
 		}

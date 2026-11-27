@@ -279,7 +279,7 @@ func TestAnAutomaticNoticeDoesNotStandInForTheClosingReport(t *testing.T) {
 	s := audit2Start(t, testConfig(model.srv.URL), Options{Prompt: brief + " Stop when done."}, newFakeSeat("Merged #42 and #44."), model, nil)
 	coreExit(s)
 	said := s.ui.said()
-	if len(said) == 0 || !strings.Contains(said[0], "can't reach my own model") {
+	if len(said) == 0 || !strings.Contains(said[0], "My model refuses my calls") {
 		t.Fatalf("the notice was not given: %q", said)
 	}
 	if last := said[len(said)-1]; !strings.HasPrefix(last, "Final report") {

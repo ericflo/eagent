@@ -416,7 +416,8 @@ func TestModelFailureBacksOffTellsTheUserOnceAndRecovers(t *testing.T) {
 	}, nil)
 	s.type_("@e status?")
 	s.waitFor("the outage notice", func() bool { return s.ui.messageCount() == 1 })
-	if got := s.ui.said()[0]; !strings.Contains(got, "can't reach my own model") || !strings.Contains(got, "Your messages still go straight to Codex") {
+	// A 400: the provider answers and refuses the calls.
+	if got := s.ui.said()[0]; !strings.Contains(got, "My model refuses my calls") || !strings.Contains(got, "Your messages still go straight to Codex") {
 		t.Fatalf("notice = %q", got)
 	}
 	s.waitFor("more failures", func() bool { return len(s.events(event.Error)) >= 4 })
