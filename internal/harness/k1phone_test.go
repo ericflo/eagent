@@ -237,10 +237,11 @@ func TestK1AQuestionPostedAsAMessageIsPostedAgainInARecreatedThread(t *testing.T
 
 // B2: a session last run without the ledger is resumed at the terminal
 // while two app messages wait, and the read that finds them fails for
-// good (the service answers 400) the first time. A message the person
-// writes after the resume is not taken past them: they are taken first,
-// in order, once the thread can be read.
-func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T) {
+// good (the service answers 400). The catch-up is given up, as a read
+// that fails for good is: what the person writes after the resume is
+// taken, and the session's log and the thread both say that what was sent
+// while it was stopped was not read.
+func TestK1AReadThatFailsForGoodAtResumeIsGivenUpAndSaid(t *testing.T) {
 	setFor(t, &phoneRetryStep, 10*time.Millisecond)
 	cfg, project, path, fp := stoppedRelaySession(t)
 	bphoneOlder(t, path)
@@ -263,30 +264,39 @@ func TestK1AReadThatFailsForGoodAtResumeTakesNothingPastWhatWaited(t *testing.T)
 	}))
 	t.Cleanup(srv.Close)
 	cfg.Finalechat.BaseURL = srv.URL
+	ui := &fakeUI{input: make(chan string, 4)}
 	rt, stop := bphoneRun(t, func() *Runtime {
 		useFakeRelays(t, newFakeSeat("Done."))
-		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, ui, path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return rt
 	})
-	waitFor(t, "the resumed session's first post", func() bool {
+	notice := func() int {
 		fp.mu.Lock()
 		defer fp.mu.Unlock()
+		n := 0
 		for _, p := range fp.posts {
-			if p["body"] == "eagent session resumed here." {
-				return true
+			if meta, _ := p["meta"].(map[string]any); meta["kind"] == "unread" {
+				n++
 			}
 		}
-		return false
-	})
+		return n
+	}
+	waitFor(t, "the thread to be told", func() bool { return notice() > 0 })
 	later := fp.userSays("run the tests", nil)
 	waitFor(t, "the later message in the record", func() bool { return slices.Contains(r6PhoneIDs(path), later) })
 	rt.sync(func() {})
 	stop()
-	if got := r6PhoneIDs(path); !slices.Equal(got, []string{first, second, later}) {
-		t.Fatalf("recorded %v, want %v", got, []string{first, second, later})
+	if got := r6PhoneIDs(path); !slices.Equal(got, []string{later}) {
+		t.Fatalf("recorded %v, want only %v (the catch-up past %v given up)", got, later, []string{first, second})
+	}
+	if n := notice(); n != 1 {
+		t.Fatalf("the thread was told %d times", n)
+	}
+	if !strings.Contains(strings.Join(ui.logged(), "\n"), "could not read what was sent to the thread while the session was stopped") {
+		t.Fatalf("the session's log does not say it: %q", ui.logged())
 	}
 }
 

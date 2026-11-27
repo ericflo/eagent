@@ -293,11 +293,12 @@ func (r *Runtime) startPhone() {
 		// The read is retried as the first call is; one that never succeeds
 		// leaves the cursor unrecorded rather than past what waited.
 		waited, waitedPrev, unread := false, "", false
+		var unreadErr error
 		if resumed && r.opts.PromptPhoneID == "" && !(ledger.Keeps && ledger.Cursor != "") {
 			for attempt := 1; ; attempt++ {
 				_, prev, found, err := started.Waiting(ctx, p.client, "eagent:"+r.sess.ID, time.Time{})
 				if err == nil || ctx.Err() != nil || !finalechat.Transient(err) {
-					waited, waitedPrev, unread = err == nil && found, prev, err != nil
+					waited, waitedPrev, unread, unreadErr = err == nil && found, prev, err != nil, err
 					break
 				}
 				timer := time.NewTimer(min(time.Duration(attempt)*phoneRetryStep, time.Minute))
@@ -346,6 +347,14 @@ func (r *Runtime) startPhone() {
 			r.post(func() {
 				r.append(event.New(event.PhoneRead, event.ActorHarness, event.PhoneReadData{MessageID: anchor}))
 			})
+		} else if ctx.Err() == nil {
+			// Given up for good: the poll reads on from the session's own
+			// post, past anything sent while it was stopped. Said in the
+			// session's log and in the thread, so it is not passed silently.
+			r.ui.Log("finalechat: could not read what was sent to the thread while the session was stopped (%v); it is not taken", shortErr(unreadErr))
+			if m, th, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: "eagent could not read what was sent here while the session was stopped, and goes on from here without it. Send again anything it should still see.", Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "unread"}, ClientKey: p.key("unread", strconv.Itoa(p.resumes))}); err == nil {
+				p.rememberIn(m, th)
+			}
 		}
 		r.post(func() { r.adoptThread(p, thread) })
 		if resumed && p.mirror && strings.TrimSpace(prompt) != "" {
@@ -390,7 +399,7 @@ func (r *Runtime) startPhone() {
 			})
 		}
 		p.wg.Add(2)
-		go p.poll(r, started, unread)
+		go p.poll(r, started)
 		go p.keeper(r)
 	})
 	// The message the session was started or resumed with is passed to
@@ -1077,9 +1086,8 @@ var (
 // ---- inbound ------------------------------------------------------------------
 
 // poll long-polls the thread for the user's replies and answers.
-// started is the ledger as this run's first write starts it (startPhone);
-// unread says its read of the messages that waited failed for good.
-func (p *phone) poll(r *Runtime, started integration.PhoneLedger, unread bool) {
+// started is the ledger as this run's first write starts it (startPhone).
+func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 	defer p.wg.Done()
 	backoff := time.Second
 	var floor time.Duration // pacing when the server answers at once with nothing
@@ -1092,24 +1100,7 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger, unread bool) {
 		var msgs []finalechat.Message
 		var anchorUnknown bool
 		var err error
-		if unread {
-			// Nothing is taken before it is known where the messages that
-			// waited begin: the read is made again, backing off as a failed
-			// read of the thread does, and the poll then reads on as the
-			// start does after it (from just before the earliest; after the
-			// session's own post, here after, when none waited).
-			var prev string
-			var found bool
-			if _, prev, found, err = started.Waiting(p.ctx, p.client, "eagent:"+r.sess.ID, time.Time{}); err == nil {
-				unread = false
-				if found {
-					p.mu.Lock()
-					p.lastID, p.resumedBy, p.fallback = prev, prev, after
-					p.mu.Unlock()
-				}
-				continue
-			}
-		} else if after == "" {
+		if after == "" {
 			// No message to read on from: the thread from its start, oldest
 			// first. (Asked with no cursor the service lists its newest
 			// page, which passes over what is older.)
