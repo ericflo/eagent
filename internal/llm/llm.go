@@ -418,13 +418,15 @@ func (e *APIError) RejectsImages() bool {
 	return false
 }
 
-// tooLong reports a request refused for its length as a whole (a 413, or a
-// context overflow) with no fault named in a picture: neither a picture the
-// provider will not take nor a model that cannot see. It is returned as it
-// is, for the conversation to be made shorter; no picture is left out or
-// written down as refused for it, and the model is not taken for text-only.
+// tooLong reports a request refused as too long for the model's context:
+// neither a picture the provider will not take nor a model that cannot
+// see, whatever else its words name ("exceeds", a vision model, image
+// tokens). It is returned as it is, for the conversation to be made
+// shorter; no picture is left out or written down as refused for it, and
+// the model is not taken for text-only. A 413 is a request over a size
+// limit, which its pictures are most of, and stays a picture refusal.
 func (e *APIError) tooLong() bool {
-	return (e.Status == 413 || e.ContextOverflow()) && !e.badImage()
+	return e.Status != 413 && e.ContextOverflow()
 }
 
 // badImage reports a 4xx about this particular picture (too big, wrong

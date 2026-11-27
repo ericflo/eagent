@@ -14,13 +14,12 @@ import (
 	"testing"
 )
 
-// A request refused for its length as a whole (a context overflow, or a 413,
-// that names no fault in a picture) is an overflow: it comes back as one, no
-// picture is left out or written down as refused for it, and the model is
-// not taken for text-only. (Finding 9 of the thirteenth review, and a
+// A request refused as too long for the model's context is an overflow,
+// whatever else its words name: it comes back as one, no picture is left
+// out or written down as refused for it, and the model is not taken for
+// text-only. (Finding 9 of the thirteenth review, and a
 // reader's case: a picture the provider took on the call before was written
-// down as refused when the next call overflowed.) A 413 over the request's
-// bytes ("exceeds the maximum allowed number of bytes") is still taken for
+// down as refused when the next call overflowed.) A 413 is still taken for
 // the pictures', as before: they are most of a request's bytes.
 func TestR13AnOverflowIsNotAPictureRefusal(t *testing.T) {
 	for _, c := range []struct {
@@ -29,6 +28,7 @@ func TestR13AnOverflowIsNotAPictureRefusal(t *testing.T) {
 		body   string
 	}{
 		{"vision model, prompt too long", 400, `{"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 140000 tokens. (model Llama-3.2-90B-Vision-Instruct)"}}`},
+		{"overflow worded like a picture fault", 400, `{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model, including image tokens."}}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			img := filepath.Join(t.TempDir(), "a.png")
