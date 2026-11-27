@@ -681,6 +681,15 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
 		qid, text := d.QuestionID, d.Text
+		// The cards the record holds for the question that may still be
+		// open, other than the one the answer was written on: an earlier
+		// run's, which this run may not have asked again yet, among them.
+		var recorded []string
+		for _, c := range liveCards(r.st, qid) {
+			if c != d.CardID {
+				recorded = append(recorded, c)
+			}
+		}
 		if d.Source == "finalechat" {
 			// The phone's own words are not mirrored back to it. Typed in
 			// the thread, not on the card this run put up for the question,
@@ -688,7 +697,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			p.mu.Lock()
 			fid, asked := p.questions[qid]
 			p.mu.Unlock()
-			if !asked || (fid != "" && fid == d.CardID) {
+			if (!asked || (fid != "" && fid == d.CardID)) && len(recorded) == 0 {
 				return
 			}
 		}
@@ -699,8 +708,13 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			p.mu.Lock()
 			fid := p.questions[qid]
 			p.mu.Unlock()
-			if fid != "" {
+			if fid != "" && fid != d.CardID {
 				_ = p.client.Cancel(ctx, fid)
+			}
+			for _, c := range recorded {
+				if c != fid {
+					_ = p.client.Cancel(ctx, c) // already resolved is fine
+				}
 			}
 			if d.Source != "finalechat" && p.mirror {
 				msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
@@ -719,12 +733,18 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 		p.mu.Lock()
 		p.gone[qid] = true
 		p.mu.Unlock()
+		recorded := liveCards(r.st, qid) // an earlier run's card among them, as for an answer
 		p.enqueue(func(ctx context.Context) {
 			p.mu.Lock()
 			fid := p.questions[qid]
 			p.mu.Unlock()
 			if fid != "" {
 				_ = p.client.Dismiss(ctx, fid)
+			}
+			for _, c := range recorded {
+				if c != fid {
+					_ = p.client.Dismiss(ctx, c)
+				}
 			}
 		})
 	case event.RelayStart, event.RelayState, event.RelayTurn, event.RelayAutopilot, event.RelayEnd:

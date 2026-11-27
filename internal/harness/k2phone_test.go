@@ -1,9 +1,14 @@
 package harness
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +35,67 @@ func k2LoseCard(t *testing.T, g *phoneRig, card string) {
 		if err := os.WriteFile(f, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// k2HeldStart is the fake service holding the resumed session's first
+// post until release is closed: the phone is still attaching, and the
+// open question is not asked again until it has.
+func k2HeldStart(t *testing.T, fp *phoneFake) (url string, release func()) {
+	t.Helper()
+	gate := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			raw, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			if bytes.Contains(raw, []byte("eagent session resumed here.")) {
+				select {
+				case <-gate:
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(release)
+	return srv.URL, release
+}
+
+// Fifteenth review, finding 4: the resumed session's open question is
+// answered or dismissed before the phone has attached and asked it
+// again. The earlier run's card is withdrawn (or closed as dismissed)
+// all the same: left open, a tap on it would reach the session as a
+// second answer.
+func TestK2AQuestionSettledBeforeItIsAskedAgainLeavesNoCardOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want string
+		settled           func(g *phoneRig) bool
+	}{
+		{"answered at the terminal", "blue", "cancelled", func(g *phoneRig) bool { return len(g.events(event.UserAnswer)) == 1 }},
+		{"dismissed at the terminal", "/dismiss", "dismissed", func(g *phoneRig) bool { return len(g.events(event.UserDismiss)) == 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			g := r5AskedAndStopped(t, fp)
+			card := r5CardOf(t, g)
+			u, release := k2HeldStart(t, fp)
+			g.cfg.Finalechat.BaseURL = u
+			g.ui = &fakeUI{input: make(chan string, 16)}
+			g.resume(Options{Interactive: true})
+			g.ui.input <- tc.input
+			waitFor(t, "the question to be settled", func() bool { return tc.settled(g) })
+			release()
+			waitFor(t, "the thread to be attached", func() bool { return len(g.events(event.PhoneThread)) == 2 })
+			r14Drained(t, g)
+			if s := r14Status(fp, card); s != tc.want {
+				t.Fatalf("the earlier run's card is %q, want %q", s, tc.want)
+			}
+		})
 	}
 }
 
@@ -70,4 +136,48 @@ func TestK2AnAnswerOnALostCardIsTakenOnceWhenTheCardCannotBeChecked(t *testing.T
 	// No card of the question is open on the phone now: a session with no
 	// terminal does not wait there for ever.
 	g.exit(20 * time.Second)
+}
+
+// Finding 4, in a running session: on a service without client keys the
+// resume asks the question on a new card, and the service does not let
+// the earlier run's card be withdrawn then. The question is answered at
+// the terminal afterwards; that card is withdrawn with the new one.
+func TestK2AnAnswerWithdrawsAnEarlierCardWhoseWithdrawalFailed(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	fp.features = []string{"activity", "dismiss", "attachments"}
+	g := r5AskedAndStopped(t, fp)
+	first := r5CardOf(t, g)
+	var refuse sync.Mutex
+	refusing := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refuse.Lock()
+		no := refusing && r.URL.Path == "/api/v1/questions/"+first+"/cancel"
+		refuse.Unlock()
+		if no {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"unavailable","message":"not now"}}`))
+			return
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	g.cfg.Finalechat.BaseURL = srv.URL
+	g.ui = &fakeUI{input: make(chan string, 16)}
+	g.resume(Options{Interactive: true})
+	waitFor(t, "the second card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 2 })
+	r14Drained(t, g)
+	if s := r14Status(fp, first); s != "pending" {
+		t.Fatalf("the earlier card is %q; the test wants its withdrawal refused", s)
+	}
+	refuse.Lock()
+	refusing = false
+	refuse.Unlock()
+	g.ui.input <- "blue"
+	waitFor(t, "the answer", func() bool { return len(r14Answers(g)) == 1 })
+	r14Drained(t, g)
+	if s := r14Status(fp, first); s == "pending" {
+		t.Fatalf("the earlier run's card is still open after the answer at the terminal")
+	}
 }
