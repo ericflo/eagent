@@ -345,11 +345,9 @@ func wakeFor(ev event.Event) (wakeKind, bool) {
 		}
 	case event.TurnEnd:
 		// A turn that acted, asked for another call (to use what it read,
-		// or for what it still owed) and had that call fail (refused as too
-		// long, or not answered), or was a closing turn whose session
-		// stopped ending. The call is still owed, and is made when it can
-		// be (the retry, the restart, a resumed run, at once), on the
-		// record as it stands: what the turn did is not done again.
+		// or for what it still owed) and had that call fail, or ended as
+		// its session stopped ending ("not closing"). The call is still
+		// owed, and is made when it can be, on the record as it stands.
 		var d event.TurnData
 		if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && (d.Reason == "error" || d.Reason == "not closing") {
 			return wakeNotice, true
@@ -965,9 +963,8 @@ func (r *Runtime) turn(w wake) {
 				}
 				r.turnFailed(err)
 				r.turns.threadDue = r.turns.threadDue || w.thread
-				// The closing turn of a session still ending has had its
-				// word (the model's report, or eagent's own here): nothing
-				// is owed after it. One that is not ending is owed as any.
+				// The closing turn of a session still ending has had its word
+				// (the model's, or eagent's own here): nothing is owed after it.
 				if closedOut = w.final && closing; closedOut && mustSpeak && !tc.spoke {
 					r.fallbackFinal()
 				}
@@ -1371,16 +1368,16 @@ func (r *Runtime) afterCallLimit(maxCalls int) {
 	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", stuck.Who(), stuck.Name)})
 }
 
-// stillClosing reports whether the session a closing turn (the closing word,
-// or the last title and summary) was made for is still ending: no agent, no
-// timer, no question on the phone, no word from the user keeps it going.
+// stillClosing reports whether the session a closing turn was made for is
+// still ending, as maybeEnd has it: no agent, timer (unless a question nobody
+// can answer is open), phone question or word from the user keeps it going.
 // Loop goroutine.
 func (r *Runtime) stillClosing() bool {
 	r.relays.mu.Lock()
 	starting := len(r.relays.launching) > 0
 	r.relays.mu.Unlock()
-	return (r.turns.finalAsked || r.summary.final) && len(r.st.ActiveRelays()) == 0 && !starting &&
-		len(r.st.ActiveSchedules()) == 0 && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
+	kept := (len(r.st.ActiveRelays()) > 0 || starting || len(r.st.ActiveSchedules()) > 0) && (r.st.Question == nil || r.phone != nil)
+	return (r.turns.finalAsked || r.summary.final) && !kept && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
 // fallbackFinal makes sure a session with no terminal does not end in

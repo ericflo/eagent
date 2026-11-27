@@ -357,3 +357,38 @@ func TestR12UnanswerableQuestionWithATimerEndsTheSession(t *testing.T) {
 		t.Fatalf("the session is still running with a question nobody can answer (phase %d); said %q", phase.Load(), s.ui.said())
 	}
 }
+
+// The same session asks its question and leaves the agent running, as a
+// question with nobody to answer it does: the session ends anyway, so its
+// last title and summary is still one attempt. It reads something and the
+// call after the read fails, as does every call after it: nothing is made
+// again, nobody is told the model cannot be reached, and the session ends
+// awaiting the answer.
+func TestR12LastSummaryOfASessionEndingOnAQuestionIsOneAttempt(t *testing.T) {
+	coreSummariesOn(t, false)
+	var phase, after atomic.Int32
+	s, _ := r12Start(t, newFakeSeat("Merged #42; #45 conflicts."), func(_ *atomic.Pointer[Runtime], msgs []map[string]any) reply {
+		tail, last := lastUserText(msgs), msgs[len(msgs)-1]["role"]
+		switch {
+		case phase.Load() >= 2:
+			after.Add(1)
+			return r10Bad
+		case last == "tool" && phase.CompareAndSwap(1, 2):
+			return r10Bad
+		case last == "tool":
+			return hold()
+		case strings.Contains(tail, "this look is only about the thread's title and summary") && phase.CompareAndSwap(0, 1):
+			return reply{calls: []event.ToolCall{tc("session_search", `{"query":"#45"}`)}}
+		case strings.Contains(tail, "finished a turn") && phase.Load() == 0:
+			return reply{calls: []event.ToolCall{tc("ask_user", `{"text":"Rebase #45 or leave it?","options":["rebase","leave"]}`)}}
+		}
+		return hold()
+	})
+	code := coreExit(s)
+	if phase.Load() < 2 {
+		t.Fatalf("the last title and summary call never failed after its read (phase %d)", phase.Load())
+	}
+	if said := s.ui.said(); code != 2 || len(said) != 0 || after.Load() != 0 {
+		t.Fatalf("exit %d, said %q, %d calls after the failure; want exit 2, nothing said, nothing made again", code, said, after.Load())
+	}
+}
