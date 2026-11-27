@@ -1295,9 +1295,14 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 					}
 					var rest map[string]json.RawMessage
 					rest, dropped = config.DropModelChoice(m)
-					if dropped != "" {
-						// The file's model goes so that the preset's runs.
-						// Where it would not run even so, nothing is
+					var was, left map[string]json.RawMessage
+					migrated, _ := config.MigrateLegacy(m)
+					_ = json.Unmarshal(migrated["model"], &was)
+					_ = json.Unmarshal(rest["model"], &left)
+					if len(left) < len(was) {
+						// Part of the file's route goes (its model, or
+						// only where one is reached) so that the preset's
+						// runs. Where it would not run even so, nothing is
 						// written: loading the file as it would be left
 						// says which model runs here.
 						after := maps.Clone(rest)

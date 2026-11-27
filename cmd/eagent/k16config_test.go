@@ -143,3 +143,32 @@ func TestSR11ServersUseUnderASavedPresetInForceSaysWhatRuns(t *testing.T) {
 		t.Fatalf("servers use said %q (exit %d); a session now runs %s @ %s\nfile: %s", out, code, cfg.Model.Model, cfg.Model.BaseURL, file)
 	}
 }
+
+// The file names only where the model is reached; a variable names the
+// model. Choosing a preset would take the address away and leave the
+// variable's model at the preset's: refused, and the file is left alone.
+func TestK16PresetsUseLeavesAnAddressTheVariablesModelNeeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("OPENAI_API_KEY", "x")
+	t.Setenv("LOCAL_KEY", "x")
+	for _, n := range []string{"EAGENT_CONFIG", "EAGENT_PRESET", "EAGENT_MODEL", "EAGENT_BASE_URL", "EAGENT_PROTOCOL", "EAGENT_API_KEY_ENV"} {
+		t.Setenv(n, "")
+		os.Unsetenv(n)
+	}
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const file = `{"model":{"base_url":"http://127.0.0.1:8080/v1","api_key_env":"LOCAL_KEY"},"finalechat":{"enabled":false}}`
+	if err := os.WriteFile(config.File(project), []byte(file), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EAGENT_MODEL", "my-local-model")
+	var code int
+	out := captureStdout(t, func() { code = cmdConfig(project, "", "", false, []string{"use", "openai-high"}) })
+	cfg, err := config.Load(project, "")
+	if got, _ := os.ReadFile(config.File(project)); code == 0 || string(got) != file || err != nil || cfg.Model.BaseURL != "http://127.0.0.1:8080/v1" {
+		t.Fatalf("exit %d, said %q, load %v, runs %s @ %s\nfile: %s", code, out, err, cfg.Model.Model, cfg.Model.BaseURL, got)
+	}
+}
