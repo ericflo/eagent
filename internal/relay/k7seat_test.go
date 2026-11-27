@@ -246,3 +246,45 @@ func TestSr5SeatQuietBeforeAMoveItHasSeenIsSaid(t *testing.T) {
 		}
 	}
 }
+
+// SR5-6. The sibling of 691e5fa for a move: a seat that has seen the agent
+// move (the poll's follow: refollow) says it (KindInner) only at its next
+// look. Closed before that look (a restart, a stop, eagent's shutdown),
+// the watcher releases what is held and ends, and the move is never said:
+// the delivered of the /clear goes out (releaseHeld(MaxInt) ignores
+// refollow), the move does not. A restart then opens the session the
+// record still names (job.innerID, which only a reported move changes):
+// Claude back on the conversation /clear left. EVENTS.md: a stop settles
+// once "what the stopped agent's terminal last read is on the record, its
+// arrivals and a move to another session of its own among it".
+func TestSr5SeatMoveSeenThenCloseIsNeverSaid(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	s, spool, _, b := sr5ClaudeSeat(t, &fakeHost{alive: true, screen: claudePromptScreen}, "sr5-close-move", claudeTurnLines("sort the shelves", "Sorted.", time.Now().Add(-time.Minute))...)
+	s.poll = 300 * time.Millisecond // room to close between two looks
+	go s.watch()
+	if !eventually(func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.transcript != "" }) {
+		t.Fatal("never found a-id")
+	}
+	if _, err := s.Send("c1", "/clear", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	sr4ClaudeHook(t, spool, "b-id", b, "clear")
+	if !within(3*time.Second, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.refollow }) {
+		t.Fatal("never saw the move")
+	}
+	s.Close() // e.g. relay_control restart, well before the next look
+	var got []string
+	for ev := range s.Events() {
+		switch ev.Kind {
+		case KindInner:
+			got = append(got, "inner "+ev.InnerID)
+		case KindDelivered:
+			got = append(got, "delivered "+ev.SendID)
+		}
+	}
+	if !slices.Contains(got, "inner b-id") {
+		t.Fatalf("events after the close %q: the move to b-id the seat had seen was never said; want it said before watching ends", got)
+	}
+}

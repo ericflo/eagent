@@ -1614,6 +1614,11 @@ func (s *Seat) releaseHeld(look int) {
 	// delivered. (After an exit the record settles a send being typed as
 	// gone, and nothing says it again.)
 	s.ended = s.ended || look == math.MaxInt && s.closed
+	if look == math.MaxInt && s.refollow {
+		// Watching ends before the look that would say the move seen:
+		// said now, ahead of the deliveries, as that look would.
+		due = append(due, Event{Kind: KindInner, InnerID: s.inner})
+	}
 	if !s.refollow || look == math.MaxInt {
 		keep := s.held[:0]
 		for _, h := range s.held {
