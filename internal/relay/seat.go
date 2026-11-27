@@ -149,6 +149,7 @@ type Seat struct {
 	dialogPrev string               // the state to go back to when it ends
 	turnEndAt  time.Time            // when the transcript last showed a turn end; zero once the agent works again
 	hung       bool                 // blocked because a working agent went quiet, not by a dialog
+	stuck      bool                 // blocked, and known not to be working (Status.Stuck)
 	attached   bool                 // reattached: the state is a guess until the transcript's history says
 	ownScreen  bool                 // reattached, and a send has once found the agent's own screen (waitReady)
 	catchingUp bool                 // reattached, before the first read to the transcript's end: restored sends wait for it, the history's state is said at it
@@ -514,7 +515,7 @@ func (s *Seat) setDialogState(state, detail, dialog string, send func(Event)) {
 	}
 	s.state, s.stateAt = state, time.Now()
 	if state != "blocked" {
-		s.hung = false
+		s.hung, s.stuck = false, false
 	}
 	if state == "working" {
 		s.turnEndAt = time.Time{} // a dialog after a turn end leaves it standing
@@ -569,13 +570,19 @@ type Status struct {
 	// since it last wrote to its transcript or a Send began.
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
+	// Stuck: blocked with no dialog, and the seat knows the agent is not
+	// working: a start that never got ready, or a turn gone quiet whose
+	// screen does not show it busy (as last looked). A quiet agent whose
+	// screen shows it at work (a long build, a subagent) is not stuck, nor
+	// is a block the seat cannot tell about (kept from before a reattach).
+	Stuck bool
 }
 
 // Snapshot describes the seat now.
 func (s *Seat) Snapshot() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target, Quiet: s.quietLocked()}
+	st := Status{State: s.state, Since: s.stateAt, Activity: s.activity, ActivityAt: s.activityAt, InnerID: s.inner, Transcript: s.transcript, Target: s.target, Quiet: s.quietLocked(), Stuck: s.state == "blocked" && s.dialogUp == "" && s.stuck}
 	if s.state == "blocked" {
 		st.Dialog = s.dialogUp
 	}
@@ -2128,8 +2135,15 @@ func (s *Seat) checkScreen(now time.Time) {
 			s.setState("idle", "")
 		}
 	} else if state == "starting" && since > 25*time.Second {
+		s.mu.Lock()
+		s.stuck = true // set before the event, which a change looks at
+		s.mu.Unlock()
 		s.setState("blocked", "still not ready after 25s; the screen ends:\n"+lastLines(screen, 10))
 	} else if state == "working" && since > 10*time.Minute {
+		busy := s.busy(screen)
+		s.mu.Lock()
+		s.stuck = !busy
+		s.mu.Unlock()
 		s.setState("blocked", "no transcript activity for 10m; the screen ends:\n"+lastLines(screen, 10))
 		s.mu.Lock()
 		s.hung = s.state == "blocked"
@@ -2139,6 +2153,14 @@ func (s *Seat) checkScreen(now time.Time) {
 		// it is idle only if its screen does not also say it is busy. A
 		// slow start is over as soon as the prompt shows.
 		s.setState("idle", "")
+	} else if state == "blocked" {
+		// Still quiet: stuck as its screen says now (Status.Stuck).
+		busy := s.busy(screen)
+		s.mu.Lock()
+		if s.hung && s.state == "blocked" {
+			s.stuck = !busy
+		}
+		s.mu.Unlock()
 	}
 }
 
