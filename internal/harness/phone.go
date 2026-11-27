@@ -1255,13 +1255,18 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					// in the step that takes the message: a session that
 					// is ending (a /quit before it in the page, say) does
 					// not take it, and says nothing.
-					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
+					note, key, name := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}, a.Filename
 					notes = append(notes, func(ctx context.Context) {
 						act := p.attach()
 						msg, thread, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
 							p.rememberIn(msg, thread)
 							p.markSent(act)
+						} else if ctx.Err() == nil {
+							// The words went on without the file; the person
+							// who sent it is not told on the phone, so the
+							// log says so.
+							p.say("finalechat: %s was dropped and its sender could not be told on the phone: %v", name, shortErr(err))
 						}
 					})
 					continue

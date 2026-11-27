@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
 )
@@ -260,5 +261,38 @@ func TestK2AMessageCutBeforeItsSendIsShownKeptForEagent(t *testing.T) {
 	r14Drained(t, g)
 	if got := k2Receipt(fp, id, before); got != "eagent" {
 		t.Fatalf("the receipt under the message is %q, want it kept for eagent", got)
+	}
+}
+
+// B10: a file from the phone cannot be fetched, and the service refuses
+// the note that would tell the sender. The words are taken once, as
+// before; the session's log says the file was dropped and that the
+// sender could not be told.
+func TestK2AFileWhoseRefusalCannotBePostedIsSaidInTheLog(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/messages") {
+			raw, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			if bytes.Contains(raw, []byte("attachment_refused")) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte(`{"error":{"code":"validation_failed","message":"no"}}`))
+				return
+			}
+		}
+		fp.handle(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, func(c *config.Config) { c.Finalechat.BaseURL = srv.URL })
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	gone := map[string]any{"id": "att-9", "kind": "image", "content_type": "image/png", "filename": "IMG_9.png", "size": 3, "url": "/api/v1/attachments/att-9"}
+	id := r10Says(fp, r10Msg("and this one", gone))[0]
+	waitFor(t, "the words to be taken", func() bool { return r14Taken(g, id) == 1 })
+	r14Drained(t, g)
+	logs := strings.Join(g.ui.logged(), "\n")
+	if !strings.Contains(logs, "IMG_9.png") || !strings.Contains(logs, "could not be told") {
+		t.Fatalf("the session's log does not say the sender was not told: %q", g.ui.logged())
 	}
 }
