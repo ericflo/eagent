@@ -124,15 +124,23 @@ func (s *Server) loadPick(p runPick) (config.Config, error) {
 	return s.loadConfig(p.Config, p.Preset)
 }
 
+// ranEntry is what ran knows of a session: the configuration of its last
+// run known here, and when that was known (the run began here, or the
+// list naming it was written).
+type ranEntry struct {
+	pick runPick
+	at   time.Time
+}
+
 // noteRan notes the configuration a run of the session here is built
-// with (ran).
+// with (ran), once it has begun.
 func (s *Server) noteRan(id string, pick runPick) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ran == nil {
-		s.ran = map[string]runPick{}
+		s.ran = map[string]ranEntry{}
 	}
-	s.ran[id] = pick
+	s.ran[id] = ranEntry{pick: pick, at: time.Now().UTC()}
 }
 
 // runConfig is the configuration the session runs on, wherever this
@@ -153,27 +161,33 @@ func (s *Server) runConfig(info store.Info) (config.Config, runPick, error) {
 func (s *Server) configFor(info store.Info, accept func(config.Config) (bool, string)) (config.Config, runPick, error) {
 	type source struct {
 		pick runPick
-		from string // "": the last run known here
+		from string    // "": the last run known here
+		at   time.Time // when this server, or the list, knew it (ran's and the list's)
 	}
 	var sources []source
 	s.mu.Lock()
-	if p, known := s.ran[info.ID]; known {
-		sources = append(sources, source{p, ""})
+	if e, known := s.ran[info.ID]; known {
+		sources = append(sources, source{e.pick, "", e.at})
 	} else {
 		list, _ := s.readHosted()
 		if m, ok := list.mark(info.ID); ok && m.runPick != (runPick{}) {
-			sources = append(sources, source{m.runPick, "its stop's mark on the list of sessions to bring back"})
+			sources = append(sources, source{m.runPick, "its stop's mark on the list of sessions to bring back", m.At})
 		} else if p, ok := list.Configs[info.ID]; ok && p != (runPick{}) {
-			sources = append(sources, source{p, "the list of sessions to bring back"})
+			sources = append(sources, source{p, "the list of sessions to bring back", list.At})
 		}
 	}
 	s.mu.Unlock()
 	if p, ok := recordedPick(info.Path); ok {
-		sources = append(sources, source{p, "record"})
+		sources = append(sources, source{p, "record", time.Time{}})
 	}
-	sources = append(sources, source{runPick{Default: true}, "own"})
+	sources = append(sources, source{runPick{Default: true}, "own", time.Time{}})
 	var last error
 	for _, src := range sources {
+		if !src.at.IsZero() && ranSince(info.Path, src.at) {
+			// A run elsewhere since: the record's word is newer.
+			s.logf("session %s: passing over %s, which it ran on here: it has run elsewhere since", info.ID, src.pick)
+			continue
+		}
 		cfg, err := s.loadPick(src.pick)
 		if err != nil {
 			if src.from != "record" {
@@ -262,8 +276,8 @@ func (s *Server) markStop(id string) {
 	if p, ok := list.Configs[id]; ok {
 		m.runPick = p
 	}
-	if p, ranHere := s.ran[id]; ranHere {
-		m.runPick = p
+	if e, ranHere := s.ran[id]; ranHere {
+		m.runPick = e.pick
 	}
 	marks := append(slices.DeleteFunc(list.Stop, func(m stopMark) bool { return m.Session == id }), m)
 	s.writeHostedList(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At, marks)
@@ -530,7 +544,8 @@ func (s *Server) writeHostedList(ids []string, at time.Time, stop []stopMark) {
 	prev, _ := s.readHosted()
 	var configs map[string]runPick
 	for _, id := range ids {
-		p, ok := s.ran[id]
+		e, ok := s.ran[id]
+		p := e.pick
 		if !ok {
 			p, ok = prev.Configs[id]
 		}
@@ -603,9 +618,9 @@ func (s *Server) restoreHosted(ctx context.Context) {
 	for id, p := range list.Configs {
 		if _, known := s.ran[id]; !known && slices.Contains(list.Sessions, id) {
 			if s.ran == nil {
-				s.ran = map[string]runPick{}
+				s.ran = map[string]ranEntry{}
 			}
-			s.ran[id] = p
+			s.ran[id] = ranEntry{pick: p, at: list.At}
 		}
 	}
 	s.writeHostedList(nil, list.At, list.Stop)

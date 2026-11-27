@@ -55,8 +55,9 @@ type Server struct {
 	// built with: a run here (kept after it ends), or one the list the
 	// previous server left names (restoreHosted). The session's next run
 	// here, a stop this server finishes, and the list and marks it writes
-	// take it (runConfig, writeHostedList, markStop). Under mu.
-	ran map[string]runPick
+	// take it (runConfig, writeHostedList, markStop), unless the record
+	// shows a run begun after it. Under mu.
+	ran map[string]ranEntry
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).

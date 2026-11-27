@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
@@ -24,6 +25,39 @@ func k18Session(t *testing.T, project, name string) store.Info {
 		t.Fatal(err)
 	}
 	return info
+}
+
+// A session ran here on the bundle "other", and then elsewhere (a terminal:
+// a session.resume on its record after that run). The configuration this
+// server knew it by is no longer the newest word: the record's (here, the
+// server's own, as it names none) wins. It used to keep "other".
+func TestK18ANewerRunElsewhereOutranksTheOneKnownHere(t *testing.T) {
+	_, project := newTestServer(t)
+	s := New(project, nil)
+	if _, err := config.Write(project, r11Model(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.SaveBundle(project, "other", "", r11Model(t)); err != nil {
+		t.Fatal(err)
+	}
+	info := k18Session(t, project, "")
+	s.noteRan(info.ID, runPick{Config: "other", Preset: "-"}) // its run here
+	if _, pick, err := s.runConfig(info); err != nil || pick.Config != "other" {
+		t.Fatalf("setup: runs on %+v (%v)", pick, err)
+	}
+	sess, _, err := store.Open(info.Path, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := event.New(event.SessionResume, event.ActorHarness, event.SessionResumeData{Interactive: true})
+	later.Time = time.Now().Add(time.Second).UTC()
+	if _, err := sess.Append(later); err != nil {
+		t.Fatal(err)
+	}
+	_ = sess.Close()
+	if _, pick, err := s.runConfig(info); err != nil || pick != (runPick{Default: true}) {
+		t.Fatalf("a newer run elsewhere, and the session still runs on %+v (%v), the one its run here had", pick, err)
+	}
 }
 
 // A session whose record names a preset (its session.start's config: the
