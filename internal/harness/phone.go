@@ -1086,10 +1086,8 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 			continue
 		}
 		backoff = time.Second
-	page:
 		for _, m := range msgs {
 			p.mu.Lock()
-			prev := p.lastID
 			p.lastID = m.ID
 			mine := p.posted[m.ID]
 			p.mu.Unlock()
@@ -1121,43 +1119,17 @@ func (p *phone) poll(r *Runtime, started integration.PhoneLedger) {
 					}
 					// The person who sent it is on the phone, not at the
 					// terminal: tell them there, or the file is dropped
-					// without a word. The message is taken in only once
-					// they have been told; until then neither it nor any
-					// after it is, and the poll reads it again after a
-					// pause, as after a failed read.
+					// without a word.
 					note, key := finalechat.RefusedNote(a.Filename, err), []string{"refused", m.ID, a.ID}
-					told := make(chan bool, 1)
-					if !p.enqueue(func(ctx context.Context) {
+					p.enqueue(func(ctx context.Context) {
 						act := p.attach()
 						msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: note, Sender: "system", Format: "text", Meta: map[string]any{"eagent": "notice", "kind": "attachment_refused"}, ClientKey: p.key(key...), Activity: act})
 						if err == nil {
 							p.remember(msg.ID)
 							p.markSent(act)
 						}
-						told <- err == nil
-					}) {
-						told <- false
-					}
-					var ok bool
-					select {
-					case ok = <-told:
-					case <-p.ctx.Done():
-						return
-					}
-					if ok {
-						continue
-					}
-					p.mu.Lock()
-					if p.lastID == m.ID {
-						p.lastID = prev
-					}
-					p.mu.Unlock()
-					select {
-					case <-time.After(backoff):
-					case <-p.ctx.Done():
-						return
-					}
-					break page
+					})
+					continue
 				}
 				atts = append(atts, saved)
 			}
