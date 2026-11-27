@@ -580,7 +580,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, map[string]any{"delivered": how})
+	writeJSON(w, deliveredAnswer(how))
 }
 
 // deliver hands words from the browser to a session: to its inbox when
@@ -622,12 +622,63 @@ func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func(
 		if stopped {
 			return "", errStopping
 		}
-		return "inbox", harness.PostInbox(info.Path, msg)
+		if s.isHosted(info.ID) {
+			return "inbox", harness.PostInbox(info.Path, msg)
+		}
+		// Another process runs it, which may be past its last look at the
+		// inbox: they wait there, watched, until it takes them or lets go
+		// of the session (watchInbox).
+		file, err := harness.PostInboxFile(info.Path, msg)
+		if err == nil {
+			go s.watchInbox(info, file)
+		}
+		return "queued", err
 	}
 	if s.stopping {
 		return "", errStopping
 	}
 	return "resumed", resume()
+}
+
+// inboxWatchEvery is how often watchInbox looks; tests shorten it.
+var inboxWatchEvery = 200 * time.Millisecond
+
+// watchInbox follows words deliver left in the inbox of a session another
+// process runs, until that run takes them (their file goes) or lets go of
+// the session. A run that lets go with the file still there (it was past
+// its last look) leaves them for the next run: the session is resumed here
+// at once, and its run takes the file, the words' only copy, as words left
+// for it. Once this server's shutdown has begun, they are left for the
+// session's next run.
+func (s *Server) watchInbox(info store.Info, file string) {
+	tick := time.NewTicker(inboxWatchEvery)
+	defer tick.Stop()
+	for range tick.C {
+		if _, err := os.Stat(file); err != nil || alive(info.Path) {
+			if err != nil {
+				return // taken
+			}
+			continue
+		}
+		s.resuming.Lock()
+		if _, err := os.Stat(file); err == nil && !s.stopping && !alive(info.Path) && !s.isHosted(info.ID) {
+			if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose}, "", "", true); err != nil {
+				s.logf("web: session %s stopped with words in its inbox, and could not be resumed for them: %v", info.ID, err)
+			}
+		}
+		s.resuming.Unlock()
+		return
+	}
+}
+
+// deliveredAnswer is the answer to words deliver took as how; words left
+// "queued" are said to wait, not to be delivered.
+func deliveredAnswer(how string) map[string]any {
+	out := map[string]any{"delivered": how}
+	if how == "queued" {
+		out["message"] = "They wait in the session's inbox: it takes them when it next reads it, or when it is resumed for them."
+	}
+	return out
 }
 
 var errStopping = errors.New("eagent is stopping; send it again once it is back")
@@ -658,7 +709,7 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
-	writeJSON(w, map[string]any{"delivered": how})
+	writeJSON(w, deliveredAnswer(how))
 }
 
 // postDismiss closes the session's open question with no answer. Nothing

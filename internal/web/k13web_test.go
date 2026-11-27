@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -141,6 +143,63 @@ func TestSR6WebAStopPressedOnAMarkedSessionKeepsTheOldMarksTime(t *testing.T) {
 	New(project, nil).restoreHosted(context.Background())
 	if len(restored) != 0 || len(*killed) == 0 {
 		t.Fatalf("the Stop pressed during the shutdown was judged by a mark made before the resume: brought back %q, killed %q; want it kept stopped and its agent stopped", restored, *killed)
+	}
+}
+
+// A session a terminal runs (`eagent`), in its last steps: its run has made
+// its last look at the inbox (finish) and still holds the session's lock
+// while its agents' starts and sends wind down. The page's message goes to
+// the inbox (the session is alive), and the run lets go without reading
+// it. It used to be answered "delivered" and left there, and the user, who
+// saw it nowhere, sent it again: the next run took both. Now the server
+// watches the file it wrote; when the run lets go of the session with the
+// file still there, the server resumes the session, whose run takes the
+// file, once. (Adapted from the review's test: the answer now says the
+// words wait, and the user does not need to send them again.)
+func TestSR6WebWordsLeftInATerminalRunsInboxAreTakenTwice(t *testing.T) {
+	s, project := newTestServer(t)
+	k1Model(t, s, project)
+	old := inboxWatchEvery
+	inboxWatchEvery = time.Millisecond
+	t.Cleanup(func() { inboxWatchEvery = old })
+	info := r11Session(t, project)
+	// The terminal's run, past its last look, still holding the lock.
+	sess, _, err := store.Open(info.Path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	words := map[string]any{"text": "add the retry test"}
+	if w := do(s, "POST", "/api/sessions/"+info.ID+"/message", words, nil); w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"inbox"`) {
+		_ = sess.Close()
+		t.Fatalf("send: %d %s; want it answered as waiting, not delivered", w.Code, w.Body)
+	}
+	_ = sess.Close() // the terminal's run lets go
+	var h *hosted
+	for deadline := time.Now().Add(5 * time.Second); h == nil; runtime.Gosched() {
+		s.mu.Lock()
+		h = s.running[info.ID]
+		s.mu.Unlock()
+		if h == nil && time.Now().After(deadline) {
+			t.Fatal("the session was never resumed for the words left in its inbox")
+		}
+	}
+	// A no-op hand-over, taken on the run's loop after its first look.
+	if _, err := h.rt.Take(harness.InboxMessage{Type: "message", From: "web"}); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := store.Read(info.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, ev := range evs {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.Text == "add the retry test" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the session took the user's words %d times, want once", n)
 	}
 }
 
