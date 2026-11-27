@@ -174,6 +174,7 @@ func Resolve(project, preset, bundle string) Resolution {
 				res.LoadError = err.Error()
 			}
 		} else {
+			cfg.Name = "" // the project file is no bundle, whatever "name" it carries
 			prev = mark(flatten(cfg), "file")
 		}
 	} else if res.File.ParseError != "" && res.LoadError == "" {

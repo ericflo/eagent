@@ -746,11 +746,16 @@ func DefaultBundle(fileCfg map[string]json.RawMessage) string {
 	return bundle
 }
 
-// IsDefaultBundle says whether sessions started with no bundle named load
-// the saved bundle name, so it is not to be deleted: EAGENT_CONFIG names it,
-// or the file's default_config does.
+// IsDefaultBundle says whether the saved bundle name is in force, so it is
+// not to be deleted: the bundle res laid (the one a caller names, or the one
+// an explicit preset names), EAGENT_PRESET or EAGENT_CONFIG naming it (the
+// loader takes a saved preset EAGENT_PRESET names as the bundle), or the
+// file's default_config.
 func IsDefaultBundle(res Resolution, name string) bool {
-	return name != "" && (os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name)
+	if name == "" {
+		return false
+	}
+	return res.Active.Kind == "bundle" && res.Active.Name == name || os.Getenv("EAGENT_PRESET") == name || os.Getenv("EAGENT_CONFIG") == name || res.Effective.DefaultConfig == name
 }
 
 func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
@@ -829,6 +834,7 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 	if err := overlay(project, &cfg, fileCfg, File(project), &n); err != nil {
 		return cfg, err
 	}
+	cfg.Name = "" // the project file is no bundle, whatever "name" it carries
 	if bundle != "" {
 		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle), &n); err != nil {
 			return cfg, err

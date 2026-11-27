@@ -1350,6 +1350,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		if cfg, err = settings.CurrentLayers(project, preset, bundle); err != nil {
 			return fail(err)
 		}
+		cfg.Name = "" // config.json is no bundle: a name there would read as one laid
 		path, err := config.Write(project, cfg)
 		if err != nil {
 			return fail(err)

@@ -568,7 +568,9 @@ func CurrentLayers(project, preset, bundle string) (config.Config, error) {
 		return config.Config{}, err // what is in force must load, as on main
 	}
 	res := config.Resolve(project, preset, bundle)
-	if bundle == "" && res.LoadError == "" && res.Layered.Name == "" {
+	// Whether a bundle is laid is the bundle Resolve applied (Active), never
+	// a "name" config.json may carry (`config --write` once wrote one).
+	if bundle == "" && res.LoadError == "" && res.Active.Kind != "bundle" {
 		var file map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(res.File.Raw), &file)
 		if b := config.DefaultBundle(file); b != "" {
