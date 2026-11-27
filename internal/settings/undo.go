@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -114,8 +115,9 @@ func ConfigInverse(original control.Proposal, beforeRaw, desiredRaw string) (con
 
 // PrepareUndo writes a reversal under the caller's project lock. It is a
 // conflict when any key of the reversal now differs from the file the
-// command wrote, or the address of a route the reversal sets a model back
-// on does, and nothing else is; the file it writes is checked as a
+// command wrote, or, for a route whose model the reversal sets back or
+// whose address it puts back, the route's address or model (as it
+// resolves) does, and nothing else is; the file it writes is checked as a
 // person's save of it would be, except that a route pairing an address and
 // a key variable as a route in force at the command did (inForce, the
 // journal's in_force) passes the key-choice and pairing checks. beforeRaw
@@ -130,21 +132,39 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 	if err != nil {
 		return "", "", RemoteView{}, err
 	}
-	keys := []string{}
 	for _, edit := range inverse.Edits {
-		keys = append(keys, edit.Key)
-	}
-	// A model set back on a route is sent to the address the route has
-	// then, so a change of that address since the command conflicts too.
-	for _, edit := range inverse.Edits {
-		if route, ok := strings.CutSuffix(edit.Key, "/model"); ok && edit.Op == "set" && edit.Value != nil && !slices.Contains(keys, route+"/base_url") {
-			keys = append(keys, route+"/base_url")
+		want, wantExists := pointerValue(desired, edit.Key)
+		got, gotExists := pointerValue(current, edit.Key)
+		if wantExists != gotExists || !reflect.DeepEqual(want, got) {
+			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
-	for _, key := range keys {
-		want, wantExists := pointerValue(desired, key)
-		got, gotExists := pointerValue(current, key)
-		if wantExists != gotExists || !reflect.DeepEqual(want, got) {
+	// A route's model goes to its address: a reversal that sets a model back,
+	// or puts an address back, conflicts when the other one, as the route
+	// resolves over today's layers, changed since the command.
+	var wrote *config.Config
+	for _, edit := range inverse.Edits {
+		i := strings.LastIndex(edit.Key, "/")
+		route, leaf := edit.Key[:i], edit.Key[i+1:]
+		model := leaf == "model" && edit.Op == "set" && edit.Value != nil
+		if !model && leaf != "base_url" {
+			continue
+		}
+		if wrote == nil {
+			raw, _ := json.Marshal(desired)
+			var file map[string]json.RawMessage
+			_ = json.Unmarshal(raw, &file)
+			cfg, err := config.LoadBundleWithFile(s.Project, s.Preset, s.Bundle, file)
+			if err != nil {
+				break // the file the undo writes is checked below
+			}
+			wrote = &cfg
+		}
+		was, is := routeAt(*wrote, route), routeAt(res.Effective, route)
+		if was == nil || is == nil {
+			continue
+		}
+		if model && strings.TrimRight(was.BaseURL, "/") != strings.TrimRight(is.BaseURL, "/") || !model && was.Model != is.Model {
 			return "", "", RemoteView{}, &config.ErrConflict{ETag: res.File.ETag}
 		}
 	}
@@ -154,6 +174,25 @@ func (s *Service) PrepareUndo(inverse control.Proposal, beforeRaw, desiredRaw st
 		err = fmt.Errorf("this undo would write settings that cannot be saved from here now (%v); nothing was changed, so put those settings back by hand instead", err)
 	}
 	return raw, etag, view, err
+}
+
+// routeAt is the route of cfg a pointer names (/model or /summarizer/model,
+// and their fallbacks), or nil.
+func routeAt(cfg config.Config, ptr string) *config.ModelRoute {
+	r := &cfg.Model
+	rest, ok := strings.CutPrefix(ptr, "/summarizer/model")
+	if ok {
+		r = cfg.Summarizer.Model
+	} else if rest, ok = strings.CutPrefix(ptr, "/model"); !ok {
+		return nil
+	}
+	for rest != "" && r != nil {
+		if rest, ok = strings.CutPrefix(rest, "/fallback"); !ok {
+			return nil
+		}
+		r = r.Fallback
+	}
+	return r
 }
 
 // RoutePairs are the (address, key variable) pairs of a configuration's
