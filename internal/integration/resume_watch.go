@@ -106,12 +106,12 @@ func lockKept(project string) (func(), error) {
 }
 
 // writeDown adds the replies kept to those written down that nobody has
-// taken up yet.
-func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
+// taken up yet; it says so, and returns the error, when it cannot.
+func (r *replyRetries) writeDown(project string, logf func(string, ...any)) error {
 	unlock, err := lockKept(project)
 	if err != nil {
 		logf("finalechat: could not note the replies kept for the next start: %v", err)
-		return
+		return err
 	}
 	defer unlock()
 	kept := map[string]keptReply{}
@@ -124,11 +124,13 @@ func (r *replyRetries) writeDown(project string, logf func(string, ...any)) {
 	}
 	r.mu.Unlock()
 	if len(kept) == 0 {
-		return
+		return nil
 	}
 	if err := writeJSONAtomic(keptFile(project), kept); err != nil {
 		logf("finalechat: could not note the replies kept for the next start: %v", err)
+		return err
 	}
+	return nil
 }
 
 // takeUp keeps what an earlier watcher wrote down, as it kept it: a reply
@@ -192,9 +194,9 @@ type replyRetries struct {
 // leaveWithWatcher writes m down, quietly, for the next sweep of whoever
 // holds the project's watch (this process or another), as a stopping
 // watcher writes down what it keeps.
-func leaveWithWatcher(project string, info store.Info, m finalechat.Message) {
+func leaveWithWatcher(project string, info store.Info, m finalechat.Message) error {
 	r := &replyRetries{replies: map[string]pendingReply{m.ID: {thread: finalechat.Thread{ExternalID: "eagent:" + info.ID}, msg: m, since: time.Now()}}}
-	r.writeDown(project, func(string, ...any) {})
+	return r.writeDown(project, func(string, ...any) {})
 }
 
 // watchResumes runs one connection to the event stream, sweeping first and
@@ -613,8 +615,9 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 				// A notice before it went: eagent's is the thread's latest
 				// message, which hides the reply from the sweep. The
 				// project's reply watcher keeps it quietly, as it keeps
-				// one whose notice it could not post itself.
-				leaveWithWatcher(project, info, last)
+				// one whose notice it could not post itself. When that
+				// cannot be written either, the restore is told both.
+				err = errors.Join(err, leaveWithWatcher(project, info, last))
 			}
 			return PhoneMessage{}, false, err
 		}
@@ -623,7 +626,11 @@ func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMe
 	// again (a /quit ends it before it reads on) is looked for by the
 	// project's reply watcher once it has stopped, as after a resume of the
 	// watcher's own: its closing note may hide the thread from the sweep.
-	leaveWithWatcher(project, info, last)
+	// When that cannot be written down, nothing is taken and the restore
+	// gets the error, as for a notice that could not be posted.
+	if err := leaveWithWatcher(project, info, last); err != nil {
+		return PhoneMessage{}, false, err
+	}
 	// Also a message whose files were all refused: the session takes it
 	// in, so the ones after it are read in order.
 	return msg, true, nil
