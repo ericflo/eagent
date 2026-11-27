@@ -518,12 +518,10 @@ func (s *Service) PrepareSavePreset(editor *config.Editor, p control.Proposal, g
 	if err != nil {
 		return change, err
 	}
-	// What the files and bundle say, never a value only a variable gives.
-	res := config.Resolve(s.Project, s.Preset, s.Bundle)
-	if res.LoadError != "" {
-		return change, errors.New(res.LoadError)
+	cfg, err := CurrentLayers(s.Project, s.Preset, s.Bundle)
+	if err != nil {
+		return change, err
 	}
-	cfg := res.Layered
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
 	if err := cfg.Validate(); err != nil {
 		return change, err
@@ -558,17 +556,39 @@ func (s *Service) PrepareSavePreset(editor *config.Editor, p control.Proposal, g
 
 // SaveEffectiveAsPreset writes the project's current effective configuration
 // as a standalone named preset while the caller holds editor's lock.
+// CurrentLayers is the configuration in force as every save of it keeps
+// it: the bundle loading takes (bundle, else an explicit preset naming a
+// saved one, EAGENT_CONFIG, then the file's default_config) with the
+// layers below it, never a value only an environment variable gives (a
+// bundle EAGENT_CONFIG chooses is a file, and its values count).
+func CurrentLayers(project, preset, bundle string) (config.Config, error) {
+	res := config.Resolve(project, preset, bundle)
+	if bundle == "" && res.LoadError == "" {
+		// Resolve leaves EAGENT_CONFIG and default_config to its callers;
+		// loading follows them, so the bundle in force is the loader's.
+		loaded, err := config.LoadBundle(project, preset, "")
+		if err != nil {
+			return config.Config{}, err
+		}
+		if loaded.Name != "" && loaded.Name != res.Layered.Name {
+			res = config.Resolve(project, preset, loaded.Name)
+		}
+	}
+	if res.LoadError != "" {
+		return config.Config{}, errors.New(res.LoadError)
+	}
+	return res.Layered, nil
+}
+
 func (s *Service) SaveEffectiveAsPreset(editor *config.Editor, name string) (string, error) {
 	name, err := ValidateSavePresetName(name)
 	if err != nil {
 		return "", err
 	}
-	// What the files and bundle say, never a value only a variable gives.
-	res := config.Resolve(s.Project, s.Preset, s.Bundle)
-	if res.LoadError != "" {
-		return "", errors.New(res.LoadError)
+	cfg, err := CurrentLayers(s.Project, s.Preset, s.Bundle)
+	if err != nil {
+		return "", err
 	}
-	cfg := res.Layered
 	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
 	if err := cfg.Validate(); err != nil {
 		return "", err
