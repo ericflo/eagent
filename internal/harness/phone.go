@@ -201,6 +201,7 @@ func (r *Runtime) startPhone() {
 			case event.SessionResume:
 				resumeSeq = ev.Seq
 				prompt, promptSeq = "", 0
+				settled = map[string]string{} // only this resume's answers: an earlier one told the thread then
 				var d event.SessionResumeData
 				if ev.Decode(&d) == nil {
 					stoppedAt = d.After
