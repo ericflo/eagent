@@ -1,11 +1,14 @@
 package harness
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/event"
 )
 
 // r14AskedAsMessage reports whether the question went to the thread as a
@@ -71,4 +74,72 @@ func TestR14AQuestionPostedAsAMessageTakesARecreatedThread(t *testing.T) {
 		defer p.mu.Unlock()
 		return p.threadID == "t2"
 	})
+}
+
+// r14Drained waits until the phone's outbound worker has run everything
+// queued so far: it runs one call at a time, in order.
+func r14Drained(t *testing.T, g *phoneRig) {
+	t.Helper()
+	var p *phone
+	g.rt.sync(func() { p = g.rt.phone })
+	ran := make(chan struct{})
+	if !p.enqueue(func(context.Context) { close(ran) }) {
+		t.Fatal("the phone's queue is full")
+	}
+	select {
+	case <-ran:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the phone's worker did not get to the end of its queue")
+	}
+}
+
+// r14AskBrain asks "Which colour?" once the agent has finished a turn and
+// leaves the agent running, so what the person writes with no question
+// open goes to the agent.
+func r14AskBrain() func(string, []map[string]any) reply {
+	return func(_ string, msgs []map[string]any) reply {
+		if !phoneLastIsTool(msgs) && strings.Contains(lastUserText(msgs), "finished a turn") && !strings.Contains(allText(msgs), "Which colour?") {
+			args, _ := json.Marshal(map[string]any{"text": "Which colour?", "options": []string{"red", "blue"}})
+			return reply{calls: []event.ToolCall{tc("ask_user", string(args))}}
+		}
+		return hold()
+	}
+}
+
+// r14Answers are the live session's recorded answers.
+func r14Answers(g *phoneRig) []event.UserAnswerData {
+	var out []event.UserAnswerData
+	for _, ev := range g.events(event.UserAnswer) {
+		var d event.UserAnswerData
+		_ = ev.Decode(&d)
+		out = append(out, d)
+	}
+	return out
+}
+
+// Finding 13 of the fourteenth review: the person answers the open
+// question by typing in the phone thread rather than on its card. The
+// card is withdrawn, as it is for an answer given at the terminal or on
+// the web, so it cannot be tapped and the answer typed to the agent a
+// second time.
+func TestR14AnAnswerTypedInThePhoneThreadWithdrawsTheCard(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := phoneStart(t, fp, "paint it", true, r14AskBrain(), nil)
+	waitFor(t, "the card", func() bool { return fp.pendingQuestions() == 1 })
+	waitFor(t, "the card to be recorded", func() bool { return len(g.events(event.PhoneQuestion)) == 1 })
+	fp.userReply("blue")
+	waitFor(t, "the typed words to answer the question", func() bool { return len(r14Answers(g)) == 1 })
+	if a := r14Answers(g)[0]; a.Text != "blue" || a.Source != "finalechat" || a.CardID != "" {
+		t.Fatalf("answer = %+v", a)
+	}
+	r14Drained(t, g)
+	if fp.pendingQuestions() == 0 {
+		return
+	}
+	// The card is still up: tapping it is what the person can do now.
+	fp.answer("blue", "")
+	g.phoneWeighed(fp.lastMessageID())
+	waitFor(t, "the agent to be sent the tap", func() bool { return strings.Count(strings.Join(g.seat.sentTexts(), "\n"), "blue") > 0 })
+	t.Fatalf("the card stayed open after the typed answer; tapping it sent the agent %q", g.seat.sentTexts())
 }

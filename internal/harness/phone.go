@@ -643,11 +643,19 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 	case event.UserAnswer:
 		var d event.UserAnswerData
 		_ = ev.Decode(&d)
+		qid, text := d.QuestionID, d.Text
 		if d.Source == "finalechat" {
-			return
+			// The phone's own words are not mirrored back to it. Typed in
+			// the thread, not on the card this run put up for the question,
+			// they withdraw that card as an answer given anywhere else does.
+			p.mu.Lock()
+			fid, asked := p.questions[qid]
+			p.mu.Unlock()
+			if !asked || (fid != "" && fid == d.CardID) {
+				return
+			}
 		}
 		// Answered elsewhere: withdraw the phone question and show the choice.
-		qid, text := d.QuestionID, d.Text
 		p.enqueue(func(ctx context.Context) {
 			// Read the phone's id here, not at enqueue time: the ask call that
 			// learns it runs on this same queue, just ahead of us.
@@ -657,7 +665,7 @@ func (p *phone) observe(r *Runtime, ev event.Event) {
 			if fid != "" {
 				_ = p.client.Cancel(ctx, fid)
 			}
-			if p.mirror {
+			if d.Source != "finalechat" && p.mirror {
 				msg, _, err := p.client.Post(ctx, p.ref, finalechat.PostRequest{Body: text, Sender: "user", Notify: boolPtr(false), Meta: map[string]any{"eagent": "mirror", "kind": "answer", "question_id": d.QuestionID, "seq": ev.Seq, "source_anchor": p.sourceAnchor(ev.Seq)}, ClientKey: p.key("a", seq)})
 				if err == nil {
 					p.remember(msg.ID)
