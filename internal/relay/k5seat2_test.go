@@ -130,6 +130,78 @@ func TestSr4SeatClaudeSecondClearBeforeAPromptIsNeverFollowed(t *testing.T) {
 	}
 }
 
+// SR4-5. A reattached seat judges the transcript the record read (readIn)
+// by the record's mark alone, whenever it reads it (fold: byMark replaces
+// the cut by time). Claude's seat now follows Claude to other sessions;
+// when Claude comes back to that transcript (/clear, a prompt, then an
+// in-app /resume of the conversation it left), the seat reads it again
+// from the record's old mark, and every turn it already reported there
+// since the reattach is news again: reported twice.
+func TestSr4SeatClaudeResumedBackToTheMarkedTranscriptReportsItsTurnsAgain(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	project := filepath.Join(cfg, "projects", "-work")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a, b := filepath.Join(project, "a-id.jsonl"), filepath.Join(project, "b-id.jsonl")
+	writeLines(t, a, claudeTurnLines("sort the shelves", "Sorted.", time.Now().Add(-time.Minute))...)
+	st, _ := os.Stat(a)
+	state := t.TempDir()
+	spool := filepath.Join(state, "after_turn")
+	sr4ClaudeHook(t, spool, "a-id", a, "startup")
+	spec := Spec{Dir: state, Spool: spool, StatusFile: filepath.Join(state, "claude-session.json"), Hook: "eagent relay-hook", State: "idle", Read: st.Size()}
+	s := attachSeat(spec, claudeAgent{}, &fakeHost{alive: true, screen: claudePromptScreen}, "sr4-back-"+filepath.Base(state), "a-id", a, time.Now().Add(-30*time.Second))
+	s.poll = piLook
+	go s.watch()
+	t.Cleanup(s.Close)
+	turns := map[string]int{}
+	deadline := time.After(8 * time.Second)
+	until := func(text string) {
+		t.Helper()
+		for turns[text] == 0 {
+			select {
+			case ev := <-s.events:
+				if ev.Kind == KindTurn {
+					turns[ev.Text]++
+				}
+			case <-deadline:
+				t.Fatalf("timed out waiting for %q; turns %v", text, turns)
+			}
+		}
+	}
+	appendLines := func(path string, lines ...string) {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range lines {
+			_, _ = f.WriteString(l + "\n")
+		}
+		f.Close()
+	}
+	if !eventually(func() bool { s.mu.Lock(); defer s.mu.Unlock(); return !s.catchingUp }) {
+		t.Fatal("never caught up")
+	}
+	appendLines(a, claudeTurnLines("fix the bug", "Fixed.", time.Now())...)
+	until("Fixed.")
+	sr4ClaudeHook(t, spool, "b-id", b, "clear")
+	if !eventually(func() bool { return s.innerID() == "b-id" }) {
+		t.Fatal("never followed /clear")
+	}
+	appendLines(b, claudeTurnLines("hello", "Hi.", time.Now())...)
+	until("Hi.")
+	sr4ClaudeHook(t, spool, "a-id", a, "resume") // /resume of the conversation left
+	if !eventually(func() bool { return s.innerID() == "a-id" }) {
+		t.Fatal("never followed /resume")
+	}
+	appendLines(a, claudeTurnLines("now test it", "Tested.", time.Now().Add(time.Second))...)
+	until("Tested.")
+	if turns["Fixed."] != 1 || turns["Sorted."] != 0 {
+		t.Fatalf("turns reported %v; want \"Fixed.\" once (it was reported before the /clear) and the history before the mark never", turns)
+	}
+}
+
 // SR4-3. A typed command's delivered event waits for the watcher's next
 // look (9888cae) and is dropped when the seat closes first: a restart, a
 // stop or eagent's own shutdown within a poll of the typing. The record

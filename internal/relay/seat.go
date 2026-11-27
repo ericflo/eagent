@@ -143,6 +143,7 @@ type Seat struct {
 	followed   bool                 // ...and where its news begins is decided when it opens
 	sinceKept  time.Time            // since as it was before the move
 	onAt       time.Time            // when the agent was last seen on the session the seat follows
+	leftAt     map[string]int64     // transcripts this seat read and left, and how far it read them
 	readAt     time.Time            // the newest stamp read from a transcript (readTail)
 	dialogUp   string               // the dialog the agent itself reports waiting on
 	dialogPrev string               // the state to go back to when it ends
@@ -1352,6 +1353,14 @@ func (s *Seat) watch() {
 			if s.transcript != "" {
 				claimed.CompareAndDelete(s.transcript, s.target)
 			}
+			if tail != nil {
+				// Where this seat stopped reading it: a move back reads on
+				// from there.
+				if s.leftAt == nil {
+					s.leftAt = map[string]int64{}
+				}
+				s.leftAt[tail.path] = tail.offset - int64(len(tail.rest))
+			}
 			s.refollow, s.transcript, tail = false, "", nil
 		}
 		s.mu.Unlock()
@@ -1382,7 +1391,13 @@ func (s *Seat) watch() {
 				}
 				s.transcript, s.inner = path, inner
 				exact := false
-				if s.followed {
+				if back, again := s.leftAt[path]; again {
+					// A transcript this seat read and left (Claude's /resume
+					// of the conversation /clear left): read on from where
+					// it stopped, never from the record's older mark, so
+					// nothing already read is read, reported or matched again.
+					tail.offset, exact, s.followed = back, true, false
+				} else if s.followed {
 					// The agent moved here itself. If it says how much the
 					// transcript held when it opened it, exactly that is
 					// history; news written before this look is still news.
