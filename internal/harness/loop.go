@@ -871,6 +871,14 @@ func (r *Runtime) turn(w wake) {
 		var msgs []llm.Message
 		r.sync(func() {
 			defer func() { r.turns.callAt = time.Now() }()
+			if tail == "" && (w.final || w.wait > 0) && !r.stillClosing() {
+				// The session stopped ending before the closing turn's
+				// first call went out: no call is made, and what came
+				// (the user wrote, an agent is being started) is taken up
+				// as it would be after one.
+				asked, end = false, "not closing"
+				return
+			}
 			msgs = base
 			if !tailKept {
 				msgs = state.WithTail(base, tail)
@@ -880,19 +888,21 @@ func (r *Runtime) turn(w wake) {
 			}
 			refresh = false
 			base, covered = r.st.View(&r.view), r.st.LastSeq()
-			fresh := tail == ""
-			if !fresh {
+			first, owed := tail == "", w.owed
+			fresh := first
+			if !first || !w.event {
 				// Only something that asks for a look gets a tail of its
 				// own. Anything else that came (a remark from the agent,
 				// what this turn's own calls put on the record) is in the
-				// conversation the call is given, and counts as seen.
+				// conversation the call is given, and counts as seen. A
+				// turn made for nothing that happened takes up such a
+				// thing that came before its first call too.
 				if k, ok := r.dueWake(); ok {
 					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
 					tc.wake, fresh = w, true
 				}
 			}
 			if fresh {
-				first := tail == ""
 				if h := r.heldSince(r.turns.seen); h > 0 {
 					// Not answered by what the turn did before it came. One
 					// kept earlier in this turn and not dealt with yet stays
@@ -911,7 +921,7 @@ func (r *Runtime) turn(w wake) {
 					// one made for something else. That is the reminder:
 					// a hold is not sent back with it again.
 					answerDebt, remindedAnswer = true, true
-				} else if first && w.owed && held == 0 {
+				} else if first && owed && held == 0 {
 					held = r.turns.owed
 				}
 				if seq := r.answeredSince(r.turns.seen); seq > 0 {
@@ -935,6 +945,9 @@ func (r *Runtime) turn(w wake) {
 				msgs = state.WithTail(base, tail)
 			}
 		})
+		if end == "not closing" {
+			break
+		}
 		// Every call of a session is the same request but for its messages:
 		// one system prompt, one tool list, one effort, one output ceiling.
 		// Anything that varied would cost the provider's cache of the
@@ -949,7 +962,7 @@ func (r *Runtime) turn(w wake) {
 			}
 			r.sync(func() {
 				closing := r.stillClosing()
-				if w.wait > 0 && !w.event && closing {
+				if w.wait > 0 && closing {
 					// The last title and summary of a session that is
 					// ending is one attempt, like the dedicated call's
 					// (summary.go). Taken for an outage it would be tried
@@ -1016,9 +1029,16 @@ func (r *Runtime) turn(w wake) {
 		if acts == 0 {
 			// A reply that reaches no one. Some are sent back once, off the
 			// record, with the reason; after that it is taken for a hold.
+			// A closing turn whose session stopped ending during the call
+			// sends nothing back: the hold stands, and what came is taken
+			// up as after any turn.
+			closing := true
+			if w.final || w.wait > 0 {
+				r.sync(func() { closing = r.stillClosing() })
+			}
 			var back string
 			switch {
-			case last:
+			case last, !closing:
 			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
 				cut = true
 				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
@@ -1096,10 +1116,11 @@ func (r *Runtime) turn(w wake) {
 		}
 		if w.final || w.wait > 0 {
 			// A closing turn whose session stopped ending ends here. A call
-			// it still wanted is owed (wakeFor) to an ordinary turn.
+			// it still wanted, or one whose tools ran out of its time (on
+			// its last call too), is owed (wakeFor) to an ordinary turn.
 			closing := true
 			r.sync(func() { closing = r.stillClosing() })
-			if !closing && call < maxCalls {
+			if !closing && (call < maxCalls || end == "timeout") {
 				if end == "timeout" || again && end == "done" {
 					end = "not closing"
 				}
@@ -1172,8 +1193,20 @@ func (r *Runtime) turn(w wake) {
 		if asked && end != "error" && end != "interrupted" && end != "timeout" {
 			r.threadAsked(tc.threaded)
 		}
-		if w.final && mustSpeak && !tc.spoke && end != "error" && r.stillClosing() {
-			r.fallbackFinal()
+		if w.final || w.wait > 0 {
+			closing := r.stillClosing()
+			if w.final && mustSpeak && !tc.spoke && end != "error" && closing {
+				r.fallbackFinal()
+			}
+			// One whose session stopped ending before it gave the closing
+			// word, or the last title and summary, leaves it to be asked
+			// for again if the session ends after all (maybeEnd).
+			if !closing && w.final && !tc.spoke {
+				r.turns.finalAsked = false
+			}
+			if !closing && w.wait > 0 && !tc.threaded {
+				r.summary.final = false
+			}
 		}
 	})
 }
@@ -1369,15 +1402,11 @@ func (r *Runtime) afterCallLimit(maxCalls int) {
 }
 
 // stillClosing reports whether the session a closing turn was made for is
-// still ending, as maybeEnd has it: no agent, timer (unless a question nobody
-// can answer is open), phone question or word from the user keeps it going.
-// Loop goroutine.
+// still ending: nothing keeps it open, as maybeEnd has it (keptOpen), and
+// no word from the user waits. Loop goroutine.
 func (r *Runtime) stillClosing() bool {
-	r.relays.mu.Lock()
-	starting := len(r.relays.launching) > 0
-	r.relays.mu.Unlock()
-	kept := (len(r.st.ActiveRelays()) > 0 || starting || len(r.st.ActiveSchedules()) > 0) && (r.st.Question == nil || r.phone != nil)
-	return (r.turns.finalAsked || r.summary.final) && !kept && !r.waitingOnPhone() && r.turns.wakes[wakeUser] <= r.turns.seen
+	kept, _ := r.keptOpen()
+	return (r.turns.finalAsked || r.summary.final) && !kept && r.turns.wakes[wakeUser] <= r.turns.seen
 }
 
 // fallbackFinal makes sure a session with no terminal does not end in
@@ -1396,11 +1425,17 @@ func (r *Runtime) fallbackFinal() {
 	if r.st.Question != nil {
 		b.WriteString("\n\nStill open: " + clipRunes(oneLine(r.st.Question.Text, 300), 300))
 	}
-	// It does not retry on its own once it has ended.
+	// It does not retry on its own once it has ended. An agent can still
+	// be running: a question nobody can answer ends the session anyway
+	// (maybeEnd).
+	running := "Nothing is running now."
+	if active := r.st.ActiveRelays(); len(active) > 0 {
+		running = active[0].Who() + " keeps running in its own terminal."
+	}
 	if r.phone != nil {
-		b.WriteString("\n\nNothing is running now. A reply here picks the session back up.")
+		b.WriteString("\n\n" + running + " A reply here picks the session back up.")
 	} else {
-		b.WriteString("\n\nNothing is running now. `eagent -c` picks the session back up.")
+		b.WriteString("\n\n" + running + " `eagent -c` picks the session back up.")
 	}
 	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: b.String()})
 }
