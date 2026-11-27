@@ -196,6 +196,7 @@ func TestPiHangMarkHoldsWhileStatusSaysWorking(t *testing.T) {
 	// pi settles: the status file says so, and the mark goes.
 	writePiStatus(t, status, piStatus{State: "idle", SessionFile: "/x.jsonl", SessionID: "id", Settled: 1})
 	s.checkScreen(now.Add(6 * time.Second))
+	s.checkScreen(now.Add(7500 * time.Millisecond)) // two checks in a row agree
 	if st := s.Snapshot().State; st != "idle" {
 		t.Fatalf("still %s after pi went idle", st)
 	}
@@ -208,6 +209,7 @@ func TestPiHangMarkWithoutStatusFallsBackToTheScreen(t *testing.T) {
 	now := time.Now()
 	s.state, s.stateAt = "blocked", now.Add(-time.Minute)
 	s.checkScreen(now)
+	s.checkScreen(now) // two checks in a row agree
 	if st := s.Snapshot().State; st != "idle" {
 		t.Fatalf("state %s", st)
 	}

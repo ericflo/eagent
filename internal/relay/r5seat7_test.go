@@ -35,6 +35,7 @@ func TestABulletEndingInAQuotedWorkingLineIsNotBusy(t *testing.T) {
 	s.state, s.hung, s.stateAt, s.lastLine = "blocked", true, now.Add(-11*time.Minute), now.Add(-11*time.Minute)
 	s.mu.Unlock()
 	s.checkScreen(now)
+	s.checkScreen(now) // two checks in a row agree
 	if st := s.Snapshot().State; st != "idle" {
 		t.Errorf("a quiet Claude at its idle prompt stays %s", st)
 	}

@@ -181,15 +181,17 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 		}
 		return 0
 	}
+	// What was claimed is removed only once it is handed over: a hook
+	// stopped in between leaves the claimed files, which nothing takes
+	// again, and never a message removed and not handed over.
 	taken, texts := takeSpool(spool)
+	if len(texts) > 0 {
+		out, _ := json.Marshal(map[string]string{"decision": "block", "reason": strings.Join(texts, "\n\n")})
+		fmt.Fprintln(stdout, string(out))
+	}
 	for _, path := range taken {
 		_ = os.Remove(path)
 	}
-	if len(texts) == 0 {
-		return 0
-	}
-	out, _ := json.Marshal(map[string]string{"decision": "block", "reason": strings.Join(texts, "\n\n")})
-	fmt.Fprintln(stdout, string(out))
 	return 0
 }
 

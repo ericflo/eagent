@@ -93,6 +93,7 @@ func TestR13SPiTurnEndUnderADialogCountsForAHeldSend(t *testing.T) {
 		}
 		later := time.Now().Add(heldGrace)
 		s.leftOvers(later, false)
+		s.checkScreen(later.Add(46 * time.Second)) // the look before: nothing is decided on one
 		s.checkScreen(later.Add(46 * time.Second))
 		if got := deliveredEvents(s); len(got) != 1 || got[0].SendID != "r1" || got[0].Outcome != OutcomeUnconfirmed {
 			t.Errorf("%s: reported %+v, pending %v; want r1 unconfirmed", kind, got, s.Snapshot().Pending)

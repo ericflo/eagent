@@ -196,6 +196,18 @@ func (codexAgent) afterTurn(s *Seat, _ string, text string) error {
 // there (Codex dropped it): see reportLeftOvers.
 func (codexAgent) poll(s *Seat, now time.Time) { s.reportLeftOvers(now) }
 
+// refuses: /new, /clear and /fork start another thread and /resume opens
+// another, each written to a rollout of its own, and Codex says nothing of
+// the move: the seat would stay on the rollout it left and hear nothing
+// after. They are not typed.
+func (codexAgent) refuses(command string) string {
+	switch strings.ToLower(command) {
+	case "/new", "/clear", "/fork", "/resume":
+		return command + " was not typed: it moves Codex to another thread, and Codex does not say which, so eagent would hear nothing from this relay after it. For a new conversation, stop this relay and start it again"
+	}
+	return ""
+}
+
 // codexQueueArgs is the codex queue command for a message. The values go
 // joined to their flags: codex's parser takes a separate "-x ..." for an
 // unknown flag and refuses the command, and "--" does not help there.

@@ -77,6 +77,7 @@ func TestATypedMessageNeverSeenIsReportedUnconfirmed(t *testing.T) {
 	s.mu.Lock()
 	s.stateAt = now.Add(-time.Hour)
 	s.mu.Unlock()
+	s.checkScreen(now) // the look before: nothing is decided on one
 	s.checkScreen(now)
 	if lost := lostReports(s); len(lost) != 1 || lost[0].SendID != "r1" || lost[0].Outcome != OutcomeUnconfirmed {
 		t.Errorf("reports %+v", lost)
