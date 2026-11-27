@@ -148,14 +148,8 @@ func (claudeAgent) poll(s *Seat, now time.Time) {
 	}
 }
 
-// movesSession: /clear starts a new session, /resume opens another.
-func (claudeAgent) movesSession(command string) bool {
-	switch commandName(command) {
-	case "/clear", "/resume":
-		return true
-	}
-	return false
-}
+// movesSessions: /clear starts a new session, /resume opens another.
+func (claudeAgent) movesSessions() {}
 
 // canResume: Claude saves a session only when its first message is sent,
 // and exits at once on --resume of an id it never saved.

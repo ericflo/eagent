@@ -162,12 +162,14 @@ type Seat struct {
 	// typing has read the agent's status and transcript (releaseHeld).
 	looks int
 	held  []heldEvent
-	// moveFrom, moveLook: a command that moves the agent to another
-	// session (sessionMover) was typed at look moveLook (0: none) on
-	// session moveFrom. quietSaid: KindQuiet was sent, and no other event
-	// since (emitAside clears it).
+	// moveFrom, moveLook, moveIdle: one of the agent's own commands (any:
+	// which move it to another session is not kept) was typed on session
+	// moveFrom before look moveLook (0: none), and moveIdle is the first
+	// look from then that found the agent idle (0: none yet). quietSaid:
+	// KindQuiet was sent, and no other event since (emitAside clears it).
 	moveFrom  string
 	moveLook  int
+	moveIdle  int
 	quietSaid atomic.Bool
 	sending   int // Sends under way (Send, until it returns)
 
@@ -549,8 +551,8 @@ type Status struct {
 	Dialog string
 	// Quiet: nothing waits on the agent. It is idle, no dialog holds it,
 	// the seat waits to confirm no send, holds no command's delivered, and
-	// no move a command started is pending (a command that moves the
-	// session: pending until the move is seen, or quietMoveLooks looks).
+	// none of the agent's own commands is pending (until a move to another
+	// session is seen, or quietMoveLooks looks after the agent is idle).
 	// KindQuiet says when it becomes true. A blocked seat is not quiet.
 	Quiet bool
 }
@@ -709,9 +711,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// first), so the record does not take it as acted on before then.
 		s.mu.Lock()
 		s.held = append(s.held, heldEvent{Event{Kind: KindDelivered, SendID: id, OK: true}, s.looks})
-		if m, ok := s.agent.(sessionMover); ok && m.movesSession(text) {
-			s.moveFrom, s.moveLook = s.inner, s.looks+1
-		}
+		s.moveFrom, s.moveLook, s.moveIdle = s.inner, s.looks+1, 0
 		s.mu.Unlock()
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
@@ -1523,22 +1523,15 @@ func (s *Seat) watch() {
 }
 
 // sessionMover is an agent with commands of its own that move it to
-// another session (pi's /new, Claude's /clear): until the move is seen,
-// nothing that waits on the agent being quiet goes ahead.
+// another session (pi's /new, Claude's /clear): it is polled at every
+// look, so a move is seen.
 type sessionMover interface {
-	movesSession(command string) bool
+	movesSessions()
 }
 
-// commandName is a command's first word ("/resume" of "/resume abc").
-func commandName(text string) string {
-	if f := strings.Fields(text); len(f) > 0 {
-		return f[0]
-	}
-	return ""
-}
-
-// quietMoveLooks is how many looks a command that moves the session is
-// waited for when no move shows (Status.Quiet).
+// quietMoveLooks is how many looks, from the first that finds the agent
+// idle after one of its own commands, the command is waited on when no
+// move to another session shows (Status.Quiet).
 const quietMoveLooks = 5
 
 // quietLocked is Status.Quiet. The caller holds s.mu.
@@ -1549,11 +1542,18 @@ func (s *Seat) quietLocked() bool {
 // sayQuiet says (KindQuiet) when the seat has become quiet, at the end of a
 // look: after what the look read, and the moves and deliveries it sent. A
 // move a command started is seen once the seat is on another session and
-// has said so; one that does not show is given up after quietMoveLooks.
+// has said so; one that does not show is given up quietMoveLooks after the
+// first look that finds the agent idle (a command queued while it works
+// runs after the turn).
 func (s *Seat) sayQuiet() {
 	s.mu.Lock()
-	if s.moveLook > 0 && (s.inner != s.moveFrom && !s.refollow || s.looks-s.moveLook >= quietMoveLooks) {
-		s.moveFrom, s.moveLook = "", 0
+	if s.moveLook > 0 {
+		if s.moveIdle == 0 && s.state == "idle" && s.looks >= s.moveLook {
+			s.moveIdle = s.looks
+		}
+		if s.inner != s.moveFrom && !s.refollow || s.moveIdle > 0 && s.looks-s.moveIdle >= quietMoveLooks {
+			s.moveFrom, s.moveLook, s.moveIdle = "", 0, 0
+		}
 	}
 	q := s.quietLocked()
 	s.mu.Unlock()
