@@ -1077,11 +1077,11 @@ func (r *Runtime) sync(fn func()) bool {
 }
 
 // post runs fn on the loop goroutine without waiting; once finish has ended
-// the queue it is not run, and the log says so.
+// the queue it is not run. Nothing is recorded after session.end, so what
+// is refused then (a seat's last news as it is closed, a timer that came
+// due) would not be recorded either.
 func (r *Runtime) post(fn func()) {
-	if !r.enqueue(fn) {
-		r.ui.Log("loop work after the session's end was not run")
-	}
+	r.enqueue(fn)
 }
 
 // append writes an event and folds it into state. Loop goroutine only

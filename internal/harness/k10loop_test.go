@@ -161,9 +161,12 @@ func TestK10AClosingTurnPastTheQueuesEndMakesNoCall(t *testing.T) {
 	}
 }
 
-// Probe (not a bar finding): an ordinary /quit of an interactive session
-// with an agent up. closeRelays closes the seat after endQueue, so the
-// seat watcher's last post is refused; post logs that refusal.
+// An ordinary /quit of an interactive session with an agent up.
+// closeRelays closes the seat after endQueue, so the seat watcher's last
+// post (it drops the seat; nothing for the record) is refused, and post
+// logged that refusal on every such quit. A post refused at the end
+// carries nothing that would be recorded after session.end: it says
+// nothing.
 func TestSR9LoopProbeOrdinaryQuitLogsRefusedLoopWork(t *testing.T) {
 	seat := newFakeSeat("ok")
 	rt, _, done := r10Session(t, seat)
@@ -175,11 +178,9 @@ func TestSR9LoopProbeOrdinaryQuitLogsRefusedLoopWork(t *testing.T) {
 	}
 	for _, l := range rt.ui.(*fakeUI).logged() {
 		if strings.Contains(l, "loop work after the session's end was not run") {
-			t.Logf("PROBE: an ordinary quit logged %q", l)
-			return
+			t.Fatalf("an ordinary quit logged %q", l)
 		}
 	}
-	t.Logf("PROBE: no refused-work line on an ordinary quit")
 }
 
 // Control for the timeout: with the closing word answered, the notice is
