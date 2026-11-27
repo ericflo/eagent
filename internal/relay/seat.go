@@ -439,6 +439,14 @@ func (s *Seat) emit(ev Event) {
 	if ev.Read == 0 {
 		ev.Read = s.readTo.Load()
 	}
+	s.emitAside(ev)
+}
+
+// emitAside is emit for an event that says nothing of how far the record
+// has read: one no line gave, from a goroutine other than the watcher's
+// (Send), or one from a line before the record's mark (history), whose
+// end would move that mark back.
+func (s *Seat) emitAside(ev Event) {
 	select {
 	case s.events <- ev:
 	case <-s.stop:
@@ -601,7 +609,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 				// rather than recording a message, so handed over is
 				// delivered, as typed is below. (A spool hands one over
 				// as text, which arrives as a held message does.)
-				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 			if err == nil || !s.untrack(id) {
 				// Handed over, or already confirmed (by an entry written
@@ -643,7 +651,7 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		// The agent's own command (/goal, /compact): it runs it rather than
 		// recording a message, so there is no arrival to confirm; typed is
 		// delivered.
-		s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+		s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 		return fmt.Sprintf("typed the command into %s", label), nil
 	}
 	switch {
@@ -888,6 +896,10 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 // space or the end. "/home/eric/plan.md has it" is a message.
 func isAgentCommand(text string) bool { return agentCommand.MatchString(strings.TrimSpace(text)) }
 
+// IsAgentCommand is isAgentCommand for the harness: typed into the agent's
+// prompt, such a command runs at once and starts no turn.
+func IsAgentCommand(text string) bool { return isAgentCommand(text) }
+
 var agentCommand = regexp.MustCompile(`^/[A-Za-z][\w:-]*(\s|$)`)
 
 // Interrupt stops what the agent is doing (Escape, unless the agent says
@@ -908,7 +920,7 @@ func normalize(s string) string { return strings.Join(strings.Fields(s), " ") }
 // transcript shows arriving (see arrivals) and returns their ids, oldest
 // first.
 func (s *Seat) matchPending(text string) []string {
-	return s.matchSends(text, time.Time{}, math.MaxInt64)
+	return s.matchSends(text, time.Time{}, math.MaxInt64, false)
 }
 
 // matchSends is matchPending for an entry that starts at pos in the
@@ -917,8 +929,11 @@ func (s *Seat) matchPending(text string) []string {
 // An entry from before the reattach (history, at set) is the arrival only
 // of a restored send recorded no later than the entry: it may have arrived
 // just before the record's last event, but a send of the same words
-// confirmed earlier, or sent after the reattach, is not it.
-func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
+// confirmed earlier, or sent after the reattach, is not it. A newer entry
+// (news) is no restored send's arrival when stamped before that send was
+// recorded: the record's read mark makes such an entry news, and it was
+// written before the send.
+func (s *Seat) matchSends(text string, at time.Time, pos int64, news bool) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cands []int
@@ -936,7 +951,11 @@ func (s *Seat) matchSends(text string, at time.Time, pos int64) []string {
 		} else if at.Nanosecond()%int(time.Millisecond) == 0 {
 			sent = sent.Truncate(time.Millisecond)
 		}
-		if at.IsZero() || p.restored && !at.Before(sent) {
+		ok := at.IsZero() || p.restored && !at.Before(sent)
+		if news {
+			ok = !p.restored || at.IsZero() || !at.Before(sent)
+		}
+		if ok {
 			cands = append(cands, i)
 		}
 	}
@@ -1389,10 +1408,13 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 		s.lastLine = now
 		s.mu.Unlock()
 		var newest time.Time
+		// The end of the last whole line read: the tailer has also read
+		// the start of a line still being written (rest), which is not read.
+		whole := tail.offset - int64(len(tail.rest))
 		for i, line := range lines {
 			// What this line gives is said with how far the transcript was
 			// read: to its end (where the next line starts).
-			end := tail.offset
+			end := whole
 			if i+1 < len(starts) {
 				end = starts[i+1]
 			}
@@ -1417,7 +1439,7 @@ func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 			// record: say how far it was read, so a reattach does not take
 			// it for news.
 			s.silentUser = false
-			s.emit(Event{Kind: KindRead, Read: tail.offset})
+			s.emit(Event{Kind: KindRead, Read: whole})
 		}
 	}
 	return err
@@ -1439,8 +1461,8 @@ func (s *Seat) fold(o obs) {
 		// whether the agent is still in a turn, and whether a send the
 		// record still waits on arrived just before the record ends.
 		if o.kind == "user" && !o.again {
-			for _, id := range s.matchSends(o.text, o.at, o.pos) {
-				s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})
+			for _, id := range s.matchSends(o.text, o.at, o.pos, false) {
+				s.emitAside(Event{Kind: KindDelivered, SendID: id, OK: true})
 			}
 		}
 		s.foldHistory(o)
@@ -1464,7 +1486,7 @@ func (s *Seat) fold(o obs) {
 	case "user":
 		var ids []string
 		if !o.again {
-			ids = s.matchSends(o.text, time.Time{}, o.pos)
+			ids = s.matchSends(o.text, o.at, o.pos, true)
 		}
 		for _, id := range ids {
 			s.emit(Event{Kind: KindDelivered, SendID: id, OK: true})

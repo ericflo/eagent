@@ -38,6 +38,27 @@ func TestK3ATurnWrittenBeforeAHarnessOnlyEventIsReadOnAReattach(t *testing.T) {
 	}
 }
 
+// A9, a review's case: the agent's own command typed while the watcher is
+// folding a line (another goroutine) is confirmed at once; that event is
+// no line's, and does not carry how far the watcher has read (the record
+// would mark that line read before the line's own events are recorded).
+func TestK3AnEventFromASendCarriesNoReadPosition(t *testing.T) {
+	saved := typeSettle
+	typeSettle = 0
+	t.Cleanup(func() { typeSettle = saved })
+	s := newSeat(Spec{}, claudeAgent{}, &fakeHost{alive: true}, "k3cmd", "")
+	s.state = "idle"
+	s.readTo.Store(4096) // the watcher is folding a line that ends there
+	if _, err := s.Send("r1", "/compact", "queue"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range drain(s.events) {
+		if ev.Kind == KindDelivered && ev.Read != 0 {
+			t.Fatalf("the command's confirmation says the transcript was read to %d", ev.Read)
+		}
+	}
+}
+
 // A9, its marks: what a read gives is said with how far the transcript was
 // read (the end of the line it came from), and a read whose only news is a
 // user line that confirmed nothing is followed by a mark of how far it was
