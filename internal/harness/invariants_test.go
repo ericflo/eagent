@@ -142,10 +142,11 @@ func invAfterRun(r *Runtime) {
 		invFail("%s: after the session ended, %s is %s in the loop and %s rebuilt from the record", test, d[0], d[1], d[2])
 	}
 	// A send can wait to be confirmed only while its agent is there to
-	// confirm it.
+	// confirm it. (A message of the user's that a switch left to its brief
+	// keeps no outcome of its own: briefedSends.)
 	for name, rel := range st.Relays {
-		if (rel.Ended || rel.State == "exited") && len(rel.Undelivered) > 0 {
-			invFail("%s: %d sends are still waiting on %s, which is %s", test, len(rel.Undelivered), name, rel.State)
+		if n := len(rel.Undelivered) - len(briefedSends(st, rel)); (rel.Ended || rel.State == "exited") && n > 0 {
+			invFail("%s: %d sends are still waiting on %s, which is %s", test, n, name, rel.State)
 		}
 	}
 }

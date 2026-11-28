@@ -38,8 +38,9 @@ func (t *tailer) next() ([][]byte, []int64, error) {
 	}
 	t.size = st.Size()
 	if st.Size() < t.offset {
-		// Truncated or replaced: start again from the top.
-		t.offset, t.rest = 0, nil
+		// Truncated or replaced: start again from the top, which is the
+		// start of a line.
+		t.offset, t.rest, t.skipPartial = 0, nil, false
 	}
 	t.atEnd = false
 	if st.Size() == t.offset {

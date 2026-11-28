@@ -395,7 +395,8 @@ func (r *Runtime) enqueueSend(name string, seat relaySeat, items ...heldSend) {
 // replaced) are not typed: they are recorded undelivered, as a send to a
 // stopped relay is. Once the session has ended nothing more is taken from
 // the queue: what is left in it is recorded not sent by finish, which
-// reads it under the same lock. Never on the loop goroutine.
+// reads it under the same lock, as it does a send whose typing the loop
+// never took the end of (typing). Never on the loop goroutine.
 func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 	for {
 		r.relays.mu.Lock()
@@ -407,7 +408,7 @@ func (r *Runtime) drainSends(seat relaySeat, q *sendQueue) {
 		}
 		if len(q.items) == 0 || ended {
 			q.running = false
-			if r.relays.queues[seat] == q && len(q.items) == 0 {
+			if r.relays.queues[seat] == q && len(q.items) == 0 && q.typing == "" {
 				delete(r.relays.queues, seat)
 			}
 			close(q.idle)
@@ -489,11 +490,13 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 // settleSend ends the typing of a send: on the loop goroutine, in the one
 // step that stops naming it as being typed, a failure is recorded, and so
 // is a send typed into a process that went meanwhile (nothing will confirm
-// it). No exit or restart seen in between can report it too. A send never
-// typed (untyped) that the loop did not take, as it has closed, is back at
-// the head of its queue, which finish records not sent; not one a switch's
-// brief carries, which stays the brief's either way. Then its waiter, if
-// any, is told. Not on the loop goroutine.
+// it). No exit or restart seen in between can report it too. When the loop
+// did not take it, as it has closed, finish records how it went: a send
+// never typed (untyped) is back at the head of its queue, not sent (not
+// one a switch's brief carries, which stays the brief's either way), and
+// one that was typed is still named as being typed, with what became of
+// its agent meanwhile. Then its waiter, if any, is told. Not on the loop
+// goroutine.
 func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
 	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
@@ -523,6 +526,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	})
 	if !ran && untyped {
 		r.relays.mu.Lock()
+		q.typing = ""
 		if r.relays.carried[h.id] == "" {
 			q.items = append([]heldSend{h}, q.items...)
 		}
@@ -949,15 +953,9 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		// arrival can no longer show. Settled as at a stop; what the
 		// switch holds is passed on below. (After the brief: a switch's
 		// end, start and brief are neighbours on the record.)
-		skip := map[string]bool{}
+		except := briefedSends(r.st, rel)
 		for _, h := range held {
-			skip[h.id] = true
-		}
-		var except []string
-		for _, s := range unresolvedSends(r.st, rel) {
-			if d, ok := sendRecord(r.st, s.ID); skip[s.ID] || !ok || d.From != "eagent" {
-				except = append(except, s.ID)
-			}
+			except = append(except, h.id)
 		}
 		r.settleExited(rel, except...)
 	}
@@ -1377,6 +1375,24 @@ func (r *Runtime) takeBack(rel *state.Relay, id, mode, how string) bool {
 	}
 	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
 	return true
+}
+
+// briefedSends are the sends rel still waits on that are left to the brief
+// of the switch that handed its work over: the user's, which that brief
+// quotes whole (eagent's own it does not quote). They keep no outcome of
+// their own. None for an agent that was not handed over. From the record
+// alone.
+func briefedSends(st *state.State, rel *state.Relay) []string {
+	if _, ok := handedOver(st)[holder{rel.Name, rel.StartSeq}]; !ok {
+		return nil
+	}
+	var out []string
+	for _, s := range unresolvedSends(st, rel) {
+		if d, ok := sendRecord(st, s.ID); !ok || d.From != "eagent" {
+			out = append(out, s.ID)
+		}
+	}
+	return out
 }
 
 // unresolvedSends are the sends the record still waits on for rel, oldest
@@ -2312,10 +2328,11 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		fmt.Fprintf(&b, " %s was started to take over in between and stopped before it finished a turn; it may have changed files.", strings.Join(ho.via, ", then "))
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
-	// waits: the record has no word of how a send of it went. The brief is
-	// such a message's only way to the new agent, and the switch leaves it
-	// without an outcome on that account: it is quoted whole, however many
-	// came after it.
+	// waits: the record has no word of how a send of it went, and no brief
+	// before this one gave it to an agent (reached). The brief is such a
+	// message's only way to the new agent, and the switch leaves it without
+	// an outcome on that account: it is quoted whole, however many came
+	// after it.
 	type quote struct {
 		text  string
 		waits bool
@@ -2333,6 +2350,29 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		names[n.name] = true
 	}
 	handed := handedOver(r.st)
+	// reached: a message put to the agent h, and never seen arriving
+	// there, has reached an agent since. The switch away from h quoted it
+	// in its brief, and that brief arrived or the agent it was typed into
+	// has finished a turn (or the same of the switch after that one). It
+	// is then one of the user's instructions like the others: not this
+	// brief's to carry, nor this brief's to lose.
+	reached := func(h holder) bool {
+		for steps := 0; steps <= len(handed); steps++ {
+			next, ok := handed[h]
+			if !ok {
+				return false
+			}
+			rel := r.st.RelayAt(next.name, next.start)
+			if rel == nil {
+				return false
+			}
+			if _, brief := briefedBy(r.st, rel); rel.Turns > 0 || r.st.SendOutcome(brief) == state.SendArrived {
+				return true
+			}
+			h = next
+		}
+		return false
+	}
 	quoted := map[string]bool{}
 	// A user message sent more than once (forwarded again after a send
 	// that did not go) is one instruction: quoted once, and not at all
@@ -2366,11 +2406,15 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		// holder of a name, one that was stopped rather than handed over,
 		// or another agent altogether.
 		ours := names[d.Name]
-		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil {
+		at := r.st.RelayAt(d.Name, ev.Seq)
+		if at != nil {
 			ours = inChain(handed, holder{d.Name, at.StartSeq}, targets)
 		}
+		waits := func() bool {
+			return !r.hasOutcome(d.ID) && (at == nil || !reached(holder{d.Name, at.StartSeq}))
+		}
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
-			if i, ok := bySeq[d.Seq]; ok && ours && d.From == "user" && d.Seq > 0 && !pending[d.ID] && !r.hasOutcome(d.ID) {
+			if i, ok := bySeq[d.Seq]; ok && ours && d.From == "user" && d.Seq > 0 && !pending[d.ID] && waits() {
 				texts[i].waits = true // sent again, and this send of it waits
 				carried[d.ID] = true
 			}
@@ -2384,8 +2428,8 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 			quotedSeq[d.Seq] = true
 			bySeq[d.Seq] = len(texts)
 		}
-		texts = append(texts, quote{d.Text, !r.hasOutcome(d.ID)})
-		if !r.hasOutcome(d.ID) {
+		texts = append(texts, quote{d.Text, waits()})
+		if waits() {
 			carried[d.ID] = true
 		}
 	}

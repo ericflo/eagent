@@ -125,13 +125,17 @@ func (r *Runtime) repickRelay(name string, pick relayPick) (string, error) {
 	}
 	then := " it starts again with " + r.pickText(rel, pick)
 	switch {
+	case pick == runs && job != nil:
+		// What the start runs stays the change that waits until the
+		// start is done (restartRelayWith); a newer one is taken back.
+		r.setWaitingPick(name, pick)
+		r.syncRelaySettings()
+		r.publishRelayMeta()
+		return rel.Who() + " is already starting again with " + r.pickText(rel, pick) + ".", nil
 	case pick == runs:
 		delete(r.relayNext, name) // a change that waited is taken back
 		r.syncRelaySettings()
 		r.publishRelayMeta()
-		if job != nil {
-			return rel.Who() + " is already starting again with " + r.pickText(rel, pick) + ".", nil
-		}
 		return rel.Who() + " already runs that.", nil
 	case job != nil || rel.State == "working" || rel.State == "starting" || rel.Awaited() > 0 || rel.State == "idle" && time.Since(rel.LastEventAt) < repickGrace:
 		r.setWaitingPick(name, pick)

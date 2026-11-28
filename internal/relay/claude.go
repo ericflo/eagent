@@ -202,9 +202,11 @@ func RunStopHook(spool string, stdin io.Reader, stdout io.Writer) int {
 	if json.Unmarshal(raw, &in) == nil && in.Event == "SessionStart" {
 		if in.ID != "" {
 			if out, err := json.Marshal(in.claudeSession); err == nil {
+				// Nothing may have been written for this relay yet: its
+				// directory is made by whoever writes there first.
 				file := claudeSessionFile(spool)
 				tmp := file + ".tmp"
-				if os.WriteFile(tmp, out, 0o644) == nil {
+				if os.MkdirAll(filepath.Dir(file), 0o755) == nil && os.WriteFile(tmp, out, 0o644) == nil {
 					_ = os.Rename(tmp, file)
 				}
 			}

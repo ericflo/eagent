@@ -202,12 +202,14 @@ func (r *Runtime) pollInbox() {
 			_ = os.Remove(path)
 		case id != "" && (r.inboxTaken[id] || r.sess.Stale[name] && r.inboxRecorded(id)):
 			_ = os.Remove(path)
-		case msg.Type == "stop" && r.sess.Stale[name]:
-			// A stop that was already in the inbox when this run took the
-			// session lock was meant for an earlier run; it must not quit
-			// this one before its first tick. Messages and answers are kept.
+		case r.sess.Stale[name] && inboxQuit(msg):
+			// A stop or a /quit that was already in the inbox when this
+			// run took the session lock was meant for an earlier run (one
+			// that was ending leaves it, below; one may be written after a
+			// run's last look); it must not quit this one before its first
+			// tick. Messages and answers are kept.
 			_ = os.Remove(path)
-			r.ui.Log("inbox: ignoring a stop left by an earlier run")
+			r.ui.Log("inbox: ignoring a stop or /quit left by an earlier run")
 		case leaving || (r.ending || r.loopGone()) && (id == "" || !inboxWords(msg, r.ownCommand)):
 			// A run that is ending carries out nothing more (its work
 			// would fail, or its answer go unread once the loop has
@@ -289,6 +291,23 @@ func inboxWords(msg InboxMessage, command func(line, source string) bool) bool {
 		return true
 	case "message", "":
 		return !command(strings.TrimSpace(msg.Text), msg.From)
+	}
+	return false
+}
+
+// inboxQuit reports whether an inbox message ends the session: a stop, or
+// the command that quits (slashCommandFrom).
+func inboxQuit(msg InboxMessage) bool {
+	if msg.Type == "stop" {
+		return true
+	}
+	fields := strings.Fields(msg.Text)
+	if (msg.Type != "message" && msg.Type != "") || len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "/quit", "/exit", "/q":
+		return true
 	}
 	return false
 }

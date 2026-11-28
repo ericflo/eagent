@@ -166,7 +166,12 @@ func (s *Service) CheckRoutes(cfg config.Config, recorded ...config.ModelRoute) 
 			}
 			return fmt.Errorf("%s is not a key variable registered for %s; update the server registration or edit %s", a.APIKeyEnv, pr.Label, config.File(s.Project))
 		}
-		hostOK := config.KnownBaseURL(a.BaseURL)
+		// A route with no address written sends nothing anywhere: there is
+		// no host to refuse (an inline summarizer may keep a field written
+		// for it, which is no route). One that is called and has none is a
+		// configuration that does not load (config.Problems), not this
+		// check's to report.
+		hostOK := a.BaseURL == "" || config.KnownBaseURL(a.BaseURL)
 		keyOK := a.APIKeyEnv == "" || config.KnownKeyEnv(a.APIKeyEnv)
 		for _, sa := range saved {
 			if strings.TrimRight(sa.BaseURL, "/") == trimmed {
@@ -350,7 +355,8 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// that variable's too: the window of the environment's model is not
 	// written. A variable naming the model the route already has moved
 	// nothing (Resolve shows the model as the layers'), and the window
-	// stays the user's.
+	// stays the user's; unless the form picks another model there: the
+	// variable keeps that pick out of the file, and its window with it.
 	var res *config.Resolution
 	resolved := func() *config.Resolution {
 		if res == nil {
@@ -359,15 +365,23 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		}
 		return res
 	}
-	for _, route := range []string{"/model", "/summarizer/model"} {
-		name, ok := env[route+"/model"]
+	route := func(c *config.Config, ptr string) *config.ModelRoute {
+		if ptr == "/model" {
+			return &c.Model
+		}
+		return c.Summarizer.Model
+	}
+	for _, ptr := range []string{"/model", "/summarizer/model"} {
+		name, ok := env[ptr+"/model"]
 		if !ok {
 			continue
 		}
-		if moved, _ := resolved().EnvMoved(route); moved {
-			if _, has := env[route+"/context_tokens"]; !has {
-				env[route+"/context_tokens"] = name
-			}
+		moved, _ := resolved().EnvMoved(ptr)
+		if want, runs := route(&cfg, ptr), route(&resolved().Effective, ptr); want != nil && runs != nil && want.Model != runs.Model {
+			moved = true
+		}
+		if _, has := env[ptr+"/context_tokens"]; moved && !has {
+			env[ptr+"/context_tokens"] = name
 		}
 	}
 	var onDisk map[string]json.RawMessage
@@ -395,12 +409,6 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// window in force is reported skipped as that variable's. A save told
 	// to write over the environment (AllowShadow) writes the window it was
 	// given, as it writes the rest.
-	route := func(c *config.Config, ptr string) *config.ModelRoute {
-		if ptr == "/model" {
-			return &c.Model
-		}
-		return c.Summarizer.Model
-	}
 	var loaded config.Config
 	haveLoaded := len(b.Loaded) > 0 && string(b.Loaded) != "null" && json.Unmarshal(b.Loaded, &loaded) == nil
 	for _, ptr := range []string{"/model", "/summarizer/model"} {

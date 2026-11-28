@@ -17,6 +17,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -585,7 +586,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			return resp, nil
 		}
 		if ctx.Err() != nil {
-			return nil, err // stopped, or out of time
+			return nil, callErr{err, client.Endpoint} // stopped, or out of time
 		}
 		if networkDown(err) {
 			// The provider cannot be reached at all (no DNS, no route, the
@@ -608,7 +609,7 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 			}
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, callErr{ctx.Err(), client.Endpoint}
 			case <-time.After(min(time.Duration(offline)*offlineWait, 4*offlineWait)):
 			}
 			continue
@@ -639,7 +640,8 @@ func (r *Runtime) complete(ctx context.Context, who string, req llm.Request, obs
 
 // callErr is a model call's failure with the route the call was made on,
 // which need not be the one its actor's calls are on by the time the
-// failure is read (onRouteInUse).
+// failure is read (onRouteInUse). Every failure of a call that was made
+// is one: refused, cut off, or given up while the network was down.
 type callErr struct {
 	error
 	on llm.Endpoint
@@ -1306,6 +1308,26 @@ queued:
 			gone.Time = rel.LastEventAt
 		}
 		r.appendOutcomeDirect(gone)
+	}
+	// A send whose typing ended after the loop did (settleSend), into an
+	// agent that was stopped or had exited meanwhile (settleExited left it
+	// to its typing's end): nothing will confirm it, and that is recorded
+	// now, as the loop would have. One a switch's brief carries stays the
+	// brief's.
+	r.relays.mu.Lock()
+	var typed []*sendQueue
+	for _, q := range r.relays.queues {
+		if q.typing != "" && q.gone != "" {
+			typed = append(typed, q)
+		}
+	}
+	r.relays.mu.Unlock()
+	slices.SortFunc(typed, func(a, b *sendQueue) int { return strings.Compare(a.name, b.name) })
+	for _, q := range typed {
+		d, _ := sendRecord(r.st, q.typing)
+		if r.leftToBrief(q.typing) == "" && !r.hasOutcome(q.typing) && !r.takeBack(q.goneRel, q.typing, d.Mode, q.gone) {
+			r.append(goneUnconfirmed(q.goneRel.Name, q.typing, q.gone))
+		}
 	}
 	if r.turns.silent.Count > 0 {
 		r.appendDirect(event.New(event.Checks, event.ActorEagent, r.turns.silent))

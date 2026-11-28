@@ -851,17 +851,34 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	if inForce, err := CurrentLayers(s.Project, s.Preset, s.Bundle); err == nil {
 		layers = inForce
 	}
-	// A dedicated summarizer with no route written calls the main model's.
-	// An edit of its route starts from that one, so a model picked alone
-	// keeps the provider it is reached by. A route written as null is none.
-	// Where a saved preset in force gives the summarizer its route, the
-	// edit is of that one, and only the fields it names are written;
-	// unless the file itself makes the summarizer dedicated: a field alone
-	// there would not load without that preset.
+	// The route the file writes for the summarizer is whole where the file
+	// needs it whole: where the file itself makes the summarizer dedicated
+	// (part of a route there loads only under a saved preset that gives
+	// the rest), and where nothing in force gives the summarizer a route
+	// (a model picked alone keeps the provider it is reached by). There a
+	// change that sets a field of a route the file does not have yet, or
+	// that makes a summarizer dedicated in a file with part of one, also
+	// writes what the route lacks, from the main model's: with no route
+	// written, a dedicated summarizer calls that one. Elsewhere a saved
+	// preset in force gives the route, the edit is of that one, and only
+	// the fields it names are written. The mode is the one this change
+	// leaves. A route written as null is none.
 	mode, _ := pointerValue(values, "/summarizer/mode")
-	if v, written := pointerValue(values, "/summarizer/model"); picks && (!written || v == nil) && (layers.Summarizer.Model == nil || mode == config.SummarizerDedicated) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
-		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
-	}) {
+	sets := false // a field of the summarizer's route
+	for _, e := range p.Edits {
+		if e.Key == "/summarizer/mode" {
+			mode = nil
+			if e.Op == "set" {
+				mode = e.Value
+			}
+		}
+		sets = sets || e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
+	}
+	own, _ := pointerValue(values, "/summarizer/model")
+	has, _ := own.(map[string]any)
+	first := sets && len(has) == 0 && (mode == config.SummarizerDedicated || layers.Summarizer.Model == nil)
+	left := map[string]any{"summarizer": map[string]any{"mode": mode, "model": own}}
+	if picks && (first || needsPreset(left) && !needsPreset(values)) {
 		// The route as the layers write it: a variable's value is not the
 		// file's to keep.
 		seed := layers.Model
@@ -869,18 +886,27 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 		var route map[string]any
 		b, _ := json.Marshal(seed)
 		_ = json.Unmarshal(b, &route)
-		// The whole route is written, so the proposal must be allowed
-		// every field of it: one it may not write (its grant does not
-		// cover where a model is reached, or its key variable) is not
+		// The rest of the route is written, so the proposal must be
+		// allowed every field of it: one it may not write (its grant does
+		// not cover where a model is reached, or its key variable) is not
 		// written for it, and its undo could not take it back.
 		for _, f := range before.Descriptor.Fields {
 			leaf, under := strings.CutPrefix(f.Key, "/summarizer/model/")
-			if _, seeded := route[leaf]; under && seeded && !f.Writable {
-				err = &pickRefused{fmt.Sprintf("the project file gives the summarizer no model of its own yet, and giving it one there writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
-				return
+			_, seeded := route[leaf]
+			if _, had := has[leaf]; !under || !seeded || had || f.Writable {
+				continue
 			}
+			err = &pickRefused{fmt.Sprintf("the project file gives the summarizer no whole model of its own yet, and giving it one there writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
+			return
+		}
+		for leaf, v := range has {
+			route[leaf] = v
 		}
 		setPointer(values, "/summarizer/model", route, false)
+	}
+	var named string // the preset the file names, before this change
+	if v, _ := pointerValue(values, "/preset"); v != nil {
+		named, _ = v.(string)
 	}
 	for _, e := range p.Edits {
 		if e.Key == "/add_server_url" || e.Key == "/servers" {
@@ -901,9 +927,17 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	// summarizer's route above is seeded from: what the environment makes
 	// of a route is not the file's.
 	if picks {
-		if err = s.routePicks(values, p.Edits, layers, before.Descriptor); err != nil {
+		if err = s.routePicks(values, p.Edits, layers, named, before.Descriptor); err != nil {
 			return
 		}
+	}
+	// No change leaves the file with part of a route for a summarizer it
+	// makes dedicated, where it had none or a whole one (one the proposal
+	// unsets a field of): that file loads only under a saved preset that
+	// gives the rest, and without it cannot be read here at all.
+	if was, _ := fileValues(res.File.Raw); picks && needsPreset(values) && !needsPreset(was) {
+		err = &pickRefused{"the project file would make the summarizer dedicated with only part of a model of its own, and would then load only with a saved preset that gives the rest; nothing was changed"}
+		return
 	}
 	var candidate []byte
 	candidate, err = json.MarshalIndent(values, "", "  ")
@@ -935,6 +969,25 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	return
 }
 
+// needsPreset reports whether a project file's values make the summarizer
+// dedicated and write only part of a route for it. The loader takes a
+// route as written, so that file loads only under a saved preset that
+// gives the rest.
+func needsPreset(values map[string]any) bool {
+	mode, _ := pointerValue(values, "/summarizer/mode")
+	own, _ := pointerValue(values, "/summarizer/model")
+	if has, _ := own.(map[string]any); mode != config.SummarizerDedicated || len(has) == 0 {
+		return false
+	}
+	var route config.ModelRoute
+	raw, _ := json.Marshal(own)
+	_ = json.Unmarshal(raw, &route)
+	alone := config.Config{Summarizer: config.Summarizer{Mode: config.SummarizerDedicated, Model: &route}}
+	return slices.ContainsFunc(alone.Problems(), func(p config.Problem) bool {
+		return p.Severity == "error" && strings.HasPrefix(p.Path, "/summarizer/model")
+	})
+}
+
 // routePicks gives a route whose model or base_url a proposal changes the
 // rest of what that model at that provider takes, the way a pick in the
 // local editor does: its protocol, key variable, an effort it accepts, and
@@ -942,14 +995,18 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 // sets itself, or one the connector may not write, is left as it is. A
 // model no list knows gets the provider's protocol and key variable when
 // the address changes, keeps the rest of the route, and its window becomes
-// unknown. The fallback is kept, as the local editor keeps it.
-func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, d control.Descriptor) error {
+// unknown. The fallback is kept, as the local editor keeps it. named is
+// the preset the file named before the proposal's edits.
+func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior config.Config, named string, d control.Descriptor) error {
 	writable, locked := map[string]bool{}, map[string]string{}
 	for _, f := range d.Fields {
 		writable[f.Key], locked[f.Key] = f.Writable, f.LockedReason
 	}
-	names := func(key string) bool {
-		return slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == key })
+	// sets says the proposal gives a field a value of its own. One it
+	// unsets takes what the layers give, like one it leaves alone (the
+	// settings page unsets the file's model beside a preset it chooses).
+	sets := func(key string) bool {
+		return slices.ContainsFunc(edits, func(e control.Edit) bool { return e.Key == key && e.Op == "set" })
 	}
 	raw, err := json.Marshal(values)
 	if err != nil {
@@ -968,8 +1025,10 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	// chosen or unset, /default_config, can bring another preset with it
 	// and is no pick: the file's own route is not that change's to remove.)
 	// The pick is the preset the proposal leaves the file naming ("" for
-	// none), whatever a layer above the file then makes of it: where that
-	// layer names the preset, the check below refuses the pick.
+	// none) where the file named another, whatever a layer above the file
+	// names or then makes of it: the file's own choice of model goes all
+	// the same, and where that layer keeps another model running, the
+	// check below refuses the pick.
 	asked := ""
 	if v, _ := pointerValue(values, "/preset"); v != nil {
 		asked, _ = v.(string)
@@ -977,7 +1036,10 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 	if canon, ok := config.ResolvePreset(asked); ok {
 		asked = canon
 	}
-	presetPick := asked != prior.Preset && names("/preset") && !names("/model/model") && !names("/model/base_url")
+	if canon, ok := config.ResolvePreset(named); ok {
+		named = canon
+	}
+	presetPick := asked != named && !sets("/model/model") && !sets("/model/base_url")
 	if presetPick {
 		// The file's own choice of model and of where it is reached goes,
 		// by the rule `eagent presets use` and a session's pick have
@@ -996,13 +1058,13 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 		_ = json.Unmarshal(rest["model"], &left)
 		dropped := false
 		for leaf := range was {
-			if _, kept := left[leaf]; !kept && leaf != "fallback" && !names("/model/"+leaf) && writable["/model/"+leaf] {
+			if _, kept := left[leaf]; !kept && leaf != "fallback" && !sets("/model/"+leaf) && writable["/model/"+leaf] {
 				setPointer(values, "/model/"+leaf, nil, true)
 				dropped = true
 			}
 		}
 		if dropped {
-			return s.routePicks(values, edits, prior, d)
+			return s.routePicks(values, edits, prior, named, d)
 		}
 		// What then runs must be the preset's route (the defaults', when
 		// the preset was unset), but for what the proposal names. Where a
@@ -1021,7 +1083,7 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 				{"protocol", after.Model.Protocol, want.Model.Protocol},
 				{"api_key_env", after.Model.APIKeyEnv, want.Model.APIKeyEnv},
 			} {
-				if f.now == f.want || names("/model/"+f.leaf) {
+				if f.now == f.want || sets("/model/"+f.leaf) {
 					continue
 				}
 				why := "set outside the project file"
