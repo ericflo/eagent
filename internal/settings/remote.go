@@ -604,6 +604,8 @@ func (s *Service) SaveEffectiveAsPreset(editor *config.Editor, name string) (str
 
 // ValidateServerEdits checks a proposal containing /add_server_url or /servers
 // against the current snapshot and grant without touching disk or network.
+// The proposal's other edits are judged when they are prepared, after the
+// servers are in place, except a preset pick that would be refused.
 func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (RemoteView, error) {
 	before, err := s.RemoteSnapshot(grant)
 	if err != nil {
@@ -630,8 +632,21 @@ func (s *Service) ValidateServerEdits(p control.Proposal, grant control.Grant) (
 			return RemoteView{}, err
 		}
 	}
+	// A preset pick in the same proposal that is refused (routePicks) is
+	// refused here, before a server is touched: its refusal says nothing
+	// was changed. What else the file's edits come to is judged once the
+	// servers are in place, as they may name one of them.
+	if _, _, _, err := s.Prepare(p, grant); errors.As(err, new(*pickRefused)) {
+		return RemoteView{}, err
+	}
 	return before, nil
 }
+
+// pickRefused is the refusal of a preset pick whose preset would not run
+// as it is (routePicks). Nothing is written for a proposal it refuses.
+type pickRefused struct{ why string }
+
+func (e *pickRefused) Error() string { return e.why }
 
 func serverSpecs(v any) ([]config.SyncServerSpec, error) {
 	var specs []config.SyncServerSpec
@@ -998,7 +1013,7 @@ func (s *Service) routePicks(values map[string]any, edits []control.Edit, prior 
 				if after.Preset == "" {
 					chosen = fmt.Sprintf("the defaults (%s @ %s) would not run as they are", want.Model.Model, want.Model.BaseURL)
 				}
-				return fmt.Errorf("eagent's %s, so %s; nothing was changed", strings.Join(parts, ", and its "), chosen)
+				return &pickRefused{fmt.Sprintf("eagent's %s, so %s; nothing was changed", strings.Join(parts, ", and its "), chosen)}
 			}
 		}
 	}
