@@ -120,7 +120,7 @@ func TestSR4AfterTurnCommandTypedIntoAnIdleAgentLeavesTheChangeWaitingForEver(t 
 	look := func() bool {
 		rt.sync(func() {
 			launching = rt.relays.launch("pi") != nil
-			_, _, waiting = rt.nextPick("pi")
+			_, waiting = rt.waitingPick("pi")
 			st = rt.st.Relays["pi"].State
 			awaited = rt.st.Relays["pi"].Awaited()
 		})

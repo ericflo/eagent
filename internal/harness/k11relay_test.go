@@ -2,7 +2,6 @@ package harness
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -340,36 +339,4 @@ func TestSR8AStopsLateSettleLeavesTheStoppedAgentsSendUnresolved(t *testing.T) {
 	if got := deliveredFor(rt, typed); len(got) != 1 {
 		t.Errorf("%s, typed into the agent that was stopped: outcomes %+v; want one (unconfirmed: the agent was stopped)", typed, got)
 	}
-}
-
-// The relay reviewer's suspicion: a send's failed outcome and the agent's
-// exit come in the same look while a change waits for its turn. The
-// failed outcome looks at the waiting change (appendOutcome) while the
-// record still says idle; the seat already says exited. The exit rule
-// holds there too: an agent that exited is not started again; the change
-// is what its next start runs.
-func TestK11AFailedOutcomeInTheExitsLookDoesNotRestartTheExitedAgent(t *testing.T) {
-	seat := newFakeSeat("one")
-	useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
-	rt := newLaunchRuntime(t)
-	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
-	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
-	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
-		t.Fatalf("repick in a turn: %q", msg)
-	}
-	rt.sync(func() { // one look, said at once, before the loop takes any of it
-		seat.emit(relay.Event{Kind: relay.KindState, State: "idle"},
-			relay.Event{Kind: relay.KindDelivered, SendID: "r9", OK: false, Outcome: relay.OutcomeUnconfirmed, Detail: "never showed up"},
-			relay.Event{Kind: relay.KindState, State: "exited", Detail: "$ "})
-	})
-	waitFor(t, "the failed outcome recorded", func() bool { return len(deliveredFor(rt, "r9")) > 0 })
-	rt.sync(func() {}) // and the exit, after it
-	if k1Restarting(rt) {
-		t.Fatal("the agent that exited was started again by the waiting change")
-	}
-	rt.sync(func() {
-		if _, ok, waiting := rt.nextPick("codex"); !ok || waiting {
-			t.Errorf("after the exit: change kept %v, waiting %v; want it kept for the next start", ok, waiting)
-		}
-	})
 }

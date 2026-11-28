@@ -23,7 +23,7 @@ func TestR9AModelChangeForAnAgentBeingReplacedIsRefused(t *testing.T) {
 	g.release <- struct{}{}
 	recv(t, sw, "switch")
 	rt.sync(func() {
-		if _, _, waiting := rt.nextPick("codex"); waiting {
+		if _, waiting := rt.waitingPick("codex"); waiting {
 			t.Errorf("a change is left waiting for codex after it was replaced")
 		}
 	})

@@ -522,9 +522,10 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 			// For the record that was settled, not whatever holds the name
 			// now (a start under it since).
 			if !r.takeBack(goneRel, h.id, h.mode, gone) {
-				r.appendOutcome(goneUnconfirmed(goneRel.Name, h.id, gone))
+				r.append(goneUnconfirmed(goneRel.Name, h.id, gone))
 			}
 		}
+		r.applyWaitingRepick(q.name) // a typing that failed may have been all it waited on
 	})
 	if !ran && untyped {
 		r.relays.mu.Lock()
@@ -579,25 +580,7 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 	if r.hasOutcome(id) {
 		return
 	}
-	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
-}
-
-// appendOutcome records how a send ended (relay.delivered); every outcome
-// the harness writes goes through here. One that did not arrive, of a
-// relay between turns whose terminal is up, may have been the last thing
-// on its way to the agent, with nothing after it for the seat to say
-// (KindQuiet goes out only after other news): a change waiting for the
-// relay is looked at again (applyWaitingRepick, which asks the seat).
-// Loop goroutine.
-func (r *Runtime) appendOutcome(ev event.Event) {
-	r.append(ev)
-	var d event.RelayDeliveredData
-	if ev.Decode(&d) != nil || d.OK {
-		return
-	}
-	if rel := r.st.Relays[d.Name]; rel != nil && rel.State == "idle" && r.relays.get(d.Name) != nil {
-		r.applyWaitingRepick(d.Name)
-	}
+	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
 }
 
 // prepareLaunch settles what a start launches. Loop goroutine (or before
@@ -749,7 +732,7 @@ func (job *relayLaunch) run() {
 func (r *Runtime) recordTakenBack(name string, ids []string) {
 	for _, id := range ids {
 		if !r.hasOutcome(id) {
-			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, name), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, name), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent was started again"}))
 		}
 	}
 }
@@ -817,14 +800,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		}
 	}
 	r.startFailed = err != nil
-	// The change this relay was to start with is done with: one waiting
-	// that this start ran or that failed, one kept for its next start once
-	// a start has run, any once the relay was stopped (it was for the agent
+	// The change this start ran is no longer one that waits; nor is any once
+	// the start failed, or once the relay was stopped (it was for the agent
 	// stopped: a start under a stopped relay's name runs what it is asked).
-	// A newer one waiting stays, for below; a kept one survives a failure.
-	pick, ok, waiting := r.nextPick(job.name)
-	if prev := r.st.Relays[job.name]; prev != nil && prev.Ended || ok && (waiting && (err != nil || pick == job.pick) || !waiting && err == nil) {
-		r.setNextPick(job.name, nil, false)
+	// A newer one stays and applies once the new agent is between turns.
+	if pick, ok := r.relayNext[job.name]; ok {
+		if prev := r.st.Relays[job.name]; err != nil || pick == job.pick || prev != nil && prev.Ended {
+			delete(r.relayNext, job.name)
+		}
 	}
 	if err != nil {
 		var waiting []string // held for the start: reported below
@@ -860,7 +843,7 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 				h.done <- sendResult{err: failed}
 				continue
 			}
-			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: firstNonEmpty(h.on, job.replaces), ID: h.id, OK: false, Outcome: event.DeliveryNotSent, Detail: clipRunes("the agent could not start again: "+err.Error(), 2000)}))
 		}
 		r.syncRelaySettings()
 		return "", err
@@ -977,16 +960,6 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 	}
 	if job.drained != nil {
 		queue = append(queue, heldSend{barrier: true, done: job.drained})
-	}
-	if pick, ok, waiting := r.nextPick(job.name); ok && waiting && job.replaces == job.name {
-		// A newer change waited for this restart (one equal to it was
-		// dropped above): it replaces the agent just started now, and what
-		// waited goes to the agent it brings up, not into this one.
-		rerr := r.restartRelayWith(r.st.Relays[job.name], pick, queue...)
-		if rerr == nil {
-			return job.name, nil
-		}
-		r.repickFailed(r.st.Relays[job.name], pick, rerr)
 	}
 	r.enqueueSend(job.name, job.seat, queue...)
 	return job.name, nil
@@ -1145,7 +1118,7 @@ func (r *Runtime) watchSeat(name string, seat relaySeat) {
 				if r.relays.get(name) == seat {
 					r.onRelayEvent(name, ev)
 				} else if ev.Kind == relay.KindDelivered && !r.sameWord(ev) {
-					r.appendOutcome(r.outcomeAside(sendHolder(r.st, ev.SendID, name), ev))
+					r.append(r.outcomeAside(sendHolder(r.st, ev.SendID, name), ev))
 				}
 			})
 		}
@@ -1194,26 +1167,22 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.append(event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: name, State: ev.State, Detail: clipRunes(ev.Detail, 2000), Dialog: ev.Dialog, Read: ev.Read}))
 		if ev.State == "idle" && dialog != "" {
 			// A dialog the agent reports held it, through a turn's end
-			// that left the record blocked: idle now, as at that end. (A
-			// change that waited applies once the seat is quiet.)
+			// that left the record blocked: idle now, as at that end.
 			r.armAutopilotCheck(name)
 		}
 		if rel := r.st.Relays[name]; ev.State == "exited" && rel != nil {
 			r.settleExited(rel)
 		}
-		if ev.State == "blocked" || ev.State == "exited" {
-			// No quiet comes. A change that waited applies now if the seat
-			// says the agent is stuck, as one asked now would (heldBack: a
-			// quiet agent at work keeps it waiting for its turn's end); one
-			// whose agent exited is what its next start runs.
+		r.applyWaitingRepick(name)
+	case relay.KindDelivered:
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
+		// A message that arrived starts the agent's next turn: a change
+		// that waits is looked at again at that turn's end. One that did
+		// not go, or one of the agent's own commands, may have been all
+		// the change waited on.
+		if d, ok := sendRecord(r.st, ev.SendID); !ev.OK || ok && relay.IsAgentCommand(d.Text) {
 			r.applyWaitingRepick(name)
 		}
-	case relay.KindDelivered:
-		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: ev.SendID, OK: ev.OK, Outcome: ev.Outcome, Detail: clipRunes(ev.Detail, 2000), Read: ev.Read}))
-	case relay.KindQuiet:
-		// Nothing waits on the agent any more, as its seat says: a change
-		// that waited for that applies now.
-		r.applyWaitingRepick(name)
 	case relay.KindRead:
 		// How far the transcript was read, after a read the record has
 		// nothing else of (a reattach reads on from there).
@@ -1232,11 +1201,10 @@ func (r *Runtime) onRelayEvent(name string, ev relay.Event) {
 		r.relays.mu.Lock()
 		delete(r.relays.activity, name)
 		r.relays.mu.Unlock()
-		// A model or effort change that waited for this turn to end applies
-		// when the seat says nothing waits on the agent (KindQuiet): a turn
-		// end in the same look as the start of the next (a held message
-		// handed over) is not the end of the agent's work.
 		r.armAutopilotCheck(name)
+		// A model or effort change that waited for this turn to end, unless
+		// a message held for the turn's end is about to start the next.
+		r.applyWaitingRepick(name)
 	case relay.KindLimit:
 		r.append(event.New(event.RelayLimit, event.ActorHarness, event.RelayLimitData{Name: name, UsedPercent: ev.UsedPercent, Window: ev.Window, ResetsAt: ev.ResetsAt, Text: ev.Text, Exhausted: ev.Exhausted, Read: ev.Read}))
 	case relay.KindActivity:
@@ -1262,7 +1230,7 @@ func (r *Runtime) reattachRelays() []string {
 	// What the record shows was held for a start that never came up was
 	// never typed, whatever became of its agent.
 	for _, d := range state.NeverTyped(r.st.Events) {
-		r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, state.NotTyped(d)))
+		r.append(event.New(event.RelayDelivered, event.ActorHarness, state.NotTyped(d)))
 	}
 	for _, rel := range r.st.ActiveRelays() {
 		if rel.State == "exited" {
@@ -1359,7 +1327,7 @@ func (r *Runtime) settleExited(rel *state.Relay, except ...string) {
 		}
 	}
 	for _, id := range rest {
-		r.appendOutcome(goneUnconfirmed(rel.Name, id, how))
+		r.append(goneUnconfirmed(rel.Name, id, how))
 	}
 }
 
@@ -1380,7 +1348,7 @@ func (r *Runtime) takeBack(rel *state.Relay, id, mode, how string) bool {
 	if spool == "" || !relay.Unspool(spool, id) {
 		return false
 	}
-	r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
+	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "it was held for the end of the agent's turn and taken back unread when the agent " + how}))
 	return true
 }
 
@@ -1757,7 +1725,7 @@ func (r *Runtime) forwardUserMessage(rel *state.Relay, seq int64, d event.UserMe
 	r.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: name, ID: id, From: "user", Seq: seq, Mode: mode, Text: text, Auto: true, Held: seat == nil && r.relays.launch(name) != nil}))
 	if seat == nil {
 		if !r.holdSend(name, heldSend{id: id, text: text, mode: mode}) {
-			r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 		}
 		return
 	}
@@ -1925,7 +1893,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 				return
 			}
 			if held = r.holdSend(rel.Name, heldSend{id: id, text: text, mode: mode}); !held {
-				r.appendOutcome(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
+				r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: rel.Name, ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: "the agent is not running"}))
 			} else if job := r.relays.launch(rel.Name); job != nil && job.name != rel.Name {
 				// A switch: the words go to the agent taking over.
 				starting = relay.AgentLabel(job.spec.Profile.Agent) + " is starting in place of " + rel.Who()
@@ -3228,8 +3196,8 @@ func (r *Runtime) relayThreadMeta() any {
 	// waits for its turn to end, in words.
 	profile := r.cfg.Relay.RelayProfiles()[rel.Profile]
 	m["model"], m["effort"] = relay.ProfileDefaults(rel.Agent, firstNonEmpty(rel.Model, profile.Model), firstNonEmpty(rel.Effort, profile.Effort))
-	if pick, ok, _ := r.nextPick(rel.Name); ok {
-		m["pending"] = r.pickText(rel, pick) // waiting, or kept for its next start
+	if pick, ok := r.waitingPick(rel.Name); ok {
+		m["pending"] = r.pickText(rel, pick)
 	}
 	var alternatives []string
 	for _, name := range r.cfg.Relay.RelayProfileNames() {

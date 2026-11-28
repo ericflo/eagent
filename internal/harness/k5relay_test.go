@@ -132,41 +132,6 @@ func TestSR2TwoStartsTheEndOvertakesAreRecordedOneAtATime(t *testing.T) {
 	}
 }
 
-// A review's suspicion: a model change restarts Codex; a newer change is
-// asked while it starts (it waits for that start); the session ends before
-// the start is recorded. The newer change is not made, as nothing starts
-// once the session is ending: the record says so as what it is, with what
-// Codex runs, not as a start that was tried and could not be made.
-func TestK5ANewerChangeTheEndOvertakesIsSaidTruthfully(t *testing.T) {
-	one, two := newFakeSeat("one"), newFakeSeat("two")
-	rt, g, done := r10Session(t, one, two)
-	rt.sync(func() {
-		if _, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", ""}); err != nil {
-			t.Errorf("repick: %v", err)
-		}
-	})
-	g.waitEntered(t)
-	rt.sync(func() {
-		msg, err := rt.repickRelay("codex", relayPick{"gpt-6.2-astra", "max"})
-		t.Logf("newer change: %q %v", msg, err)
-	})
-	evs := r10Quit(t, rt, g, 1, done)
-	said := false
-	for _, ev := range evs {
-		var d event.ErrorData
-		if ev.Type != event.Error || ev.Decode(&d) != nil {
-			continue
-		}
-		if strings.Contains(d.Text, "could not start") {
-			t.Errorf("the record says a start was tried and failed: %q", d.Text)
-		}
-		said = said || d.Text == "Codex runs gpt-6.2-astra; the change to gpt-6.2-astra at max was not made, as the session ended first"
-	}
-	if !said {
-		t.Error("the record does not say the newer change was not made, and what Codex runs")
-	}
-}
-
 // A review's suspicion on df2c602: eagent types one of the agent's own
 // commands (/clear) into an idle Codex and, while it is being typed, the
 // model is changed. A command holds nothing back since df2c602, so the

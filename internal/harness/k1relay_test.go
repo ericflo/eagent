@@ -349,40 +349,6 @@ func TestK1AWaitingModelChangeIsNotAppliedUnderADialog(t *testing.T) {
 	k1AppliedOnceIdle(t, rt, g, seat)
 }
 
-// A11, a change asked while the dialog is up (the earlier fix's case: the
-// record kept blocked through progress, and the change started the agent
-// again at once, mid-turn, under its dialog). It waits, also when the
-// dialog came up between turns, and applies once the dialog is over.
-func TestK1AModelChangeAskedUnderADialogWaits(t *testing.T) {
-	for _, midTurn := range []bool{true, false} {
-		seat := newK1HeldSeat()
-		g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
-		rt := newLaunchRuntime(t)
-		if midTurn {
-			seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
-		}
-		seat.setDialog(k1DialogTitle)
-		seat.emit(k1DialogUp)
-		if midTurn {
-			seat.emit(relay.Event{Kind: relay.KindProgress, Text: "Checking the build."})
-		}
-		k1Relay(t, rt, "the dialog recorded", func(rel *state.Relay) bool {
-			if midTurn {
-				return len(rel.Recent) == 1
-			}
-			return rel.State == "blocked"
-		})
-		if msg := k1Repick(t, rt); k1Restarting(rt) || strings.Contains(msg, "is starting again") {
-			t.Fatalf("mid-turn %v: the change started the agent under its dialog: %q", midTurn, msg)
-		}
-		if midTurn {
-			seat.emit(relay.Event{Kind: relay.KindTurn, Text: "Done."})
-			k1Relay(t, rt, "the turn recorded", func(rel *state.Relay) bool { return rel.Turns == 1 })
-		}
-		k1AppliedOnceIdle(t, rt, g, seat)
-	}
-}
-
 // A11, its bound: an agent on autopilot blocked for going quiet in a turn
 // ends that turn: the autopilot idle check is armed at the turn as before.
 // (A change that waits through such a block applies at the block itself,

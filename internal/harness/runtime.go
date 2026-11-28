@@ -199,9 +199,9 @@ type Runtime struct {
 	startFailed bool
 	// inboxTaken: the ids of the inbox submissions this run handled (pollInbox). Loop goroutine.
 	inboxTaken map[string]bool
-	// relayNext: relay name -> the change of model or effort it starts with
-	// next (nextPick, setNextPick: read and written only through them).
-	relayNext map[string]nextPick
+	// relayNext: relay name -> a change of model or effort that waits for
+	// the relay to be between turns (waitingPick, applyWaitingRepick).
+	relayNext map[string]relayPick
 
 	ending bool
 	// closings counts the times this run started ending (stillClosing

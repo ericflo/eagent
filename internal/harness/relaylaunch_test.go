@@ -152,7 +152,7 @@ func TestRelayRestartRunsOffTheLoop(t *testing.T) {
 	})
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
-		if _, waiting, _ := rt.nextPick("codex"); rel.Model != "gpt-6.2-astra" || waiting {
+		if _, waiting := rt.waitingPick("codex"); rel.Model != "gpt-6.2-astra" || waiting {
 			t.Errorf("after the restart: model %q, waiting %v", rel.Model, rt.relayNext)
 		}
 	})
@@ -184,7 +184,7 @@ func TestRelayRestartThatFailsIsExited(t *testing.T) {
 		if rel.State != "exited" || !strings.Contains(rel.Detail, "not on PATH") {
 			t.Errorf("relay after a failed restart: %s %q", rel.State, rel.Detail)
 		}
-		if _, ok, _ := rt.nextPick("codex"); ok || rt.relayRoutes()["codex"].Waiting {
+		if _, ok := rt.waitingPick("codex"); ok || rt.relayRoutes()["codex"].Waiting {
 			t.Errorf("the change still waits: %v", rt.relayNext)
 		}
 		if len(rel.Undelivered) != 0 {
@@ -268,8 +268,7 @@ func TestRelaySwitchRunsOffTheLoop(t *testing.T) {
 // The reviewer's scenario: a model change starts Codex again; while that
 // launch is under way the user picks the default again. That is not "what
 // it already runs": the launch starts the first pick, so the second waits
-// and is applied once the new agent is up (at once, review 15 finding 9:
-// nothing is typed into an agent that is to be replaced).
+// and is applied once the new agent is up and between turns.
 func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 	first, second := newFakeSeat("two"), newFakeSeat("three")
 	g := useGatedLaunches(t, []relaySeat{newFakeSeat("one"), first, second}, nil)
@@ -294,17 +293,15 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 		t.Fatalf("repick back to the default during the launch: %q", msg)
 	}
 	g.release <- struct{}{}
-	// Up: the waiting change applies.
-	g.waitEntered(t)
+	// Up and ready: the waiting change applies.
+	waitRelayStarts(t, rt)
 	rt.sync(func() {
-		rel := rt.st.Relays["codex"]
-		if rel.Model != "gpt-6.2-astra" {
+		if rel := rt.st.Relays["codex"]; rel.Model != "gpt-6.2-astra" {
 			t.Errorf("the launch under way started %q", rel.Model)
 		}
-		if p, ok, waiting := rt.nextPick("codex"); !ok || !waiting || p != (relayPick{}) {
-			t.Errorf("the default pick is not waiting after the launch: %v %v", p, ok)
-		}
 	})
+	first.emit(relay.Event{Kind: relay.KindState, State: "idle"})
+	g.waitEntered(t)
 	if !first.wasKilled() {
 		t.Error("the agent the first change brought up was not replaced")
 	}
@@ -312,7 +309,7 @@ func TestRelayRepickDuringLaunchBackToDefault(t *testing.T) {
 	waitRelayStarts(t, rt)
 	rt.sync(func() {
 		rel := rt.st.Relays["codex"]
-		if _, ok, _ := rt.nextPick("codex"); rel.Model != "" || ok {
+		if _, ok := rt.waitingPick("codex"); rel.Model != "" || ok {
 			t.Errorf("after the waiting change: model %q, waiting %v", rel.Model, rt.relayNext)
 		}
 	})
@@ -341,7 +338,7 @@ func TestRelayRepickDuringLaunchSamePick(t *testing.T) {
 	g.release <- struct{}{}
 	waitRelayStarts(t, rt)
 	rt.sync(func() {
-		if _, ok, _ := rt.nextPick("codex"); rt.st.Relays["codex"].Model != "gpt-6.2-astra" || ok {
+		if _, ok := rt.waitingPick("codex"); rt.st.Relays["codex"].Model != "gpt-6.2-astra" || ok {
 			t.Errorf("after the launch: model %q, waiting %v", rt.st.Relays["codex"].Model, rt.relayNext)
 		}
 	})

@@ -41,7 +41,7 @@ func TestSRRelayCommandOnItsWayLeavesAModelChangeWaitingForATurnThatNeverComes(t
 	var waiting bool
 	var state string
 	rt.sync(func() {
-		_, _, waiting = rt.nextPick("codex")
+		_, waiting = rt.waitingPick("codex")
 		state = rt.st.Relays["codex"].State
 	})
 	if !k1Restarting(rt) {

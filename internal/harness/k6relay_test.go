@@ -17,7 +17,6 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/relay"
-	"github.com/ericflo/eagent/internal/store"
 )
 
 // sr3CommandSeat is pi as its seat reports one of its own commands typed
@@ -252,20 +251,6 @@ func TestSR3CtrlCDuringAChangeWithANewerOneWaitingKeepsTheAgent(t *testing.T) {
 	}
 	if two.wasKilled() {
 		t.Error("Ctrl-C killed the Codex that finish recorded as started (the newer change was applied after the loop had ended)")
-	}
-	evs, err := store.Read(rt.sess.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	said := false
-	for _, ev := range evs {
-		var d event.ErrorData
-		if ev.Type == event.Error && ev.Decode(&d) == nil && strings.Contains(d.Text, "was not made") {
-			said = true
-		}
-	}
-	if !said {
-		t.Error("the record does not say the newer change was not made")
 	}
 }
 

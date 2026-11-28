@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/state"
@@ -127,59 +126,9 @@ func TestSR5AChangeRightAfterAStartIsToldSomethingWasSent(t *testing.T) {
 	}
 }
 
-// SR5-2's siblings: the words a waiting change is told name what holds the
-// agent, as the record and the seat say: a message sent and on its way, one
-// of the agent's own commands not yet acted on.
-func TestK8AWaitingChangeIsToldWhatHoldsTheAgent(t *testing.T) {
-	for _, c := range []struct{ text, want string }{
-		{"run the tests", "has a message on its way"},
-		{"/new", "acting on one of its own commands"},
-	} {
-		seat := newK2FeedSeat(t)
-		useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
-		rt := newLaunchRuntime(t)
-		k2Forward(t, rt, seat, c.text, "queue")
-		if msg := k1Repick(t, rt); !strings.Contains(msg, c.want) {
-			t.Errorf("%q on its way: the change says %q; want %q", c.text, msg, c.want)
-		}
-	}
-}
-
-// The fifth review's suspicion, as the sixth review's rule has it: a change
-// waits for Codex's turn to end, and the seat then says Codex is stuck
-// (blocked, no dialog, its screen showing nothing at work: Status.Stuck).
-// Asked then, the change would start it again at once (heldBack), but the
-// waiting one saw no quiet and waited for good. It applies then, once. (A
-// quiet agent at work is not stuck: TestSR6AWaitingChangeKillsALongQuietTurn.)
-func TestK8AWaitingChangeAppliesWhenTheAgentIsStuckOrExits(t *testing.T) {
-	seat := newFakeSeat("one")
-	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
-	rt := newLaunchRuntime(t)
-	seat.emit(relay.Event{Kind: relay.KindState, State: "working"})
-	k1Relay(t, rt, "the agent in a turn", func(rel *state.Relay) bool { return rel.State == "working" })
-	if msg := k1Repick(t, rt); !strings.Contains(msg, "when the turn ends") {
-		t.Fatalf("repick in a turn: %q", msg)
-	}
-	seat.setStuck(true)
-	seat.emit(relay.Event{Kind: relay.KindState, State: "blocked", Detail: "no transcript activity for 10m; the screen ends:\n$"})
-	if !k2Until(5*time.Second, func() bool { return k1Restarting(rt) }) {
-		t.Fatal("the waiting change was never applied to the stuck agent")
-	}
-	g.waitEntered(t)
-	g.release <- struct{}{}
-	waitRelayStarts(t, rt)
-	k1Relay(t, rt, "the new model", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
-	rt.sync(func() {
-		if _, _, waiting := rt.nextPick("codex"); waiting {
-			t.Error("the change still waits after it was applied")
-		}
-	})
-}
-
-// The sixth review's rule for an agent that exits (the user's own /exit
-// among the ways) while a change waits for its turn: it is not started
-// again; the change is what its next start runs, no longer one that waits,
-// and a later restart starts it once, with the change.
+// An agent that exits (the user's own /exit among the ways) while a change
+// waits for its turn is not started again; the change is what its next
+// start runs, and a later restart starts it once, with the change.
 func TestK8AWaitingChangeIsTheNextStartOfAnAgentThatExited(t *testing.T) {
 	seat := newFakeSeat("one")
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two"), newFakeSeat("three")}, nil)
@@ -195,10 +144,8 @@ func TestK8AWaitingChangeIsTheNextStartOfAnAgentThatExited(t *testing.T) {
 		t.Fatal("the agent that exited was started again by the waiting change")
 	}
 	rt.sync(func() {
-		_, _, waiting := rt.nextPick("codex")
-		route := rt.relayRoutes()["codex"]
-		if waiting || route.Waiting || route.Model != "gpt-6.2-astra" {
-			t.Errorf("after the exit: waiting %v, live settings %+v; want gpt-6.2-astra as what its next start runs, not waiting", waiting, route)
+		if route := rt.relayRoutes()["codex"]; route.Model != "gpt-6.2-astra" {
+			t.Errorf("after the exit: live settings %+v; want gpt-6.2-astra as what its next start runs", route)
 		}
 	})
 	restarted := relayToolAsync(rt, map[string]any{"action": "restart"})
