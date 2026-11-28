@@ -41,8 +41,8 @@ func (claudeAgent) ready(screen string) bool {
 // (at the end of its mode line, "⏵⏵ bypass permissions on (shift+tab to
 // cycle) · esc to interrupt"), and in earlier versions on the spinner line
 // above the box. The hint is read by its shape (one of the footer's parts,
-// which " · " separates) from the foot of the screen, below the box's
-// lower rule where that shows there; the spinner line from the foot, or
+// which " · " separates; claudeHint) from the foot of the screen, below the
+// box's lower rule where that shows there; the spinner line from the foot, or
 // from further up while the prompt shows under it (its todo list is drawn
 // between the two). The same words in its output above a dialog, or in a
 // sentence of its last answer, are not it.
@@ -55,7 +55,7 @@ func (c claudeAgent) busy(screen string) bool {
 			break // the box's lower rule: the box and the output are above it
 		}
 		for part := range strings.SplitSeq(line, " · ") {
-			if strings.TrimSpace(part) == "esc to interrupt" {
+			if claudeHint.MatchString(strings.TrimSpace(part)) {
 				return true
 			}
 		}

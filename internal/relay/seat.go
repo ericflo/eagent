@@ -651,13 +651,17 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 		return "", errors.New("the agent is not running")
 	}
 	state, err := s.waitReady(readyWait)
-	if mode == "interrupt" && isAgentCommand(text) && (err == nil && state == "working" || errors.Is(err, errUnknownScreen)) && s.queueHasWords() {
-		// The interrupt's Escape puts what the agent's own queue holds back
-		// into its input box (Claude's popAll): the command would be typed
-		// after those words and sent as the end of that message, and no
-		// command would run, though typed is delivered for a command.
-		label := s.agent.Label()
-		return "", fmt.Errorf("%s was not sent: %s's own queue holds a message, which the interrupt would put back into its input box; the command would be typed after it and sent as part of that message, not run. Send it once %s has read the queued message", strings.Fields(text)[0], label, label)
+	if isAgentCommand(text) && (err == nil || errors.Is(err, errUnknownScreen) && mode == "interrupt") {
+		// A command typed behind words in the agent's input box is sent as
+		// the end of that message, and no command runs, though typed is
+		// delivered for a command. Words are there once the agent's own
+		// queue has given a message up (Claude's popAll), and an
+		// interrupt's Escape puts there what the queue holds.
+		escape := mode == "interrupt" && (state == "working" || err != nil)
+		if why := s.boxWouldHold(escape); why != "" {
+			label := s.agent.Label()
+			return "", fmt.Errorf("%s was not sent: %s; the command would be typed after it and sent as part of that message, not run. Send it once %s has read that message", strings.Fields(text)[0], fmt.Sprintf(why, label), label)
+		}
 	}
 	if errors.Is(err, errUnknownScreen) && mode == "interrupt" {
 		// Quiet for ten minutes on a screen the seat does not know: the
@@ -1214,14 +1218,22 @@ func (s *Seat) requeuedLeft() []Event {
 	return last
 }
 
-// queueHasWords says whether an interrupt would leave words in the agent's
-// input box: its own queue holds a message, as the transcript last said
-// (of a send, inQueue; of anything typed there, queueHolds), or one the
-// queue gave up already sits in the box (requeued).
-func (s *Seat) queueHasWords() bool {
+// boxWouldHold says why the agent's input box would hold words when a
+// command is typed ("" when it would not; %s is the agent's label): a
+// message its own queue gave up sits there already (requeued), or, where
+// an Escape goes first, the queue holds one, as the transcript last said
+// (of a send, inQueue; of anything typed there, queueHolds), which the
+// Escape puts there.
+func (s *Seat) boxWouldHold(escape bool) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.queueHolds || len(s.inQueue) > 0 || slices.ContainsFunc(s.pending, func(p *pending) bool { return p.requeued })
+	if slices.ContainsFunc(s.pending, func(p *pending) bool { return p.requeued }) {
+		return "a message %s's own queue gave up sits in its input box"
+	}
+	if escape && (s.queueHolds || len(s.inQueue) > 0) {
+		return "%s's own queue holds a message, which the interrupt would put back into its input box"
+	}
+	return ""
 }
 
 // noteQueued keeps the sends that arrived as the agent's queued message n.
@@ -2549,6 +2561,12 @@ var (
 	claudeSpinner = spinnerLine("·✢✳✶✻✽*")
 	codexSpinner  = spinnerLine("•")
 )
+
+// claudeHint matches the part of Claude's footer that says how to stop a
+// turn: alone, or with the gap after it that stands before what Claude
+// draws at the right end of the same row (a notice of the context left, of
+// an update). The words in a sentence are not it.
+var claudeHint = regexp.MustCompile(`^esc to interrupt(\s{2,}\S.*)?$`)
 
 // busyScreen is an agent whose prompt or status line stays on screen while
 // it works (Claude's footer, Antigravity's relay line), and that shows

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -59,5 +60,36 @@ func TestK19ACommandIsNotTypedBehindWhatAnInterruptPutsBackInTheBox(t *testing.T
 	}
 	if keys, typed := pressed(h); keys != "Escape Enter" || len(typed) != 1 || typed[0] != "/compact" {
 		t.Fatalf("keys %q, typed %q; want the interrupt and the command", keys, typed)
+	}
+}
+
+// The queue has given its message up already (an Escape from the terminal
+// or relay_control: popAll), and its words sit in the box of an idle
+// Claude until the seat presses Enter on them. The agent's own command
+// sent then, to interrupt or to queue, was pasted after those words and
+// sent as one message; main types it the same way. It is refused until the
+// message has gone.
+func TestK19ACommandIsNotTypedBehindAMessageTheQueueGaveUp(t *testing.T) {
+	savedSettle, savedPause, savedInt := typeSettle, dialogPause, interruptPause
+	typeSettle, dialogPause, interruptPause = 0, 0, 0
+	t.Cleanup(func() { typeSettle, dialogPause, interruptPause = savedSettle, savedPause, savedInt })
+	const text = "also update the changelog"
+	for _, mode := range []string{"interrupt", "queue", "after_turn"} {
+		s, h, feed := k17Seat(t, text)
+		feed(k1Queue("enqueue", text))
+		feed(k1Queue("popAll", ""), k17Prompt("[Request interrupted by user]"))
+		k17Idle(s, h, fmt.Sprintf(k17Box, text))
+		drain(s.Events())
+		_, err := s.Send("c1", "/compact", mode)
+		h.mu.Lock()
+		keys, typed := strings.Join(h.keys, " "), append([]string{}, h.typed...)
+		h.mu.Unlock()
+		if err == nil || !strings.Contains(err.Error(), "sits in its input box") || keys != "" || len(typed) != 0 {
+			t.Errorf("%s: send err %v, keys %q, typed %q; want the command refused for the words in the box, nothing pressed or typed", mode, err, keys, typed)
+		}
+		// A plain message still goes: it joins the words in the box.
+		if _, err := s.Send("r2", "and the README", mode); err != nil {
+			t.Errorf("%s: a plain message was refused: %v", mode, err)
+		}
 	}
 }
