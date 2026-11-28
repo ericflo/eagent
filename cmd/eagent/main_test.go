@@ -140,22 +140,8 @@ func TestCmdServersLifecycle(t *testing.T) {
 	}
 }
 
-// `eagent view --actor X` (and --task) are accepted and said to be ignored.
+// `eagent view --actor X` (and --task) are still accepted.
 func TestViewIgnoredFlags(t *testing.T) {
-	var b strings.Builder
-	viewIgnoredFlags(&b, "", "")
-	if b.String() != "" {
-		t.Fatalf("no flags: %q", b.String())
-	}
-	viewIgnoredFlags(&b, "narrator", "")
-	if b.String() != "eagent view: there is one conversation now, so --actor is ignored\n" {
-		t.Fatalf("--actor: %q", b.String())
-	}
-	b.Reset()
-	viewIgnoredFlags(&b, "orchestrator", "t3")
-	if b.String() != "eagent view: there is one conversation now, so --actor and --task are ignored\n" {
-		t.Fatalf("both: %q", b.String())
-	}
 	// Both flags still parse rather than failing with "flag provided but not
 	// defined".
 	if code := run([]string{"view", "--actor", "narrator", "--task", "t1", "-C", t.TempDir()}); code == 64 {

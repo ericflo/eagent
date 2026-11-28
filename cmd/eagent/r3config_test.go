@@ -1,11 +1,7 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,12 +9,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ericflo/eagent/internal/config"
-	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/prompts"
-	"github.com/ericflo/eagent/internal/store"
 )
 
 // The help's list of built-in presets is the list of presets: every one is
@@ -135,41 +128,6 @@ func TestServersUseRefusesARouteTheEnvironmentPins(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(config.File(project)); string(raw) != `{"tick_seconds":45}` {
 		t.Fatalf("the file changed:\n%s", raw)
-	}
-}
-
-// `eagent summarize` names the model that answered, the fallback when the
-// first route could not serve it.
-func TestSummarizeNamesTheModelThatAnswered(t *testing.T) {
-	r3NoEnv(t)
-	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, `{"error":{"message":"no access to this model"}}`)
-	}))
-	defer down.Close()
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": `{"title": "Fix the login page", "summary": "The login page was fixed."}`}}}})
-		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		chunk, _ = json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
-	}))
-	defer up.Close()
-	project := t.TempDir()
-	r3WriteConfig(t, project, fmt.Sprintf(`{"model":{"protocol":"openai-chat","base_url":%q,"model":"first-model","api_key_env":"","reasoning_effort":"","fallback":{"protocol":"openai-chat","base_url":%q,"model":"fallback-model","api_key_env":""}}}`, down.URL+"/v1", up.URL+"/v1"))
-	sess, err := store.Create(store.Root(project), time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess.Append(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
-	sess.Append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "fix the login page"}))
-	var code int
-	out := captureStdout(t, func() { code = cmdSummarize(project, "", "", []string{sess.ID}, false, true, false, false) })
-	if code != 0 {
-		t.Fatalf("exit %d:\n%s", code, out)
-	}
-	if !strings.Contains(out, "on fallback-model") {
-		t.Fatalf("the summary line does not name the model that answered:\n%s", out)
 	}
 }
 

@@ -17,7 +17,6 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -252,7 +251,6 @@ func run(args []string) int {
 		if len(rest) < 1 {
 			return fail(errors.New("usage: eagent view <session-id> [--until SEQ]"))
 		}
-		viewIgnoredFlags(os.Stderr, *actor, *task)
 		return cmdView(project, rest[0], *until, *asJSON)
 	}
 
@@ -381,25 +379,6 @@ func run(args []string) int {
 // it with none: the session starts the agent and waits.
 func batchNeedsPrompt(prompt, relay string) bool { return prompt == "" && relay == "" }
 
-// viewIgnoredFlags says, on w, that `eagent view` ignores --actor and
-// --task: the three-model design had a prompt per actor and per task, and
-// there is one conversation now.
-func viewIgnoredFlags(w io.Writer, actor, task string) {
-	var given []string
-	if actor != "" {
-		given = append(given, "--actor")
-	}
-	if task != "" {
-		given = append(given, "--task")
-	}
-	switch len(given) {
-	case 1:
-		fmt.Fprintf(w, "eagent view: there is one conversation now, so %s is ignored\n", given[0])
-	case 2:
-		fmt.Fprintf(w, "eagent view: there is one conversation now, so %s and %s are ignored\n", given[0], given[1])
-	}
-}
-
 // parseInterleaved accepts flags anywhere on the command line, so
 // `eagent show <id> --raw` and `eagent resume <id> --answer yes` both work.
 // A literal `--` ends flag parsing.
@@ -513,54 +492,6 @@ func cmdSessions(project string) int {
 // checking what the summary prompt produces (--dry-run). It reads logs and
 // never writes them. With --json each line carries the old title and
 // summary too, so a run can be undone by hand.
-// routeChain is a route and its fallbacks for calls made side by side: all
-// use the current one, and the first to find it unroutable moves them all
-// to the next.
-type routeChain struct {
-	mu      sync.Mutex
-	routes  []llm.Endpoint
-	clients []*llm.Client
-	at      int
-}
-
-func newRouteChain(routes []llm.Endpoint) *routeChain {
-	c := &routeChain{routes: routes}
-	for _, ep := range routes {
-		c.clients = append(c.clients, llm.NewClient(ep))
-	}
-	return c
-}
-
-func (c *routeChain) current() *llm.Client {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.clients[c.at]
-}
-
-// currentRoute is the route the calls use now: after a fallback took over,
-// the fallback's.
-func (c *routeChain) currentRoute() llm.Endpoint {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.routes[c.at]
-}
-
-// next moves past failed, reporting whether another route is left to try.
-// A call that failed on a route already left behind just tries the current.
-func (c *routeChain) next(failed *llm.Client) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.clients[c.at] != failed {
-		return true
-	}
-	if c.at+1 >= len(c.clients) {
-		return false
-	}
-	c.at++
-	fmt.Fprintf(os.Stderr, "summarizer: %s is unavailable; switching to %s\n", c.routes[c.at-1], c.routes[c.at])
-	return true
-}
-
 func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, asJSON, verbose bool) int {
 	if all == (len(refs) > 0) {
 		return fail(errors.New("usage: eagent summarize <session-id>... | --all [--dry-run] [--json]"))
@@ -577,7 +508,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 	if err != nil {
 		return fail(fmt.Errorf("summarizer: %w", err))
 	}
-	models := newRouteChain(routes)
+	model := llm.NewClient(routes[0])
 	set, err := prompts.Load(project)
 	if err != nil {
 		return fail(err)
@@ -622,18 +553,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
-			var res harness.SessionSummary
-			var err error
-			for {
-				model := models.current()
-				res, err = harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
-				// A route that cannot serve the model at all (no access,
-				// no credits) gives way to the configured fallback.
-				var ae *llm.APIError
-				if !errors.As(err, &ae) || !ae.Unroutable() || !models.next(model) {
-					break
-				}
-			}
+			res, err := harness.SummarizeSession(ctx, model, set, client, project, info, dryRun)
 			done <- outcome{res, err}
 		}(results[i], info)
 	}
@@ -688,7 +608,7 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 		}
 	}
 	if !asJSON {
-		fmt.Printf("%d session%s, %d thread%s updated, %d tokens in / %d out on %s\n", len(sessions), pluralS(len(sessions)), sent, pluralS(sent), usage.Input, usage.Output, models.currentRoute().Model)
+		fmt.Printf("%d session%s, %d thread%s updated, %d tokens in / %d out on %s\n", len(sessions), pluralS(len(sessions)), sent, pluralS(sent), usage.Input, usage.Output, routes[0].Model)
 	}
 	return code
 }
