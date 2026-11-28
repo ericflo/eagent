@@ -16,6 +16,7 @@ those decisions needs a reason.
 
 ```
 make check          # gofmt, go vet, go test -race
+make test-times     # the same tests, then each package's time and the slow tests
 make build          # rebuilds the embedded replay assets, then the binary
 go run ./cmd/eagent doctor --live
 ```
@@ -37,6 +38,15 @@ Changing `cmd/eagent-replay-wasm` or the reducer means running
 - One change per PR, with a test where the behaviour can be tested (most
   can: the harness tests and the chaos suites are the model to copy).
 - `make check` must pass; CI runs it on Go 1.24 and the current release.
+- Keep the suite fast: the whole race run takes under a minute, and a new
+  test should take well under a second. Wait on the event instead of the
+  clock. When a test would wait out a delay of the program (a retry, a grace
+  period, a poll), make that delay a package variable the test shortens.
+  When a test's point is an order of events, give the fake a stated delay
+  instead of relying on how long the disk or the machine takes.
+  `make test-times` lists every test over two seconds (today: the provider
+  retry tests and pi's extension at its shipped timers); CI warns over five
+  seconds and fails a test over thirty.
 - Keep the README truthful: if a flag, a preset or a default changes, the
   README and `eagent --help` change in the same commit.
 

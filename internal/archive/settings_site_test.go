@@ -14,7 +14,7 @@ func TestSettingsWebsiteDoesNotUploadTranscriptsOrCredentials(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(config.File(project)), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.File(project), []byte(`{"task_concurrency":5,"unknown_secret":"must-not-be-published"}`), 0600); err != nil {
+	if err := os.WriteFile(config.File(project), []byte(`{"max_calls_per_turn":5,"unknown_secret":"must-not-be-published"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	service := &settings.Service{Project: project}

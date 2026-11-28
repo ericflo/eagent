@@ -210,7 +210,7 @@ func TestSeatSkipsHistoryOnAttach(t *testing.T) {
 }
 
 func TestSeatAnswersStartupDialogs(t *testing.T) {
-	h := &fakeHost{alive: true, screen: " Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder\n"}
+	h := &fakeHost{alive: true, screen: claudeTrustScreen}
 	s := newSeat(Spec{}, claudeAgent{}, h, "x", "")
 	s.checkScreen(time.Now())
 	if strings.Join(h.keys, " ") != "Down Enter" {
@@ -235,7 +235,7 @@ func TestStopHook(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("empty spool should let the turn end, got %q", out.String())
 	}
-	s := &Seat{spec: Spec{Spool: spool}}
+	s := &Seat{spec: Spec{Spool: spool, Hook: "eagent relay-hook"}}
 	_ = claudeAgent{}.afterTurn(s, "r1", "first")
 	time.Sleep(2 * time.Millisecond)
 	_ = claudeAgent{}.afterTurn(s, "r2", "second")
@@ -256,19 +256,19 @@ func TestTailerPartialLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.jsonl")
 	os.WriteFile(path, []byte("{\"a\":1}\n{\"b\":"), 0o644)
 	tl := &tailer{path: path}
-	lines, _ := tl.next()
+	lines, _, _ := tl.next()
 	if len(lines) != 1 || string(lines[0]) != `{"a":1}` {
 		t.Fatalf("first read %q", lines)
 	}
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString("2}\n")
 	f.Close()
-	lines, _ = tl.next()
+	lines, _, _ = tl.next()
 	if len(lines) != 1 || string(lines[0]) != `{"b":2}` {
 		t.Fatalf("second read %q", lines)
 	}
 	mid := &tailer{path: path, offset: 3, skipPartial: true}
-	lines, _ = mid.next()
+	lines, _, _ = mid.next()
 	if len(lines) != 1 || string(lines[0]) != `{"b":2}` {
 		t.Fatalf("mid-file read %q", lines)
 	}
@@ -302,11 +302,11 @@ func TestCodexLocate(t *testing.T) {
 	write("rollout-a.jsonl", "old", work, launched.Add(-time.Hour))
 	write("rollout-b.jsonl", "elsewhere", t.TempDir(), launched.Add(time.Second))
 	want := write("rollout-c.jsonl", "mine", work, launched.Add(2*time.Second))
-	path, id := codexAgent{}.locate(work, launched, "")
+	path, id := codexAgent{}.locate(Spec{Dir: work}, launched, "")
 	if path != want || id != "mine" {
 		t.Fatalf("locate = %s %s", path, id)
 	}
-	if p, _ := (codexAgent{}).locate(work, launched, "old"); p == "" {
+	if p, _ := (codexAgent{}).locate(Spec{Dir: work}, launched, "old"); p == "" {
 		t.Fatalf("resume lookup by id found nothing")
 	}
 }

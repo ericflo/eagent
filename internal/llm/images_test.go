@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ericflo/eagent/internal/event"
 )
 
 func TestImagesAreInlinedAndDroppedForTextOnlyModels(t *testing.T) {
@@ -80,7 +82,7 @@ func TestReasoningItemsAreDroppedUnlessReplayed(t *testing.T) {
 	native := json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"xx","summary":[]},{"type":"function_call","id":"fc_1","call_id":"c1","name":"ping","arguments":"{}"}]`)
 	req := Request{Messages: []Message{
 		{Role: "user", Text: "go"},
-		{Role: "assistant", Native: native, NativeProtocol: ProtocolResponses},
+		{Role: "assistant", ToolCalls: []event.ToolCall{{ID: "c1", Name: "ping", Args: json.RawMessage(`{}`)}}, Native: native, NativeProtocol: ProtocolResponses},
 		{Role: "tool", Results: []ToolResult{{CallID: "c1", Name: "ping", Output: "pong"}}},
 	}}
 	types := func(items []any) []string {

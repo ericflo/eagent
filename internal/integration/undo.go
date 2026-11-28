@@ -20,7 +20,7 @@ func journalInverse(j commandJournal) (control.Proposal, error) {
 	if j.Applied == nil || j.BeforeRaw == nil {
 		return control.Proposal{}, fmt.Errorf("this command has no undo metadata")
 	}
-	return settings.ConfigInverse(*j.Applied, *j.BeforeRaw)
+	return settings.ConfigInverse(*j.Applied, *j.BeforeRaw, j.Desired)
 }
 
 func inverseDigest(p control.Proposal) string {
@@ -47,7 +47,17 @@ func undoOffer(j commandJournal) map[string]any {
 		}
 		offer["resource"] = map[string]any{"kind": j.Resource.Kind, "name": j.Resource.Name, "restore_override": j.Resource.BeforeExists, "restore_sha256": artifact.Digest(j.Resource.Before)}
 	} else {
-		offer["edits"] = inverse.Edits
+		// A set with no value writes null (a route turned off): the review
+		// shows the null rather than leave the value out.
+		edits := []map[string]any{}
+		for _, e := range inverse.Edits {
+			edit := map[string]any{"op": e.Op, "key": e.Key}
+			if e.Op == "set" {
+				edit["value"] = e.Value
+			}
+			edits = append(edits, edit)
+		}
+		offer["edits"] = edits
 	}
 	// Return the same JSON representation recovered from the durable journal.
 	raw, _ := json.Marshal(offer)
@@ -84,7 +94,7 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		return err
 	}
 	if p.Parameters["restore_sha256"] != inverseDigest(inverse) {
-		return fmt.Errorf("the reviewed undo no longer matches its original command")
+		return fmt.Errorf("this undo was reviewed as a different change from the one it would make now (an undo offered by an earlier eagent can differ); nothing was changed, so put those settings back by hand instead")
 	}
 	inverse.SchemaVersion, inverse.ExpectedVersion, inverse.Generation = p.SchemaVersion, p.ExpectedVersion, p.Generation
 	journal.Applied = &inverse
@@ -97,7 +107,9 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		if !after {
 			return &config.ErrConflict{}
 		}
-		change, err := s.PrepareResource(editor, inverse, grant)
+		// The bytes to restore come from the record read above, which
+		// eagent wrote from this machine's files; the request only names it.
+		change, err := s.PrepareRestore(editor, inverse, grant, original.Resource.Before)
 		if err != nil {
 			return err
 		}
@@ -107,15 +119,17 @@ func prepareUndo(s *settings.Service, editor *config.Editor, grant control.Grant
 		journal.Resource = &change
 		return nil
 	}
-	desired, etag, _, err := s.PrepareUndo(inverse, original.Desired, grant)
+	desired, etag, _, err := s.PrepareUndo(inverse, *original.BeforeRaw, original.Desired, grant, original.InForce...)
 	if err != nil {
 		return err
 	}
 	journal.Desired, journal.BeforeETag, journal.DesiredETag = desired, etag, artifact.Digest([]byte(desired))
-	before := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	before := res.File.Raw
 	if before == "" {
 		before = "{}\n"
 	}
 	journal.BeforeRaw = &before
+	journal.InForce = s.RunningPairs(res)
 	return nil
 }

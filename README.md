@@ -1,52 +1,25 @@
 # eagent
 
-A coding agent that runs as three cooperating actors over one append-only event log, in a single binary.
+Runs a coding agent in a terminal and stands between it and you.
+
+You write, and your words go to the agent as written. eagent watches the agent work, tells you what it is doing and what it finished, clears the dialogs it gets stuck on, and asks you only what is yours to decide. You can do this from a terminal, a local web page, or your phone.
 
 ```
-$ eagent -p "Read INSTRUCTIONS.md and build it."
-eagent session 1788745982263
-  orchestrator GLM-5.3 · task GLM-5.3-Flash · narrator DeepSeek-V4-Flash-0731
-  ▸ t1 delegated: Build "Neon Brickles" — complete modern breakout game
-  ✓ t1 completed after 31 calls
-  ✎ Game complete and verified; served locally on port 8000 …
-
-│ The game is done. Files are in index.html, css/, and js/ (vanilla ES modules, no
-│ dependencies) …
+eagent relay codex --cwd ~/Development/epsilon "Merge every pending PR, then a deep dependency pass"
+eagent relay claude --cwd ~/Development/snowdown     # starts it and waits for your first message
+eagent -c                                            # pick the latest session back up
 ```
 
-## What it did on a real task
+## What you get
 
-Given the one-paragraph, dictated brief for "a modern take on Breakout" in `INSTRUCTIONS.md` and the prompt *"Read INSTRUCTIONS.md and relentlessly build it until you're confident that it's fully and completely implemented to the highest possible standard you can manage"*, a batch session with the default models did this, unattended:
-
-| | |
-|---|---|
-| Wall clock | 29 minutes |
-| Orchestrator | 55 calls, 1.5M input tokens (93% served from cache), 52k output |
-| Task worker | 2 tasks, 120 calls, 6.0M input (85% cached), 134k output |
-| Narrator | 25 wakes, 3 messages sent |
-| Cost | about $1.20 at Together's list prices |
-| Result | 17 files, ~3,000 lines of dependency-free JavaScript; 74 unit tests and 9 headless smoke tests, all passing; zero console errors in a real browser |
-
-<p align="center">
-  <img src="docs/neon-brickles-title.png" width="280" alt="Title screen of the generated game">
-  <img src="docs/neon-brickles-play.png" width="280" alt="The generated game mid-play">
-</p>
-
-The orchestrator wrote a 9,000-token spec for the worker (architecture contract, file layout, ten brick types, test plan), the worker ran out of its call budget mid-debug and was reported as failed with its last message attached, the orchestrator verified what was on disk (unit tests green, one smoke assertion failing, no README), delegated a precise follow-up, then found and fixed a dead config value the worker had flagged, re-ran everything, and only then declared the work done. The narrator spoke three times: when the first task failed, when the follow-up finished, and a final report with paths, commands, verification results, and the one late fix.
-
-The same brief was run three more times to check consistency, once with `SIGINT` sent 200 seconds in and the session resumed with `eagent -c`. All four produced a working game with its own passing test suite. The resumed run split the build into six parallel tasks, then during its own integration pass found and fixed six bugs the workers' tests had missed (an audio-module crash, a broken tap-to-start, an unbounded multiplier), and finished with 59 rule tests, 12 physics tests, and a 26-scenario real-Chromium end-to-end suite green. A separate run with the same brief but a 20k-token rollover threshold rolled its context over ten times and still finished.
-
-The same brief was then run on sixteen presets at once — fourteen plus two xhigh heroes — from a $0.04 eleven-minute build to a $78.11 two-hour one: ~$242 of runs all in at a ~92% cache-hit rate, with four interrupted runs resumed and re-judged (one black-canvas failure fixed into a second perfect score) — and the sixteen results were measured, played and judged side by side: [docs/breakout-grid.md](docs/breakout-grid.md) has the full grid — the cost and quality tables, the rubric with evidence, screenshots of every build, the two heroes and the redemption, and what profiling the sixteen runs changed in the harness.
-
-Most agents are one model in a loop. eagent splits the job three ways because the three jobs pull in different directions:
-
-| Actor | Job | Context | Default model |
-|---|---|---|---|
-| **Orchestrator** | Decides what happens: plans, delegates, verifies, decides when the work is done. | Continuous | `zai-org/GLM-5.3` |
-| **Task worker** | Does one self-contained task well and fast, then reports. | Fresh per task | `zai-org/GLM-5.3-Flash` |
-| **Narrator** | The only actor that talks to you. Watches everything and decides what is worth saying, and when. | Continuous | `deepseek-ai/DeepSeek-V4-Flash-0731` |
-
-All three write to the same JSONL log in your project directory. Replaying that log rebuilds the whole session, so a crash never loses work: `eagent -c` picks up where it stopped.
+- **Any agent.** Codex, Claude Code, Antigravity and pi are built in; add your own profile in the project config. The agent runs in a tmux terminal eagent owns (screen when tmux is missing) and keeps running when eagent restarts.
+- **Your words, unchanged.** A message reaches the agent the moment it arrives, before any model call. "Stop" and "wait" interrupt it first. Start a line with `@e` to talk to eagent itself; questions about the session ("how's it going?") stay with eagent too.
+- **Narration.** While the agent works, eagent says what it is doing every minute or two, from the agent's own transcript. When a turn ends you get the agent's report: on the phone, the short version with the report folded under it.
+- **Stuck terminals handled.** Trust prompts, update dialogs and menus are read off the screen and answered. A choice that is yours comes to you as a question.
+- **Autopilot.** "Keep it going until 10am" makes eagent send the agent on at every stop, in the spirit of your standing order, and decide its questions the way you would.
+- **Timers.** "At 9:00 tell it to deploy", "check back in half an hour".
+- **Your phone.** With [FinaleChat](https://www.finalechat.com), every session is a thread: messages, questions with buttons, the agent's screen, settings, and starting new sessions.
+- **Nothing lost.** Every event is a line in a JSONL log in your project. `eagent -c` replays it and reattaches to the running agent. When the conversation grows long, eagent restarts it from a dossier: a briefing with a map of `file:line` places in the log, which it can go back and read.
 
 ## Install
 
@@ -54,271 +27,89 @@ All three write to the same JSONL log in your project directory. Replaying that 
 go install github.com/ericflo/eagent/cmd/eagent@latest
 ```
 
-or clone and `go build -o eagent ./cmd/eagent`. No runtime dependencies beyond `bash`.
+or clone and `make build`. You need tmux (or screen) and at least one agent CLI installed.
 
-Set one key for the default models:
+eagent's own model defaults to GLM-5.3 on Together:
 
 ```
 export TOGETHER_API_KEY=...
-eagent doctor --live     # makes one tiny call per actor
+eagent doctor --live
 ```
+
+`eagent --preset NAME` picks another model (`eagent config list` shows them: OpenAI, Anthropic, OpenRouter, DeepInfra, Fireworks, and more).
 
 ## Use
 
 ```
-eagent "add a Makefile with build and test targets"    # interactive
-eagent -p "fix the failing test in pkg/store"          # batch: exits when done
-eagent -c                                              # continue the latest session here
-eagent sessions                                        # what has run in this project
-eagent show 1788745982263                              # human transcript
-eagent replay 1788745982263                            # rebuild state from the log
+eagent "add a Makefile with build and test targets"   # interactive, with the default agent
+eagent -p "fix the failing test in pkg/store"         # no terminal: exits when the work is done
+eagent --relay claude --relay-model sonnet "…"        # choose the agent and its model
+eagent relays                                         # every agent running on this machine
+eagent relays attach codex                            # watch or type into one yourself
+eagent sessions                                       # what has run in this project
+eagent show <id>                                      # a readable transcript
+eagent                                                # web UI and phone host for this project
 ```
 
-In an interactive session, type to talk to the agent (even while it is working; your message is delivered at the next model call), `/status` to see what is running, `/dismiss` to close an open question without answering it, `/quit` to stop. Ctrl-C stops the session cleanly; everything is on disk and `eagent -c` resumes it. Resuming replays the log, closes whatever the crash left open (a tool call without a result, a running task, a process), tells the orchestrator what was lost, and continues.
+In a session:
 
-Batch mode exits `0` when the orchestrator declares the work done, `2` when it stopped to ask you something (answer with `eagent -c --answer "..."`), `130` on Ctrl-C.
+| Type | What happens |
+|---|---|
+| anything | goes to the agent, word for word |
+| `@e …` | goes to eagent instead |
+| `/screen` | the agent's terminal |
+| `/interrupt`, `/restart`, `/stop-relay` | what they say |
+| `/model sonnet high` | change the agent's model and effort; it restarts on the same conversation |
+| `/switch claude` | hand the work to another agent, with a brief |
+| `/autopilot until 10:00 keep going until the tests pass` | standing order; `/autopilot off` ends it |
+| `/notify-done` | buzz the phone when this turn ends |
+| `/schedules`, `/status`, `/dismiss`, `/quit` | timers, state, close a question unanswered, stop |
 
-## The web UI
+Batch mode (`-p`) exits `0` when the work is done, `2` when it stopped on a question for you (`eagent -c --answer "…"`), `130` on Ctrl-C.
 
-```
-eagent                       # in a project: http://127.0.0.1:7331 (same as eagent serve)
-eagent -p --serve 127.0.0.1:7331 "…"  # also serve while a terminal session runs
-```
+## Web UI and phone
 
-It listens on this machine only: the page can start sessions that run shell commands, so it refuses anything but local requests. Ctrl-C stops it in a few seconds (a second Ctrl-C quits at once); sessions it hosts resume when you write to them again.
+`eagent` (or `eagent serve`) serves a page on `127.0.0.1:7331`: chat, the agent's screen, token usage and cost, the raw timeline, and a settings editor. It also hosts the project for FinaleChat, so sessions can be started, watched and answered from your phone. Set `FINALECHAT_TOKEN` (or run `finalechat login`) to turn the phone on; `EAGENT_FINALECHAT=off` turns it off.
 
-<p align="center">
-  <img src="docs/web-chat.png" width="49%" alt="Chat view">
-  <img src="docs/web-tasks.png" width="49%" alt="Tasks view">
-</p>
-
-The UI reads the same JSONL logs as everything else, so it shows every session in the project, including ones running in another terminal, live. **Chat** is the narrator conversation: messages, questions with their options as buttons, your replies; toggle *show activity* to see delegations, notes, and task results interleaved. **Tasks** shows the cost and cache ratio per actor, a timeline of orchestrator turns and task bars with every fresh-context boundary marked, the orchestrator's prompt size per call, and every task with status, call count, tokens, and duration; click one to read its description, its report, and every model turn with tool calls rendered the way you would read them (a command and its output, a file and its content, an edit as old and new). **Timeline** is the raw event log with actor filters, text search, relative timestamps, and inline JSON. **Config** is a graphical editor for the whole configuration: pick a provider and model for each of the three actors from one searchable catalog (price, context window, and whether the key is present shown per row), set each one's reasoning effort with a segmented control and *Try every effort* to measure latency and reasoning tokens per level, add a fallback route, tune the session and narrator cadence, turn the phone mirror on or off, and save to the project file. Every field says where its value comes from (default, preset, project file, or an environment variable, which makes it read-only), and the raw file and prompts are one click away for the hands-on route.
-
-Every per-call instruction the harness gives an actor (the wake reason, the context budget, what to do now) is recorded in the log as a `steer` event rather than appended on the fly, so each prompt is a strict extension of the previous one. That matters more than it sounds: OpenAI's prompt cache only reuses a previous prompt that is an exact prefix of the new one, so an ephemeral trailing message cut its hit rate to 6 percent in a long build; recorded steers restore it, and `eagent view` shows the exact prompt a model saw. Three more habits the logs showed and the harness now curbs: a file re-read while unchanged comes back as a one-line note instead of its contents (`force: true` reads anyway), a second look at an unchanged screenshot does not resend the image, and an orchestrator that has written or edited files itself eight times in one context is told to delegate. The session list shows duration, tokens, and an estimated cost for every session, priced per provider and model at September 2026 list prices (a model with no known price leaves the total marked as partial). The browser tab shows `?` when a question is waiting for you and `●` while the agent is working, and the page can notify you when the agent has something to say. Keyboard: `n` new session, `1` `2` `3` tabs, `/` message, `g` config. The new-session dialog offers the project configuration, the server default, every preset and bundle — and *custom models — browse the catalogue…*, which opens a searchable picker over the built-in catalog plus each provider's live model list (the same cached fetch the Config page uses) so you can route any actor to the latest model for that one session, with a per-actor reasoning-effort selector limited to what the picked model accepts; picking a different model drops the base's fallback for that actor, and the session log records which models ran. Light and dark follow the OS, and everything from the timeline down to the tool-call cards holds up on a phone.
-
-Writing to a session works from anywhere: the UI drops a JSON file into the session's `inbox/` directory and the running process folds it into the log, so you can answer a question from the browser while the session runs in your terminal. Writing to a finished session resumes it inside the server.
-
-## Your phone
-
-If you use [Finalechat](https://www.finalechat.com), eagent talks to you there too. With a token in `FINALECHAT_TOKEN` (or a `finalechat login` on the machine) every session gets a thread on your phone: your prompt, everything the narrator says, and its questions with the options as buttons. The thread's model chip shows the orchestrator's model actually in use (it follows a fallback), and the thread's **Settings** opens on that session's own settings: every actor's model and reasoning effort, task workers and narrator timing, changeable while it runs. Tap an answer or type a reply and it lands in the session exactly as if you had typed it in the terminal; answer in the terminal and the phone question is withdrawn. **Dismiss** on a question closes it and sends nothing: no answer is made up for you and the agent is not told to decide for itself. It stays where it was, and what you write next is an ordinary message (`/dismiss` does the same from the terminal or the composer). Most messages arrive quietly; the narrator marks a message important when it deserves a buzz (finished, blocked, needs you), and questions always notify. Files travel both ways: the narrator attaches screenshots, diffs, or logs when seeing beats reading, and anything you send from the phone (a screenshot, a photo of a whiteboard, a log) is saved under the session and handed to the agent with its path; models that accept images see the picture itself, and the rest get the words and the file.
-
-This turns `eagent -p "…"` into a headless run you can steer from anywhere: a batch session with a question open on your phone waits for the answer instead of ending. The wait is bounded by `question_timeout_seconds` (an hour by default), after which the session stops as awaiting-input and can be resumed. Dismissing the question does not end the wait: the session keeps listening for your message until the same deadline.
-
-Between messages the phone shows what the session is doing right now: a status line ("Running go test ./…", "Working on the parser task", "Thinking about the next step", "Waiting for your answer") with how long it has been at it. It comes from the harness's own state, so it is always true: a running command names the command (credentials in it are blanked), a running task names the task and its latest step, a pending question says so. It is written at most every few seconds, refreshed before it can lapse, carried on the narrator's own messages so it never blinks off mid-work, and cleared when the session ends. Dismissing a question from the phone (declining to answer) ends the wait: the orchestrator is told you declined and to use its judgement, cautiously, and say what it chose. Every post to the phone carries an idempotency key, so a lost response is retried without duplicating the message, and rate limits are honoured. If you flip remote mode in the app mid-session, eagent notices within a few minutes and whenever it asks a question. Against an older Finalechat deployment that lacks these features, eagent simply does without them; `FINALECHAT_URL` points it at a local or staging server.
-
-It is on whenever a token is found. Turn it off per project with
-
-```json
-{"finalechat": {"enabled": false}}
-```
-
-in `.agents/eagent/config.json` (or a bundle), or once with `EAGENT_FINALECHAT=off`, which wins over configuration, artifact publication, and stored settings pairing (the test suite sets it so tests cannot reach a real account). `enabled: true` makes a missing token an error, `mirror_input: false` keeps what you type in the terminal off the phone, `agent` renames the sender, and `eagent doctor --live` proves the token. Chat mirroring sends the conversation and its attachments. Session archives are published automatically and also upload native session logs, including tool inputs/results, and session files; `artifacts: false` or `EAGENT_FINALECHAT_ARTIFACTS=0` opts out.
-
-A session that has finished comes back to life when you write to its thread, the same as writing to it in the web UI: while `eagent serve` (or `eagent connector run`) is running in the project, your reply resumes the session in that process, your message (with any files) is delivered as the next turn, and an answer to the question it stopped on is taken as the answer. Nothing watches the thread while no eagent runs in the project; such a reply is picked up when one starts.
-
-You can start a session from the phone too. While an eagent is running in the project (`eagent serve`, a session, or `eagent connector run`), Finalechat's inbox shows **New session**: a draft that looks like a thread, where the folder chip picks the directory the session starts in (the project, a recent directory, a subdirectory or a sibling, or any path), Settings edits the project's defaults, and the first message is what starts the session, already configured, on that machine. `eagent serve` and `eagent connector run` host it in-process, so it stays interactive as long as they run; a terminal session starts it as a batch process of its own, which runs until the work is done and can be resumed with `eagent -c`.
-
-Native transcript archives are on by default. Settings for your existing FinaleChat conversations connect automatically and appear under **Settings in the thread header**. `eagent artifact export SESSION --output NEW_DIRECTORY` creates an offline archive without uploading. Proactive publication runs while eagent or its web server is running; `eagent artifact disable` opts out and `eagent artifact enable` turns it back on. `eagent connector pair` can also connect this project's settings explicitly; keep eagent, its web server, or `eagent connector run` running. Every running session's own settings appear in its thread automatically. Historical websites remain readable after the original process disappears. See [session archives and settings](docs/FINALECHAT-INTEGRATIONS.md) for recovery, scope, and lifecycle details.
-
-## Relays with Antigravity, Codex and Claude Code
-
-```
-eagent relay antigravity --cwd ~/Development/my-project "Run the tests"
-eagent relay codex --cwd ~/Development/epsilon "Merge every pending PR, then a deep dependency pass"
-eagent relay claude --cwd ~/Development/snowdown       # starts it and waits for your first message
-eagent relays                                          # every relay on this machine
-eagent relays attach codex                             # watch or type into one yourself
-```
-
-A relay session runs another coding agent in a tmux terminal eagent owns (screen when tmux is not installed) and passes your messages to it. The built-in profiles are `codex` (`--yolo`), `claude` and `antigravity`. The latter two run `claude` and `agy` with `--dangerously-skip-permissions`. All three use their native model defaults. Add your own under `"relay": {"profiles": {...}}` in the project config. eagent advertises the profiles to Finalechat's New session screen, so a phone can start a relay too.
-
-- **Model and effort.** Pick them when you start (`--relay-model sonnet --relay-effort high`, or the phone's Options, which it remembers) and change them while the agent runs, with `/model sonnet high` (`/model default` for its own) or from the thread's settings. A change restarts the agent on the same conversation, after the turn it's on. Antigravity lists your account's model IDs with `agy models`. It accepts `--model` and `--effort` and resumes the same conversation with `--conversation`. Codex's choices come from its own model cache (`~/.codex/models_cache.json`); Claude Code's are its aliases (`fable`, `opus`, `sonnet`, `haiku`) and the Anthropic models eagent knows.
-
-The agent works in the folder the session starts in: `--cwd` in a terminal, the folder chip on the phone (pick one, or type any path, `~/…` included). Mid-session, "start Claude in ~/Development/snowdown" starts one there.
-
-- Your words reach the agent verbatim, the moment they arrive, whatever eagent is doing. "Stop", "wait" and "don't…" interrupt it first. Messages for eagent itself (`@e …`, "not for relay"), questions about the relay ("how's it going?") and requests to restart or change the update cadence stay with eagent.
-- What the agent says and does is read from its own transcript (Codex rollouts, Claude Code session files), not scraped off the screen: nothing scrolls off, ghost suggestions are not mistaken for questions, and every send is confirmed when the transcript shows it arrived. Its folder-trust and update prompts are answered on the way up.
-- eagent is woken when the agent finishes a turn, needs attention, or crosses 50/80/95% of its usage budget, never on a timer. The narrator relays the agent's own report and attaches the screenshots it made. While the agent works the narrator tells you what it is doing as it goes, from the steps in the agent's own transcript (files edited, commands run), as in any session (see *The narrator's voice*).
-- Relay mode is session state. A context reset keeps it, and the harness writes the relay's details into the dossier itself. While a relay runs, eagent refuses to edit files or delegate work unless you addressed it directly.
-- "Keep it going until 10am" (or "until I say stop") turns on autopilot: at every turn end where the agent has stopped, eagent nudges it on in the spirit of your standing order (an agent waiting on its own render or timer is left to wake itself, with a check after 10 idle minutes), decides its questions as you would and says what it chose, and reports when the time is up.
-- Ask for an upgrade and eagent runs `agy update`, `codex update` or `claude update` and restarts the agent continuing its own session; ask to switch ("have Claude continue where Codex left off") and the other agent starts in the same folder with a handoff brief of your instructions and the last report.
-- On the phone, each of your messages shows what became of it (sent, Codex has it, held for its turn, kept for eagent, not delivered), each turn's report arrives verbatim and folded under the narrator's summary, `/screen` shows the agent's terminal, and `/notify-done` buzzes you once when the current turn ends.
-- Commands, from the terminal, the web UI, Finalechat or Messenger, act at once without a model in the loop: `/relay` (status), `/screen`, `/notify-done`, `/interrupt`, `/restart`, `/model [model] [effort]`, `/upgrade`, `/switch claude [model] [effort]`, `/autopilot [until 10:00] [order]`, `/autopilot off`, `/stop-relay`. The phone's thread header shows the agent and its state (`meta.relay`), and its composer can address a message to eagent instead of the agent or send it interrupting (`eagent.route`, `eagent.delivery` on the message).
-- The agent outlives eagent: `eagent -c` reattaches to the running terminal. Restarting `eagent` (serve) brings back the sessions it was running as it starts, each with any reply you sent while it was down, so relay threads keep reporting without a message from you. After a hard kill they come back on your next message. Each relay belongs to the session that started it (`eagent-relay-<session>-<name>` on a private tmux socket); eagent never touches terminal sessions it did not create.
-
-## How a session runs
-
-1. Your message wakes the **orchestrator**. It looks around, then either does something small itself or writes a self-contained task and calls `delegate`. Several tasks can run at once; `wait` blocks until one finishes.
-2. Each task runs in the **task worker** with a brand-new context: the task description, the tools, nothing else. It works until it calls `complete_task`; the report lands in the orchestrator's history as a message.
-3. The orchestrator verifies (opens files, runs the build, runs the app), delegates follow-ups for anything missing, and leaves `note`s about milestones and problems.
-4. Every note wakes the **narrator**. So does a finished task and an idle orchestrator, and while work is in progress it is asked every 30 seconds whether you should hear something. The narrator reads what changed and decides: say something, ask a question, or hold. It never narrates mechanics; it reports outcomes.
-5. When the orchestrator calls `yield` with `done=true`, the narrator sends a final report and a batch session exits. Loops and cron schedules the orchestrator set up keep a session alive until they are cancelled.
-
-### The log
-
-Everything is an event in `.agents/eagent/sessions/<session>/<epoch-ms>.jsonl`:
-
-```json
-{"seq":14,"ts":"2026-09-07T01:54:03Z","type":"assistant","actor":"orchestrator","data":{"model":"zai-org/GLM-5.3","tool_calls":[{"id":"call_…","name":"delegate","args":{…}}],"usage":{"input":4900,"output":9000},"elapsed_ms":240211,"seen_seq":13}}
-{"seq":15,"ts":"…","type":"task.create","actor":"orchestrator","data":{"id":"t1","title":"Build …","description":"…","kind":"work"}}
-{"seq":16,"ts":"…","type":"tool.result","actor":"orchestrator","data":{"call_id":"call_…","name":"delegate","output":"Task t1 started …"}}
-```
-
-One reducer (`internal/state`) folds events into tasks, processes, schedules, the pending question, and each actor's conversation. The live process and `eagent replay` run the same code. Each actor's view is a filter over the same log: the orchestrator sees task *reports*, not the worker's tool traffic; the worker sees only its own task; the narrator sees a compact observation stream of what the orchestrator did.
-
-Every model response records `seen_seq`, the last event it was shown. A task report that lands while the orchestrator is mid-call is delivered after that call's tool results, exactly where the model would have first seen it. That is what makes replay faithful and the prompt prefix stable.
-
-### Prefix caching
-
-Both continuous actors are built so their prompts grow only at the end:
-
-- System prompts and tool lists are fixed for the life of a subsession.
-- History is rendered deterministically from the log; nothing is rewritten or summarised in place.
-- Everything that changes per call (time, running tasks, context usage, wake reason) is a steering message appended as the *final* user turn and never persisted.
-- Native reasoning state (OpenAI Responses encrypted reasoning items, Anthropic thinking blocks) is stored and replayed verbatim. OpenAI gets a `prompt_cache_key`; Anthropic gets `cache_control` breakpoints; Together caches automatically.
-
-In practice the orchestrator's cached share has been 85–93% of input tokens over full sessions.
-
-### Dossiers instead of compaction
-
-When the orchestrator's prompt passes `rollover_tokens` (150k by default), eagent does not summarise the tail of the conversation in place. It:
-
-1. closes the current subsession file and opens a new one;
-2. pauses the orchestrator;
-3. gives the task worker a **dossier task** with the directory of every subsession so far and `session_list` / `session_read` / `session_search` tools;
-4. delivers the dossier as the first message of the new subsession.
-
-The dossier is a briefing plus a **map**: `file:line` citations into the raw logs for every important item. This is what one looked like in a real session that rolled over three times (threshold lowered to 20k tokens to force it; the orchestrator was reading a repository's documentation file by file):
-
-```
-# DOSSIER — Session 1788751572547 (now on subsession 4, 1788751741241.jsonl)
-
-## 1. USER'S GOAL
-Verbatim (1788751572547.jsonl:3): "The repository ../sequin is a Rust project. Personally
-(do NOT delegate any of this; use read_file yourself) read these files in full, one at a time: …"
-
-## 2. CURRENT STATE
-Verified on disk (ls/wc this session, handle p6):
-- summaries/README.md (1803 B, 29 lines) — done (source README.md, 177 lines, read fully in subsession 1).
-- summaries/arrival.md (3603 B, 20 lines) — done (source arrival.md, 866 lines, read in 3 chunks).
-- summaries/content.md (3023 B, 12 lines) — done …
-- scratch/founder-calls-notes.md — the orchestrator's OWN notes on founder-calls.md lines 1–710,
-  written as a durability measure at 1788751636035.jsonl:46. NOT the deliverable.
-Not yet read/summarized: … canon-evidence.md — 1728 lines, NOT READ (needs ~6 chunks) …
-
-## 3. DECISIONS AND CONSTRAINTS
-- read_file truncates ~24 KB per call; chunk big files (offset/limit ~200-300 lines). …
-
-## 5. MAP
-- founder-calls.md read part 1 (lines 1–480): 1788751636035.jsonl:42-43. Lines 481–710: …:44-45.
-- Prior dossier (covers subsession 1 only): 1788751587025.jsonl:26-29 — this dossier supersedes it.
-```
-
-The orchestrator, told in its steering message that it was at 19k of 20k tokens, wrote its reading notes to a scratch file *before* the reset so nothing was lost; the next dossier pointed at that file. Nobody programmed that. The session went on to roll over ten times in total and finished the job: eight summaries and an index, every link resolving, no file summarised twice and none skipped. The orchestrator can `session_read` any cited range at full fidelity. Because each dossier is rebuilt from the original events, nothing decays into a summary of a summary; each one is written for the work at hand. A dossier without citations is rejected and retried once; if the worker still fails, a harness-built briefing keeps the session going. The narrator starts the new subsession from the same dossier.
-
-### Shell commands never block the harness
-
-`bash` starts every command in its own process group under a handle and returns within `wait_seconds` (20 by default) with either the finished output or the handle plus whatever was printed so far. The harness keeps managing it: `bash_poll` (with optional wait), `bash_write` for stdin, `bash_extend` for the deadline, `bash_kill`. Commands started with `timeout_seconds=0` are servers and are handed over when a task ends; everything else a task started is killed with it. A command that finishes after its owner moved on is reported as a notification. Output is captured in full (no 4KB pipe truncation) and capped at 4MB per process, keeping the head and the tail.
-
-Each actor has a working directory. It starts at the project root, and a `cd` inside a command moves it for that actor's later commands: the shell reports where it ended up, the log records the move as a `cwd.change` event, the tool result says so, and the phone's thread chip and the web UI follow it. A worker starts where the orchestrator was when it delegated. File tools (`read_file`, `view_image` (a picture shown to the model, for screenshots and renders), `write_file`, `edit_file`, `list_dir`) resolve relative paths against it, can read anywhere, and only write inside the project directory, that working directory, or the OS temp dir, so a mistyped path cannot clobber something elsewhere. The spec calls for bash only; the file tools exist because mid-tier models writing 300-line files through heredocs was the single biggest source of broken output in earlier attempts.
+Details: [docs/FINALECHAT-INTEGRATIONS.md](docs/FINALECHAT-INTEGRATIONS.md).
 
 ## Configuration
 
-`eagent config` prints the effective configuration. Layers, each overriding the last: built-in defaults, a preset, the project's `.agents/eagent/config.json`, a named bundle, `EAGENT_*` environment variables.
-
-The easiest way to change any of it is the **Config** page of the web UI (`eagent serve`, then *Config*). It edits the effective configuration as a form and saves to `.agents/eagent/config.json`. By default it writes an *overlay*: the file names the preset it builds on and only the values that differ, so the file stays short and picks up preset improvements in later releases; tick *write every value* to pin everything instead. The page shows where each value comes from, refuses to write a value an `EAGENT_*` variable currently overrides (it would have no effect), checks the file has not changed underneath it before saving, keeps a `.bak` of the previous version, and offers *Undo* after every save. Custom base URLs and key variable names are the one thing it will not accept from the browser: those are added by editing the file, so a web page can never point a key at a new host. *Test this route* makes one tiny tool call through a route and reports whether the model called the tool, how long it took, and how many reasoning tokens it spent; *Try every effort* does that for every effort the catalog lists for the model and remembers the results in `.agents/eagent/route-checks.json`, so the effort control shows what each level actually costs on your account. The model picker also merges each provider's **live** `/models` list (badged *live*), so models released after your eagent build are selectable without an upgrade. That fetch happens when the Config page or the new-session dialog asks, and from the settings connector, which keeps the list current for the phone's model pickers — never on the way to starting a session, so a start never waits on the network — and the result is cached in `.agents/eagent/live-models.json` for 6 hours (a refresh that finds nothing keeps the stale cache and is retried after ten minutes; a provider that fails keeps the models it listed before). Providers are queried at their catalog base URL with the key variable the catalog already names (OpenRouter's list is public); providers whose key is unset are skipped and noted. Models the provider doesn't publish prices for show as unpriced in session views.
-
-**Presets** are built in, named by provider and tier so the trade-off is in the name. `glm` (default) is GLM-5.3 / GLM-5.3-Flash / DeepSeek V4.1 Flash 1017 on Together. `openai-high` is GPT-6 Astra orchestrating, GPT-6.1 Sol working, GPT-6 Luna narrating; `openai-med` has GPT-6.1 Terra working instead; `openai-low` is GPT-6.1 Sol orchestrating with GPT-6 Luna working and narrating. Each OpenAI route falls back to the same model through OpenRouter when the direct key is missing or out of credits; fallbacks work for every actor, and a billing failure is never retried, the next route is tried at once. `openrouter-high` is Kimi K3 / GLM-5.3 / GLM-5.3-Flash; `openrouter-med` is the default routing through OpenRouter; `openrouter-low` is GLM-5.3-Flash / DeepSeek V4.1 Flash 1017 / DeepSeek V4.1 Flash 1017 and the cheapest way to run. `anthropic-high` is Claude Fable 5.1 / Opus 5.5 / Sonnet 5.5; `anthropic-med` is Opus 5.5 / Sonnet 5.5 / Haiku 5.5. The same three tiers exist for four more providers with one key each: `deepinfra-high|med|low` (Kimi K3, GLM-5.3, GLM-5.3-Flash, DeepSeek V4.1 Flash 1017 on DeepInfra), `fireworks-high|med|low` (the same lineup on Fireworks), `opencode-high|med|low` (OpenCode Zen, which sells at provider cost; the high tier puts Claude Fable 5.1 in the orchestrator seat), and `nous-high|med|low` (Nous Portal). `astra` is the spec's hybrid (Astra orchestrating, Together workers). `deepseek`, `qwen` and `muse` run one model for all three actors (DeepSeek V4.1 Flash 1017 on Together, Qwen 3.8 27B through OpenRouter, Muse Spark 1.3 Contributor on Meta's API, the training-data tier of Muse Spark at a fraction of the price), the shape you would get from a single local model. Four more do the same for October 2026 OpenRouter releases, each with a 1M-token window: `mistral` (Mistral Large 4), `muse-open` (Meta's open-weight Muse Spark Open), `beam` (Reflection Beam 1.0 501B A23B), and `deepseek-1017` (DeepSeek V4.1 Flash 1017, whose weekday peak hours cost double). Reasoning effort follows one policy in all of them: the orchestrator runs at its model's highest effort below max (`xhigh` where the model has it, otherwise `high`); the task worker runs `high` when it is a full-size model and `medium` when it is a flash-class one, except GPT-6 Luna, which always gets `xhigh`, and DeepSeek V4.1 Flash 1017, which offers no `medium` and so runs `high`; the narrator always thinks a little (`low`), never `none`. `eagent config list` describes them, and `eagent doctor --live --preset NAME` makes one tiny call per actor to prove a preset works before you rely on it.
-
-**Bundles** are named configurations checked into the project under `.agents/eagent/configs/NAME.json`, so a team can keep everyone's preferred setup side by side and borrow each other's:
-
-```
-eagent config save eric "Eric's setup: Anthropic" --preset anthropic-med
-eagent --config eric "…"          # or EAGENT_CONFIG=eric, or "default_config": "eric" in config.json
-eagent config show eric
-```
-
-A bundle is a partial override: it can name a preset and change one model, or spell out everything. The session log records which bundle ran.
+`.agents/eagent/config.json` in the project, or the settings page:
 
 ```json
 {
-  "orchestrator": { "protocol": "openai-chat", "base_url": "https://api.together.xyz/v1",
-                    "model": "zai-org/GLM-5.3", "api_key_env": "TOGETHER_API_KEY",
-                    "reasoning_effort": "high", "max_tokens": 32768 },
-  "task":         { "model": "zai-org/GLM-5.3-Flash", "reasoning_effort": "medium", "…": "…" },
-  "narrator":     { "model": "deepseek-ai/DeepSeek-V4-Flash-0731", "reasoning_effort": "low", "…": "…" },
-  "task_concurrency": 3,
-  "max_task_turns": 150,
-  "narrator_tick_seconds": 90,
-  "rollover_tokens": 150000,
-  "bash_wait_seconds": 20,
-  "bash_timeout_seconds": 600,
-  "persona": "optional override of the narrator's voice"
+  "preset": "anthropic-med",
+  "model": { "reasoning_effort": "high" },
+  "relay": { "default": "claude" },
+  "quiet_seconds": 180
 }
 ```
 
-Protocols: `openai-chat` (Together, OpenRouter, DeepInfra, Fireworks, OpenCode Zen, Nous Portal, any compatible server), `openai-responses` (OpenAI, OpenRouter, Zen), `anthropic` (Anthropic, Zen). Presets switch the whole routing:
+- One model, with an optional fallback route. It runs at one reasoning effort for every call, so the provider's prompt cache keeps hitting: `xhigh` by default, or the highest the model offers below `max`.
+- The conversation restarts from a dossier when it fills half the model's context window. `rollover_tokens` fixes a number instead.
+- `summarizer` keeps the thread's title and summary: in the same loop by default, or on a small model of its own (`"mode": "dedicated"`).
+- `.agents/eagent/INSTRUCTIONS.md` holds standing instructions for the project (`AGENTS.md` is read when there is none).
+- `eagent prompts export` copies the prompts into the project, where you can edit them.
+- A config file written for the earlier three-model eagent still loads; `eagent doctor` says what was carried over.
 
-```
-eagent --preset openai-high …     # GPT-6 Astra / GPT-6.1 Sol / GPT-6 Luna, OpenRouter fallback
-eagent --preset openrouter-low …  # GLM-5.3-Flash / DeepSeek V4.1 Flash 1017 / DeepSeek V4.1 Flash 1017, cheapest
-eagent --preset anthropic-med …   # Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5
-eagent --preset beam …            # Reflection Beam 1.0 501B A23B on all three actors, OpenRouter
-```
+## How it works
 
-A route with a `fallback` switches automatically when the primary is unroutable (bad key, no model access, exhausted credits); the switch is recorded in the log and sticks for the session. Transient failures (429 rate limits, 5xx, stalled streams) retry with backoff. All calls stream; a stream that goes silent for two minutes, or runs past fifteen, is aborted and retried instead of hanging.
+One model loop sits between you and the agent. The harness around it is plain code: it forwards messages, tails the agent's transcript, keeps the log, and decides when the model needs to look. Each look is the same request as the last one plus what happened since, which is what makes the looks cheap.
 
-Two failure modes seen in the wild get special treatment. A stream that closes before the provider signals completion is treated as a transport failure and retried, never accepted as a response (a 12-minute GLM call once ended with a tool call whose arguments were the single character `{`). And a malformed tool call that does make it into the log is sanitised when the history is replayed, so one bad turn cannot make every later request fail validation. If the orchestrator's call still fails after retries, it gets one recovery turn; if that fails too, the session pauses, the narrator tells you plainly, and `eagent -c` picks up exactly where it stopped.
+[docs/DESIGN.md](docs/DESIGN.md) has the whole design. [docs/EVENTS.md](docs/EVENTS.md) is the log's schema.
 
-`reasoning_effort` matters for GLM on Together: at `medium` GLM-5.3-Flash spent 8,800 reasoning tokens and 69 seconds on a 120-line file; at `low` it spent 7 tokens and 14 seconds. The task worker ships at `medium` for the quality of its work; set `low` in the project file when speed on simple steps matters more.
+## Limits
 
-Project instructions in `AGENTS.md` or `.agents/eagent/INSTRUCTIONS.md` are added to the orchestrator's and worker's system prompts.
-
-### The narrator's voice
-
-The narrator narrates. Once the orchestrator has looked around it says what it understood the job to be and how the work will go. Then, while anything is working (the orchestrator, a task worker, a relayed agent), it is shown every 30 seconds (`narrator_tick_seconds`) what has happened since it last spoke and what is in flight, and by default it tells you: a message every minute or two while things move. It may hold when nothing new is worth a sentence, but never past `narrator_quiet_seconds` (180 by default): then it says what got done, or, if nothing new has shown, which command or step is still running and for how long. There is no update frequency to set; ask it in words to say more or less.
-
-- A check with nothing new since the last one makes no model call.
-- A check where the narrator holds leaves nothing in its conversation (no steer, no turn), so its prompt grows only with what happens and what it tells you, and every check reuses the cached prefix of the one before. Their tokens are still counted (`narrator.checks` events).
-- In a relay session, which can run for days, the narrator's view is cut back to its newest part once its prompt passes 40k tokens, with a recap of what it last told you.
-
-The narrator answers with the orchestrator, not ahead of it. When you write, its reply is held until the orchestrator has reacted (a note, a command, a delegation; for a question, its answer or the end of its turn) or fifteen seconds have passed, and its steer says which: relay the orchestrator's answer, say what started, or, if nothing has happened yet, one line that the message landed. Questions about the work or about eagent itself ("did you read beyond your notes?", "do you have a working directory?") are the orchestrator's to answer, in a note marked as an answer that the narrator relays faithfully; every actor's prompt carries the same short description of how eagent works, so the answer is grounded rather than guessed. A narrator message that names the machinery (orchestrator, dossier, subsession, and so on) is sent back once to be rewritten as "I".
-
-The narrator has a character rather than a register: the colleague who kept the build going while you were away and is now catching you up over your shoulder. It leads with what you'd want to know, keeps a path or a number in most sentences because that's what makes the news usable, says what it checked itself versus what a worker told it, has opinions about what turned out well, and delivers bad news in the same calm voice as good. No greetings, no sign-offs, no catchphrases, no labelled fields. A list of machine-prose habits (announced sincerity, staged openers, "not just X but Y", "no X, no Y", hedging filler, participle tails, the usual vocabulary) is banned outright in `NARRATOR.md`, and the persona was tuned against the narrator model on real session transcripts until the messages read like a person wrote them. Replace `PERSONA.md` in your project's prompt overrides to give it a different voice.
-
-### Prompts
-
-The actors' prompts are Markdown files embedded in the binary: `ORCHESTRATOR.md`, `TASK-WORKER.md`, `NARRATOR.md`, `PERSONA.md` (the narrator's voice), `FACTS.md` (how eagent works, shared by every actor), `USER_MESSAGE.md` and `USER_ANSWER.md` (how one `user.message` / `user.answer` event renders as an IRC-style `[timestamp] <nick> text` chatlog line in the orchestrator's view), `COMPACTION-DOSSIER.md` (the dossier task), and `THREAD-SUMMARY.md` (how a session's title and summary are written). `eagent prompts` lists them with their sources; `eagent prompts export` copies them into `.agents/eagent/prompts/` where any edited file overrides the built-in one for that project. They are Go templates with a handful of variables (`{{.Project}}`, `{{.Instructions}}`, `{{.Interactive}}`, `{{.Persona}}`, …). The user-message templates receive only the persisted event (`ev.Time`, formatted in Go) and never the current clock, so replays render byte-identical text and provider prompt caches keep hitting. A connected client (the web UI, the phone app) may also declare what context it can supply — timezone, locale, screen — in an optional `client` capsule on `user.message` / `user.answer`; the orchestrator then sees a trailing `[client line]` such as `[web · tz America/Los_Angeles · en-US]`, and nothing changes when it is absent.
-
-### Efficiency
-
-Every session reports per-actor input, output, and cached tokens; the web UI shows the cache ratio live and `eagent replay` prints it afterwards. Tool results are capped at 24k characters, keeping the head and the tail, but nothing is lost: the full text is saved under the session's `outputs/` directory and the notice tells the model the path and line count, so it can page through with `read_file(path, offset, limit)` or `grep` when the part it needs was cut. Command output is retained up to 4MB per process with cursor-based polling.
-
-## What eagent will not do (yet)
-
-- **Sandboxing.** Commands run on your machine as you. Read the log before you trust a session that touched anything important.
-- **Narrator or worker context exhaustion.** Only the orchestrator rolls over. Workers are bounded by `max_task_turns`; the narrator's view truncates tool output and restarts with each subsession (a relay session's is cut back when it grows, see *The narrator's voice*).
-- **Multi-machine sessions.** Session directories from different checkouts can be pooled (they are just timestamped files) but nothing merges them for you; the dossier task is what makes sense of a combined history.
-
-## More
-
-- [docs/LESSONS.md](docs/LESSONS.md): what broke in four earlier implementations of this design, and what eagent does about each failure.
-- [docs/breakout-grid.md](docs/breakout-grid.md): fourteen presets building the same game in parallel, measured, played and judged side by side.
-- [docs/EVENTS.md](docs/EVENTS.md): the event log schema and which actor sees which events.
-- [docs/DESIGN-SPEC.md](docs/DESIGN-SPEC.md): the design specification eagent was built from.
-- [docs/SPEC-COMPLIANCE.md](docs/SPEC-COMPLIANCE.md): that specification, requirement by requirement, with the two deliberate deviations.
+- No sandbox. The agent runs on your machine as you, with whatever permissions its profile gives it.
+- eagent has no shell or file tools of its own. Work in the project is the agent's.
+- One machine. A session's log and its terminal live where it started.
 
 ## Development
 
 ```
-make check          # gofmt, go vet, go test -race
-make release        # dist/eagent-{linux,darwin}-{amd64,arm64} + SHA256SUMS
+make check      # gofmt, go vet, go test -race
+make release    # dist/eagent-{linux,darwin}-{amd64,arm64}
 ```
 
-CI runs the same checks on every push and pull request
-(`.github/workflows/ci.yml`); pushing a `v*` tag builds the four binaries and
-publishes them as a GitHub release (`.github/workflows/release.yml`). Bug
-reports and pull requests are welcome; see `CONTRIBUTING.md`, and
-`SECURITY.md` for how to report a vulnerability privately.
-
-Packages: `event` (schema), `store` (JSONL sessions, torn-line repair, locking), `state` (reducer and per-actor views), `llm` (three protocols, streaming, retries, text tool-call recovery), `procs` (asynchronous shell), `sched` (loops and cron), `tools` (files and the session archive), `prompts` (embedded Markdown prompts), `config` (presets and bundles), `harness` (runtime, actors, rollover, resume, inbox), `ui` (terminal), `web` (HTTP API, SSE, embedded UI). The harness tests run the whole runtime against a scripted fake provider: delegation, nudging a tool-less orchestrator, rollover with a dossier, interrupt-then-resume, interactive questions. Two chaos suites inject random provider faults (5xx, rate limits with Retry-After, streams cut mid tool call, malformed arguments, garbage frames, latency) and kill and resume the runner at random points, and check after every run that the log parses, sequence numbers are contiguous, no tool call is left without a result, and the work still finished.
+Bug reports and pull requests are welcome: see `CONTRIBUTING.md`, and `SECURITY.md` for reporting a vulnerability privately. Earlier design documents are kept in `docs/` and marked historical.

@@ -28,7 +28,7 @@ const fmtTime = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocal
 const rel = (ts, start) => { const ms = new Date(ts) - start; if (isNaN(ms)) return ''; const s = Math.max(0, ms) / 1000; const m = Math.floor(s / 60); return m >= 60 ? `+${Math.floor(m/60)}:${String(m%60).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}` : `+${m}:${(s%60).toFixed(1).padStart(4,'0')}`; };
 const fmtDate = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}); };
 const k = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n ?? 0);
-const dur = ms => ms >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%3600000)/60000)}m` : ms >= 60000 ? `${Math.floor(ms/60000)}m${Math.round((ms%60000)/1000)}s` : ms >= 1000 ? (ms/1000).toFixed(1)+'s' : `${ms}ms`;
+const dur = ms => (ms = Math.round(ms)) >= 3600000 ? `${Math.floor(ms/3600000)}h${Math.round((ms%3600000)/60000)}m` : ms >= 60000 ? `${Math.floor(ms/60000)}m${Math.round((ms%60000)/1000)}s` : ms >= 1000 ? (ms/1000).toFixed(1)+'s' : `${ms}ms`;
 const money = usd => usd >= 1 ? '$' + usd.toFixed(2) : usd >= 0.01 ? '$' + usd.toFixed(2) : usd > 0 ? '<$0.01' : '$0';
 const when = ts => { const d = ts ? new Date(ts) : null; return d && !isNaN(d) && d.getFullYear() > 1 ? d : null; };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n-1) + '…' : s; };
@@ -93,7 +93,8 @@ document.addEventListener('click', e => {
 });
 
 // ---- state ------------------------------------------------------------------
-const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, showActivity: !ARCHIVE && localStorage.getItem('eagent.activity') === '1', filters: new Set(), search: '', taskSel: null };
+function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+const S = { gen: 0, open: new Set(), closed: new Set(), sessions: [], sid: null, tab: 'chat', detail: null, events: [], lastSeq: 0, es: null, queued: [], queuedSeq: 0, drafts: {}, showActivity: !ARCHIVE && stored('eagent.activity') === '1', showLegacyActivity: ARCHIVE || stored('eagent.activity.legacy') !== '0', filters: new Set(), search: '' };
 
 let lastHash = location.hash;
 function route() {
@@ -106,7 +107,7 @@ function route() {
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   if (parts[0] === 'config') { S.sid = null; S.tab = 'config'; }
-  else if (parts[0] === 's' && parts[1]) { if (S.sid !== parts[1]) { S.taskSel = null; S.open.clear(); S.closed.clear(); } S.sid = parts[1]; S.tab = parts[2] || 'chat'; }
+  else if (parts[0] === 's' && parts[1]) { if (S.sid !== parts[1]) { S.open.clear(); S.closed.clear(); } S.sid = parts[1]; S.tab = TABS.includes(parts[2]) ? parts[2] : 'chat'; }
   else { S.sid = null; S.tab = 'home'; }
   render();
 }
@@ -171,9 +172,11 @@ function openStream(id, after) {
     const before = S.detail;
     S.detail = JSON.parse(e.data);
     renderLive();
-    // Rebuild the Tasks tab only when something it shows changed (or a task is
-    // running and its duration ticks); open panels survive either way.
-    if (S.tab === 'tasks' && (tasksDigest(S.detail) !== tasksDigest(before) || S.detail.tasks.some(t => t.status === 'running' || t.status === 'queued'))) renderTab();
+    renderTools();
+    // Rebuild the Usage tab only when something it shows changed; open
+    // panels survive either way.
+    if (S.tab === 'usage' && usageDigest(S.detail) !== usageDigest(before)) renderTab();
+    renderAgents();
     updateComposer();
     if (S.detail.question && !(before && before.question)) notify('eagent has a question for you');
     const s = S.sessions.find(x => x.id === id);
@@ -182,40 +185,116 @@ function openStream(id, after) {
   es.onerror = () => { /* the browser reconnects */ };
 }
 function onEvent(ev) {
+  if (S.tab === 'chat' && (ev.type === 'user.answer' || ev.type === 'user.dismiss')) closeQuestionCard(ev.data && ev.data.question_id);
+  takeQueued(ev);
   if (S.tab === 'chat') { const node = chatNode(ev); if (node) { const sc = $('.chat .scroll'); const col = $('.chat .col'); const atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80; const w = $('#working'); if (w) col.insertBefore(node, w); else col.append(node); if (atBottom) sc.scrollTop = sc.scrollHeight; } }
   else if (S.tab === 'timeline') { const tb = $('.tl tbody'); if (tb) { if (passesFilter(ev)) tb.append(tlRow(ev)); tlUpdateCount(); } }
   if (ev.type === 'narrator.message' && document.hidden) notify('eagent: ' + clip(ev.data.text, 80));
+}
+// closeQuestionCard redraws a question's card once it is answered or
+// dismissed, so its options can no longer be picked.
+function closeQuestionCard(qid) {
+  if (!qid) return;
+  const q = S.events.find(e => e.type === 'narrator.question' && e.data && e.data.id === qid);
+  const old = q && [...document.querySelectorAll('#pane [data-qid]')].find(n => n.dataset.qid === qid);
+  const node = old && chatNode(q);
+  if (node) old.replaceWith(node);
 }
 function notify(text) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   try { new Notification(text, {tag: 'eagent'}); } catch (e) {}
 }
 
+// eagentModel is the model eagent ran on: the one loop's, or in an old
+// session the orchestrator's.
+const eagentModel = d => (d.models || {}).eagent || (d.models || {}).orchestrator || '';
+const shortModel = m => String(m || '').split('/').pop();
+const TABS = ['chat', 'usage', 'timeline'];
 function renderSessionShell() {
   const d = S.detail;
-  const tabs = ['chat', 'tasks', 'timeline'].map((t, i) => h('a', {href: `#/s/${S.sid}/${t}`, class: S.tab === t ? 'active' : '', title: `shortcut: ${i+1}`}, t[0].toUpperCase() + t.slice(1), t === 'tasks' && d.tasks.length ? ` (${d.tasks.length})` : ''));
-  const stopBtn = h('button', {onclick: async () => { if (confirm('Stop this session? It can be resumed later.')) await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); }}, 'Stop');
-  const resumeBtn = h('button', {onclick: async () => { try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); } }}, 'Resume');
-  const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
+  const tabs = TABS.map((t, i) => h('a', {href: `#/s/${S.sid}/${t}`, class: S.tab === t ? 'active' : '', title: `shortcut: ${i+1}`}, t[0].toUpperCase() + t.slice(1)));
   const titleText = d.title ? d.title : (d.first_message ? clip(d.first_message, 120) : 'New session');
   $('#main').replaceChildren(
     h('div', {class: 'session-head'},
       h('div', {class: 'session-title', id: 'session-title'}, titleText),
-      h('div', {class: 'session-desc', id: 'session-desc', style: d.description ? '' : 'display:none'}, d.description || '')),
-    h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), h('div', {class: 'tools'},
-      d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
-      cost,
-      d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
-      h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
-      h('span', {class: 'badge mono', title: 'session id'}, S.sid),
-      d.alive ? stopBtn : resumeBtn)),
+      h('div', {class: 'session-desc', id: 'session-desc', style: d.description ? '' : 'display:none'}, d.description || ''),
+      h('div', {class: 'agents', id: 'agents'})),
+    h('div', {class: 'tabs'}, ...tabs, h('span', {class: 'spacer'}), sessionTools(d)),
     h('div', {class: 'pane', id: 'pane'}));
+  renderAgents();
+}
+// sessionTools is the toolbar beside the tabs: what the session runs on,
+// what it has cost, and Stop or Resume. The button is made once and only
+// relabelled (renderTools), so a click never lands on a button that is
+// being swapped out; what it does is decided when it is clicked. It is the
+// button of the session it was built for, and stays on the page past a
+// click on another session until that one has loaded: it acts on its own
+// session, and while the page's state is not that session's it does what
+// its label says.
+function sessionTools(d) {
+  const sid = S.sid;
+  const act = ARCHIVE ? null : h('button', {id: 'session-act', onclick: async () => {
+    const alive = S.sid === sid && S.detail ? S.detail.alive : act.textContent === 'Stop';
+    if (alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) { try { await api(`/api/sessions/${sid}/stop`, {method: 'POST', body: '{}'}); } catch (e) { toast(e.message, 'bad'); } } return; }
+    try { await api(`/api/sessions/${sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); }
+  }}, d.alive ? 'Stop' : 'Resume');
+  return h('div', {class: 'tools', id: 'session-tools'}, h('span', {id: 'session-badges', style: 'display:contents'}, ...toolBadges(d)), act);
+}
+// toolBadges are the toolbar's badges for a session's detail.
+function toolBadges(d) {
+  const cost = d.priced && d.cost_usd > 0 ? h('span', {class: 'badge', title: 'estimated at list prices'}, money(d.cost_usd)) : null;
+  const model = eagentModel(d);
+  return [
+    d.legacy ? h('span', {class: 'badge', title: 'Written before eagent was one loop: its tasks, processes and schedules are shown as history only.'}, 'older session') : null,
+    model ? h('span', {class: 'badge model', title: `eagent runs on ${model}`}, shortModel(model)) : null,
+    d.duration_s > 0 ? h('span', {class: 'badge', title: 'duration'}, dur(d.duration_s * 1000)) : null,
+    cost,
+    d.phone ? h('span', {class: 'badge phone', title: `Finalechat thread ${d.phone.external_id}` + (d.phone.remote_mode ? ' · remote mode' : '')}, 'phone') : null,
+    h('span', {class: 'badge'}, `${d.subsessions} file${d.subsessions === 1 ? '' : 's'}`),
+    h('span', {class: 'badge mono', title: 'session id'}, S.sid),
+  ].filter(Boolean);
+}
+// renderTools brings the toolbar up to date with the latest status in
+// place: the badges only when what they show changed, the button only by
+// its label.
+function renderTools() {
+  const badges = $('#session-badges'); if (!badges || !S.detail) return;
+  const next = toolBadges(S.detail);
+  const key = nodes => nodes.map(n => n.className + '\u0000' + (n.title || '') + '\u0000' + n.textContent).join('\u0001');
+  if (key(next) !== key([...badges.children])) badges.replaceChildren(...next);
+  const act = $('#session-act');
+  const label = S.detail.alive ? 'Stop' : 'Resume';
+  if (act && act.textContent !== label) act.textContent = label;
+}
+
+// renderAgents shows the session's agents under its title: who, what it
+// runs, what it is doing, and a look at its terminal while it runs.
+function renderAgents() {
+  const el = $('#agents'); const d = S.detail; if (!el || !d) return;
+  const agents = d.agents || [];
+  el.replaceChildren(...agents.map(a => {
+    const running = d.alive && !ARCHIVE && a.state !== 'exited' && a.state !== 'stopped';
+    const what = [a.model ? shortModel(a.model) : '', a.effort].filter(Boolean).join(' ');
+    return h('span', {class: 'agent ' + a.state, title: `${a.who}${what ? ' · ' + what : ''} · ${a.state}${a.detail ? ': ' + a.detail : ''} · ${a.dir}` + (a.autopilot ? ' · autopilot on' : '')},
+      h('span', {class: 'st ' + a.state}), h('b', null, a.who), what ? h('span', {class: 'sub'}, ' ' + what) : null, h('span', {class: 'sub'}, ' · ' + a.state + (a.autopilot ? ' · autopilot' : '')),
+      running ? h('button', {class: 'ghost small', title: 'What its terminal shows right now', onclick: () => showScreen(a.name)}, 'Screen') : null);
+  }));
+}
+async function showScreen(name) {
+  const pre = h('pre', {class: 'code screen'}, 'reading…');
+  const title = h('h2', null, 'Screen');
+  const load = async () => {
+    try { const r = await api(`/api/sessions/${S.sid}/agents/${encodeURIComponent(name)}/screen`); title.textContent = `${r.who} · ${r.state}`; pre.textContent = r.screen || '(blank)'; }
+    catch (e) { pre.textContent = e.message; }
+  };
+  showModal(h('div', null, title, pre, h('div', {class: 'foot'}, h('span', {class: 'sub'}, 'Read only; nothing is typed into it.'), h('span', {style: 'flex:1'}), h('button', {onclick: load}, 'Refresh'), h('button', {onclick: closeModal}, 'Close'))));
+  load();
 }
 
 function renderTab() {
   const pane = $('#pane'); if (!pane) return;
   if (S.tab === 'chat') renderChat(pane);
-  else if (S.tab === 'tasks') renderTasks(pane);
+  else if (S.tab === 'usage') renderUsage(pane);
   else if (S.tab === 'timeline') renderTimeline(pane);
   if (ARCHIVE) ARCHIVE.changed?.();
 }
@@ -225,25 +304,22 @@ function renderLive() {
   if (ARCHIVE) return;
   const el = $('#live'); const d = S.detail;
   const w = $('#working');
-  let busy = false;
-  if (w && d) { const live = d.live || {}; busy = d.alive && (live.OrchestratorBusy || live.Rollover || d.tasks.some(t => t.status === 'running' || t.status === 'queued')); w.classList.toggle('hidden', !busy); w.querySelector('.wtext').textContent = live.Rollover ? 'summarising the session for a fresh context…' : live.OrchestratorBusy ? 'thinking' + (live.OrchestratorFor ? ' · ' + live.OrchestratorFor : '') + '…' : 'tasks running…'; }
+  const live = (d && d.live) || {};
+  const busy = !!(d && d.alive && (live.Busy || live.Compacting));
+  if (w) { w.classList.toggle('hidden', !busy); w.querySelector('.wtext').textContent = live.Compacting ? 'writing a briefing for a fresh conversation…' : 'eagent is thinking' + (live.BusyFor ? ' · ' + live.BusyFor : '') + '…'; }
   if (!d) { el.innerHTML = ''; document.title = 'eagent'; return; }
   const parts = [];
-  const live = d.live || {};
   if (d.alive) {
-    if (live.Rollover) parts.push('writing notes for a fresh context');
-    else if (live.OrchestratorBusy) parts.push('working' + (live.OrchestratorFor ? ' · ' + live.OrchestratorFor : ''));
+    if (live.Compacting) parts.push('eagent writing a briefing for a fresh conversation');
+    else if (live.Busy) parts.push('eagent thinking' + (live.BusyFor ? ' · ' + live.BusyFor : ''));
     else if (d.question) parts.push('waiting for your answer');
     else if (d.idle) parts.push(d.done ? 'done, waiting for you' : 'waiting for you');
-    else parts.push('running');
-    const running = d.tasks.filter(t => t.status === 'running' || t.status === 'queued').length;
-    if (running) parts.push(`${running} task${running === 1 ? '' : 's'}`);
-    const procs = d.procs.filter(p => p.status === 'running').length;
-    if (procs) parts.push(`${procs} proc${procs === 1 ? '' : 's'}`);
+    for (const a of live.Agents || []) parts.push(`${a.Who || a.Name} ${a.State}`);
+    if (!parts.length) parts.push('running');
   } else parts.push(`session ${d.status}`);
   if (d.context_tokens) parts.push(`ctx ${k(d.context_tokens)}`);
-  const orch = d.usage.find(u => u.actor === 'orchestrator');
-  if (orch && orch.input) parts.push(`cache ${Math.round(orch.cache_ratio * 100)}%`);
+  const main = d.usage.find(u => u.actor === 'eagent') || d.usage.find(u => u.actor === 'orchestrator');
+  if (main && main.input) parts.push(`cache ${Math.round(main.cache_ratio * 100)}%`);
   el.replaceChildren(h('span', {class: 'dot ' + (d.alive ? 'on' : '')}), h('span', null, parts.join(' · ')));
   // The event-sourced title (thread.title) names the whole session so far;
   // fall back to the opening prompt, as the list does.
@@ -253,7 +329,7 @@ function renderLive() {
   const sd = $('#session-desc');
   if (sd) { sd.textContent = d.description || ''; sd.style.display = d.description ? '' : 'none'; }
   if (d.description) el.title = d.description; else el.removeAttribute('title');
-  document.title = (d.question ? '? ' : (d.alive && (busy || live.OrchestratorBusy)) ? '● ' : '') + (name ? name + ' · eagent' : 'eagent');
+  document.title = (d.question ? '? ' : busy ? '● ' : '') + (name ? name + ' · eagent' : 'eagent');
 }
 
 // ---- chat ---------------------------------------------------------------------
@@ -261,41 +337,110 @@ function renderChat(pane) {
   pane.classList.add('chat'); pane.style.padding = '0';
   const col = h('div', {class: 'col'});
   for (const ev of S.events) { const n = chatNode(ev); if (n) col.append(n); }
+  S.queued = S.queued.filter(q => q.sid !== S.sid || !S.events.some(ev => showsWords(ev, q)));
+  for (const q of S.queued) if (q.sid === S.sid) col.append(queuedNode(q));
   col.append(h('div', {class: 'working hidden', id: 'working'}, h('span', {class: 'dots'}, h('i'), h('i'), h('i')), h('span', {class: 'wtext'})));
   const scroll = h('div', {class: 'scroll'}, col);
   if (ARCHIVE) { pane.replaceChildren(scroll); scroll.scrollTop = scroll.scrollHeight; return; }
+  // The box is this session's (data-sid) for as long as it is on the page,
+  // which is past the click on another session, until that one has loaded:
+  // what is typed and sent in it is this session's, whatever S.sid says.
+  const sid = S.sid;
   const composer = h('div', {class: 'composer'}, h('div', {class: 'col'},
     h('div', {class: 'pending', id: 'pending'}),
     h('form', {onsubmit: e => { e.preventDefault(); send(); }},
-      h('textarea', {id: 'input', placeholder: 'Message the agent… (Enter to send, Shift+Enter for a new line)', rows: 1,
+      h('textarea', {id: 'input', 'data-sid': sid, placeholder: 'Message the agent… (Enter to send, Shift+Enter for a new line)', rows: 1,
         onkeydown: e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } },
-        oninput: e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
+        oninput: e => { S.drafts[sid] = e.target.value; e.target.style.height = 'auto'; e.target.style.height = Math.min(200, e.target.scrollHeight) + 'px'; }}),
       h('button', {class: 'primary', type: 'submit'}, 'Send')),
     h('div', {class: 'hint'},
       h('span', {id: 'hint'}),
-      h('label', {class: 'toggle'}, h('input', {type: 'checkbox', checked: S.showActivity, onchange: e => { S.showActivity = e.target.checked; localStorage.setItem('eagent.activity', S.showActivity ? '1' : '0'); renderTab(); }}), 'show activity'))));
+      h('label', {class: 'toggle'}, h('input', {type: 'checkbox', checked: activityShown(), onchange: e => setActivity(e.target.checked)}), 'show activity'))));
   pane.replaceChildren(scroll, composer);
+  // What the session's box held when it was last on the page (S.drafts:
+  // typed and not sent, or sent and refused) is in the new one.
+  const draft = S.drafts[sid];
+  if (draft) { const ta = $('#input'); ta.value = draft; ta.style.height = Math.min(200, ta.scrollHeight) + 'px'; }
   scroll.scrollTop = scroll.scrollHeight;
   updateComposer();
   renderLive();
   // No autofocus: the single-key shortcuts must keep working on the default tab; "/" focuses the composer.
 }
+// An older session's tasks, notes and processes are its history: its
+// activity shows unless the user turned it off for older sessions.
+function activityShown() { return S.detail && S.detail.legacy ? S.showLegacyActivity : S.showActivity; }
+function setActivity(on) {
+  const legacy = !!(S.detail && S.detail.legacy);
+  if (legacy) S.showLegacyActivity = on; else S.showActivity = on;
+  try { localStorage.setItem(legacy ? 'eagent.activity.legacy' : 'eagent.activity', on ? '1' : '0'); } catch (e) {}
+  renderTab();
+}
 function updateComposer() {
   const d = S.detail; const pend = $('#pending'); const hint = $('#hint'); if (!pend || !d) return;
   pend.innerHTML = '';
   if (d.question) pend.append(h('span', null, 'Question pending:'), ...(d.question.Options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o)), ...(d.alive && !ARCHIVE ? [h('button', {class: 'ghost', title: 'Close the question without answering. Nothing is sent to the agent.', onclick: dismissQuestion}, 'Dismiss')] : []));
-  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer. Dismiss closes the question and sends nothing.' : 'Delivered to the running session; the agent reads it at its next step.') : 'The session is not running; sending a message resumes it here.';
+  hint.textContent = d.alive ? (d.question ? 'Pick an option above or type your answer. Dismiss closes the question and sends nothing.' : 'Goes to the agent word for word. Start with @e to talk to eagent instead; eagent itself takes /relay, /interrupt, /restart, /model and /stop-relay.') : 'The session is not running; sending a message resumes it here.';
 }
 async function send() {
   const ta = $('#input'); const text = ta.value.trim(); if (!text) return;
-  ta.value = ''; ta.style.height = 'auto';
+  // The words are for the session the box was built for (renderChat). The
+  // page's own state is that session's only while it is the one shown.
+  const sid = ta.dataset.sid;
+  const d = S.sid === sid ? S.detail : null;
+  ta.value = ''; ta.style.height = 'auto'; delete S.drafts[sid];
+  // /screen shows the agent's terminal here, as its Screen button does: the
+  // session itself shows it only at its own terminal and on the phone.
+  const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped' && a.state !== 'exited');
+  if (agent) { showScreen(agent.name); return; }
   try {
-    if (S.detail && S.detail.question) await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})});
-    else await api(`/api/sessions/${S.sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
-  } catch (e) { toast(e.message, 'bad'); }
+    let r;
+    if (d && d.question) r = await api(`/api/sessions/${sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: d.question.ID, client: clientCaps()})});
+    else r = await api(`/api/sessions/${sid}/message`, {method: 'POST', body: JSON.stringify({text, client: clientCaps()})});
+    if (r && r.delivered === 'queued') showQueued(sid, text, r.message, r.inbox);
+  } catch (e) {
+    // Refused: the words go back where they can be sent again, in front
+    // of anything typed since. The box they came from may be gone (the
+    // request can wait for seconds, and another tab or session rebuilds
+    // it): they are the session's draft again, which its box is filled
+    // from, and are put into that box at once when it is the one on the
+    // page (what it holds then is what was typed since).
+    const box = $('#input'); const shown = !!box && box.dataset.sid === sid;
+    const since = shown ? box.value : S.drafts[sid];
+    S.drafts[sid] = since ? text + '\n' + since : text;
+    if (shown) box.value = S.drafts[sid];
+    toast(e.message, 'bad');
+  }
 }
-async function dismissQuestion() { try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
-async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
+// Words the server answered "queued" (another process runs the session;
+// they wait in its inbox, not yet on its record) show in the chat with
+// the answer's line under them (S.queued), until an event on the record
+// carries their inbox id: taken as a turn, carried out as a command, or
+// kept for the next run (which the chat then shows as kept).
+function showQueued(sid, text, message, inbox) {
+  if (S.sid === sid && S.events.some(ev => showsWords(ev, {inbox}))) return; // already taken
+  const q = {id: String(++S.queuedSeq), sid, text, message: message || '', inbox};
+  S.queued.push(q);
+  const col = S.sid === sid && S.tab === 'chat' && $('.chat .col'); if (!col) return;
+  const w = $('#working'); const node = queuedNode(q);
+  if (w) col.insertBefore(node, w); else col.append(node);
+  const sc = $('.chat .scroll'); if (sc) sc.scrollTop = sc.scrollHeight;
+}
+function queuedNode(q) {
+  return h('div', {class: 'msg user', 'data-queued': q.id}, h('div', {class: 'head'}, 'you · waiting'), h('div', {class: 'bubble'}, h('div', {html: md(q.text)})), h('div', {class: 'head'}, q.message));
+}
+// showsWords says whether ev, on the record, carries the waiting words q
+// (their inbox id).
+function showsWords(ev, q) { return !!q.inbox && (ev.type === 'user.message' || ev.type === 'user.answer' || ev.type === 'inbox.taken') && !!ev.data && ev.data.inbox === q.inbox; }
+// takeQueued drops the waiting copy of the words the record now shows (ev).
+function takeQueued(ev) {
+  const i = S.queued.findIndex(q => q.sid === S.sid && showsWords(ev, q)); if (i < 0) return;
+  const [q] = S.queued.splice(i, 1);
+  const n = document.querySelector(`[data-queued="${q.id}"]`); if (n) n.remove();
+}
+// A question's buttons outlast a click on another session until that one
+// has loaded; nothing is asked of the page's session then.
+async function dismissQuestion() { if (!S.detail || !S.detail.question) return; try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
+async function answer(text) { if (!S.detail || !S.detail.question) return; try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
 
 // What a thread.title event changed, in words: the session's own summary
 // (by "summary"), a name set at the user's request, or the thread as the
@@ -312,38 +457,89 @@ function titleNotice(d) {
 function chatNode(ev) {
   const d = ev.data || {};
   switch (ev.type) {
-    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, d.text ? h('div', {html: md(d.text)}) : null, attachmentsNode(d.attachments)));
+    case 'user.message': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'you' + srcLabel(d.source) + (d.held === 'the session was ending' ? ' · kept for the next run' : '') + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, d.text ? h('div', {html: md(d.text)}) : null, attachmentsNode(d.attachments)));
     case 'user.answer': return h('div', {class: 'msg user'}, h('div', {class: 'head'}, 'your answer' + srcLabel(d.source) + ' · ' + fmtTime(ev.ts)), h('div', {class: 'bubble'}, h('div', {html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'narrator.message': return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, 'e'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, fmtTime(ev.ts)), d.important ? h('span', {class: 'badge buzz', title: 'sent as important: the phone buzzed'}, 'buzzed') : null), h('div', {class: 'text', html: md(d.text)}), attachmentsNode(d.attachments)));
     case 'phone.thread': return h('div', {class: 'notice'}, 'mirrored to your phone' + (d.remote_mode ? ' (remote mode)' : ''));
     case 'thread.title': return titleNotice(d) ? h('div', {class: 'notice'}, titleNotice(d)) : null;
-    case 'cwd.change': return (ev.actor === 'orchestrator' && !ev.task) ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
+    case 'cwd.change': return !ev.task ? h('div', {class: 'notice'}, 'working directory is now ' + d.path) : null;
     case 'user.dismiss': return h('div', {class: 'notice'}, 'you dismissed the question' + srcLabel(d.source) + ' · nothing was sent to the agent');
     case 'narrator.question': {
       const answered = S.events.find(e => e.type === 'user.answer' && e.data && e.data.question_id === d.id);
       const dismissed = S.events.find(e => e.type === 'user.dismiss' && e.data && e.data.question_id === d.id);
-      return h('div', {class: 'msg'}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
+      return h('div', {class: 'msg', 'data-qid': d.id}, h('div', {class: 'avatar'}, '?'), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, 'eagent'), h('span', null, 'needs a decision · ' + fmtTime(ev.ts))),
         h('div', {class: 'qcard'}, h('div', {class: 'text', html: md(d.text)}),
           answered ? h('div', {class: 'answered'}, 'you answered: ' + answered.data.text) : dismissed ? h('div', {class: 'answered'}, 'dismissed without an answer') : h('div', {class: 'options'}, ...(d.options || []).map(o => h('button', {disabled: !!ARCHIVE, onclick: () => answer(o)}, o))))));
     }
-    case 'session.start': { const m = d.models || {}; return h('div', {class: 'notice'}, `session started ${fmtDate(ev.ts)} · ${['orchestrator', 'task', 'narrator'].map(a => (m[a] || '?').split('/').pop()).join(' / ')}` + (d.config ? ` · ${d.config}` : '')); }
+    case 'session.start': { const m = d.models || {}; const models = m.eagent ? 'eagent on ' + shortModel(m.eagent) : m.orchestrator ? ['orchestrator', 'task', 'narrator'].map(a => shortModel(m[a]) || '?').join(' / ') : ''; return h('div', {class: 'notice'}, `session started ${fmtDate(ev.ts)}` + (models ? ` · ${models}` : '') + (d.config ? ` · ${d.config}` : '')); }
     case 'session.resume': return h('div', {class: 'notice'}, 'session resumed ' + fmtDate(ev.ts) + (d.closed && d.closed.length ? ' · ' + d.closed.join('; ') : ''));
     case 'session.end': return h('div', {class: 'notice'}, `session ended (${d.reason}) ${fmtDate(ev.ts)}`);
-    case 'subsession.start': return d.reason === 'rollover' ? h('div', {class: 'notice'}, `fresh context (subsession ${d.index + 1}); notes carried over`) : null;
+    case 'subsession.start': return d.reason === 'rollover' ? h('div', {class: 'notice'}, `fresh conversation (subsession ${d.index + 1}); a briefing carried over`)
+      : d.reason === 'upgrade' ? h('div', {class: 'notice'}, `the current eagent took this older session over here (subsession ${d.index + 1}); it continues from a briefing written from the record above`) : null;
+    case 'relay.start': return h('div', {class: 'notice'}, `${agentWho(d.name, d)} ${d.resumed ? 'resumed' : 'started'} in ${d.dir}` + (d.model || d.effort ? ` · ${[shortModel(d.model), d.effort].filter(Boolean).join(' ')}` : ''));
+    case 'relay.end': return h('div', {class: 'notice'}, `${agentWho(d.name)} stopped`);
+    case 'relay.turn': {
+      const text = String(d.text || '').trim();
+      const meta = [d.duration_ms ? dur(d.duration_ms) : '', d.tools ? `${d.tools} tool call${d.tools === 1 ? '' : 's'}` : '', d.interrupted ? 'interrupted' : ''].filter(Boolean).join(' · ');
+      return h('div', {class: 'msg agent'}, h('div', {class: 'avatar'}, agentWho(d.name).slice(0, 1)), h('div', {class: 'mbody'}, h('div', {class: 'head'}, h('b', null, agentWho(d.name)), h('span', null, 'finished a turn · ' + fmtTime(ev.ts)), meta ? h('span', {class: 'sub'}, meta) : null),
+        text ? h('div', {class: 'text', html: md(text)}) : h('div', {class: 'sub'}, 'it ended the turn without a message')));
+    }
+    case 'relay.delivered': {
+      // A quiet receipt for a message of the user's that went to the agent,
+      // under the agent the receipt names: a switch passes a message on its
+      // way on to the next agent (relay.moved), and it arrives there.
+      const sent = S.events.find(e => (e.type === 'relay.send' || e.type === 'relay.moved') && e.data && e.data.id === d.id);
+      if (!sent || sent.data.from !== 'user') return null;
+      // Only a failure that says nothing was typed is "did not reach"; one
+      // that was typed (or an older record that does not say) may have.
+      const failed = d.outcome === 'not_sent' ? `did not reach ${agentWho(d.name)}` : `not confirmed by ${agentWho(d.name)}`;
+      return h('div', {class: 'receipt' + (d.ok ? '' : ' bad')}, d.ok ? `delivered to ${agentWho(d.name)}` : failed + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+    }
+    case 'relay.state':
+      // A stop on a dialog and an exit are notices; the rest is activity.
+      if (d.state === 'blocked') return h('div', {class: 'notice'}, `${agentWho(d.name)} is stopped on a dialog` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+      if (d.state === 'exited') return h('div', {class: 'notice'}, `${agentWho(d.name)} exited` + (d.detail ? ': ' + clip(d.detail, 160) : ''));
+      break;
+    case 'relay.limit': return h('div', {class: 'notice'}, `${agentWho(d.name)} usage` + (d.exhausted ? ' ran out' : d.used_percent ? ` at ${Math.round(d.used_percent)}%` : '') + (d.window ? ` (${d.window})` : '') + (d.resets_at ? `, resets ${fmtDate(d.resets_at)}` : '') + (d.text ? ': ' + clip(d.text, 160) : ''));
+    case 'relay.autopilot': return h('div', {class: 'notice'}, d.off ? `autopilot off for ${agentWho(d.name)}` : `autopilot on for ${agentWho(d.name)}` + (d.until ? ` until ${fmtDate(d.until)}` : '') + (d.instruction ? ': ' + clip(d.instruction, 160) : ''));
     case 'error': return h('div', {class: 'act bad'}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, 'error'), h('span', null, clip(d.where + ': ' + d.text, 200)));
   }
-  if (!S.showActivity) return null;
+  if (!activityShown()) return null;
   switch (ev.type) {
-    case 'note': return act(ev, 'note', 'note', d.text);
-    case 'task.create': return act(ev, '', d.kind === 'dossier' ? 'notes for a fresh context' : 'delegated ' + d.id, d.title);
-    case 'task.end': return act(ev, d.status === 'completed' ? 'ok' : 'bad', `${d.id} ${d.status}`, clip(d.summary, 240));
-    case 'yield': return act(ev, d.done ? 'ok' : '', d.done ? 'done' : 'waiting', d.reason);
+    case 'route': return act(ev, '', 'route', `${d.actor} → ${d.model}`);
+    case 'dossier': return act(ev, '', 'fresh conversation', 'briefing written; eagent continues from it');
+    case 'relay.send': return act(ev, '', `→ ${agentWho(d.name)}`, `${d.from === 'user' ? 'your message' : 'from eagent'} (${d.mode}): ${d.text}`);
     case 'schedule.create': return act(ev, '', `schedule ${d.id}`, `${d.kind} ${d.spec}: ${d.note}`);
     case 'schedule.fire': return act(ev, '', `schedule ${d.id} fired`, d.note);
-    case 'route': return act(ev, '', 'route', `${d.actor} → ${d.model}`);
-    case 'dossier': return act(ev, '', 'fresh context', 'notes delivered; the orchestrator continues');
+    case 'schedule.cancel': return act(ev, '', `schedule ${d.id} cancelled`, d.reason || '');
+    case 'tool.result': return d.images && d.images.length ? h('div', null, act(ev, d.is_error ? 'bad' : '', d.name, d.output), attachmentsNode(d.images)) : null;
+    case 'relay.progress': return act(ev, '', agentWho(d.name), d.text);
+    case 'relay.state': return act(ev, '', agentWho(d.name), d.state + (d.detail ? ': ' + d.detail : ''));
+    case 'harness.message': return act(ev, '', 'notice', d.text);
   }
+  switch (ev.type) {
+    case 'note': return act(ev, 'note', d.answer ? 'answer' : 'note', d.text);
+    case 'task.create': return act(ev, '', d.kind === 'dossier' ? 'notes for a fresh context' : 'delegated ' + d.id, d.title + (d.description ? ': ' + d.description : ''));
+    case 'task.start': return act(ev, '', `${ev.task || d.id} started`, '');
+    case 'task.end': return act(ev, d.status === 'completed' ? 'ok' : 'bad', `${d.id} ${d.status}`, d.summary);
+    case 'yield': return act(ev, d.done ? 'ok' : '', d.done ? 'done' : 'waiting', d.reason);
+    case 'proc.start': return act(ev, '', `${d.handle} started` + (ev.task ? ' · ' + ev.task : ''), '$ ' + d.command);
+    case 'proc.exit': return act(ev, d.exit_code === 0 ? '' : 'bad', `${d.handle} ${d.reason}`, `exit ${d.exit_code}` + (d.duration_ms ? ' after ' + dur(d.duration_ms) : '') + (d.tail ? ' · ' + d.tail : ''));
+    case 'proc.pid': return null;
+    case 'narrator.trim': return act(ev, '', 'narrator trimmed', `its view starts at #${d.from_seq}` + (d.recap ? ': ' + clip(d.recap, 200) : ''));
+  }
+  if (LEGACY_TYPES.has(ev.type)) return act(ev, '', ev.type + (ev.task ? ' ' + ev.task : ''), legacyText(d));
   return null;
+}
+// Event types only sessions from before eagent was one loop hold. They are
+// shown as plain history.
+const LEGACY_TYPES = new Set(['task.create', 'task.start', 'task.end', 'note', 'yield', 'proc.start', 'proc.pid', 'proc.exit', 'narrator.trim']);
+const legacyText = d => d.text || d.title || d.summary || d.reason || d.command || d.note || d.id || '';
+// agentWho is how the session's agent called name reads for people.
+function agentWho(name, start) {
+  if (start && start.agent_label) return start.agent_label;
+  const a = (S.detail && S.detail.agents || []).find(x => x.name === name);
+  return a ? a.who : (name || 'the agent');
 }
 function attachmentsNode(atts) {
   if (!atts || !atts.length) return null;
@@ -358,10 +554,10 @@ const fmtBytes = n => n >= 1048576 ? (n/1048576).toFixed(1) + ' MB' : n >= 1024 
 function srcLabel(src) { return src === 'finalechat' ? ' · from your phone' : src === 'web' ? ' · web' : ''; }
 function act(ev, cls, kind, text) { return h('div', {class: 'act ' + cls}, h('span', {class: 't'}, fmtTime(ev.ts)), h('span', {class: 'k'}, kind), h('span', null, clip(text, 300))); }
 
-// ---- tasks ----------------------------------------------------------------------
-function tasksDigest(d) {
+// ---- usage ----------------------------------------------------------------------
+function usageDigest(d) {
   if (!d) return '';
-  return JSON.stringify([d.last_seq, d.idle, !!d.question, d.tasks.map(t => [t.id, t.status, t.turns, t.usage && t.usage.input]), d.procs.map(p => [p.handle, p.status]), d.usage.map(u => [u.actor, u.calls]), d.schedules.map(s => [s.id, s.fires])]);
+  return JSON.stringify([d.last_seq, d.idle, !!d.question, schedulesOf(S.events).map(s => [s.id, s.fires]), d.usage.map(u => [u.actor, u.calls]), (d.agents || []).map(a => [a.name, a.state, a.turns])]);
 }
 // det is a <details> that remembers being opened or closed by the user, so a
 // re-render (every status frame while work runs) does not fold it back.
@@ -369,34 +565,53 @@ function det(key, defaultOpen, ...children) {
   const open = S.open.has(key) ? true : S.closed.has(key) ? false : !!defaultOpen;
   return h('details', {open, ontoggle: e => { if (e.target.open) { S.open.add(key); S.closed.delete(key); } else { S.closed.add(key); S.open.delete(key); } if (ARCHIVE) ARCHIVE.changed?.(); }}, ...children);
 }
-function renderTasks(pane) {
+function renderUsage(pane) {
   pane.classList.remove('chat'); pane.style.padding = '';
   const y = pane.scrollTop;
   const d = S.detail;
-  const sel = S.taskSel;
   const usage = h('div', {class: 'stats'}, ...d.usage.filter(u => u.calls).map(u => h('div', {class: 'stat'},
     h('span', {class: 'v'}, u.priced ? money(u.cost_usd) : k(u.input) + ' in'),
-    h('span', {class: 'l'}, `${u.actor} · ${u.model ? u.model.split('/').pop() : ''}`),
+    h('span', {class: 'l'}, `${u.actor} · ${shortModel(u.model)}`),
     h('span', {class: 'l'}, `${u.calls} calls · ${k(u.input)} in · ${k(u.output)} out · cache ${Math.round(u.cache_ratio * 100)}%`),
     u.p50_ms ? h('span', {class: 'l'}, `latency p50 ${dur(u.p50_ms)} · p95 ${dur(u.p95_ms)}`) : null)),
     d.priced && d.cost_usd > 0 ? h('div', {class: 'stat total'}, h('span', {class: 'v'}, money(d.cost_usd)), h('span', {class: 'l'}, 'estimated total at list prices'), h('span', {class: 'l'}, `${k(d.tokens)} input tokens · ${dur(d.duration_s * 1000)}`)) : null);
-  const table = h('table', {class: 'tasks'}, h('thead', null, h('tr', null, ...['id', 'title', 'status', 'calls', 'tokens (cache)', 'duration'].map(x => h('th', null, x)))),
-    h('tbody', null, ...d.tasks.map(t => h('tr', {class: 'row' + (sel === t.id ? ' open' : ''), onclick: () => { S.taskSel = t.id; renderTab(); setTimeout(() => $('#taskdetail')?.scrollIntoView({behavior: 'smooth', block: 'start'}), 0); }},
-      h('td', {class: 'num'}, t.id), h('td', {class: 'wrap'}, t.title || '(untitled)', t.kind === 'dossier' ? h('span', {class: 'badge', style: 'margin-left:6px'}, 'notes') : null),
-      h('td', null, h('span', {class: 'badge ' + t.status}, t.status)), h('td', {class: 'num'}, t.turns),
-      h('td', {class: 'num'}, `${k(t.usage.input)} · ${k(t.usage.output)} (${Math.round(t.usage.cache_ratio * 100)}%)`),
-      h('td', {class: 'num'}, when(t.ended) && when(t.created) ? dur(when(t.ended) - when(t.created)) : when(t.created) ? dur(Math.max(0, now() - when(t.created))) + (ARCHIVE ? '' : '…') : '')))));
-  const parts = [usage, chartsCard(d, pane.clientWidth)];
-  parts.push(h('div', {class: 'card'}, h('h3', null, 'Tasks'), d.tasks.length ? table : h('div', {class: 'sub'}, 'Nothing delegated yet.')));
-  if (d.procs.length) { const procs = S.allProcs ? d.procs : d.procs.slice(-25); parts.push(h('div', {class: 'card'}, h('h3', null, 'Processes', h('span', {class: 'sub'}, `${d.procs.length}`), d.procs.length > 25 ? h('button', {class: 'ghost small', style: 'margin-left:auto', onclick: () => { S.allProcs = !S.allProcs; renderTab(); }}, S.allProcs ? 'show recent' : 'show all') : null), h('table', null, h('tbody', null, ...procs.map(p => h('tr', null, h('td', {class: 'num'}, p.handle), h('td', null, h('span', {class: 'badge ' + p.status + (p.status !== 'running' && p.exit_code !== 0 ? ' failed' : '')}, p.status + (p.status !== 'running' ? ` ${p.exit_code}` : ''))), h('td', {class: 'nowrap'}, p.task || p.actor), h('td', {class: 'wrap'}, h('code', {class: 'inline'}, clip(p.command, 120))))))))); }
-  if (d.schedules.length) parts.push(h('div', {class: 'card'}, h('h3', null, 'Schedules'), ...d.schedules.map(s => h('div', null, h('code', {class: 'inline'}, `${s.id} ${s.kind} ${s.spec}`), ' ', s.note, h('span', {class: 'sub'}, ` · next ${fmtTime(s.next)} · fired ${s.fires}×`)))));
-  if (sel) { const t = d.tasks.find(x => x.id === sel); if (t) parts.push(taskDetail(t)); }
+  const agents = d.agents || [];
+  const table = h('table', null, h('thead', null, h('tr', null, ...['agent', 'model', 'state', 'turns', 'folder'].map(x => h('th', null, x)))),
+    h('tbody', null, ...agents.map(a => h('tr', null, h('td', null, h('b', null, a.who), a.label && a.label !== a.who ? h('span', {class: 'sub'}, ' ' + a.label) : null),
+      h('td', null, [shortModel(a.model), a.effort].filter(Boolean).join(' ') || h('span', {class: 'sub'}, 'its own default')),
+      h('td', null, h('span', {class: 'badge ' + a.state}, a.state), a.autopilot ? h('span', {class: 'badge', style: 'margin-left:6px'}, 'autopilot') : null),
+      h('td', {class: 'num'}, a.turns), h('td', {class: 'wrap'}, h('code', {class: 'inline'}, a.dir))))));
+  const parts = [usage, chartsCard(d, pane.clientWidth), h('div', {class: 'card'}, h('h3', null, 'Agents'), agents.length ? table : h('div', {class: 'sub'}, d.legacy ? 'This session is from before eagent ran an agent in a terminal.' : 'No agent has been started.'))];
+  const scheds = schedulesOf(S.events);
+  if (scheds.length) parts.push(h('div', {class: 'card'}, h('h3', null, 'Schedules'), ...scheds.map(s => h('div', null, h('code', {class: 'inline'}, `${s.id} ${s.kind} ${s.spec}`), ' ', s.note, h('span', {class: 'sub'}, (s.next ? ` · next ${fmtTime(s.next)}` : '') + ` · fired ${s.fires}×`)))));
   pane.replaceChildren(...parts);
   pane.scrollTop = y;
 }
 
-// chartsCard: a timeline of who was doing what, and the orchestrator's
-// context size per call with fresh-context resets.
+// schedulesOf folds the log's scheduled wake-ups into the ones that will
+// fire again.
+function schedulesOf(evs) {
+  const by = new Map();
+  for (const e of evs) {
+    const d = e.data || {};
+    if (e.type === 'schedule.create') by.set(d.id, {id: d.id, kind: d.kind, spec: d.spec, note: d.note, next: d.next, fires: 0});
+    else if (e.type === 'schedule.fire' && by.has(d.id)) { const s = by.get(d.id); s.fires++; s.next = d.next; if (s.kind === 'once' || !when(d.next)) by.delete(d.id); }
+    else if (e.type === 'schedule.cancel') by.delete(d.id);
+  }
+  return [...by.values()];
+}
+
+// isBoundary says an event starts a fresh conversation: a rollover, or the
+// current eagent taking an older session over.
+const isBoundary = e => e.type === 'subsession.start' && e.data && (e.data.reason === 'rollover' || e.data.reason === 'upgrade');
+
+// isMain says an event is eagent's own (or, in an old session, the
+// orchestrator's outside any task).
+const isMain = e => e.actor === 'eagent' || (e.actor === 'orchestrator' && !e.task);
+
+// chartsCard: a timeline of when eagent was thinking and when each agent
+// was working, and eagent's prompt size per call with fresh-conversation
+// resets.
 function chartsCard(d, paneW) {
   const evs = S.events;
   const start = evs.length ? new Date(evs[0].ts).getTime() : Date.now();
@@ -408,92 +623,56 @@ function chartsCard(d, paneW) {
   const LW = narrow ? 76 : 124, RW = W - LW - 12;
   const x = t => LW + (Math.min(Math.max(t, start), end) - start) / span * RW;
   const rows = [];
-  // orchestrator turns
   const turns = []; let open = null;
-  for (const e of evs) { if (e.actor === 'orchestrator' && e.type === 'turn.start') open = new Date(e.ts).getTime(); if (e.actor === 'orchestrator' && e.type === 'turn.end' && open) { turns.push([open, new Date(e.ts).getTime()]); open = null; } }
+  for (const e of evs) { if (isMain(e) && e.type === 'turn.start') open = new Date(e.ts).getTime(); if (isMain(e) && e.type === 'turn.end' && open) { turns.push([open, new Date(e.ts).getTime()]); open = null; } }
   if (open) turns.push([open, end]);
-  rows.push({label: 'orchestrator', bars: turns.map(([a, b]) => ({a, b, cls: 'orch'}))});
-  for (const t of d.tasks) { const a = when(t.created)?.getTime() ?? start; const b = when(t.ended)?.getTime() ?? end; rows.push({label: `${t.id} ${clip(t.title, narrow ? 8 : 16)}`, bars: [{a, b, cls: t.status, title: `${t.id} ${t.title} · ${t.status} · ${dur(b - a)}`}]}); }
+  rows.push({label: 'eagent', bars: turns.map(([a, b]) => ({a, b, cls: 'orch'}))});
+  // Each agent's working spans, from its state changes.
+  const spans = new Map(); const since = new Map();
+  for (const e of evs) {
+    if (e.type !== 'relay.state' || !e.data) continue;
+    const n = e.data.name, t = new Date(e.ts).getTime();
+    if (!spans.has(n)) spans.set(n, []);
+    if (e.data.state === 'working') { if (!since.has(n)) since.set(n, t); }
+    else if (since.has(n)) { spans.get(n).push([since.get(n), t]); since.delete(n); }
+  }
+  for (const [n, t] of since) spans.get(n).push([t, end]);
+  for (const [n, bars] of spans) rows.push({label: clip(agentWho(n), narrow ? 10 : 18), bars: bars.map(([a, b]) => ({a, b, cls: 'running', title: `${agentWho(n)} working · ${dur(b - a)}`}))});
   const RH = 18, top = 22, height = top + rows.length * RH + 8;
   const g = svg('svg', {viewBox: `0 0 ${W} ${height}`, class: 'gantt', preserveAspectRatio: 'none'});
   // time axis
   const ticks = narrow ? 3 : 6;
   for (let i = 0; i <= ticks; i++) { const t = start + span * i / ticks; g.append(svg('line', {x1: x(t), x2: x(t), y1: top - 4, y2: height, class: 'grid'}), svg('text', {x: x(t), y: 12, class: 'tick', 'text-anchor': i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}, dur(t - start))); }
   // rollover markers
-  for (const e of evs) if (e.type === 'subsession.start' && e.data.reason === 'rollover') { const xx = x(new Date(e.ts).getTime()); g.append(svg('line', {x1: xx, x2: xx, y1: top - 4, y2: height, class: 'rollover'}), svg('title', null, 'fresh context')); }
+  for (const e of evs) if (isBoundary(e)) { const xx = x(new Date(e.ts).getTime()); g.append(svg('line', {x1: xx, x2: xx, y1: top - 4, y2: height, class: 'rollover'}), svg('title', null, e.data.reason === 'upgrade' ? 'taken over by the current eagent' : 'fresh conversation')); }
   rows.forEach((r, i) => {
     const y = top + i * RH;
     g.append(svg('text', {x: LW - 6, y: y + 13, class: 'label', 'text-anchor': 'end'}, r.label));
     for (const b of r.bars) { const rect = svg('rect', {x: x(b.a), y: y + 3, width: Math.max(2, x(b.b) - x(b.a)), height: RH - 6, rx: 3, class: 'bar ' + b.cls}); if (b.title) rect.append(svg('title', null, b.title)); g.append(rect); }
   });
   // context sparkline
-  const calls = evs.filter(e => e.type === 'assistant' && e.actor === 'orchestrator' && !e.task && e.data.usage);
+  const calls = evs.filter(e => e.type === 'assistant' && isMain(e) && e.data.usage);
   let spark = null;
   if (calls.length > 1) {
     const SH = 70, ST = 16, maxIn = Math.max(...calls.map(c => c.data.usage.input), 1);
     const sy = v => ST + (SH - 6) * (1 - v / maxIn);
     spark = svg('svg', {viewBox: `0 0 ${W} ${SH + 18}`, class: 'spark', preserveAspectRatio: 'none'});
-    for (const e of evs) if (e.type === 'subsession.start' && e.data.reason === 'rollover') { const xx = x(new Date(e.ts).getTime()); spark.append(svg('line', {x1: xx, x2: xx, y1: ST - 4, y2: SH + 4, class: 'rollover'})); }
+    for (const e of evs) if (isBoundary(e)) { const xx = x(new Date(e.ts).getTime()); spark.append(svg('line', {x1: xx, x2: xx, y1: ST - 4, y2: SH + 4, class: 'rollover'})); }
     let path = '', prevSub = null;
     for (const c of calls) { const t = new Date(c.ts).getTime(); const px = x(t), py = sy(c.data.usage.input); const sub = c.file; path += (path && sub === prevSub ? ' L' : ' M') + px.toFixed(1) + ' ' + py.toFixed(1); prevSub = sub; }
     spark.append(svg('path', {d: path.trim(), class: 'line'}));
     for (const c of calls) { const dot = svg('circle', {cx: x(new Date(c.ts).getTime()), cy: sy(c.data.usage.input), r: 2.2, class: 'dot' + (c.data.usage.cached / Math.max(c.data.usage.input, 1) > 0.5 ? ' cached' : '')}); dot.append(svg('title', null, `${k(c.data.usage.input)} in (${Math.round(100 * c.data.usage.cached / Math.max(c.data.usage.input, 1))}% cached) · ${dur(c.data.elapsed_ms || 0)} · ${fmtTime(c.ts)}`)); spark.append(dot); }
     spark.append(svg('text', {x: LW - 6, y: ST + 4, class: 'label', 'text-anchor': 'end'}, k(maxIn)), svg('text', {x: LW - 6, y: SH, class: 'label', 'text-anchor': 'end'}, '0'), svg('text', {x: LW - 6, y: ST + (SH - 6) / 2 + 4, class: 'label dim', 'text-anchor': 'end'}, 'context'));
   }
-  return h('div', {class: 'card'}, h('h3', null, 'Timeline ', h('span', {class: 'sub'}, `${dur(span)} · dotted lines mark a fresh context`)), g,
-    spark ? h('div', null, h('div', {class: 'sub', style: 'margin:8px 0 2px'}, 'Orchestrator prompt size per call (green dots were mostly served from cache)'), spark) : null);
-}
-
-function taskDetail(t) {
-  const evs = S.events.filter(e => e.task === t.id);
-  const created = S.events.find(e => e.type === 'task.create' && e.data && e.data.id === t.id);
-  return h('div', {class: 'card', id: 'taskdetail'},
-    h('h3', null, h('span', {class: 'grow'}, `${t.id} · ${t.title}`), h('span', {class: 'badge ' + t.status}, t.status), h('button', {class: 'ghost small', onclick: () => { S.taskSel = null; renderTab(); }}, 'close')),
-    created && det('desc:' + t.id, false, h('summary', null, 'task description'), h('pre', {class: 'code'}, created.data.description)),
-    t.summary && h('div', null, h('div', {class: 'sub'}, 'report'), h('div', {html: md(t.summary)})),
-    h('div', {class: 'sub', style: 'margin-top:10px'}, `${t.turns} model calls · ${k(t.usage.input)} in · ${k(t.usage.output)} out`),
-    ...turns(evs));
-}
-// Render assistant events with their tool calls and results.
-function turns(evs) {
-  const results = new Map();
-  for (const e of evs) if (e.type === 'tool.result') results.set(e.data.call_id, e.data);
-  const out = [];
-  for (const e of evs) {
-    const d = e.data || {};
-    if (e.type === 'assistant') {
-      out.push(h('div', {class: 'turn'},
-        h('div', {class: 'hd'}, h('span', {class: 'actor'}, e.actor), h('span', null, fmtTime(e.ts)), h('span', null, dur(d.elapsed_ms || 0)), h('span', {class: 'num'}, `${k(d.usage?.input)} in · ${k(d.usage?.output)} out`), d.stop === 'length' && h('span', {class: 'badge failed'}, 'cut off')),
-        d.reasoning && det('reason:' + e.seq, false, h('summary', null, 'reasoning'), h('div', {class: 'reasoning'}, d.reasoning)),
-        d.text && h('div', {class: 'text'}, d.text),
-        ...(d.tool_calls || []).map(tc => renderCall(tc, results.get(tc.id)))));
-    } else if (e.type === 'harness.message') out.push(h('div', {class: 'turn'}, h('div', {class: 'hd'}, h('span', {class: 'actor'}, 'harness'), fmtTime(e.ts)), h('div', {class: 'text'}, d.text)));
-  }
-  return out;
-}
-// renderCall shows a tool call the way a person would read it.
-function renderCall(tc, r) {
-  const a = (tc.args && typeof tc.args === 'object') ? tc.args : {};
-  const res = r ? h('div', {class: 'res' + (r.is_error ? ' err' : '')}, r.output && r.output.length > 600 ? det('res:' + tc.id, false, h('summary', null, (r.is_error ? 'error' : 'result') + ` (${r.output.length} chars)`), h('pre', {class: 'code'}, r.output)) : h('pre', {class: 'code'}, r.output || '(empty)')) : h('div', {class: 'res sub'}, 'no result recorded');
-  const head = (label, extra) => h('div', {class: 'callhd'}, h('span', {class: 'name'}, tc.name), extra ? h('span', {class: 'sub'}, ' ', extra) : null, label ? h('span', {class: 'sub'}, ' · ', label) : null);
-  switch (tc.name) {
-    case 'bash': return h('div', {class: 'call'}, head('', a.timeout_seconds === 0 ? 'service' : ''), h('pre', {class: 'code'}, '$ ' + (a.command || '')), res);
-    case 'bash_poll': case 'bash_kill': case 'bash_extend': case 'bash_write': return h('div', {class: 'call'}, head('', a.handle + (a.input ? ' ← ' + JSON.stringify(a.input) : '')), res);
-    case 'write_file': { const c = String(a.content || ''); const lines = c.split('\n').length; return h('div', {class: 'call'}, head(`${lines} lines`, a.path), det('wf:' + tc.id, lines <= 40, h('summary', null, 'content'), h('pre', {class: 'code'}, c)), res); }
-    case 'edit_file': return h('div', {class: 'call'}, head('', a.path), h('div', {class: 'diff'}, h('pre', {class: 'code old'}, a.old_text || ''), h('pre', {class: 'code new'}, a.new_text || '')), res);
-    case 'view_image': { const res2 = r && r.images && r.images.length ? h('div', {class: 'res'}, attachmentsNode(r.images), r.is_error ? h('pre', {class: 'code'}, r.output) : null) : res; return h('div', {class: 'call'}, head('', a.path), res2); }
-    case 'read_file': return h('div', {class: 'call'}, head(a.offset ? `from line ${a.offset}${a.limit ? ', ' + a.limit + ' lines' : ''}` : '', a.path), res);
-    case 'list_dir': case 'session_list': case 'session_read': case 'session_search': return h('div', {class: 'call'}, head('', a.path || a.file || a.query || ''), res);
-    case 'delegate': return h('div', {class: 'call'}, head('', a.title), det('dg:' + tc.id, false, h('summary', null, 'task description'), h('pre', {class: 'code'}, a.description || '')), res);
-    case 'note': case 'yield': case 'complete_task': return h('div', {class: 'call'}, head(tc.name === 'yield' ? (a.done ? 'done' : 'waiting') : (a.status || ''), ''), h('div', {class: 'text'}, a.text || a.reason || a.summary || ''), res);
-    case 'wait': return h('div', {class: 'call'}, head('', [].concat(a.tasks || [], a.processes || []).join(', ') || 'any task'), res);
-    case 'schedule': case 'cancel_schedule': case 'cancel_task': return h('div', {class: 'call'}, head('', a.spec || a.schedule || a.task || ''), a.note ? h('div', {class: 'text'}, a.note) : null, res);
-    default: return h('div', {class: 'call'}, head('', ''), det('args:' + tc.id, false, h('summary', null, 'arguments'), h('pre', {class: 'code'}, JSON.stringify(tc.args, null, 2))), res);
-  }
+  return h('div', {class: 'card'}, h('h3', null, 'Timeline ', h('span', {class: 'sub'}, `${dur(span)} · dotted lines mark a fresh conversation`)), g,
+    spark ? h('div', null, h('div', {class: 'sub', style: 'margin:8px 0 2px'}, 'eagent prompt size per call (green dots were mostly served from cache)'), spark) : null);
 }
 
 // ---- timeline -----------------------------------------------------------------------
-const ACTORS = ['user', 'orchestrator', 'task', 'narrator', 'harness'];
+// The actors a log names, in a steady order: the one loop's first, then
+// those of older sessions.
+const ACTOR_ORDER = ['user', 'eagent', 'summarizer', 'harness', 'orchestrator', 'task', 'narrator'];
+const actorsOf = evs => { const seen = new Set(evs.map(e => e.actor).filter(Boolean)); return [...ACTOR_ORDER.filter(a => seen.has(a)), ...[...seen].filter(a => !ACTOR_ORDER.includes(a)).sort()]; };
 function passesFilter(ev) {
   if (S.filters.size && !S.filters.has(ev.actor)) return false;
   if (S.search) { const q = S.search.toLowerCase(); if (!(ev.type + ' ' + summary(ev) + ' ' + (ev.task || '')).toLowerCase().includes(q)) return false; }
@@ -505,7 +684,7 @@ function tlUpdateCount() {
 }
 function renderTimeline(pane) {
   pane.classList.remove('chat'); pane.style.padding = '';
-  const chips = ACTORS.map(a => h('span', {class: 'chip' + (S.filters.has(a) ? ' on' : ''), onclick: () => { S.filters.has(a) ? S.filters.delete(a) : S.filters.add(a); renderTab(); }}, a));
+  const chips = actorsOf(S.events).map(a => h('span', {class: 'chip' + (S.filters.has(a) ? ' on' : ''), onclick: () => { S.filters.has(a) ? S.filters.delete(a) : S.filters.add(a); renderTab(); }}, a));
   const search = h('input', {class: 'search', placeholder: 'search events…', value: S.search, oninput: e => { S.search = e.target.value; const tb = $('.tl tbody'); tb.replaceChildren(...S.events.filter(passesFilter).map(tlRow)); tlUpdateCount(); }});
   const tbody = h('tbody', null, ...S.events.filter(passesFilter).map(tlRow));
   pane.replaceChildren(h('div', {class: 'filters'}, h('span', {class: 'sub'}, 'actor:'), ...chips, search, h('span', {class: 'sub', id: 'tlcount', style: 'margin-left:auto'}, `${tbody.children.length} of ${S.events.length} events`)),
@@ -525,7 +704,7 @@ function tlRow(ev) {
 }
 function argPreview(args) {
   if (!args || typeof args !== 'object') return String(args ?? '');
-  for (const key of ['command', 'path', 'title', 'text', 'reason', 'handle', 'query', 'spec']) if (typeof args[key] === 'string') return args[key];
+  for (const key of ['text', 'query', 'reason', 'action', 'instruction', 'profile', 'title', 'file', 'command', 'path']) if (typeof args[key] === 'string') return args[key];
   return JSON.stringify(args);
 }
 function summary(ev) {
@@ -533,14 +712,25 @@ function summary(ev) {
   switch (ev.type) {
     case 'assistant': return [d.text, ...(d.tool_calls || []).map(t => `${t.name}(${clip(argPreview(t.args), 80)})`)].filter(Boolean).join(' | ');
     case 'tool.result': return `${d.name}${d.is_error ? ' ERROR' : ''} → ${clip(d.output, 200)}`;
-    case 'user.message': case 'narrator.message': case 'note': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
+    case 'user.message': case 'narrator.message': case 'narrator.question': case 'harness.message': case 'dossier': case 'steer': return clip(d.text, 240);
     case 'cwd.change': return 'working directory → ' + d.path;
-    case 'task.create': return `${d.id} ${d.title}`;
+    case 'turn.start': case 'turn.end': return d.reason || '';
     case 'thread.title': return titleNotice(d) || 'summary checked: nothing to change';
+    case 'relay.start': return `${d.name} (${d.agent}) in ${d.dir}` + (d.model ? ` · ${d.model}` : '') + (d.effort ? ` ${d.effort}` : '');
+    case 'relay.send': return `→ ${d.name} ${d.mode} from ${d.from}: ${clip(d.text, 200)}`;
+    case 'relay.state': return `${d.name} ${d.state}` + (d.detail ? ': ' + clip(d.detail, 200) : '');
+    case 'relay.progress': return `${d.name}: ${clip(d.text, 200)}`;
+    case 'relay.turn': return `${d.name} finished a turn` + (d.tools ? ` (${d.tools} tools)` : '') + ': ' + clip(d.text, 200);
+    case 'task.create': return `${d.id} ${d.title}`;
     case 'task.end': return `${d.id} ${d.status}: ${clip(d.summary, 200)}`;
     case 'proc.start': return `${d.handle} $ ${clip(d.command, 200)}`;
     case 'proc.exit': return `${d.handle} ${d.reason} exit=${d.exit_code}`;
-    case 'yield': return (d.done ? 'DONE: ' : 'waiting: ') + d.reason;
+    case 'yield': return (d.done ? 'DONE: ' : 'waiting: ') + (d.reason || '');
+    case 'note': return clip(d.text, 240);
+    case 'task.start': return `${d.id || ev.task} started`;
+    case 'proc.pid': return `${d.handle} pid ${d.pid}`;
+    case 'narrator.trim': return `narrator conversation trimmed from #${d.from_seq}` + (d.recap ? ': ' + clip(d.recap, 200) : '');
+    case 'subsession.start': return `${d.file} (${d.reason})`;
     default: return clip(JSON.stringify(d), 200);
   }
 }
@@ -563,149 +753,46 @@ async function promptEditor(name) {
 }
 
 // ---- new session -------------------------------------------------------------------------
-const trimSlash = u => String(u || '').replace(/\/+$/, '');
-async function newSessionDialog(pre = {}) {
-  let c = null; try { c = await api('/api/config'); } catch (e) {}
-  const ta = h('textarea', {placeholder: 'What should the agent do? Be as specific as you like; it will ask if it needs a decision.'});
-  const srv = c && c.server && (c.server.preset || c.server.bundle);
-  const baseOptions = () => [
-    h('option', {value: 'project:', selected: !!pre.project || !srv}, 'project configuration' + (c && c.resolution && c.resolution.active ? ` · ${c.resolution.active.kind === 'file' ? 'saved in the project' : c.resolution.active.kind + ' ' + c.resolution.active.name}` : '')),
-    srv ? h('option', {value: '', selected: !pre.project && !pre.preset && !pre.config}, `server default · ${c.server.bundle ? 'bundle ' + c.server.bundle : 'preset ' + c.server.preset}`) : null,
-    ...(c ? [...c.presets.map(p => h('option', {value: 'preset:' + p.name, selected: pre.preset === p.name}, `preset · ${p.name} — ${p.models}`)), ...c.bundles.map(b => h('option', {value: 'config:' + b.name, selected: pre.config === b.name}, `bundle · ${b.name} — ${b.models}`))] : []),
-  ];
-  const sel = h('select', null, ...baseOptions(), h('option', {value: 'custom:'}, 'custom models — browse the catalogue…'));
-
-  // ---- custom routing: pick one catalog model per actor, on top of a base configuration ----
-  const picks = {orchestrator: null, task: null, narrator: null};
-  let cat = null, picksInit = false, browsing = null;
-  const baseSel = h('select', null, ...baseOptions());
-  const rowLabel = {};
-  const effortSels = {};
-  const routeRows = {};
-  const pickedModel = actor => { const p = picks[actor]; return p && cat ? cat.models.find(m => m.provider === p.provider && m.id === p.model) : null; };
-  // (Re)build an actor's effort select from the picked model's known efforts
-  // (or the full scale when unknown), keeping the current pick when possible
-  // and otherwise taking the nearest level, as the server does.
-  const order = () => cat.effort_order || ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  const nearestEffort = (list, want) => {
-    const i = order().indexOf(want);
-    if (i < 0) return list.includes('medium') ? 'medium' : list[Math.floor(list.length / 2)];
-    return list.reduce((best, e) => Math.abs(order().indexOf(e) - i) < Math.abs(order().indexOf(best) - i) ? e : best, list[0]);
+// A new session is a first message, the folder its agent starts in, the
+// agent profile (the project's default preselected) and, optionally, that
+// agent's model and effort. eagent's own model comes from the configuration.
+// opts.project starts it on the project's own configuration, not the
+// server's --preset or --config.
+async function newSessionDialog(opts = {}) {
+  const ta = h('textarea', {placeholder: 'What should the agent do? This is sent to it word for word.'});
+  const dir = h('input', {class: 'search', placeholder: 'folder (default: the project root)', autocomplete: 'off', style: 'flex:1; min-width:0'});
+  const agentSel = h('select', null, h('option', {value: ''}, 'loading agents…'));
+  const modelList = h('datalist', {id: 'agent-models'});
+  const model = h('input', {class: 'search', list: 'agent-models', autocomplete: 'off', style: 'flex:1; min-width:0'});
+  const effortSel = h('select');
+  let agents = [];
+  try { agents = await api('/api/agents'); } catch (e) { toast(e.message, 'bad'); }
+  const picked = () => agents.find(a => a.name === agentSel.value);
+  const fill = () => {
+    const a = picked();
+    model.value = '';
+    model.placeholder = a ? `model (default: ${a.model || 'its own'})` : 'model';
+    modelList.replaceChildren(...(a ? a.models : []).map(m => h('option', {value: m.id}, m.label && m.label !== m.id ? m.label : null)));
+    effortSel.replaceChildren(h('option', {value: ''}, `effort: ${a && a.effort ? a.effort + ' (default)' : 'default'}`), ...(a ? a.efforts : []).map(e => h('option', {value: e}, e)));
   };
-  const refreshEffort = actor => {
-    const sel = effortSels[actor];
-    const m = pickedModel(actor);
-    const list = (m && m.efforts && m.efforts.length) ? m.efforts : order();
-    if (picks[actor] && picks[actor].effort && !list.includes(picks[actor].effort)) {
-      picks[actor].effort = nearestEffort(list, picks[actor].effort);
-    }
-    const opts = [];
-    if (picks[actor] && !picks[actor].effort) opts.push(h('option', {value: '', selected: true}, 'base default'));
-    for (const e of list) opts.push(h('option', {value: e, selected: !!(picks[actor] && picks[actor].effort === e)}, e));
-    sel.replaceChildren(...opts);
-  };
-  const browsePane = h('div', {style: 'display:none; margin-top:8px'});
-  const search = h('input', {class: 'search', placeholder: 'Search models or providers…', autocomplete: 'off', style: 'flex:1; min-width:0'});
-  const browseList = h('div', {class: 'plist', style: 'max-height:300px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:4px'});
-  const setPickLabel = (actor, m, p) => { rowLabel[actor].replaceChildren(h('b', null, m ? m.label : '—'), m && m.live ? h('span', {class: 'livetag'}, 'live') : null, h('span', {class: 'sub'}, ` · ${m ? (p ? p.label : m.provider) : ''} · ${picks[actor] ? picks[actor].model : ''}`)); rowLabel[actor].title = `${m ? m.label : ''} · ${picks[actor] ? picks[actor].model : ''}`; };
-  const renderBrowse = () => {
-    const q = search.value.trim().toLowerCase();
-    const keyed = p => !p.key_env || !!(cat.keys && cat.keys[p.key_env]);
-    const rows = cat.models.map(m => ({m, p: cat.providers.find(pp => pp.id === m.provider)})).filter(({m, p}) => p && (!q || `${m.label} ${m.id} ${m.family} ${p.label} ${p.id} ${p.engine || ''} ${p.custom ? 'local custom' : ''} ${m.live ? 'live' : ''}`.toLowerCase().includes(q)));
-    rows.sort((x, y) => (!!y.p.custom - !!x.p.custom) || (keyed(y.p) - keyed(x.p)) || x.p.label.localeCompare(y.p.label) || ((x.m.price ? x.m.price.out : 1e9) - (y.m.price ? y.m.price.out : 1e9)));
-    browseList.replaceChildren();
-    let lastP = null;
-    const shown = 150;
-    for (const {m, p} of rows.slice(0, shown)) {
-      const grp = p.label + (p.custom ? ' · local' : (keyed(p) ? '' : ' · no key in this shell'));
-      if (grp !== lastP) { browseList.append(h('div', {class: 'pgroup'}, grp)); lastP = grp; }
-      const name = h('span', {class: 'l1'}, h('b', null, m.label), p.custom ? h('span', {class: 'livetag local'}, p.engine || 'local') : (m.live ? h('span', {class: 'livetag'}, 'live') : null), h('span', {class: 'sub'}, ` · ${m.id}`));
-      const ctx = !m.context ? '' : m.context >= 1e6 ? (m.context / 1e6) + 'M' : Math.round(m.context / 1000) + 'k';
-      const meta = [ctx, m.vision ? 'vision' : ''].filter(Boolean).join(' · ');
-      const price = h('span', {class: 'pr'}, m.price ? `$${m.price.in} / $${m.price.out}` : (p.custom ? 'local' : '—'), meta ? h('span', {class: 'sub'}, ` · ${meta}`) : null);
-      const row = h('button', {class: 'prow', onclick: () => {
-        const prev = picks[browsing] || {};
-        picks[browsing] = {provider: m.provider, model: m.id, effort: prev.effort || ''};
-        setPickLabel(browsing, m, p);
-        refreshEffort(browsing);
-        browsing = null; browsePane.style.display = 'none';
-      }}, h('span', {class: 'pl'}, name), price);
-      browseList.append(row);
-    }
-    if (!rows.length) browseList.append(h('div', {class: 'sub', style: 'padding:10px'}, 'No model matches.'));
-    if (rows.length > shown) browseList.append(h('div', {class: 'sub', style: 'padding:10px'}, `Showing ${shown} of ${rows.length}. Search to find the rest.`));
-  };
-  search.addEventListener('input', () => cat && renderBrowse());
-  async function browse(actor) {
-    browsing = actor;
-    if (!cat) { cat = await api('/api/catalog'); } // triggers the 24h-debounced live provider fetch
-    browsePane.style.display = '';
-    renderBrowse();
-    search.focus();
-  }
-  // Picks start from the chosen base and follow it when the base changes.
-  async function initPicks() {
-    if (picksInit) return; picksInit = true;
-    try { cat = await api('/api/catalog'); } catch (e) { return; }
-    const [bk, bn] = baseSel.value.split(':');
-    const q = bk === 'preset' ? `?preset=${encodeURIComponent(bn)}` : bk === 'config' ? `?bundle=${encodeURIComponent(bn)}` : '';
-    let cc = c; try { cc = await api('/api/config' + q); } catch (e) {}
-    const eff = cc && cc.resolution && cc.resolution.effective;
-    for (const actor of ['orchestrator', 'task', 'narrator']) {
-      const a = eff && eff[actor];
-      const p = a && cat.providers.find(pp => trimSlash(pp.base_url) === trimSlash(a.base_url));
-      const m = a && cat.models.find(mm => p && mm.provider === p.id && mm.id === a.model);
-      picks[actor] = a ? {provider: p ? p.id : '', model: a.model, effort: a.reasoning_effort || ''} : null;
-      setPickLabel(actor, m, p);
-      refreshEffort(actor);
-    }
-  }
-  for (const actor of ['orchestrator', 'task', 'narrator']) {
-    rowLabel[actor] = h('span', {class: 'lbl'}, '…');
-    effortSels[actor] = h('select', {class: 'mini', onchange: ev => { if (picks[actor]) picks[actor].effort = ev.target.value; }});
-    routeRows[actor] = h('div', {class: 'routerow'}, h('span', {class: 'sub'}, actor), rowLabel[actor], h('span', {class: 'sub'}, 'effort'), effortSels[actor], h('button', {class: 'ghost small', onclick: () => browse(actor)}, 'browse'));
-  }
-  browsePane.append(h('div', {class: 'row', style: 'margin:0 0 6px'}, search, h('button', {class: 'ghost small', onclick: () => { browsing = null; browsePane.style.display = 'none'; }}, 'back')), browseList);
-  const customBox = h('div', {style: 'display:none'},
-    h('div', {class: 'row'}, h('span', {class: 'sub'}, 'base'), baseSel, h('span', {class: 'sub'}, 'picked models override the base for this session only')),
-    ...Object.values(routeRows),
-    browsePane,
-    h('div', {class: 'sub', style: 'margin-top:4px'}, 'models come from the built-in catalog plus each provider’s live list, fetched when you browse and cached for 24h'));
-  sel.addEventListener('change', () => {
-    const custom = sel.value === 'custom:';
-    customBox.style.display = custom ? '' : 'none';
-    if (custom) initPicks();
-  });
-  baseSel.addEventListener('change', () => { picksInit = false; initPicks(); });
-
+  agentSel.replaceChildren(...agents.map(a => h('option', {value: a.name, selected: !!a.default}, a.who + (a.label && a.label !== a.who ? ' · ' + a.label : '') + (a.default ? ' (default)' : ''))));
+  if (!agents.length) agentSel.append(h('option', {value: ''}, 'the default agent'));
+  agentSel.addEventListener('change', fill);
+  fill();
   const start = h('button', {class: 'primary', onclick: async () => {
     const prompt = ta.value.trim(); if (!prompt) return;
     start.disabled = true;
-    const [kind, name] = sel.value.split(':');
-    const body = {prompt};
-    if (kind === 'custom') {
-      const [bk, bn] = baseSel.value.split(':');
-      body.use_project = bk === 'project';
-      if (bk === 'preset') body.preset = bn;
-      if (bk === 'config') body.config = bn;
-      body.routes = {};
-      for (const a of ['orchestrator', 'task', 'narrator']) {
-        if (!picks[a] || !picks[a].provider) continue;
-        const r = {provider: picks[a].provider, model: picks[a].model};
-        if (picks[a].effort) r.effort = picks[a].effort;
-        body.routes[a] = r;
-      }
-      if (!Object.keys(body.routes).length) delete body.routes;
-    } else {
-      body.preset = kind === 'preset' ? name : '';
-      body.config = kind === 'config' ? name : '';
-      body.use_project = kind === 'project';
-    }
+    const body = {prompt, dir: dir.value.trim(), relay: agentSel.value, relay_model: model.value.trim(), relay_effort: effortSel.value, client: clientCaps()};
+    if (opts.project) body.use_project = true;
     try { const r = await api('/api/sessions', {method: 'POST', body: JSON.stringify(body)}); closeModal(); await loadSessions(); location.hash = `#/s/${r.id}/chat`; }
     catch (e) { toast(e.message, 'bad'); start.disabled = false; }
   }}, 'Start');
   ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) start.click(); });
-  showModal(h('div', null, h('h2', null, 'New session'), ta, h('div', {class: 'row'}, h('span', {class: 'sub'}, 'configuration'), sel, h('span', {class: 'sub', style: 'margin-left:auto'}, '⌘/Ctrl+Enter to start')), customBox, h('div', {class: 'foot'}, h('button', {onclick: closeModal}, 'Cancel'), start)));
+  showModal(h('div', null, h('h2', null, 'New session'), opts.project ? h('p', {class: 'sub'}, 'It runs on the project\'s configuration as saved.') : null, ta,
+    h('div', {class: 'row'}, h('span', {class: 'sub'}, 'folder'), dir),
+    h('div', {class: 'row'}, h('span', {class: 'sub'}, 'agent'), agentSel),
+    h('div', {class: 'row'}, h('span', {class: 'sub'}, 'its model'), model, modelList, effortSel),
+    h('div', {class: 'foot'}, h('span', {class: 'sub'}, '⌘/Ctrl+Enter to start'), h('span', {style: 'flex:1'}), h('button', {onclick: closeModal}, 'Cancel'), start)));
   ta.focus();
 }
 function showModal(content) { const m = $('#modal'); m.replaceChildren(h('div', {class: 'box'}, content)); m.classList.remove('hidden'); m.onclick = e => { if (e.target === m) closeModal(); }; }
@@ -719,7 +806,7 @@ document.addEventListener('keydown', e => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'n') { e.preventDefault(); newSessionDialog(); }
   else if (e.key === '/' && S.sid) { e.preventDefault(); location.hash = `#/s/${S.sid}/chat`; setTimeout(() => $('#input')?.focus(), 50); }
-  else if (['1', '2', '3'].includes(e.key) && S.sid) { location.hash = `#/s/${S.sid}/${['chat', 'tasks', 'timeline'][+e.key - 1]}`; }
+  else if (['1', '2', '3'].includes(e.key) && S.sid) { location.hash = `#/s/${S.sid}/${TABS[+e.key - 1]}`; }
   else if (e.key === 'g') { location.hash = '#/config'; }
 });
 
@@ -742,24 +829,22 @@ function render() {
 window.__eagent = {$, h, api, toast, toastHost, showModal, closeModal, newSessionDialog, promptEditor, k, money, dur, clip, S, renderLive, closeStream, loadSessions};
 
 let resizeTimer = null;
-window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (S.sid && S.tab === 'tasks') renderTab(); }, 150); });
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (S.sid && S.tab === 'usage') renderTab(); }, 150); });
 
 // The portable archive uses these exact session renderers and stylesheet.
 // It supplies replayed data directly; no local server or browser storage is used.
 if (ARCHIVE) {
   window.EagentSessionView = {
-    state: () => ({task: S.taskSel, open: [...S.open].slice(-200), closed: [...S.closed].slice(-200)}),
+    state: () => ({open: [...S.open].slice(-200), closed: [...S.closed].slice(-200)}),
     restore(saved) {
-      S.taskSel = typeof saved?.task === 'string' ? saved.task : null;
       for (const key of ['open', 'closed']) S[key] = new Set(Array.isArray(saved?.[key]) ? saved[key].filter(v => typeof v === 'string' && v.length < 200).slice(-200) : []);
     },
     render(pane, detail, events, tab) {
       S.sid = detail.id; S.detail = {...detail, alive: false}; S.events = events;
       S.tab = tab; S.search = ''; S.filters.clear();
-      if (!detail.tasks.some(t => t.id === S.taskSel)) S.taskSel = null;
-      if (tab === 'chat') renderChat(pane);
-      else if (tab === 'tasks') renderTasks(pane);
-      else renderTimeline(pane);
+      if (tab === 'usage') renderUsage(pane);
+      else if (tab === 'timeline') renderTimeline(pane);
+      else renderChat(pane);
     },
   };
   return;

@@ -1,4 +1,5 @@
-// Command eagent runs a three-actor, event-sourced coding agent.
+// Command eagent runs a coding agent (Claude Code, Codex, Antigravity or pi)
+// in a terminal it owns and stands between that agent and the user.
 package main
 
 import (
@@ -8,11 +9,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +28,7 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/relay"
+	"github.com/ericflo/eagent/internal/settings"
 	"github.com/ericflo/eagent/internal/state"
 	"github.com/ericflo/eagent/internal/store"
 	"github.com/ericflo/eagent/internal/tools"
@@ -36,16 +40,15 @@ import (
 // `go install` build falls back to the module version Go recorded.
 var version = "dev"
 
-const usage = `eagent — a three-actor, event-sourced coding agent in one binary
+const usage = `eagent — runs a coding agent in a terminal and stands between it and you
 
 Usage:
   eagent [--addr HOST:PORT]          serve this directory's web UI and phone host (as eagent serve)
-  eagent [flags] "prompt"            start an interactive session in this terminal
+  eagent [flags] "prompt"            start a session: the agent gets your message word for word
   eagent -p [flags] "prompt"         batch mode: run until the work is done, then exit
   eagent -c [flags] [prompt]         continue the most recent session in this project
-  eagent relay <profile> [--cwd DIR] [brief]
-                                     start Antigravity, Codex or Claude Code in a terminal
-                                     eagent owns and relay to it: your messages go to it verbatim
+  eagent relay <profile> [--cwd DIR] [prompt]
+                                     the same, with this agent profile (as --relay)
   eagent relays [attach|stop NAME]   list the relays running on this machine, watch one, or stop one
   eagent resume [flags] <id> [prompt]
   eagent sessions                    list sessions in this project
@@ -53,7 +56,7 @@ Usage:
                                      write a fresh title and summary for stored sessions
                                      to their FinaleChat threads (running sessions do this
                                      themselves; this is for ones from before they did)
-  eagent show <id> [--raw] [--actor orchestrator|task|narrator] [--task tN]
+  eagent show <id> [--raw] [--actor eagent|user|harness] [--task tN (older sessions)]
   eagent replay <id>                 rebuild state from the log and print it
   eagent artifact export <id> --output DIR
                                      export a portable website and native source logs
@@ -65,7 +68,7 @@ Usage:
   eagent artifact enable|disable     enable/disable proactive archives (on by default)
   eagent connector pair             request remote settings access in FinaleChat
   eagent connector run              keep remote settings available without a session
-  eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, tasks, tool calls, config
+  eagent serve [--addr 127.0.0.1:7331]  web UI: live chat, session browser, the agent's screen, config
   eagent doctor [--live]             check configuration and credentials
   eagent config                      print the effective configuration
   eagent config list                 built-in presets and the project's saved presets
@@ -80,34 +83,35 @@ Usage:
   eagent servers probe URL [flags]   probe a server's /models and API kinds without saving
   eagent servers refresh [ID]        re-probe one or all registered servers
   eagent servers remove ID           unregister a server
-  eagent servers use ID [MODEL]      point the project's actors at a registered server
-  eagent prompts [export|show NAME]  list, export, or print the actor prompts
-  eagent view <id> [--actor narrator|orchestrator|task --task tN] [--until SEQ]
-                                     print the exact prompt an actor would receive (for prompt work)
+  eagent servers use ID [MODEL]      point eagent's model at a registered server
+  eagent prompts [export|show NAME]  list, export, or print eagent's prompts
+  eagent view <id> [--until SEQ]     print the exact prompt eagent's model would receive (for prompt work)
   eagent version
 
 Flags (before positional arguments):
-  -p            non-interactive: exit when idle (code 0 done, 2 awaiting input)
+  -p            non-interactive: exits when the work is done and its agent stopped
+                (code 0), or when it needs an answer (code 2; the agent keeps running)
   -c            resume the latest session
   -v            verbose: show every tool call and model response
-  --json        emit narrator output as JSON lines on stdout
+  --json        emit what eagent says as JSON lines on stdout
   -C <dir>      project directory (default: current directory)
   --preset <n>  built-in or saved preset name (or EAGENT_PRESET); built-ins:
-                glm (default), astra, deepseek, qwen, mistral, muse, muse-open,
-                beam, deepseek-1017, or a provider tier: openai-high|med|low,
+                glm (default), deepseek, qwen, mistral, muse, muse-open,
+                beam, deepseek-1017, or a provider tier: openai-high|low,
                 openrouter-high|med|low, anthropic-high|med, deepinfra-high|med|low,
                 fireworks-high|med|low, opencode-high|med|low, nous-high|med|low
   --config <n>  saved preset / bundle from .agents/eagent/configs/ (or EAGENT_CONFIG)
   --answer <s>  answer the pending question when resuming
-  --cwd <dir>   start a new session's commands in this directory (default: the project)
-  --relay <p>   start the new session as a relay to this profile (antigravity, codex, claude, or one in config)
+  --cwd <dir>   start a new session's agent in this directory (default: the project)
+  --relay <p>   the agent profile a new session starts (antigravity, claude, codex, pi,
+                or one in config; default: relay.default, else the first installed)
   --relay-model <m>, --relay-effort <e>
-                the relayed agent's model and reasoning effort (default: the
+                the agent's model and reasoning effort (default: the
                 profile's, else the agent's own configuration)
   --serve <a>   also serve the web UI at this address while a session runs (e.g. 127.0.0.1:7331)
 
 Credentials come from the environment: TOGETHER_API_KEY (default models),
-OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* and astra presets, OpenRouter is the
+OPENAI_API_KEY / OPENROUTER_API_KEY (openai-* presets, OpenRouter is the
 fallback), OPENROUTER_API_KEY (openrouter-*, qwen, mistral, muse-open, beam,
 deepseek-1017), ANTHROPIC_API_KEY (anthropic-*),
 DEEPINFRA_API_KEY, FIREWORKS_API_KEY, OPENCODE_ZEN_API_KEY, NOUS_API_KEY.
@@ -138,16 +142,16 @@ func run(args []string) int {
 		addr      = fs.String("addr", "127.0.0.1:7331", "serve: listen address")
 		serveAt   = fs.String("serve", "", "serve the web UI while running")
 		answer    = fs.String("answer", "", "answer to the pending question")
-		startDir  = fs.String("cwd", "", "start a new session's commands in this directory instead of the project root")
-		relayTo   = fs.String("relay", "", "start the new session as a relay to this profile")
-		relayMdl  = fs.String("relay-model", "", "the relayed agent's model (default: the profile's, else the agent's own)")
-		relayEff  = fs.String("relay-effort", "", "the relayed agent's reasoning effort (default: the profile's, else the agent's own)")
+		startDir  = fs.String("cwd", "", "start a new session's agent in this directory instead of the project root")
+		relayTo   = fs.String("relay", "", "the agent profile a new session starts (default: relay.default, else the first installed)")
+		relayMdl  = fs.String("relay-model", "", "the agent's model (default: the profile's, else the agent's own)")
+		relayEff  = fs.String("relay-effort", "", "the agent's reasoning effort (default: the profile's, else the agent's own)")
 		showRaw   = fs.Bool("raw", false, "show raw events")
 		actor     = fs.String("actor", "", "filter by actor")
 		task      = fs.String("task", "", "filter by task id")
 		until     = fs.Int64("until", 0, "view: only events up to this seq")
 		asJSON    = fs.Bool("as-json", false, "view: machine-readable output")
-		live      = fs.Bool("live", false, "doctor: make a small live call per actor")
+		live      = fs.Bool("live", false, "doctor: make a small live call per model")
 		write     = fs.Bool("write", false, "config: write config.json")
 		output    = fs.String("output", "", "artifact export/restore: new destination directory")
 		recreate  = fs.Bool("recreate", false, "artifact publish: explicitly recreate a deleted archive")
@@ -163,7 +167,8 @@ func run(args []string) int {
 		helpFlag  = fs.Bool("h", false, "help")
 	)
 	fs.BoolVar(helpFlag, "help", false, "help")
-	rest, err := parseInterleaved(fs, args)
+	// Arguments after "--" are the prompt's words, never a command.
+	rest, commands, err := parseArgs(fs, args)
 	if err != nil {
 		return 64 // EX_USAGE
 	}
@@ -172,10 +177,10 @@ func run(args []string) int {
 		return 0
 	}
 	harness.Version = version
-	if len(rest) == 2 && rest[0] == "relay-agy-status" {
+	if commands > 0 && len(rest) == 2 && rest[0] == "relay-agy-status" {
 		return relay.WriteAntigravityStatus(rest[1], os.Stdin, os.Stdout)
 	}
-	if len(rest) > 0 && rest[0] == "relay-hook" {
+	if commands > 0 && rest[0] == "relay-hook" {
 		// Claude Code's Stop hook for a relay: fast, and silent unless it
 		// has messages to hand over.
 		if len(rest) < 2 {
@@ -190,7 +195,7 @@ func run(args []string) int {
 	}
 
 	cmd := ""
-	if len(rest) > 0 {
+	if commands > 0 {
 		switch rest[0] {
 		case "sessions", "show", "replay", "resume", "doctor", "config", "presets", "preset", "servers", "prompts", "serve", "view", "version", "help", "artifact", "connector", "relay", "relays", "summarize":
 			cmd = rest[0]
@@ -244,9 +249,9 @@ func run(args []string) int {
 		return cmdRelays(project, rest)
 	case "view":
 		if len(rest) < 1 {
-			return fail(errors.New("usage: eagent view <session-id> [--actor narrator] [--until SEQ]"))
+			return fail(errors.New("usage: eagent view <session-id> [--until SEQ]"))
 		}
-		return cmdView(project, rest[0], *actor, *task, *until, *asJSON)
+		return cmdView(project, rest[0], *until, *asJSON)
 	}
 
 	if cmd == "" && len(rest) == 0 && !*batch && !*cont && *answer == "" && strings.TrimSpace(*relayTo) == "" && *startDir == "" && *serveAt == "" && stdinIsTerminal() {
@@ -264,13 +269,13 @@ func run(args []string) int {
 	if cmd == "relay" {
 		names := cfg.Relay.RelayProfileNames()
 		if len(rest) < 1 {
-			return fail(fmt.Errorf("usage: eagent relay <profile> [--cwd DIR] [brief]  (profiles: %s)", strings.Join(names, ", ")))
+			return fail(fmt.Errorf("usage: eagent relay <profile> [--cwd DIR] [prompt]  (profiles: %s)", strings.Join(names, ", ")))
 		}
 		opts.Relay, rest = rest[0], rest[1:]
 	}
 	if opts.Relay != "" {
 		if _, ok := cfg.Relay.RelayProfiles()[opts.Relay]; !ok {
-			return fail(fmt.Errorf("no relay profile %q (have %s)", opts.Relay, strings.Join(cfg.Relay.RelayProfileNames(), ", ")))
+			return fail(fmt.Errorf("no agent profile %q (have %s)", opts.Relay, strings.Join(cfg.Relay.RelayProfileNames(), ", ")))
 		}
 	}
 	if *startDir != "" {
@@ -308,7 +313,7 @@ func run(args []string) int {
 			raw, _ := readAll(os.Stdin)
 			opts.Prompt = strings.TrimSpace(string(raw))
 		}
-		if opts.Prompt == "" && opts.Relay == "" {
+		if batchNeedsPrompt(opts.Prompt, opts.Relay) {
 			return fail(errors.New("a non-interactive run needs a prompt: eagent -p \"...\" (stdin is not a terminal)"))
 		}
 	}
@@ -334,9 +339,7 @@ func run(args []string) int {
 		}
 		_ = os.Unsetenv(integration.AnnounceEnv)
 	}
-	term.Banner(rt.SessionID(), map[string]string{
-		"orchestrator": cfg.Orchestrator.Model, "task": cfg.Task.Model, "narrator": cfg.Narrator.Model,
-	}, sessionPath != "")
+	term.Banner(rt.SessionID(), cfg.Model.Model, sessionPath != "")
 	if opts.Interactive && opts.Prompt == "" && sessionPath == "" {
 		term.Log("type what you want done, or /help")
 	}
@@ -359,8 +362,7 @@ func run(args []string) int {
 		term.Log("stopping (resume later with: eagent -c)")
 		cancel()
 		<-sigs
-		rt.KillProcesses() // do not leave children running on a hard exit
-		os.Exit(130)
+		os.Exit(130) // the agent's terminal outlives eagent; a resume finds it again
 	}()
 	code := rt.Run(ctx)
 	cancel()
@@ -372,26 +374,51 @@ func run(args []string) int {
 	return code
 }
 
+// batchNeedsPrompt reports whether a non-interactive run is missing its
+// prompt. One that names an agent (--relay, or `eagent relay NAME`) may start
+// it with none: the session starts the agent and waits.
+func batchNeedsPrompt(prompt, relay string) bool { return prompt == "" && relay == "" }
+
 // parseInterleaved accepts flags anywhere on the command line, so
 // `eagent show <id> --raw` and `eagent resume <id> --answer yes` both work.
 // A literal `--` ends flag parsing.
 func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	rest, _, err := parseArgs(fs, args)
+	return rest, err
+}
+
+// parseArgs is parseInterleaved that also says how many of the positional
+// arguments came before a "--". Everything after "--" is positional, flags
+// included: a prompt that starts with "-" or reads "help" stays a prompt.
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, int, error) {
 	var positional []string
+	before := -1
 	for len(args) > 0 {
 		if args[0] == "--" {
+			before = len(positional)
 			positional = append(positional, args[1:]...)
 			break
 		}
 		if err := fs.Parse(args); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		args = fs.Args()
+		rest := fs.Args()
+		// flag.Parse stops at a "--" and drops it.
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			before = len(positional)
+			positional = append(positional, rest...)
+			break
+		}
+		args = rest
 		if len(args) > 0 {
 			positional = append(positional, args[0])
 			args = args[1:]
 		}
 	}
-	return positional, nil
+	if before < 0 {
+		before = len(positional)
+	}
+	return positional, before, nil
 }
 
 func readAll(f *os.File) ([]byte, error) {
@@ -473,9 +500,13 @@ func cmdSummarize(project, preset, bundle string, refs []string, all, dryRun, as
 	if err != nil {
 		return fail(err)
 	}
-	routes, err := cfg.Narrator.Routes()
+	route := cfg.Model
+	if cfg.Summarizer.Mode == "dedicated" {
+		route = cfg.Summarizer.Route(cfg.Model)
+	}
+	routes, err := route.Routes()
 	if err != nil {
-		return fail(fmt.Errorf("narrator: %w", err))
+		return fail(fmt.Errorf("summarizer: %w", err))
 	}
 	model := llm.NewClient(routes[0])
 	set, err := prompts.Load(project)
@@ -676,7 +707,7 @@ func transcriptLine(ev event.Event) string {
 	case event.SessionStart:
 		var d event.SessionStartData
 		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s session      %s in %s (%s / %s / %s)", ts, d.Session, d.Cwd, d.Models["orchestrator"], d.Models["task"], d.Models["narrator"])
+		return fmt.Sprintf("%s session      %s in %s (%s)", ts, d.Session, d.Cwd, modelsLine(d.Models))
 	case event.SessionResume:
 		return fmt.Sprintf("%s session      resumed", ts)
 	case event.SessionEnd:
@@ -686,8 +717,13 @@ func transcriptLine(ev event.Event) string {
 	case event.SubsessionStart:
 		var d event.SubsessionStartData
 		_ = ev.Decode(&d)
-		if d.Reason == "rollover" {
+		switch d.Reason {
+		case "rollover":
 			return fmt.Sprintf("%s subsession   %d (%s) after context rollover", ts, d.Index+1, d.File)
+		case "upgrade":
+			// An older session continued by the one-loop eagent, from a
+			// briefing written from its record.
+			return fmt.Sprintf("%s subsession   %d (%s) continued by the one-loop eagent from a briefing", ts, d.Index+1, d.File)
 		}
 	case event.Dossier:
 		var d event.DossierData
@@ -705,32 +741,68 @@ func transcriptLine(ev event.Event) string {
 		var d event.UserDismissData
 		_ = ev.Decode(&d)
 		return block("USER", "dismissed question "+d.QuestionID+" without answering")
-	case event.NarratorMessage:
-		var d event.NarratorMessageData
+	case event.Message:
+		var d event.MessageData
 		_ = ev.Decode(&d)
-		return block("NARRATOR", d.Text)
-	case event.NarratorQuestion:
-		var d event.NarratorQuestionData
+		return block("EAGENT", d.Text)
+	case event.Question:
+		var d event.QuestionData
 		_ = ev.Decode(&d)
 		text := d.Text
 		for i, o := range d.Options {
 			text += fmt.Sprintf("\n  %d) %s", i+1, o)
 		}
-		return block("NARRATOR asks", text)
-	case event.Note:
-		var d event.NoteData
+		return block("EAGENT asks", text)
+	case event.RelayStart:
+		var d event.RelayStartData
+		_ = ev.Decode(&d)
+		what := strings.TrimSpace(d.Model + " " + d.Effort)
+		if what != "" {
+			what = " (" + what + ")"
+		}
+		verb := "started"
+		if d.Resumed {
+			verb = "resumed"
+		}
+		return fmt.Sprintf("%s agent        %s %s in %s%s   (%s)", ts, firstNonEmpty(d.AgentLabel, d.Agent, d.Name), verb, d.Dir, what, cite)
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		return block("-> "+d.Name, d.Text)
+	case event.RelayTurn:
+		var d event.RelayTurnData
+		_ = ev.Decode(&d)
+		return block(strings.ToUpper(d.Name), d.Text)
+	case event.RelayState:
+		var d event.RelayStateData
+		_ = ev.Decode(&d)
+		if d.State == "blocked" || d.State == "exited" {
+			return block(d.Name+" "+d.State, d.Detail)
+		}
+	case event.RelayEnd:
+		var d event.RelayStateData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("%s agent        %s stopped   (%s)", ts, d.Name, cite)
+	case event.LegacyNote:
+		var d struct {
+			Text string `json:"text"`
+		}
 		_ = ev.Decode(&d)
 		return block("note", d.Text)
-	case event.TaskCreate:
-		var d event.TaskCreateData
+	case event.LegacyTaskCreate:
+		var d struct {
+			ID, Title, Description string
+		}
 		_ = ev.Decode(&d)
 		return block("delegate "+d.ID, d.Title+"\n"+d.Description)
-	case event.TaskEnd:
-		var d event.TaskEndData
+	case event.LegacyTaskEnd:
+		var d struct {
+			ID, Status, Summary string
+		}
 		_ = ev.Decode(&d)
 		return block(d.ID+" "+d.Status, d.Summary)
-	case event.Yield:
-		var d event.YieldData
+	case event.LegacyYield:
+		var d event.LegacyYieldData
 		_ = ev.Decode(&d)
 		if d.Done {
 			return block("DONE", d.Reason)
@@ -744,6 +816,30 @@ func transcriptLine(ev event.Event) string {
 		var d event.RouteData
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("%s route        %s -> %s (%s)", ts, d.Actor, d.Model, d.Reason)
+	}
+	return ""
+}
+
+// modelsLine names the models a session ran on: eagent's, or the three
+// actors' in a session from before eagent was one loop.
+func modelsLine(models map[string]string) string {
+	if m := models[event.ActorEagent]; m != "" {
+		return "eagent on " + m
+	}
+	var parts []string
+	for _, a := range event.LegacyActors {
+		if m := models[a]; m != "" {
+			parts = append(parts, a+" "+m)
+		}
+	}
+	return strings.Join(parts, " / ")
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if x != "" {
+			return x
+		}
 	}
 	return ""
 }
@@ -768,11 +864,10 @@ func cmdReplay(project, ref string) int {
 	default:
 		fmt.Println(st.EndReason)
 	}
-	fmt.Printf("orchestrator view: %d messages; narrator view: %d messages\n", len(st.OrchestratorView()), len(st.NarratorView(nil)))
-	for _, id := range st.TaskOrder {
-		t := st.Tasks[id]
-		fmt.Printf("  %s [%s] %s — %d calls\n", t.ID, t.Status, clip(t.Title, 60), t.Turns)
+	if st.Legacy() {
+		fmt.Println("written before eagent was one loop; its tasks and processes are history only")
 	}
+	fmt.Printf("eagent's conversation: %d messages\n", len(st.View(nil)))
 	if len(st.Errors) > 0 {
 		fmt.Printf("\nerrors recorded: %d\n", len(st.Errors))
 		for _, e := range st.Errors[max(0, len(st.Errors)-5):] {
@@ -830,7 +925,24 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 	} else {
 		fmt.Printf("finalechat: on (token from %s; --live checks it)\n", c.Source)
 	}
-	check := func(name string, a config.Actor) {
+	if n, how := cfg.RolloverChosen(project); cfg.RolloverTokens > 0 {
+		fmt.Printf("conversation restarts at: %d prompt tokens, %s\n", n, how)
+	} else {
+		fmt.Printf("conversation restarts at: %d prompt tokens, %s (rollover_tokens fixes a number)\n", n, how)
+	}
+	// Keys and environment variables of the three-model design: what was
+	// carried over, what changed, and what is no longer read.
+	for _, m := range cfg.Migrated {
+		fmt.Printf("older configuration: %s\n", m)
+	}
+	// The load already failed on the configuration's errors; its warnings
+	// are what the editor would show.
+	for _, p := range cfg.Problems() {
+		if p.Severity != "error" {
+			fmt.Printf("  ! config %s: %s\n", strings.TrimPrefix(p.Path, "/"), p.Message)
+		}
+	}
+	check := func(name string, a config.ModelRoute) {
 		routes, err := a.Routes()
 		if err != nil {
 			ok = false
@@ -895,9 +1007,69 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 		}
 	}
 	fmt.Println("models:")
-	check("orchestrator", cfg.Orchestrator)
-	check("task", cfg.Task)
-	check("narrator", cfg.Narrator)
+	check("eagent", cfg.Model)
+	switch {
+	case cfg.Summarizer.Mode != "dedicated":
+		fmt.Println("  summarizer   inline (eagent keeps the title and summary itself)")
+	case cfg.Summarizer.Model != nil && cfg.Summarizer.Model.Model != "":
+		check("summarizer", *cfg.Summarizer.Model)
+	default:
+		fmt.Println("  summarizer   dedicated, on eagent's model")
+	}
+	fmt.Println("agents:")
+	profiles := cfg.Relay.RelayProfiles()
+	anyAgent := false
+	for _, name := range cfg.Relay.RelayProfileNames() {
+		p := profiles[name]
+		mark := "  ✓"
+		if !relay.Installed(p.Agent) {
+			mark = "  -"
+		} else {
+			anyAgent = true
+		}
+		line := fmt.Sprintf("%s %-12s %s", mark, name, relay.AgentName(p.Agent))
+		if !relay.Installed(p.Agent) {
+			line += " (not installed)"
+		}
+		if name == cfg.Relay.Default {
+			line += " (default)"
+		}
+		fmt.Println(line)
+	}
+	if d := cfg.Relay.Default; d != "" {
+		if p, ok := profiles[d]; !ok {
+			ok = false
+			fmt.Printf("  ✗ relay.default %q is not a profile\n", d)
+		} else if !relay.Installed(p.Agent) {
+			ok = false
+			fmt.Printf("  ✗ relay.default %q runs %s, which is not installed\n", d, relay.AgentName(p.Agent))
+		}
+	} else if !anyAgent {
+		ok = false
+		fmt.Println("  ✗ no agent is installed; a session needs one")
+	}
+	// A prompt override that does not parse stops every session at its
+	// start; an override of a prompt of the three-model design is read by
+	// nothing.
+	fmt.Println("prompts:")
+	if set, err := prompts.Load(project); err != nil {
+		ok = false
+		fmt.Printf("  ✗ %v\n", err)
+	} else {
+		overridden := false
+		for _, name := range prompts.Names {
+			if src := set.Source[name]; src != "built-in" {
+				overridden = true
+				fmt.Printf("  ✓ %-17s %s\n", name, src)
+			}
+		}
+		if !overridden {
+			fmt.Println("  ✓ built-in (no overrides in " + prompts.Dir(project) + ")")
+		}
+	}
+	for _, p := range prompts.Ignored(project) {
+		fmt.Printf("  ! %s is no longer read: eagent runs one model now (`eagent prompts` lists the prompts it reads)\n", p)
+	}
 	if servers, err := config.LoadServers(project); err == nil && len(servers) > 0 {
 		fmt.Println("registered servers:")
 		for _, s := range servers {
@@ -921,11 +1093,11 @@ func cmdDoctor(project, preset, bundle string, live bool) int {
 			fmt.Println(line)
 		}
 	}
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		if _, err := lookPath("bash"); err != nil {
-			ok = false
-			fmt.Println("  ✗ bash not found on PATH")
-		}
+	_, tmuxErr := lookPath("tmux")
+	_, screenErr := lookPath("screen")
+	if tmuxErr != nil && screenErr != nil {
+		ok = false
+		fmt.Println("  ✗ neither tmux nor screen is on PATH; the agent runs in one of them")
 	}
 	fmt.Printf("sessions: %s\n", store.Root(project))
 	if !ok {
@@ -989,8 +1161,12 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		if len(args) < 1 {
 			return fail(errors.New("usage: eagent presets save NAME [description]"))
 		}
-		cfg, err := config.LoadBundle(project, preset, bundle)
+		// The configuration in force as every save keeps it.
+		cfg, err := settings.CurrentLayers(project, preset, bundle)
 		if err != nil {
+			return fail(err)
+		}
+		if err := cfg.Validate(); err != nil {
 			return fail(err)
 		}
 		cfg.Preset = ""
@@ -1015,7 +1191,15 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			return fail(errors.New("usage: eagent presets use NAME|default"))
 		}
 		target := strings.TrimSpace(args[0])
+		editor, err := config.LockEditor(context.Background(), project)
+		if err != nil {
+			return fail(err)
+		}
+		defer editor.Close()
+		file := config.Resolve(project, "", "").File
 		edits := map[string]json.RawMessage{}
+		dropped, moved := "", ""
+		var unloadable error // the file as left does not load here
 		switch {
 		case target == "default" || target == "none" || target == "-":
 			edits["default_config"] = nil
@@ -1023,6 +1207,79 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 			if canon, ok := config.ResolvePreset(target); ok {
 				edits["preset"], _ = json.Marshal(canon)
 				edits["default_config"] = nil
+				// The preset's model is what this chooses: a model the
+				// file names would run instead of it, so it goes. The
+				// file's effort and reply ceiling stay.
+				if file.Raw != "" {
+					var m map[string]json.RawMessage
+					if err := json.Unmarshal([]byte(file.Raw), &m); err != nil {
+						return fail(fmt.Errorf("%s: %w", file.Path, err))
+					}
+					var rest map[string]json.RawMessage
+					rest, dropped = config.DropModelChoice(m)
+					var was, left map[string]json.RawMessage
+					migrated, _ := config.MigrateLegacy(m)
+					_ = json.Unmarshal(migrated["model"], &was)
+					_ = json.Unmarshal(rest["model"], &left)
+					if len(left) < len(was) {
+						// Part of the file's route goes (its model, or
+						// only where one is reached) so that the preset's
+						// runs. Where it would not run even so, nothing is
+						// written: loading the file as it would be left
+						// says which model runs here.
+						after := maps.Clone(rest)
+						after["preset"] = edits["preset"]
+						delete(after, "default_config")
+						want := config.Defaults()
+						config.Presets[canon](&want)
+						now, err := config.LoadBundleWithFile(project, "", "", after)
+						if err != nil {
+							// (Said in place of "the preset's model runs".)
+							unloadable = err
+						} else if otherRoute(now.Model, want.Model) {
+							// All that stands in the way, so that one pass
+							// clears it: each variable that sets a part of
+							// the route that differs, the saved preset laid
+							// over the file, and another preset that a
+							// variable names.
+							var why []string
+							for _, f := range routeFields {
+								if name, ok := config.EnvOverrides()["/model/"+f.key]; ok && f.get(now.Model) != f.get(want.Model) {
+									why = append(why, fmt.Sprintf("%s sets eagent's %s here", name, f.key))
+								}
+							}
+							slices.Sort(why)
+							if now.Name != "" {
+								why = append(why, fmt.Sprintf("%s puts the saved preset %q over the project file here", now.NameFrom, now.Name))
+							}
+							if laid, from, err := config.LaidPreset(project, after); err == nil && from != "" && from != "bundle" && presetsDiffer(laid, canon) {
+								named, _ := laidAbove(now, laid, from)
+								why = append(why, named)
+							}
+							if len(why) == 0 {
+								why = []string{"something outside the project file sets eagent's route here"}
+							}
+							return fail(fmt.Errorf("%s, so %s would not run as the preset has it: %s would, which differs from the preset's (%s) in its %s; nothing was changed. Unset that first", strings.Join(why, ", and "), target, routeText(now.Model), routeText(want.Model), routeParts(now.Model, want.Model)))
+						}
+					}
+					// An effort the preset's model does not offer moves
+					// to the nearest it does, as choosing the preset in a
+					// session moves it.
+					var route map[string]json.RawMessage
+					var kept string
+					if json.Unmarshal(rest["model"], &route) == nil && json.Unmarshal(route["reasoning_effort"], &kept) == nil && kept != "" {
+						cfg := config.Defaults()
+						config.Presets[canon](&cfg)
+						cfg.Model.ReasoningEffort = kept
+						config.OfferedEffort(project, &cfg)
+						if cfg.Model.ReasoningEffort != kept {
+							route["reasoning_effort"], _ = json.Marshal(cfg.Model.ReasoningEffort)
+							rest["model"], _ = json.Marshal(route)
+							moved = kept + " to " + cfg.Model.ReasoningEffort
+						}
+					}
+					edits["model"] = rest["model"]
+				}
 			} else {
 				if _, err := config.LoadBundle(project, "", target); err != nil {
 					return fail(err)
@@ -1030,11 +1287,19 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 				edits["default_config"], _ = json.Marshal(target)
 			}
 		}
-		res, err := config.SaveFile(project, edits, "", false)
+		res, err := editor.SaveFile(edits, file.ETag, true)
 		if err != nil {
 			return fail(err)
 		}
 		fmt.Printf("updated %s\n", res.Path)
+		if dropped != "" && unloadable != nil {
+			fmt.Printf("  the model the file named (%s) was removed; the previous file is in %s.bak. The configuration does not load here, so no session starts until that is put right: %v\n", dropped, res.Path, unloadable)
+		} else if dropped != "" {
+			fmt.Printf("  the model the file named (%s) was removed, so %s's model runs; the previous file is in %s.bak\n", dropped, target, res.Path)
+		}
+		if moved != "" {
+			fmt.Printf("  the effort moved from %s, the nearest %s's model offers\n", moved, target)
+		}
 		return 0
 	case "show":
 		if len(args) < 1 {
@@ -1050,6 +1315,12 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 		return fail(err)
 	}
 	if write {
+		// The file holds what the files and a bundle say, as every save
+		// keeps the configuration in force, never what a variable gives.
+		if cfg, err = settings.CurrentLayers(project, preset, bundle); err != nil {
+			return fail(err)
+		}
+		cfg.Name = "" // config.json is no bundle: a name there would read as one laid
 		path, err := config.Write(project, cfg)
 		if err != nil {
 			return fail(err)
@@ -1064,7 +1335,7 @@ func cmdConfig(project, preset, bundle string, write bool, args []string) int {
 
 // describe renders a bundle's models in one line.
 func describe(c config.Config) string {
-	s := fmt.Sprintf("%s / %s / %s", shortModel(c.Orchestrator.Model), shortModel(c.Task.Model), shortModel(c.Narrator.Model))
+	s := shortModel(c.Model.Model)
 	if c.Description != "" {
 		s += " — " + c.Description
 	}
@@ -1161,8 +1432,10 @@ func cmdServe(project, addr, preset, bundle string, verbose bool) int {
 	return 0
 }
 
-// cmdView renders an actor's prompt from the log, the way the runtime would.
-func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
+// cmdView renders eagent's prompt from the log, the way the runtime would:
+// its system prompt and the conversation up to an event. (The few lines a
+// call adds at its end for that call only are not in the log.)
+func cmdView(project, ref string, until int64, asJSON bool) int {
 	info, err := store.Resolve(store.Root(project), ref)
 	if err != nil {
 		return fail(err)
@@ -1187,35 +1460,20 @@ func cmdView(project, ref, actor, task string, until int64, asJSON bool) int {
 	}
 	st.SetPrompts(set)
 	cfg, _ := config.Load(project, "")
-	if actor == "" {
-		actor = event.ActorNarrator
+	persona := strings.TrimSpace(cfg.Persona)
+	if persona == "" {
+		persona = strings.TrimSpace(set.Render("PERSONA.md", nil))
 	}
-	var system string
-	var msgs []llm.Message
-	switch actor {
-	case event.ActorNarrator:
-		persona := strings.TrimSpace(cfg.Persona)
-		if persona == "" {
-			persona = strings.TrimSpace(set.Render("PERSONA.md", nil))
-		}
-		phone := ""
-		if st.Phone != nil {
-			phone = harness.PhoneStatus()
-		}
-		system = set.Render("NARRATOR.md", prompts.NarratorData{Persona: persona, Phone: phone})
-		msgs = st.NarratorView(nil)
-	case event.ActorOrchestrator:
-		system = set.Render("ORCHESTRATOR.md", prompts.OrchestratorData{Project: st.Cwd, Instructions: cfg.Instructions, Interactive: st.Interactive})
-		msgs = st.OrchestratorView()
-	case event.ActorTask:
-		if task == "" {
-			return fail(errors.New("--task is required for the task view"))
-		}
-		system = set.Render("TASK-WORKER.md", prompts.TaskData{Project: st.Cwd, Instructions: cfg.Instructions})
-		msgs = st.TaskView(task)
-	default:
-		return fail(fmt.Errorf("unknown actor %q", actor))
+	phone := ""
+	if st.Phone != nil {
+		phone = harness.PhoneStatus()
 	}
+	system := set.Render("EAGENT.md", prompts.EagentData{Persona: persona, Phone: phone, Project: st.Cwd, Interactive: st.Interactive, Instructions: strings.TrimSpace(cfg.Instructions)})
+	view := state.DefaultViewOptions
+	if cfg.ReportMaxChars > 0 {
+		view.ReportChars = cfg.ReportMaxChars
+	}
+	msgs := st.View(&view)
 	if asJSON {
 		type msg struct {
 			Role      string           `json:"role"`

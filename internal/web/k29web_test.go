@@ -1,0 +1,154 @@
+package web
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// k29Refused is the page around send() while the server holds the request
+// and then refuses it (503 during a shutdown): cur is the chat box on the
+// page, which the script may replace or write in before it calls refuse().
+const k29Refused = `
+let cur = {value: 'and add the retry test', style: {}, dataset: {sid: 's1'}};
+const $ = () => cur;
+const S = {sid: 's1', detail: {alive: true, agents: []}, drafts: {}};
+const clientCaps = () => ({});
+const told = [];
+const toast = m => told.push(m);
+const showScreen = () => {};
+const showQueued = () => {};
+let reject;
+const api = () => new Promise((_, rej) => { reject = rej; });
+const refuse = () => { const e = new Error('eagent is stopping; send it again once it is back'); e.status = 503; reject(e); };
+const want = (what, got, exp) => { if (got !== exp) { console.error(what + ': ' + JSON.stringify(got) + ', want ' + JSON.stringify(exp) + '; told ' + JSON.stringify(told)); process.exit(1); } };
+const p = send();
+`
+
+// Words the server refuses go back where the user can send them again. A
+// refusal can take seconds (the server waits for a run that is ending),
+// and the chat box may be rebuilt meanwhile (the Timeline tab and back):
+// the words are put into the box that is on the page now.
+func TestK29RefusedWordsGoIntoTheBoxOnThePageNow(t *testing.T) {
+	k2Page(t, k29Refused+`
+cur = {value: '', style: {}, dataset: {sid: 's1'}};
+refuse();
+p.then(() => { want('the box on the page', cur.value, 'and add the retry test'); want('told', told.length, 1); });
+`)
+}
+
+// The user wrote more in the box while the request waited: the refused
+// words go in front of it, and nothing is dropped.
+func TestK29RefusedWordsGoInFrontOfWhatWasTypedSince(t *testing.T) {
+	k2Page(t, k29Refused+`
+cur.value = 'then push'; S.drafts.s1 = 'then push'; // as the box's oninput keeps it
+refuse();
+p.then(() => want('the box', cur.value, 'and add the retry test\nthen push'));
+`)
+}
+
+// The box holds words the page kept no draft of (the browser put them
+// back after a reload): they stay, behind the refused ones.
+func TestK29RefusedWordsKeepWhatTheBoxHoldsWithoutADraft(t *testing.T) {
+	k2Page(t, k29Refused+`
+cur.value = 'restored by the browser';
+refuse();
+p.then(() => { want('the box', cur.value, 'and add the retry test\nrestored by the browser'); want('the draft', S.drafts.s1, cur.value); });
+`)
+}
+
+// The user opened another session meanwhile: its box is not written in,
+// and the words are kept as the draft of the session they were for.
+func TestK29RefusedWordsAreKeptForTheirOwnSession(t *testing.T) {
+	k2Page(t, k29Refused+`
+S.sid = 's2'; cur = {value: 'for the other session', style: {}, dataset: {sid: 's2'}};
+refuse();
+p.then(() => { want('the other session\'s box', cur.value, 'for the other session'); want('the draft kept', S.drafts.s1, 'and add the retry test'); });
+`)
+}
+
+// A click on another session sets the page's session at once, and the
+// chat on the page, with its box, stays the old session's until the new
+// one has loaded. A refusal that lands then, for the session being
+// loaded, leaves the box on the page alone (it is the other session's,
+// with that session's words) and keeps the refused words as their own
+// session's draft.
+func TestK29ARefusalWhileItsSessionLoadsLeavesTheOtherSessionsBoxAlone(t *testing.T) {
+	k2Page(t, k29Refused+`
+S.sid = 's2'; cur = {value: 'only for s2', style: {}, dataset: {sid: 's2'}}; S.drafts.s2 = 'only for s2';
+S.sid = 's1'; // clicked s1 in the list; s2's chat is still on the page
+refuse();
+p.then(() => { want('s2 box', cur.value, 'only for s2'); want('s2 draft', S.drafts.s2, 'only for s2'); want('s1 draft', S.drafts.s1, 'and add the retry test'); });
+`)
+}
+
+// Words sent from a session's box while another session loads go to the
+// session whose box it is, not to the one being loaded.
+func TestK29WordsSentWhileAnotherSessionLoadsGoToTheBoxsSession(t *testing.T) {
+	k2Page(t, `
+const cur = {value: 'for s1', style: {}, dataset: {sid: 's1'}};
+const $ = () => cur;
+const S = {sid: 's2', detail: null, drafts: {s1: 'for s1'}}; // s2 clicked, not loaded yet
+const clientCaps = () => ({});
+const toast = () => {}, showScreen = () => {}, showQueued = () => {};
+const sent = [];
+const api = async path => { sent.push(path); return {}; };
+send().then(() => {
+  if (sent.join() !== '/api/sessions/s1/message' || S.drafts.s1 !== undefined) { console.error('sent ' + JSON.stringify(sent) + ', drafts ' + JSON.stringify(S.drafts)); process.exit(1); }
+});
+`)
+}
+
+// The chat box is built anew whenever the chat is shown. It is filled
+// from the session's draft: what was typed and not sent, or sent and
+// refused while the box was off the page.
+func TestK29TheChatBoxIsFilledFromTheSessionsDraft(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not installed")
+	}
+	src, err := os.ReadFile(filepath.Join("static", "app.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := regexp.MustCompile(`(?s)function renderChat\(pane\) \{.*?\n\}\n`).FindString(string(src))
+	if render == "" {
+		t.Fatal("app.js has no renderChat()")
+	}
+	script := `
+let made = [];
+const h = (tag, attrs, ...kids) => { const n = {tag, attrs: attrs || {}, kids, value: '', style: {}, scrollHeight: 20, append() {}}; made.push(n); return n; };
+const $ = sel => made.findLast(n => '#' + n.attrs.id === sel);
+const ARCHIVE = null;
+const S = {sid: 's1', tab: 'chat', detail: {alive: true}, events: [], queued: [], drafts: {}};
+const chatNode = () => null, queuedNode = () => null, showsWords = () => false;
+const updateComposer = () => {}, renderLive = () => {}, activityShown = () => false, setActivity = () => {}, send = () => {};
+const pane = {classList: {add() {}}, style: {}, replaceChildren() {}};
+` + render + `
+const want = (what, got, exp) => { if (got !== exp) { console.error(what + ': ' + JSON.stringify(got) + ', want ' + JSON.stringify(exp)); process.exit(1); } };
+renderChat(pane);
+const box = $('#input');
+want('a new session\'s box', box.value, '');
+box.value = 'half a thought'; box.attrs.oninput({target: box});
+want('the draft kept as it is typed', S.drafts.s1, 'half a thought');
+made = []; renderChat(pane); // the Timeline tab and back
+want('the box after it was rebuilt', $('#input').value, 'half a thought');
+S.sid = 's2'; made = []; renderChat(pane);
+want('another session\'s box', $('#input').value, '');
+want('the box names its session', $('#input').attrs['data-sid'], 's2');
+// s1 clicked in the list: the page's session is s1 at once, and s2's box
+// stays on the page until s1 has loaded. What is typed in it is s2's.
+const old = $('#input');
+S.sid = 's1';
+old.value = 'for s2'; old.attrs.oninput({target: old});
+want('s2 draft, typed while s1 loads', S.drafts.s2, 'for s2');
+want('s1 draft, untouched', S.drafts.s1, 'half a thought');
+made = []; renderChat(pane); // s1 loaded
+want('s1 box', $('#input').value, 'half a thought');
+`
+	if out, err := exec.Command("node", "-e", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, strings.TrimSpace(string(out)))
+	}
+}

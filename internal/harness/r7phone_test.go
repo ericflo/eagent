@@ -1,0 +1,221 @@
+package harness
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/ericflo/eagent/internal/event"
+)
+
+// r7FailFirstRead stands in front of the phone service and fails its first
+// read of a thread's messages as a service briefly down does.
+func r7FailFirstRead(t *testing.T, target string) string {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	var failed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && failed.CompareAndSwap(false, true) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"unavailable","message":"down for a moment"}}`))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// r7GoneAnchor stands in front of the phone service and answers a read
+// after gone as the service does when the thread no longer has it.
+func r7GoneAnchor(t *testing.T, target, gone string) string {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages") && r.URL.Query().Get("after") == gone {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"messages":[],"has_more":false,"thread_id":"t1","timed_out":false,"anchor_unknown":true}`))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// Finding 18: a session resumed at the terminal whose cursor's message the
+// thread no longer has takes the messages that waited, each once.
+func TestMessagesThatWaitedAreTakenWhenTheCursorIsGone(t *testing.T) {
+	cfg, project, path, fp := stoppedRelaySession(t)
+	cursor, ok := bphoneAnchor(path)
+	if !ok || cursor == "" {
+		t.Fatalf("no cursor in the record (%q)", cursor)
+	}
+	first := fp.userSays("the checklist is A, B, C", nil)
+	second := fp.userSays("are you still there?", nil)
+	cfg.Finalechat.BaseURL = r7GoneAnchor(t, fp.srv.URL, cursor)
+	rt, stop := bphoneRun(t, func() *Runtime {
+		useFakeRelays(t, newFakeSeat("Done."))
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rt
+	})
+	waitFor(t, "both in the record", func() bool { return len(r6PhoneIDs(path)) >= 2 })
+	rt.sync(func() {})
+	stop()
+	if got := r6PhoneIDs(path); len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("recorded %v, want %v", got, []string{first, second})
+	}
+}
+
+// Finding 19:a file sent from the phone while the session is shutting
+// down (a turn still finishing) is neither refused in the thread nor taken
+// in: the next run takes it.
+func TestAFileSentDuringShutdownIsLeftForTheNextRun(t *testing.T) {
+	fp := newPhoneFake(false)
+	t.Cleanup(fp.srv.Close)
+	fp.files["att-1"] = phoneFakeFile{name: "IMG_1.png", contentType: "image/png", data: tinyPNG}
+	g := phoneStart(t, fp, "wait for me", true, func(string, []map[string]any) reply { return hold() }, nil)
+	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
+	g.rt.wg.Add(1) // a turn still finishing holds the shutdown in its drain
+	g.cancel()
+	waitFor(t, "the shutdown", func() bool { return g.rt.ctx.Err() != nil })
+	fp.userReplyWith("", []map[string]any{{"id": "att-1", "kind": "image", "content_type": "image/png", "filename": "IMG_1.png", "size": len(tinyPNG), "width": 1, "height": 1, "url": "/api/v1/attachments/att-1"}})
+	id := fp.lastMessageID()
+	waitFor(t, "the poll to read it", func() bool {
+		for _, l := range g.ui.logged() {
+			if strings.Contains(l, "could not fetch IMG_1.png") {
+				return true
+			}
+		}
+		return false
+	})
+	g.rt.wg.Done()
+	g.exit(20 * time.Second)
+	if refused := fp.postsWhere(func(m map[string]any) bool {
+		meta, _ := m["meta"].(map[string]any)
+		return meta["kind"] == "attachment_refused"
+	}); len(refused) > 0 {
+		t.Fatalf("told the phone the file was refused: %v", refused)
+	}
+	for _, got := range r6PhoneIDs(g.rt.sess.Path) {
+		if got == id {
+			t.Fatalf("the message %s was recorded as taken", id)
+		}
+	}
+	for _, ev := range g.log() {
+		var d event.PhoneReadData
+		if ev.Type == event.PhoneRead && ev.Decode(&d) == nil && d.MessageID == id {
+			t.Fatalf("the message %s was recorded as read", id)
+		}
+	}
+}
+
+// Finding 15:a session last run without the ledger, resumed at the
+// terminal while two app messages wait, takes both when the first read of
+// the thread fails once.
+func TestMessagesThatWaitedAreTakenWhenTheFirstReadFails(t *testing.T) {
+	setFor(t, &phoneRetryStep, 10*time.Millisecond)
+	cfg, project, path, fp := stoppedRelaySession(t)
+	bphoneOlder(t, path)
+	first := fp.userSays("the checklist is A, B, C", nil)
+	second := fp.userSays("are you still there?", nil)
+	cfg.Finalechat.BaseURL = r7FailFirstRead(t, fp.srv.URL)
+	rt, stop := bphoneRun(t, func() *Runtime {
+		useFakeRelays(t, newFakeSeat("Done."))
+		rt, err := Resume(cfg, Options{Project: project, Interactive: true}, &fakeUI{input: make(chan string, 4)}, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rt
+	})
+	waitFor(t, "both in the record", func() bool { return len(r6PhoneIDs(path)) >= 2 })
+	rt.sync(func() {})
+	stop()
+	if got := r6PhoneIDs(path); len(got) != 2 || got[0] != first || got[1] != second {
+		t.Fatalf("recorded %v, want %v", got, []string{first, second})
+	}
+}
+
+// Finding 20: the open question's card was answered while the session was
+// stopped, and the card cannot be checked; the resumed session's poll reads
+// the answer before the re-ask returns. It is the question's answer, once,
+// and the question closes.
+func TestACardAnsweredWhileStoppedIsTheAnswerWhenThePollReadsItFirst(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r5AskedAndStopped(t, fp)
+	if !fp.answer("blue", "") {
+		t.Fatal("no card to answer")
+	}
+	taken := func() bool {
+		for _, ev := range g.log() {
+			var d struct {
+				Text string `json:"text"`
+			}
+			if (ev.Type == event.UserAnswer || ev.Type == event.UserMessage) && ev.Decode(&d) == nil && d.Text == "blue" {
+				return true
+			}
+		}
+		return false
+	}
+	fp.mu.Lock()
+	fp.questionsDown = true
+	var once sync.Once
+	fp.onAsk = func() { once.Do(func() { waitFor(t, "the poll to take the answer", taken) }) }
+	fp.mu.Unlock()
+	g.ui = &fakeUI{input: make(chan string, 16)}
+	g.resume(Options{Interactive: true})
+	waitFor(t, "the question to close", func() bool { _, open := r5Answers(g); return !open })
+	if n, _ := r5Answers(g); n != 1 {
+		t.Fatalf("%d answers recorded", n)
+	}
+	for _, ev := range g.log() {
+		var d event.UserMessageData
+		if ev.Type == event.UserMessage && ev.Decode(&d) == nil && d.Text == "blue" {
+			t.Fatalf("the card's answer was recorded as a message: %s", ev.Data)
+		}
+	}
+}
+
+// Finding 17:words written on the open question's card while the session
+// was stopped are its answer, verbatim, as the running poll takes them: a
+// leading slash runs no command, and a number is not turned into an option.
+func TestACardAnswerThatResumesIsTakenVerbatim(t *testing.T) {
+	for _, words := range []string{"/status", "1"} {
+		t.Run(words, func(t *testing.T) {
+			fp := newPhoneFake(true)
+			t.Cleanup(fp.srv.Close)
+			g := r5AskedAndStopped(t, fp)
+			card := r5CardOf(t, g)
+			if !fp.answer(words, "") {
+				t.Fatal("no card to answer")
+			}
+			g.resume(Options{Prompt: words, PromptSource: "finalechat", PromptAnswers: card})
+			waitFor(t, "the answer to be recorded", func() bool { n, open := r5Answers(g); return n == 1 && !open })
+			for _, ev := range g.log() {
+				var d event.UserAnswerData
+				if ev.Type == event.UserAnswer && ev.Decode(&d) == nil && d.Text != words {
+					t.Fatalf("the card's answer %q was recorded as %q", words, d.Text)
+				}
+			}
+		})
+	}
+}

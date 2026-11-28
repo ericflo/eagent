@@ -14,12 +14,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ericflo/eagent/internal/netx"
+	"image"
+	_ "image/gif" // image.DecodeConfig reads the size of these
+	_ "image/jpeg"
+	_ "image/png"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ericflo/eagent/internal/netx"
 
 	"github.com/ericflo/eagent/internal/event"
 )
@@ -93,9 +100,11 @@ type Message struct {
 	// and item ids are bound to the account that minted them, so a fallback
 	// route at another host must rebuild the turn instead of replaying.
 	NativeHost string
-
-	// CacheBreak marks the last stable message (Anthropic cache_control).
-	CacheBreak bool
+	// NativeModel is the model that produced Native: the one the request
+	// asked for, or, for a record that only kept the name the response
+	// gave, that name (which can be a dated variant of the one asked for).
+	// Empty when the record does not say.
+	NativeModel string
 
 	// Images are pictures attached to a user message (screenshots the user
 	// sent). Adapters inline them as base64 for models that accept images;
@@ -107,10 +116,252 @@ type Message struct {
 type Image struct {
 	Path      string
 	MediaType string // image/png, image/jpeg, image/gif, image/webp
+	// Refused says the record holds a provider's refusal of this picture
+	// (Response.RefusedImages, written down by the caller): it is not
+	// uploaded again, and a note stands in its place, the same note on
+	// every call and after a restart.
+	Refused bool
 }
 
 // maxInlineImage caps what is inlined into a request.
 const maxInlineImage = 10 << 20
+
+// Anthropic refuses a picture over 10 MB once base64-encoded, or over 8000
+// pixels on a side (the Messages API's vision limits). Bedrock and Google's
+// own Vertex take 5 MB; a refusal there is handled when it comes
+// (Client.refusedImages).
+const (
+	anthropicMaxImageBase64 = 10 << 20
+	anthropicMaxImageSide   = 8000
+)
+
+// tooBigFor reports why the provider behind protocol will certainly refuse
+// the picture, or "" when it may take it. It looks at the file alone, so
+// the same record always renders the same request.
+func (im Image) tooBigFor(protocol string) string {
+	st, err := os.Stat(im.Path)
+	if err != nil {
+		return "" // unreadable: the adapter leaves it out, as before
+	}
+	if st.Size() > maxInlineImage {
+		// Never sent: the adapter leaves it out without a word, as it
+		// always has, so a turn that held one renders as it did.
+		return ""
+	}
+	if protocol != ProtocolAnthropic {
+		return ""
+	}
+	if enc := (st.Size() + 2) / 3 * 4; enc > anthropicMaxImageBase64 {
+		return fmt.Sprintf("it is %.1f MB encoded, over the %d MB this provider takes", float64(enc)/(1<<20), anthropicMaxImageBase64>>20)
+	}
+	if f, err := os.Open(im.Path); err == nil {
+		cfg, _, err := image.DecodeConfig(f)
+		f.Close()
+		if err == nil && (cfg.Width > anthropicMaxImageSide || cfg.Height > anthropicMaxImageSide) {
+			return fmt.Sprintf("it is %dx%d pixels, over the %d a side this provider takes", cfg.Width, cfg.Height, anthropicMaxImageSide)
+		}
+	}
+	return ""
+}
+
+// fitImages replaces each picture the provider will certainly refuse for
+// its size with a note saying so, instead of uploading it to be refused.
+func fitImages(req Request, protocol string) Request {
+	return replaceImages(req, func(im Image) string {
+		if why := im.tooBigFor(protocol); why != "" {
+			return "[" + filepath.Base(im.Path) + " could not be shown to this model: " + why + ". The file is on disk.]"
+		}
+		return ""
+	})
+}
+
+// replaceImages returns the request with each picture for which note says
+// something taken out and the note added to its message's text. The
+// request is returned as it is when nothing is replaced.
+func replaceImages(req Request, note func(Image) string) Request {
+	var out []Message
+	for i, m := range req.Messages {
+		var kept []Image
+		var notes []string
+		for _, im := range m.Images {
+			if n := note(im); n != "" {
+				notes = append(notes, n)
+			} else {
+				kept = append(kept, im)
+			}
+		}
+		if len(notes) == 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), req.Messages...)
+		}
+		m.Images = kept
+		m.Text = strings.TrimSpace(m.Text + "\n" + strings.Join(notes, "\n"))
+		out[i] = m
+	}
+	if out != nil {
+		req.Messages = out
+	}
+	return req
+}
+
+// WithRefused returns the request with the pictures at paths marked as
+// refused (Image.Refused), as the record will mark them on every later
+// request. A caller that has just written a refusal down and goes on with
+// the same request through another client (a fallback route) uses it, so
+// that client is not sent a picture the record says was refused, and what
+// it is sent is what the conversation renders from then on.
+func (req Request) WithRefused(paths []string) Request {
+	if len(paths) == 0 {
+		return req
+	}
+	refused := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		refused[p] = true
+	}
+	var out []Message
+	for i, m := range req.Messages {
+		var images []Image
+		for j, im := range m.Images {
+			if !refused[im.Path] || im.Refused {
+				continue
+			}
+			if images == nil {
+				images = append([]Image(nil), m.Images...)
+			}
+			images[j].Refused = true
+		}
+		if images == nil {
+			continue
+		}
+		if out == nil {
+			out = append([]Message(nil), req.Messages...)
+		}
+		m.Images = images
+		out[i] = m
+	}
+	if out != nil {
+		req.Messages = out
+	}
+	return req
+}
+
+// imagePaths lists the pictures a request carries.
+func imagePaths(req Request) []string {
+	var out []string
+	for _, m := range req.Messages {
+		for _, im := range m.Images {
+			out = append(out, im.Path)
+		}
+	}
+	return out
+}
+
+// imageMemory remembers, for one client, the pictures its provider took
+// and the ones it refused for a reason that could not be told in advance
+// (undecodable, a limit of a gateway's own). A refused picture is left out
+// of every later request with a note, instead of being uploaded to be
+// refused again; the session's pictures are copies that never change, so
+// the path names the bytes.
+type imageMemory struct {
+	mu       sync.Mutex
+	accepted map[string]bool
+	refused  map[string]bool
+	// unreported are refusals no caller has been told of yet: a call
+	// that left a picture out and then failed for another reason reports
+	// nothing, and the refusal must still reach the record.
+	unreported []string
+}
+
+// report hands over the refusals not yet told to a caller.
+func (m *imageMemory) report() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.unreported
+	m.unreported = nil
+	return out
+}
+
+func (m *imageMemory) accept(paths []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.accepted == nil {
+		m.accepted = map[string]bool{}
+	}
+	for _, p := range paths {
+		m.accepted[p] = true
+	}
+}
+
+// about returns which pictures of a refused request the refusal is about.
+// It is about a picture the provider has not taken: one this client never
+// saw go through, and that came after the model's last reply (what stands
+// before a reply went through in the call that produced it, whichever
+// client made it). When there is no such picture, every picture this
+// client never saw go through; when there is none of those either, or all
+// is set, all of them.
+func (m *imageMemory) about(req Request, all bool) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	last := -1
+	for i, msg := range req.Messages {
+		if msg.Role == "assistant" {
+			last = i
+		}
+	}
+	var paths, unseen, fresh []string
+	for i, msg := range req.Messages {
+		for _, im := range msg.Images {
+			paths = append(paths, im.Path)
+			if m.accepted[im.Path] {
+				continue
+			}
+			unseen = append(unseen, im.Path)
+			if i > last {
+				fresh = append(fresh, im.Path)
+			}
+		}
+	}
+	switch {
+	case all:
+		fresh = paths
+	case len(fresh) == 0 && len(unseen) > 0:
+		fresh = unseen
+	case len(fresh) == 0:
+		fresh = paths
+	}
+	return fresh
+}
+
+// refuse remembers the pictures as refused, and keeps the new ones to be
+// reported.
+func (m *imageMemory) refuse(fresh []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.refused == nil {
+		m.refused = map[string]bool{}
+	}
+	for _, p := range fresh {
+		if !m.refused[p] {
+			m.refused[p] = true
+			m.unreported = append(m.unreported, p)
+		}
+	}
+}
+
+// leaveOut replaces each refused picture with a note: one this client's
+// provider refused, or one the record says was refused.
+func (m *imageMemory) leaveOut(req Request) Request {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return replaceImages(req, func(im Image) string {
+		if im.Refused || m.refused[im.Path] {
+			return "[" + filepath.Base(im.Path) + " could not be shown to this model: the provider refused it. The file is on disk.]"
+		}
+		return ""
+	})
+}
 
 // dataURL reads the image and returns a data: URL, or "" when unreadable.
 func (im Image) dataURL() string {
@@ -175,6 +426,18 @@ func (e *APIError) RejectsImages() bool {
 	return false
 }
 
+// tooLong reports a request refused as too long for the model's context:
+// neither a picture the provider will not take nor a model that cannot
+// see, whatever else its words name ("exceeds", a vision model, image
+// tokens). It is returned as it is, for the conversation to be made
+// shorter; no picture is left out or written down as refused for it, and
+// the model is not taken for text-only. A 413 is a request over a size
+// limit, which its pictures are most of: its pictures are held out, and
+// written down as refused only when the call goes through without them.
+func (e *APIError) tooLong() bool {
+	return e.Status != 413 && e.ContextOverflow()
+}
+
 // badImage reports a 4xx about this particular picture (too big, wrong
 // dimensions, undecodable) rather than a model that cannot see at all.
 // Such a refusal must not be remembered: the next picture may be fine.
@@ -186,7 +449,13 @@ func (e *APIError) badImage() bool {
 	if strings.Contains(b, "expected tags") || strings.Contains(b, "union_tag_invalid") {
 		return false
 	}
-	for _, k := range []string{"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match",
+	// OpenAI names the picture's fault in a code of its own.
+	switch e.Code {
+	case "invalid_image", "image_too_large", "image_parse_error", "invalid_image_url", "invalid_image_format":
+		return true
+	}
+	for _, k := range []string{"invalid_image", "image_too_large", "image_parse_error", "does not represent a valid image",
+		"exceeds", "too large", "too big", "dimension", "could not process image", "unable to process image", "invalid base64", "image does not match", "media type does not match",
 		"unsupported image", "invalid_image_format", "image format", "media_type", "could not decode", "unable to decode", "not a valid image"} {
 		if strings.Contains(b, k) {
 			return true
@@ -221,10 +490,27 @@ type Response struct {
 	Native    json.RawMessage
 	Protocol  string
 	BaseURL   string // the endpoint that produced this response
-	Model     string
-	Usage     event.Usage
-	Stop      string // "stop" | "tool_calls" | "length" | other provider value
-	Elapsed   time.Duration
+	Model     string // as the response named it; the endpoint's model when it named none
+	Asked     string // the model the request asked for
+	// RefusedImages are the pictures the provider refused that have not
+	// been reported yet: during this call, which went through without
+	// them, or during an earlier one through this client that failed.
+	// The caller writes them down and marks them (Image.Refused) from
+	// then on, so the request stays the same whichever client renders it.
+	RefusedImages []string
+	Usage         event.Usage
+	Stop          string // "stop" | "tool_calls" | "length" | other provider value
+	Elapsed       time.Duration
+}
+
+// By is the model to hold this response's native items to when they are
+// replayed: the one that was asked for. A provider may name the model that
+// ran in its own way, and that name need not look like the one asked for.
+func (r *Response) By() string {
+	if r.Asked != "" {
+		return r.Asked
+	}
+	return r.Model
 }
 
 // Truncated reports whether the output hit the token limit.
@@ -281,9 +567,19 @@ type Client struct {
 	// anthropicBudgeted remembers whether this model wants the older
 	// budget-style thinking parameter instead of adaptive thinking.
 	anthropicBudgeted atomic.Bool
+	// anthropicTurnRuled remembers that this provider refused budgeted
+	// thinking because the last assistant turn of a tool loop did not
+	// start with a thinking block (anthropicThinkingTurnRequired).
+	anthropicTurnRuled atomic.Bool
+	// anthropicCached remembers where the last requests Anthropic took
+	// from this client left cache entries (anthropicBridge).
+	anthropicCached anthropicEntries
 	// rejectsImages remembers that this model refused pictures, so later
 	// calls send the text alone instead of re-uploading and re-failing.
 	rejectsImages atomic.Bool
+	// images remembers the pictures this model took and the ones it
+	// refused, so that a refused one is not uploaded on every later call.
+	images imageMemory
 	// chatNoCacheKey remembers that this Chat Completions endpoint rejected
 	// prompt_cache_key, so later calls omit it.
 	chatNoCacheKey atomic.Bool
@@ -296,7 +592,7 @@ type Client struct {
 func NewClient(ep Endpoint) *Client {
 	return &Client{
 		Endpoint:    ep,
-		HTTP:        &http.Client{Transport: netx.Transport()}, // per-request deadlines are set via context
+		HTTP:        &http.Client{Transport: netx.Transport(), CheckRedirect: netx.SameOriginRedirects}, // per-request deadlines are set via context
 		IdleTimeout: 120 * time.Second,
 		CallTimeout: 15 * time.Minute,
 		MaxAttempts: 6,
@@ -338,9 +634,12 @@ func (e *APIError) Retryable() bool {
 // fallback route rather than a retry.
 func (e *APIError) QuotaExhausted() bool {
 	b := strings.ToLower(e.Body)
-	return e.Code == "insufficient_quota" || e.Code == "credit_balance_exhausted" ||
+	// 402 is Payment Required: Anthropic's billing_error, OpenRouter's
+	// "requires more credits".
+	return e.Status == 402 || e.Code == "insufficient_quota" || e.Code == "credit_balance_exhausted" || e.Code == "billing_error" ||
 		strings.Contains(b, "insufficient_quota") || strings.Contains(b, "no credits") ||
-		strings.Contains(b, "credit balance") || strings.Contains(b, "insufficient credits")
+		strings.Contains(b, "credit balance") || strings.Contains(b, "insufficient credits") ||
+		strings.Contains(b, "requires more credits")
 }
 
 // Unroutable reports that this endpoint cannot serve the model at all
@@ -369,10 +668,89 @@ func (e *APIError) ContextOverflow() bool {
 		return false
 	}
 	b := strings.ToLower(e.Body)
+	if e.Status == 413 {
+		// Anthropic's request_too_large is a body over its size limit. A
+		// request with pictures has those dropped first (Complete); one
+		// without is a conversation too long to send, which a dossier
+		// fixes. A gateway's bare 413 says nothing about which it is.
+		return strings.Contains(b, "request_too_large")
+	}
 	return strings.Contains(b, "context_length") || strings.Contains(b, "context length") ||
 		strings.Contains(b, "maximum context") || strings.Contains(b, "too many tokens") ||
 		strings.Contains(b, "prompt is too long") || strings.Contains(b, "exceeds the limit") ||
-		strings.Contains(b, "input tokens exceed")
+		strings.Contains(b, "input tokens exceed") ||
+		// Anthropic: "input length and `max_tokens` exceed context limit".
+		strings.Contains(b, "exceed context limit") ||
+		// llama-server: "request (N tokens) exceeds the available context
+		// size (M tokens)", type exceed_context_size_error.
+		strings.Contains(b, "exceeds the available context size") || strings.Contains(b, "exceed_context_size_error")
+}
+
+// streamError builds the error for a failure reported inside a stream,
+// which arrives after a 200 and so carries no HTTP status of its own. The
+// provider's code or type gives it one, so that it is judged as the same
+// failure in a plain response would be (an overflow, missing credits, a
+// model this key cannot use). Only a failure that names nothing is taken
+// for a transient one, as before.
+func streamError(code any, kind, message string, raw []byte) *APIError {
+	e := &APIError{Status: 502, Body: message}
+	if len(raw) > 0 {
+		// The whole error object, as for a plain response, so that the
+		// code and type are matched as well as the message.
+		e.Body = string(raw)
+	}
+	if e.Body == "" {
+		e.Body = "stream error"
+	}
+	if n, ok := code.(int); ok {
+		code = float64(n)
+	}
+	switch v := code.(type) {
+	case float64:
+		if n := int(v); n >= 400 && n <= 599 {
+			e.Status = n
+			return e
+		}
+	case string:
+		e.Code = v
+	}
+	if e.Code == "" {
+		e.Code = kind
+	}
+	for _, k := range []string{e.Code, kind} {
+		if s, ok := streamStatus[k]; ok {
+			e.Status = s
+			return e
+		}
+		if strings.Contains(k, "image") {
+			e.Status = 400 // OpenAI's invalid_image, image_too_large, ...
+			return e
+		}
+	}
+	return e
+}
+
+// streamStatus maps the error codes and types providers put in a stream to
+// the status the same error has in a plain response.
+var streamStatus = map[string]int{
+	// Anthropic error types.
+	"invalid_request_error": 400,
+	"authentication_error":  401,
+	"billing_error":         402,
+	"permission_error":      403,
+	"not_found_error":       404,
+	"request_too_large":     413,
+	"rate_limit_error":      429,
+	"api_error":             500,
+	"timeout_error":         504,
+	"overloaded_error":      529,
+	// OpenAI error codes.
+	"context_length_exceeded": 400,
+	"invalid_prompt":          400,
+	"model_not_found":         404,
+	"insufficient_quota":      429,
+	"rate_limit_exceeded":     429,
+	"server_error":            500,
 }
 
 // ErrIdle is returned when a stream stalls.
@@ -382,8 +760,21 @@ var ErrIdle = errors.New("stream idle timeout")
 // signalled completion.
 var ErrTruncatedStream = errors.New("stream ended before completion")
 
+// tooLarge reports a request over the provider's size limit: a 413, or a
+// prompt too long for the model.
+func tooLarge(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.Status == 413 || ae.ContextOverflow())
+}
+
+// TakeRefusedImages returns the pictures a provider refused that no
+// response has reported: those of a call that left a picture out and then
+// failed for another reason. A caller that keeps a record asks after a
+// failed call, so the refusal is written down all the same.
+func (c *Client) TakeRefusedImages() []string { return c.images.report() }
+
 // Complete performs one model call with retries on transient failures.
-func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Response, error) {
+func (c *Client) Complete(ctx context.Context, in Request, obs *Observer) (*Response, error) {
 	var lastErr error
 	attempts := c.MaxAttempts
 	if attempts <= 0 {
@@ -398,22 +789,68 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			callCtx, cancel = context.WithTimeout(ctx, c.CallTimeout)
 			defer cancel()
 		}
+		// In this order on every call: a model found to take no pictures
+		// was found so on a request that already had these notes, and
+		// the next request must render the same. Every attempt starts from
+		// the request asked for, so a picture held out of one is sent again.
+		req := in
+		if hasImages(req) {
+			req = c.images.leaveOut(fitImages(req, c.Endpoint.Protocol))
+		}
 		if c.rejectsImages.Load() && hasImages(req) {
 			req = withoutImages(req)
 		}
 		resp, err := c.once(callCtx, req, obs)
-		if err != nil && hasImages(req) {
-			var ae *APIError
-			if errors.As(err, &ae) && ae.RejectsImages() {
-				if ae.badImage() {
-					// This picture was refused (too big, undecodable): go on
-					// without it this once, and say why. The model can see.
-					if c.OnRetry != nil {
-						c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text alone", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
+		var ae *APIError
+		// A request too large may be so for its text alone: the pictures
+		// it leaves out are held, and written down as refused only when
+		// the call goes through without them.
+		var held []string
+		if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
+			if ae.badImage() || tooLarge(err) {
+				// A picture was refused (undecodable, too big for a limit
+				// of this provider's own): go on without it, and say why.
+				// The model can see. The one refused is left out of later
+				// calls too; the ones taken before stay. A request too
+				// large is never the model refusing pictures, whatever its
+				// wording names.
+				if c.OnRetry != nil {
+					c.OnRetry(attempt, fmt.Errorf("%s refused a picture (%s); sending the text in its place", c.Endpoint.Model, shortBody(ae.Body, 160)), 0)
+				}
+				if out := c.images.about(req, false); tooLarge(err) {
+					held, req = out, req.WithRefused(out)
+				} else {
+					c.images.refuse(out)
+				}
+				req = c.images.leaveOut(req)
+				obs.reset()
+				resp, err = c.once(callCtx, req, obs)
+				if err != nil && hasImages(req) && errors.As(err, &ae) && (ae.RejectsImages() || ae.Status == 413) && !ae.tooLong() {
+					if ae.badImage() || tooLarge(err) {
+						// Still refused over pictures: leave them all out.
+						if out := c.images.about(req, true); tooLarge(err) {
+							held, req = append(held, out...), req.WithRefused(out)
+						} else {
+							c.images.refuse(out)
+						}
+						req = c.images.leaveOut(req)
+					} else {
+						// A text-only model: none held was refused for
+						// itself, and the request renders as later ones do.
+						held = nil
+						if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+							c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
+						}
+						req = withoutImages(c.images.leaveOut(fitImages(in, c.Endpoint.Protocol)))
 					}
-				} else if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
-					// A text-only model: say so once and go on without pictures,
-					// on this call and every later one through this client.
+					obs.reset()
+					resp, err = c.once(callCtx, req, obs)
+				}
+			} else {
+				if c.rejectsImages.CompareAndSwap(false, true) && c.OnRetry != nil {
+					// A text-only model: say so once and go on without
+					// pictures, on this call and every later one through
+					// this client.
 					c.OnRetry(attempt, fmt.Errorf("%s does not accept images; sending the text alone", c.Endpoint.Model), 0)
 				}
 				req = withoutImages(req)
@@ -422,9 +859,13 @@ func (c *Client) Complete(ctx context.Context, req Request, obs *Observer) (*Res
 			}
 		}
 		if err == nil {
+			c.images.refuse(held)
+			c.images.accept(imagePaths(req))
+			resp.RefusedImages = c.images.report()
 			resp.Elapsed = time.Since(start)
 			resp.Protocol = c.Endpoint.Protocol
 			resp.BaseURL = c.Endpoint.BaseURL
+			resp.Asked = c.Endpoint.Model
 			if resp.Model == "" {
 				resp.Model = c.Endpoint.Model
 			}

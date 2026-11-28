@@ -25,8 +25,7 @@ func routeFixture(t *testing.T, handler http.HandlerFunc) (*settings.Service, co
 	t.Cleanup(server.Close)
 	project := t.TempDir()
 	cfg := config.Defaults()
-	actor := config.Actor{BaseURL: server.URL + "/v1", Model: "fixture", Protocol: llm.ProtocolChat, APIKeyEnv: "EAGENT_ROUTE_FIXTURE_KEY"}
-	cfg.Orchestrator, cfg.Task, cfg.Narrator = actor, actor, actor
+	cfg.Model = config.ModelRoute{BaseURL: server.URL + "/v1", Model: "fixture", Protocol: llm.ProtocolChat, APIKeyEnv: "EAGENT_ROUTE_FIXTURE_KEY"}
 	t.Setenv("EAGENT_ROUTE_FIXTURE_KEY", "fixture-private-key")
 	if err := writeJSONAtomic(config.File(project), cfg); err != nil {
 		t.Fatal(err)
@@ -37,7 +36,7 @@ func routeFixture(t *testing.T, handler http.HandlerFunc) (*settings.Service, co
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := control.Proposal{Operation: "route.test", SchemaVersion: settings.SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"actor": "task", "route": "primary"}}
+	p := control.Proposal{Operation: "route.test", SchemaVersion: settings.SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"target": "model", "route": "primary"}}
 	raw, _ := json.Marshal(p)
 	return s, g, command{ID: randomID(), UserID: "fixture-user", Proposal: p, Digest: artifact.Digest(raw), Expires: time.Now().Add(time.Minute)}
 }

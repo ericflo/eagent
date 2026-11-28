@@ -14,7 +14,7 @@ try {
     document.querySelectorAll("main > :not(.hero), .site-footer, .skip-link, .toast, .image-dialog, .menu-toggle, .navigation, .header-github, .hero-actions, .hero-install, .hero-footnote").forEach(element => element.remove());
     const footer = document.createElement("div");
     footer.className = "social-footer";
-    footer.innerHTML = "<span>THREE ACTORS. ONE SHARED PURPOSE.</span><span>github.com/ericflo/eagent</span>";
+    footer.innerHTML = "<span>RUNS YOUR CODING AGENT. STANDS BETWEEN IT AND YOU.</span><span>github.com/ericflo/eagent</span>";
     document.body.append(footer);
   });
   await page.addStyleTag({ content: `

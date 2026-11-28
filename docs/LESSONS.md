@@ -1,5 +1,7 @@
 # What broke before, and what eagent does about it
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 eagent is the fifth implementation of the same design document
 ([`docs/DESIGN-SPEC.md`](DESIGN-SPEC.md)). Four earlier
 attempts (written by four different coding agents) were run on the same two

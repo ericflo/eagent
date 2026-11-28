@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
+	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/integration"
 	"github.com/ericflo/eagent/internal/store"
 )
@@ -25,25 +27,58 @@ func hostedFile(project string) string {
 }
 
 type hostedList struct {
-	Sessions []string  `json:"sessions"`
-	At       time.Time `json:"at"`
+	Sessions []string `json:"sessions"`
+	// Mirror names those of them that a reply from the phone had started,
+	// which mirror whatever the configuration says (Server.Resume): they
+	// come back mirroring.
+	Mirror []string  `json:"mirror,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
+// It sets the shutdown mark first, under the lock every start holds, so no
+// run starts after the list is taken (host, hostNewCfg). One the user
+// stops after that is taken off again (forgetHosted): the list is written
+// under mu, as a run's end is recorded.
 func (s *Server) rememberHosted() {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	s.stopping = true
 	s.mu.Lock()
-	ids := make([]string, 0, len(s.running))
-	for id := range s.running {
-		ids = append(ids, id)
+	defer s.mu.Unlock()
+	list := hostedList{At: time.Now().UTC()}
+	for id, h := range s.running {
+		list.Sessions = append(list.Sessions, id)
+		if h.mirror {
+			list.Mirror = append(list.Mirror, id)
+		}
 	}
-	s.mu.Unlock()
+	sort.Strings(list.Sessions)
+	sort.Strings(list.Mirror)
+	s.writeHosted(list)
+}
+
+// forgetHosted takes a session the user stopped off the list, so the next
+// server does not bring it back. Under mu.
+func (s *Server) forgetHosted(id string) {
+	raw, err := os.ReadFile(hostedFile(s.Project))
+	var list hostedList
+	if err != nil || json.Unmarshal(raw, &list) != nil || !slices.Contains(list.Sessions, id) {
+		return
+	}
+	gone := func(x string) bool { return x == id }
+	list.Sessions, list.Mirror = slices.DeleteFunc(list.Sessions, gone), slices.DeleteFunc(list.Mirror, gone)
+	s.writeHosted(list)
+}
+
+// writeHosted writes the list of sessions to bring back.
+func (s *Server) writeHosted(list hostedList) {
 	path := hostedFile(s.Project)
-	if len(ids) == 0 {
+	if len(list.Sessions) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	sort.Strings(ids)
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: time.Now().UTC()}, "", "  ")
+	raw, _ := json.MarshalIndent(list, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)
@@ -55,8 +90,11 @@ func (s *Server) rememberHosted() {
 }
 
 // restoreSession resumes one session, with the reply that came while it was
-// down if there is one; tests substitute it.
-var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error { return s.Resume(id, reply) }
+// down if there is one, mirroring for that reply or because it mirrored
+// so before (hostedList.Mirror); tests substitute it.
+var restoreSession = func(s *Server, id string, reply integration.PhoneMessage, mirror bool) error {
+	return s.resume(id, reply, mirror || reply.ID != "")
+}
 
 // pendingReply finds that reply; tests substitute it.
 var pendingReply = integration.PendingReply
@@ -92,11 +130,16 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			continue
 		}
 		reply, _, err := pendingReply(ctx, s.Project, info)
+		if finalechat.Gone(err) {
+			// FinaleChat says the session has no thread there, so no reply
+			// can be waiting in one: it comes back as it was.
+			reply, err = integration.PhoneMessage{}, nil
+		}
 		if err != nil {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)
 			continue
 		}
-		if err := restoreSession(s, id, reply); err != nil {
+		if err := restoreSession(s, id, reply, slices.Contains(list.Mirror, id)); err != nil {
 			s.logf("session %s could not be brought back: %v", id, err)
 			continue
 		}

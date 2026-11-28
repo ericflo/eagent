@@ -21,6 +21,9 @@ type obs struct {
 	resets     string
 	exhausted  bool
 	tool       bool // activity/image: counts as a tool call
+	// pos is where the line it was read from starts in the transcript
+	// (the watcher sets it).
+	pos int64
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -215,6 +218,9 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
+	// erred: an API error answer ended the last turn, and Claude has
+	// answered nothing since; a turn_duration now is that turn's.
+	erred bool
 }
 
 func (p *claudeParser) line(raw []byte) []obs {
@@ -250,6 +256,10 @@ func (p *claudeParser) line(raw []byte) []obs {
 	case "system":
 		switch ev.Subtype {
 		case "turn_duration":
+			if p.erred {
+				p.erred = false
+				return nil // the API error answer ended this turn already
+			}
 			text := p.held
 			p.held, p.inTurn = "", false
 			return []obs{{kind: "turn", text: text, at: at, durationMS: ev.DurationMS}}
@@ -295,6 +305,7 @@ func (p *claudeParser) line(raw []byte) []obs {
 		if ev.Message == nil {
 			return nil
 		}
+		p.erred = ev.APIError
 		var parts []struct {
 			Type  string         `json:"type"`
 			Text  string         `json:"text"`
@@ -328,6 +339,15 @@ func (p *claudeParser) line(raw []byte) []obs {
 				}
 				out = append(out, claudeTool(part.Name, part.Input, at)...)
 			}
+		}
+		if ev.APIError {
+			// Claude gave the turn up on this error: it writes no
+			// turn_duration for a turn that did not complete, and no Stop
+			// hook runs. The turn is over, as pi's and agy's errors end
+			// theirs.
+			text := p.held
+			p.held, p.inTurn = "", false
+			out = append(out, obs{kind: "aborted", text: text, at: at})
 		}
 		return out
 	}

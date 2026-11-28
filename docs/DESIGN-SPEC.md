@@ -1,5 +1,7 @@
 # eagent: Design Specification
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 `eagent` is an agent harness and agent runner, delivered as a single-file binary. It runs three cooperating LLM actors over an append-only, event-sourced session log that lives in the working directory alongside the code it operates on.
 
 This document describes the intended design: the session model, the three actors and their responsibilities, how context limits are handled, how tools execute, and which model providers back each actor.

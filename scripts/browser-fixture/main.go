@@ -27,9 +27,9 @@ func main() {
 	_ = os.Setenv("EAGENT_FINALECHAT", "off")
 	project := filepath.Join(os.Args[1], "project")
 	must(os.MkdirAll(filepath.Dir(config.File(project)), 0700))
-	must(os.WriteFile(config.File(project), []byte(`{"preset":"glm","task_concurrency":5,"unknown_secret":"fixture-must-not-be-published"}`), 0600))
+	must(os.WriteFile(config.File(project), []byte(`{"preset":"glm","max_calls_per_turn":5,"unknown_secret":"fixture-must-not-be-published"}`), 0600))
 	cfg := config.Defaults()
-	cfg.TaskConcurrency = 7
+	cfg.MaxCallsPerTurn = 7
 	// Deliberately differ from the prebuilt viewer's catalog. The WASM replay
 	// must use the captured rates to reproduce the Go exporter's estimate.
 	for i := range config.Models {
@@ -43,33 +43,40 @@ func main() {
 	}
 	_, err := config.SaveBundle(project, "fixture", "Browser fixture", cfg)
 	must(err)
+	// A saved preset with a dedicated summarizer of its own and an agent
+	// profile, which the settings page loads into its form.
+	must(os.WriteFile(config.BundlePath(project, "summarized"), []byte(`{"preset":"glm","description":"Dedicated summaries","summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3-Flash","api_key_env":"TOGETHER_API_KEY","reasoning_effort":"low"}},"relay":{"profiles":{"fixture-agent":{"agent":"claude","label":"Fixture agent"}}}}`), 0600))
+	// An override of a prompt eagent no longer reads, which the page offers
+	// to remove.
+	must(os.MkdirAll(filepath.Join(project, ".agents", "eagent", "prompts"), 0700))
+	must(os.WriteFile(filepath.Join(project, ".agents", "eagent", "prompts", "NARRATOR.md"), []byte("An old narrator override.\n"), 0600))
 	session, err := store.Create(store.Root(project), time.UnixMilli(1788800000000))
 	must(err)
-	start := event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Models: map[string]string{event.ActorNarrator: cfg.Narrator.Model}, Endpoints: map[string]string{event.ActorNarrator: cfg.Narrator.BaseURL}})
+	start := event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{Models: map[string]string{event.ActorEagent: cfg.Model.Model}, Endpoints: map[string]string{event.ActorEagent: cfg.Model.BaseURL}})
 	start.Time = time.UnixMilli(1788800000000)
 	_, err = session.Append(start)
 	must(err)
 	message := event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "Synthetic browser fixture"})
 	message.Time = start.Time.Add(10 * time.Second)
-	_, err = session.Append(message)
+	message, err = session.Append(message)
 	must(err)
-	// A task changes state after the selected chat message; historical views
-	// must never show its later report or tool output before they happened.
+	// The agent works and reports after the selected chat message; historical
+	// views must never show its report or eagent's tool output before they
+	// happened.
 	for i, ev := range []event.Event{
-		event.New(event.TaskCreate, event.ActorOrchestrator, event.TaskCreateData{ID: "t1", Title: "Inspect saved workflow", Description: "Read the archived task details", Kind: "work"}),
-		event.New(event.ProcStart, event.ActorTask, event.ProcStartData{Handle: "p1", Command: "echo fixture"}),
-		event.New(event.Assistant, event.ActorTask, event.AssistantData{Text: "Reading saved evidence", ToolCalls: []event.ToolCall{{ID: "call1", Name: "shell", Args: []byte(`{"command":"echo fixture"}`)}}}),
-		event.New(event.ToolResult, event.ActorTask, event.ToolResultData{CallID: "call1", Name: "shell", Output: "Archived tool output"}),
-		event.New(event.TaskEnd, event.ActorTask, event.TaskEndData{ID: "t1", Status: "completed", Summary: "Archived task result", Turns: 1}),
+		event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Profile: "claude", Agent: "claude", AgentLabel: "Claude", Dir: project, Host: "tmux", Target: "fixture-target"}),
+		event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Seq: message.Seq, Mode: "queue", Text: "the forwarded fixture message", Auto: true}),
+		event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "working"}),
+		event.New(event.Assistant, event.ActorEagent, event.AssistantData{Model: cfg.Model.Model, Host: cfg.Model.BaseURL, Text: "Looking at the screen", ToolCalls: []event.ToolCall{{ID: "call1", Name: "screen", Args: []byte(`{"relay":"claude"}`)}}}),
+		event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: "call1", Name: "screen", Output: "Archived tool output"}),
+		event.New(event.RelayTurn, event.ActorHarness, event.RelayTurnData{Name: "claude", Text: "Archived turn report", DurationMS: 4000, Tools: 2}),
+		event.New(event.RelayState, event.ActorHarness, event.RelayStateData{Name: "claude", State: "idle"}),
 	} {
 		ev.Time = start.Time.Add(time.Duration(15+i*2) * time.Second)
-		if ev.Actor == event.ActorTask {
-			ev.Task = "t1"
-		}
 		_, err = session.Append(ev)
 		must(err)
 	}
-	response := event.New(event.Assistant, event.ActorNarrator, event.AssistantData{Model: cfg.Narrator.Model, Host: cfg.Narrator.BaseURL, Text: "Synthetic response", Usage: event.Usage{Input: 1000000, Output: 100000, Cached: 200000}})
+	response := event.New(event.Assistant, event.ActorEagent, event.AssistantData{Model: cfg.Model.Model, Host: cfg.Model.BaseURL, Text: "Synthetic response", Usage: event.Usage{Input: 1000000, Output: 100000, Cached: 200000}})
 	response.Time = start.Time.Add(30 * time.Second)
 	_, err = session.Append(response)
 	must(err)

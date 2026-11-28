@@ -1,4 +1,4 @@
-{{/* USER_ANSWER.md renders one user.answer event for the orchestrator.
+{{/* USER_ANSWER.md renders one user.answer event in eagent's conversation.
 
   Data:
     .Text        the answer text
@@ -10,7 +10,7 @@
     .Nick        IRC nick derived from .Source: "user", "user@web", "user@phone",
                  or "user@<source>" for anything else
     .Attachments pre-rendered attachment notes ("" when none)
-    .QuestionID  the answered narrator question's id
+    .QuestionID  the answered question's id
     .Question    the question restatement ("text (options: a | b)" or "" when
                  the question was asked in this subsession and needs no restating)
     .Client      the client capsule's source ("" when the client sent none)

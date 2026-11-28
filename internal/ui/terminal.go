@@ -1,4 +1,4 @@
-// Package ui renders a session in a terminal: narrator messages on stdout,
+// Package ui renders a session in a terminal: what eagent says on stdout,
 // activity and status on stderr, and user input from stdin.
 package ui
 
@@ -14,11 +14,12 @@ import (
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
+	"github.com/ericflo/eagent/internal/relay"
 )
 
 // Terminal is the default UI.
 type Terminal struct {
-	out         io.Writer // narrator output
+	out         io.Writer // what eagent says
 	err         *os.File  // status, activity, logs
 	tty         bool
 	color       bool
@@ -33,7 +34,12 @@ type Terminal struct {
 	status   harness.Status
 	statusOn bool
 	spinner  int
-	stream   map[string]*streamState
+	stream   streamState
+	// who names each agent for people ("Claude"), from relay.start; sends
+	// are the user's messages typed into an agent, by send id: what the
+	// record says became of each is shown.
+	who      map[string]string
+	sends    map[string]bool
 	idle     bool
 	question bool
 	input    chan string
@@ -62,8 +68,9 @@ func New(opts Options) *Terminal {
 		verbose:     opts.Verbose,
 		jsonOut:     opts.JSON,
 		interactive: opts.Interactive,
-		stream:      map[string]*streamState{},
 		stopSpin:    make(chan struct{}),
+		who:         map[string]string{},
+		sends:       map[string]bool{},
 		started:     time.Now(),
 		lastOutput:  time.Now(),
 	}
@@ -94,7 +101,7 @@ func (t *Terminal) heartbeat() {
 		select {
 		case <-tick.C:
 			t.mu.Lock()
-			busy := t.status.OrchestratorBusy || t.status.NarratorBusy || t.status.Rollover || t.status.TasksRunning+t.status.TasksQueued > 0
+			busy := !t.status.Waiting && (t.status.Busy || t.status.Compacting || len(t.status.Agents) > 0)
 			line := t.statusText()
 			quiet := time.Since(t.lastOutput) >= 30*time.Second
 			changed := line != t.lastStatus || time.Since(t.lastBeat) >= 60*time.Second
@@ -191,52 +198,39 @@ func (t *Terminal) redrawLocked() {
 func (t *Terminal) statusText() string {
 	s := t.status
 	var parts []string
-	if s.Rollover {
-		parts = append(parts, "writing dossier for a new subsession")
-	} else if s.OrchestratorBusy {
-		what := "orchestrator thinking"
-		if st := t.stream["orchestrator"]; st != nil {
-			switch {
-			case st.tool != "":
-				what = "orchestrator calling " + st.tool
-			case st.chars > 0:
-				what = "orchestrator writing"
-			case st.thinking > 0:
-				what = "orchestrator reasoning"
-			}
+	switch {
+	case s.Compacting:
+		parts = append(parts, "eagent writing a briefing for a fresh conversation")
+	case s.Busy:
+		what := "eagent thinking"
+		switch st := t.stream; {
+		case st.tool != "":
+			what = "eagent calling " + st.tool
+		case st.chars > 0:
+			what = "eagent writing"
+		case st.thinking > 0:
+			what = "eagent reasoning"
 		}
-		if s.OrchestratorFor != "" {
-			what += " " + s.OrchestratorFor
+		if s.BusyFor != "" {
+			what += " " + s.BusyFor
 		}
 		parts = append(parts, what)
 	}
-	if n := s.TasksRunning + s.TasksQueued; n > 0 {
-		var names []string
-		for k, st := range t.stream {
-			if strings.HasPrefix(k, "task:") && st.tool != "" {
-				names = append(names, strings.TrimPrefix(k, "task:")+":"+st.tool)
-			}
+	for _, a := range s.Agents {
+		who := a.Who
+		if who == "" {
+			who = a.Name
 		}
-		x := fmt.Sprintf("%d task%s", n, plural(n))
-		if s.TasksQueued > 0 {
-			x += fmt.Sprintf(" (%d queued)", s.TasksQueued)
-		}
-		if len(names) > 0 {
-			x += " " + strings.Join(names, " ")
-		}
-		parts = append(parts, x)
+		parts = append(parts, who+" "+a.State)
 	}
-	if s.NarratorBusy {
-		parts = append(parts, "narrator")
-	}
-	if s.Procs > 0 {
-		parts = append(parts, fmt.Sprintf("%d proc%s", s.Procs, plural(s.Procs)))
-	}
-	if len(parts) == 0 {
+	if s.Waiting || len(parts) == 0 {
 		return "" // nothing is happening; no status line
 	}
 	if s.ContextTokens > 0 {
 		parts = append(parts, fmt.Sprintf("ctx %dk", s.ContextTokens/1000))
+	}
+	if s.Phone {
+		parts = append(parts, "phone")
 	}
 	return strings.Join(parts, " · ")
 }
@@ -257,29 +251,18 @@ func (t *Terminal) Status(s harness.Status) {
 }
 
 // Stream implements harness.UI.
-func (t *Terminal) Stream(actor, task, kind, delta string) {
+func (t *Terminal) Stream(kind, delta string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	key := actor
-	if task != "" {
-		key = "task:" + task
-	}
-	if kind == "" {
-		delete(t.stream, key)
-		return
-	}
-	st := t.stream[key]
-	if st == nil {
-		st = &streamState{}
-		t.stream[key] = st
-	}
 	switch kind {
+	case "":
+		t.stream = streamState{}
 	case "tool":
-		st.tool = delta
+		t.stream.tool = delta
 	case "text":
-		st.chars += len(delta)
+		t.stream.chars += len(delta)
 	case "reasoning":
-		st.thinking += len(delta)
+		t.stream.thinking += len(delta)
 	}
 }
 
@@ -316,8 +299,8 @@ func (t *Terminal) write(w io.Writer, s string) {
 	}
 }
 
-// Narrate implements harness.UI.
-func (t *Terminal) Narrate(text string) {
+// Say implements harness.UI.
+func (t *Terminal) Say(text string) {
 	if t.jsonOut {
 		t.emitJSON(map[string]any{"type": "message", "text": text, "ts": time.Now().UTC().Format(time.RFC3339)})
 		return
@@ -326,6 +309,54 @@ func (t *Terminal) Narrate(text string) {
 	b.WriteString("\n")
 	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
 		b.WriteString(t.cyan("│ ") + line + "\n")
+	}
+	b.WriteString("\n")
+	t.write(t.out, b.String())
+}
+
+// agentName is how people call one of the session's agents.
+func (t *Terminal) agentName(name string) string {
+	t.mu.Lock()
+	who := t.who[name]
+	t.mu.Unlock()
+	if who != "" {
+		return who
+	}
+	if a := relay.AgentOf(name); a != "" {
+		return relay.AgentLabel(a)
+	}
+	return name
+}
+
+// agentTurn prints the agent's own words at the end of a turn.
+func (t *Terminal) agentTurn(d event.RelayTurnData) {
+	who := t.agentName(d.Name)
+	if t.jsonOut {
+		t.emitJSON(map[string]any{"type": "agent_turn", "agent": d.Name, "who": who, "text": d.Text, "duration_ms": d.DurationMS, "tools": d.Tools, "interrupted": d.Interrupted, "ts": time.Now().UTC().Format(time.RFC3339)})
+		return
+	}
+	var meta []string
+	if d.DurationMS > 0 {
+		meta = append(meta, fmtDur(time.Duration(d.DurationMS)*time.Millisecond))
+	}
+	if d.Tools > 0 {
+		meta = append(meta, fmt.Sprintf("%d tool call%s", d.Tools, plural(d.Tools)))
+	}
+	if d.Interrupted {
+		meta = append(meta, "interrupted")
+	}
+	head := who + " finished a turn"
+	if len(meta) > 0 {
+		head += " (" + strings.Join(meta, ", ") + ")"
+	}
+	var b strings.Builder
+	b.WriteString("\n" + t.grn(head) + "\n")
+	text := strings.TrimRight(d.Text, "\n")
+	if strings.TrimSpace(text) == "" {
+		text = t.dim("(it ended the turn without a message)")
+	}
+	for _, line := range strings.Split(text, "\n") {
+		b.WriteString(t.grn("┃ ") + line + "\n")
 	}
 	b.WriteString("\n")
 	t.write(t.out, b.String())
@@ -380,6 +411,50 @@ func (t *Terminal) Log(format string, args ...any) {
 
 // Trace implements harness.UI: activity lines, more with -v.
 func (t *Terminal) Trace(ev event.Event) {
+	switch ev.Type {
+	case event.RelayStart:
+		var d event.RelayStartData
+		_ = ev.Decode(&d)
+		t.mu.Lock()
+		t.who[d.Name] = firstNonEmpty(d.AgentLabel, relay.AgentLabel(d.Agent), d.Name)
+		t.mu.Unlock()
+	case event.RelayTurn:
+		// The agent's report for its turn is the user's to read, whole, as
+		// eagent does not restate it.
+		var d event.RelayTurnData
+		_ = ev.Decode(&d)
+		t.agentTurn(d)
+		return
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		if d.From == "user" {
+			t.mu.Lock()
+			t.sends[d.ID] = true
+			t.mu.Unlock()
+		}
+	case event.RelayDelivered:
+		// Each word on a message of the user's is shown, under the agent
+		// it is about: a message passed on to another agent arrives
+		// there, and an arrival can show after "not confirmed".
+		var d event.RelayDeliveredData
+		_ = ev.Decode(&d)
+		t.mu.Lock()
+		mine := t.sends[d.ID]
+		t.mu.Unlock()
+		if !mine || t.jsonOut {
+			break
+		}
+		if d.OK {
+			t.write(t.err, t.dim("  ✓ delivered to "+t.agentName(d.Name))+"\n")
+		} else if d.Outcome == event.DeliveryNotSent {
+			t.write(t.err, t.red("  ✗ ")+t.dim("did not reach "+t.agentName(d.Name)+": "+clip(d.Detail, 160))+"\n")
+		} else {
+			// Typed (or an older record that does not say): it may have.
+			t.write(t.err, t.red("  ✗ ")+t.dim("not confirmed by "+t.agentName(d.Name)+": "+clip(d.Detail, 160))+"\n")
+		}
+		return
+	}
 	if t.jsonOut && !t.verbose {
 		return
 	}
@@ -392,32 +467,6 @@ func (t *Terminal) Trace(ev event.Event) {
 
 func (t *Terminal) traceLine(ev event.Event) string {
 	switch ev.Type {
-	case event.TaskCreate:
-		var d event.TaskCreateData
-		_ = ev.Decode(&d)
-		if d.Kind == "dossier" {
-			return "▸ " + d.ID + " dossier: summarising the session for a fresh context"
-		}
-		return "▸ " + d.ID + " delegated: " + d.Title
-	case event.TaskEnd:
-		var d event.TaskEndData
-		_ = ev.Decode(&d)
-		mark := t.grn("✓")
-		if d.Status != "completed" {
-			mark = t.red("✗")
-		}
-		return fmt.Sprintf("%s %s %s after %d calls", mark, d.ID, d.Status, d.Turns)
-	case event.Note:
-		var d event.NoteData
-		_ = ev.Decode(&d)
-		return "✎ " + clip(d.Text, 160)
-	case event.Yield:
-		var d event.YieldData
-		_ = ev.Decode(&d)
-		if d.Done {
-			return t.grn("■ orchestrator: done. ") + clip(d.Reason, 140)
-		}
-		return "▫ orchestrator waiting: " + clip(d.Reason, 140)
 	case event.SubsessionStart:
 		var d event.SubsessionStartData
 		_ = ev.Decode(&d)
@@ -425,15 +474,25 @@ func (t *Terminal) traceLine(ev event.Event) string {
 			return fmt.Sprintf("↻ subsession %d started (%s)", d.Index+1, d.File)
 		}
 	case event.Dossier:
-		return "↻ dossier delivered; orchestrator resuming"
-	case event.ScheduleCreate:
-		var d event.ScheduleCreateData
+		return "↻ briefing written; eagent continues from it"
+	case event.ScheduleCreate: // "schedule.create", still written by scheduled wake-ups
+		var d struct {
+			ID, Kind, Spec, Note string
+		}
 		_ = ev.Decode(&d)
 		return fmt.Sprintf("⏰ %s %s %q: %s", d.ID, d.Kind, d.Spec, clip(d.Note, 100))
 	case event.ScheduleFire:
-		var d event.ScheduleFireData
+		var d struct{ ID string }
 		_ = ev.Decode(&d)
 		return "⏰ " + d.ID + " fired"
+	case event.ScheduleCancel:
+		var d struct{ ID, Reason string }
+		_ = ev.Decode(&d)
+		s := "⏰ " + d.ID + " cancelled"
+		if d.Reason != "" {
+			s += ": " + clip(d.Reason, 100)
+		}
+		return s
 	case event.Error:
 		var d event.ErrorData
 		_ = ev.Decode(&d)
@@ -449,14 +508,32 @@ func (t *Terminal) traceLine(ev event.Event) string {
 			return "resumed; " + strings.Join(d.Closed, "; ")
 		}
 		return "resumed"
+	case event.RelayStart:
+		var d event.RelayStartData
+		_ = ev.Decode(&d)
+		who := firstNonEmpty(d.AgentLabel, d.Agent, d.Name)
+		verb := "started"
+		if d.Resumed {
+			verb = "resumed"
+		}
+		return fmt.Sprintf("▸ %s %s in %s", who, verb, d.Dir)
+	case event.RelayEnd:
+		var d struct {
+			Name string `json:"name"`
+		}
+		_ = ev.Decode(&d)
+		return "■ " + d.Name + " stopped"
+	}
+	if event.IsLegacy(ev) || isLegacyType(ev.Type) {
+		if !t.verbose {
+			return ""
+		}
+		return legacyLine(ev)
 	}
 	if !t.verbose {
 		return ""
 	}
 	who := ev.Actor
-	if ev.Task != "" {
-		who = ev.Task
-	}
 	switch ev.Type {
 	case event.Assistant:
 		var d event.AssistantData
@@ -466,7 +543,7 @@ func (t *Terminal) traceLine(ev event.Event) string {
 			parts = append(parts, tc.Name+" "+clip(argPreview(tc), 100))
 		}
 		s := fmt.Sprintf("%s (%s, %s in/%s out)", who, fmtDur(time.Duration(d.ElapsedMS)*time.Millisecond), k(d.Usage.Input), k(d.Usage.Output))
-		if d.Text != "" && ev.Actor != event.ActorNarrator {
+		if d.Text != "" {
 			s += ": " + clip(d.Text, 160)
 		}
 		if len(parts) > 0 {
@@ -476,21 +553,10 @@ func (t *Terminal) traceLine(ev event.Event) string {
 	case event.ToolResult:
 		var d event.ToolResultData
 		_ = ev.Decode(&d)
-		if d.Name == "hold" {
-			return "narrator holds"
-		}
 		if d.IsError {
 			return fmt.Sprintf("%s %s error: %s", who, d.Name, clip(d.Output, 160))
 		}
 		return fmt.Sprintf("%s %s: %s", who, d.Name, clip(d.Output, 120))
-	case event.ProcStart:
-		var d event.ProcStartData
-		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s $ %s", d.Handle, clip(d.Command, 140))
-	case event.ProcExit:
-		var d event.ProcExitData
-		_ = ev.Decode(&d)
-		return fmt.Sprintf("%s %s exit=%d", d.Handle, d.Reason, d.ExitCode)
 	case event.TurnStart:
 		var d event.TurnData
 		_ = ev.Decode(&d)
@@ -498,7 +564,59 @@ func (t *Terminal) traceLine(ev event.Event) string {
 	case event.HarnessMessage:
 		var d event.HarnessMessageData
 		_ = ev.Decode(&d)
-		return "harness→" + who + ": " + clip(d.Text, 140)
+		return "harness: " + clip(d.Text, 140)
+	case event.RelayState:
+		var d event.RelayStateData
+		_ = ev.Decode(&d)
+		s := d.Name + " " + d.State
+		if d.Detail != "" {
+			s += ": " + clip(d.Detail, 120)
+		}
+		return s
+	case event.RelaySend:
+		var d event.RelaySendData
+		_ = ev.Decode(&d)
+		return fmt.Sprintf("→ %s (%s, from %s): %s", d.Name, d.Mode, d.From, clip(d.Text, 120))
+	}
+	return ""
+}
+
+// legacyTypes are the event types only old (three-actor) logs hold.
+var legacyTypes = map[string]bool{
+	event.LegacyTaskCreate: true, event.LegacyTaskStart: true, event.LegacyTaskEnd: true,
+	event.LegacyNote: true, event.LegacyYield: true,
+	event.LegacyProcStart: true, event.LegacyProcPID: true, event.LegacyProcExit: true,
+	event.LegacyNarratorTrim: true,
+}
+
+func isLegacyType(typ string) bool { return legacyTypes[typ] }
+
+// legacyLine is a plain line for an event from an old log: who wrote it,
+// its type, and its text when it has one.
+func legacyLine(ev event.Event) string {
+	who := ev.Actor
+	if ev.Task != "" {
+		who += " " + ev.Task
+	}
+	var d struct {
+		Text   string `json:"text"`
+		Title  string `json:"title"`
+		Reason string `json:"reason"`
+		Output string `json:"output"`
+	}
+	_ = ev.Decode(&d)
+	s := strings.TrimSpace(who + " " + ev.Type)
+	if x := firstNonEmpty(d.Text, d.Title, d.Reason, d.Output); x != "" {
+		s += ": " + clip(x, 140)
+	}
+	return s
+}
+
+func firstNonEmpty(xs ...string) string {
+	for _, x := range xs {
+		if x != "" {
+			return x
+		}
 	}
 	return ""
 }
@@ -508,7 +626,7 @@ func argPreview(tc event.ToolCall) string {
 	if json.Unmarshal(tc.Args, &m) != nil {
 		return string(tc.Args)
 	}
-	for _, key := range []string{"command", "path", "title", "text", "reason", "handle", "query", "spec"} {
+	for _, key := range []string{"text", "keys", "query", "reason", "name", "model"} {
 		if v, ok := m[key].(string); ok {
 			return v
 		}
@@ -538,8 +656,8 @@ func fmtDur(d time.Duration) string {
 	return d.Round(100 * time.Millisecond).String()
 }
 
-// Banner prints the session header.
-func (t *Terminal) Banner(session string, models map[string]string, resumed bool) {
+// Banner prints the session header: the session and eagent's model.
+func (t *Terminal) Banner(session, model string, resumed bool) {
 	if t.jsonOut {
 		return
 	}
@@ -548,8 +666,7 @@ func (t *Terminal) Banner(session string, models map[string]string, resumed bool
 		verb = "resumed session"
 	}
 	t.write(t.err, fmt.Sprintf("%s %s %s\n%s\n",
-		t.bold("eagent"), t.dim(verb), t.dim(session),
-		t.dim(fmt.Sprintf("  orchestrator %s · task %s · narrator %s", short(models["orchestrator"]), short(models["task"]), short(models["narrator"])))))
+		t.bold("eagent"), t.dim(verb), t.dim(session), t.dim("  model "+short(model))))
 }
 
 func short(model string) string {

@@ -23,20 +23,21 @@ func TestAntigravityUsesSessionSpecificStatus(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	a := antigravityAgent{statusFile: filepath.Join(t.TempDir(), "status.json")}
-	if found, _ := a.locate("", time.Now(), ""); found != "" {
+	a := antigravityAgent{}
+	spec := Spec{StatusFile: filepath.Join(t.TempDir(), "status.json")}
+	if found, _ := a.locate(spec, time.Now(), ""); found != "" {
 		t.Fatal("claimed a different terminal's transcript")
 	}
 	var out bytes.Buffer
 	input := strings.NewReader(`{"conversation_id":"` + id + `","email":"private@example.org","agent_state":"idle"}`)
-	if WriteAntigravityStatus(a.statusFile, input, &out) != 0 || !looksReady(out.String()) {
+	if WriteAntigravityStatus(spec.StatusFile, input, &out) != 0 || !a.ready(out.String()) {
 		t.Fatal(out.String())
 	}
-	saved, err := os.ReadFile(a.statusFile)
+	saved, err := os.ReadFile(spec.StatusFile)
 	if err != nil || bytes.Contains(saved, []byte("private@example.org")) {
 		t.Fatal("invalid private status record", err)
 	}
-	if found, inner := a.locate("", time.Now(), ""); found != path || inner != id {
+	if found, inner := a.locate(spec, time.Now(), ""); found != path || inner != id {
 		t.Fatal(found, inner)
 	}
 	args := a.command(config.BuiltinRelayProfiles()["antigravity"].With("gemini-test-high", "low"), id, true, "hook")

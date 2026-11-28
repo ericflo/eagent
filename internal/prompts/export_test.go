@@ -37,7 +37,10 @@ func TestExportSharesSettingsLockAndPreservesExistingOverrides(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	// The wait ends when the export does. The bound is only there to
+	// catch an export that never returns, and a loaded CI runner has taken
+	// longer than a second to write the files.
+	case <-time.After(10 * time.Second):
 		t.Fatal("export did not finish after lock release")
 	}
 	raw, err := os.ReadFile(path)

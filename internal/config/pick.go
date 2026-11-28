@@ -6,17 +6,19 @@ import (
 	"strings"
 )
 
-// PickRoute applies a provider + model + reasoning-effort pick to an actor:
-// the one place a pick from the new-session dialog or a running session's
+// PickRoute applies a provider + model + reasoning-effort pick to a route:
+// the one place a pick from the settings editor or a running session's
 // settings becomes a route. The model must be in the static catalog or the
-// cached live list; the network is never touched. The actor keeps its own
+// cached live list; the network is never touched. The route keeps its own
 // limits; picking a different model drops its fallback chain, which belonged
-// to the old model. An empty effort keeps the actor's when the model accepts
-// it, else takes the nearest level the model offers. An empty provider is
-// inferred from the model.
-func PickRoute(project string, a Actor, providerID, modelID, effort string) (Actor, error) {
+// to the old model. An empty effort keeps the route's when the model accepts
+// it, else takes the nearest level the model offers; a route with no effort
+// (send none) keeps none. An empty provider is
+// inferred from the model. The context window becomes the new model's, or 0
+// (unknown) when no list says it.
+func PickRoute(project string, a ModelRoute, providerID, modelID, effort string) (ModelRoute, error) {
 	if providerID == "" {
-		// No provider named: the actor's own, when it lists the model, or
+		// No provider named: the route's own, when it lists the model, or
 		// the one provider that does.
 		var err error
 		if providerID, err = providerFor(project, a, modelID); err != nil {
@@ -35,19 +37,38 @@ func PickRoute(project string, a Actor, providerID, modelID, effort string) (Act
 			return a, fmt.Errorf("model %q does not list effort %q (known: %s)", modelID, effort, strings.Join(m.Efforts, ", "))
 		}
 	}
-	if a.BaseURL != pr.BaseURL || a.Model != m.ID {
+	// The same address with or without a trailing slash (llm.SameBaseURL):
+	// a route written either way keeps its key, window and fallbacks.
+	if strings.TrimRight(a.BaseURL, "/") != strings.TrimRight(pr.BaseURL, "/") || a.Model != m.ID {
 		a.Protocol, a.BaseURL, a.Model, a.APIKeyEnv, a.Fallback = m.ProtocolForProvider(pr), pr.BaseURL, m.ID, pr.KeyEnv, nil
-		if m.Context > 0 {
-			a.ContextTokens = m.Context
-		}
+		a.ContextTokens = m.Context
 	}
 	switch {
 	case effort != "":
 		a.ReasoningEffort = effort
+	case a.ReasoningEffort == "":
+		// No effort sends none (the provider's default) on any model; it
+		// is not a level the model lacks, so it stays.
 	case len(m.Efforts) > 0 && !slices.Contains(m.Efforts, a.ReasoningEffort):
 		a.ReasoningEffort = NearestEffort(m.Efforts, a.ReasoningEffort)
 	}
 	return a, nil
+}
+
+// KnownContext is a model's context window as the built-in catalog or the
+// project's cached live list gives it, or 0 when neither knows the model or
+// its window. It never touches the network.
+func KnownContext(project, baseURL, model string) int {
+	if project == "" {
+		m, _ := Lookup(baseURL, model)
+		return m.Context
+	}
+	if pr, ok := ProviderForURLFor(project, baseURL); ok {
+		if m, _, ok := ResolveLiveModel(project, pr.ID, model); ok {
+			return m.Context
+		}
+	}
+	return 0
 }
 
 // NearestEffort is the offered level closest to want (the lower one on a
@@ -76,7 +97,7 @@ func NearestEffort(offered []string, want string) string {
 }
 
 // providerFor finds the provider for a model named without one.
-func providerFor(project string, a Actor, modelID string) (string, error) {
+func providerFor(project string, a ModelRoute, modelID string) (string, error) {
 	if pr, ok := ProviderForURLFor(project, a.BaseURL); ok {
 		if _, _, ok := ResolveLiveModel(project, pr.ID, modelID); ok {
 			return pr.ID, nil

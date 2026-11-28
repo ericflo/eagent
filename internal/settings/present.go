@@ -20,19 +20,16 @@ type fieldPlace struct {
 }
 
 var projectPlaces = map[string]fieldPlace{
-	"/preset":                              {"Models", "Configuration", "Preset", "The built-in lineup of models new sessions start from. Choosing one sets every actor's models to it.", false},
+	"/preset":                              {"Models", "Configuration", "Preset", "The built-in model new sessions start from. Choosing one sets the model to it.", false},
 	"/default_config":                      {"Models", "Configuration", "Saved preset", "A preset saved in this project that new sessions start from instead.", false},
-	"/task_concurrency":                    {"Behavior", "Work", "Tasks at once", "How many task workers run at the same time.", false},
-	"/max_task_turns":                      {"Behavior", "Work", "Turns per task", "Model calls a task may make before it is stopped.", false},
-	"/max_orchestrator_calls_per_turn":     {"Behavior", "Work", "Orchestrator calls before a nudge", "After this many tool calls in a row the orchestrator is asked to delegate, wait, or yield.", true},
-	"/rollover_tokens":                     {"Behavior", "Work", "Context rollover (tokens)", "At this prompt size the orchestrator starts fresh from a written summary.", true},
-	"/persona":                             {"Behavior", "Narrator", "Persona", "The narrator's voice.", false},
-	"/narrator_tick_seconds":               {"Behavior", "Narrator", "Check interval (seconds)", "How often the narrator looks in while work goes on.", false},
-	"/narrator_quiet_seconds":              {"Behavior", "Narrator", "Quiet limit (seconds)", "The longest you go without a progress line while work continues. 0 turns the reminder off.", false},
-	"/bash_wait_seconds":                   {"Behavior", "Commands", "Wait inline (seconds)", "How long a command runs before it continues in the background.", true},
-	"/bash_timeout_seconds":                {"Behavior", "Commands", "Timeout (seconds)", "The default deadline for a command.", false},
-	"/tool_output_max_chars":               {"Behavior", "Commands", "Output kept (characters)", "Longer tool output is cut to this.", true},
-	"/allow_outside_project":               {"Behavior", "Commands", "Files outside the project", "Lets file tools read and write outside the project folder.", false},
+	"/summarizer/mode":                     {"Models", "Summarizer", "Title and summary", "How the thread's title and summary are kept.", false},
+	"/relay/default":                       {"Behavior", "Agents", "Default agent", "The coding agent a session starts when it is not told which. Empty picks the first one installed.", false},
+	"/persona":                             {"Behavior", "Voice", "Persona", "eagent's voice.", false},
+	"/tick_seconds":                        {"Behavior", "Progress", "Seconds between progress looks", "How often eagent considers telling you how the work is going.", false},
+	"/quiet_seconds":                       {"Behavior", "Progress", "Longest silence while the agent works", "In seconds: the longest you go without a progress line. 0 turns the limit off.", false},
+	"/max_calls_per_turn":                  {"Behavior", "Work", "Calls per turn", "Model calls eagent may make each time it wakes: a look at the screen, a key press, another look.", true},
+	"/rollover_tokens":                     {"Behavior", "Work", "Context rollover (tokens)", "At this prompt size eagent restarts its conversation from a dossier: where things stand, with a map of where everything is in the session's record. 0 follows the model: half its context window.", true},
+	"/report_max_chars":                    {"Behavior", "Work", "Report kept (characters)", "How much of the agent's report eagent itself reads. You always get the whole report.", true},
 	"/finalechat/enabled":                  {"FinaleChat", "Phone", "Mirror to the phone", "Off stops mirroring even with a token; on makes a missing token an error.", false},
 	"/finalechat/mirror_input":             {"FinaleChat", "Phone", "Show terminal messages", "Copies what you type in the terminal or web UI into the thread.", false},
 	"/finalechat/artifacts":                {"FinaleChat", "Phone", "Publish session archives", "Uploads each session's log and viewer to its thread.", false},
@@ -40,7 +37,15 @@ var projectPlaces = map[string]fieldPlace{
 	"/finalechat/agent":                    {"FinaleChat", "Phone", "Agent name", "Shown next to the thread in the app.", true},
 	"/finalechat/base_url":                 {"FinaleChat", "Phone", "Server URL", "A self-hosted or staging FinaleChat.", true},
 	"/finalechat/token_env":                {"FinaleChat", "Phone", "Token variable", "The environment variable holding the token.", true},
-	"/relay/quiet_seconds":                 {"FinaleChat", "Relayed agents", "Quiet limit for relays (seconds)", "Set this only to give relayed agents a different quiet limit from the narrator's. Empty uses the same one.", true},
+}
+
+// SummarizerModeSuggestions say what each summarizer mode does, for the
+// /summarizer/mode choice.
+func SummarizerModeSuggestions() []control.Suggestion {
+	return []control.Suggestion{
+		{Value: config.SummarizerInline, Label: "Inline", Detail: "eagent keeps the title and summary itself, on the prompt it already has."},
+		{Value: config.SummarizerDedicated, Label: "Dedicated", Detail: "A separate small call on its own model."},
+	}
 }
 
 var routeLabels = map[string]string{
@@ -55,7 +60,7 @@ var routeLabels = map[string]string{
 }
 
 // placeProjectField gives a project settings field its section, card,
-// label, and whether it is advanced. An actor's model and effort are its
+// label, and whether it is advanced. A route's model and effort are its
 // card's main settings; the rest of a route, and every fallback route, are
 // advanced.
 func placeProjectField(f *control.Field) {
@@ -67,48 +72,94 @@ func placeProjectField(f *control.Field) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(f.Key, "/"), "/")
-	if len(parts) < 2 || !slices.Contains(StartActors, parts[0]) {
+	var group string
+	var route []string // the route's own keys: fallback/.../leaf
+	switch {
+	case len(parts) >= 2 && parts[0] == "model":
+		// A reader puts the card's name before a label: "eagent model".
+		group, route = "eagent", parts[1:]
+	case len(parts) >= 3 && parts[0] == "summarizer" && parts[1] == "model":
+		group, route = "Summarizer", parts[2:]
+	default:
 		f.Section, f.Advanced = "Other", true
 		return
 	}
-	group := actorName(parts[0])
-	if depth := len(parts) - 2; depth > 0 {
+	if depth := len(route) - 1; depth > 0 {
 		group += " fallback"
 		if depth > 1 {
 			group += fmt.Sprintf(" %d", depth)
 		}
 	}
-	leaf := parts[len(parts)-1]
+	leaf := route[len(route)-1]
 	f.Section, f.Group = "Models", group
 	if label, ok := routeLabels[leaf]; ok {
 		f.Label = label
 	}
-	f.Advanced = len(parts) > 2 || (leaf != "model" && leaf != "reasoning_effort")
+	f.Advanced = len(route) > 1 || (leaf != "model" && leaf != "reasoning_effort")
 	if leaf == "reasoning_effort" {
-		f.Shape.Enum = nil
+		// "" sends no effort, so the provider's default applies: the
+		// editor's "default", which a preset's effort does not take away.
+		f.Shape.Enum = []any{""}
 		for _, e := range config.EffortOrder {
 			f.Shape.Enum = append(f.Shape.Enum, e)
 		}
 	}
 }
 
-func actorName(actor string) string { return strings.ToUpper(actor[:1]) + actor[1:] }
-
 // ModelSuggestions are the models eagent knows of (registered servers' live
 // models first, then the built-in catalog and cloud providers' live lists as
 // last cached), grouped by provider id, for a client to offer as choices. Any
 // model id can still be typed in.
 func ModelSuggestions(project string) []control.Suggestion {
+	return modelSuggestionsWithin(project, modelListBudget, func(pr config.Provider) string { return pr.ID })
+}
+
+// projectModelSuggestions are ModelSuggestions grouped by their provider's
+// address, for the project settings, where a route names its provider by
+// base_url: a model's group is the base_url picking it gives the route.
+func projectModelSuggestions(project string, budget int) []control.Suggestion {
+	return modelSuggestionsWithin(project, budget, func(pr config.Provider) string { return pr.BaseURL })
+}
+
+// providerAddressSuggestions name each address a route may use by its
+// provider, for the project settings' base_url fields.
+func providerAddressSuggestions(project string, addresses []any) []control.Suggestion {
+	out := make([]control.Suggestion, 0, len(addresses))
+	for _, v := range addresses {
+		u, _ := v.(string)
+		if u == "" || len(u) > 500 {
+			continue
+		}
+		s := control.Suggestion{Value: u}
+		if pr, ok := config.ProviderForURLFor(project, u); ok {
+			s.Label = clip(pr.Label, 200)
+		}
+		s.Detail = clip(strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://"), 300)
+		out = append(out, s)
+	}
+	return out
+}
+
+// modelListBudget is the share of a settings document (256 KiB) the model
+// list may take, so a provider listing thousands of models cannot crowd
+// out the settings themselves.
+const modelListBudget = 160 << 10
+
+// suggestionSize is roughly what a suggestion takes in a document.
+func suggestionSize(s control.Suggestion) int {
+	return len(s.Value) + len(s.Label) + len(s.Group) + len(s.Detail) + 48
+}
+
+// modelSuggestionsWithin is ModelSuggestions within budget bytes, each in the
+// group group gives its provider.
+func modelSuggestionsWithin(project string, budget int, group func(config.Provider) string) []control.Suggestion {
 	models := config.KnownModels(project)
 	providers := map[string]config.Provider{}
 	for _, pr := range config.AllProviders(project) {
 		providers[pr.ID] = pr
 	}
 	out := make([]control.Suggestion, 0, len(models))
-	// A settings document is capped at 256 KiB; the list keeps to 160 KiB,
-	// so a provider listing thousands of models cannot crowd out the
-	// settings themselves. Registered local models and the catalog come first.
-	budget := 160 << 10
+	// Registered local models and the catalog come first.
 	for _, m := range models {
 		if m.ID == "" || len(m.ID) > 500 {
 			continue
@@ -133,8 +184,15 @@ func ModelSuggestions(project string) []control.Suggestion {
 		if m.Vision && providers[m.Provider].Custom {
 			detail = append(detail, "vision")
 		}
-		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: m.Provider, Detail: clip(strings.Join(detail, " · "), 300)}
-		if budget -= len(sug.Value) + len(sug.Label) + len(sug.Group) + len(sug.Detail) + 48; budget < 0 {
+		pr, ok := providers[m.Provider]
+		if !ok {
+			pr = config.Provider{ID: m.Provider}
+		}
+		if group(pr) == "" {
+			continue // a provider no longer known has no address to pick
+		}
+		sug := control.Suggestion{Value: m.ID, Label: clip(label, 200), Group: group(pr), Detail: clip(strings.Join(detail, " · "), 300)}
+		if budget -= suggestionSize(sug); budget < 0 {
 			break
 		}
 		out = append(out, sug)
@@ -157,8 +215,8 @@ func ProviderSuggestions(project string) []control.Suggestion {
 	return out
 }
 
-// ConfigChoices are the configurations a new session may start from: the
-// built-in presets, then the ones saved in this project as bundle:NAME.
+// ConfigChoices are the configurations a session may run on: the built-in
+// presets, then the ones saved in this project as bundle:NAME.
 func ConfigChoices(project string) []string {
 	out := append([]string{}, config.PresetNames()...)
 	if bundles, err := config.ListBundles(project); err == nil {
@@ -169,11 +227,14 @@ func ConfigChoices(project string) []string {
 	return out
 }
 
-// ConfigSuggestions describe each configuration a session may start from as
-// it would actually load in this project (its own settings on top), and the
-// provider, model and effort it gives each actor, so a reader can show what
-// a choice brings before anything starts.
-func ConfigSuggestions(project string) []control.Suggestion {
+// SessionConfigSuggestions describe each configuration a running session may
+// switch to as it would actually load in this project (its own settings on
+// top), and the provider, model and effort it gives the session's routes,
+// keyed /routes/eagent/... and, when its summarizer is dedicated and the
+// session has a summarizer route, /routes/summarizer/..., so a reader can
+// show what a choice brings. A session without one (summaries inline)
+// keeps them inline whatever it chooses (runtimecontrol.ApplyValues).
+func SessionConfigSuggestions(project string, summarizer bool) []control.Suggestion {
 	file := map[string]json.RawMessage{}
 	if raw, err := readProjectFile(project); err == nil {
 		file = raw
@@ -189,17 +250,30 @@ func ConfigSuggestions(project string) []control.Suggestion {
 		if bundle != "" {
 			s.Label = bundle
 		}
-		cfg, err := config.LoadBundleWithFile(project, preset, bundle, file)
+		var cfg config.Config
+		var err error
+		if bundle != "" {
+			// As for a preset (ChosenPresetWithFile): an effort the
+			// bundle's model lacks is the nearest it offers.
+			if cfg, err = config.LoadBundleWithFile(project, "", bundle, file); err == nil {
+				config.OfferedEffort(project, &cfg)
+			}
+		} else {
+			cfg, err = config.ChosenPresetWithFile(project, preset, file)
+		}
 		if err == nil {
+			if !summarizer {
+				cfg.Summarizer.Mode = config.SummarizerInline
+			}
 			detail := lineup(project, cfg)
 			if bundle != "" && cfg.Description != "" {
 				detail += " — " + cfg.Description
 			}
 			s.Detail = clip(detail, 300)
-			s.Implies = startImplies(project, cfg)
+			s.Implies = sessionImplies(project, cfg)
 			if bundle == "" {
 				group = "Presets"
-				if pr, ok := config.ProviderForURLFor(project, cfg.Orchestrator.BaseURL); ok {
+				if pr, ok := config.ProviderForURLFor(project, cfg.Model.BaseURL); ok {
 					group = pr.Label
 				}
 			}
@@ -247,10 +321,11 @@ func PresetSuggestions(project string) []control.Suggestion {
 	var out []control.Suggestion
 	for _, name := range config.PresetNames() {
 		s := control.Suggestion{Value: name, Group: "Presets"}
-		if cfg, err := config.LoadBundleWithFile(project, name, "", map[string]json.RawMessage{}); err == nil {
+		// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
+		if cfg, err := config.LoadBundleWithFile(project, name, name, map[string]json.RawMessage{}); err == nil {
 			s.Detail = clip(lineup(project, cfg), 300)
 			s.Implies = projectImplies(cfg)
-			if pr, ok := config.ProviderForURLFor(project, cfg.Orchestrator.BaseURL); ok {
+			if pr, ok := config.ProviderForURLFor(project, cfg.Model.BaseURL); ok {
 				s.Group = pr.Label
 			}
 		}
@@ -259,49 +334,31 @@ func PresetSuggestions(project string) []control.Suggestion {
 	return out
 }
 
-// projectImplies maps a configuration's routes onto the project settings
-// that hold them: each actor's model, effort, and the route it is reached by.
+// projectImplies maps a configuration's model route onto the project
+// settings that hold it: its model, effort, and the route it is reached by.
 func projectImplies(cfg config.Config) map[string]any {
 	out := map[string]any{}
-	for actor, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
-		p := "/" + actor + "/"
-		for k, v := range map[string]string{"model": a.Model, "reasoning_effort": a.ReasoningEffort, "base_url": a.BaseURL, "protocol": a.Protocol, "api_key_env": a.APIKeyEnv} {
-			if v != "" && len(v) <= 500 {
-				out[p+k] = v
-			}
+	a := cfg.Model
+	for k, v := range map[string]string{"model": a.Model, "reasoning_effort": a.ReasoningEffort, "base_url": a.BaseURL, "protocol": a.Protocol, "api_key_env": a.APIKeyEnv} {
+		if v != "" && len(v) <= 500 {
+			out["/model/"+k] = v
 		}
-		for k, v := range map[string]int{"max_tokens": a.MaxTokens, "context_tokens": a.ContextTokens} {
-			if v > 0 {
-				out[p+k] = v
-			}
+	}
+	for k, v := range map[string]int{"max_tokens": a.MaxTokens, "context_tokens": a.ContextTokens} {
+		if v > 0 {
+			out["/model/"+k] = v
 		}
-		if a.ReplayReasoning != nil {
-			out[p+"replay_reasoning"] = *a.ReplayReasoning
-		}
+	}
+	if a.ReplayReasoning != nil {
+		out["/model/replay_reasoning"] = *a.ReplayReasoning
 	}
 	return out
 }
 
-// SessionConfigSuggestions are ConfigSuggestions for a running session's own
-// settings, whose routes are keyed /routes/ACTOR/provider, model, effort.
-func SessionConfigSuggestions(project string) []control.Suggestion {
-	out := ConfigSuggestions(project)
-	for i := range out {
-		implied := map[string]any{}
-		for k, v := range out[i].Implies {
-			if actor, input, ok := strings.Cut(k, "_"); ok {
-				implied["/routes/"+actor+"/"+input] = v
-			}
-		}
-		out[i].Implies = implied
-	}
-	return out
-}
-
-// lineup says which models a configuration runs: "GLM-5.3 orchestrating,
-// GLM-5.3 Flash working, DeepSeek V4.1 Flash narrating".
+// lineup says which models a configuration runs: "GLM-5.3", or
+// "GLM-5.3, summaries on GLM-5.3 Flash" with a dedicated summarizer.
 func lineup(project string, cfg config.Config) string {
-	name := func(a config.Actor) string {
+	name := func(a config.ModelRoute) string {
 		if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
 			if m, _, ok := config.ResolveLiveModel(project, pr.ID, a.Model); ok && m.Label != "" {
 				return m.Label
@@ -309,23 +366,31 @@ func lineup(project string, cfg config.Config) string {
 		}
 		return a.Model
 	}
-	return fmt.Sprintf("%s orchestrating, %s working, %s narrating", name(cfg.Orchestrator), name(cfg.Task), name(cfg.Narrator))
+	if cfg.Summarizer.Mode == config.SummarizerDedicated {
+		return name(cfg.Model) + ", summaries on " + name(cfg.Summarizer.Route(cfg.Model))
+	}
+	return name(cfg.Model)
 }
 
-// startImplies maps a configuration onto session.start's per-actor inputs.
-func startImplies(project string, cfg config.Config) map[string]any {
+// sessionImplies maps a configuration onto a running session's route
+// fields.
+func sessionImplies(project string, cfg config.Config) map[string]any {
+	routes := map[string]config.ModelRoute{"eagent": cfg.Model}
+	if cfg.Summarizer.Mode == config.SummarizerDedicated {
+		routes["summarizer"] = cfg.Summarizer.Route(cfg.Model)
+	}
 	out := map[string]any{}
-	for actor, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
+	for name, a := range routes {
 		for k, v := range routeInputs(project, a) {
-			out[actor+"_"+k] = v
+			out["/routes/"+name+"/"+k] = v
 		}
 	}
 	return out
 }
 
-// routeInputs are an actor route's provider, model and effort, each only
-// when it is one session.start accepts.
-func routeInputs(project string, a config.Actor) map[string]string {
+// routeInputs are a route's provider, model and effort, each only when it
+// is one a session's route fields accept.
+func routeInputs(project string, a config.ModelRoute) map[string]string {
 	out := map[string]string{}
 	if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
 		out["provider"] = pr.ID

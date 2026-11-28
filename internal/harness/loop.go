@@ -1,0 +1,1713 @@
+package harness
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/ericflo/eagent/internal/event"
+	"github.com/ericflo/eagent/internal/llm"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/tools"
+)
+
+// The model loop.
+//
+// eagent's model is called when something may need it: the user wrote, the
+// agent finished a turn or got stuck, a message did not arrive, or the
+// agent has been working for a while and the user should hear about it.
+// Each call gets the session's record as one conversation, rendered from
+// the log (state.View), and after it a few lines that exist for that call
+// only: why it was woken, what the agent is doing this second, how long the
+// user has heard nothing (tail.go).
+//
+// What a call leaves behind depends on what the model does with it:
+//
+//   - It holds (or says nothing usable). Then nothing is recorded but its
+//     cost. The conversation is exactly what it was, so the next call's
+//     prompt starts with the same bytes and the provider's cache of them
+//     still holds. Most looks while an agent works end this way, which is
+//     what makes looking often affordable.
+//   - It acts. Then the lines it was given are recorded as a steer, its
+//     reply and the results of its tools follow, and all of it is part of
+//     the conversation from then on. If it looked at something (the
+//     agent's screen, the session's record) it gets another call to use
+//     what it saw, up to max_calls_per_turn; a reply that only acts ends
+//     the turn.
+//
+// Either way the system prompt and the tool list never change, and the
+// conversation only grows at its end, until it is restarted from a
+// dossier (dossier.go).
+
+// wakeKind is why eagent's model is called, most pressing last.
+type wakeKind int
+
+const (
+	wakeNotice    wakeKind = iota // the harness left it a notice
+	wakeTurnEnd                   // an agent finished a turn
+	wakeAttention                 // an agent needs something: a dialog, an exit, a message that did not arrive
+	wakeUser                      // the user wrote
+	wakeKinds
+)
+
+// wake is one reason to call the model, with what the tail needs to say so.
+type wake struct {
+	kind   wakeKind
+	event  bool // something happened that asks for a look (kind says what)
+	look   bool // a progress look while the agent works: nothing asked for it
+	moved  bool // (look) something has happened since the user last heard
+	steps  int  // (look) how many steps the agents had taken when it was started
+	thread bool // the thread's title and summary may be out of date
+	final  bool // the session is about to end: the closing word
+	// wait bounds the whole turn: the last title and summary of a session
+	// that is about to end must not hold the end for long.
+	wait time.Duration
+}
+
+// reason names the wake for the turn's record: the most pressing thing
+// that asked for the look. The steer that follows names all of them.
+func (w wake) reason() string {
+	switch {
+	case w.event && w.kind == wakeUser:
+		return "the user wrote"
+	case w.event && w.kind == wakeAttention:
+		return "the agent needs attention"
+	case w.event && w.kind == wakeTurnEnd:
+		return "the agent finished a turn"
+	case w.event:
+		return "a notice from eagent"
+	case w.look:
+		return "progress while the agent works"
+	case w.final:
+		return "the session is ending"
+	}
+	return "the thread's title and summary"
+}
+
+// turnState is the loop's memory of the model loop. Loop goroutine only.
+type turnState struct {
+	busy       bool      // a model call (a turn, or the dossier) is in flight
+	callAt     time.Time // when the call in flight started
+	compacting bool      // the conversation is being restarted from a dossier
+
+	// seen is the newest event eagent has looked at, whether or not the
+	// look left a record. wakes holds, per kind, the newest event that asks
+	// for a look; one newer than seen is still owed.
+	seen  int64
+	wakes [wakeKinds]int64
+	// heldCut is the message kept for eagent that a turn showed the model
+	// and a failed call cut off before it was answered (0 for none): the
+	// turn that tries again takes it up, and a hold there is sent back.
+	heldCut int64
+	worthy  int64 // the newest event that shows in the conversation and is not eagent's own
+	settle  *time.Timer
+
+	// What the user last heard from eagent, and what eagent had seen when
+	// it said it. saidAt counts a notice eagent wrote by itself (Auto: a
+	// command's outcome, word that its model cannot be reached); saidSeq
+	// does not: such a notice is no answer to the user, and the closing
+	// word is still owed after it.
+	saidAt   time.Time
+	saidSeq  int64
+	saidSeen int64
+	lastSaid string
+	// spokeSeen is the newest event the call that made eagent's last
+	// word (a message of its own or a question, saidSeq) had been shown:
+	// what that word can have answered (closingWordOwed).
+	spokeSeen int64
+
+	// Progress looks while the agent works: when the last one ran, how many
+	// steps the agents had taken by then, and when one last failed.
+	lookedAt  time.Time
+	lookSteps int
+	ticker    *time.Timer
+	tickGen   uint64
+
+	// silent is the cost of the looks that left no record since the last
+	// one that did, written to the log in one line now and then.
+	silent event.ChecksData
+	// promptTokens is the size of the last prompt, recorded or not.
+	promptTokens provTokens
+
+	// After a failed call: how many in a row, when the next try is due, and
+	// the newest event at the time (a message from the user after it does
+	// not wait for the timer).
+	failures  int
+	retryAt   time.Time
+	failSeq   int64
+	failTold  bool // the user has been told the model cannot be reached
+	retryTime *time.Timer
+
+	// threadDue says the title and summary may be out of date and the next
+	// call should be asked about them (inline summarizer).
+	threadDue bool
+
+	// The dossier (dossier.go): how many calls this subsession has made and
+	// how long its first prompt was, whether the provider refused a prompt
+	// as too long, and when rotating the files last failed.
+	subCalls        int
+	firstPrompt     provTokens
+	overflowed      bool
+	futileLogged    bool
+	rereadTold      bool // the user was told what they wrote waits on this dossier pass
+	dossierFailedAt time.Time
+	// adopt: the log was written by the three-actor design, and the first
+	// thing this loop does is write a dossier from its files (resume.go).
+	adopt bool
+
+	// finalAsked: the closing word of a session with no terminal has been
+	// asked for. finalBusy: that call is in flight (finish waits for it).
+	finalAsked bool
+	finalBusy  bool
+}
+
+// init reads, from a replayed log, what the loop would otherwise have had
+// in memory. Called once, before the loop starts.
+func (t *turnState) init(st *state.State) {
+	// A log from the three-actor design: its events were weighed by actors
+	// that no longer exist, so nothing in it is owed a look. The one loop
+	// takes over from the end of it, where its first run here began.
+	legacy, tookOver := st.Legacy(), false
+	for _, ev := range st.Events {
+		switch {
+		case legacy && !tookOver && ev.Type == event.SessionResume:
+			var d event.SessionResumeData
+			if ev.Decode(&d) == nil && d.PhoneLedger {
+				tookOver, t.seen = true, max(t.seen, d.After)
+			}
+		case ev.Type == event.Assistant && ev.Actor == event.ActorEagent:
+			var d event.AssistantData
+			if ev.Decode(&d) == nil && d.SeenSeq > t.seen {
+				t.seen = d.SeenSeq
+			}
+		case ev.Type == event.Checks && ev.Actor == event.ActorEagent:
+			var d event.ChecksData
+			if ev.Decode(&d) == nil && d.SeenSeq > t.seen {
+				t.seen = d.SeenSeq
+			}
+		case ev.Type == event.Message:
+			var d event.MessageData
+			if ev.Decode(&d) == nil {
+				if !d.Auto || d.Text != rereadNotice { // the reread notice is not eagent speaking (tellRereading)
+					t.saidAt = ev.Time
+				}
+				if !d.Auto {
+					t.saidSeq, t.lastSaid, t.saidSeen = ev.Seq, d.Text, t.seen
+					t.spokeSeen = spokeSeenOnReplay(t.seen, ev.Seq)
+				}
+			}
+		case ev.Type == event.Question:
+			t.saidAt, t.saidSeq = ev.Time, ev.Seq
+			t.spokeSeen = spokeSeenOnReplay(t.seen, ev.Seq)
+		}
+		if shows(st, ev) {
+			t.worthy = ev.Seq
+		}
+	}
+	t.promptTokens = provTokens(st.ContextTokens())
+	// How many calls the conversation in the current file has made, and how
+	// long its first prompt was: the rollover guard (needsDossier) reads
+	// them to tell a conversation that was too long from its first call,
+	// which restarting cannot shrink, from one that grew. Left at zero, the
+	// first call of this process would be taken for the first call of the
+	// conversation, and a resumed session whose prompt the provider then
+	// refused would never be restarted from a dossier again.
+	if cur := st.Current(); cur != nil {
+		var first int64 // the seq that recorded the conversation's first call
+		for _, ev := range st.Events {
+			if ev.Seq < cur.StartSeq || ev.Actor != event.ActorEagent || ev.Task != "" {
+				continue
+			}
+			// A reply from a route eagent had moved off (one still out when
+			// the model changed) is a call of the conversation, but its
+			// prompt was the old model's (promptOf).
+			switch ev.Type {
+			case event.Assistant:
+				var d event.AssistantData
+				if ev.Decode(&d) == nil {
+					if t.subCalls == 0 && st.OnRoute(event.ActorEagent, d.Host, d.Asked) {
+						t.firstPrompt, first = provTokens(d.Usage.Input), ev.Seq
+					}
+					t.subCalls++
+				}
+			case event.Checks:
+				var d event.ChecksData
+				if ev.Decode(&d) == nil && d.Count > 0 {
+					if t.subCalls == 0 && st.OnRoute(event.ActorEagent, d.Host, d.Asked) {
+						// The looks that left no record are kept as a
+						// total. The first prompt is known when the record
+						// says it, or when there was one look. A record
+						// from before it said so leaves it unknown (0):
+						// the guard then lets a refused conversation be
+						// restarted, which costs one dossier if it was in
+						// fact too long from the start, where a guess that
+						// was too high would switch restarts off.
+						switch {
+						case d.FirstPrompt > 0:
+							t.firstPrompt = provTokens(d.FirstPrompt)
+						case d.Count == 1:
+							t.firstPrompt = provTokens(d.Usage.Input)
+						}
+						first = ev.Seq
+					}
+					t.subCalls += d.Count
+				}
+			}
+		}
+		if first < st.Moved() {
+			// Measured on another model than the one in use (recordRoute).
+			t.firstPrompt = 0
+		}
+	}
+	// Until its upgrade dossier is written, the first thing it does is
+	// write one (resume.go).
+	t.adopt = legacy && !st.Upgraded()
+	if legacy && !tookOver {
+		// Not yet run by the one loop: it picks up from a briefing
+		// (resume.go).
+		t.seen = st.LastSeq()
+		return
+	}
+	// Whatever arrived after the last look and before the previous run
+	// stopped is still owed one.
+	for _, ev := range st.Events {
+		if ev.Seq > t.seen {
+			if k, ok := wakeFor(st, ev); ok {
+				t.wakes[k] = ev.Seq
+			}
+		}
+	}
+}
+
+// wakeFor says whether an event asks for a look, and how pressingly.
+func wakeFor(st *state.State, ev event.Event) (wakeKind, bool) {
+	switch ev.Type {
+	case event.UserMessage, event.UserAnswer:
+		return wakeUser, true
+	case event.RelayTurn:
+		return wakeTurnEnd, true
+	case event.RelayState, event.RelayDelivered, event.RelayLimit:
+		if st.NeedsAttention(ev) {
+			return wakeAttention, true
+		}
+	case event.HarnessMessage:
+		if ev.Actor == event.ActorEagent && ev.Task == "" {
+			return wakeNotice, true
+		}
+	case event.ScheduleFire:
+		if ev.Actor == event.ActorHarness {
+			return wakeNotice, true
+		}
+	case event.SessionResume:
+		var d event.SessionResumeData
+		if ev.Decode(&d) == nil && len(d.Closed) > 0 {
+			return wakeNotice, true
+		}
+	case event.TurnEnd:
+		// A turn that acted, asked for another call (to use what it read,
+		// or for what it still owed) and had that call fail, or ended as
+		// its session stopped ending ("not closing"). The call is still
+		// owed, and is made when it can be, on the record as it stands.
+		var d event.TurnData
+		if ev.Actor == event.ActorEagent && ev.Decode(&d) == nil && (d.Reason == "error" || d.Reason == "not closing") {
+			return wakeNotice, true
+		}
+	}
+	return 0, false
+}
+
+// shows reports an event that adds a line to eagent's conversation and is
+// not eagent's own doing: what a progress look would have to weigh.
+func shows(st *state.State, ev event.Event) bool {
+	switch ev.Type {
+	case event.UserMessage, event.UserAnswer, event.RelayStart, event.RelayProgress, event.RelayTurn, event.RelayEnd:
+		return true
+	case event.ScheduleFire:
+		return ev.Actor == event.ActorHarness
+	case event.RelayState, event.RelayDelivered, event.RelayLimit:
+		return st.NeedsAttention(ev)
+	}
+	return false
+}
+
+// wakeSettle is how long the loop waits after something asks for a look
+// before making the call, so events that arrive together (a turn's end,
+// its usage line, the agent going idle) are read in one call. A variable
+// so tests can run without it.
+var wakeSettle = 400 * time.Millisecond
+
+// noteWake tracks which events ask for a look. Loop goroutine (called from
+// append).
+func (r *Runtime) noteWake(ev event.Event) {
+	t := &r.turns
+	if shows(r.st, ev) {
+		t.worthy = ev.Seq
+	}
+	k, ok := wakeFor(r.st, ev)
+	if !ok {
+		return
+	}
+	t.wakes[k] = ev.Seq
+	if k == wakeUser {
+		// What they write now is owed a closing word of its own.
+		t.finalAsked = false
+	}
+	if r.ending || wakeSettle <= 0 {
+		return
+	}
+	if t.settle != nil {
+		t.settle.Stop()
+	}
+	// A timer that fired while the loop was busy has its callback queued
+	// behind this one: it clears only itself, never the timer that took
+	// its place.
+	var tm *time.Timer
+	tm = time.AfterFunc(wakeSettle, func() {
+		r.post(func() {
+			if r.turns.settle == tm {
+				r.turns.settle = nil
+			}
+		})
+	})
+	t.settle = tm
+}
+
+// wakePending reports whether something still asks for a look.
+func (r *Runtime) wakePending() bool {
+	_, ok := r.dueWake()
+	return ok
+}
+
+// dueWake is the most pressing thing that still asks for a look.
+func (r *Runtime) dueWake() (wakeKind, bool) {
+	t := &r.turns
+	for k := wakeKinds - 1; k >= 0; k-- {
+		if t.wakes[k] > t.seen {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
+// maybeTurn starts a model call when one is due: first the dossier when
+// the conversation is full, then whatever asks for a look, then a progress
+// look, then a look at the thread's title and summary. Loop goroutine.
+func (r *Runtime) maybeTurn() {
+	t := &r.turns
+	r.tellRereading()
+	if t.busy || r.ending {
+		return
+	}
+	if r.refusedWhileClosing() {
+		// Final for an ending session: only the last title and summary,
+		// if the end waits on it, is still asked for (one attempt).
+		if t.threadDue && r.summary.final {
+			r.startTurn(wake{thread: true})
+		}
+		return
+	}
+	if kind, ok := r.dueWake(); ok {
+		if t.settle != nil {
+			return // more may be on its way; the timer ticks the loop
+		}
+		if time.Now().Before(t.retryAt) && t.wakes[wakeUser] <= t.failSeq {
+			return // the model was failing a moment ago; a message from the user does not wait
+		}
+		// Not in a session that is ending (a notice of its own asks for
+		// the look): nothing will be asked of a new conversation
+		// (noRestartNow).
+		if r.needsDossier() {
+			r.startDossier()
+			return
+		}
+		r.startTurn(wake{kind: kind, event: true, thread: t.threadDue || r.summaryRipe()})
+		return
+	}
+	if time.Now().Before(t.retryAt) {
+		return
+	}
+	if r.restartAtQuiet() {
+		r.startDossier()
+		return
+	}
+	if t.threadDue {
+		r.startTurn(wake{thread: true})
+	}
+}
+
+// restartAtQuiet reports that the conversation is restarted at this quiet
+// moment: the prompt is still in the provider's cache, so the dossier is
+// cheap to write now, and the user's next message does not have to wait
+// for it. Not in a session that is ending: nothing will be asked of it
+// again (noRestartNow). Nor in one that ends at this quiet moment
+// (endsAtQuiet), whose conversation still fits: maybeEnd, next in this
+// tick, asks its closing word on it, or ends it. One the provider refused
+// as too long (overflowed) no longer fits, and is restarted. Loop
+// goroutine.
+func (r *Runtime) restartAtQuiet() bool {
+	return r.needsDossier() && (r.turns.overflowed || !r.endsAtQuiet())
+}
+
+// ---- a message for eagent is answered -------------------------------------
+
+// heldSince returns the oldest message the user wrote that was kept for
+// eagent and has not been looked at, or 0. Loop goroutine.
+func (r *Runtime) heldSince(seen int64) int64 {
+	var oldest int64
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= seen {
+			break
+		}
+		if ev.Type == event.UserMessage {
+			var d event.UserMessageData
+			if ev.Decode(&d) == nil && d.Held != "" {
+				oldest = ev.Seq
+			}
+		}
+	}
+	return oldest
+}
+
+// answeredSince returns the newest answer the user gave to a question of
+// eagent's after seen, or 0. Loop goroutine.
+func (r *Runtime) answeredSince(seen int64) int64 {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		if ev.Seq <= seen {
+			break
+		}
+		if ev.Type == event.UserAnswer {
+			return ev.Seq
+		}
+	}
+	return 0
+}
+
+// sentBack is the exchange that returns a reply to the model for another
+// try without recording it: its reply, then why it will not do. A reply
+// that called hold gets the reason as that call's result.
+func sentBack(resp *llm.Response, why string) []llm.Message {
+	out := []llm.Message{{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.By()}}
+	if len(resp.ToolCalls) == 0 {
+		return append(out, llm.Message{Role: "user", Text: "[eagent] " + why})
+	}
+	results := llm.Message{Role: "tool"}
+	for _, c := range resp.ToolCalls {
+		results.Results = append(results.Results, llm.ToolResult{CallID: c.ID, Name: c.Name, Output: "not accepted: " + why, IsError: true})
+	}
+	return append(out, results)
+}
+
+// ---- progress looks -------------------------------------------------------
+
+// narrateGap is the least time between something eagent said and the next
+// progress look, so two messages never land on top of each other.
+var narrateGap = 45 * time.Second
+
+// armTicker (re)starts the timer that considers a progress look. A
+// generation rejects an expired callback already queued when a live
+// settings change reschedules it. Loop goroutine.
+func (r *Runtime) armTicker() {
+	t := &r.turns
+	t.tickGen++
+	gen := t.tickGen
+	if t.ticker != nil {
+		t.ticker.Stop()
+	}
+	if r.ending {
+		return
+	}
+	every := time.Duration(r.activeSettings.TickSeconds) * time.Second
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	t.ticker = time.AfterFunc(every, func() {
+		r.post(func() {
+			if gen != r.turns.tickGen || r.ending {
+				return
+			}
+			r.maybeLook()
+			r.armTicker()
+		})
+	})
+}
+
+// maybeLook starts a progress look when an agent is working and there is
+// something for eagent to weigh: news since it last spoke, or a silence
+// that has gone on too long. A tick with nothing new costs no model call.
+// Loop goroutine.
+func (r *Runtime) maybeLook() {
+	t := &r.turns
+	if t.busy || !r.st.RelayWorking() || r.wakePending() || time.Now().Before(t.retryAt) {
+		return // something that happened comes first
+	}
+	limit, quiet := r.quietLimit(), r.quietFor()
+	steps, stepped := r.relays.stepped(t.saidAt)
+	// moved: something happened since the user last heard.
+	// fresh: since eagent last looked.
+	moved := t.worthy > t.saidSeen || stepped
+	fresh := t.worthy > t.seen || steps > t.lookSteps
+	gap := narrateGap
+	if limit > 0 {
+		gap = min(gap, limit)
+	}
+	switch {
+	case moved && limit > 0 && quiet >= limit && time.Since(t.lookedAt) >= gap:
+		// Overdue: it should speak.
+	case moved && fresh && quiet >= gap:
+		// Something new to tell, and the last message has had its moment.
+	case !moved && limit > 0 && quiet >= limit && time.Since(t.lookedAt) >= limit:
+		// Nothing new for a while: it says what is still running.
+	default:
+		return
+	}
+	if r.needsDossier() {
+		r.startDossier()
+		return
+	}
+	t.lookedAt = time.Now()
+	r.startTurn(wake{look: true, moved: moved, steps: steps, thread: t.threadDue || r.summaryRipe()})
+}
+
+// quietLimit is the longest the user goes without a progress line while an
+// agent works. Loop goroutine only.
+func (r *Runtime) quietLimit() time.Duration {
+	return time.Duration(r.activeSettings.QuietSeconds) * time.Second
+}
+
+// quietFor is how long the user has gone without hearing from eagent, or
+// since the session started when there has been nothing. Loop goroutine.
+func (r *Runtime) quietFor() time.Duration {
+	if !r.turns.saidAt.IsZero() {
+		return time.Since(r.turns.saidAt)
+	}
+	if !r.st.Started.IsZero() {
+		return time.Since(r.st.Started)
+	}
+	return 0
+}
+
+// contextTokens is the size of eagent's last prompt.
+func (r *Runtime) contextTokens() provTokens {
+	if r.turns.promptTokens > 0 {
+		return r.turns.promptTokens
+	}
+	return provTokens(r.st.ContextTokens())
+}
+
+// ---- a turn ---------------------------------------------------------------
+
+func (r *Runtime) startTurn(w wake) {
+	t := &r.turns
+	t.busy, t.callAt = true, time.Now()
+	t.finalBusy = w.final
+	if w.thread {
+		t.threadDue = false
+		if r.summary.final && !w.event && !w.look && !w.final {
+			w.wait = summaryFinalWait // as the dedicated call is (summary.go)
+		}
+	}
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.turn(w)
+		r.post(func() {
+			r.turns.busy, r.turns.callAt, r.turns.finalBusy = false, time.Time{}, false
+		})
+	}()
+}
+
+// turn makes the model calls of one wake. It runs on its own goroutine.
+func (r *Runtime) turn(w wake) {
+	ctx := r.ctx
+	if w.final {
+		// The closing word gets a minute of its own: it is still written
+		// when the session is being shut down, and a provider that cannot
+		// be reached does not keep a finished session open.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), finalReportTimeout)
+		defer cancel()
+	} else if w.wait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(r.ctx, w.wait)
+		defer cancel()
+	}
+	maxCalls := max(r.cfg.MaxCallsPerTurn, 1)
+	tc := &turnCalls{wake: w}
+	recorded := false
+	// extra is what belongs to this turn's calls alone and is never
+	// recorded: replies that had to be sent back for another try, each
+	// with the reason, in the order they happened.
+	var extra []llm.Message
+	nudged, rewrote, cut, reminded, remindedAnswer, remindedFinal := false, false, false, false, false, false
+	end := "done"
+	closedOut := false // a closing turn whose call failed: it owes nothing
+	// answers: a call of this turn came back (looked) and no call failed
+	// after it (turnFailed counted none). Only then does the turn's end
+	// clear the model's failures: one whose next call failed after one
+	// went through is a failure more, so the waits between such turns grow.
+	answers := false
+	// stoppedClosing: a check in this turn found the session no longer
+	// ending (stillClosing). The turn's end goes by that, not by a check of
+	// its own made after what kept it open has gone.
+	stoppedClosing := false
+	// tail is the end of the prompt: written when the turn starts, and
+	// again when something that asks for a look arrives while the turn is
+	// running (the user writes, the agent ends a turn), so that nothing
+	// reaches the model without being told what it calls for. A tail is
+	// recorded only if the model acts on it (tailKept). Two things are
+	// settled with each tail: held is the message kept for eagent that
+	// the turn has to answer (0 for none), and answered says the user
+	// answered a question.
+	//
+	// base is the conversation as rendered for a call, and covered the
+	// newest event in it. A reply is recorded with covered, and the
+	// renderer puts everything newer after that reply (state.View), so
+	// the two must be taken together: a later prompt then has every line
+	// exactly where this call saw it. base is rendered again only when the
+	// record has changed (refresh). A reply sent back for another try is
+	// answered from the same base, so that call is the last one plus the
+	// exchange and nothing has moved under it.
+	var tail string
+	tailKept := false
+	asked := w.thread // the turn was asked about the title and summary
+	var mustSpeak, answered bool
+	var held, covered int64
+	// answerSeq is the answer this turn was woken for (0 for none), and
+	// answerMark is how many calls had dealt with something (tc.dealt)
+	// when the answer was first shown: only one after that deals with it.
+	var answerSeq int64
+	answerMark := 0
+	answerDealt := func() bool { return answerSeq == 0 || tc.dealt > answerMark }
+	var base []llm.Message
+	refresh := true
+	who := "the agent"
+	stopped := func() string { return stopReason(ctx) }
+	// owes returns the reminder for what the wake asked for and the turn
+	// has not done, each given once: a message kept for eagent, an answer
+	// from the user, the closing word. acted says the reply did something
+	// else instead (set the title, say) rather than hold.
+	owes := func(acted bool) string {
+		switch {
+		case held > 0 && !reminded && !tc.handled:
+			reminded = true
+			last := " Holding is not an answer to a message addressed to you."
+			if acted {
+				last = " What you just did is not an answer to it."
+			}
+			return "The user's message was kept for you, so it has gone nowhere and nobody else will answer it. Answer it with send_message, or pass it on with relay_forward if it is for " + who + "." + last
+		case answered && !remindedAnswer && !answerDealt():
+			remindedAnswer = true
+			last := " Hold again only if the answer needs nothing done."
+			if acted {
+				last = " Hold only if the answer needs nothing done."
+			}
+			return "The user's answer has reached nobody but you. If " + who + " is waiting on it, give it to " + who + " with relay_send in words it can act on; if the question was only yours, do what the answer calls for, or tell the user what happens next." + last
+		case mustSpeak && !remindedFinal && !tc.spoke:
+			remindedFinal = true
+			if acted {
+				return "The session is ending and the user is owed a last word, which they have not had. Send the final report now with send_message."
+			}
+			return "Holding is not allowed here: the session is ending and the user is owed a last word. Send the final report now with send_message."
+		}
+		return ""
+	}
+	for call := 1; call <= maxCalls; call++ {
+		if ctx.Err() != nil {
+			end = stopped()
+			break
+		}
+		var msgs []llm.Message
+		ran := r.sync(func() {
+			defer func() { r.turns.callAt = time.Now() }()
+			if tail == "" && (w.final || w.wait > 0) && !r.stillClosing() {
+				// The session stopped ending before the closing turn's
+				// first call went out: no call is made, and what came
+				// (the user wrote, an agent is being started) is taken up
+				// as it would be after one.
+				asked, end, stoppedClosing = false, "not closing", true
+				return
+			}
+			msgs = base
+			if !tailKept {
+				msgs = state.WithTail(base, tail)
+			}
+			if !refresh {
+				return
+			}
+			refresh = false
+			base, covered = r.st.View(&r.view), r.st.LastSeq()
+			first := tail == ""
+			fresh := first
+			if !first || !w.event {
+				// Only something that asks for a look gets a tail of its
+				// own. Anything else that came (a remark from the agent,
+				// what this turn's own calls put on the record) is in the
+				// conversation the call is given, and counts as seen. A
+				// turn made for nothing that happened takes up such a
+				// thing that came before its first call too.
+				if k, ok := r.dueWake(); ok {
+					w = wake{kind: k, event: true, final: w.final, thread: asked && !tc.threaded, wait: w.wait}
+					tc.wake, fresh = w, true
+				}
+			}
+			if fresh {
+				h := r.heldSince(r.turns.seen)
+				if first {
+					if h == 0 {
+						h = r.turns.heldCut
+					}
+					r.turns.heldCut = 0
+				}
+				if h > 0 {
+					// Not answered by what the turn did before it came,
+					// and one that came while the turn ran is owed its
+					// own reminder.
+					reminded = reminded && h == held
+					held = h
+					tc.handled = tc.handled && first
+				}
+				if seq := r.answeredSince(r.turns.seen); seq > 0 {
+					// One that arrives while the turn runs is not dealt
+					// with by what the turn did before it came, and is
+					// owed its own reminder.
+					answered, answerSeq, answerMark = true, seq, tc.dealt
+					remindedAnswer = remindedAnswer && first
+				}
+				// The closing word is owed whenever eagent's last word was
+				// made without seeing what the user last wrote (or there
+				// has been none).
+				mustSpeak = w.final && closingWordOwed(r.st.LastUserSeq, r.turns.saidSeq, r.turns.spokeSeen)
+				if active := r.st.ActiveRelays(); len(active) > 0 {
+					who = active[0].Who()
+				}
+				tail, tailKept = r.tail(w, time.Now()), false
+			}
+			msgs = base
+			if !tailKept {
+				msgs = state.WithTail(base, tail)
+			}
+		})
+		if !ran {
+			// The session has ended (endQueue): no call is made, with no
+			// conversation to give it, nor anything run.
+			end = stopped()
+			break
+		}
+		if end == "not closing" {
+			break
+		}
+		// Every call of a session is the same request but for its messages:
+		// one system prompt, one tool list, one effort, one output ceiling.
+		// Anything that varied would cost the provider's cache of the
+		// conversation.
+		req := llm.Request{System: r.system, Messages: append(msgs, extra...), Tools: r.toolset, CacheKey: r.sess.ID}
+		resp, err := r.complete(ctx, event.ActorEagent, req, r.observer())
+		r.ui.Stream("", "")
+		if err != nil {
+			if ctx.Err() != nil && !w.final {
+				end = stopped() // on a timeout the row keeps the summary it had
+				break
+			}
+			r.sync(func() {
+				closing := r.stillClosing()
+				stoppedClosing = stoppedClosing || !closing
+				if w.wait > 0 && closing {
+					// The last title and summary of a session that is
+					// ending is one attempt, like the dedicated call's
+					// (summary.go). Taken for an outage it would be tried
+					// again at once, tell the user after their closing
+					// report that the model cannot be reached, or restart
+					// the conversation, and end the session as one that
+					// waits on them. Nor is the failed call owed (wakeFor).
+					r.ui.Log("thread summary: %s; the title and summary keep their last values", shortErr(err))
+					closedOut = true
+					return
+				}
+				// A refusal as too long that restarts the conversation is
+				// no failed call (turnFailed counts none): a call of this
+				// turn that came back still ends the failures before it.
+				counted, came := r.turns.failures, answers
+				p := r.turnFailed(err, covered, answers, w)
+				answers = answers && r.turns.failures == counted
+				r.turns.threadDue = r.turns.threadDue || w.thread
+				if held > 0 && !tc.handled {
+					r.turns.heldCut = held
+				}
+				// The closing turn of a session that ends on this
+				// (sessionPlan, as turnFailed's log has it) has had its
+				// word (the model's, or eagent's own here): nothing is owed
+				// after it. One that does not end (a look is still due) is
+				// tried again, and its closing word, not given, is asked
+				// for again when the session ends.
+				closedOut = w.final && p.ends
+				switch {
+				case closedOut && mustSpeak && !tc.spoke:
+					why := ""
+					if p.down {
+						why = r.downWhy(came)
+					}
+					r.fallbackFinal(why)
+				case w.final && !p.ends && !tc.spoke:
+					r.turns.finalAsked = false
+				}
+			})
+			end = "error"
+			break
+		}
+		acts, fits := 0, false
+		for _, c := range resp.ToolCalls {
+			switch {
+			case c.Name == tools.Hold:
+			case keepsThread(c):
+				// "The title and summary still fit" changes nothing, so
+				// like a hold it leaves no record.
+				fits = true
+			default:
+				acts++
+			}
+		}
+		if acts == 0 && mustSpeak && !tc.spoke && len(resp.ToolCalls) == 0 && cleanNarration(resp.Text) != "" {
+			// The closing report came as plain text: the text is the report.
+			// (Once the turn has given its report, plain text is a reply
+			// like any other: said to no one.) Not when the session
+			// stopped ending during the call (the user wrote, or an agent
+			// came up): its words were written before that, for an end
+			// that is not happening. Asked and recorded in one step of
+			// the loop, so nothing is taken in between.
+			report := true
+			r.sync(func() {
+				if report = r.stillClosing(); !report {
+					return
+				}
+				r.flushSilent()
+				if !recorded {
+					r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
+				}
+				if !tailKept {
+					r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
+				}
+				r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
+					Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+					Native: resp.Native, Usage: resp.Usage, ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
+				}))
+				r.looked(covered, resp, w)
+				answers = true
+				r.recordMessage(event.MessageData{Text: resp.Text, Important: true})
+			})
+			if report {
+				recorded, tailKept, tc.spoke = true, true, true
+				tc.handle()
+				break
+			}
+			stoppedClosing = true
+		}
+		// last: no call is left in this turn. A reply sent back now would
+		// never be answered, and the wake would stay unsettled, so the next
+		// turn would start at once with the same wake and its reminders
+		// unspent: with max_calls_per_turn at 1, a model that held on a
+		// message kept for eagent was called again without end. On the last
+		// call a reply stands as it came (the closing word has its own
+		// fallback).
+		last := call == maxCalls
+		if acts == 0 {
+			// A reply that reaches no one. Some are sent back once, off the
+			// record, with the reason; after that it is taken for a hold.
+			// A closing turn whose session stopped ending during the call
+			// sends nothing back: the hold stands, and what came is taken
+			// up as after any turn.
+			closing := true
+			if w.final || w.wait > 0 {
+				r.sync(func() { closing = r.stillClosing() })
+				stoppedClosing = stoppedClosing || !closing
+			}
+			var back string
+			switch {
+			case last, !closing:
+			case resp.Truncated() && len(resp.ToolCalls) == 0 && !cut:
+				cut = true
+				back = "Your reply was cut off by the output limit before any tool call was made. Keep it short and act through tool calls."
+			case len(resp.ToolCalls) == 0 && !nudged:
+				nudged = true
+				back = "That reply had no tool call, so nobody saw it. To tell the user something, call send_message with those words; to pass on or do something, call the tool for it; if there is nothing to say or do, call hold."
+			default:
+				back = owes(false)
+			}
+			if back != "" {
+				r.sync(func() { r.noteSilent(resp, 0, wake{}) })
+				extra = append(extra, sentBack(resp, back)...)
+				continue
+			}
+			r.sync(func() {
+				r.noteSilent(resp, covered, w)
+				answers = true
+				if fits {
+					tc.threaded = true
+					r.threadKept()
+				}
+			})
+			break
+		}
+		if leak := leakingMessage(resp); leak != "" && !rewrote && !last {
+			// The machinery has names inside; the user hears "I". One
+			// rewrite is asked for, off the record, and nothing in the
+			// reply is run; after that the words go out as they are.
+			rewrote = true
+			r.sync(func() { r.noteSilent(resp, 0, wake{}) })
+			extra = append(extra,
+				llm.Message{Role: "assistant", Text: resp.Text, ToolCalls: resp.ToolCalls, Native: resp.Native, NativeProtocol: resp.Protocol, NativeHost: resp.BaseURL, NativeModel: resp.By()},
+				rewriteRequest(resp, leak),
+			)
+			continue
+		}
+		// It acts, so this turn goes on the record: the lines it was given,
+		// then its reply. Not once the session has ended (endQueue): what it
+		// asks is not run either.
+		if !r.sync(func() {
+			r.flushSilent()
+			if !recorded {
+				r.append(event.New(event.TurnStart, event.ActorEagent, event.TurnData{Reason: w.reason()}))
+			}
+			if !tailKept {
+				r.append(event.New(event.Steer, event.ActorEagent, event.SteerData{Text: tail}))
+			}
+			r.append(event.New(event.Assistant, event.ActorEagent, event.AssistantData{
+				Provider: resp.Protocol, Model: resp.Model, Asked: resp.Asked, Host: resp.BaseURL, Text: resp.Text, Reasoning: summarizeReasoning(resp.Reasoning),
+				ToolCalls: resp.ToolCalls, Native: resp.Native, Usage: resp.Usage,
+				ElapsedMS: resp.Elapsed.Milliseconds(), SeenSeq: covered, Stop: resp.Stop,
+			}))
+			r.looked(covered, resp, w)
+			answers = true
+		}) {
+			end = stopped()
+			break
+		}
+		recorded, tailKept, extra, refresh = true, true, nil, true
+		again := false
+		tc.said, tc.stamped, tc.own, tc.view = false, false, nil, covered
+		for _, c := range resp.ToolCalls {
+			out, isErr, more := "interrupted", true, false
+			if ctx.Err() == nil {
+				out, isErr, more = r.runTool(ctx, tc, c)
+			} else {
+				// Decided and not done. When the session was stopped under
+				// it the turn was cut off, and says so, so that a resumed
+				// session takes it up again (resume.go).
+				end = stopped()
+			}
+			images := tc.images
+			tc.images = nil
+			if !r.sync(func() {
+				r.append(event.New(event.ToolResult, event.ActorEagent, event.ToolResultData{CallID: c.ID, Name: c.Name, Output: out, IsError: isErr, Images: images}))
+			}) {
+				// The session ended under the turn (endQueue): the tools
+				// after this one are not run.
+				end = stopped()
+				break
+			}
+			again = again || more
+		}
+		if tc.stamped && len(tc.own) > 0 {
+			r.sync(func() { r.coverOwnWords(tc.own) })
+		}
+		if w.final || w.wait > 0 {
+			// A closing turn whose session stopped ending ends here. A call
+			// it still wanted, or one whose tools ran out of its time (on
+			// its last call too), is owed (wakeFor) to an ordinary turn.
+			closing := true
+			r.sync(func() { closing = r.stillClosing() })
+			stoppedClosing = stoppedClosing || !closing
+			if !closing && (call < maxCalls || end == "timeout") {
+				if end == "timeout" || again && end == "done" {
+					end = "not closing"
+				}
+				break
+			}
+		}
+		if !again && end == "done" && call < maxCalls {
+			// The turn would end here. A reply that did something else
+			// than what the wake asked for (it set the title and summary,
+			// and the user's answer or their message to eagent went
+			// nowhere) is told so once, off the record, like a hold is.
+			if back := owes(true); back != "" {
+				extra, again = []llm.Message{{Role: "user", Text: back}}, true
+			}
+		}
+		if !again || end == "interrupted" || end == "timeout" {
+			break
+		}
+		if call == maxCalls {
+			end = "call limit"
+		}
+	}
+	r.sync(func() {
+		if t := &r.turns; answers && t.failures > 0 {
+			t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+			r.ui.Log("eagent: the model answers again")
+		}
+		if recorded {
+			reason := end
+			if closedOut {
+				// The closing turn failed after its word (the model's
+				// report or eagent's own), or the last title and summary
+				// did (one attempt): nothing is owed, where an "error"
+				// end owes the failed call (wakeFor).
+				reason = "error, closing"
+			}
+			r.append(event.New(event.TurnEnd, event.ActorEagent, event.TurnData{Reason: reason}))
+		}
+		if end == "call limit" {
+			r.afterCallLimit()
+		}
+		if asked && end != "error" && end != "interrupted" && end != "timeout" {
+			r.threadAsked(tc.threaded)
+		}
+		if w.final || w.wait > 0 {
+			closing := !stoppedClosing && r.stillClosing()
+			if w.final && mustSpeak && !tc.spoke && end != "error" && closing {
+				r.fallbackFinal("")
+			}
+			// One whose session stopped ending before it gave the closing
+			// word, or the last title and summary, leaves it to be asked
+			// for again if the session ends after all (maybeEnd).
+			if !closing && w.final && !tc.spoke {
+				r.turns.finalAsked = false
+			}
+			if !closing && w.wait > 0 && !tc.threaded {
+				r.summary.final = false
+			}
+		}
+	})
+}
+
+// closingWordOwed says whether a session that is ending owes the user a
+// closing word. lastUser is the newest message or answer from the user,
+// spoke the record's eagent last spoke at (a message of its own or a
+// question; 0 for never), and spokeSeen the newest event the call that
+// made that word had been shown. A word answers what its call saw, not
+// what happens to be recorded before it:
+//
+//	the user's message was recorded      then              closing word owed
+//	before the reply's call was made     nothing           no (the reply saw it)
+//	while the reply's call was out       nothing           yes (the reply never saw it)
+//	after the reply                      nothing           yes
+//	any of the three                     a later reply     no (that reply saw it)
+//	                                     that saw it
+//	any of the three                     only an automatic as with nothing: a notice
+//	                                     notice            is not eagent speaking
+//	any of the three                     a stop and resume as before the stop: the record
+//	                                                       rebuilds the same marks
+//	                                                       (spokeSeenOnReplay)
+//	(eagent has not spoken at all)                         yes
+func closingWordOwed(lastUser, spoke, spokeSeen int64) bool {
+	return spoke == 0 || lastUser > spokeSeen
+}
+
+// spokeSeenOnReplay rebuilds spokeSeen for a word at seq from a replayed
+// record, where seen is the newest event the record says eagent's calls
+// had seen by then: the word's own call is recorded (its reply, with the
+// newest event it was shown) before the word, so seen is that call's. A
+// record with no such marks before the word (written by the eagent of
+// three models) falls back to record order, which is all it holds.
+func spokeSeenOnReplay(seen, seq int64) int64 {
+	if seen == 0 {
+		return seq
+	}
+	return seen
+}
+
+// stopReason names why a turn whose context is done ended: its own time
+// ran out (the closing word's minute, the last summary's 45 seconds), or
+// the session was stopped under it. Only the second is a turn cut off,
+// which a resume takes up again (resume.go).
+func stopReason(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "interrupted"
+}
+
+// keepsThread reports an update_thread call that sets nothing: the model's
+// way of saying the title and summary still fit.
+func keepsThread(c event.ToolCall) bool {
+	if c.Name != tools.UpdateThread {
+		return false
+	}
+	args, err := llm.ArgsObject(c.Args)
+	if err != nil {
+		return false
+	}
+	title, _ := args["title"].(string)
+	summary, _ := args["summary"].(string)
+	return strings.TrimSpace(title) == "" && strings.TrimSpace(summary) == ""
+}
+
+// afterCallLimit handles a turn that was stopped at the call limit. If an
+// agent is still stuck on its screen, the work of clearing it is not done:
+// the user is told how to reach it. Loop goroutine.
+func (r *Runtime) afterCallLimit() {
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State == "blocked" {
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: fmt.Sprintf("%s is stuck on something on its screen and I could not clear it. You can look and type into it with `eagent relays attach %s`.", rel.Who(), rel.Name)})
+			return
+		}
+	}
+}
+
+// stillClosing reports whether the session a closing turn was made for is
+// still ending: nothing keeps it open, as maybeEnd has it (keptOpen), and
+// no word from the user waits. Loop goroutine.
+func (r *Runtime) stillClosing() bool {
+	kept, _ := r.keptOpen()
+	return (r.turns.finalAsked || r.summary.final) && !kept && r.turns.wakes[wakeUser] <= r.turns.seen
+}
+
+// downWhy says why a session ends as down: its calls kept failing,
+// partway through its looks when a call of the look that failed last came
+// back first (answered: lastFailedAnswered once that turn has ended, the
+// turn's own word while it fails), which is no model that cannot be
+// reached. The failure is the newest on the record. Loop goroutine.
+func (r *Runtime) downWhy(answered bool) string {
+	why := "My calls to my own model kept failing"
+	if answered {
+		why += " partway through my looks"
+	}
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		var d event.ErrorData
+		if ev := r.st.Events[i]; ev.Type == event.Error && ev.Decode(&d) == nil && d.Where == event.ActorEagent {
+			return why + " (" + shortErr(errors.New(d.Text)) + ")."
+		}
+	}
+	return why + "."
+}
+
+// fallbackFinal makes sure a session with no terminal does not end in
+// silence when the model could not give the closing word: eagent says
+// where things stand in its own words, with why its model fails (downWhy)
+// when the session ends as down (sessionPlan): then the user has been
+// told. Loop goroutine.
+func (r *Runtime) fallbackFinal(why string) {
+	var b strings.Builder
+	b.WriteString("This session is ending and I could not write a proper closing report.")
+	if why != "" {
+		b.WriteString(" " + why)
+		r.turns.failTold = true
+	}
+	for _, name := range r.st.RelayOrder {
+		rel := r.st.Relays[name]
+		if rel == nil || strings.TrimSpace(rel.LastTurn) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n\n%s's last report (%s):\n%s", rel.Who(), r.when(rel.LastTurnAt), clipRunes(strings.TrimSpace(rel.LastTurn), 1500))
+	}
+	if r.st.Question != nil {
+		b.WriteString("\n\nStill open: " + clipRunes(oneLine(r.st.Question.Text, 300), 300))
+	}
+	// It does not retry on its own once it has ended. An agent can still
+	// be running: a question nobody can answer ends the session anyway
+	// (maybeEnd). One whose pane went away (exited) is not running.
+	var who []string
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State != "exited" {
+			who = append(who, rel.Who())
+		}
+	}
+	running := "Nothing is running now."
+	switch {
+	case len(who) == 1:
+		running = who[0] + " keeps running in its own terminal."
+	case len(who) > 1:
+		running = strings.Join(who, " and ") + " keep running in their own terminals."
+	}
+	if r.phone != nil {
+		b.WriteString("\n\n" + running + " A reply here picks the session back up.")
+	} else {
+		b.WriteString("\n\n" + running + " `eagent -c` picks the session back up.")
+	}
+	r.recordMessage(event.MessageData{Auto: true, Important: true, Text: b.String()})
+}
+
+// looked notes that a call came back having seen everything up to seen.
+// Loop goroutine.
+func (r *Runtime) looked(seen int64, resp *llm.Response, w wake) {
+	t := &r.turns
+	if seen > t.seen {
+		t.seen = seen
+	}
+	if p := r.promptOf(resp); p > 0 {
+		t.promptTokens = p
+	}
+	// The first prompt is the conversation's on the model in use: a reply
+	// still out when the model changed counted the old one's (promptOf). A
+	// resumed session reads it the same from the record (turnState.init).
+	r.called(r.promptOf(resp))
+	t.overflowed = false
+	if w.look {
+		t.lookSteps = w.steps
+	}
+}
+
+// called counts one answered call of the conversation in the current
+// file, and keeps the size of its first prompt. The rollover guard
+// (needsDossier) reads both, and a resumed session rebuilds them from the
+// record (turnState.init), so every call that is recorded there, alone or
+// in a batch of silent ones, is counted here. Loop goroutine.
+func (r *Runtime) called(promptTokens provTokens) {
+	t := &r.turns
+	if promptTokens > 0 && t.subCalls == 0 {
+		t.firstPrompt = promptTokens
+	}
+	t.subCalls++
+}
+
+// noteSilent keeps the cost of a call that left no record, to be put in
+// the log in one line with the others. seen is 0 for a reply that was sent
+// back for another try: it weighed nothing yet, but it was a call of the
+// conversation, and when it was the first, its prompt is the first prompt
+// (the next call's carries the exchange on top). Loop goroutine.
+func (r *Runtime) noteSilent(resp *llm.Response, seen int64, w wake) {
+	t := &r.turns
+	if t.silent.Count > 0 && (t.silent.Host != resp.BaseURL || t.silent.Asked != resp.Asked) {
+		// Served by another route than the looks so far (one still out when
+		// the model changed, or the one after it): each batch is priced on
+		// the route that made it.
+		r.flushSilent()
+	}
+	t.silent.Host, t.silent.Asked = resp.BaseURL, resp.Asked
+	t.silent.Count++
+	t.silent.Usage.Input += resp.Usage.Input
+	t.silent.Usage.Output += resp.Usage.Output
+	t.silent.Usage.Cached += resp.Usage.Cached
+	t.silent.Usage.Reasoning += resp.Usage.Reasoning
+	t.silent.ElapsedMS += resp.Elapsed.Milliseconds()
+	if resp.Usage.Input > 0 {
+		t.silent.PromptTokens = resp.Usage.Input
+		if t.silent.FirstPrompt == 0 {
+			t.silent.FirstPrompt = resp.Usage.Input
+		}
+	}
+	if seen > 0 {
+		t.silent.SeenSeq = seen
+		r.looked(seen, resp, w)
+	} else {
+		r.called(r.promptOf(resp))
+	}
+	if t.silent.Count >= 20 {
+		r.flushSilent()
+	}
+}
+
+// promptOf is the prompt size a reply reports, when the route eagent is on
+// served it. One still out when the model changed counts the old model's
+// tokens; the new model's size comes from its own first call. Loop
+// goroutine.
+func (r *Runtime) promptOf(resp *llm.Response) provTokens {
+	if !r.st.OnRoute(event.ActorEagent, resp.BaseURL, resp.Asked) {
+		return 0
+	}
+	return provTokens(resp.Usage.Input)
+}
+
+// flushSilent records the looks that left no trace since the last record,
+// so their tokens count toward the session's totals. Loop goroutine.
+func (r *Runtime) flushSilent() {
+	t := &r.turns
+	if t.silent.Count == 0 {
+		return
+	}
+	d := t.silent
+	t.silent = event.ChecksData{}
+	r.append(event.New(event.Checks, event.ActorEagent, d))
+}
+
+// errorRetryDelays space out the calls after the model failed: the first
+// failure is tried again at once (the client has already waited out what
+// looked passing), then further and further apart, hourly for as long as
+// it takes. A session lives for days; a provider that comes back needs no
+// resume.
+var errorRetryDelays = []time.Duration{0, time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour}
+
+// finalReportTimeout bounds the closing word of a session with no
+// terminal; finalReportGrace is how long shutdown waits for one in flight.
+// Variables so tests need not wait a minute for a model that is gone.
+var (
+	finalReportTimeout = 60 * time.Second
+	finalReportGrace   = 75 * time.Second
+)
+
+// turnFailed handles a model call that did not come back, which had been
+// shown the record up to shown, in a turn woken by w; answered says a call
+// of its turn came back before it. What asked for the look is still owed
+// one, so the loop tries again later, unless the session ends on this; a
+// message from the user after shown (one written while the call was out
+// too) tries at once. It returns what the session does now (sessionPlan),
+// which its log and notice say and the turn's close-out follows. Loop
+// goroutine.
+func (r *Runtime) turnFailed(err error, shown int64, answered bool, w wake) endPlan {
+	t := &r.turns
+	if !r.onRouteInUse(err) {
+		// The call was made on a model eagent's calls have since moved
+		// off (a pick in the settings while it was out). Like a reply
+		// still out then (state OnRoute), its failure says nothing of the
+		// model in use, which starts clean (newModel): nothing is
+		// counted, no restart is asked for, and the look, still owed, is
+		// made again at the loop's next step, shown the record with the
+		// move in it. That holds for a closing turn too: its word is
+		// asked for again, of the model in use.
+		r.ui.Log("eagent: a call made before the model changed failed (%s); it is not counted against the model in use", shortErr(err))
+		if p := r.sessionPlan(w, true); !w.final || !p.ends {
+			return p
+		}
+		return endPlan{waits: true}
+	}
+	var ae *llm.APIError
+	if errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && !ae.Retryable() && r.stillClosing() {
+		// The session is ending: a refusal is final for it
+		// (refusedWhileClosing). No restart, no try again, no notice: it
+		// ends in its closing path's own words. A transient status (a
+		// rate limit, a timeout: Retryable) is no refusal: it is tried
+		// again after its wait, and a session whose calls all fail ends
+		// as one whose model could not be reached (maybeEnd).
+		r.noteClosing()
+		r.refusedIn = r.closings
+		if ae.ContextOverflow() {
+			// Should the session stop ending, the next look restarts
+			// the conversation first (needsDossier), from the size the
+			// refusal implies, as below.
+			t.overflowed = true
+			t.promptTokens = max(t.promptTokens, r.rolloverTokens())
+			r.ui.Log("eagent: the model refused the prompt as too long (%s); the session is ending, and ends without this look", shortErr(err))
+			return r.sessionPlan(w, true)
+		}
+		r.ui.Log("eagent: the model refused the call (%s); the session is ending, and ends without this look", shortErr(err))
+		return r.sessionPlan(w, true)
+	}
+	if errors.As(err, &ae) && ae.ContextOverflow() && !t.overflowed {
+		// The prompt no longer fits: restart the conversation from a
+		// dossier before anything else. If it does not fit even then, the
+		// second refusal takes the ordinary path below, and so does this
+		// one when no restart will be made for it (needsDossier: the
+		// restarts were stopped, or one could not be made a moment ago).
+		t.overflowed = true
+		t.promptTokens = max(t.promptTokens, r.rolloverTokens())
+		if r.restartRuns() {
+			r.ui.Log("eagent: the model refused the prompt as too long (%s); restarting the conversation from a dossier", shortErr(err))
+			return r.sessionPlan(w, true)
+		}
+	}
+	t.failures++
+	wait := errorRetryDelays[min(t.failures, len(errorRetryDelays))-1]
+	t.retryAt, t.failSeq = time.Now().Add(wait), shown
+	p := r.sessionPlan(w, true)
+	switch {
+	case p.ends && p.down:
+		r.ui.Log("eagent: model call failed: %s; %d failed looks in a row, and nothing keeps the session open: it ends as one whose model fails", shortErr(err), t.failures)
+	case p.ends:
+		r.ui.Log("eagent: model call failed: %s; the session is ending, and ends without this look", shortErr(err))
+	case wait <= 0:
+		r.ui.Log("eagent: model call failed: %s; trying again now", shortErr(err))
+	default:
+		r.ui.Log("eagent: model call failed: %s; trying again in %s", shortErr(err), roundDur(wait))
+	}
+	r.append(event.New(event.Error, event.ActorHarness, event.ErrorData{Where: event.ActorEagent, Text: err.Error()}))
+	if t.retryTime != nil {
+		t.retryTime.Stop()
+	}
+	t.retryTime = time.AfterFunc(wait, func() { r.post(func() {}) })
+	if t.failures >= 2 && !t.failTold {
+		// The user's messages still reach the agent; they should know why
+		// nobody is telling them what it does.
+		if p.ends {
+			// The session ends on this (sessionPlan): it does not keep
+			// trying, nor keep what is written for an answer, so it does
+			// not say so. Why its model fails is said as it ends
+			// (maybeEnd), and is not told yet: should something keep it
+			// open after all, the next failure tells it as below.
+			return p
+		}
+		t.failTold = true
+		// Unless the restart could not be made (its file could not be
+		// created, finishDossier): then nothing was restarted, and the user
+		// hears what any failed call tells them.
+		if errors.As(err, &ae) && ae.ContextOverflow() && time.Since(t.dossierFailedAt) >= dossierRetry {
+			if cur := r.st.Current(); cur != nil && cur.StartSeq < r.st.Moved() && r.toldFull() {
+				// The restart was made on a model before the one in use,
+				// and the user was told no restart can make room
+				// (needsDossier): this model restarted nothing.
+				return p
+			}
+			// Not an outage: the provider refuses the prompt as too long,
+			// and restarting from a dossier did not make it fit.
+			r.recordMessage(event.MessageData{Auto: true, Important: true, Text: "My model refuses my conversation as too long, even after I restarted it from my notes, " + r.whileDown() + " Shorten .agents/eagent/INSTRUCTIONS.md, or move me to a model with a larger context in this thread's settings."})
+			return p
+		}
+		if answered {
+			// The model answered a call of this turn: it can be reached,
+			// and what fails is a call after.
+			r.recordMessage(event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", failingNotice, shortErr(err), r.whileDown())})
+			return p
+		}
+		r.recordMessage(r.unreachableNotice(err))
+	}
+	return p
+}
+
+// refusedWhileClosing reports that a call was refused (a 4xx that is not
+// transient: too long, or any other refusal) in the closing the session
+// is in now (refusedIn, closings; turnFailed): that is final for this
+// closing. No restart is made (noRestartNow), the look is not made again
+// (maybeTurn), no notice is given, and the session ends (maybeEnd) in its
+// closing path's own words, as done: its closing word was asked for, and
+// what was refused came after it. A closing that starts later (the
+// session stopped ending, then ended again) has had no refusal. Loop
+// goroutine.
+func (r *Runtime) refusedWhileClosing() bool {
+	r.noteClosing()
+	return r.wasClosing && r.refusedIn != 0 && r.refusedIn == r.closings
+}
+
+// noteClosing counts a closing that starts: the session is ending
+// (stillClosing) and was not when last seen. It is seen at every step of
+// the loop (tick), and by whoever asks about a refusal. Loop goroutine.
+func (r *Runtime) noteClosing() {
+	now := r.stillClosing()
+	if now && !r.wasClosing {
+		r.closings++
+	}
+	r.wasClosing = now
+}
+
+// failingNotice opens what the user is told after two failed calls in a
+// row when a call of the turn that failed second came back first.
+const failingNotice = "My calls to my own model keep failing"
+
+// lastFailedAnswered reports that a call of the turn whose call failed
+// last came back first: that turn is on the record, which a turn is once a
+// call of it came back and acted, and it ended on the failure ("error", or
+// "error, closing") after the failure's own event. Loop goroutine only,
+// once that turn has ended.
+func (r *Runtime) lastFailedAnswered() bool {
+	for i := len(r.st.Events) - 1; i >= 0; i-- {
+		ev := r.st.Events[i]
+		switch {
+		case ev.Type == event.TurnEnd && ev.Actor == event.ActorEagent && ev.Task == "":
+			var d event.TurnData
+			if ev.Decode(&d) == nil && strings.HasPrefix(d.Reason, "error") {
+				return true
+			}
+		case ev.Type == event.Error:
+			var d event.ErrorData
+			if ev.Decode(&d) == nil && d.Where == event.ActorEagent {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// unreachableNotice is what the user is told when eagent's model has not
+// answered for a while: automatic, so it is no answer to them. Loop
+// goroutine.
+func (r *Runtime) unreachableNotice(err error) event.MessageData {
+	// Out of reach only when nothing answered (no connection, no answer in
+	// time, a server error); a provider that answers 4xx refuses the calls,
+	// unless the status is a transient one (a rate limit, a timeout:
+	// Retryable), which turns them away for now.
+	lead := "I can't reach my own model right now"
+	var ae *llm.APIError
+	switch {
+	case errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500 && ae.Retryable():
+		lead = "My model is turning my calls away for now"
+	case errors.As(err, &ae) && ae.Status >= 400 && ae.Status < 500:
+		lead = "My model refuses my calls"
+	}
+	return event.MessageData{Auto: true, Text: fmt.Sprintf("%s (%s), %s I keep trying and will pick up where I left off.", lead, shortErr(err), r.whileDown())}
+}
+
+// whileDown is what a notice that eagent's model is not answering says of
+// the agents and the user's messages. The agents named are the ones still
+// running, as fallbackFinal counts them (not stopped, terminal not gone).
+// The messages go straight to an agent only when it is the one on the
+// record (routeUserMessage); otherwise they wait for eagent. Loop
+// goroutine.
+func (r *Runtime) whileDown() string {
+	active := r.st.ActiveRelays()
+	var who []string
+	for _, rel := range active {
+		if rel.State != "exited" {
+			who = append(who, rel.Who())
+		}
+	}
+	kept := "What you write to me is kept, and I'll answer it when my model does."
+	switch {
+	case len(who) == 0:
+		return "so I can't answer you for now. " + kept
+	case len(active) == 1:
+		return fmt.Sprintf("so I can't tell you what %s is doing. Your messages still go straight to %s.", who[0], who[0])
+	case len(who) == 1:
+		return fmt.Sprintf("so I can't tell you what %s is doing. %s", who[0], kept)
+	}
+	return fmt.Sprintf("so I can't tell you what %s are doing. %s", strings.Join(who, " and "), kept)
+}
+
+// stopTimers stops the loop's timers at the end of a run.
+func (r *Runtime) stopTimers() {
+	t := &r.turns
+	for _, tm := range []*time.Timer{t.ticker, t.settle, t.retryTime} {
+		if tm != nil {
+			tm.Stop()
+		}
+	}
+	for _, tm := range r.timers {
+		tm.Stop()
+	}
+	for _, tm := range r.autopilotTimers {
+		tm.Stop()
+	}
+	for _, tm := range r.autopilotChecks {
+		tm.Stop()
+	}
+}
+
+// observer forwards streaming deltas to the UI.
+func (r *Runtime) observer() *llm.Observer {
+	return &llm.Observer{
+		Text:      func(d string) { r.ui.Stream("text", d) },
+		Reasoning: func(d string) { r.ui.Stream("reasoning", d) },
+		ToolCall:  func(n string) { r.ui.Stream("tool", n) },
+		Reset:     func() { r.ui.Stream("", "") },
+	}
+}
+
+// summarizeReasoning keeps reasoning text for humans without bloating the log.
+func summarizeReasoning(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 4000 {
+		// On a whole character: half of one is not valid text, and the log
+		// would hold a replacement mark instead.
+		cut := 4000
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
+	}
+	return s
+}
+
+// ---- what the user is told ------------------------------------------------
+
+// mechanicsWords are the names of the machinery the user never sees; eagent
+// speaks as "I" and a message naming them is sent back once.
+var mechanicsWords = regexp.MustCompile(`(?i)\b(orchestrator|narrator|task worker|dossier|subsession|rollover|context reset|harness|tool call|long think)s?\b`)
+
+// mechanicsLeak lists the internal names a message uses, or "".
+func mechanicsLeak(text string) string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range mechanicsWords.FindAllString(text, -1) {
+		w := strings.ToLower(m)
+		if !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
+// leakingMessage reports the internal names in the words a reply would
+// send the user (a message or a question), or "".
+func leakingMessage(resp *llm.Response) string {
+	for _, c := range resp.ToolCalls {
+		if c.Name != tools.SendMessage && c.Name != tools.AskUser {
+			continue
+		}
+		if args, err := llm.ArgsObject(c.Args); err == nil {
+			if text, _ := args["text"].(string); text != "" {
+				if leak := mechanicsLeak(text); leak != "" {
+					return leak
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// rewriteRequest answers a reply whose words named the machinery: nothing
+// in it was run, and it is asked for again.
+func rewriteRequest(resp *llm.Response, leak string) llm.Message {
+	m := llm.Message{Role: "tool"}
+	for _, c := range resp.ToolCalls {
+		out := "not run: another call in this reply has to be rewritten first. Make this call again in your next reply."
+		if c.Name == tools.SendMessage || c.Name == tools.AskUser {
+			out = fmt.Sprintf("not sent: it names internal machinery (%s), which the user never sees. Say it as \"I\", in your own words, and send it again.", leak)
+		}
+		m.Results = append(m.Results, llm.ToolResult{CallID: c.ID, Name: c.Name, Output: out, IsError: true})
+	}
+	return m
+}
+
+// leakedToken matches provider control markup that occasionally escapes into
+// model text, e.g. DeepSeek's <｜DSML｜…> tool markup or <|im_end|>.
+var leakedToken = regexp.MustCompile(`</?[｜|][^<>]{0,80}>`)
+
+// cleanNarration removes leaked control tokens and trailing junk.
+func cleanNarration(text string) string {
+	text = leakedToken.ReplaceAllString(text, "")
+	return strings.TrimSpace(text)
+}
+
+// recordMessage records and shows something the user is told. Loop
+// goroutine only.
+func (r *Runtime) recordMessage(d event.MessageData) {
+	d.Text = cleanNarration(d.Text)
+	if d.Text == "" {
+		return
+	}
+	t := &r.turns
+	ev := r.append(event.New(event.Message, event.ActorEagent, d))
+	t.saidAt = time.Now()
+	if !d.Auto {
+		t.saidSeq, t.lastSaid, t.saidSeen, t.spokeSeen = ev.Seq, d.Text, t.seen, t.seen
+	}
+	text := d.Text
+	if s := attachmentSummary(d.Attachments); s != "" {
+		text += "\n" + s
+	}
+	r.ui.Say(text)
+}
+
+// tell says something to the user in the harness's own words, with no
+// model call: the outcome of a command they typed. It is recorded as said
+// by eagent and shown to the model as a notice. Any goroutine but the loop.
+func (r *Runtime) tell(text string, important bool) {
+	r.sync(func() { r.recordMessage(event.MessageData{Text: text, Important: important, Auto: true}) })
+}
+
+// ---- small helpers --------------------------------------------------------
+
+func since(t, now time.Time) string {
+	d := now.Sub(t).Round(time.Second)
+	switch {
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
+}
+
+// roundDur is a human duration: 45s, 3m, 1h10m.
+func roundDur(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+}

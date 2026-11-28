@@ -18,7 +18,7 @@ Two short sentences, at most 170 characters together. The list shows about that 
 - Do not copy the user's request word for word, and do not narrate ("the user asked", "this session", "the agent was told").
 - Use only what the log shows. An agent that has stopped while work it started is still running in the background is not waiting on the user.
 - Where it stands is about the work, never about the agent. That the agent is idle, stopped, restarted, switched, closed or waiting for the next instruction is housekeeping: leave it out, and end on the last result instead ("Rev 10 live with tests passing.", not "Rev 10 live; agent stopped.").
-- The session's own plumbing stays out too: no relay, orchestrator, narrator, harness, turn, subagent, screen or polling, unless that software is what the session is building.
+- The session's own plumbing stays out too: no relay, harness, turn, subagent, screen or polling, unless that software is what the session is building.
 - No links unless a link is the result.
 
 Reply with one JSON object and nothing else:

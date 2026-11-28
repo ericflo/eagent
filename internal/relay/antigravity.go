@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,11 +16,77 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 )
 
-type antigravityAgent struct{ statusFile string }
+// Antigravity (Google's agy CLI). Its status line is this binary's
+// relay-agy-status command, which saves the conversation id, agent state
+// and quota to a file the seat polls.
+type antigravityAgent struct{ agentBase }
 
-func (antigravityAgent) label() string     { return "Antigravity" }
-func (antigravityAgent) chooseID() string  { return "" }
-func (antigravityAgent) newParser() parser { return antigravityParser{} }
+func init() { register(antigravityAgent{}) }
+
+func (antigravityAgent) Name() string        { return "antigravity" }
+func (antigravityAgent) Label() string       { return "Antigravity" }
+func (antigravityAgent) DisplayName() string { return "Antigravity" }
+func (antigravityAgent) Binary() string      { return "agy" }
+
+func (antigravityAgent) newParser(Spec) parser { return antigravityParser{} }
+
+// interruptKeys: agy stops a turn on Ctrl+C.
+func (antigravityAgent) interruptKeys() []string { return []string{"C-c"} }
+
+// status reads the line the relay-agy-status hook prints, at the foot of
+// the screen: the state it names, and whether the line is there as agy
+// draws it at its prompt and while it works. agy draws the line under its
+// own dialogs too (its folder-trust prompt): one right under the hint its
+// dialogs end on is a dialog's, and says neither that agy is at its prompt
+// nor that it works.
+func (antigravityAgent) status(screen string) (state string, ok bool) {
+	lines := strings.Split(foot(screen), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		_, rest, found := strings.Cut(lines[i], "Antigravity relay ·")
+		if !found {
+			continue
+		}
+		if i > 0 && strings.Contains(lines[i-1], "enter Confirm") {
+			return "", false
+		}
+		state, _, _ = strings.Cut(rest, " ·")
+		return strings.TrimSpace(state), true
+	}
+	return "", false
+}
+
+// ready: agy's status line stands at the foot of its screen (status).
+func (a antigravityAgent) ready(screen string) bool {
+	_, ok := a.status(screen)
+	return ok
+}
+
+// busy: the status line is drawn whatever agy does, and names its state.
+// Only "idle" is known for certain (agy's own run statuses are idle,
+// running, busy and canceling, but how it names them here is not
+// documented), so any other name reads as busy. The seat asks only when an
+// agent that went quiet would otherwise be called idle, and such an agent
+// still takes messages and goes back to work on its next transcript line.
+func (a antigravityAgent) busy(screen string) bool {
+	state, ok := a.status(screen)
+	return ok && state != "" && !strings.EqualFold(state, "idle")
+}
+
+func (antigravityAgent) dialogs() []dialog {
+	return []dialog{
+		{name: "antigravity-trust", match: []string{"Antigravity CLI requires permission", "> Yes, I trust this folder"}, end: "enter Confirm", under: 1, keys: []string{"Enter"}, what: "accepted Antigravity’s workspace trust prompt"},
+	}
+}
+
+func (antigravityAgent) prepare(spec *Spec, stateDir string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	spec.StatusFile = filepath.Join(stateDir, "agy-status.json")
+	spec.Hook = ShellQuote(exe) + " relay-agy-status " + ShellQuote(spec.StatusFile)
+	return nil
+}
 
 func (antigravityAgent) command(p config.RelayProfile, id string, resume bool, hook string) []string {
 	argv := []string{"agy"}
@@ -41,8 +108,14 @@ func (antigravityAgent) command(p config.RelayProfile, id string, resume bool, h
 	return append(argv, p.Args...)
 }
 
+// afterTurn types the text: agy's native queue delivers it after the
+// running turn. A failure here may come after the paste went in, so the
+// seat must not type it again.
 func (antigravityAgent) afterTurn(s *Seat, _, text string) error {
-	return s.typeText(text) // agy's native queue delivers it after the running turn
+	if err := s.typeText(text); err != nil {
+		return &TypingError{err}
+	}
+	return nil
 }
 
 func antigravityHome() string {
@@ -89,17 +162,17 @@ func WriteAntigravityStatus(path string, stdin io.Reader, stdout io.Writer) int 
 	return 0
 }
 
-func (a antigravityAgent) status() agyStatus {
+func antigravityStatus(file string) agyStatus {
 	var status agyStatus
-	if raw, err := os.ReadFile(a.statusFile); err == nil {
+	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &status)
 	}
 	return status
 }
 
-func (a antigravityAgent) locate(_ string, _ time.Time, id string) (string, string) {
+func (antigravityAgent) locate(spec Spec, _ time.Time, id string) (string, string) {
 	if id == "" {
-		id = a.status().ID
+		id = antigravityStatus(spec.StatusFile).ID
 	}
 	if !conversationID.MatchString(id) {
 		return "", ""
@@ -114,8 +187,11 @@ func (a antigravityAgent) locate(_ string, _ time.Time, id string) (string, stri
 
 // An interrupted agy turn can end without a final transcript step. Wait for
 // the transcript writer to settle before reporting a turn without a reply.
-func (a antigravityAgent) poll(s *Seat, now time.Time) {
-	status := a.status()
+// A message handed to agy's queue that a turn's end left there is noted
+// too (reportLeftOvers).
+func (antigravityAgent) poll(s *Seat, now time.Time) {
+	s.reportLeftOvers(now)
+	status := antigravityStatus(s.spec.StatusFile)
 	if status.ID == "" || status.ID != s.innerID() {
 		return
 	}
@@ -215,9 +291,7 @@ func antigravityModels() []ModelChoice {
 	agyCatalog.Lock()
 	defer agyCatalog.Unlock()
 	if time.Now().After(agyCatalog.retry) {
-		cmd, cancel := bounded(8*time.Second, "agy", "models")
-		defer cancel()
-		raw, err := cmd.Output()
+		raw, err := catalog(8*time.Second, nil, "agy", "models")
 		agyCatalog.retry = time.Now().Add(time.Minute)
 		if err == nil {
 			var models []ModelChoice
@@ -236,6 +310,40 @@ func antigravityModels() []ModelChoice {
 		}
 	}
 	return slices.Clone(agyCatalog.models)
+}
+
+func (antigravityAgent) defaults() (string, string) { return antigravityDefaults() }
+
+func (antigravityAgent) models(string) []ModelChoice { return antigravityModels() }
+
+func (antigravityAgent) efforts() []string { return slices.Clone(standardEfforts) }
+
+// validModel: agy takes a model by its label too ("Gemini 3.8 Flash (Low)").
+func (antigravityAgent) validModel(string) bool { return true }
+
+func (antigravityAgent) checkPick(p config.RelayProfile) error {
+	return CheckAntigravityEffort(p.Model, p.Effort)
+}
+
+// resolve reads a model given by label or variant id as its variant id,
+// and its variant as the effort when none is given.
+func (antigravityAgent) resolve(model, effort string) (string, string) {
+	if model != "" {
+		id, variant := agyModelVariant(model)
+		return id, cmp.Or(effort, variant)
+	}
+	return resolveDefaults(antigravityAgent{}, model, effort)
+}
+
+// trimModelLabel drops the variant from "Gemini 3.8 Flash (High)" when the
+// label says the effort anyway.
+func (antigravityAgent) trimModelLabel(label, effort string) string {
+	if effort != "" {
+		if stem, suffix, ok := strings.Cut(label, " ("); ok && slices.Contains(standardEfforts, strings.ToLower(strings.TrimSuffix(suffix, ")"))) {
+			return stem
+		}
+	}
+	return label
 }
 
 func antigravityDefaults() (string, string) {

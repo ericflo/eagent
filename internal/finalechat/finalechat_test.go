@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -353,5 +354,53 @@ func TestGoneOnlyForFinaleChatsOwnNotFound(t *testing.T) {
 	}
 	if Gone(&Error{Status: 404, Message: "404 page not found"}) || Gone(&Error{Status: 503}) {
 		t.Fatal("a proxy's 404 or an outage is not a deletion")
+	}
+}
+
+// A download over the limit is an error, whether the server says its
+// length up front or not, and never a file cut short without one.
+func TestDownloadOverTheLimitIsRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := bytes.Repeat([]byte("x"), MaxAttachmentSize+1)
+		if r.URL.Path == "/sized" {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			_, _ = w.Write(data)
+			return
+		}
+		_, _ = w.Write(data[:1<<20])
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(data[1<<20:])
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "fc_x"}
+	for _, path := range []string{"/sized", "/streamed"} {
+		var buf bytes.Buffer
+		if _, _, err := c.Download(context.Background(), path, &buf); !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("%s: err = %v after %d bytes, want too large", path, err, buf.Len())
+		}
+	}
+	var buf bytes.Buffer
+	exact := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("y"), MaxAttachmentSize))
+	}))
+	defer exact.Close()
+	c.BaseURL = exact.URL
+	if _, _, err := c.Download(context.Background(), "/f", &buf); err != nil || buf.Len() != MaxAttachmentSize {
+		t.Fatalf("a file of exactly the limit: %d bytes, %v", buf.Len(), err)
+	}
+}
+
+// A long name is cut to 120 bytes on a character boundary and keeps its
+// extension; the saved name stays well inside 255 bytes.
+func TestInboundFileNameFitsAndKeepsItsExtension(t *testing.T) {
+	file, name := InboundFileName("019abc12-0000-7000-8000-000000000001", strings.Repeat("a", 251)+".png")
+	if len(name) != 120 || !strings.HasSuffix(name, ".png") || len(file) > 255 || !strings.HasPrefix(file, "in-019abc12-0000-7000-8000-000000000001-") {
+		t.Fatalf("file %q (%d), name %q (%d)", file, len(file), name, len(name))
+	}
+	if got := clipBytes("ab"+"é", 3); got != "ab" {
+		t.Fatalf("clipBytes cut inside a character: %q", got)
+	}
+	if _, name := InboundFileName("x", "../../etc/passwd"); name != "passwd" {
+		t.Fatalf("name = %q", name)
 	}
 }

@@ -307,7 +307,13 @@ func publish(ctx context.Context, project, session, version string, force, recre
 		// mirror has not yet, leaving it untitled (later posts never
 		// backfill). Re-assert title/agent so a raced registration cannot
 		// strand an orphan. Best effort: never fail publication over it.
-		_, _ = client.Patch(ctx, "ext:eagent:"+info.ID, finalechat.PatchRequest{Title: filepath.Base(project), Agent: cfg.Finalechat.AgentName()})
+		// A thread that has a title keeps it: by now it is usually the
+		// session's summary, which the service would let this replace.
+		patch := finalechat.PatchRequest{Title: filepath.Base(project), Agent: cfg.Finalechat.AgentName()}
+		if t, err := client.Thread(ctx, "ext:eagent:"+info.ID); err == nil && strings.TrimSpace(t.Title) != "" {
+			patch.Title = ""
+		}
+		_, _ = client.Patch(ctx, "ext:eagent:"+info.ID, patch)
 		if a.ID == "" {
 			return "", fmt.Errorf("artifact registration returned no identity")
 		}
@@ -485,16 +491,12 @@ func Export(ctx context.Context, project, session, version, destination string) 
 		return err
 	}
 	defer snapshot.Close()
-	// Reserve a new destination atomically. A directory created by another
-	// writer while the snapshot was built must never be silently replaced.
-	if err := os.Mkdir(absolute, 0o700); err != nil {
-		return err
-	}
-	if err := os.Rename(snapshot.Dir, absolute); err != nil {
-		_ = os.Remove(absolute)
-		return err
-	}
-	return nil
+	// Move the finished snapshot into place. Anything another writer put at
+	// the destination while the snapshot was built is never replaced: Go's
+	// Rename refuses an existing directory, and a directory cannot be
+	// renamed onto a file. (Reserving the destination with Mkdir first, as
+	// this once did, made every export fail for that very reason.)
+	return os.Rename(snapshot.Dir, absolute)
 }
 
 func IsArtifactEnabled(project string) bool {

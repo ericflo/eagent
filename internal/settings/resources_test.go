@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -101,7 +102,7 @@ func TestBundleResourceAndActiveDeletionGuard(t *testing.T) {
 		t.Fatal("deleted active default bundle")
 	}
 	p.Operation = "bundle.save"
-	p.Parameters = map[string]any{"name": "unsafe", "config_json": `{"task":{"base_url":"https://unregistered.invalid","api_key_env":"SECRET"}}`}
+	p.Parameters = map[string]any{"name": "unsafe", "config_json": `{"model":{"base_url":"https://unregistered.invalid","api_key_env":"SECRET"}}`}
 	if _, err := s.PrepareResource(editor, p, s.Grant()); err == nil {
 		t.Fatal("accepted unregistered endpoint/key through bundle action")
 	}
@@ -188,13 +189,17 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 	if _, err := os.Stat(config.File(project)); !os.IsNotExist(err) {
 		t.Fatal("standalone /save_preset unexpectedly created config.json")
 	}
-	// /default_config unlocks and carries bundle suggestions.
-	if len(v1.Descriptor.Suggestions["bundles"]) != 1 || v1.Descriptor.Suggestions["bundles"][0].Value != "my-baseline" {
-		t.Fatalf("bundles suggestions = %+v", v1.Descriptor.Suggestions["bundles"])
+	// /default_config unlocks and offers the bundle. Its suggestion list,
+	// which adds what the bundle runs, comes only when the descriptor has
+	// room for a ninth list beside every relay agent's models (it holds
+	// eight at most).
+	bundles, listed := v1.Descriptor.Suggestions["bundles"]
+	if listed && (len(bundles) != 1 || bundles[0].Value != "my-baseline") || !listed && len(v1.Descriptor.Suggestions) < 8 {
+		t.Fatalf("bundles suggestions = %+v (%d lists)", bundles, len(v1.Descriptor.Suggestions))
 	}
 	for _, f := range v1.Descriptor.Fields {
 		if f.Key == "/default_config" {
-			if !f.Writable || f.Suggest == nil || f.Suggest.List != "bundles" {
+			if !f.Writable || !slices.Contains(f.Shape.Enum, any("my-baseline")) || listed != (f.Suggest != nil && f.Suggest.List == "bundles") {
 				t.Fatalf("/default_config after save = %+v", f)
 			}
 		}
@@ -207,7 +212,7 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 		SchemaVersion:   SchemaVersion,
 		ExpectedVersion: v1.Snapshot.Version,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/task_concurrency", Value: float64(7)},
+			{Op: "set", Key: "/max_calls_per_turn", Value: float64(7)},
 			{Op: "set", Key: "/save_preset", Value: "fast-seven"},
 		},
 	}
@@ -223,7 +228,7 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 		t.Fatalf("config.json leaked save_preset key: %s", rawCfg)
 	}
 	loaded, err := config.Load(project, "fast-seven")
-	if err != nil || loaded.TaskConcurrency != 7 {
+	if err != nil || loaded.MaxCallsPerTurn != 7 {
 		t.Fatalf("saved preset fast-seven = %+v err=%v", loaded, err)
 	}
 	if _, exists := v2.Snapshot.Saved["/save_preset"]; exists {
@@ -236,5 +241,95 @@ func TestSavePresetViaRemoteApplyAndBundleSuggestions(t *testing.T) {
 	}
 	if err := s.DeleteBundle(context.Background(), "fast-seven"); err == nil {
 		t.Fatal("DeleteBundle succeeded on missing preset")
+	}
+}
+
+// An override of a retired prompt (NARRATOR.md and the rest) is read by
+// nothing. The editors can see it and delete it, and never create or save
+// one.
+func TestRetiredPromptOverridesCanOnlyBeDeleted(t *testing.T) {
+	if !slices.Equal(config.RetiredPromptNames, prompts.Retired) {
+		t.Fatalf("config.RetiredPromptNames %v != prompts.Retired %v", config.RetiredPromptNames, prompts.Retired)
+	}
+	ctx := context.Background()
+	s := &Service{Project: t.TempDir()}
+	if err := os.MkdirAll(prompts.Dir(s.Project), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) string {
+		t.Helper()
+		path := filepath.Join(prompts.Dir(s.Project), name)
+		if err := os.WriteFile(path, []byte("Never say 'great news'."), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	exists := func(path string) bool { _, err := os.Stat(path); return err == nil }
+
+	// Never written: not by the web editor's path, not through the editor.
+	for _, name := range prompts.Retired {
+		if _, err := s.SavePrompt(ctx, name, "new text", false); err == nil || !strings.Contains(err.Error(), "can only be deleted") {
+			t.Fatalf("SavePrompt %s: %v", name, err)
+		}
+		if exists(filepath.Join(prompts.Dir(s.Project), name)) {
+			t.Fatalf("%s was created", name)
+		}
+	}
+	editor, err := config.LockEditor(ctx, s.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editor.WriteRelated("prompt", "NARRATOR.md", []byte("x"), false); err == nil {
+		t.Fatal("WriteRelated wrote a retired prompt")
+	}
+	editor.Close()
+
+	// The web editor's delete (PromptName accepts the short name too).
+	path := write("NARRATOR.md")
+	name, err := PromptName("narrator")
+	if err != nil || name != "NARRATOR.md" {
+		t.Fatalf("PromptName: %q %v", name, err)
+	}
+	if _, err := s.SavePrompt(ctx, name, "", true); err != nil || exists(path) {
+		t.Fatalf("delete: %v (still there: %v)", err, exists(path))
+	}
+
+	// The phone: listed, not editable; prompt.reset deletes it; prompt.set
+	// is refused; and the deletion cannot be undone into a write.
+	path = write("ORCHESTRATOR.md")
+	view, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := view.Snapshot.Details["prompts"].(map[string]any)["ORCHESTRATOR.md"].(map[string]any)
+	if entry == nil || entry["retired"] != true || entry["editable"] != false {
+		t.Fatalf("snapshot entry = %v", entry)
+	}
+	editor, err = config.LockEditor(ctx, s.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer editor.Close()
+	set := control.Proposal{Operation: "prompt.set", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"name": "ORCHESTRATOR.md", "text": "changed"}}
+	if _, err := s.PrepareResource(editor, set, s.Grant()); err == nil {
+		t.Fatal("prompt.set accepted a retired prompt")
+	}
+	reset := control.Proposal{Operation: "prompt.reset", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version, Parameters: map[string]any{"name": "ORCHESTRATOR.md"}}
+	change, err := s.PrepareResource(editor, reset, s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := change.Apply(editor); err != nil || exists(path) {
+		t.Fatalf("reset: %v (still there: %v)", err, exists(path))
+	}
+	if _, err := change.Inverse(); err == nil {
+		t.Fatal("undo of a retired override's deletion would write it back")
+	}
+	after, err := s.RemoteSnapshot(s.Grant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, listed := after.Snapshot.Details["prompts"].(map[string]any)["ORCHESTRATOR.md"]; listed || after.Snapshot.Version == view.Snapshot.Version {
+		t.Fatalf("after reset: listed %v, version changed %v", listed, after.Snapshot.Version != view.Snapshot.Version)
 	}
 }

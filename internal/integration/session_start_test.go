@@ -7,7 +7,6 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/runtimecontrol"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -244,13 +243,13 @@ func TestProjectDirectoriesListsRootRecentChildrenAndSiblings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sess.Append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: filepath.Join(base, "sibling")})); err != nil {
+	if _, err := sess.Append(event.New(event.CwdChange, event.ActorHarness, event.CwdChangeData{Path: filepath.Join(base, "sibling")})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sess.Append(event.New(event.CwdChange, event.ActorTask, event.CwdChangeData{Path: filepath.Join(project, "src")}).WithTask("t1")); err != nil {
+	if _, err := sess.Append(event.New(event.CwdChange, event.LegacyTask, event.CwdChangeData{Path: filepath.Join(project, "src")}).WithTask("t1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sess.Append(event.New(event.CwdChange, event.ActorOrchestrator, event.CwdChangeData{Path: filepath.Join(base, "gone")})); err != nil {
+	if _, err := sess.Append(event.New(event.CwdChange, event.ActorHarness, event.CwdChangeData{Path: filepath.Join(base, "gone")})); err != nil {
 		t.Fatal(err)
 	}
 	sess.Close()
@@ -295,73 +294,49 @@ func TestSessionStartPassesARelayProfileAndAllowsAnEmptyBrief(t *testing.T) {
 	if res, err := executeCommand(context.Background(), s, g, q, false); err != nil || res.Status != "rejected" || got.Relay != "" {
 		t.Fatalf("unknown profile: %s %v %#v", res.Status, res.Result, got)
 	}
-	var names []string
-	for _, p := range relayProfiles(t.TempDir()) {
-		names = append(names, p["name"].(string)+"/"+p["agent"].(string))
-	}
-	if strings.Join(names, ",") != "antigravity/antigravity,claude/claude,codex/codex" {
-		t.Fatalf("advertised profiles %v", names)
-	}
-}
-
-// A session started from the phone can name its configuration and each
-// actor's model; a bad pick is refused before anything starts.
-func TestStartPicks(t *testing.T) {
-	project := t.TempDir()
-	name, picks, err := startPicks(project, map[string]any{"config": "anthropic-med", "task_provider": "openrouter", "task_model": "z-ai/glm-5.3", "task_effort": "high", "narrator_effort": "low"})
-	if err != nil || name != "anthropic-med" || picks["task"].Model != "z-ai/glm-5.3" || picks["narrator"].Effort != "low" || len(picks) != 2 {
-		t.Fatalf("picks = %q %+v %v", name, picks, err)
-	}
-	cfg, _ := config.LoadBundle(project, "anthropic-med", "")
-	out, err := ApplyPicks(project, cfg, picks)
-	if err != nil || out.Task.Model != "z-ai/glm-5.3" || out.Task.BaseURL != "https://openrouter.ai/api/v1" || out.Narrator.ReasoningEffort != "low" || out.Narrator.Model != cfg.Narrator.Model {
-		t.Fatalf("applied = %+v / %+v (%v)", out.Task, out.Narrator, err)
-	}
-	// The provider is inferred from a model only one provider lists.
-	if _, p, err := startPicks(project, map[string]any{"orchestrator_model": "reflection/beam-1.0-501b-a23b"}); err != nil || p["orchestrator"].Model == "" {
-		t.Fatalf("inferred provider: %v", err)
-	}
-	for _, bad := range []map[string]any{
-		{"task_provider": "openrouter", "task_model": "nope/none"},
-		{"task_provider": "openrouter"},
-		{"config": "bundle:missing"},
-		{"task_model": "claude-opus-5-5"}, // two providers list it: say which
+	// The agents come in the order a session prefers them, the one it
+	// would start first.
+	installed := agentInstalled
+	defer func() { agentInstalled = installed }()
+	for _, c := range []struct {
+		installed []string
+		want      string
+	}{
+		{nil, "claude/claude,codex/codex,antigravity/antigravity,pi/pi"},
+		{[]string{"codex", "pi"}, "codex/codex,claude/claude,antigravity/antigravity,pi/pi"},
 	} {
-		if _, _, err := startPicks(project, bad); err == nil {
-			t.Errorf("%v accepted", bad)
+		agentInstalled = func(agent string) bool { return slices.Contains(c.installed, agent) }
+		var names []string
+		for _, p := range relayProfiles(t.TempDir()) {
+			names = append(names, p["name"].(string)+"/"+p["agent"].(string))
+		}
+		if strings.Join(names, ",") != c.want {
+			t.Fatalf("installed %v: advertised profiles %v", c.installed, names)
 		}
 	}
 }
 
-// A detached session gets the configuration as flags and the picks as its
-// actor overrides.
-func TestSpawnCommandCarriesPicks(t *testing.T) {
+// A detached session gets its agent, and that agent's model and effort, as
+// flags.
+func TestSpawnCommandCarriesTheAgentPicks(t *testing.T) {
 	project := t.TempDir()
-	cmd, err := spawnCommand(project, SessionRequest{Prompt: "go", Config: "anthropic-med", Routes: map[string]RoutePick{"task": {Provider: "openrouter", Model: "z-ai/glm-5.3"}}}, filepath.Join(project, "announce"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "--preset anthropic-med") {
-		t.Fatalf("args = %s", args)
-	}
-	env := strings.Join(cmd.Env, "\n")
-	if !strings.Contains(env, "EAGENT_TASK_MODEL=z-ai/glm-5.3") || !strings.Contains(env, "EAGENT_TASK_BASE_URL=https://openrouter.ai/api/v1") {
-		t.Fatal("picks missing from the environment")
-	}
-	cmd, _ = spawnCommand(project, SessionRequest{Prompt: "go", Config: "bundle:eric"}, filepath.Join(project, "announce"))
-	if !strings.Contains(strings.Join(cmd.Args, " "), "--config eric") {
-		t.Fatalf("bundle args = %v", cmd.Args)
-	}
 	// A relay's model and effort reach the detached process as flags.
-	cmd, _ = spawnCommand(project, SessionRequest{Prompt: "go", Relay: "claude", RelayModel: "sonnet", RelayEffort: "high"}, filepath.Join(project, "announce"))
+	cmd, _ := spawnCommand(project, SessionRequest{Prompt: "go", Relay: "claude", RelayModel: "sonnet", RelayEffort: "high"}, filepath.Join(project, "announce"))
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--relay claude --relay-model sonnet --relay-effort high") {
 		t.Fatalf("relay args = %v", cmd.Args)
 	}
+	// The prompt is the last argument, after "--": a bullet or a command's
+	// name is still the first message.
+	for _, prompt := range []string{"- fix login", "help", "--version"} {
+		cmd, _ := spawnCommand(project, SessionRequest{Prompt: prompt}, filepath.Join(project, "announce"))
+		if n := len(cmd.Args); n < 2 || cmd.Args[n-2] != "--" || cmd.Args[n-1] != prompt {
+			t.Fatalf("args for %q = %v", prompt, cmd.Args)
+		}
+	}
 }
 
-// Both the project's start action and a session's model fields offer the
-// known models, narrowed by the provider picked beside them.
+// The project's start action offers each agent's models, and a session's
+// model fields offer the known models.
 func TestModelSuggestionsAreOffered(t *testing.T) {
 	t.Setenv("EAGENT_FINALECHAT", "on")
 	codexHome, claudeHome := t.TempDir(), t.TempDir()
@@ -386,18 +361,15 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			start = a
 		}
 	}
-	if len(start.Inputs) != 16 || start.Inputs[0].Name != "config" || start.Inputs[2].Suggest == nil || start.Inputs[2].Suggest.GroupBy != "orchestrator_provider" {
+	// Each agent profile's model and effort apply only with that profile,
+	// defaulting to what the agent's own configuration says. A new session
+	// picks nothing else: eagent's own model comes from the configuration.
+	if len(start.Inputs) != 8 || start.Inputs[0].Name != "relay_antigravity_model" {
 		t.Fatalf("start inputs = %+v", start.Inputs)
 	}
-	// eagent's own models apply only when eagent does the work; each relay
-	// profile's model and effort only with that profile, defaulting to what
-	// the agent's own configuration says.
 	inputs := map[string]control.Input{}
 	for _, in := range start.Inputs {
 		inputs[in.Name] = in
-	}
-	if w := inputs["orchestrator_model"].When["relay"]; len(w) != 1 || w[0] != "" {
-		t.Fatalf("orchestrator model applies when %v", inputs["orchestrator_model"].When)
 	}
 	agy := inputs["relay_antigravity_model"]
 	if agy.Group != "Antigravity" || agy.Suggest == nil || agy.Suggest.List != "antigravity_models" || inputs["relay_antigravity_effort"].Group != agy.Group {
@@ -409,6 +381,13 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	if codexModel.Default != nil || codexModel.Suggest == nil || len(view.Descriptor.Suggestions["codex_models"]) == 0 || view.Descriptor.Suggestions["claude_models"][0].Value != "fable" {
 		t.Fatalf("codex input %+v, lists %d/%d", codexModel, len(view.Descriptor.Suggestions["codex_models"]), len(view.Descriptor.Suggestions["claude_models"]))
+	}
+	piModel, piEffort := inputs["relay_pi_model"], inputs["relay_pi_effort"]
+	if w := piModel.When["relay"]; len(w) != 1 || w[0] != "pi" || piModel.Group != "Pi" || piModel.Suggest == nil || piModel.Suggest.List != "pi_models" || piEffort.Group != "Pi" {
+		t.Fatalf("pi inputs %+v %+v", piModel, piEffort)
+	}
+	if _, ok := view.Descriptor.Suggestions["pi_models"]; !ok {
+		t.Fatal("no pi_models list")
 	}
 	if model, effort := RelayPicks(map[string]any{"relay_claude_model": " sonnet ", "relay_codex_model": "x", "relay_claude_effort": "high"}, "claude"); model != "sonnet" || effort != "high" {
 		t.Fatalf("picks %q %q", model, effort)
@@ -427,14 +406,14 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	found := false
 	for _, f := range sv.Descriptor.Fields {
-		if f.Key == "/routes/task/model" {
-			found = f.Suggest != nil && f.Suggest.GroupBy == "/routes/task/provider"
+		if f.Key == "/routes/eagent/model" {
+			found = f.Suggest != nil && f.Suggest.GroupBy == "/routes/eagent/provider"
 		}
 	}
 	if !found || len(sv.Descriptor.Suggestions["models"]) == 0 || sv.Descriptor.Validate(grant) != nil {
 		t.Fatal("the session's model fields offer no models")
 	}
-	// A card per actor under Models, named providers, the rest under Behavior.
+	// The routes under Models, named providers, the rest under Behavior.
 	for _, f := range sv.Descriptor.Fields {
 		route := strings.HasPrefix(f.Key, "/routes/")
 		if f.Key == "/config" {
@@ -449,7 +428,9 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 			}
 			continue
 		}
-		if route && (f.Section != "Models" || f.Group == "" || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
+		// A reader puts the card's name before the label, so a label does
+		// not repeat it ("eagent model", never "Model model").
+		if route && (f.Section != "Models" || f.Group == "" || f.Group == f.Label || strings.Contains(f.Label, f.Group)) || !route && f.Section != "Behavior" {
 			t.Errorf("%s: section %q group %q label %q", f.Key, f.Section, f.Group, f.Label)
 		}
 		if strings.HasSuffix(f.Key, "/provider") && (f.Suggest == nil || f.Suggest.List != "providers") {
@@ -463,7 +444,7 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	configs := sv.Descriptor.Suggestions["configs"]
 	i := slices.IndexFunc(configs, func(s control.Suggestion) bool { return s.Value == "anthropic-high" })
-	if i < 0 || configs[i].Implies["/routes/orchestrator/model"] != "claude-fable-5-1" || configs[i].Implies["/routes/narrator/provider"] != "anthropic" || len(configs[i].Implies) != 9 {
+	if i < 0 || configs[i].Implies["/routes/eagent/model"] == "" || configs[i].Implies["/routes/eagent/provider"] != "anthropic" || len(configs[i].Implies) != 3 {
 		t.Fatalf("anthropic-high in a session = %+v", configs)
 	}
 	for k := range configs[i].Implies {
@@ -473,58 +454,5 @@ func TestModelSuggestionsAreOffered(t *testing.T) {
 	}
 	if len(sv.Descriptor.Suggestions["providers"]) != len(config.Providers) {
 		t.Fatalf("providers = %+v", sv.Descriptor.Suggestions["providers"])
-	}
-}
-
-func TestSessionStartAndRuntimeSupportRegisteredLocalServer(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[{"id":"local-gemma","context_length":131072}]}`))
-		case "/v1/chat/completions":
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"messages required"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer mock.Close()
-
-	s, g, _ := routeFixture(t, func(w http.ResponseWriter, r *http.Request) { t.Error("no cloud provider call expected") })
-	reg, err := config.RegisterServer(context.Background(), s.Project, config.ProbeOptions{
-		URL: mock.URL, ID: "my-local", Label: "My Local",
-	}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var got SessionRequest
-	restore := SetSessionStarter(func(_ context.Context, _ string, req SessionRequest) (SessionStart, error) {
-		got = req
-		return SessionStart{ID: "1788000000099", Host: "in_process", Interactive: true}, nil
-	})
-	defer restore()
-
-	q := sessionStartCommand(t, s, g, "Test local model")
-	q.Proposal.Parameters["orchestrator_provider"] = "my-local"
-	q.Proposal.Parameters["orchestrator_model"] = "local-gemma"
-	raw, _ := json.Marshal(q.Proposal)
-	q.Digest = artifact.Digest(raw)
-	res, err := executeCommand(context.Background(), s, g, q, false)
-	if err != nil || res.Status != "succeeded" {
-		t.Fatalf("session.start with local server: status=%s result=%v err=%v", res.Status, res.Result, err)
-	}
-	if got.Routes["orchestrator"].Provider != "my-local" || got.Routes["orchestrator"].Model != "local-gemma" {
-		t.Fatalf("routes = %+v", got.Routes)
-	}
-	// Detached spawn carries explicit empty EAGENT_ORCHESTRATOR_API_KEY_ENV= so
-	// child process overrides the default preset's TOGETHER_API_KEY.
-	cmd, err := spawnCommand(s.Project, got, filepath.Join(s.Project, "announce"))
-	if err != nil {
-		t.Fatalf("spawnCommand: %v", err)
-	}
-	if !slices.Contains(cmd.Env, "EAGENT_ORCHESTRATOR_API_KEY_ENV=") || !slices.Contains(cmd.Env, "EAGENT_ORCHESTRATOR_BASE_URL="+reg.Server.BaseURL) {
-		t.Fatalf("detached env missing keyless local overrides: %v", cmd.Env)
 	}
 }

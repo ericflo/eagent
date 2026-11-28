@@ -2,6 +2,7 @@ package runtimecontrol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -21,6 +22,14 @@ type Request struct {
 	Proposal control.Proposal `json:"proposal"`
 }
 
+// Refusal is an error Apply returns when it refuses a change before it
+// records anything: the controller reports the change rejected, with the
+// refusal's message, not as one that may or may not have been made.
+type Refusal struct{ Err error }
+
+func (e Refusal) Error() string { return e.Err.Error() }
+func (e Refusal) Unwrap() error { return e.Err }
+
 type Outcome struct {
 	ID     string         `json:"command_id"`
 	Digest string         `json:"proposal_sha256"`
@@ -37,14 +46,29 @@ type Controller struct {
 	// Stop records an accepted session.stop and arranges for the session to
 	// end once Poll returns (Poll's files must stay open until then). Nil
 	// refuses the stop.
-	Stop                               func(Request) error
+	Stop func(Request) error
+	// Routes, when set, gives for each route key in routes (eagent's, the
+	// summarizer's) the chain the session runs or, for a pick that changes
+	// it, will run once the change is applied, as configured (address, key
+	// variable, window, reply ceiling, fallbacks). A preset saved from the
+	// session is built from it. Called on the goroutine that polls.
+	Routes func(routes map[string]Route) (map[string]config.ModelRoute, error)
+	// ChosenRoutes is Routes for a preset saved in a change that chooses a
+	// configuration (/config, named by chosen): a pick that names that
+	// configuration's route is the route as it defines it. Nil uses Routes.
+	ChosenRoutes func(routes map[string]Route, chosen string) (map[string]config.ModelRoute, error)
+	// base is the configuration the session started from (its first
+	// Values.Config): a choice in the session changes only its routes, so a
+	// preset saved from it takes its other settings from this one, never
+	// from the name being saved.
+	base                               string
 	status, pending, started, outcomes *os.Root
 	lastHeartbeat                      time.Time
 	statusSerial                       int64
 }
 
 func New(project, session string, values Values, apply func(Request, Values, map[string]any) error) (*Controller, error) {
-	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply}
+	c := &Controller{Project: project, Session: session, Generation: newID(), Values: values, Apply: apply, base: values.Config}
 	var err error
 	c.status, err = openDirectory(project, session, true, "status")
 	if err != nil {
@@ -195,7 +219,16 @@ func (c *Controller) process(q Request) error {
 	if q.Proposal.Generation != c.Generation || q.Proposal.ExpectedVersion != view.Snapshot.Version {
 		return finish("conflicted", map[string]any{"message": "The runtime generation or settings version changed."})
 	}
-	values, err := ApplyValues(c.Project, c.Values, q.Proposal, view, q.Grant)
+	// The routes the session runs or will run: with a configuration chosen
+	// in this change, a pick of its route is that route as it defines it
+	// (ChosenRoutes), for the key check and a preset saved here alike.
+	routes := c.Routes
+	if chosen := ChosenConfig(q.Proposal); chosen != "" && c.ChosenRoutes != nil {
+		routes = func(picks map[string]Route) (map[string]config.ModelRoute, error) {
+			return c.ChosenRoutes(picks, chosen)
+		}
+	}
+	values, err := applyValues(c.Project, c.Values, q.Proposal, view, q.Grant, routes)
 	if err != nil {
 		return finish("rejected", map[string]any{"message": err.Error()})
 	}
@@ -211,7 +244,15 @@ func (c *Controller) process(q Request) error {
 	presetName := SavePresetName(q.Proposal)
 	var presetCfg config.Config
 	if presetName != "" {
-		presetCfg, err = ConfigFromValues(c.Project, values)
+		var running map[string]config.ModelRoute
+		if routes != nil {
+			if running, err = routes(values.Routes); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
+			}
+		}
+		layers := values
+		layers.Config = c.base
+		presetCfg, err = ConfigFromRoutes(c.Project, layers, running)
 		if err != nil {
 			return finish("rejected", map[string]any{"message": err.Error()})
 		}
@@ -243,6 +284,13 @@ func (c *Controller) process(q Request) error {
 		}
 	}
 	if err := c.Apply(q, values, result); err != nil {
+		if refusal := (Refusal{}); errors.As(err, &refusal) {
+			msg := refusal.Error()
+			if presetName != "" {
+				msg += fmt.Sprintf(" (The preset %q was saved.)", presetName)
+			}
+			return finish("rejected", map[string]any{"message": msg})
+		}
 		return finish("unknown", map[string]any{"message": "The runtime could not durably acknowledge this change.", "detail": err.Error()})
 	}
 	c.Values = values

@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
 	"github.com/ericflo/eagent/internal/llm"
@@ -23,19 +22,29 @@ import (
 // The thread's title and summary.
 //
 // A session is one row in the user's thread list, and the title and summary
-// are all that row says about it. They used to be the project's directory
-// name and the first message, word for word, unless the orchestrator
-// remembered to call retitle_thread, which it mostly did not. So the harness
-// writes them itself: a small model call on the narrator's route reads what
-// the user asked for and what they have been told since, and returns a title
-// for the session's subject and a summary of the whole session and where it
-// stands. It runs soon after the user writes, when the agent finishes a turn,
-// and now and then while one long turn goes on.
+// are all that row says about it. Keeping them current is part of the
+// session's work, and how it is done is a setting (summarizer.mode):
+//
+//   - inline (the default): eagent's own model keeps them. When they may be
+//     out of date, the next call's tail says so and shows them as they
+//     stand, and the model changes them with update_thread if they no longer
+//     fit, in the same reply as whatever else it does. Nothing is forced:
+//     the tool is one of the fifteen it always has, and a model that leaves
+//     them alone leaves no trace. The request is the conversation it already
+//     has cached, so it costs a few hundred fresh tokens.
+//   - dedicated: a separate model call writes them from a short digest of
+//     the session (what the user asked, what they were told, the agent's
+//     last report). It uses the route configured under summarizer.model
+//     exactly as written there, reasoning effort included, and its calls are
+//     counted under "summarizer". For when the title and summary should come
+//     from a different model than the one that talks to the user.
+//
+// Both follow the same schedule: soon after the user writes, when the agent
+// finishes a turn, and now and then while one long turn goes on.
 //
 // The title names the subject and is meant to stay put: the user finds the
-// thread by it. A title someone chose on purpose (the user in the app, the
-// orchestrator at the user's request) is kept. The summary moves with the
-// work.
+// thread by it. A title someone chose on purpose (the user in the app, or
+// eagent at the user's request) is kept. The summary moves with the work.
 
 // The schedule. Variables so tests can run it in milliseconds.
 var (
@@ -52,8 +61,9 @@ var (
 	summaryAttachPoll = 500 * time.Millisecond
 )
 
-// summariesDisabled is the process-wide switch (EAGENT_SUMMARIES=off): no
-// summary calls, titles change only through retitle_thread.
+// summariesDisabled is the process-wide switch (EAGENT_SUMMARIES=off): the
+// title and summary are never brought up, and change only when the user
+// asks eagent for a name.
 func summariesDisabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("EAGENT_SUMMARIES"))) {
 	case "0", "off", "false", "no":
@@ -65,14 +75,18 @@ func summariesDisabled() bool {
 // summaryKeeper is the loop-owned schedule for the next summary.
 type summaryKeeper struct {
 	on     bool
-	busy   bool
+	inline bool // eagent's own model keeps them; else a dedicated call does
+	busy   bool // a dedicated call is in flight
 	timer  *time.Timer
 	due    time.Time // when timer fires; zero when none is armed
 	last   time.Time // when the latest call started
 	seen   int64     // newest event a finished call covered
 	worthy int64     // newest event worth a fresh summary
 	fails  int
-	final  bool // the last summary of a batch session has been started
+	// notBefore: the model was asked about them and said nothing either
+	// way; it is not asked again before this (inline).
+	notBefore time.Time
+	final     bool // the last summary of a batch session has been started
 	// attached says the phone thread's own title and summary have been
 	// read (adoptThread), and attachBy is how long a summary waits for
 	// that: the model should see the title the user sees.
@@ -87,6 +101,7 @@ type summaryKeeper struct {
 // starts.
 func (r *Runtime) startSummaries() {
 	r.summary.on = !summariesDisabled()
+	r.summary.inline = r.models[event.ActorSummarizer] == nil
 	if !r.summary.on {
 		return
 	}
@@ -109,11 +124,57 @@ func (r *Runtime) stopSummaries() {
 	}
 }
 
+// summaryNews reports an event that is news for the thread list: one that
+// noteSummary schedules a summary for.
+func summaryNews(ev event.Event) bool {
+	switch ev.Type {
+	case event.UserMessage, event.UserAnswer, event.RelayEnd, event.Question, event.UserDismiss, event.Message, event.RelayProgress:
+		return true
+	case event.RelayTurn:
+		var d event.RelayTurnData
+		return ev.Decode(&d) == nil && !d.Idle
+	}
+	return false
+}
+
+// coverOwnWords moves the mark of how far the title and summary are right
+// past what the reply that set them did itself (own: the message it sent,
+// the question it asked, the agent it stopped). The model wrote them
+// knowing all of that, so asking again for it alone would be a call that
+// can only repeat them. The mark stops at the first piece of news that is
+// not the reply's own: that one is still owed a look. Loop goroutine only.
+func (r *Runtime) coverOwnWords(own []int64) {
+	k := &r.summary
+	if !k.on {
+		return
+	}
+	mine := make(map[int64]bool, len(own))
+	for _, seq := range own {
+		mine[seq] = true
+	}
+	evs := r.st.Events
+	from := sort.Search(len(evs), func(i int) bool { return evs[i].Seq > k.seen })
+	seen := k.seen
+	for _, ev := range evs[from:] {
+		if mine[ev.Seq] {
+			seen = ev.Seq
+		} else if summaryNews(ev) {
+			break
+		}
+	}
+	if seen > k.seen {
+		// On the record too, as a mark with nothing changed (threadKept), so
+		// a resumed session knows it.
+		r.append(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{By: "summary", SeenSeq: seen}))
+		k.seen = seen
+	}
+}
+
 // noteSummary decides whether an event is news for the thread list and when
 // to act on it. Loop goroutine only.
 func (r *Runtime) noteSummary(ev event.Event) {
 	k := &r.summary
-	if !k.on || r.ending {
+	if !k.on || r.ending || !summaryNews(ev) {
 		return
 	}
 	now := time.Now()
@@ -127,6 +188,10 @@ func (r *Runtime) noteSummary(ev event.Event) {
 	var due time.Time
 	switch ev.Type {
 	case event.UserMessage, event.UserAnswer:
+		// The user is here: a session that was writing its last summary
+		// is not ending after all. The next ending gets one of its own,
+		// and until then no turn carries the last summary's time limit.
+		k.final = false
 		due = now.Add(summaryUserDelay)
 		if r.st.SummarySeq == 0 {
 			due = now.Add(summaryFirstDelay)
@@ -137,16 +202,9 @@ func (r *Runtime) noteSummary(ev event.Event) {
 			return // a turn that only said "still waiting" is not news
 		}
 		due = notBefore(summaryTurnGap)
-	case event.Yield, event.RelayEnd, event.NarratorQuestion, event.UserDismiss:
+	case event.RelayEnd, event.Question, event.UserDismiss:
 		due = notBefore(summaryTurnGap)
-	case event.TaskEnd:
-		var d event.TaskEndData
-		_ = ev.Decode(&d)
-		if t := r.st.Tasks[d.ID]; t != nil && t.Kind == "dossier" {
-			return
-		}
-		due = notBefore(summaryTalkGap)
-	case event.NarratorMessage:
+	case event.Message:
 		due = notBefore(summaryTalkGap)
 	case event.RelayProgress:
 		due = notBefore(summaryLongGap)
@@ -190,8 +248,97 @@ func (r *Runtime) summaryDue(at time.Time) {
 		r.armSummary(time.Now().Add(summaryAttachPoll))
 		return
 	}
+	if k.inline {
+		if time.Now().Before(k.notBefore) {
+			// The model was asked and said nothing: it is asked again
+			// when that wait is over, not when an older timer happens to
+			// come due.
+			r.armSummary(k.notBefore)
+			return
+		}
+		// The next call is asked about them; with nothing else going on,
+		// that is a call of its own (loop.go).
+		k.last = time.Now()
+		r.turns.threadDue = true
+		return
+	}
 	r.startSummary()
 }
+
+// summaryRipe reports that a call about to be made for another reason
+// should also be asked about the title and summary, saving a call of its
+// own: there is news for the thread list, and the last time they were
+// brought up was long enough ago. Loop goroutine only.
+func (r *Runtime) summaryRipe() bool {
+	k := &r.summary
+	if !k.on || !k.inline || r.ending || k.worthy <= k.seen || r.st.LastUserSeq == 0 {
+		return false
+	}
+	if r.phone != nil && !k.attached && time.Now().Before(k.attachBy) {
+		return false
+	}
+	if !k.last.IsZero() && time.Since(k.last) < summaryTurnGap {
+		return false
+	}
+	if time.Now().Before(k.notBefore) {
+		return false
+	}
+	k.last = time.Now()
+	return true
+}
+
+// threadKept records that eagent looked at the title and summary and
+// found they still fit. Nothing the user sees changes; the mark says how
+// far they are known to be right, so nobody asks again until there is
+// news. Loop goroutine only.
+func (r *Runtime) threadKept() {
+	seen := r.turns.seen
+	if !r.summary.on || seen <= r.summary.seen {
+		return
+	}
+	r.append(event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{By: "summary", SeenSeq: seen}))
+	r.summary.seen = seen
+}
+
+// threadAsked is told how a call that was asked about the title and
+// summary ended (inline). A model that set them, or said they still fit,
+// has answered. One that did neither has left them as they were, possibly
+// stale: it is asked again, further apart each time, as a failed call of
+// the dedicated summarizer is tried again. Loop goroutine only.
+func (r *Runtime) threadAsked(answered bool) {
+	k := &r.summary
+	if !k.on || !k.inline {
+		return
+	}
+	if answered || k.worthy <= k.seen {
+		k.fails, k.notBefore = 0, time.Time{}
+		if k.worthy <= k.seen {
+			// A timer that came due while the call ran asked for a look
+			// that this call has made: nothing is left for it.
+			r.turns.threadDue = false
+		}
+		return
+	}
+	k.fails++
+	if k.fails > threadAskAgain {
+		// It was asked several times and left them alone each time: that
+		// is taken for "they still fit" until there is news.
+		k.fails, k.notBefore = 0, time.Time{}
+		r.threadKept()
+		return
+	}
+	k.notBefore = time.Now().Add(min(summaryRetry<<min(k.fails-1, 3), summaryLongGap))
+	// A timer that came due while that call ran has already asked for the
+	// next one. It waits too.
+	r.turns.threadDue = false
+	if !r.ending {
+		r.armSummary(k.notBefore)
+	}
+}
+
+// threadAskAgain is how many more times a model that said nothing about
+// the title and summary is asked.
+const threadAskAgain = 2
 
 // finalSummary holds a batch session open for one last summary when it is
 // about to end with news the thread list has not got: the row should say
@@ -206,10 +353,23 @@ func (r *Runtime) finalSummary() bool {
 	if k.busy {
 		return true
 	}
-	if k.final || k.worthy <= k.seen || r.st.LastUserSeq == 0 {
+	if k.final {
+		// Inline: the call that was asked about them is on its way or in
+		// flight (maybeEnd is not reached while one is).
+		return k.inline && r.turns.threadDue && !time.Now().Before(r.turns.retryAt)
+	}
+	if k.worthy <= k.seen || r.st.LastUserSeq == 0 {
 		return false
 	}
 	k.final = true
+	if k.inline {
+		if time.Now().Before(r.turns.retryAt) {
+			return false // the model is not answering; do not hold the end for it
+		}
+		r.turns.threadDue = true
+		r.later = append(r.later, func() {}) // the next tick makes the call
+		return true
+	}
 	r.startSummary()
 	return true
 }
@@ -226,14 +386,15 @@ func (r *Runtime) startSummary() {
 	project := filepath.Base(r.projectPath())
 	in := summaryInput(r.st, project, time.Now())
 	seen := r.st.LastSeq()
-	client := summaryClient(r.opts.Project, r.narrClient)
 	system := r.prompts.Render("THREAD-SUMMARY.md", nil)
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		ctx, cancel := context.WithTimeout(r.ctx, timeout)
 		defer cancel()
-		out, err := summarize(ctx, client, system, in)
+		out, err := summarize(ctx, func(ctx context.Context, req llm.Request) (*llm.Response, error) {
+			return r.complete(ctx, event.ActorSummarizer, req, nil)
+		}, system, in)
 		r.post(func() {
 			k.busy = false
 			if r.ending {
@@ -262,8 +423,8 @@ func (r *Runtime) startSummary() {
 func (r *Runtime) applySummary(project string, seen int64, out summaryResult) {
 	title, description := acceptSummary(r.st, project, out)
 	usage := out.Usage
-	r.append(event.New(event.ThreadTitle, event.ActorHarness, event.ThreadTitleData{
-		Title: title, Description: description, By: "summary", SeenSeq: seen, Usage: &usage, ElapsedMS: out.Elapsed.Milliseconds(),
+	r.append(event.New(event.ThreadTitle, event.ActorSummarizer, event.ThreadTitleData{
+		Title: title, Description: description, By: "summary", SeenSeq: seen, Usage: &usage, ElapsedMS: out.Elapsed.Milliseconds(), Host: out.Host, Asked: out.Asked,
 	}))
 	if r.phone != nil && (title != "" || description != "") {
 		r.phone.RetitleThread(r, title, description)
@@ -348,17 +509,24 @@ type summaryResult struct {
 	Title, Summary string
 	Usage          event.Usage
 	Elapsed        time.Duration
+	// Host and Asked: the route that served its calls ("" when two did).
+	Host, Asked string
 }
 
 // summarize asks the model once, and once more if the answer was not the
 // JSON object it was asked for.
-func summarize(ctx context.Context, client *llm.Client, system, input string) (summaryResult, error) {
+func summarize(ctx context.Context, complete func(context.Context, llm.Request) (*llm.Response, error), system, input string) (summaryResult, error) {
 	req := llm.Request{System: system, Messages: []llm.Message{{Role: "user", Text: input}}}
 	var out summaryResult
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := client.Complete(ctx, req, nil)
+		resp, err := complete(ctx, req)
 		if err != nil {
 			return out, err
+		}
+		if attempt == 0 {
+			out.Host, out.Asked = resp.BaseURL, resp.Asked
+		} else if out.Host != resp.BaseURL || out.Asked != resp.Asked {
+			out.Host, out.Asked = "", ""
 		}
 		out.Usage.Input += resp.Usage.Input
 		out.Usage.Output += resp.Usage.Output
@@ -374,46 +542,6 @@ func summarize(ctx context.Context, client *llm.Client, system, input string) (s
 			llm.Message{Role: "user", Text: `Reply with only the JSON object: {"title": "...", "summary": "..."}`})
 	}
 	return out, errors.New("the model did not return a title and summary")
-}
-
-// summaryClient returns base, or a shallow variant with reasoning disabled
-// ("none" or "minimal") when base targets a registered local/custom model that
-// explicitly advertises that effort level. On shared local GPUs, skipping
-// hundreds of reasoning tokens keeps thread titles fast and avoids starving
-// the orchestrator.
-func summaryClient(project string, base *llm.Client) *llm.Client {
-	if base == nil || project == "" {
-		return base
-	}
-	ep := base.Endpoint
-	pr, ok := config.ProviderForURLFor(project, ep.BaseURL)
-	if !ok || !pr.Custom {
-		return base
-	}
-	m, _, ok := config.ResolveLiveModel(project, pr.ID, ep.Model)
-	if !ok || len(m.Efforts) == 0 {
-		return base
-	}
-	want := ""
-	switch {
-	case slices.Contains(m.Efforts, "none"):
-		want = "none"
-	case slices.Contains(m.Efforts, "minimal"):
-		want = "minimal"
-	default:
-		return base
-	}
-	if ep.ReasoningEffort == want {
-		return base
-	}
-	ep.ReasoningEffort = want
-	c := llm.NewClient(ep)
-	c.HTTP = base.HTTP
-	c.IdleTimeout = base.IdleTimeout
-	c.CallTimeout = base.CallTimeout
-	c.MaxAttempts = base.MaxAttempts
-	c.UserAgent = base.UserAgent
-	return c
 }
 
 // parseSummary reads the JSON object out of a reply that may wrap it in a
@@ -456,7 +584,7 @@ func parseSummary(text string) (title, summary string, ok bool) {
 // summaryInput is what the summary call reads: the title and summary as they
 // stand, everything the user wrote (the early and the recent in full, the
 // middle counted), what they were told lately, the relayed agent's last
-// report, the tasks, and the state of play.
+// report, and the state of play.
 func summaryInput(st *state.State, project string, now time.Time) string {
 	var b strings.Builder
 	stamp := func(t time.Time) string { return t.Local().Format("Jan 2 15:04") }
@@ -486,7 +614,6 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 		text string
 	}
 	var user, told []line
-	var lastYield *event.YieldData
 	for _, ev := range st.Events {
 		switch ev.Type {
 		case event.UserMessage:
@@ -505,15 +632,10 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 				}
 				user = append(user, line{ev.Time, text})
 			}
-		case event.NarratorMessage:
-			var d event.NarratorMessageData
+		case event.Message:
+			var d event.MessageData
 			if ev.Decode(&d) == nil && strings.TrimSpace(d.Text) != "" {
 				told = append(told, line{ev.Time, d.Text})
-			}
-		case event.Yield:
-			var d event.YieldData
-			if ev.Decode(&d) == nil {
-				lastYield = &d
 			}
 		}
 	}
@@ -552,21 +674,6 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 		fmt.Fprintf(&b, "\n## %s does the work in this session. Its latest report (turn %d, %s)\n%s\n", rel.Who(), rel.Turns, stamp(rel.LastTurnAt), clipRunes(rel.LastTurn, 1800))
 	}
 
-	var tasks []string
-	for _, id := range st.TaskOrder {
-		if t := st.Tasks[id]; t != nil && t.Kind != "dossier" {
-			tasks = append(tasks, fmt.Sprintf("- %s (%s)", clipRunes(oneLine(t.Title, 120), 120), t.Status))
-		}
-	}
-	if len(tasks) > 0 {
-		b.WriteString("\n## Tasks, oldest first\n")
-		if len(tasks) > 10 {
-			fmt.Fprintf(&b, "(%d earlier tasks)\n", len(tasks)-10)
-			tasks = tasks[len(tasks)-10:]
-		}
-		b.WriteString(strings.Join(tasks, "\n") + "\n")
-	}
-
 	b.WriteString("\n## Right now\n")
 	working := false
 	for _, rel := range st.ActiveRelays() {
@@ -580,36 +687,17 @@ func summaryInput(st *state.State, project string, now time.Time) string {
 			fmt.Fprintf(&b, "%s last reported %s ago and is not working at the moment. If its report says it left something running in the background, that may still be going.\n", rel.Who(), roundDur(now.Sub(rel.StateSince)))
 		}
 	}
-	if n := len(st.RunningTasks()); n > 0 {
-		working = true
-		fmt.Fprintf(&b, "%d task(s) running.\n", n)
-	}
-	reason := ""
-	if lastYield != nil {
-		reason = clipRunes(oneLine(lastYield.Reason, 300), 300)
-	}
 	switch {
 	case st.Question != nil:
-		fmt.Fprintf(&b, "The agent asked the user a question and is waiting for the answer: %s\n", clipRunes(oneLine(st.Question.Text, 300), 300))
+		fmt.Fprintf(&b, "The user was asked a question and the session waits for the answer: %s\n", clipRunes(oneLine(st.Question.Text, 300), 300))
 	case st.Ended:
 		fmt.Fprintf(&b, "The session has ended (%s).\n", st.EndReason)
 	case working:
-	case lastYield == nil:
-		b.WriteString("The agent is working.\n")
-	case st.RelayMode() && len(st.ActiveRelays()) == 0:
-		// The user stopped the relayed agent. Said outright, that becomes
-		// the summary's second sentence ("…; relay stopped"), which tells
-		// the reader nothing about the work.
+	case len(st.ActiveRelays()) == 0:
+		// The user stopped the agent. Said outright, that becomes the
+		// summary's second sentence ("…; agent stopped"), which tells the
+		// reader nothing about the work.
 		b.WriteString("Nothing is in progress. The second sentence says where the work was left: what is finished and what is not.\n")
-	case st.RelayMode():
-		// The note is eagent's own, about a session another agent works in.
-		if reason != "" {
-			fmt.Fprintf(&b, "Latest status note: %s\n", reason)
-		}
-	case lastYield.Done:
-		fmt.Fprintf(&b, "The agent says the work is finished: %s\n", reason)
-	default:
-		fmt.Fprintf(&b, "Nothing is running. The agent's closing note: %s\n", reason)
 	}
 	return b.String()
 }
@@ -676,7 +764,9 @@ func SummarizeSession(ctx context.Context, model *llm.Client, set *prompts.Set, 
 	// to set unless someone pinned it.
 	st.TitleRevisions = 0
 	res.Input = summaryInput(st, base, time.Now())
-	out, err := summarize(ctx, summaryClient(project, model), set.Render("THREAD-SUMMARY.md", nil), res.Input)
+	out, err := summarize(ctx, func(ctx context.Context, req llm.Request) (*llm.Response, error) {
+		return model.Complete(ctx, req, nil)
+	}, set.Render("THREAD-SUMMARY.md", nil), res.Input)
 	res.Usage = out.Usage
 	if err != nil {
 		return res, err

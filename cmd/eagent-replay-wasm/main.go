@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"strings"
 	"syscall/js"
+	// A browser has no zoneinfo files, so without the zones built in the
+	// session's time zone (SessionStartData.TZ) cannot be loaded and the
+	// prompt's clock times would be rendered at the browser's offset.
+	_ "time/tzdata"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/projection"
@@ -81,30 +85,24 @@ func main() {
 		}
 		return projection.Detail(captured, current), nil
 	})
+	// eagentReplayConversation is eagent's conversation as its model saw it
+	// at an event (0 or nothing: the latest).
 	register("eagentReplayConversation", func(args []js.Value) (any, error) {
-		if len(args) < 2 || len(args) > 3 {
-			return nil, fmt.Errorf("actor, task and optional event sequence required")
+		if len(args) > 1 {
+			return nil, fmt.Errorf("at most an event sequence")
 		}
 		current := st
-		if len(args) == 3 && args[2].Type() == js.TypeNumber && args[2].Int() > 0 {
+		if len(args) == 1 && args[0].Type() == js.TypeNumber && args[0].Int() > 0 {
 			var prefix []event.Event
 			for _, ev := range st.Events {
-				if ev.Seq > int64(args[2].Int()) {
+				if ev.Seq > int64(args[0].Int()) {
 					break
 				}
 				prefix = append(prefix, ev)
 			}
 			current = state.Replay(prefix)
 		}
-		switch args[0].String() {
-		case "orchestrator":
-			return current.OrchestratorView(), nil
-		case "task":
-			return current.TaskView(args[1].String()), nil
-		case "narrator":
-			return current.NarratorView(nil), nil
-		}
-		return nil, fmt.Errorf("unknown actor")
+		return current.View(nil), nil
 	})
 	select {}
 }

@@ -1,0 +1,17 @@
+{
+  "/description": "\"GPT-6 Astra (OpenAI, OpenRouter fallback)\"",
+  "/finalechat/artifacts": "true",
+  "/max_calls_per_turn": "30",
+  "/model/api_key_env": "\"OPENAI_API_KEY\"",
+  "/model/base_url": "\"https://api.openai.com/v1\"",
+  "/model/context_tokens": "1050000",
+  "/model/max_tokens": "32768",
+  "/model/model": "\"gpt-6-astra\"",
+  "/model/protocol": "\"openai-responses\"",
+  "/preset": "\"openai-high\"",
+  "/quiet_seconds": "180",
+  "/report_max_chars": "20000",
+  "/rollover_tokens": "0",
+  "/summarizer/mode": "\"inline\"",
+  "/tick_seconds": "30"
+}

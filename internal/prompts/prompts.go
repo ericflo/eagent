@@ -1,20 +1,16 @@
-// Package prompts holds the actors' system prompts and task templates as
-// Markdown files. The defaults are embedded in the binary; a project can
+// Package prompts holds eagent's system prompt and the templates around it
+// as Markdown files. The defaults are embedded in the binary; a project can
 // override any of them by placing a file with the same name in
 // .agents/eagent/prompts/.
 //
 // Templates use Go text/template syntax. The data each one receives:
 //
-//	ORCHESTRATOR.md        {{.Project}} {{.Instructions}} {{.Interactive}} {{.Facts}}
-//	RELAY.md               {{.Project}} {{.Instructions}} {{.Interactive}} {{.Facts}} {{.Agent}} (the orchestrator in a relay session)
-//	TASK-WORKER.md         {{.Project}} {{.Instructions}} {{.Facts}}
-//	NARRATOR.md            {{.Persona}} {{.Phone}} {{.Facts}} {{.Relay}}
-//	PERSONA.md             (plain text, inserted into NARRATOR.md)
-//	FACTS.md               {{.Project}} (how eagent works; inserted into the three actor prompts)
-//	USER_MESSAGE.md        {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
-//	USER_ANSWER.md         {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
-//	COMPACTION-DOSSIER.md  {{.SessionDir}} {{.Files}} {{.Reason}} {{.RunningTasks}} {{.Relay}}
-//	THREAD-SUMMARY.md      (plain text: how the session's title and summary are written)
+//	EAGENT.md         {{.Persona}} {{.Phone}} {{.Project}} {{.Interactive}} {{.Instructions}} (the system prompt)
+//	PERSONA.md        (plain text, inserted into EAGENT.md)
+//	USER_MESSAGE.md   {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.Client}} {{.ClientLine}}
+//	USER_ANSWER.md    {{.Text}} {{.Time}} {{.Timestamp}} {{.Source}} {{.Nick}} {{.Attachments}} {{.QuestionID}} {{.Question}} {{.Client}} {{.ClientLine}}
+//	DOSSIER.md        {{.Files}} {{.Index}} {{.Fresh}} {{.Reason}} (the request for a briefing before the conversation restarts)
+//	THREAD-SUMMARY.md (plain text: how a dedicated summarizer writes the title and summary)
 package prompts
 
 import (
@@ -37,7 +33,25 @@ import (
 var builtin embed.FS
 
 // Names lists the prompt files, in display order.
-var Names = []string{"ORCHESTRATOR.md", "RELAY.md", "TASK-WORKER.md", "NARRATOR.md", "PERSONA.md", "FACTS.md", "USER_MESSAGE.md", "USER_ANSWER.md", "COMPACTION-DOSSIER.md", "THREAD-SUMMARY.md"}
+var Names = []string{"EAGENT.md", "PERSONA.md", "USER_MESSAGE.md", "USER_ANSWER.md", "DOSSIER.md", "THREAD-SUMMARY.md"}
+
+// Retired are prompt files of the three-actor design. A project's override
+// of one of them is read by nothing now.
+var Retired = []string{"ORCHESTRATOR.md", "NARRATOR.md", "RELAY.md", "TASK-WORKER.md", "FACTS.md", "COMPACTION-DOSSIER.md"}
+
+// Ignored lists a project's overrides of retired prompts: files that used
+// to change how eagent behaves and no longer do. The caller says so, since
+// silently dropping someone's instructions is worse than a line of log.
+func Ignored(project string) []string {
+	var out []string
+	for _, name := range Retired {
+		p := filepath.Join(Dir(project), name)
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // Dir is where a project keeps its overrides.
 func Dir(project string) string { return filepath.Join(project, ".agents", "eagent", "prompts") }
@@ -91,37 +105,33 @@ func (s *Set) Render(name string, data any) string {
 	return strings.TrimSpace(b.String()) + "\n"
 }
 
-// OrchestratorData feeds ORCHESTRATOR.md and RELAY.md. Agent names the
-// relayed agent ("Codex") in a relay session.
-type OrchestratorData struct {
+// EagentData feeds EAGENT.md. Phone is the one line that says the user
+// also reads on their phone ("" without a mirror). Nothing here may change
+// while a session runs: the system prompt opens every request, and a byte
+// that moved would cost the provider's cache of everything after it.
+type EagentData struct {
+	Persona      string
+	Phone        string
 	Project      string
-	Instructions string
 	Interactive  bool
-	Facts        string
-	Agent        string
-}
-
-// TaskData feeds TASK-WORKER.md.
-type TaskData struct {
-	Project      string
 	Instructions string
-	Facts        string
 }
 
-// NarratorData feeds NARRATOR.md. Relay names the relayed agent ("Codex")
-// in a relay session, "" otherwise.
-type NarratorData struct{ Persona, Phone, Facts, Relay string }
-
-// FactsData feeds FACTS.md.
-type FactsData struct{ Project string }
-
-// DossierData feeds COMPACTION-DOSSIER.md.
+// DossierData feeds DOSSIER.md.
 type DossierData struct {
-	SessionDir   string
-	Files        string
-	Reason       string
-	RunningTasks []string
-	Relay        string // the relayed agent in a relay session
+	// Files is the table of the session's record files, oldest first.
+	Files string
+	// Index lists the record by place (file:line): everything before the
+	// last dossier in outline, and what happened since line by line.
+	Index string
+	// Fresh says the model no longer has the conversation in front of it
+	// (the provider refused it as too long) and writes from the files.
+	Fresh bool
+	// Legacy says the record was written by the three-actor design: there
+	// never was a conversation of this model's to restart.
+	Legacy bool
+	// Reason is why the restart is happening ("" when it is only size).
+	Reason string
 }
 
 // UserMessageData feeds USER_MESSAGE.md. Timestamp is preformatted from

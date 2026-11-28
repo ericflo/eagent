@@ -31,7 +31,7 @@ func TestArchiveCapturesRuntimeContextWithoutControlState(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := runtimecontrol.FromConfig(config.Defaults())
-	values.TaskConcurrency, values.Revision = 7, 3
+	values.TickSeconds, values.Revision = 7, 3
 	c, err := runtimecontrol.New(project, session.ID, values, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestArchiveCapturesRuntimeContextWithoutControlState(t *testing.T) {
 		if err := json.Unmarshal(raw, &captured); err != nil {
 			t.Fatal(err)
 		}
-		if captured.View.Generation != c.Generation || captured.View.Snapshot.RuntimeKnown != available || captured.View.Snapshot.Saved["/task_concurrency"] != float64(7) {
+		if captured.View.Generation != c.Generation || captured.View.Snapshot.RuntimeKnown != available || captured.View.Snapshot.Saved["/tick_seconds"] != float64(7) {
 			t.Fatalf("lost runtime context: %+v", captured.View)
 		}
 		if exported.Manifest.Dataset["runtime_settings_version"] != captured.View.Snapshot.Version {

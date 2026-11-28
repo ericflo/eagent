@@ -63,19 +63,7 @@ func List(root string) ([]Info, error) {
 		if !e.IsDir() {
 			continue
 		}
-		info := Info{ID: e.Name(), Path: filepath.Join(root, e.Name())}
-		files, _ := subsessionFiles(info.Path)
-		info.Subsessions = len(files)
-		for _, f := range files {
-			st, err := os.Stat(filepath.Join(info.Path, f))
-			if err != nil {
-				continue
-			}
-			info.Size += st.Size()
-			if st.ModTime().After(info.Modified) {
-				info.Modified = st.ModTime()
-			}
-		}
+		info := Refresh(Info{ID: e.Name(), Path: filepath.Join(root, e.Name())})
 		if ms, err := strconv.ParseInt(strings.TrimLeft(e.Name(), "0"), 10, 64); err == nil {
 			info.Started = time.UnixMilli(ms)
 		} else if st, err := e.Info(); err == nil {
@@ -85,6 +73,25 @@ func List(root string) ([]Info, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// Refresh measures a session again: its subsessions, size and last change,
+// which grow while it runs.
+func Refresh(info Info) Info {
+	info.Subsessions, info.Size, info.Modified = 0, 0, time.Time{}
+	files, _ := subsessionFiles(info.Path)
+	info.Subsessions = len(files)
+	for _, f := range files {
+		st, err := os.Stat(filepath.Join(info.Path, f))
+		if err != nil {
+			continue
+		}
+		info.Size += st.Size()
+		if st.ModTime().After(info.Modified) {
+			info.Modified = st.ModTime()
+		}
+	}
+	return info
 }
 
 // Resolve finds a session by exact id, unique prefix, or "latest".
@@ -148,10 +155,15 @@ type Session struct {
 	mu      sync.Mutex
 	file    *os.File
 	current string // current subsession file name
+	line    int    // lines written to it so far
 	seq     int64
 	lock    *os.File
 	closed  bool
 	nextSeq func() int64
+	// pending is the next subsession's file, created by CreateSubsession
+	// and not yet switched to.
+	pending     *os.File
+	pendingName string
 	// Stale names the inbox files that already existed when this run took
 	// the lock: orders meant for an earlier run, not this one.
 	Stale map[string]bool
@@ -179,47 +191,116 @@ func Create(root string, now time.Time) (*Session, error) {
 		}
 	}
 	s := &Session{ID: id, Path: path}
-	if err := s.acquireLock(); err != nil {
-		return nil, err
-	}
-	if _, err := s.newSubsession(now); err != nil {
+	if err := s.start(now); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// Open opens an existing session for appending. It does not read history;
-// use Read for that.
-func Open(path string, lastSeq int64, now time.Time) (*Session, error) {
+// start takes a new session's lock and makes its first file. A file it
+// cannot make lets the lock go again, so the directory is not left taken by
+// a run that never started.
+func (s *Session) start(now time.Time) error {
+	if err := s.acquireLock(); err != nil {
+		return err
+	}
+	if _, err := s.newSubsession(now); err != nil {
+		s.Close()
+		return err
+	}
+	return nil
+}
+
+// Open opens an existing session for appending and returns its committed
+// events. The lock is taken before anything is read: a run that is still
+// finishing (its last events, a new subsession) holds it until it is done,
+// and what it wrote in that time is part of the history this run goes on
+// from, so its numbering and its file are the ones the record ends with.
+func Open(path string, now time.Time) (*Session, []event.Event, error) {
+	s := &Session{ID: filepath.Base(path), Path: path}
+	if err := s.acquireLock(); err != nil {
+		return nil, nil, err
+	}
 	files, err := subsessionFiles(path)
 	if err != nil {
-		return nil, err
+		s.Close()
+		return nil, nil, err
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("%s has no subsession files", path)
-	}
-	s := &Session{ID: filepath.Base(path), Path: path, seq: lastSeq}
-	if err := s.acquireLock(); err != nil {
-		return nil, err
+		s.Close()
+		return nil, nil, fmt.Errorf("%s has no subsession files", path)
 	}
 	current := files[len(files)-1]
+	if len(files) > 1 {
+		if fi, err := os.Stat(filepath.Join(path, current)); err == nil && fi.Size() == 0 {
+			// The next subsession's file was made (CreateSubsession) and
+			// the run stopped before anything was written to it. It holds
+			// nothing, and a file of the record begins with its
+			// subsession.start: it is let go, and the session goes on where
+			// its record does (a restart left half-done is finished by the
+			// harness).
+			if err := os.Remove(filepath.Join(path, current)); err == nil {
+				current = files[len(files)-2]
+			}
+		}
+	}
 	if err := s.repairTail(filepath.Join(path, current)); err != nil {
 		s.Close()
-		return nil, err
+		return nil, nil, err
+	}
+	events, err := Read(path)
+	if err != nil {
+		s.Close()
+		return nil, nil, err
+	}
+	if n := len(events); n > 0 {
+		s.seq = events[n-1].Seq
 	}
 	f, err := os.OpenFile(filepath.Join(path, current), os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		s.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	s.file = f
 	s.current = current
-	return s, nil
+	s.line = countLines(filepath.Join(path, current))
+	return s, events, nil
+}
+
+// countLines counts the lines of a subsession file, so an event appended
+// to it can say which line it is.
+func countLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	n := 0
+	buf := make([]byte, 64<<10)
+	for {
+		k, err := f.Read(buf)
+		n += bytes.Count(buf[:k], []byte{'\n'})
+		if err != nil {
+			return n
+		}
+	}
 }
 
 // ReadOnly returns a Session handle that can enumerate files but not append.
 func ReadOnly(path string) *Session {
 	return &Session{ID: filepath.Base(path), Path: path, closed: true}
+}
+
+// lockWaitHooks: session path -> what OnLockWait registered.
+var lockWaitHooks sync.Map
+
+// OnLockWait has fn called, once per open, when a run finds the session at
+// path locked and begins to wait for it; the run tries the lock again as
+// soon as fn returns. Tests use it to put events in a known order around
+// the wait. The returned function removes it.
+func OnLockWait(path string, fn func()) (remove func()) {
+	lockWaitHooks.Store(path, fn)
+	return func() { lockWaitHooks.Delete(path) }
 }
 
 func (s *Session) acquireLock() error {
@@ -231,9 +312,16 @@ func (s *Session) acquireLock() error {
 	// A liveness probe holds a shared lock for a moment; wait it out before
 	// declaring the session taken.
 	var lerr error
+	hooked := false
 	for i := 0; i < 50; i++ {
 		if lerr = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); lerr == nil {
 			break
+		}
+		if fn, ok := lockWaitHooks.Load(s.Path); ok && !hooked {
+			hooked = true
+			fn.(func())()
+			i-- // the wait starts after the hook
+			continue
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -315,7 +403,8 @@ func (s *Session) Append(ev event.Event) (event.Event, error) {
 	if err := s.file.Sync(); err != nil {
 		return ev, err
 	}
-	ev.Source = event.Source{File: s.current}
+	s.line++
+	ev.Source = event.Source{File: s.current, Line: s.line}
 	return ev, nil
 }
 
@@ -331,9 +420,10 @@ func (s *Session) NewSubsession(now time.Time) (string, error) {
 func (s *Session) NewSubsessionName(now time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now = s.after(now)
 	name := NewID(now) + ".jsonl"
 	for i := 0; ; i++ {
-		if _, err := os.Stat(filepath.Join(s.Path, name)); errors.Is(err, os.ErrNotExist) && name != s.current {
+		if _, err := os.Stat(filepath.Join(s.Path, name)); errors.Is(err, os.ErrNotExist) && name > s.current {
 			return name, nil
 		}
 		now = now.Add(time.Millisecond)
@@ -344,20 +434,83 @@ func (s *Session) NewSubsessionName(now time.Time) (string, error) {
 	}
 }
 
-// OpenSubsession closes the current file and starts appending to name.
+// CreateSubsession creates the file the next subsession will be written
+// to and returns its name, without switching to it: the session goes on
+// appending to its current file until OpenSubsession is given that name.
+// So the closing event of the current file can name its successor knowing
+// the successor exists, and a session that cannot create the file (a full
+// disk, a directory it may no longer write) is left exactly as it was.
+func (s *Session) CreateSubsession(now time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now = s.after(now)
+	s.dropPending()
+	name := NewID(now) + ".jsonl"
+	for i := 0; ; i++ {
+		// After the current file in name order too, which is the order
+		// the record is read in, even when the clock was set back.
+		if name > s.current {
+			f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
+			if err == nil {
+				s.pending, s.pendingName = f, name
+				return name, nil
+			}
+			if !errors.Is(err, os.ErrExist) {
+				return "", err
+			}
+		}
+		now = now.Add(time.Millisecond)
+		name = NewID(now) + ".jsonl"
+		if i > 1000 {
+			return "", errors.New("could not allocate a subsession name")
+		}
+	}
+}
+
+// after is now, or the first moment whose file name sorts after the
+// current file's when the clock reads earlier than that file's name (it was
+// set back): the record is read in the order its file names sort.
+func (s *Session) after(now time.Time) time.Time {
+	if ms, err := strconv.ParseInt(strings.TrimSuffix(s.current, ".jsonl"), 10, 64); err == nil && now.UnixMilli() <= ms {
+		return time.UnixMilli(ms + 1)
+	}
+	return now
+}
+
+// dropPending lets go of a file CreateSubsession made that was never
+// switched to. It holds nothing, so it is removed.
+func (s *Session) dropPending() {
+	if s.pending == nil {
+		return
+	}
+	_ = s.pending.Close()
+	_ = os.Remove(filepath.Join(s.Path, s.pendingName))
+	s.pending, s.pendingName = nil, ""
+}
+
+// OpenSubsession closes the current file and starts appending to name: the
+// file CreateSubsession made, or a new one. The new file is in hand before
+// the current one is let go, so when it cannot be created the session goes
+// on appending where it was.
 func (s *Session) OpenSubsession(name string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	f := s.pending
+	if f != nil && s.pendingName == name {
+		s.pending, s.pendingName = nil, ""
+	} else {
+		var err error
+		f, err = os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
+		if err != nil {
+			return "", err
+		}
+	}
 	if s.file != nil {
 		_ = s.file.Close()
-		s.file = nil
-	}
-	f, err := os.OpenFile(filepath.Join(s.Path, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_EXCL, 0o644)
-	if err != nil {
-		return "", err
 	}
 	s.file = f
 	s.current = name
+	s.line = 0
 	s.closed = false
 	return name, nil
 }
@@ -381,6 +534,7 @@ func (s *Session) newSubsession(now time.Time) (string, error) {
 	}
 	s.file = f
 	s.current = name
+	s.line = 0
 	s.closed = false
 	return name, nil
 }
@@ -399,6 +553,7 @@ func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	s.dropPending()
 	var err error
 	if s.file != nil {
 		err = s.file.Close()

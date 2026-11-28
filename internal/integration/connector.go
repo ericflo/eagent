@@ -75,14 +75,16 @@ type commandJournal struct {
 	ConfigEdits    []control.Edit      `json:"config_edits,omitempty"`
 	ServersStarted bool                `json:"servers_started,omitempty"`
 	SavePreset     string              `json:"save_preset,omitempty"`
+	// InForce are the (address, key variable) pairs of the routes in force
+	// when a configuration command was applied, read with BeforeRaw; its
+	// undo may put such a pair back (settings.PrepareUndo).
+	InForce [][2]string `json:"in_force,omitempty"`
 }
 
 type sessionStartIntent struct {
-	Prompt string               `json:"prompt"`
-	Dir    string               `json:"dir,omitempty"`
-	Relay  string               `json:"relay,omitempty"`
-	Config string               `json:"config,omitempty"`
-	Routes map[string]RoutePick `json:"routes,omitempty"`
+	Prompt string `json:"prompt"`
+	Dir    string `json:"dir,omitempty"`
+	Relay  string `json:"relay,omitempty"`
 	// RelayModel and RelayEffort are the relayed agent's picks.
 	RelayModel  string `json:"relay_model,omitempty"`
 	RelayEffort string `json:"relay_effort,omitempty"`
@@ -257,7 +259,7 @@ func startConnectorAt(ctx context.Context, project, path, lockPath string, logf 
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(connectorRetry):
 			}
 		}
 	}()
@@ -267,6 +269,11 @@ func startConnectorAt(ctx context.Context, project, path, lockPath string, logf 
 func RunConnector(ctx context.Context, project string, logf func(string, ...any)) error {
 	return runConnectorAt(ctx, project, connectorPath(project), logf)
 }
+
+// connectorRetry is how long the connector waits before it tries again
+// after a failure, or looks again at a connector that is not active yet.
+// A variable so that tests need not wait it out.
+var connectorRetry = 5 * time.Second
 
 var errConnectorOccupied = errors.New("another settings connection is still active; waiting for it to disconnect")
 
@@ -318,7 +325,7 @@ func runConnectorAt(ctx context.Context, project, path string, logf func(string,
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(connectorRetry):
 		}
 	}
 	return ctx.Err()
@@ -354,7 +361,7 @@ func runConnectorConnection(ctx context.Context, project string, local connector
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Second):
+			case <-time.After(connectorRetry):
 				continue
 			}
 		}
@@ -733,11 +740,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 				prepareErr = fmt.Errorf("the first message is required")
 			} else if err := checkStartDir(dir); err != nil {
 				prepareErr = err
-			} else if cfgName, picks, err := startPicks(s.Project, q.Proposal.Parameters); err != nil {
-				prepareErr = err
 			} else {
 				model, effort := RelayPicks(q.Proposal.Parameters, relayProfile)
-				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir, Relay: relayProfile, Config: cfgName, Routes: picks, RelayModel: model, RelayEffort: effort}
+				journal.Session = &sessionStartIntent{Prompt: prompt, Dir: dir, Relay: relayProfile, RelayModel: model, RelayEffort: effort}
 			}
 		case "prompt.set", "prompt.reset", "bundle.save", "bundle.delete":
 			change, err := s.PrepareResource(editor, q.Proposal, grant)
@@ -775,11 +780,13 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 				if hasSavePreset {
 					journal.SavePreset = savePreset
 				}
-				raw := config.Resolve(s.Project, s.Preset, s.Bundle).File.Raw
+				res := config.Resolve(s.Project, s.Preset, s.Bundle)
+				raw := res.File.Raw
 				if raw == "" {
 					raw = "{}\n"
 				}
 				journal.BeforeRaw = &raw
+				journal.InForce = s.RunningPairs(res)
 			}
 		}
 		if prepareErr != nil {
@@ -807,7 +814,7 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 		// Starting a session must not hold the settings writer: the new
 		// session reads the configuration through the same lock.
 		editor.Close()
-		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir, Relay: journal.Session.Relay, RelayModel: journal.Session.RelayModel, RelayEffort: journal.Session.RelayEffort, Config: journal.Session.Config, Routes: journal.Session.Routes})
+		started, err := startSession(ctx, s.Project, SessionRequest{Prompt: journal.Session.Prompt, Dir: journal.Session.Dir, Relay: journal.Session.Relay, RelayModel: journal.Session.RelayModel, RelayEffort: journal.Session.RelayEffort})
 		if err != nil {
 			if ctx.Err() != nil {
 				return finish("unknown", map[string]any{"message": "Starting the session was interrupted. It was not repeated; check the session list."})
@@ -898,6 +905,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 			if reconcile {
 				return finish("unknown", map[string]any{"message": "The prepared resource write cannot be confirmed. It was not repeated."})
 			}
+			if err := s.CheckResource(*journal.Resource); err != nil {
+				return finish("rejected", map[string]any{"message": err.Error()})
+			}
 			if err := journal.Resource.Apply(editor); err != nil {
 				return journal, err
 			}
@@ -914,6 +924,9 @@ func executeCommand(ctx context.Context, s *settings.Service, grant control.Gran
 	case journal.BeforeETag:
 		if reconcile {
 			return finish("unknown", map[string]any{"reason": "prepared_but_unconfirmed", "message": "The prepared write has no confirmed outcome. No edit was repeated."})
+		}
+		if err := s.CheckWrite(journal.Desired); err != nil {
+			return finish("rejected", map[string]any{"message": err.Error()})
 		}
 		if _, err := editor.SaveRaw(journal.Desired, journal.BeforeETag, true); err != nil {
 			return journal, err

@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"regexp"
 	"strings"
@@ -12,22 +11,33 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
-	"github.com/ericflo/eagent/internal/state"
 )
 
 // The status line: what the session is doing right now, shown on the phone
 // as a typing indicator with a timer. It is derived from the runtime's own
-// state after every event, written at most every few seconds, refreshed
-// while it stays the same so it never lapses mid-work, and cleared when the
-// session ends. It never creates a thread and never notifies anyone.
+// state whenever the loop has run, written at most every few seconds,
+// refreshed while it stays the same so it never lapses mid-work, and
+// cleared when the session ends. It never creates a thread and never
+// notifies anyone.
+
+// statusMinGap is the least time between writes; a variable so tests can
+// shorten it.
+var statusMinGap = 2500 * time.Millisecond
+
+// statusFirstLook is when the status keeper first looks after it starts;
+// a variable so tests can shorten it.
+var statusFirstLook = time.Second
+
+// statusLookFloor is the least time between two looks of the keeper; a
+// variable so tests can shorten it.
+var statusLookFloor = 200 * time.Millisecond
 
 const (
-	statusMinGap      = 2500 * time.Millisecond // between writes
-	statusRefresh     = 40 * time.Second        // re-send an unchanged busy status
-	statusWaitRefresh = 4 * time.Minute         // re-send an unchanged waiting status
-	statusTTL         = 90                      // seconds a busy status lives without a refresh
-	statusWaitTTL     = 300                     // seconds a waiting status lives
-	meRefresh         = 3 * time.Minute         // re-read the account (remote mode, features)
+	statusRefresh     = 40 * time.Second // re-send an unchanged busy status
+	statusWaitRefresh = 4 * time.Minute  // re-send an unchanged waiting status
+	statusTTL         = 90               // seconds a busy status lives without a refresh
+	statusWaitTTL     = 300              // seconds a waiting status lives
+	meRefresh         = 3 * time.Minute  // re-read the account (remote mode, features)
 )
 
 // phoneStats is what the keeper reports as thread meta.
@@ -100,7 +110,15 @@ func (p *phone) markSent(a *finalechat.Activity) {
 	}
 	p.mu.Lock()
 	p.sent, p.sentAt = *a, time.Now()
+	// The post carried the line as it was when it went out. When the work
+	// has moved on since, the phone now shows an older line than the
+	// session wants, and only the keeper can put that right: wake it, or
+	// it sleeps until its refresh.
+	stale := a.Text != p.want.Text || a.Kind != p.want.Kind
 	p.mu.Unlock()
+	if stale {
+		p.kick()
+	}
 }
 
 // currentActivity describes the session's present work in one line. Loop
@@ -113,55 +131,32 @@ func (r *Runtime) currentActivity() finalechat.Activity {
 	if text, ok := r.relayActivityLine(); ok {
 		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
 	}
-	if procs := r.st.RunningProcs(); len(procs) > 0 {
-		text := "Running " + redactSecrets(shortCommand(procs[0].Command))
-		if len(procs) > 1 {
-			text += fmt.Sprintf(" and %d more", len(procs)-1)
-		}
-		return finalechat.Activity{Text: oneLine(text, 200), Kind: "tool", TTLSeconds: statusTTL}
+	if r.turns.compacting {
+		// The conversation is being restarted from a dossier, which takes
+		// minutes and during which eagent says nothing else.
+		return finalechat.Activity{Text: "Rereading the session so far, to carry on with a clear head", Kind: "thinking", TTLSeconds: statusTTL}
 	}
-	var running []*state.Task
-	queued := 0
-	for _, t := range r.st.RunningTasks() {
-		if t.Status == "running" {
-			running = append(running, t)
-		} else {
-			queued++
-		}
-	}
-	if len(running) > 0 {
-		t := running[0]
-		text := "Working on " + t.Title
-		if step, _ := r.lastStep(t.ID); step != "" {
-			text += ": " + step
-		}
-		if len(running) > 1 {
-			text += fmt.Sprintf(" (+%d tasks)", len(running)-1)
-		}
-		return finalechat.Activity{Text: oneLine(redactSecrets(text), 200), Kind: "working", TTLSeconds: statusTTL}
-	}
-	if r.orchBusy {
+	if r.turns.busy {
 		text := "Thinking about the next step"
-		if !r.orchCallAt.IsZero() && now.Sub(r.orchCallAt) > 45*time.Second {
+		if !r.turns.callAt.IsZero() && now.Sub(r.turns.callAt) > 45*time.Second {
 			text = "Still thinking (a long think or a long reply)"
 		}
 		return finalechat.Activity{Text: text, Kind: "thinking", TTLSeconds: statusTTL}
 	}
-	if r.narrBusy {
-		return finalechat.Activity{Text: "Writing to you", Kind: "typing", TTLSeconds: statusTTL}
-	}
 	if r.st.Question != nil {
 		return finalechat.Activity{Text: "Waiting for your answer", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
-	if queued > 0 {
-		return finalechat.Activity{Text: fmt.Sprintf("Waiting for a free worker (%d queued)", queued), Kind: "working", TTLSeconds: statusTTL}
+	for _, rel := range r.st.ActiveRelays() {
+		if rel.State == "blocked" {
+			// Stopped on a dialog on its own screen: it waits on a person,
+			// and the line says on what.
+			return finalechat.Activity{Text: rel.Who() + " is stopped on a prompt on its screen", Kind: "waiting", TTLSeconds: statusWaitTTL}
+		}
 	}
-	// Nothing is running, nobody is mid-call, no question is open: the
-	// session is waiting on the user, whether it has yielded (Idle) or has
-	// simply not started yet (a fresh interactive session before the first
-	// message). Idle() alone misses the second case and used to leave a
-	// phantom "Working" on the phone.
-	if r.opts.Interactive || r.listeningAfterDismissal() {
+	// No agent is mid-turn, no model call is in flight, no question is
+	// open: the session waits on the user. One with an agent stays up for
+	// as long as the agent does.
+	if r.opts.Interactive || len(r.st.ActiveRelays()) > 0 || r.listeningAfterDismissal() {
 		return finalechat.Activity{Text: "Waiting for your next message", Kind: "waiting", TTLSeconds: statusWaitTTL}
 	}
 	return finalechat.Activity{} // a batch session with nothing left is about to end
@@ -194,7 +189,7 @@ func (r *Runtime) phoneStats() phoneStats {
 // server's seq ordering settles any race between the two.
 func (p *phone) keeper(r *Runtime) {
 	defer p.wg.Done()
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(statusFirstLook)
 	defer timer.Stop()
 	lastMe := time.Now()
 	var lastMeta phoneStats
@@ -229,8 +224,8 @@ func (p *phone) keeper(r *Runtime) {
 		if d := meRefresh - time.Since(lastMe); d < next {
 			next = d
 		}
-		if next < 200*time.Millisecond {
-			next = 200 * time.Millisecond
+		if next < statusLookFloor {
+			next = statusLookFloor
 		}
 		timer.Reset(next)
 	}
@@ -264,18 +259,36 @@ func (p *phone) pushStatus() time.Duration {
 	ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
 	defer cancel()
 	var err error
+	shown := want
+	turnedDown := false
 	if want.Text == "" {
 		err = p.client.ClearActivity(ctx, p.ref, now.UnixNano())
 	} else {
 		want.Seq = now.UnixNano()
-		_, err = p.client.SetActivity(ctx, p.ref, want)
+		var applied bool
+		var line *finalechat.Status
+		applied, line, err = p.client.SetActivityShown(ctx, p.ref, want)
+		if err == nil && !applied && (line == nil || line.Text != want.Text || line.Kind != want.Kind) {
+			// The service kept something else (a newer line, or a clear
+			// that outranks this write). What it shows is what was sent,
+			// so the next look sees the difference and writes again. A
+			// repeat it skipped because the same line is still fresh is
+			// shown, and counts as sent.
+			shown, turnedDown = finalechat.Activity{}, true
+			if line != nil {
+				shown = finalechat.Activity{Text: line.Text, Kind: line.Kind}
+			}
+		}
 	}
 	p.mu.Lock()
 	p.sentAt = now
 	if err == nil {
-		p.sent = want
+		p.sent = shown
 	}
 	p.mu.Unlock()
+	if turnedDown {
+		return 2 * statusMinGap
+	}
 	if err != nil {
 		// Best effort: a 404 means the thread is not there yet, anything
 		// else is retried after a full gap. Nothing is logged; the status is

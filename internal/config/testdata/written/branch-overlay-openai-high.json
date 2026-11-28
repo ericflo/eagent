@@ -1,0 +1,8 @@
+{
+  "preset": "openai-high",
+  "model": {
+    "fallback": null,
+    "reasoning_effort": null
+  },
+  "finalechat": {}
+}

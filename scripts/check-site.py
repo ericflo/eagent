@@ -98,47 +98,50 @@ for name in ("robots.txt", "sitemap.xml", ".nojekyll"):
     if not (SITE / name).is_file():
         ERRORS.append(f"Missing {name}")
 
-# Breakout-grid gallery: staged games, thumbnails, and results.json parity.
+page_text = (SITE / "index.html").read_text()
+
+# The main page tells the current story: eagent runs an agent and stands
+# between it and you. The three-actor design survives only in the FAQ entry
+# that says it is gone and in the footer's "Earlier design" links.
+for node in ("user", "eagent", "agent"):
+    if f'data-node="{node}"' not in page_text:
+        ERRORS.append(f"index.html: walkthrough is missing the {node} node")
+for edge in ("words", "relay", "tell"):
+    if f'data-edge="{edge}"' not in page_text:
+        ERRORS.append(f"index.html: walkthrough is missing the {edge} edge")
+for step in ("send", "watch", "progress", "dialog", "end", "ask"):
+    if f'id="step-{step}"' not in page_text:
+        ERRORS.append(f"index.html: walkthrough is missing the {step} step")
+current = re.sub(r'<section class="faq.*?</section>', "", page_text, flags=re.DOTALL)
+current = re.sub(r"<footer.*?</footer>", "", current, flags=re.DOTALL)
+for retired in (
+    "orchestrator", "Orchestrator", "narrator", "Narrator", "task worker",
+    "Task worker", "data-node=\"engine\"", "data-node=\"touch\"", "game-card",
+    "data-play=", "web-tasks.png", "web-chat.png", "neon-brickles", "93%",
+    "Breakout", "#in-practice",
+):
+    if retired in current:
+        ERRORS.append(f"index.html: retired three-actor content outside the FAQ and footer: {retired}")
+if "variance/" in current:
+    ERRORS.append("index.html: the variance page may be linked only from the footer")
+footer = re.search(r"<footer.*?</footer>", page_text, re.DOTALL)
+if not footer or not re.search(r"EARLIER DESIGN</span.*?href=\"variance/\"", footer.group(0), re.DOTALL):
+    ERRORS.append("index.html: the variance page belongs under the footer's EARLIER DESIGN heading")
+if "Does eagent still do the work itself?" not in page_text:
+    ERRORS.append("index.html: missing the FAQ entry on what eagent no longer does")
+
+# The Breakout grid games stay staged so their old URLs keep working.
 grid = json.loads((ROOT / "docs" / "grid" / "results.json").read_text())
 order = grid.get("ranking_by_rubric_total") or sorted(grid["presets"])
-page_text = (SITE / "index.html").read_text()
-game_data_text = None
-for match in re.finditer(
-    r'<script type="application/json" id="game-data">(.*?)</script>', page_text, re.DOTALL
-):
-    game_data_text = match.group(1)
-if game_data_text is None:
-    ERRORS.append("index.html: missing game-data gallery payload")
-    game_data = {}
-else:
-    game_data = json.loads(game_data_text.replace("\\u003c", "<"))
-if set(game_data) != set(grid["presets"]):
-    ERRORS.append("index.html: game-data presets differ from results.json")
+if len(order) != 16:
+    ERRORS.append(f"grid: expected 16 grid presets, found {len(order)}")
 for preset in order:
-    info = grid["presets"][preset]
-    entry = game_data.get(preset, {})
-    for key, expected in (
-        ("title", info["title"]),
-        ("href", f"games/{preset}/"),
-        ("desktop", f"assets/games/{preset}-desktop.png"),
-        ("mobile", f"assets/games/{preset}-mobile.png"),
-    ):
-        if entry.get(key) != expected:
-            ERRORS.append(f"index.html: game-data {preset}.{key} != results.json")
-    if entry.get("cost") != f'${info["cost_usd"]:.2f}':
-        ERRORS.append(f"index.html: game-data {preset}.cost != results.json")
-    if entry.get("rubric") != f'{info["rubric_total"]}/27':
-        ERRORS.append(f"index.html: game-data {preset}.rubric != results.json")
-    if f'id="game-card-{preset}"' not in page_text:
-        ERRORS.append(f"index.html: missing gallery card for {preset}")
-    if f'data-play="{preset}"' not in page_text:
-        ERRORS.append(f"index.html: missing Play button for {preset}")
     game_dir = SITE / "games" / preset
     if not (game_dir / "index.html").is_file():
         ERRORS.append(f"Missing staged game entry: games/{preset}/index.html")
     for shot in ("desktop", "mobile"):
         if not (SITE / "assets" / "games" / f"{preset}-{shot}.png").is_file():
-            ERRORS.append(f"Missing gallery thumbnail: assets/games/{preset}-{shot}.png")
+            ERRORS.append(f"Missing grid thumbnail: assets/games/{preset}-{shot}.png")
     if (game_dir / "index.html").is_file():
         staged = " ".join(
             path.read_text(errors="replace")
@@ -164,14 +167,7 @@ for preset in order:
             if pattern in staged:
                 ERRORS.append(f"games/{preset}/: absolute asset ref {pattern} survived staging")
                 break
-if len(order) != 16:
-    ERRORS.append(f"index.html: expected 16 grid presets, found {len(order)}")
-if page_text.count('<article class="game-card') != len(order):
-    ERRORS.append("index.html: gallery card count != results.json preset count")
-if page_text.count("<tr>") - 1 < len(order):
-    ERRORS.append("index.html: comparison table rows != results.json preset count")
 # Breakout variance annex: staged games, thumbnails, and variance.json parity.
-# The index gallery assertions above are unchanged; this page is separate.
 variance = json.loads((ROOT / "docs" / "grid" / "variance.json").read_text())
 variance_order = [run for lane in ("muse", "fireworks-med", "openrouter-med", "deepseek-fw") for run in variance["lanes"][lane]["runs"]]
 if len(variance_order) != 33:
@@ -253,6 +249,10 @@ for finding in (
 ):
     if finding not in variance_text:
         ERRORS.append(f"variance: missing key finding ({finding})")
+if 'class="history-banner' not in variance_text or "earlier design" not in variance_text:
+    ERRORS.append("variance: missing the banner saying the page documents eagent's earlier design")
+if "#in-practice" in variance_text:
+    ERRORS.append("variance: links to the main page's removed game gallery")
 if "VARIANCE.md" not in variance_text:
     ERRORS.append("variance: missing link to the variance writeup")
 variance_page = pages["variance/index.html"]

@@ -1,4 +1,4 @@
-.PHONY: build test check install replay test-browser
+.PHONY: build test test-times check install replay test-browser
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -10,6 +10,12 @@ build: replay
 
 test: replay
 	go test -race ./...
+
+# The same run, then where its time went: each package's wall time and
+# every test slower than two seconds.
+test-times: replay
+	@out="$$(mktemp)"; go test -race -json ./... > "$$out"; status=$$?; \
+	go run ./scripts/testtimes "$$out"; rm -f "$$out"; exit $$status
 
 check: test
 	go vet ./...

@@ -39,14 +39,15 @@
   }
   function configView() {
     const snapshot = resource.snapshot, details = snapshot.details || {}, effective = expand(snapshot.effective), saved = expand(snapshot.saved);
-    const models = cfg => ['orchestrator', 'task', 'narrator'].map(actor => cfg[actor]?.model || '').join(' · ');
+    const models = cfg => cfg.model?.model || '';
     const presets = Object.entries(data.presets).map(([name, config]) => ({ name, description: config.description, models: models(config) }));
     const bundles = (details.bundles || []).map(name => {
       const entry = data.bundles[name], valid = entry?.config && entry.sha256 === details.context_digests?.['bundle:' + name];
       return { name, description: valid ? entry.config.description : '', models: valid ? models(entry.config) : '', invalid: valid ? '' : entry?.invalid || 'This bundle changed since capture. Reopen the latest artifact to load it.' };
     });
     const project = details.project || snapshot.context || '';
-    return { project, defaults: data.defaults, presets, bundles, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source })), keys: details.keys_present || {}, running: [], server: {},
+    const agents = (field('/relay/default')?.schema?.enum || []).map(name => ({ name: String(name) }));
+    return { project, defaults: data.defaults, presets, bundles, agents, prompts: Object.entries(details.prompts || {}).map(([name, value]) => ({ name, source: value.source, retired: !!value.retired })), keys: details.keys_present || {}, running: [], server: {},
       files: { config: project + '/.agents/eagent/config.json', bundles: project + '/.agents/eagent/configs', prompts: project + '/.agents/eagent/prompts' },
       phone: { state: effective.finalechat?.enabled === false ? 'disabled' : 'configured', detail: 'Mirror defaults are shown here. Live chat delivery and credentials remain with the integration.' },
       resolution: { effective, sources: details.sources || {}, active: details.active || { kind: '', name: '' }, preset: effective.preset || '', file: { exists: !!details.file_etag, etag: snapshot.version, raw: JSON.stringify(saved, null, 2), preset: saved.preset || '', default_config: saved.default_config || '', path: project + '/.agents/eagent/config.json', unknown_keys: [] } } };
@@ -101,16 +102,18 @@
       for (const m of (base.models || [])) if (customIDs.has(m.provider)) existingCustomModels.set(`${m.provider}|${m.id}`, m);
       const customModels = [];
       const seen = new Set();
+      // A model's group is its provider's address (base_url).
+      const providerOf = group => customProviders.find(p => p.id === group || p.base_url === String(group || '').replace(/\/+$/, ''));
       for (const sug of (resource?.descriptor?.suggestions?.models || [])) {
-        if (!customIDs.has(sug.group)) continue;
-        const k = `${sug.group}|${sug.value}`;
+        const pr = providerOf(sug.group);
+        if (!pr) continue;
+        const k = `${pr.id}|${sug.value}`;
         if (seen.has(k)) continue;
         seen.add(k);
         const existing = existingCustomModels.get(k);
         if (existing) { customModels.push(existing); continue; }
-        const pr = customProviders.find(p => p.id === sug.group);
         customModels.push({
-          provider: sug.group, id: sug.value, family: sug.value, label: sug.label || sug.value,
+          provider: pr.id, id: sug.value, family: sug.value, label: sug.label || sug.value,
           protocol: pr?.protocol || 'openai-chat', protocols: pr?.protocols || [], note: sug.detail || '', live: true,
         });
       }
@@ -190,10 +193,36 @@
         if (!base) throw new Error('The base preset is unavailable in this archive.');
         const baseValues = flatten(base), loaded = resource.snapshot.effective, desired = clone(resource.snapshot.saved), form = flatten(cfg);
         const omitted = new Set(['/name', '/description', '/instructions', '/default_config', '/preset', '/servers', '/add_server_url', '/save_preset']);
+        // Relay profiles name programs to run: a captured bundle may carry
+        // them, and they stay as config.json has them.
+        const kept = key => omitted.has(key) || key.startsWith('/relay/profiles/');
+        // A fallback the preset the file will build on gives cannot be
+        // removed by unsetting its fields: say so rather than save as if it
+        // were gone. Another preset, or none, without one is no removal.
+        for (const route of ['/model', '/summarizer/model']) {
+          const has = values => Object.keys(values).some(key => key.startsWith(route + '/fallback/'));
+          if (has(loaded) && has(baseValues) && !has(form)) throw new Error('The fallback this route has comes from its preset and cannot be removed from FinaleChat. Remove it in the local editor, or pick another model.');
+        }
         for (const key of new Set([...Object.keys(form), ...Object.keys(loaded)])) {
-          if (omitted.has(key)) continue;
+          if (kept(key)) continue;
           if (!field(key)) throw new Error('Unsupported setting: ' + key);
           if (!canEdit(key)) continue;
+          const route = key.endsWith('/context_tokens') ? key.slice(0, -'context_tokens'.length) : '', routeModel = route && route + 'model';
+          // On a route a shell variable moves to another address (as
+          // config's moved: a trailing slash is no move), a window the form
+          // still shows as loaded, with the model, stays as the file has
+          // it: the form shows the environment's route, not the file's
+          // (settings.SaveLocked). The window of a model a variable names
+          // is that variable's, and locked (config.Resolve).
+          const trim = value => String(value ?? '').replace(/\/+$/, '');
+          const shell = k => String(field(k)?.source || '').startsWith('env:');
+          const layered = k => Object.hasOwn(resource.snapshot.saved, k) ? resource.snapshot.saved[k] : baseValues[k];
+          const pinned = route && shell(route + 'base_url') && trim(loaded[route + 'base_url']) !== trim(layered(route + 'base_url'));
+          if (pinned && canonical(form[key]) === canonical(loaded[key]) && canonical(form[routeModel]) === canonical(loaded[routeModel])) continue;
+          // A route the form moves to another model or address takes the
+          // window there unless the file names one (config.Overlay,
+          // followModel): the window the form shows is written.
+          if (route && form[key] != null && (canonical(form[routeModel]) !== canonical(baseValues[routeModel]) || trim(form[route + 'base_url']) !== trim(baseValues[route + 'base_url']))) { desired[key] = form[key]; continue; }
           if (body.mode !== 'pin' && canonical(form[key]) === canonical(loaded[key]) && body.base_preset === (resource.snapshot.saved['/preset'] || '')) continue;
           if (form[key] === undefined || form[key] === null || body.mode !== 'pin' && canonical(form[key]) === canonical(baseValues[key])) delete desired[key];
           else desired[key] = form[key];
@@ -207,13 +236,16 @@
         return await stage({ operation: 'settings.apply', edits: editsFor(values, resource.snapshot.saved, false) }, { version: body.if_match });
       }
       if (method === 'POST' && url.pathname === '/api/config/test') {
-        const actor = body.actor_key, route = body.route || 'primary';
-        if (!['orchestrator', 'task', 'narrator'].includes(actor) || !['primary', 'fallback'].includes(route)) throw new Error('Select a saved actor route.');
-        const saved = expand(resource.snapshot.effective)[actor];
-        const selected = route === 'fallback' ? body.actor?.fallback : body.actor, current = route === 'fallback' ? saved?.fallback : saved;
+        const target = body.target, route = body.route || 'primary';
+        if (!['model', 'summarizer'].includes(target) || !['primary', 'fallback'].includes(route)) throw new Error('Select a saved model route.');
+        const effective = expand(resource.snapshot.effective);
+        // A dedicated summarizer with no model of its own uses the session's.
+        const own = effective.summarizer?.model;
+        const saved = target === 'model' ? effective.model : (own?.model ? own : effective.model);
+        const selected = route === 'fallback' ? body.model?.fallback : body.model, current = route === 'fallback' ? saved?.fallback : saved;
         const routeIdentity = value => Object.fromEntries(Object.entries(value || {}).filter(([key]) => !['reasoning_effort', 'fallback'].includes(key)));
         if (!selected || !current || canonical(routeIdentity(selected)) !== canonical(routeIdentity(current))) throw new Error('Save this model route before testing it remotely. Each test uses the reviewed saved route.');
-        return await stage({ operation: 'route.test', parameters: { actor, route, effort: body.effort ?? selected.reasoning_effort ?? '' } }, { routeKey: actor, route });
+        return await stage({ operation: 'route.test', parameters: { target, route, effort: body.effort ?? selected.reasoning_effort ?? '' } }, { routeKey: target, route });
       }
       if (method === 'POST' && url.pathname === '/api/config/bundles') return await stage({ operation: 'bundle.save', parameters: { name: body.name, description: body.description || '', config_json: JSON.stringify(body.config) } }, { bundleSave: { name: body.name, description: body.description || '', config: clone(body.config) } });
       if (method === 'POST' && url.pathname === '/api/config/delete-bundle') return await stage({ operation: 'bundle.delete', parameters: { name: body.name } }, { bundleDelete: body.name });

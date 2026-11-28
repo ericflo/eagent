@@ -1,6 +1,6 @@
 // Package web serves eagent's browser UI: a live view of any session in the
 // project (running in this process or in a terminal elsewhere), a session
-// browser, task and tool-call drill-down, and configuration.
+// browser, a peek at the agent's terminal, and configuration.
 //
 // The log on disk is the source of truth, so the UI tails the JSONL files
 // rather than depending on the process that writes them. Messages to a
@@ -48,8 +48,15 @@ type Server struct {
 
 	mu      sync.Mutex
 	running map[string]*hosted
-	mux     *http.ServeMux
-	logf    func(string, ...any)
+	// resuming is held while a request from the browser decides between a
+	// session's inbox and resuming it (deliver), and while a reply from the
+	// phone decides whether to resume it (Resume).
+	resuming sync.Mutex
+	// stopping is set, under resuming, once Shutdown has begun: from then
+	// on no run starts here (host, hostNewCfg).
+	stopping bool
+	mux      *http.ServeMux
+	logf     func(string, ...any)
 
 	token    string // per-process page token echoed on every mutating request
 	addr     string // the address the server listens on, for Host checks
@@ -62,6 +69,9 @@ type hosted struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	code   int
+	// mirror: the run was started for a reply from the phone, and mirrors
+	// whatever the configuration says of mirroring (Resume).
+	mirror bool
 }
 
 // New builds a server for a project directory.
@@ -99,6 +109,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/events", s.getEvents)
 	s.mux.HandleFunc("GET /api/sessions/{id}/stream", s.stream)
 	s.mux.HandleFunc("GET /api/sessions/{id}/attachments/{name}", s.getAttachment)
+	s.mux.HandleFunc("GET /api/sessions/{id}/agents/{name}/screen", s.getScreen)
+	s.mux.HandleFunc("GET /api/agents", s.listAgents)
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.guard(s.postMessage))
 	s.mux.HandleFunc("POST /api/sessions/{id}/answer", s.guard(s.postAnswer))
 	s.mux.HandleFunc("POST /api/sessions/{id}/dismiss", s.guard(s.postDismiss))
@@ -155,8 +167,23 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // Resume reopens a session nobody is running with a reply the user sent to
 // its thread from the phone, the way postMessage resumes one from the
 // browser. The reply is the session's next turn (or the answer to the
-// question it stopped on); its source keeps the mirror from echoing it.
+// question it stopped on); its source keeps the mirror from echoing it. It
+// carries what a running session reads off the message too (its id, the
+// composer's route and delivery, the client's capabilities), so it is
+// taken as it would be had the session been running. It decides one at a
+// time with the browser's deliver, so the two never both resume it.
+//
+// A run started for a reply mirrors to the phone, whatever this server's
+// configuration says of mirroring: the thread the reply came from is where
+// its refused files are told and where the user's next words are read. It
+// comes back so after a restart of the server too (restoreHosted); any
+// other session a restart brings back with no reply waiting runs on the
+// configuration as it is.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
+	return s.resume(sessionID, msg, msg.ID != "")
+}
+
+func (s *Server) resume(sessionID string, msg integration.PhoneMessage, mirror bool) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
 		return err
@@ -164,10 +191,24 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if info.ID != sessionID {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if s.isHosted(info.ID) || alive(info.Path) {
-		return errors.New("the session is running; its own mirror reads the thread")
+		return ErrRunning
 	}
-	return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments}, "", "", true)
+	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", mirror)
+}
+
+// ErrRunning is Resume's answer for a session that is already running, here
+// or in another process: the reply is its own mirror's to read.
+var ErrRunning = errors.New("the session is running; its own mirror reads the thread")
+
+// phoneResumeOptions are the options a session is resumed with for a
+// message the user sent from the phone.
+func (s *Server) phoneResumeOptions(msg integration.PhoneMessage) harness.Options {
+	route, delivery, client := harness.FromPhone(msg.Meta)
+	return harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: msg.Text, PromptSource: "finalechat", PromptAttachments: msg.Attachments,
+		PromptClient: client, PromptPhoneID: msg.ID, PromptRoute: route, PromptDelivery: delivery, PromptAnswers: harness.AnsweredCard(msg.Meta), PromptRefused: msg.Refused}
 }
 
 // ---- sessions ---------------------------------------------------------------
@@ -175,12 +216,8 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 // Session views are shared with the portable artifact exporter.
 type SessionSummary = projection.SessionSummary
 type SessionDetail = projection.SessionDetail
-type TaskView = projection.TaskView
-type ProcView = projection.ProcView
-type ScheduleView = projection.ScheduleView
 type UsageView = projection.UsageView
 
-var priceFor = projection.PriceFor
 var estimateCost = projection.EstimateCost
 
 func projectionInfo(info store.Info) projection.Metadata {
@@ -202,14 +239,12 @@ func (s *Server) summarize(info store.Info) (SessionSummary, *state.State, error
 // summarizeState summarizes an already-folded log.
 func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary {
 	sum := projection.Summary(projectionInfo(info), st)
-	s.mu.Lock()
-	_, sum.Hosted = s.running[info.ID]
-	s.mu.Unlock()
+	sum.Hosted = s.hostedBusy(info.ID) != nil
 	sum.Alive = sum.Hosted || alive(info.Path)
 	switch {
-	case sum.Alive && st.Idle() && st.Question != nil:
+	case sum.Alive && st.Question != nil:
 		sum.Status = "awaiting-input"
-	case sum.Alive && st.Idle():
+	case sum.Alive && s.idle(info.ID, st):
 		sum.Status = "idle"
 	case sum.Alive:
 		sum.Status = "running"
@@ -217,6 +252,36 @@ func (s *Server) summarizeState(info store.Info, st *state.State) SessionSummary
 		sum.Status = "interrupted"
 	}
 	return sum
+}
+
+// hostedBusy reports, for a session this process runs, whether eagent is in
+// the middle of something the log does not show yet: a model call that has
+// not acted, or a briefing being written for a fresh conversation. It is nil
+// for a session run elsewhere.
+func (s *Server) hostedBusy(id string) *bool {
+	s.mu.Lock()
+	h, ok := s.running[id]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	busy := false
+	if h != nil && h.ui != nil {
+		live := h.ui.status()
+		busy = live.Busy || live.Compacting
+	}
+	return &busy
+}
+
+// idle says nothing more is expected until the user writes: the log shows
+// no open turn of eagent's and no agent starting, working or stopped on a
+// dialog, and (for a session hosted here) eagent is not thinking or writing
+// a briefing.
+func (s *Server) idle(id string, st *state.State) bool {
+	if b := s.hostedBusy(id); b != nil && *b {
+		return false
+	}
+	return projection.Idle(st)
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
@@ -249,6 +314,7 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 	d := projection.Detail(projectionInfo(info), st)
 	sum := s.summarizeState(info, st)
 	d.SessionSummary = sum
+	d.Idle = s.idle(info.ID, st)
 	s.mu.Lock()
 	if h := s.running[info.ID]; h != nil {
 		live := h.ui.status()
@@ -256,22 +322,23 @@ func (s *Server) detailState(info store.Info, st *state.State) *SessionDetail {
 	}
 	s.mu.Unlock()
 	if d.Live == nil && sum.Alive {
-		// Not hosted here: derive activity from open turns in the log.
-		live := harness.Status{OrchestratorBusy: st.Turns[event.ActorOrchestrator] > 0, NarratorBusy: st.Turns[event.ActorNarrator] > 0, ContextTokens: d.Context}
-		if live.OrchestratorBusy {
-			live.OrchestratorFor = time.Since(st.TurnSince[event.ActorOrchestrator]).Round(time.Second).String()
-		}
-		for _, t := range st.RunningTasks() {
-			if t.Status == "running" {
-				live.TasksRunning++
-			} else {
-				live.TasksQueued++
-			}
-		}
-		live.Procs = len(st.RunningProcs())
-		d.Live = &live
+		// Not hosted here: derive activity from the log.
+		d.Live = liveFromLog(st)
 	}
 	return d
+}
+
+// liveFromLog is the status of a session another process runs, as far as
+// its log tells: an open turn of eagent's, and what each agent is doing.
+func liveFromLog(st *state.State) *harness.Status {
+	live := harness.Status{Busy: st.Turns[event.ActorEagent] > 0, ContextTokens: st.ContextTokens(), Waiting: projection.Idle(st) && st.Question == nil, Phone: st.Phone != nil}
+	if live.Busy {
+		live.BusyFor = time.Since(st.TurnSince[event.ActorEagent]).Round(time.Second).String()
+	}
+	for _, r := range st.ActiveRelays() {
+		live.Agents = append(live.Agents, harness.AgentStatus{Name: r.Name, Who: r.Who(), State: r.State})
+	}
+	return &live
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +395,10 @@ func (s *Server) getEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// streamStatusEvery is how often a followed session's status line is sent
+// again. A variable so that tests need not wait it out.
+var streamStatusEvery = 2 * time.Second
+
 // stream tails the session: every new event as an SSE "append" and a status
 // snapshot every couple of seconds.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
@@ -364,9 +435,10 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	tick := time.NewTicker(400 * time.Millisecond)
 	defer tick.Stop()
-	statusTick := time.NewTicker(2 * time.Second)
+	statusTick := time.NewTicker(streamStatusEvery)
 	defer statusTick.Stop()
-	emitStatus := func() { send("status", s.detailState(info, st)) }
+	// The session grows while it is followed: a rollover adds a subsession.
+	emitStatus := func() { info = store.Refresh(info); send("status", s.detailState(info, st)) }
 	emitStatus()
 	tail := newTailer(info.Path, after)
 	for {
@@ -482,23 +554,15 @@ type messageBody struct {
 	Config     string `json:"config"`
 	Preset     string `json:"preset"`
 	UseProject bool   `json:"use_project"`
-	// Routes lets the new-session dialog start a session on catalog models
-	// picked in the browser, on top of the chosen preset/bundle. Only
-	// provider id + model id travel from the browser; the base URL and key
-	// variable are resolved server-side from the catalog, so a browser can
-	// never point a key at an arbitrary host.
-	Routes map[string]routePick `json:"routes,omitempty"`
+	// Dir, Relay, RelayModel and RelayEffort start a new session in a
+	// folder with an agent profile and that agent's model and effort. Empty
+	// means the project root, the default agent and the profile's picks.
+	Dir         string `json:"dir"`
+	Relay       string `json:"relay"`
+	RelayModel  string `json:"relay_model"`
+	RelayEffort string `json:"relay_effort"`
 	// Client declares what context the browser can supply.
 	Client *clientcaps.Caps `json:"client"`
-}
-
-// routePick names one catalog model for one actor, optionally with the
-// reasoning effort to run it at. Effort is validated against the canonical
-// scale and the model's known efforts, when the catalog lists any.
-type routePick struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Effort   string `json:"effort,omitempty"`
 }
 
 func readBody(r *http.Request) (messageBody, error) {
@@ -518,20 +582,106 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}); err != nil {
-			writeErr(w, 500, err)
-			return
+	// Nobody running it: resume here with the message as the prompt, from
+	// the web as the inbox message would be.
+	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, false)
+	})
+	if err != nil {
+		writeErr(w, deliverCode(err), err)
+		return
+	}
+	writeJSON(w, s.deliveredAnswer(how, inbox))
+}
+
+// deliver hands words from the browser to a session: to its inbox when
+// somebody is running it, and otherwise by resuming it here with them
+// (resume). One at a time: of two requests for a stopped session the
+// second waits for the first's resume and then goes to the inbox of the
+// run it started, where it used to fail on the session's lock. A run here
+// takes them on its own loop (Take), so they are on its record before the
+// answer; one that is ending reads its inbox no more: they wait for it to
+// stop (its shutdown is bounded) and resume the session then, and wait
+// again when the run another request resumed it with meanwhile is ending
+// too. Once the server's shutdown has begun they resume nothing (the exit
+// would kill the run): that is errStopping, and the page keeps the words.
+// Words for a session another process runs wait in its inbox ("queued"):
+// it reads them while it runs, and, if it has ended first, they wait for
+// its next run; the server does not resume a session another process ran
+// for them, as it cannot tell from that run's record whether the user
+// stopped it after writing them.
+func (s *Server) deliver(info store.Info, msg harness.InboxMessage, resume func() error) (string, error) {
+	how, _, err := s.deliverTo(info, msg, resume)
+	return how, err
+}
+
+// deliverTo is deliver, which also returns the inbox id of words left
+// "queued", by which the page knows them on the record.
+func (s *Server) deliverTo(info store.Info, msg harness.InboxMessage, resume func() error) (how, inbox string, err error) {
+	s.resuming.Lock()
+	for {
+		s.mu.Lock()
+		h := s.running[info.ID]
+		s.mu.Unlock()
+		if h == nil || h.rt == nil {
+			break
 		}
-		writeJSON(w, map[string]any{"delivered": "inbox"})
-		return
+		s.resuming.Unlock()
+		if !h.rt.Ending() {
+			if took, err := h.rt.Take(msg); took || err != nil {
+				return "inbox", "", err
+			}
+		}
+		<-h.done
+		s.resuming.Lock()
 	}
-	// Nobody is running it: resume here with the message as the prompt.
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
-		writeErr(w, 500, err)
-		return
+	defer s.resuming.Unlock()
+	if alive(info.Path) || s.isHosted(info.ID) {
+		if s.isHosted(info.ID) {
+			return "inbox", "", harness.PostInbox(info.Path, msg)
+		}
+		// Another process runs it: they wait in its inbox (deliver).
+		file, err := harness.PostInboxFile(info.Path, msg)
+		return "queued", strings.TrimSuffix(filepath.Base(file), ".json"), err
 	}
-	writeJSON(w, map[string]any{"delivered": "resumed"})
+	if s.stopping {
+		return "", "", errStopping
+	}
+	return "resumed", "", resume()
+}
+
+// deliveredAnswer is the answer to words deliverTo took as how; words left
+// "queued" are said to wait, not to be delivered, with their inbox id, and
+// what is true of them: the session reads them while it runs and, if it
+// has ended, when it is next resumed; once this server's shutdown has
+// begun, when it next runs.
+func (s *Server) deliveredAnswer(how, inbox string) map[string]any {
+	out := map[string]any{"delivered": how}
+	if how == "queued" {
+		s.resuming.Lock()
+		stopping := s.stopping
+		s.resuming.Unlock()
+		out["inbox"] = inbox
+		out["message"] = "They wait in the session's inbox: the session reads them while it runs and, if it has ended, when it is next resumed (Resume does it here)."
+		if stopping {
+			out["message"] = "They wait in the session's inbox until it next runs."
+		}
+	}
+	return out
+}
+
+// errStopping: nothing is started once this server's shutdown has begun.
+// The page keeps the words for the user to send again; the reply watcher
+// leaves a reply from the phone in its thread for the next server
+// (integration.ErrStopping).
+var errStopping = fmt.Errorf("%w; send it again once it is back", integration.ErrStopping)
+
+// deliverCode is the status of a failed deliver.
+func deliverCode(err error) int {
+	if errors.Is(err, errStopping) {
+		return http.StatusServiceUnavailable
+	}
+	return 500
 }
 
 func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
@@ -545,19 +695,14 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, errors.New("text is required"))
 		return
 	}
-	if alive(info.Path) || s.isHosted(info.ID) {
-		if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}); err != nil {
-			writeErr(w, 500, err)
-			return
-		}
-		writeJSON(w, map[string]any{"delivered": "inbox"})
+	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, false)
+	})
+	if err != nil {
+		writeErr(w, deliverCode(err), err)
 		return
 	}
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true); err != nil {
-		writeErr(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]any{"delivered": "resumed"})
+	writeJSON(w, s.deliveredAnswer(how, inbox))
 }
 
 // postDismiss closes the session's open question with no answer. Nothing
@@ -578,11 +723,41 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"delivered": "inbox"})
+}
+
+// errEnding: said of a run here that is ending, on its own or with this
+// server; a session the server's shutdown ends comes back with the next
+// server (restoreHosted), as it was.
+var errEnding = errors.New("the session is stopping and takes nothing more; if eagent is restarting, the session comes back with it: do this again then")
+
+// hand gives a dismissal or a stop to a session that is running: to a run
+// here on its own loop (Take), so it is taken before the answer, and not
+// at all once that run is ending (errEnding); to its inbox when another
+// process runs it.
+func (s *Server) hand(info store.Info, msg harness.InboxMessage) error {
+	s.mu.Lock()
+	h := s.running[info.ID]
+	s.mu.Unlock()
+	if h == nil || h.rt == nil {
+		return harness.PostInbox(info.Path, msg)
+	}
+	took, err := h.rt.Take(msg)
+	if err == nil && !took {
+		err = errEnding
+	}
+	return err
+}
+
+func handCode(err error) int {
+	if errors.Is(err, errEnding) {
+		return http.StatusConflict
+	}
+	return 500
 }
 
 func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
@@ -592,13 +767,13 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !alive(info.Path) && !s.isHosted(info.ID) {
-		// A stop for a session nobody runs would sit in the inbox and quit
-		// the next resume before its first tick.
+		// A stop left in the inbox of a session nobody runs is ignored by
+		// its next run.
 		writeErr(w, 409, errors.New("session is not running"))
 		return
 	}
-	if err := harness.PostInbox(info.Path, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
-		writeErr(w, 500, err)
+	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
+		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -610,13 +785,16 @@ func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
+	b, _ := readBody(r)
+	// One at a time with deliver and Resume, so the two never both resume it.
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
 	if alive(info.Path) || s.isHosted(info.ID) {
 		writeErr(w, 409, errors.New("session is already running"))
 		return
 	}
-	b, _ := readBody(r)
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
-		writeErr(w, 500, err)
+	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, false); err != nil {
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -637,31 +815,23 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err)
 		return
 	}
-	if len(b.Routes) > 0 {
-		cfg, err = s.applyRoutePicks(cfg, b.Routes)
-		if err != nil {
-			writeErr(w, 400, err)
+	dir := strings.TrimSpace(b.Dir)
+	if dir != "" {
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(s.Project, dir)
+		}
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			writeErr(w, 400, fmt.Errorf("%s is not a directory", dir))
 			return
 		}
 	}
-	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt}, cfg)
+	id, err := s.hostNewCfg(harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Prompt, PromptClient: b.Client,
+		StartDir: dir, Relay: b.Relay, RelayModel: b.RelayModel, RelayEffort: b.RelayEffort}, cfg)
 	if err != nil {
-		writeErr(w, 500, err)
+		writeErr(w, deliverCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
-}
-
-// applyRoutePicks overlays browser-picked models onto the resolved
-// configuration. Picks resolve against the static catalog and the cached
-// live list (the dialog's browse fetched it), so starting a session never
-// waits on the network, and a browser cannot point a key elsewhere.
-func (s *Server) applyRoutePicks(cfg config.Config, picks map[string]routePick) (config.Config, error) {
-	converted := map[string]integration.RoutePick{}
-	for actor, p := range picks {
-		converted[actor] = integration.RoutePick{Provider: p.Provider, Model: p.Model, Effort: p.Effort}
-	}
-	return integration.ApplyPicks(s.Project, cfg, converted)
 }
 
 func (s *Server) isHosted(id string) bool {
@@ -686,24 +856,21 @@ func (s *Server) loadConfig(bundle, preset string) (config.Config, error) {
 	return config.LoadBundle(s.Project, preset, bundle)
 }
 
-// hostNew starts a new session in this process.
-func (s *Server) hostNew(opts harness.Options, bundle, preset string) (string, error) {
-	cfg, err := s.loadConfig(bundle, preset)
-	if err != nil {
-		return "", err
-	}
-	return s.hostNewCfg(opts, cfg)
-}
-
 // hostNewCfg starts a new session in this process on an already-resolved
-// configuration (loadConfig plus any browser-picked route overrides).
+// configuration (loadConfig plus any browser-picked route overrides),
+// unless the server's shutdown has begun.
 func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, error) {
+	s.resuming.Lock()
+	defer s.resuming.Unlock()
+	if s.stopping {
+		return "", errStopping
+	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.New(cfg, opts, ui)
 	if err != nil {
 		return "", err
 	}
-	s.run(rt, ui)
+	s.run(rt, ui, false)
 	return rt.SessionID(), nil
 }
 
@@ -715,13 +882,7 @@ func (s *Server) RegisterSessionStarter() func() {
 		if project != s.Project {
 			return integration.SessionStart{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
 		}
-		// The configuration and model picks the phone chose, else this
-		// server's default configuration.
-		preset, bundle := integration.SplitConfig(req.Config)
-		cfg, err := s.loadConfig(bundle, preset)
-		if err == nil {
-			cfg, err = integration.ApplyPicks(s.Project, cfg, req.Routes)
-		}
+		cfg, err := s.loadConfig("", "")
 		if err != nil {
 			return integration.SessionStart{}, err
 		}
@@ -730,27 +891,42 @@ func (s *Server) RegisterSessionStarter() func() {
 			return integration.SessionStart{}, err
 		}
 		return integration.SessionStart{ID: id, Host: "in_process", Interactive: true, Message: "Running in the eagent server; keep talking to it from this thread."}, nil
+	}, func(project string) (config.Config, error) {
+		if project != s.Project {
+			return config.Config{}, fmt.Errorf("this eagent serves %s, not %s", s.Project, project)
+		}
+		return s.loadConfig("", "") // the configuration it starts sessions on
 	})
 }
 
-// host resumes an existing session in this process.
-func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
+// host resumes an existing session in this process; its caller holds
+// resuming. Once the server's shutdown has begun it resumes nothing. It
+// runs on this server's own configuration, or on the bundle and preset the
+// page picked; with mirror, the phone's mirror is on for the run whatever
+// that configuration says of it (Resume).
+func (s *Server) host(path string, opts harness.Options, bundle, preset string, mirror bool) error {
+	if s.stopping {
+		return errStopping
+	}
 	cfg, err := s.loadConfig(bundle, preset)
 	if err != nil {
 		return err
+	}
+	if mirror {
+		cfg.Finalechat.Enabled = nil
 	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.Resume(cfg, opts, ui, path)
 	if err != nil {
 		return err
 	}
-	s.run(rt, ui)
+	s.run(rt, ui, mirror)
 	return nil
 }
 
-func (s *Server) run(rt *harness.Runtime, ui *webUI) {
+func (s *Server) run(rt *harness.Runtime, ui *webUI, mirror bool) {
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &hosted{rt: rt, ui: ui, cancel: cancel, done: make(chan struct{})}
+	h := &hosted{rt: rt, ui: ui, cancel: cancel, done: make(chan struct{}), mirror: mirror}
 	s.mu.Lock()
 	s.running[rt.SessionID()] = h
 	s.mu.Unlock()
@@ -759,14 +935,24 @@ func (s *Server) run(rt *harness.Runtime, ui *webUI) {
 		h.code = rt.Run(ctx)
 		s.mu.Lock()
 		delete(s.running, rt.SessionID())
+		if rt.State().EndReason == "quit" {
+			// The user stopped it (a stop, /quit): a list rememberHosted
+			// wrote must not bring it back.
+			s.forgetHosted(rt.SessionID())
+		}
 		s.mu.Unlock()
 		close(h.done)
 		s.logf("web: session %s ended (%s)", rt.SessionID(), rt.State().EndReason)
 	}()
 }
 
-// Shutdown stops hosted sessions cleanly.
+// Shutdown stops hosted sessions cleanly. A run started here before it set
+// stopping is among them (every start holds resuming), and none starts
+// after.
 func (s *Server) Shutdown(timeout time.Duration) {
+	s.resuming.Lock()
+	s.stopping = true
+	s.resuming.Unlock()
 	s.mu.Lock()
 	hs := make([]*hosted, 0, len(s.running))
 	for _, h := range s.running {
@@ -799,6 +985,9 @@ type bundleView struct {
 type promptView struct {
 	Name   string `json:"name"`
 	Source string `json:"source"`
+	// Retired marks an override of a prompt nothing reads any more: it
+	// can be removed, not edited.
+	Retired bool `json:"retired,omitempty"`
 }
 
 func modelsLine(c config.Config) string {
@@ -808,7 +997,7 @@ func modelsLine(c config.Config) string {
 		}
 		return m
 	}
-	return short(c.Orchestrator.Model) + " / " + short(c.Task.Model) + " / " + short(c.Narrator.Model)
+	return short(c.Model.Model)
 }
 
 // saveBundle writes a named configuration from the UI. The body carries the
@@ -877,13 +1066,13 @@ type webUI struct {
 
 func newWebUI(logf func(string, ...any)) *webUI { return &webUI{logf: logf} }
 
-func (u *webUI) Narrate(string)                        {}
-func (u *webUI) Ask(string, string, []string)          {}
-func (u *webUI) Trace(event.Event)                     {}
-func (u *webUI) Stream(string, string, string, string) {}
-func (u *webUI) Input() <-chan string                  { return nil }
-func (u *webUI) Idle(bool)                             {}
-func (u *webUI) Log(format string, args ...any)        { u.logf("  "+format, args...) }
+func (u *webUI) Say(string)                     {}
+func (u *webUI) Ask(string, string, []string)   {}
+func (u *webUI) Trace(event.Event)              {}
+func (u *webUI) Stream(string, string)          {}
+func (u *webUI) Input() <-chan string           { return nil }
+func (u *webUI) Idle(bool)                      {}
+func (u *webUI) Log(format string, args ...any) { u.logf("  "+format, args...) }
 func (u *webUI) Status(s harness.Status) {
 	u.mu.Lock()
 	u.st = s
@@ -897,6 +1086,16 @@ func (u *webUI) status() harness.Status {
 
 // ListenAndServe runs the server until ctx is cancelled.
 func ListenAndServe(ctx context.Context, addr string, s *Server) error {
+	// The address first: a serve that cannot listen (the port is taken)
+	// brings nothing back and leaves the list for the next one.
+	listenAt := addr
+	if listenAt == "" {
+		listenAt = ":http" // as http.Server.ListenAndServe has it
+	}
+	ln, err := net.Listen("tcp", listenAt)
+	if err != nil {
+		return err
+	}
 	stopPublisher := integration.StartPublisher(ctx, s.Project, harness.Version, s.logf)
 	restoreStarter := s.RegisterSessionStarter()
 	defer restoreStarter()
@@ -911,8 +1110,7 @@ func ListenAndServe(ctx context.Context, addr string, s *Server) error {
 	srv := &http.Server{Addr: addr, Handler: s.loopbackOnly(s.Handler()), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	var err error
+	go func() { errc <- srv.Serve(ln) }()
 	var start time.Time
 	var sessions time.Duration
 	select {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ericflo/eagent/internal/event"
@@ -71,24 +72,42 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 	if err != nil {
 		var ae *APIError
 		if fallbacks > 0 && errors.As(err, &ae) && (ae.Status == 400 || ae.Status == 422) {
-			if sentCacheKey && chatFieldRejected(ae.Body, "prompt_cache_key") {
-				c.chatNoCacheKey.Store(true)
-				return c.chatTry(ctx, req, obs, fallbacks-1)
+			// Drop the field the error seems to be about and try again.
+			// When that is refused in the same words, the field was not
+			// the problem: it comes back (unless another call had already
+			// dropped it), so that a guess that did not help does not
+			// cost every later call its cache. A different refusal is the
+			// next thing in the way (a picture a text-only model cannot
+			// take, a conversation too long): the field stays dropped and
+			// that error is the one the caller acts on.
+			without := func(flag *atomic.Bool, same func(body string) bool) (*Response, error) {
+				set := flag.CompareAndSwap(false, true)
+				out, rerr := c.chatTry(ctx, req, obs, fallbacks-1)
+				var again *APIError
+				if rerr != nil && set && errors.As(rerr, &again) && (again.Status == 400 || again.Status == 422) && (again.Body == ae.Body || same(again.Body)) {
+					flag.CompareAndSwap(true, false)
+					return nil, err
+				}
+				return out, rerr
 			}
-			if replayedReasoning && (chatFieldRejected(ae.Body, "reasoning_content") || chatFieldRejected(ae.Body, "reasoning")) {
-				c.chatNoReplayReasoning.Store(true)
-				return c.chatTry(ctx, req, obs, fallbacks-1)
+			aboutCacheKey := func(body string) bool { return chatFieldRejected(body, "prompt_cache_key") }
+			aboutReasoning := func(body string) bool {
+				return chatFieldRejected(body, "reasoning_content") || chatFieldRejected(body, "reasoning")
+			}
+			if sentCacheKey && aboutCacheKey(ae.Body) {
+				return without(&c.chatNoCacheKey, aboutCacheKey)
+			}
+			if replayedReasoning && aboutReasoning(ae.Body) {
+				return without(&c.chatNoReplayReasoning, aboutReasoning)
 			}
 			// Generic unknown-field error (e.g. strict schema validation):
 			// shed prompt_cache_key first, then reasoning replay.
 			if chatGenericExtraFieldError(ae.Body) {
 				if sentCacheKey {
-					c.chatNoCacheKey.Store(true)
-					return c.chatTry(ctx, req, obs, fallbacks-1)
+					return without(&c.chatNoCacheKey, chatGenericExtraFieldError)
 				}
 				if replayedReasoning {
-					c.chatNoReplayReasoning.Store(true)
-					return c.chatTry(ctx, req, obs, fallbacks-1)
+					return without(&c.chatNoReplayReasoning, chatGenericExtraFieldError)
 				}
 			}
 		}
@@ -101,7 +120,12 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 
 	type partial struct {
 		id, name string
+		names    []string // the name as it came, chunk by chunk
 		args     strings.Builder
+	}
+	known := make(map[string]bool, len(req.Tools))
+	for _, t := range req.Tools {
+		known[t.Name] = true
 	}
 	var (
 		text           strings.Builder
@@ -145,16 +169,19 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 					Reasoning int `json:"reasoning_tokens"`
 				} `json:"completion_tokens_details"`
 			} `json:"usage"`
-			Error *struct {
-				Message string `json:"message"`
-				Code    any    `json:"code"`
-			} `json:"error"`
+			Error json.RawMessage `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return nil // tolerate keepalives / unknown frames
 		}
-		if chunk.Error != nil {
-			return &APIError{Status: 502, Body: chunk.Error.Message}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			var e struct {
+				Message string `json:"message"`
+				Code    any    `json:"code"`
+				Type    string `json:"type"`
+			}
+			_ = json.Unmarshal(chunk.Error, &e)
+			return streamError(e.Code, e.Type, e.Message, chunk.Error)
 		}
 		if chunk.Model != "" {
 			out.Model = chunk.Model
@@ -209,9 +236,12 @@ func (c *Client) chatTry(ctx context.Context, req Request, obs *Observer, fallba
 				if tc.ID != "" {
 					p.id = tc.ID
 				}
-				if tc.Function.Name != "" && !strings.HasSuffix(p.name, tc.Function.Name) {
-					p.name += tc.Function.Name
-					obs.toolCall(p.name)
+				if tc.Function.Name != "" {
+					p.names = append(p.names, tc.Function.Name)
+					if name := streamedName(p.names, known); name != p.name {
+						p.name = name
+						obs.toolCall(name)
+					}
 				}
 				p.args.WriteString(tc.Function.Arguments)
 			}
@@ -343,6 +373,34 @@ func chatMessages(req Request, replayReasoning bool, host string) ([]map[string]
 	return msgs, replayedReasoning
 }
 
+// streamedName puts together a tool name that came over several chunks.
+// Providers differ: most send it in pieces to be joined, some send the
+// whole name again on every chunk, some the name so far. A piece that the
+// name so far already ends with ("send_mes", then "s") is still a piece.
+// The tools the request offered settle which reading is meant; when
+// neither reading names one of them, chunks that each repeat or extend the
+// one before are taken for the name so far, anything else for pieces.
+func streamedName(chunks []string, known map[string]bool) string {
+	joined := strings.Join(chunks, "")
+	last := chunks[len(chunks)-1]
+	cumulative := true
+	for i := 1; i < len(chunks); i++ {
+		if !strings.HasPrefix(chunks[i], chunks[i-1]) {
+			cumulative = false
+			break
+		}
+	}
+	switch {
+	case known[joined]:
+		return joined
+	case cumulative && known[last]:
+		return last
+	case cumulative:
+		return last
+	}
+	return joined
+}
+
 func encodeChatNative(field, reasoning string) json.RawMessage {
 	if reasoning == "" {
 		return nil
@@ -360,9 +418,22 @@ func encodeChatNative(field, reasoning string) json.RawMessage {
 	return b
 }
 
+// chatFieldRejected reports an error that names field as a whole word:
+// "reasoning" is not named by an error about reasoning_effort.
 func chatFieldRejected(body, field string) bool {
 	b := strings.ToLower(body)
-	return strings.Contains(b, field)
+	word := func(c byte) bool { return c == '_' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' }
+	for i := 0; ; {
+		j := strings.Index(b[i:], field)
+		if j < 0 {
+			return false
+		}
+		at, end := i+j, i+j+len(field)
+		if (at == 0 || !word(b[at-1])) && (end == len(b) || !word(b[end])) {
+			return true
+		}
+		i = at + 1
+	}
 }
 
 func chatGenericExtraFieldError(body string) bool {
@@ -456,6 +527,8 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		} `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
 		} `json:"error"`
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
@@ -466,7 +539,7 @@ func (c *Client) chatNonStreaming(resp *http.Response) (*Response, error) {
 		return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 	}
 	if body.Error != nil {
-		return nil, &APIError{Status: 502, Body: body.Error.Message}
+		return nil, streamError(body.Error.Code, body.Error.Type, body.Error.Message, raw)
 	}
 	if len(body.Choices) == 0 {
 		return nil, ErrTruncatedStream

@@ -1,0 +1,16 @@
+{
+  "/finalechat": "{}",
+  "/max_calls_per_turn": "30",
+  "/model/api_key_env": "\"TOGETHER_API_KEY\"",
+  "/model/base_url": "\"https://api.together.xyz/v1\"",
+  "/model/context_tokens": "200000",
+  "/model/max_tokens": "32768",
+  "/model/model": "\"zai-org/GLM-5.3\"",
+  "/model/protocol": "\"openai-chat\"",
+  "/model/reasoning_effort": "\"high\"",
+  "/quiet_seconds": "180",
+  "/report_max_chars": "20000",
+  "/rollover_tokens": "0",
+  "/summarizer/mode": "\"inline\"",
+  "/tick_seconds": "30"
+}

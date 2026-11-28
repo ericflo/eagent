@@ -27,7 +27,7 @@ func TestCreateAppendRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Append(event.New(event.Note, event.ActorOrchestrator, event.NoteData{Text: "n"})); err != nil {
+	if _, err := s.Append(event.New(event.Message, event.ActorEagent, event.MessageData{Text: "n"})); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -74,7 +74,7 @@ func TestTornTailIsSkippedAndRepaired(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("expected the torn line to be skipped, got %d events", len(evs))
 	}
-	s2, err := Open(s.Path, 1, time.Now())
+	s2, _, err := Open(s.Path, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestLockPreventsSecondRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := Open(s.Path, 0, time.Now()); err == nil {
+	if _, _, err := Open(s.Path, time.Now()); err == nil {
 		t.Fatal("second Open should fail while the first holds the lock")
 	}
 }

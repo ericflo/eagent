@@ -64,60 +64,52 @@ type SessionSummary struct {
 	Size         int64             `json:"size"`
 	Events       int               `json:"events"`
 	Cwd          string            `json:"cwd,omitempty"`
-	// WorkDir is the orchestrator's current working directory when a cd
-	// moved it off the project root.
+	// WorkDir is the folder the session works in when that is not the
+	// project root.
 	WorkDir string `json:"work_dir,omitempty"`
+	// Legacy says the log was written before eagent was one loop.
+	Legacy bool `json:"legacy,omitempty"`
 }
 
 // SessionDetail adds the derived runtime picture.
 type SessionDetail struct {
 	SessionSummary
-	Tasks       []TaskView      `json:"tasks"`
-	Procs       []ProcView      `json:"procs"`
-	Schedules   []ScheduleView  `json:"schedules"`
-	Question    *state.Question `json:"question,omitempty"`
-	Idle        bool            `json:"idle"`
-	Done        bool            `json:"done"`
-	LastReason  string          `json:"last_reason,omitempty"`
-	Usage       []UsageView     `json:"usage"`
-	Context     int             `json:"context_tokens"`
-	Files       []string        `json:"files"`
-	Live        any             `json:"live,omitempty"`
-	LastSeq     int64           `json:"last_seq"`
-	Interactive bool            `json:"interactive"`
+	// Agents are the coding agents the session runs.
+	Agents   []AgentView     `json:"agents"`
+	Question *state.Question `json:"question,omitempty"`
+	// Schedules are the timers that will fire again.
+	Schedules []ScheduleView `json:"schedules"`
+	// Idle says nothing more is expected until the user writes.
+	Idle bool `json:"idle"`
+	// Done and LastReason are how an old session (one from before eagent
+	// was one loop) stopped: its orchestrator's last yield. Both are absent
+	// for any other session.
+	Done        *bool       `json:"done,omitempty"`
+	LastReason  string      `json:"last_reason,omitempty"`
+	Usage       []UsageView `json:"usage"`
+	Context     int         `json:"context_tokens"`
+	Files       []string    `json:"files"`
+	Live        any         `json:"live,omitempty"`
+	LastSeq     int64       `json:"last_seq"`
+	Interactive bool        `json:"interactive"`
 	// Phone is set when the session is mirrored to the user's phone.
 	Phone *event.PhoneThreadData `json:"phone,omitempty"`
 }
 
-type TaskView struct {
-	ID      string     `json:"id"`
-	Title   string     `json:"title"`
-	Kind    string     `json:"kind"`
-	Status  string     `json:"status"`
-	Summary string     `json:"summary"`
-	Turns   int        `json:"turns"`
-	Created time.Time  `json:"created"`
-	Ended   *time.Time `json:"ended,omitempty"` // nil while the task is running
-	Usage   UsageView  `json:"usage"`
-}
-
-type ProcView struct {
-	Handle   string    `json:"handle"`
-	Actor    string    `json:"actor"`
-	Task     string    `json:"task,omitempty"`
-	Command  string    `json:"command"`
-	Status   string    `json:"status"`
-	ExitCode int       `json:"exit_code"`
-	Started  time.Time `json:"started"`
-}
-
-type ScheduleView struct {
-	ID    string    `json:"id"`
-	Kind  string    `json:"kind"`
-	Spec  string    `json:"spec"`
-	Note  string    `json:"note"`
-	Next  time.Time `json:"next"`
-	Fires int       `json:"fires"`
+// AgentView is one agent the session runs or ran.
+type AgentView struct {
+	Name      string    `json:"name"`
+	Agent     string    `json:"agent"`
+	Who       string    `json:"who"`
+	Label     string    `json:"label,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	Effort    string    `json:"effort,omitempty"`
+	Dir       string    `json:"dir"`
+	State     string    `json:"state"` // starting | working | idle | blocked | exited | stopped
+	Detail    string    `json:"detail,omitempty"`
+	Since     time.Time `json:"since"`
+	Turns     int       `json:"turns"`
+	Autopilot bool      `json:"autopilot,omitempty"`
 }
 
 type UsageView struct {
@@ -147,7 +139,7 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	evs := st.Events
 	sum := SessionSummary{
 		ID: info.ID, Started: info.Started, Modified: info.Modified, Subsessions: info.Subsessions, Size: info.Size,
-		Models: st.Models, Cwd: st.Cwd, WorkDir: workDirOf(st), Events: len(evs),
+		Models: st.Models, Cwd: st.Cwd, WorkDir: workDirOf(st), Events: len(evs), Legacy: st.Legacy(),
 	}
 	if len(evs) > 0 {
 		var d event.SessionStartData
@@ -169,8 +161,8 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 	sum.Title = st.Title
 	sum.Description = st.Description
 	sum.Summary = st.Description
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		sum.Tokens += st.Totals[a].Input
+	for _, u := range st.Totals {
+		sum.Tokens += u.Input
 	}
 	sum.CostUSD, sum.Priced = costOfRoutesWithPrices(st, "", info.Pricing)
 	sum.PriceBasis = "viewer_catalog"
@@ -187,9 +179,9 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 		sum.Duration = end.Sub(st.Started).Seconds()
 	}
 	switch {
-	case !st.Ended && st.Idle() && st.Question != nil:
+	case !st.Ended && st.Question != nil:
 		sum.Status = "awaiting-input"
-	case !st.Ended && st.Idle():
+	case !st.Ended && Idle(st):
 		sum.Status = "idle"
 	case !st.Ended:
 		sum.Status = "running"
@@ -203,46 +195,30 @@ func Summary(info Metadata, st *state.State) SessionSummary {
 
 func Detail(info Metadata, st *state.State) *SessionDetail {
 	sum := Summary(info, st)
-	d := &SessionDetail{SessionSummary: sum, Idle: st.Idle(), LastSeq: st.LastSeq(), Context: st.ContextTokens(event.ActorOrchestrator), Interactive: st.Interactive, Phone: st.Phone}
-	if st.LastYield != nil {
-		d.Done = st.LastYield.Done
-		d.LastReason = st.LastYield.Reason
-	}
+	d := &SessionDetail{SessionSummary: sum, Idle: Idle(st), LastSeq: st.LastSeq(), Context: st.ContextTokens(), Interactive: st.Interactive, Phone: st.Phone}
 	d.Question = st.Question
-	for _, id := range st.TaskOrder {
-		t := st.Tasks[id]
-		var ended *time.Time
-		if !t.Ended.IsZero() {
-			e := t.Ended
-			ended = &e
-		}
-		d.Tasks = append(d.Tasks, TaskView{ID: t.ID, Title: t.Title, Kind: t.Kind, Status: t.Status, Summary: t.Summary, Turns: t.Turns, Created: t.Created, Ended: ended, Usage: usageView(event.ActorTask, t.Turns, t.Usage)})
+	if done, reason, ok := LegacyClose(st); ok {
+		d.Done, d.LastReason = &done, reason
 	}
-	for _, h := range st.ProcOrder {
-		p := st.Procs[h]
-		d.Procs = append(d.Procs, ProcView{Handle: p.Handle, Actor: p.Actor, Task: p.Task, Command: p.Command, Status: p.Status, ExitCode: p.ExitCode, Started: p.Started})
+	d.Schedules = schedulesOf(st)
+	d.Agents = []AgentView{}
+	for _, name := range st.RelayOrder {
+		r := st.Relays[name]
+		d.Agents = append(d.Agents, AgentView{Name: r.Name, Agent: r.Agent, Who: r.Who(), Label: r.Label, Model: r.Model, Effort: r.Effort, Dir: r.Dir,
+			State: r.State, Detail: r.Detail, Since: r.StateSince, Turns: r.Turns, Autopilot: r.Autopilot != nil})
 	}
-	for _, sc := range st.ActiveSchedules() {
-		d.Schedules = append(d.Schedules, ScheduleView{ID: sc.ID, Kind: sc.Kind, Spec: sc.Spec, Note: sc.Note, Next: sc.Next, Fires: sc.Fires})
-	}
-	for _, a := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
+	for _, a := range st.UsageActors() {
 		u := usageView(a, st.Calls[a], st.Totals[a])
 		u.P50MS, u.P95MS = st.Percentile(a, 50), st.Percentile(a, 95)
 		u.Model = st.Models[a]
 		u.CostUSD, u.Priced = costOfRoutesWithPrices(st, a, info.Pricing)
 		d.Usage = append(d.Usage, u)
 	}
+	if d.Usage == nil {
+		d.Usage = []UsageView{}
+	}
 	for _, ss := range st.Subsessions {
 		d.Files = append(d.Files, ss.File)
-	}
-	if d.Tasks == nil {
-		d.Tasks = []TaskView{}
-	}
-	if d.Procs == nil {
-		d.Procs = []ProcView{}
-	}
-	if d.Schedules == nil {
-		d.Schedules = []ScheduleView{}
 	}
 	return d
 }
@@ -265,8 +241,8 @@ func pricedUsage(p config.Price, u event.Usage) float64 {
 	return (float64(uncached)*p.In + float64(u.Cached)*p.Cached + float64(u.Output)*p.Out) / 1e6
 }
 
-// estimateCost sums per-actor estimates; Priced is false if any actor's
-// model is unknown so the UI can say so.
+// estimateCost sums the estimates for every route that served a call;
+// Priced is false if any model is unknown so the UI can say so.
 func estimateCost(st *state.State) (float64, bool) {
 	return costOfRoutes(st, "")
 }
@@ -305,11 +281,6 @@ func costOfRoutesWithPrices(st *state.State, actor string, pricing *PricingSnaps
 	return total, priced && any
 }
 
-// workDirOf is the orchestrator's working directory when it differs from the
+// workDirOf is the folder the session works in when it differs from the
 // project root, else "".
-func workDirOf(st *state.State) string {
-	if d := st.WorkDir(""); d != st.Cwd {
-		return d
-	}
-	return ""
-}
+func workDirOf(st *state.State) string { return st.Dir }

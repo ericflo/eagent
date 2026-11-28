@@ -28,12 +28,12 @@ func TestUserMessageWithCapsRendersClientLine(t *testing.T) {
 	}))
 
 	st := Replay(b.events)
-	msgs := st.OrchestratorView()
+	msgs := st.View(nil)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
 	}
-	ts := ev.Time.Local().Format("2006-01-02 15:04:05")
-	want := "[" + ts + "] <user@web> hi [web · tz America/Los_Angeles · en-US]\n"
+	ts := ev.Time.In(st.Location()).Format("2006-01-02 15:04:05")
+	want := "[" + ts + "] <user@web> hi [web · tz America/Los_Angeles · en-US]"
 	if msgs[0].Text != want {
 		t.Fatalf("got %q, want %q", msgs[0].Text, want)
 	}
@@ -46,7 +46,7 @@ func TestUserMessageWithoutCapsIsByteIdentical(t *testing.T) {
 	web := b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "from web", Source: "web"}))
 
 	st := Replay(b.events)
-	msgs := st.OrchestratorView()
+	msgs := st.View(nil)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
@@ -55,8 +55,8 @@ func TestUserMessageWithoutCapsIsByteIdentical(t *testing.T) {
 		nick string
 		text string
 	}{{um, "<user>", "hello"}, {web, "<user@web>", "from web"}} {
-		ts := w.ev.Time.Local().Format("2006-01-02 15:04:05")
-		want := "[" + ts + "] " + w.nick + " " + w.text + "\n"
+		ts := w.ev.Time.In(st.Location()).Format("2006-01-02 15:04:05")
+		want := "[" + ts + "] " + w.nick + " " + w.text
 		if msgs[i].Text != want {
 			t.Fatalf("message %d = %q, want %q", i, msgs[i].Text, want)
 		}
@@ -78,21 +78,21 @@ func TestUserAnswerWithCapsRendersClientLine(t *testing.T) {
 	}
 	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
 	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.NarratorQuestion, event.ActorNarrator, event.NarratorQuestionData{ID: "q1", Text: "Pick one", Options: []string{"a", "b"}}))
+	add(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Pick one", Options: []string{"a", "b"}}))
 	atev := add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{
 		QuestionID: "q1",
 		Text:       "a",
 		Source:     "finalechat",
 		Client:     &clientcaps.Caps{Source: "finalechat", Timezone: "America/Los_Angeles", Locale: "en-US", Device: "phone"},
 	}))
-	msgs := st.OrchestratorView()
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d: %+v", len(msgs), msgs)
+	msgs := st.View(nil)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d: %+v", len(msgs), msgs)
 	}
-	ts := atev.Time.Local().Format("2006-01-02 15:04:05")
-	want := "[" + ts + "] <user@phone> a\n[The user answered question q1] [finalechat · tz America/Los_Angeles · en-US · phone]\n"
-	if msgs[1].Text != want {
-		t.Fatalf("got %q, want %q", msgs[1].Text, want)
+	ts := atev.Time.In(st.Location()).Format("2006-01-02 15:04:05")
+	want := "[" + ts + "] <user@phone> a\n[The user answered question q1] [finalechat · tz America/Los_Angeles · en-US · phone]"
+	if msgs[0].Text != want {
+		t.Fatalf("got %q, want %q", msgs[0].Text, want)
 	}
 }
 
@@ -118,14 +118,14 @@ func TestUserMessageOverrideCanUseClientLine(t *testing.T) {
 	b.add(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "plain"}))
 	st := Replay(b.events)
 	st.SetPrompts(set)
-	msgs := st.OrchestratorView()
+	msgs := st.View(nil)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(msgs))
 	}
-	if msgs[0].Text != "user@web: hi|web|web · tz America/Los_Angeles · en-US\n" {
+	if msgs[0].Text != "user@web: hi|web|web · tz America/Los_Angeles · en-US" {
 		t.Fatalf("caps override = %q", msgs[0].Text)
 	}
-	if !strings.HasSuffix(msgs[1].Text, "plain||\n") {
+	if !strings.HasSuffix(msgs[1].Text, "plain||") {
 		t.Fatalf("no-caps override = %q, want empty Client/ClientLine", msgs[1].Text)
 	}
 }

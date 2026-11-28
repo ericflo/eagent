@@ -1,5 +1,7 @@
 # Spec compliance
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 A section-by-section reading of the design specification
 ([`docs/DESIGN-SPEC.md`](DESIGN-SPEC.md)) against what eagent does. "Met" means implemented and
 covered by a test or a real run; "Deviates" means a deliberate difference with
@@ -69,7 +71,7 @@ are exactly as specified: `zai-org/GLM-5.3-Flash` and
 
 | Requirement | Status |
 |---|---|
-| New subsession file when the orchestrator hits its limit | Met: threshold `rollover_tokens` (default 150k) read from provider usage after every call; also forced by a provider context-overflow error |
+| New subsession file when the orchestrator hits its limit | Met: threshold `rollover_tokens` (by default half the model's context window) read from provider usage after every call; also forced by a provider context-overflow error |
 | Orchestrator pauses | Met: no orchestrator turn starts while `rolling` |
 | Task worker gets the directory of all subsessions | Met: the dossier task lists the files and has `session_list`, `session_read`, `session_search` |
 | Dossier is a brief plus a map into the logs | Met: required `file:line` citations; rejected and retried once without them; harness-built fallback if the retry fails |
@@ -107,7 +109,7 @@ attempted, as the specification says.
 - `eagent show`, `eagent replay`, `eagent sessions`, `eagent doctor --live`, `eagent config list/save/show`, `eagent prompts`.
 - Finalechat: when a token is present the narrator's conversation is mirrored to the user's phone (messages, questions with tappable options, replies and answers back into the session, batch sessions waiting on a phone answer), on by default and disabled per config.
 - `eagent serve`: a web UI over the same logs, with live chat and question answering through a per-session inbox, a session browser, task and tool-call drill-down, a timeline, and configuration (presets, bundles, prompts, key presence, bundle saving).
-- Named configuration bundles in `.agents/eagent/configs/`, built-in presets for GLM, Astra, OpenAI (high/med/low), OpenRouter (high/med/low), Anthropic (high: Fable 5.1 / Opus 5 / Sonnet 5; med: Opus 5 / Sonnet 5 / Haiku 4.5), DeepInfra, Fireworks, OpenCode Zen, and Nous Portal (high/med/low each), all-DeepSeek, all-Qwen, and all-Muse routings, each proven with `eagent doctor --live`.
+- Named configuration bundles in `.agents/eagent/configs/`, built-in presets for GLM, OpenAI (high/low; `astra` and `openai-med` are older names for high), OpenRouter (high/med/low), Anthropic (high: Fable 5.1 / Opus 5 / Sonnet 5; med: Opus 5 / Sonnet 5 / Haiku 4.5), DeepInfra, Fireworks, OpenCode Zen, and Nous Portal (high/med/low each), all-DeepSeek, all-Qwen, and all-Muse routings, each proven with `eagent doctor --live`.
 - Prompts as embedded Markdown templates with per-project overrides.
 - Retry with backoff for transient provider failures; streams that stall or close early are retried, never accepted as fragments; malformed tool calls are sanitised on replay so one bad turn cannot poison a session; oversized tool output is spilled to files the model can page through.
 - Interactive sessions accept input while the orchestrator is working; `/status`, `/tasks`, `/procs`, `/kill`, `/schedules`.

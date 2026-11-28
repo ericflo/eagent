@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const canonicalEdit = e => JSON.stringify([e.op, e.key, e.value ?? null]);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const moduleName = process.env.FINALECHAT_PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(path.isAbsolute(moduleName) ? pathToFileURL(moduleName).href : moduleName);
@@ -66,37 +67,37 @@ try {
   await page.route('**/*', route => { if (new URL(route.request().url()).origin !== base) { outbound.push(route.request().url()); return route.abort(); } return route.continue(); });
   await page.goto(base);
   const frame = page.frameLocator('iframe');
-  const concurrency = frame.locator('.field').filter({ has: frame.getByText('Task workers at once', { exact: true }) }).locator('input');
+  const callsPerTurn = frame.locator('.field').filter({ has: frame.getByText('Calls per turn', { exact: true }) }).locator('input');
   await frame.getByRole('heading', { name: 'Configuration', exact: true }).waitFor();
   await frame.getByRole('button', { name: 'Review project changes', exact: true }).waitFor();
-  assert.equal(await concurrency.inputValue(), '5');
+  assert.equal(await callsPerTurn.inputValue(), '5');
   assert.equal(await page.evaluate(() => window.proposals.length), 0, 'opening settings staged a change');
-  await concurrency.fill('6'); await concurrency.press('Tab');
+  await callsPerTurn.fill('6'); await callsPerTurn.press('Tab');
   await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
   await page.waitForFunction(() => window.proposal !== null);
   let proposal = await page.evaluate(() => window.proposal);
-  assert.deepEqual(proposal.edits, [{ op: 'set', key: '/task_concurrency', value: 6 }]);
+  assert.deepEqual(proposal.edits, [{ op: 'set', key: '/max_calls_per_turn', value: 6 }]);
   assert.equal(proposal.expected_version, resource.snapshot.version);
-  assert.equal(await concurrency.inputValue(), '6', 'staging reset the form');
+  assert.equal(await callsPerTurn.inputValue(), '6', 'staging reset the form');
   assert.match(await frame.locator('#artifact-status').innerText(), /No settings have changed/);
-  await concurrency.fill('7'); await concurrency.press('Tab');
+  await callsPerTurn.fill('7'); await callsPerTurn.press('Tab');
   await page.waitForFunction(() => window.proposal === null);
   await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
   await page.waitForFunction(() => window.proposal?.edits?.[0]?.value === 7);
-  await page.evaluate(p => { fixture.resource.snapshot.version = 'v2'; fixture.resource.snapshot.effective['/task_concurrency'] = 6; fixture.resource.snapshot.saved['/task_concurrency'] = 6; complete(p); }, proposal);
+  await page.evaluate(p => { fixture.resource.snapshot.version = 'v2'; fixture.resource.snapshot.effective['/max_calls_per_turn'] = 6; fixture.resource.snapshot.saved['/max_calls_per_turn'] = 6; complete(p); }, proposal);
   await frame.locator('#artifact-status').filter({ hasText: 'newer local edits remain' }).waitFor();
-  assert.equal(await concurrency.inputValue(), '7', 'late result discarded newer edits');
-  await concurrency.fill('8'); await concurrency.press('Tab');
+  assert.equal(await callsPerTurn.inputValue(), '7', 'late result discarded newer edits');
+  await callsPerTurn.fill('8'); await callsPerTurn.press('Tab');
   await page.waitForFunction(() => window.proposal === null);
   await frame.getByRole('button', { name: 'Reload current defaults', exact: true }).click();
   await frame.getByRole('button', { name: 'Discard edits and reload', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('iframe') !== null);
-  await concurrency.filter({ visible: true }).waitFor();
+  await callsPerTurn.filter({ visible: true }).waitFor();
   await frame.locator('#artifact-status').filter({ hasText: 'Editing current project defaults' }).waitFor();
-  assert.equal(await concurrency.inputValue(), '6');
+  assert.equal(await callsPerTurn.inputValue(), '6');
 
   await frame.getByRole('button', { name: 'fixture', exact: true }).click();
-  assert.equal(await concurrency.inputValue(), '7', 'captured bundle could not be loaded');
+  assert.equal(await callsPerTurn.inputValue(), '7', 'captured bundle could not be loaded');
   await frame.getByRole('button', { name: 'Discard', exact: true }).click();
   await frame.getByText('Named configuration actions', { exact: true }).click();
   await frame.getByLabel('Default named configuration').selectOption('fixture');
@@ -111,10 +112,69 @@ try {
   await frame.getByRole('button', { name: 'Review route test', exact: true }).first().click();
   await page.waitForFunction(() => window.proposal?.operation === 'route.test');
   proposal = await page.evaluate(() => window.proposal);
-  assert.equal(proposal.parameters.actor, 'orchestrator');
+  assert.equal(proposal.parameters.target, 'model');
   assert.equal(proposal.parameters.route, 'primary');
   await page.evaluate(p => complete(p, { route_test: { route: 'primary', model: 'fixture-model', effort: 'high', base_url: 'https://fixture.invalid', status: 'tool_call', ms: 250, usage: { input: 1, output: 2 }, at: '2026-09-08T12:00:00Z' } }), proposal);
-  await frame.locator('.route.orchestrator').getByText(/fixture-model/).waitFor();
+  await frame.locator('.route.model').getByText(/fixture-model/).waitFor();
+
+  // Chat Completions routes replay reasoning too, so the setting is there.
+  await frame.locator('.route.model summary').filter({ hasText: 'Advanced' }).click();
+  await frame.locator('.route.model').getByText('Replay reasoning', { exact: true }).waitFor();
+  // A dedicated summarizer can be given a model of its own here, though it
+  // is inline in the snapshot.
+  await frame.locator('.route.summarizer').getByRole('button', { name: 'Dedicated', exact: true }).click();
+  await frame.getByRole('button', { name: 'Give it its own model', exact: true }).click();
+  await frame.locator('.route.summarizer .rhead').waitFor();
+  assert.equal(await frame.locator('.route.summarizer').getByText('Model', { exact: true }).count() > 0, true, 'the summarizer got no route card');
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  // A saved preset with a summarizer of its own and an agent profile loads
+  // whole, and reviews without an error.
+  await frame.getByRole('button', { name: 'summarized', exact: true }).click();
+  await frame.locator('.route.summarizer').getByText('GLM-5.3-Flash').first().waitFor();
+  await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+  await page.waitForFunction(() => window.proposal?.operation === 'settings.apply' && window.proposal.edits.some(e => e.key === '/summarizer/model/model'));
+  proposal = await page.evaluate(() => window.proposal);
+  assert.ok(proposal.edits.some(e => e.key === '/summarizer/mode' && e.value === 'dedicated'), JSON.stringify(proposal.edits));
+  assert.ok(!proposal.edits.some(e => e.key.startsWith('/relay/profiles')), JSON.stringify(proposal.edits));
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  // A fallback the file's preset gives cannot be removed here; choosing
+  // another preset or the defaults, which give none, is not removing it.
+  const capturedSnapshot = await page.evaluate(() => JSON.stringify(fixture.resource.snapshot));
+  await page.evaluate(() => {
+    const s = fixture.resource.snapshot;
+    s.saved['/preset'] = s.effective['/preset'] = 'openai-high';
+    Object.assign(s.effective, { '/model/fallback/model': 'openai/gpt-6-luna', '/model/fallback/base_url': 'https://openrouter.ai/api/v1', '/model/fallback/protocol': 'openai-responses', '/model/fallback/api_key_env': 'OPENROUTER_API_KEY' });
+  });
+  const reloadDefaults = async () => {
+    await frame.getByRole('button', { name: 'Reload current defaults', exact: true }).click();
+    const discard = frame.getByRole('button', { name: 'Discard edits and reload', exact: true });
+    if (await discard.isVisible().catch(() => false)) await discard.click();
+    await frame.locator('#artifact-status').filter({ hasText: 'Editing current project defaults' }).waitFor();
+  };
+  await reloadDefaults();
+  for (const [chipName, presetEdit] of [['glm', { op: 'set', key: '/preset', value: 'glm' }], ['defaults', { op: 'unset', key: '/preset' }]]) {
+    await page.evaluate(() => { window.proposal = null; });
+    await frame.getByRole('button', { name: chipName, exact: true }).click();
+    await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+    await page.waitForFunction(() => window.proposal?.operation === 'settings.apply', null, { timeout: 5000 }).catch(() => {});
+    proposal = await page.evaluate(() => window.proposal);
+    assert.ok(proposal?.edits?.some(e => canonicalEdit(e) === canonicalEdit(presetEdit)), `switching to ${chipName}: ${JSON.stringify(proposal)} ${await frame.locator('#toasts').innerText()}`);
+    await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  }
+  // Removing the preset's fallback while keeping the preset stays refused.
+  await page.evaluate(() => { window.proposal = null; });
+  await frame.locator('.route.model').getByRole('button', { name: 'remove', exact: true }).click();
+  await frame.getByRole('button', { name: 'Review project changes', exact: true }).click();
+  await frame.getByText(/comes from its preset and cannot be removed/).first().waitFor();
+  assert.equal(await page.evaluate(() => window.proposal), null);
+  await frame.getByRole('button', { name: 'Discard', exact: true }).click();
+  await page.evaluate(snapshot => { fixture.resource.snapshot = JSON.parse(snapshot); }, capturedSnapshot);
+  await reloadDefaults();
+  // An override of a retired prompt is removed by a staged reset: a
+  // sandboxed frame has no confirm().
+  await frame.getByRole('button').filter({ hasText: /^NARRATOR\.md/ }).click();
+  await page.waitForFunction(() => window.proposal?.operation === 'prompt.reset');
+  assert.equal((await page.evaluate(() => window.proposal)).parameters.name, 'NARRATOR.md');
 
   // Prompt and bundle actions use the same editor but remain proposals.
   await frame.getByRole('button').filter({ hasText: /^PERSONA.md/ }).click();
@@ -142,15 +202,15 @@ try {
   await frame.getByText('Files and raw JSON', { exact: true }).click();
   const raw = frame.getByRole('textbox', { name: 'Known saved overrides' });
   assert.doesNotMatch(await raw.inputValue(), /unknown_secret|fixture-must-not-be-published/);
-  const saved = JSON.parse(await raw.inputValue()); saved.task_concurrency = 8;
+  const saved = JSON.parse(await raw.inputValue()); saved.max_calls_per_turn = 8;
   await raw.fill(JSON.stringify(saved));
   await frame.getByRole('button', { name: 'Review override changes', exact: true }).click();
   await page.waitForFunction(() => window.proposal?.operation === 'settings.apply');
   proposal = await page.evaluate(() => window.proposal);
-  saved.task_concurrency = 9; await raw.fill(JSON.stringify(saved));
+  saved.max_calls_per_turn = 9; await raw.fill(JSON.stringify(saved));
   await page.evaluate(p => { fixture.resource.snapshot.version = 'v3'; complete(p); }, proposal);
   await frame.locator('#artifact-status').filter({ hasText: 'newer local edits remain' }).waitFor();
-  assert.equal(JSON.parse(await raw.inputValue()).task_concurrency, 9);
+  assert.equal(JSON.parse(await raw.inputValue()).max_calls_per_turn, 9);
   await raw.fill('{"unknown_secret":"bad"}');
   await frame.getByRole('button', { name: 'Review override changes', exact: true }).click();
   await frame.getByText('Unsupported setting: /unknown_secret', { exact: true }).waitFor();
@@ -161,7 +221,7 @@ try {
   await frame.getByRole('button', { name: 'Reload current defaults', exact: true }).click();
   await frame.getByRole('button', { name: 'Discard edits and reload', exact: true }).click();
   await frame.locator('#artifact-status').filter({ hasText: 'read only' }).waitFor();
-  assert.equal(await concurrency.isDisabled(), true);
+  assert.equal(await callsPerTurn.isDisabled(), true);
   assert.equal(await frame.getByRole('button', { name: 'Review project changes', exact: true }).isDisabled(), true);
   assert.equal(await frame.getByRole('button', { name: 'Review route test', exact: true }).first().isDisabled(), true);
   assert.deepEqual(errors, []);
@@ -221,34 +281,33 @@ try {
   assert.equal(await frame.locator('#until').inputValue(), '2', 'clearing the event focus jumped forward in time');
   await frame.getByRole('button', { name: 'Latest', exact: true }).click();
   console.log('PASS actual eagent viewer focuses a native sequence and requests its matching chat message');
-  // The archive uses the local admin's actual task chart, table and drilldown.
-  await frame.getByRole('button', { name: 'Tasks', exact: true }).click();
-  await frame.locator('table.tasks tr.row').first().click();
-  await frame.locator('#taskdetail').getByText('Archived task result', { exact: true }).waitFor();
-  await frame.locator('#taskdetail').getByText('Archived tool output', { exact: true }).waitFor();
+  // The archive uses the local admin's actual usage chart, agent table and chat.
+  await frame.getByRole('button', { name: 'Usage', exact: true }).click();
   assert.equal(await frame.locator('svg.gantt').count(), 1);
-  await page.waitForFunction(() => window.inspection?.admin?.task === 't1');
-  await page.evaluate(() => { window.anchor=null; document.querySelector('iframe').src='/viewer?task-refresh=1'; });
-  await frame.locator('#taskdetail').getByText('Archived task result', { exact: true }).waitFor();
-  await frame.getByRole('heading', { name: /Processes/ }).waitFor();
+  await frame.locator('#pane table').getByText('Claude', { exact: true }).waitFor();
+  await frame.locator('#pane table .badge.idle').waitFor();
+  await page.waitForFunction(() => window.inspection?.view === 'usage');
+  await page.evaluate(() => { window.anchor=null; document.querySelector('iframe').src='/viewer?usage-refresh=1'; });
+  await frame.locator('#until:not([disabled])').waitFor();
+  await frame.getByRole('button', { name: 'Usage', exact: true, pressed: true }).waitFor();
   assert.equal(await frame.getByRole('button', { name: 'Resume', exact: true }).count(), 0);
-  await frame.locator('#until').evaluate(el => { el.value = '3'; el.dispatchEvent(new Event('change', { bubbles:true })); });
-  await frame.locator('table.tasks').getByText('queued', { exact: true }).waitFor();
-  assert.equal(await frame.getByText('Archived task result', { exact: true }).count(), 0);
-  assert.equal(await frame.getByText('Archived tool output', { exact: true }).count(), 0);
+  await frame.locator('#until').evaluate(el => { el.value = '5'; el.dispatchEvent(new Event('change', { bubbles:true })); });
+  await frame.locator('#pane table .badge.working').waitFor();
   await frame.locator('#until').evaluate(el => { el.value = '2'; el.dispatchEvent(new Event('change', { bubbles:true })); });
-  await frame.getByText('Nothing delegated yet.', { exact: true }).waitFor();
-  assert.equal(await frame.getByRole('combobox', { name: 'Task', exact: true }).locator('option').count(), 1, 'task filter exposed future tasks');
-  const atMessage = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 2)).result);
-  const atLatest = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation('narrator', '', 0)).result);
+  await frame.getByText('No agent has been started.', { exact: true }).waitFor();
+  const atMessage = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation(2)).result);
+  const atLatest = await frame.locator('body').evaluate(() => JSON.parse(window.eagentReplayConversation(0)).result);
   assert.ok(!JSON.stringify(atMessage).includes('Synthetic response'));
   assert.ok(JSON.stringify(atLatest).includes('Synthetic response'));
   await frame.getByRole('button', { name: 'Chat', exact: true }).click();
   await frame.locator('#pane .msg.user').getByText('Synthetic browser fixture', { exact: true }).waitFor();
+  assert.equal(await frame.getByText('Archived turn report', { exact: true }).count(), 0, 'an earlier state showed a later report');
+  await frame.getByRole('button', { name: 'Latest', exact: true }).click();
+  await frame.locator('#pane .msg.agent').getByText('Archived turn report', { exact: true }).first().waitFor();
   assert.equal(await frame.getByRole('textbox', { name: /Message the agent/ }).count(), 0);
   assert.deepEqual(errors, []);
   assert.deepEqual(outbound, []);
-  console.log('PASS shared admin charts, task drilldown and tool output; earlier states exclude future tasks, reports and model conversation');
+  console.log('PASS shared usage chart, agent table and chat; earlier states exclude later reports and model conversation');
 
 
   // The exact same exported page opens from disk with verified captured data.

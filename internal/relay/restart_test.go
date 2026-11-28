@@ -54,6 +54,7 @@ func TestRestartedCodexRelayFindsItsTranscript(t *testing.T) {
 	target := Target("S", "codex")
 	s1 := newSeat(spec, codexAgent{}, h, target, "inner-1")
 	s1.launched = time.Now().Add(-time.Second)
+	s1.poll = piLook
 	go s1.watch()
 	if got, ok := transcriptFound(s1, 5*time.Second); !ok || got != path {
 		t.Fatalf("first seat: %q", got)
@@ -68,6 +69,7 @@ func TestRestartedCodexRelayFindsItsTranscript(t *testing.T) {
 	f.Close()
 	s2 := newSeat(spec, codexAgent{}, h, target, "inner-1")
 	s2.launched, s2.since = launched, launched
+	s2.poll = piLook
 	go s2.watch()
 	defer s2.Close()
 	if got, ok := transcriptFound(s2, 5*time.Second); !ok || got != path {
@@ -83,7 +85,7 @@ func TestCodexResumeFindsAnOldRollout(t *testing.T) {
 	path := writeRollout(t, home, time.Now().Add(-72*time.Hour), "inner-old", work)
 	now := time.Now()
 	_ = os.Chtimes(path, now, now) // appended to by the resume
-	if got, _ := (codexAgent{}).locate(work, now.Add(-time.Second), "inner-old"); got != path {
+	if got, _ := (codexAgent{}).locate(Spec{Dir: work}, now.Add(-time.Second), "inner-old"); got != path {
 		t.Fatalf("locate = %q, want %q", got, path)
 	}
 }

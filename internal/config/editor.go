@@ -33,12 +33,22 @@ type Active struct {
 // Resolution is a configuration with its layers laid bare.
 type Resolution struct {
 	Effective Config `json:"effective"`
-	// Sources maps a JSON pointer ("/orchestrator/model") to the layer that
+	// Layered is Effective before the environment: what the defaults, the
+	// preset, the file and a bundle say. A value copied into the file comes
+	// from here, never from a variable.
+	Layered Config `json:"-"`
+	// Sources maps a JSON pointer ("/model/model") to the layer that
 	// set the effective value: "default", "preset:NAME", "file",
-	// "bundle:NAME", or "env:VAR".
+	// "bundle:NAME", "env:VAR", or "env" for a value the environment
+	// changed that no variable pins (the window of the server an address
+	// variable moves the route to).
 	Sources map[string]string `json:"sources"`
 	Active  Active            `json:"active"`
-	Preset  string            `json:"preset"` // the preset in force before the file, if any
+	// Loads is the bundle loading lays here, as loading chooses it (one a
+	// default chooses too, which Active leaves to the callers), and the
+	// layer that chose it (Config.Name and NameFrom).
+	Loads  struct{ Name, From string } `json:"-"`
+	Preset string                      `json:"preset"` // the preset in force before the file, if any
 	// File is the project's config.json as found on disk.
 	File FileState `json:"file"`
 	// LoadError is set when the configuration could not be loaded; Effective
@@ -94,30 +104,21 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.File.ParseError = err.Error()
 			fileMap = nil
 		} else {
-			res.File.UnknownKeys = unknownKeys(fileMap)
-			if raw, ok := fileMap["preset"]; ok {
+			migrated, _ := MigrateLegacy(fileMap)
+			res.File.UnknownKeys = unknownKeys(migrated)
+			// The names the file gives, as they are called today.
+			if raw, ok := migrated["preset"]; ok {
 				_ = json.Unmarshal(raw, &res.File.Preset)
 			}
-			if raw, ok := fileMap["default_config"]; ok {
+			if raw, ok := migrated["default_config"]; ok {
 				_ = json.Unmarshal(raw, &res.File.DefaultConfig)
 			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		res.LoadError = err.Error()
 	}
-	explicitPreset := preset
-	if explicitPreset == "" {
-		explicitPreset = os.Getenv("EAGENT_PRESET")
-	}
-	if bundle == "" && explicitPreset != "" {
-		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
-			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
-				bundle = explicitPreset
-				preset = ""
-				explicitPreset = ""
-			}
-		}
-	}
+	_, res.Loads.Name, _, res.Loads.From = chooseBundle(project, preset, bundle, fileMap)
+	preset, bundle, explicitPreset := explicitChoice(project, preset, bundle)
 	bundleMap := map[string]json.RawMessage{}
 	if bundle != "" {
 		if canon, isPreset := ResolvePreset(bundle); isPreset {
@@ -159,19 +160,21 @@ func Resolve(project, preset, bundle string) Resolution {
 			res.LoadError = fmt.Sprintf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
 		}
 	}
+	var n named
 	if fileMap != nil && len(fileMap) > 0 {
-		if err := overlay(&cfg, fileMap, path); err != nil {
+		if err := overlay(project, &cfg, fileMap, path, &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
 		} else {
+			cfg.Name = "" // the project file is no bundle, whatever "name" it carries
 			prev = mark(flatten(cfg), "file")
 		}
 	} else if res.File.ParseError != "" && res.LoadError == "" {
 		res.LoadError = path + ": " + res.File.ParseError
 	}
 	if bundle != "" && len(bundleMap) > 0 {
-		if err := overlay(&cfg, bundleMap, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleMap, BundlePath(project, bundle), &n); err != nil {
 			if res.LoadError == "" {
 				res.LoadError = err.Error()
 			}
@@ -181,15 +184,22 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	envVars := EnvOverrides()
-	applyEnv(&cfg)
+	res.Layered = cfg
+	normalize(&res.Layered)
+	applyEnv(project, &cfg, n)
+	normalize(&cfg)
 	cur := flatten(cfg)
+	// A key the environment removed (a window an unknown model has none
+	// of) is the environment's doing too.
+	changed := map[string]bool{}
 	for k, v := range cur {
 		if prev[k] != v {
-			if name, ok := envVars[k]; ok {
-				res.Sources[k] = "env:" + name
-			} else {
-				res.Sources[k] = "env"
-			}
+			changed[k] = true
+		}
+	}
+	for k := range prev {
+		if _, ok := cur[k]; !ok {
+			changed[k] = true
 		}
 	}
 	cfg.Instructions = loadInstructions(project)
@@ -199,6 +209,39 @@ func Resolve(project, preset, bundle string) Resolution {
 		}
 	}
 	res.Effective = cfg
+	// A route's window is the variable's that names another model for it,
+	// by the loader's own rule (EnvMoved): it follows that model whatever
+	// the layers say, the same number or not. A variable that names the
+	// model the route already has owns no window.
+	windows := map[string]string{}
+	for _, route := range []string{"/model", "/summarizer/model"} {
+		name, named := envVars[route+"/model"]
+		if model, _ := res.EnvMoved(route); named && model {
+			windows[route+"/context_tokens"] = name
+			changed[route+"/context_tokens"] = true
+		}
+	}
+	for k := range changed {
+		if name, ok := envVars[k]; ok {
+			res.Sources[k] = "env:" + name
+		} else if name, ok := windows[k]; ok {
+			res.Sources[k] = "env:" + name
+		} else if k == "/summarizer/model/context_tokens" && res.Layered.Summarizer.Model != nil {
+			// The window of the server an address variable moves the
+			// layers' route to (applyEnv), as for the main route below.
+			res.Sources[k] = "env"
+		} else if name := summarizerEnv(); name != "" && strings.HasPrefix(k, "/summarizer/model/") {
+			// The rest of a summarizer route the environment created is
+			// copied from the main model because of that variable.
+			res.Sources[k] = "env:" + name
+		} else {
+			// Among them the window of the server an address variable moves
+			// the route to: the environment's doing, but no variable's, as
+			// a window the file names holds over it (applyEnv). So it is
+			// not shown as pinned, and stays editable.
+			res.Sources[k] = "env"
+		}
+	}
 	switch {
 	case bundle != "":
 		res.Active = Active{Kind: "bundle", Name: bundle}
@@ -214,37 +257,73 @@ func Resolve(project, preset, bundle string) Resolution {
 	return res
 }
 
-// fileSetsRoutes reports whether the project file decides any actor's route.
+// EnvMoved says what the environment did to the route at ptr ("/model" or
+// "/summarizer/model"), by the loader's own rule: whether it named another
+// model (model), and whether it moved the route to another model or
+// address (route, moved: a trailing slash is no move). A summarizer route
+// the environment makes is measured from the main route it copies.
+func (r Resolution) EnvMoved(ptr string) (model, route bool) {
+	before, after := r.Layered.Model, r.Effective.Model
+	if ptr == "/summarizer/model" {
+		if r.Effective.Summarizer.Model == nil {
+			return false, false
+		}
+		after = *r.Effective.Summarizer.Model
+		if r.Layered.Summarizer.Model != nil {
+			before = *r.Layered.Summarizer.Model
+		} else {
+			before = r.Effective.Model
+		}
+	}
+	return after.Model != before.Model, moved(before, after)
+}
+
+// fileSetsRoutes reports whether the project file decides the model or the
+// summarizer.
 func fileSetsRoutes(sources map[string]string) bool {
 	for k, v := range sources {
-		if v == "file" && (strings.HasPrefix(k, "/orchestrator/") || strings.HasPrefix(k, "/task/") || strings.HasPrefix(k, "/narrator/")) {
+		if v == "file" && (strings.HasPrefix(k, "/model/") || strings.HasPrefix(k, "/summarizer/")) {
 			return true
 		}
 	}
 	return false
 }
 
+// routeEnvFields maps the suffix of a route's environment variables to the
+// route field it sets.
+var routeEnvFields = map[string]string{"MODEL": "model", "PROTOCOL": "protocol", "BASE_URL": "base_url", "API_KEY_ENV": "api_key_env", "REASONING_EFFORT": "reasoning_effort", "MAX_TOKENS": "max_tokens", "REPLAY_REASONING": "replay_reasoning"}
+
 // EnvOverrides maps the JSON pointer of every field an EAGENT_* variable
-// currently overrides to that variable's name.
+// currently overrides to that variable's name. Where an older name is read
+// as a fallback, the name in effect is reported.
 func EnvOverrides() map[string]string {
 	out := map[string]string{}
-	for name, ptr := range map[string]string{"ORCHESTRATOR": "/orchestrator", "TASK": "/task", "NARRATOR": "/narrator"} {
-		for suffix, field := range map[string]string{"MODEL": "model", "PROTOCOL": "protocol", "BASE_URL": "base_url", "API_KEY_ENV": "api_key_env", "REASONING_EFFORT": "reasoning_effort", "MAX_TOKENS": "max_tokens", "REPLAY_REASONING": "replay_reasoning"} {
-			v := "EAGENT_" + name + "_" + suffix
-			if suffix == "API_KEY_ENV" {
-				if _, ok := os.LookupEnv(v); ok {
-					out[ptr+"/"+field] = v
+	set := func(ptr string, names ...string) {
+		for _, n := range names {
+			if strings.HasSuffix(n, "_API_KEY_ENV") {
+				// An empty key variable is an override too: no key needed.
+				if _, ok := os.LookupEnv(n); ok {
+					out[ptr] = n
+					return
 				}
-			} else if os.Getenv(v) != "" {
-				out[ptr+"/"+field] = v
+			} else if os.Getenv(n) != "" {
+				out[ptr] = n
+				return
 			}
 		}
 	}
-	for v, ptr := range map[string]string{"EAGENT_TASK_CONCURRENCY": "/task_concurrency", "EAGENT_ROLLOVER_TOKENS": "/rollover_tokens", "EAGENT_NARRATOR_TICK_SECONDS": "/narrator_tick_seconds", "EAGENT_NARRATOR_QUIET_SECONDS": "/narrator_quiet_seconds", "EAGENT_PERSONA": "/persona", "EAGENT_FINALECHAT": "/finalechat/enabled", "EAGENT_FINALECHAT_ARTIFACTS": "/finalechat/artifacts"} {
-		if os.Getenv(v) != "" {
-			out[ptr] = v
-		}
+	for suffix, field := range routeEnvFields {
+		set("/model/"+field, "EAGENT_"+suffix, "EAGENT_ORCHESTRATOR_"+suffix)
+		set("/summarizer/model/"+field, "EAGENT_SUMMARIZER_"+suffix)
 	}
+	set("/summarizer/mode", "EAGENT_SUMMARIZER_MODE")
+	set("/tick_seconds", "EAGENT_TICK_SECONDS", "EAGENT_NARRATOR_TICK_SECONDS")
+	set("/quiet_seconds", "EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")
+	set("/rollover_tokens", "EAGENT_ROLLOVER_TOKENS")
+	set("/persona", "EAGENT_PERSONA")
+	set("/relay/default", "EAGENT_DEFAULT_RELAY")
+	set("/finalechat/enabled", "EAGENT_FINALECHAT")
+	set("/finalechat/artifacts", "EAGENT_FINALECHAT_ARTIFACTS")
 	return out
 }
 
@@ -275,9 +354,12 @@ func flatten(cfg Config) map[string]string {
 }
 
 // editorKeys are the top-level keys the editor may write. Anything else in
-// the file is left byte for byte as it was.
-var editorKeys = []string{"preset", "default_config", "orchestrator", "task", "narrator", "task_concurrency", "max_task_turns", "max_orchestrator_calls_per_turn", "narrator_tick_seconds", "narrator_quiet_seconds", "rollover_tokens", "bash_wait_seconds", "bash_timeout_seconds", "tool_output_max_chars", "persona", "allow_outside_project", "finalechat"}
+// the file is left byte for byte as it was. Of relay the editor writes only
+// relay.default: profiles name programs to run and stay as written.
+var editorKeys = []string{"preset", "default_config", "model", "summarizer", "max_calls_per_turn", "tick_seconds", "quiet_seconds", "rollover_tokens", "report_max_chars", "persona", "finalechat", "relay"}
 
+// unknownKeys lists the keys of a configuration object, already carried
+// over to today's keys, that eagent does not read.
 func unknownKeys(m map[string]json.RawMessage) []string {
 	known := map[string]bool{"name": true, "description": true}
 	for _, k := range editorKeys {
@@ -298,7 +380,8 @@ func unknownKeys(m map[string]json.RawMessage) []string {
 // Overlay returns the JSON the file needs so that Defaults()+preset+file
 // equals cfg, touching only editor-owned keys: values equal to the base are
 // omitted (a key present on disk but now equal to the base is deleted, sent
-// as a nil RawMessage), and actors carry only the fields that differ.
+// as a nil RawMessage), routes carry only the fields that differ, and relay
+// carries only its default.
 func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 	base := Defaults()
 	if preset != "" {
@@ -323,8 +406,25 @@ func Overlay(cfg Config, preset string) (map[string]json.RawMessage, error) {
 		}
 		w, h := want[k], have[k]
 		switch k {
-		case "orchestrator", "task", "narrator":
+		case "relay":
+			if cfg.Relay.Default == base.Relay.Default {
+				out[k] = nil
+			} else {
+				out[k] = relayDefault(cfg.Relay.Default)
+			}
+		case "model", "summarizer":
 			diff := diffObjects(h, w)
+			// A route the file moves to another model or address takes
+			// the window there unless the file names one (followModel), so
+			// a window shown for it is written even when it equals the
+			// base's.
+			if k == "model" && routeMoved(h, w) {
+				if _, named := diff["context_tokens"]; !named {
+					if cw := object(w)["context_tokens"]; cw != nil {
+						diff["context_tokens"] = cw
+					}
+				}
+			}
 			if len(diff) == 0 {
 				out[k] = nil
 			} else {
@@ -381,9 +481,10 @@ func BundleFromBytes(name string, raw []byte) (Config, error) {
 		Presets[canon](&cfg)
 		preset = canon
 	}
-	if err := overlay(&cfg, m, "bundle "+name); err != nil {
+	if err := overlay("", &cfg, m, "bundle "+name, &named{}); err != nil {
 		return Config{}, err
 	}
+	normalize(&cfg)
 	cfg.Preset = preset
 	return cfg, nil
 }
@@ -396,13 +497,104 @@ func Pin(cfg Config, preset string) map[string]json.RawMessage {
 	} else {
 		out["preset"] = nil // a pinned file stands alone; drop any preset the file had
 	}
-	for k, v := range topLevel(cfg) {
+	for k, v := range spelled(cfg) {
 		for _, ek := range editorKeys {
 			if ek == k && k != "preset" && k != "default_config" {
 				out[k] = v
 			}
 		}
 	}
+	out["relay"] = relayDefault(cfg.Relay.Default)
+	return out
+}
+
+// relayDefault is the editor's edit of the relay key: its default alone.
+func relayDefault(name string) json.RawMessage {
+	raw, _ := json.Marshal(map[string]string{"default": name})
+	return raw
+}
+
+// mergeRelay applies the editor's relay edit (nil, or an object of which
+// only "default" is read) to the relay object in the file, keeping
+// everything else there as written. It returns nil when nothing is left.
+func mergeRelay(existing, edit json.RawMessage) json.RawMessage {
+	obj := object(existing)
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	var name string
+	if e := object(edit); e != nil {
+		_ = json.Unmarshal(e["default"], &name)
+	}
+	if name == "" {
+		delete(obj, "default")
+	} else {
+		obj["default"], _ = json.Marshal(name)
+	}
+	if len(obj) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(obj)
+	return raw
+}
+
+// spelled is cfg as a file holds it when the file stands over other layers
+// (a preset, or for a saved preset the project file too) and must load back
+// to cfg: what JSON would leave out as empty is written, so a layer below
+// cannot fill it in. A route's empty field is null, which the loader reads
+// as "clear what is below" (followModel); a missing fallback or summarizer
+// route is null; other empty values are written as they are.
+func spelled(cfg Config) map[string]json.RawMessage {
+	m := topLevel(cfg)
+	m["model"] = spelledRoute(cfg.Model)
+	summarizer := object(m["summarizer"])
+	if summarizer == nil {
+		summarizer = map[string]json.RawMessage{}
+	}
+	summarizer["model"] = json.RawMessage("null")
+	if cfg.Summarizer.Model != nil {
+		summarizer["model"] = spelledRoute(*cfg.Summarizer.Model)
+	}
+	m["summarizer"], _ = json.Marshal(summarizer)
+	phone := object(m["finalechat"])
+	if phone == nil {
+		phone = map[string]json.RawMessage{}
+	}
+	for k, empty := range map[string]string{"enabled": "null", "mirror_input": "null", "token_env": `""`, "base_url": `""`, "agent": `""`, "question_timeout_seconds": "0"} {
+		if _, ok := phone[k]; !ok {
+			phone[k] = json.RawMessage(empty)
+		}
+	}
+	m["finalechat"], _ = json.Marshal(phone)
+	if _, ok := m["persona"]; !ok {
+		m["persona"] = json.RawMessage(`""`)
+	}
+	// No default agent is spelled too, or the layer below names one.
+	relay := object(m["relay"])
+	if relay == nil {
+		relay = map[string]json.RawMessage{}
+	}
+	if _, ok := relay["default"]; !ok {
+		relay["default"] = json.RawMessage(`""`)
+	}
+	m["relay"], _ = json.Marshal(relay)
+	return m
+}
+
+// spelledRoute is a route with its empty fields as nulls (see spelled).
+func spelledRoute(a ModelRoute) json.RawMessage {
+	raw, _ := json.Marshal(a)
+	obj := object(raw)
+	for _, k := range []string{"reasoning_effort", "replay_reasoning", "max_tokens", "context_tokens"} {
+		if _, ok := obj[k]; !ok {
+			obj[k] = json.RawMessage("null")
+		}
+	}
+	obj["fallback"] = json.RawMessage("null")
+	if a.Fallback != nil {
+		obj["fallback"] = spelledRoute(*a.Fallback)
+	}
+	out, _ := json.Marshal(obj)
 	return out
 }
 
@@ -422,6 +614,16 @@ func canon(raw json.RawMessage) []byte {
 	return b
 }
 
+// routeMoved says whether the route object want names another model than
+// have, or reaches it at another address: the loader's rule (moved), by
+// which a layer that does so without naming a window gets the one there.
+func routeMoved(have, want json.RawMessage) bool {
+	var h, w ModelRoute
+	_ = json.Unmarshal(have, &h)
+	_ = json.Unmarshal(want, &w)
+	return moved(h, w)
+}
+
 // diffObjects returns the keys of want whose value differs from have, plus
 // explicit nulls for keys have has and want lacks.
 func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
@@ -431,9 +633,28 @@ func diffObjects(have, want json.RawMessage) map[string]json.RawMessage {
 	_ = json.Unmarshal(want, &w)
 	out := map[string]json.RawMessage{}
 	for k, v := range w {
-		if hv, ok := h[k]; !ok || !bytes.Equal(canon(hv), canon(v)) {
-			out[k] = v
+		hv, ok := h[k]
+		if ok && bytes.Equal(canon(hv), canon(v)) {
+			continue
 		}
+		// A route inside (a fallback, the summarizer's model) loads field
+		// by field over the one below, so it is written as its own diff:
+		// a field it no longer has becomes null instead of being refilled
+		// from below.
+		if ok && object(hv) != nil && object(v) != nil {
+			sub := diffObjects(hv, v)
+			if routeMoved(hv, v) {
+				// As for the main route: a route moved takes the window shown.
+				if _, named := sub["context_tokens"]; !named {
+					if cw := object(v)["context_tokens"]; cw != nil {
+						sub["context_tokens"] = cw
+					}
+				}
+			}
+			out[k], _ = json.Marshal(sub)
+			continue
+		}
+		out[k] = v
 	}
 	for k := range h {
 		if _, ok := w[k]; !ok {
@@ -463,8 +684,10 @@ type SaveResult struct {
 	PrevETag string `json:"prev_etag,omitempty"`
 }
 
-// SaveFile applies editor edits to the project's config.json: existing keys
-// the editor does not own are kept byte for byte, a nil value deletes a key,
+// SaveFile applies editor edits to the project's config.json: a file still
+// in the keys of eagent's earlier design is carried over to today's first,
+// existing keys the editor does not own are kept byte for byte, a nil value
+// deletes a key, a relay edit sets only relay.default,
 // the write is atomic, the previous bytes go to config.json.bak, and when
 // ifMatch is given the write is refused unless the file still has that etag
 // ("" meaning "there was no file").
@@ -497,7 +720,15 @@ func saveFile(project string, edits map[string]json.RawMessage, ifMatch string, 
 	if checkMatch && ifMatch != res.PrevETag {
 		return res, &ErrConflict{Current: res.Previous, ETag: res.PrevETag}
 	}
+	existing, _ = MigrateLegacy(existing)
+	if existing == nil {
+		// A file holding null loads as no file; a save starts it afresh.
+		existing = map[string]json.RawMessage{}
+	}
 	for k, v := range edits {
+		if k == "relay" {
+			v = mergeRelay(existing[k], v)
+		}
 		if v == nil {
 			delete(existing, k)
 		} else {
@@ -543,6 +774,10 @@ func saveRaw(project, raw, ifMatch string, checkMatch bool) (SaveResult, error) 
 	m := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return res, fmt.Errorf("not valid JSON: %v", err)
+	}
+	if m == nil {
+		// null decodes into a map without an error, as no map at all.
+		return res, fmt.Errorf("the configuration must be a JSON object, not null")
 	}
 	out := []byte(raw)
 	if !strings.HasSuffix(raw, "\n") {
@@ -664,38 +899,39 @@ func (c Config) Problems() []Problem {
 	add := func(sev, path, code, msg string) {
 		out = append(out, Problem{Path: path, Code: code, Message: msg, Severity: sev})
 	}
-	for name, a := range map[string]Actor{"/orchestrator": c.Orchestrator, "/task": c.Task, "/narrator": c.Narrator} {
-		out = append(out, actorProblems(name, a, 0)...)
+	out = append(out, routeProblems("/model", c.Model, 0)...)
+	// An inline summarizer calls no route, so one left written is not checked:
+	// it cannot fail a load or a save it plays no part in.
+	if c.Summarizer.Model != nil && c.Summarizer.Mode != SummarizerInline && c.Summarizer.Mode != "" {
+		out = append(out, routeProblems("/summarizer/model", *c.Summarizer.Model, 0)...)
 	}
-	if c.TaskConcurrency < 1 {
-		add("error", "/task_concurrency", "min", "task_concurrency must be at least 1")
+	switch c.Summarizer.Mode {
+	case "", SummarizerInline, SummarizerDedicated:
+	default:
+		add("error", "/summarizer/mode", "enum", fmt.Sprintf("summarizer mode %q is not %s or %s", c.Summarizer.Mode, SummarizerInline, SummarizerDedicated))
 	}
-	if c.MaxTaskTurns < 1 {
-		add("error", "/max_task_turns", "min", "max_task_turns must be at least 1")
+	if c.MaxCallsPerTurn < 1 || c.MaxCallsPerTurn > 200 {
+		add("error", "/max_calls_per_turn", "range", "max_calls_per_turn must be between 1 and 200")
 	}
-	if c.MaxOrchestratorCallsPerTurn < 1 {
-		add("error", "/max_orchestrator_calls_per_turn", "min", "max_orchestrator_calls_per_turn must be at least 1")
+	if c.TickSeconds < 5 {
+		add("error", "/tick_seconds", "min", "tick_seconds must be at least 5")
 	}
-	if c.NarratorTickSeconds < 5 {
-		add("error", "/narrator_tick_seconds", "min", "narrator_tick_seconds must be at least 5")
+	if c.QuietSeconds < 0 {
+		add("error", "/quiet_seconds", "min", "quiet_seconds cannot be negative (0 disables the limit)")
 	}
-	if c.NarratorQuietSeconds < 0 {
-		add("error", "/narrator_quiet_seconds", "min", "narrator_quiet_seconds cannot be negative (0 disables the reminder)")
+	if c.RolloverTokens != 0 && c.RolloverTokens < 20_000 {
+		add("error", "/rollover_tokens", "min", "rollover_tokens must be at least 20000, or 0 to follow the model's context window")
 	}
-	if c.RolloverTokens < 20_000 {
-		add("error", "/rollover_tokens", "min", "rollover_tokens must be at least 20000")
+	if w := c.Model.ContextTokens; w > 0 && float64(c.RolloverTokens) > 0.9*float64(w) {
+		add("warning", "/rollover_tokens", "near_window", fmt.Sprintf("rollover_tokens (%d) is within 10%% of the model's context window (%d); the context can overflow before the dossier is written", c.RolloverTokens, w))
 	}
-	if w := c.Orchestrator.ContextTokens; w > 0 && float64(c.RolloverTokens) > 0.9*float64(w) {
-		add("warning", "/rollover_tokens", "near_window", fmt.Sprintf("rollover_tokens (%d) is within 10%% of the orchestrator's context window (%d); the context can overflow before the dossier is written", c.RolloverTokens, w))
+	if c.ReportMaxChars < 500 {
+		add("error", "/report_max_chars", "min", "report_max_chars must be at least 500")
 	}
-	if c.BashWaitSeconds < 0 || c.BashWaitSeconds > 300 {
-		add("error", "/bash_wait_seconds", "range", "bash_wait_seconds must be between 0 and 300")
-	}
-	if c.BashTimeoutSeconds < 1 {
-		add("error", "/bash_timeout_seconds", "min", "bash_timeout_seconds must be at least 1")
-	}
-	if c.ToolOutputMaxChars < 1000 {
-		add("error", "/tool_output_max_chars", "min", "tool_output_max_chars must be at least 1000")
+	if d := c.Relay.Default; d != "" {
+		if _, ok := c.Relay.RelayProfiles()[d]; !ok {
+			add("error", "/relay/default", "enum", fmt.Sprintf("relay default %q is not a relay profile (have %s)", d, strings.Join(c.Relay.RelayProfileNames(), ", ")))
+		}
 	}
 	if len(c.Persona) > 8192 {
 		add("error", "/persona", "too_long", "persona must be at most 8 KB")
@@ -709,7 +945,7 @@ func (c Config) Problems() []Problem {
 	return out
 }
 
-func actorProblems(path string, a Actor, depth int) []Problem {
+func routeProblems(path string, a ModelRoute, depth int) []Problem {
 	var out []Problem
 	add := func(sev, p, code, msg string) {
 		out = append(out, Problem{Path: p, Code: code, Message: msg, Severity: sev})
@@ -758,7 +994,7 @@ func actorProblems(path string, a Actor, depth int) []Problem {
 		if depth >= 1 {
 			add("error", path+"/fallback", "too_deep", "only one level of fallback is supported")
 		} else {
-			out = append(out, actorProblems(path+"/fallback", *a.Fallback, depth+1)...)
+			out = append(out, routeProblems(path+"/fallback", *a.Fallback, depth+1)...)
 		}
 	}
 	return out

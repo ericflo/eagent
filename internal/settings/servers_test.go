@@ -68,10 +68,14 @@ func TestRemoteSnapshotApplyAndEditorDataWithRegisteredServer(t *testing.T) {
 	if view.Snapshot.Version == before.Snapshot.Version {
 		t.Fatal("registering a server did not change RemoteSnapshot version")
 	}
-	// Provider and model suggestions include the local server first.
-	provs := view.Descriptor.Suggestions["providers"]
-	if len(provs) == 0 || provs[0].Value != "my-local" {
-		t.Fatalf("providers[0] = %+v, want my-local", provs)
+	// The model field offers the local server's models first, and its
+	// address is a base URL to choose.
+	fields := map[string]control.Field{}
+	for _, f := range view.Descriptor.Fields {
+		fields[f.Key] = f
+	}
+	if f := fields["/model/model"]; f.Suggest == nil || f.Suggest.List != "models" || !slices.Contains(fields["/model/base_url"].Shape.Enum, any(reg.Server.BaseURL)) {
+		t.Fatalf("model fields = %+v %+v", f, fields["/model/base_url"])
 	}
 	models := view.Descriptor.Suggestions["models"]
 	if len(models) == 0 || models[0].Value != "local-coder" {
@@ -80,12 +84,12 @@ func TestRemoteSnapshotApplyAndEditorDataWithRegisteredServer(t *testing.T) {
 	// api_key_env field enum allows "" (keyless local server).
 	foundEmptyKey := false
 	for _, f := range view.Descriptor.Fields {
-		if f.Key == "/orchestrator/api_key_env" {
+		if f.Key == "/model/api_key_env" {
 			foundEmptyKey = slices.Contains(f.Shape.Enum, any(""))
 		}
 	}
 	if !foundEmptyKey {
-		t.Fatal("/orchestrator/api_key_env enum does not allow empty string for keyless servers")
+		t.Fatal("/model/api_key_env enum does not allow empty string for keyless servers")
 	}
 	// EditorData for FinaleChat's embedded settings website includes the registered server + model.
 	ed, err := s.EditorData()
@@ -109,23 +113,23 @@ func TestRemoteSnapshotApplyAndEditorDataWithRegisteredServer(t *testing.T) {
 		t.Fatalf("EditorData models missing local-coder")
 	}
 
-	// Applying a remote edit switching orchestrator to the registered keyless server succeeds.
+	// Applying a remote edit switching the model to the registered keyless server succeeds.
 	p := control.Proposal{
 		Operation:       "settings.apply",
 		SchemaVersion:   SchemaVersion,
 		ExpectedVersion: view.Snapshot.Version,
 		Edits: []control.Edit{
-			{Op: "set", Key: "/orchestrator/base_url", Value: reg.Server.BaseURL},
-			{Op: "set", Key: "/orchestrator/model", Value: "local-coder"},
-			{Op: "set", Key: "/orchestrator/protocol", Value: llm.ProtocolChat},
-			{Op: "set", Key: "/orchestrator/api_key_env", Value: ""},
+			{Op: "set", Key: "/model/base_url", Value: reg.Server.BaseURL},
+			{Op: "set", Key: "/model/model", Value: "local-coder"},
+			{Op: "set", Key: "/model/protocol", Value: llm.ProtocolChat},
+			{Op: "set", Key: "/model/api_key_env", Value: ""},
 		},
 	}
 	_, after, err := s.Apply(context.Background(), p, g)
 	if err != nil {
 		t.Fatalf("Apply keyless local route: %v", err)
 	}
-	if after.Snapshot.Effective["/orchestrator/base_url"] != reg.Server.BaseURL || after.Snapshot.Effective["/orchestrator/api_key_env"] != "" {
+	if after.Snapshot.Effective["/model/base_url"] != reg.Server.BaseURL || after.Snapshot.Effective["/model/api_key_env"] != "" {
 		t.Fatalf("effective = %v", after.Snapshot.Effective)
 	}
 
@@ -134,7 +138,7 @@ func TestRemoteSnapshotApplyAndEditorDataWithRegisteredServer(t *testing.T) {
 		Operation:       "settings.apply",
 		SchemaVersion:   SchemaVersion,
 		ExpectedVersion: after.Snapshot.Version,
-		Edits:           []control.Edit{{Op: "set", Key: "/orchestrator/api_key_env", Value: "OPENAI_API_KEY"}},
+		Edits:           []control.Edit{{Op: "set", Key: "/model/api_key_env", Value: "OPENAI_API_KEY"}},
 	}
 	if _, _, err := s.Apply(context.Background(), bad, g); err == nil {
 		t.Fatal("expected CheckRoutes to refuse pairing OPENAI_API_KEY with keyless custom server")
@@ -142,7 +146,7 @@ func TestRemoteSnapshotApplyAndEditorDataWithRegisteredServer(t *testing.T) {
 
 	// Route test against the registered keyless server works end-to-end.
 	tr, err := s.TestRoute(context.Background(), RouteTestRequest{
-		Actor: config.Actor{
+		Model: config.ModelRoute{
 			Protocol:  llm.ProtocolChat,
 			BaseURL:   reg.Server.BaseURL,
 			Model:     "local-coder",
@@ -187,21 +191,21 @@ func TestRemoteApplyRegistersEditsAndRemovesLocalServers(t *testing.T) {
 	if err != nil || len(servers) != 1 || servers[0].BaseURL != srv.URL+"/v1" {
 		t.Fatalf("servers after /add_server_url = %+v err=%v", servers, err)
 	}
-	if !slices.ContainsFunc(v1.Descriptor.Suggestions["models"], func(s control.Suggestion) bool { return s.Value == "local-coder" && s.Group == servers[0].ID }) {
+	if !slices.ContainsFunc(v1.Descriptor.Suggestions["models"], func(s control.Suggestion) bool { return s.Value == "local-coder" && s.Group == servers[0].BaseURL }) {
 		t.Fatalf("suggestions missing newly probed local model: %+v", v1.Descriptor.Suggestions["models"])
 	}
 
-	// 2. Edit default protocol via /servers AND switch orchestrator to it in one proposal.
+	// 2. Edit default protocol via /servers AND switch the model to it in one proposal.
 	editProp := control.Proposal{
 		Operation:       "settings.apply",
 		SchemaVersion:   SchemaVersion,
 		ExpectedVersion: v1.Snapshot.Version,
 		Edits: []control.Edit{
 			{Op: "set", Key: "/servers", Value: []any{map[string]any{"id": servers[0].ID, "url": servers[0].BaseURL, "label": "Renamed Box", "protocol": llm.ProtocolAnthropic}}},
-			{Op: "set", Key: "/orchestrator/base_url", Value: servers[0].BaseURL},
-			{Op: "set", Key: "/orchestrator/model", Value: "local-coder"},
-			{Op: "set", Key: "/orchestrator/protocol", Value: llm.ProtocolAnthropic},
-			{Op: "set", Key: "/orchestrator/api_key_env", Value: ""},
+			{Op: "set", Key: "/model/base_url", Value: servers[0].BaseURL},
+			{Op: "set", Key: "/model/model", Value: "local-coder"},
+			{Op: "set", Key: "/model/protocol", Value: llm.ProtocolAnthropic},
+			{Op: "set", Key: "/model/api_key_env", Value: ""},
 		},
 	}
 	_, v2, err := s.Apply(context.Background(), editProp, g)
@@ -212,8 +216,8 @@ func TestRemoteApplyRegistersEditsAndRemovesLocalServers(t *testing.T) {
 	if len(servers) != 1 || servers[0].Label != "Renamed Box" || servers[0].Protocol != llm.ProtocolAnthropic {
 		t.Fatalf("servers after edit = %+v", servers)
 	}
-	if v2.Snapshot.Effective["/orchestrator/protocol"] != llm.ProtocolAnthropic || v2.Snapshot.Effective["/orchestrator/api_key_env"] != "" {
-		t.Fatalf("effective orchestrator = %v", v2.Snapshot.Effective)
+	if v2.Snapshot.Effective["/model/protocol"] != llm.ProtocolAnthropic || v2.Snapshot.Effective["/model/api_key_env"] != "" {
+		t.Fatalf("effective model = %v", v2.Snapshot.Effective)
 	}
 
 	// 3. Remove all registered servers by unsetting /servers.

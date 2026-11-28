@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,11 +169,33 @@ type File struct {
 	Data        []byte
 }
 
-// Limits mirror the server's.
+// Limits on what eagent sends and takes. The service holds up to 8 files a
+// message, each up to 25 MB; eagent keeps files to 10 MB either way.
 const (
 	MaxAttachments    = 8
 	MaxAttachmentSize = 10 << 20
 )
+
+// ErrTooLarge is a file over MaxAttachmentSize: it is refused whole, never
+// kept cut short.
+var ErrTooLarge = fmt.Errorf("finalechat: the file is over the %d MB limit", MaxAttachmentSize>>20)
+
+// RefusedNote is what the person who sent a file from the phone is told
+// when it could not be taken, so it is not dropped without a word.
+func RefusedNote(filename string, err error) string {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		name = "a file you sent"
+	}
+	if errors.Is(err, ErrTooLarge) {
+		return fmt.Sprintf("eagent did not take %s: it is over %d MB, the largest file eagent takes from the phone, so none of it was saved. Send a smaller file.", name, MaxAttachmentSize>>20)
+	}
+	why := strings.ReplaceAll(err.Error(), "\n", " ")
+	if len(why) > 200 {
+		why = why[:200] + "..."
+	}
+	return fmt.Sprintf("eagent could not fetch %s from the phone (%s), so it was not passed on. Send it again.", name, why)
+}
 
 // IsAnswer reports whether the message records the answer to a question,
 // and returns that question's id.
@@ -211,7 +234,12 @@ type Question struct {
 	Answer        *Answer        `json:"answer"`
 	Meta          map[string]any `json:"meta"`
 	CreatedAt     time.Time      `json:"created_at"`
+	AnsweredAt    *time.Time     `json:"answered_at"` // when it was answered, dismissed, withdrawn or expired
 	ExpiresAt     *time.Time     `json:"expires_at"`
+	// Created is set by Ask: false when the client key matched a question
+	// the service already had, which it returns as it is, leaving the
+	// thread's status line alone.
+	Created bool `json:"-"`
 }
 
 // Thread is one conversation.
@@ -231,6 +259,8 @@ type Thread struct {
 	Muted             bool       `json:"muted"`
 	PendingQuestions  int        `json:"pending_questions"`
 	Activity          *Status    `json:"activity"` // the live status line, or nil
+	// LastActivityAt is when the thread's newest message was written.
+	LastActivityAt time.Time `json:"last_activity_at"`
 }
 
 // Status is the live status line the app shows as a typing indicator.
@@ -504,11 +534,20 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 // server kept a newer status (by seq) or the same text still had most of
 // its life. A thread that does not exist yet is a 404: post a message first.
 func (c *Client) SetActivity(ctx context.Context, ref string, a Activity) (bool, error) {
+	applied, _, err := c.SetActivityShown(ctx, ref, a)
+	return applied, err
+}
+
+// SetActivityShown is SetActivity that also returns the line the thread
+// shows after the call (nil for none): when the write was not applied,
+// that is what the app shows instead.
+func (c *Client) SetActivityShown(ctx context.Context, ref string, a Activity) (bool, *Status, error) {
 	var out struct {
-		Applied bool `json:"applied"`
+		Applied bool   `json:"applied"`
+		Thread  Thread `json:"thread"`
 	}
 	err := c.do(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/activity", nil, a, &out, 0)
-	return out.Applied, err
+	return out.Applied, out.Thread.Activity, err
 }
 
 // ClearActivity drops the status line. seq (nanoseconds, like Activity.Seq)
@@ -554,8 +593,17 @@ func (c *Client) Download(ctx context.Context, urlOrID string, w io.Writer) (con
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", &Error{Status: resp.StatusCode, Message: strings.TrimSpace(string(raw))}
 	}
-	if _, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1)); err != nil {
+	if resp.ContentLength > MaxAttachmentSize {
+		return "", "", ErrTooLarge
+	}
+	n, err := io.Copy(w, io.LimitReader(resp.Body, MaxAttachmentSize+1))
+	if err != nil {
 		return "", "", fmt.Errorf("finalechat: %w", err)
+	}
+	if n > MaxAttachmentSize {
+		// What was written is only the start of the file: the caller must
+		// drop it, not keep it as if whole.
+		return "", "", ErrTooLarge
 	}
 	filename = ""
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
@@ -571,12 +619,14 @@ func (c *Client) Ask(ctx context.Context, ref string, req AskRequest) (Question,
 	var out struct {
 		Question Question `json:"question"`
 		Thread   Thread   `json:"thread"`
+		Created  bool     `json:"created"`
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return Question{}, Thread{}, err
 	}
 	err = c.send(ctx, http.MethodPost, "/api/v1/threads/"+refPath(ref)+"/questions", "application/json", raw, &out, 0, req.ClientKey != "")
+	out.Question.Created = out.Created
 	return out.Question, out.Thread, err
 }
 
@@ -670,6 +720,58 @@ func (c *Client) MessagesPage(ctx context.Context, ref, after, sender string, wa
 	}
 	err = c.do(ctx, http.MethodGet, "/api/v1/threads/"+refPath(ref)+"/messages", q, nil, &out, wait)
 	return out.Messages, out.TimedOut, out.AnchorUnknown, err
+}
+
+// MessagesSince lists the messages written after since, oldest first: the
+// read for a caller that has no message to read on from. (Asked with no
+// cursor at all the service lists the thread's newest page, which is no
+// place to start reading forward from.) The zero time reads from the
+// thread's start. The answer is held to that whatever the service made of
+// the request: one that does not know after_time (a FinaleChat from before
+// September 2026) answers with its newest page, newest first, and of that
+// only what was written after since is returned, oldest first.
+func (c *Client) MessagesSince(ctx context.Context, ref string, since time.Time, sender string, limit int) ([]Message, error) {
+	if since.IsZero() {
+		since = time.Unix(0, 0)
+	}
+	msgs, err := c.window(ctx, ref, url.Values{"after_time": {since.UTC().Format(time.RFC3339Nano)}}, sender, limit)
+	msgs = slices.DeleteFunc(msgs, func(m Message) bool { return !m.CreatedAt.IsZero() && !m.CreatedAt.After(since) })
+	slices.SortStableFunc(msgs, func(a, b Message) int {
+		if n := a.CreatedAt.Compare(b.CreatedAt); n != 0 {
+			return n
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	return msgs, err
+}
+
+// MessageBefore is the id of the message listed just before m, "" when m
+// is the first (or the service's answer is not a message listed before m,
+// as from one that does not know the request). The service lists by time
+// written, then by id.
+func (c *Client) MessageBefore(ctx context.Context, ref string, m Message, sender string) (string, error) {
+	msgs, err := c.window(ctx, ref, url.Values{"before": {m.ID}}, sender, 1)
+	if err != nil || len(msgs) != 1 {
+		return "", err
+	}
+	if b := msgs[0]; b.CreatedAt.Before(m.CreatedAt) || (b.CreatedAt.Equal(m.CreatedAt) && b.ID < m.ID) {
+		return b.ID, nil
+	}
+	return "", nil
+}
+
+func (c *Client) window(ctx context.Context, ref string, q url.Values, sender string, limit int) ([]Message, error) {
+	var out struct {
+		Messages []Message `json:"messages"`
+	}
+	if sender != "" {
+		q.Set("sender", sender)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	err := c.do(ctx, http.MethodGet, "/api/v1/threads/"+refPath(ref)+"/messages", q, nil, &out, 0)
+	return out.Messages, err
 }
 
 // Patch updates a thread's title, description/summary, agent, archived, or

@@ -29,8 +29,8 @@ func TestSummaryTitleFallback(t *testing.T) {
 func TestSummaryTitleOverride(t *testing.T) {
 	evs := []event.Event{
 		event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "paint the fence"}),
-		event.New(event.ThreadTitle, event.ActorOrchestrator, event.ThreadTitleData{Title: "Paint the fence", Description: "Repainting the fence blue."}),
-		event.New(event.ThreadTitle, event.ActorOrchestrator, event.ThreadTitleData{Description: "Repainting the fence blue and covering it."}),
+		event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{Title: "Paint the fence", Description: "Repainting the fence blue."}),
+		event.New(event.ThreadTitle, event.ActorEagent, event.ThreadTitleData{Description: "Repainting the fence blue and covering it."}),
 	}
 	st := state.Replay(evs)
 	sum := Summary(Metadata{}, st)

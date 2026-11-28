@@ -137,72 +137,82 @@
     });
   });
 
+  // One turn, step by step. Nodes are listed in document order: user,
+  // eagent, agent. Edges: "words" (you → agent, before any model call),
+  // "relay" (between eagent and the agent), "tell" (eagent → you).
   const flow = $(".actor-flow");
   const canvas = $(".flow-canvas");
   const flowStates = {
-    plan: {
-      phase: "01 / DELEGATION",
-      active: ["user", "orchestrator"],
-      edges: ["request", "engine", "touch"],
-      statuses: [
-        "Request sent",
-        "Defining tasks",
-        "Physics + tests",
-        "Input + tests",
-        "Observing",
-      ],
+    send: {
+      phase: "01 / YOUR WORDS",
+      active: ["user", "agent"],
+      edges: ["words"],
+      relay: "in",
+      labels: { words: "Word for word" },
+      statuses: ["Message sent", "No model call", "Typed in as written"],
       description:
-        "Your request reaches the orchestrator, which delegates a game-engine task and a touch-controls task to separate workers. The narrator observes.",
+        "Your message goes straight to Codex's terminal, word for word. eagent types it in the moment it arrives, before any model call.",
     },
-    build: {
-      phase: "02 / PARALLEL EXECUTION",
-      active: ["engine", "touch"],
-      edges: ["engine", "touch", "report"],
-      statuses: [
-        "Following progress",
-        "Coordinating",
-        "Writing + testing",
-        "Writing + testing",
-        "Sharing progress",
-      ],
+    watch: {
+      phase: "02 / WATCHING",
+      active: ["eagent", "agent"],
+      edges: ["relay"],
+      relay: "in",
+      labels: { relay: "New steps" },
+      statuses: ["Away", "Reading new steps", "Working"],
       description:
-        "Two workers build and test in parallel with separate contexts. Their code and task reports return to the orchestrator. The narrator sends progress updates to you.",
+        "Codex works. eagent reads the new steps from Codex's own transcript. When there is nothing new, no model call is made.",
     },
-    verify: {
-      phase: "03 / VERIFICATION",
-      active: ["orchestrator"],
-      edges: ["engine", "touch"],
-      statuses: [
-        "Following progress",
-        "Checking the result",
-        "Report returned",
-        "Report returned",
-        "Observing",
-      ],
+    progress: {
+      phase: "03 / PROGRESS",
+      active: ["eagent", "user"],
+      edges: ["relay", "tell"],
+      relay: "in",
+      labels: { relay: "New steps", tell: "A line or two" },
+      statuses: ["Gets an update", "Says what changed", "Still working"],
       description:
-        "Reports return from both workers to the orchestrator, which inspects the files, runs tests, and verifies the assembled game. Missing work becomes a follow-up task.",
+        "From the new steps, eagent tells you in a sentence or two what Codex has done, with the files, commands and numbers that matter.",
     },
-    report: {
-      phase: "04 / REPORTING",
-      active: ["narrator", "user"],
-      edges: ["verified", "report"],
+    dialog: {
+      phase: "04 / A STUCK DIALOG",
+      active: ["eagent", "agent"],
+      edges: ["relay"],
+      relay: "both",
+      labels: { relay: "Screen in, keys out" },
+      statuses: ["Not disturbed", "Reads screen, sends keys", "Dialog cleared"],
+      description:
+        "Codex is stuck on a dialog. eagent reads its screen, answers with keys, and reads the screen again to check that it took. You are not asked unless the choice is yours.",
+    },
+    end: {
+      phase: "05 / TURN ENDS",
+      active: ["user", "eagent", "agent"],
+      edges: ["relay", "tell"],
+      relay: "in",
+      labels: { relay: "Turn report", tell: "Short version + report" },
+      statuses: ["Reads both", "Writes the short version", "Turn finished"],
+      description:
+        "Codex finishes its turn. Its full report reaches you as a message of its own, and eagent adds the short version: what changed, what comes next, and anything that needs you.",
+    },
+    ask: {
+      phase: "06 / YOUR DECISION",
+      active: ["user", "eagent"],
+      edges: ["tell", "relay"],
+      relay: "out",
+      labels: { tell: "Question + options", relay: "Your answer" },
       statuses: [
-        "Result received",
-        "Result verified",
-        "Complete",
-        "Complete",
-        "Reporting the result",
+        "Picks an option",
+        "Asks, then passes it on",
+        "Waiting on you",
       ],
       description:
-        "The verified outcome reaches the narrator through the event log. The narrator delivers the final report to you, including changes, checks, and remaining limitations.",
+        "Codex asks something only you can decide. eagent asks you in plain words with the choices as options, and your answer goes back to Codex.",
     },
   };
+  const arrow = "url(#flow-arrow)";
   function renderFlow(stage) {
     const state = flowStates[stage];
     flow.dataset.stage = stage;
     $("#flow-phase").textContent = state.phase;
-    $(".flow-return-label", flow).textContent =
-      stage === "build" ? "Progress updates" : "Final report";
     canvas.setAttribute("aria-label", state.description);
     $$("[data-node]", flow).forEach((node, index) => {
       node.dataset.active = String(state.active.includes(node.dataset.node));
@@ -210,14 +220,15 @@
     });
     $$("[data-edge]", flow).forEach((edge) => {
       edge.dataset.active = String(state.edges.includes(edge.dataset.edge));
-      const returning =
-        ["build", "verify"].includes(stage) &&
-        ["engine", "touch"].includes(edge.dataset.edge);
-      edge.setAttribute(
-        "marker-start",
-        returning ? "url(#flow-arrow)" : "none",
-      );
-      edge.setAttribute("marker-end", returning ? "none" : "url(#flow-arrow)");
+    });
+    // The relay path is drawn from eagent to the agent: its start points at
+    // eagent (what eagent reads), its end at the agent (what eagent sends).
+    const relay = $("[data-edge='relay']", flow);
+    relay.setAttribute("marker-start", state.relay === "out" ? "none" : arrow);
+    relay.setAttribute("marker-end", state.relay === "in" ? "none" : arrow);
+    $$("[data-label]", flow).forEach((label) => {
+      label.textContent = state.labels[label.dataset.label] || "";
+      label.hidden = !state.labels[label.dataset.label];
     });
   }
   // Route connectors between actual card bounds so labels stay full-size on
@@ -238,52 +249,49 @@
         y: rect.top - frame.top + rect.height / 2,
       };
     });
-    const { user, orchestrator: orch, engine, touch, narrator } = bounds;
-    const mobile = w <= 540;
-    const branch = (orch.right + engine.left) / 2;
-    const workerBranchY =
-      (narrator.bottom + Math.min(engine.top, touch.top)) / 2;
+    const { user, eagent, agent } = bounds;
     const paths = {
-      request: `M${user.right + 3} ${user.y}H${orch.left - 4}`,
-      engine: mobile
-        ? `M${orch.right + 3} ${orch.y}H${w - 10}V${workerBranchY}H${engine.x}V${engine.top - 4}`
-        : `M${orch.right + 3} ${orch.y}H${branch}V${engine.y}H${engine.left - 4}`,
-      touch: mobile
-        ? `M${orch.right + 3} ${orch.y}H${w - 10}V${workerBranchY}H${touch.x}V${touch.top - 4}`
-        : `M${orch.right + 3} ${orch.y}H${branch}V${touch.y}H${touch.left - 4}`,
-      verified: `M${orch.x} ${orch.bottom + 3}V${narrator.y}H${narrator.right + 4}`,
-      report: `M${narrator.left - 3} ${narrator.y}H${user.x}V${user.bottom + 4}`,
+      words: `M${user.right + 3} ${user.y}H${agent.left - 4}`,
+      relay: `M${eagent.right + 4} ${eagent.y}H${agent.x}V${agent.bottom + 4}`,
+      tell: `M${eagent.left - 3} ${eagent.y}H${user.x}V${user.bottom + 4}`,
     };
     $(".flow-edges", flow).setAttribute("viewBox", `0 0 ${w} ${h}`);
     Object.entries(paths).forEach(([name, d]) =>
       $("[data-edge='" + name + "']", flow).setAttribute("d", d),
     );
-    for (const [selector, node] of [
-      [".flow-return-label", user],
-      [".flow-verified-label", orch],
-    ]) {
-      const label = $(selector, flow);
-      label.style.left = node.x + "px";
-      label.style.top = (node.bottom + narrator.top) / 2 + "px";
-    }
+    const wide = agent.left - user.right > 150;
+    const middle = (user.bottom + eagent.y) / 2;
+    const places = {
+      words: wide
+        ? [(user.right + agent.left) / 2, user.y]
+        : [w / 2, user.bottom + 16],
+      relay: [agent.x, (agent.bottom + eagent.y) / 2],
+      tell: [user.x, middle],
+    };
+    Object.entries(places).forEach(([name, [x, y]]) => {
+      const label = $("[data-label='" + name + "']", flow);
+      label.style.left = x + "px";
+      label.style.top = y + "px";
+    });
   }
-  renderFlow("plan");
+  renderFlow("send");
   layoutFlow();
   new ResizeObserver(layoutFlow).observe(canvas);
   document.fonts.ready.then(layoutFlow);
 
-  const planContent = document.createElement("template");
-  planContent.innerHTML = $("#step-content").innerHTML;
+  const firstContent = document.createElement("template");
+  firstContent.innerHTML = $("#step-content").innerHTML;
   tabs(".step-tabs", (button) => {
     const stage = button.dataset.step;
     const content =
-      stage === "plan" ? planContent : $("#step-" + stage + "-content");
+      stage === "send" ? firstContent : $("#step-" + stage + "-content");
     $("#step-content").replaceChildren(content.content.cloneNode(true));
     renderFlow(stage);
     layoutFlow();
   });
 
   // Generated at build time from internal/config; no separate model catalog.
+  // Each preset names one model for eagent's loop (the "eagent" route).
   const catalog = JSON.parse($("#preset-data").textContent);
   const presets = new Map(
     catalog.presets.map((preset) => [preset.name, preset]),
@@ -311,161 +319,29 @@
     }
     return labels.length ? "Fallback: " + labels.join(" → ") : "";
   }
+  const presetFlag = (preset) =>
+    !preset.name || preset.name === catalog.default
+      ? ""
+      : " --preset " + preset.name;
+  const examplePrompt = ' "add a Makefile with build and test targets"';
   $("#preset-select").addEventListener("change", (event) => {
     const preset = presets.get(event.target.value);
-    preset.routes.forEach((route) => {
-      $("#model-" + route.actor).textContent = route.label;
-      $("#provider-" + route.actor).textContent = route.provider;
-      $("#effort-" + route.actor).textContent = effortLabel(route.effort);
-      const fallback = $("#fallback-" + route.actor);
-      fallback.textContent = fallbackLabel(route);
-      fallback.hidden = !route.fallback;
-    });
+    const route = preset.routes.find((item) => item.actor === "eagent");
+    $("#model-eagent").textContent = route.label;
+    $("#provider-eagent").textContent = route.provider;
+    $("#effort-eagent").textContent = effortLabel(route.effort);
+    const fallback = $("#fallback-eagent");
+    fallback.textContent = fallbackLabel(route);
+    fallback.hidden = !route.fallback;
     $("#preset-note").textContent = preset.description;
     $("#preset-command").textContent =
-      "eagent" +
-      (preset.name ? " --preset " + preset.name : "") +
-      ' "Build something good"';
+      "eagent" + presetFlag(preset) + examplePrompt;
   });
-
-  const views = {
-    tasks: {
-      src: "assets/web-tasks.png",
-      alt: "eagent’s Tasks view: per-actor costs, a task timeline with context rollover boundaries, prompt sizes, and completed dossier tasks.",
-    },
-    chat: {
-      src: "assets/web-chat.png",
-      alt: "eagent’s Chat view: the narrator’s conversation, an answered question with options, activity, and a message composer.",
-    },
-  };
-  tabs(".workspace-tabs", (button) => {
-    const view = views[button.dataset.view];
-    $("#workspace-image").src = view.src;
-    $("#workspace-image").alt = view.alt;
-  });
-  const imageDialog = $("#image-dialog");
-  $("#expand-screenshot").addEventListener("click", () => {
-    $("#dialog-image").src = $("#workspace-image").src;
-    $("#dialog-image").alt = $("#workspace-image").alt;
-    imageDialog.showModal();
-    document.body.classList.add("dialog-open");
-  });
-  $(".dialog-close").addEventListener("click", () => imageDialog.close());
-  imageDialog.addEventListener("close", () =>
-    document.body.classList.remove("dialog-open"),
-  );
-  imageDialog.addEventListener("click", (event) => {
-    if (event.target !== imageDialog) return;
-    const bounds = imageDialog.getBoundingClientRect();
-    if (
-      event.clientX < bounds.left ||
-      event.clientX > bounds.right ||
-      event.clientY < bounds.top ||
-      event.clientY > bounds.bottom
-    )
-      imageDialog.close();
-  });
-
-  // Playable Breakout-grid gallery. Game metadata ships in #game-data (built
-  // from docs/grid/results.json); iframes load lazily on Play only, and the
-  // comparison table plus full-page links work with no JavaScript at all.
-  const gameData = $("#game-data")
-    ? JSON.parse($("#game-data").textContent)
-    : null;
-  const gameDialog = $("#game-dialog");
-  if (gameData && gameDialog) {
-    const gameFrame = $("#game-dialog-frame");
-    const gameShot = $("#game-dialog-shot");
-    const gameTitle = $("#game-dialog-title");
-    const gameMeta = $("#game-dialog-meta");
-    const gameOpen = $("#game-dialog-open");
-    const shotDesktop = $("#game-shot-desktop");
-    const shotMobile = $("#game-shot-mobile");
-    let currentGame = null;
-    let currentShot = "desktop";
-    function renderShot() {
-      const shots = {
-        desktop: [gameData[currentGame].desktop, 1280, 800, "desktop"],
-        mobile: [gameData[currentGame].mobile, 390, 844, "mobile"],
-      };
-      const [src, width, height, label] = shots[currentShot];
-      // Refresh through the staged thumbnail path so a cached desktop still
-      // never lingers after switching views.
-      gameShot.removeAttribute("src");
-      gameShot.src = src;
-      gameShot.width = width;
-      gameShot.height = height;
-      gameShot.alt =
-        "Screenshot of " + gameData[currentGame].title + " on " + label;
-      shotDesktop.setAttribute(
-        "aria-pressed",
-        String(currentShot === "desktop"),
-      );
-      shotMobile.setAttribute("aria-pressed", String(currentShot === "mobile"));
-    }
-    function openGame(preset) {
-      if (!gameData[preset]) return;
-      currentGame = preset;
-      currentShot = "desktop";
-      const game = gameData[preset];
-      gameTitle.textContent = game.title;
-      gameMeta.textContent =
-        preset +
-        " · " +
-        game.models +
-        " · " +
-        game.cost +
-        " · " +
-        game.rubric +
-        " rubric · " +
-        game.status +
-        (game.flag ? " · " + game.flag : "");
-      gameOpen.href = game.href;
-      gameFrame.title = "Play " + game.title + " (" + preset + ")";
-      // Lazy: the game boots only when its dialog opens, never 14 at once.
-      gameFrame.src = game.href;
-      renderShot();
-      gameDialog.showModal();
-      document.body.classList.add("dialog-open");
-    }
-    function closeGame() {
-      gameDialog.close();
-    }
-    $$("[data-play]").forEach((button) => {
-      button.addEventListener("click", () => openGame(button.dataset.play));
-    });
-    shotDesktop.addEventListener("click", () => {
-      currentShot = "desktop";
-      renderShot();
-    });
-    shotMobile.addEventListener("click", () => {
-      currentShot = "mobile";
-      renderShot();
-    });
-    $("#game-dialog-close").addEventListener("click", closeGame);
-    gameDialog.addEventListener("close", () => {
-      document.body.classList.remove("dialog-open");
-      // Stop the game when the dialog closes so audio and loops end.
-      gameFrame.removeAttribute("src");
-      currentGame = null;
-    });
-    gameDialog.addEventListener("click", (event) => {
-      if (event.target !== gameDialog) return;
-      const bounds = gameDialog.getBoundingClientRect();
-      if (
-        event.clientX < bounds.left ||
-        event.clientX > bounds.right ||
-        event.clientY < bounds.top ||
-        event.clientY > bounds.bottom
-      )
-        closeGame();
-    });
-  }
 
   tabs(".install-tabs", (button) => {
     const source = button.dataset.install === "source";
     $("#install-command").textContent = source
-      ? "git clone https://github.com/ericflo/eagent.git\ncd eagent\ngo build -o eagent ./cmd/eagent"
+      ? "git clone https://github.com/ericflo/eagent.git\ncd eagent\nmake build"
       : "go install github.com/ericflo/eagent/cmd/eagent@latest";
     $("#install-note").innerHTML = source
       ? "Put the built binary on your <code>PATH</code>, or run it with <code>./eagent</code>."

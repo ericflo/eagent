@@ -2,6 +2,8 @@ package harness
 
 import (
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
@@ -17,6 +19,12 @@ func (r *Runtime) startRuntimeSettings() {
 		return
 	}
 	c.Stop = r.acceptRemoteStop
+	c.Routes = func(routes map[string]runtimecontrol.Route) (map[string]config.ModelRoute, error) {
+		return r.runningRoutes(routes)
+	}
+	c.ChosenRoutes = func(routes map[string]runtimecontrol.Route, chosen string) (map[string]config.ModelRoute, error) {
+		return r.runningRoutes(routes, chosen)
+	}
 	r.runtimeControl = c
 	r.append(event.New("settings.runtime_started", event.ActorHarness, map[string]any{"format": runtimecontrol.Schema, "generation": c.Generation, "values": r.activeSettings, "persistence": "this process only"}))
 }
@@ -63,24 +71,32 @@ func (r *Runtime) acceptRemoteStop(q runtimecontrol.Request) error {
 }
 
 func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimecontrol.Values, result map[string]any) error {
+	// What is refused before anything is recorded is a refusal: the app is
+	// told the change was rejected, and why (runtimecontrol.Refusal).
+	refuse := func(err error) error { return runtimecontrol.Refusal{Err: err} }
 	if r.ending || r.ctx.Err() != nil || !q.Expires.After(time.Now()) || r.runtimeControl == nil || q.Proposal.Generation != r.runtimeControl.Generation {
-		return fmt.Errorf("the targeted runtime stopped before applying the change")
+		return refuse(fmt.Errorf("the targeted runtime stopped before applying the change"))
 	}
 	// Resolve every changed route before recording anything, so a route
 	// that cannot run fails the change instead of being reported as applied.
-	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes)
+	// A configuration chosen in this change (/config) runs its routes as it
+	// defines them.
+	swaps, err := r.routeChanges(r.activeSettings.Routes, values.Routes, runtimecontrol.ChosenConfig(q.Proposal))
 	if err != nil {
-		return err
+		return refuse(err)
 	}
 	// So is a relay pick its agent cannot take.
 	repicks := relayRepicks(r.activeSettings.Relays, values.Relays)
 	for name, pick := range repicks {
 		rel := r.st.Relays[name]
 		if rel == nil || !rel.Active() {
-			return fmt.Errorf("relay %s is no longer running", name)
+			return refuse(fmt.Errorf("relay %s is no longer running", name))
+		}
+		if err := r.beingReplaced(rel); err != nil {
+			return refuse(err)
 		}
 		if err := r.checkRelayPick(rel.Profile, pick); err != nil {
-			return err
+			return refuse(err)
 		}
 	}
 	previousSeq := r.st.LastSeq()
@@ -91,10 +107,10 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 	if ev.Seq <= previousSeq || ev.Seq != r.st.LastSeq() {
 		return fmt.Errorf("the settings event was not durably recorded")
 	}
-	changedTimer := r.activeSettings.NarratorTickSeconds != values.NarratorTickSeconds
+	changedTimer := r.activeSettings.TickSeconds != values.TickSeconds
 	r.activeSettings = values
 	if changedTimer {
-		r.armNarratorTimer()
+		r.armTicker()
 	}
 	for _, sw := range swaps {
 		r.swapRoute(sw)
@@ -108,75 +124,231 @@ func (r *Runtime) applyRuntimeSettings(q runtimecontrol.Request, values runtimec
 		r.ui.Log("relay %s: %s", name, msg)
 		// Said in the conversation too, as /model says it: a change made in
 		// the app's settings is otherwise silent until the agent restarts.
-		go r.deliverMessage(msg, false)
+		// This runs on the loop, so the message is recorded here, in order.
+		r.recordMessage(event.MessageData{Text: msg, Auto: true})
 	}
 	return nil
 }
 
-// routeSwap is one actor's new route list, resolved from a settings pick.
+// routeSwap is one model's new route list, resolved from a settings pick.
 type routeSwap struct {
-	actor string
-	pick  runtimecontrol.Route
-	eps   []llm.Endpoint
+	who  string
+	pick runtimecontrol.Route
+	eps  []llm.Endpoint
+	conf config.ModelRoute // the route as configured: window and reply ceiling
 }
 
-// routeChanges resolves the actors whose pick changed. An actor whose pick
-// did not change keeps its routes, including a fallback it switched to. A
-// changed pick starts from the configured actor (see config.PickRoute:
-// limits stay, another model drops the old model's fallback chain).
-func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route) ([]routeSwap, error) {
+// routeChanges resolves the models whose pick changed. One whose pick did
+// not change keeps its routes, including a fallback it switched to. A
+// changed pick starts from the configured route (see config.PickRoute:
+// limits stay, another model drops the old model's fallback chain), or,
+// with a configuration chosen in the same change (chosen, the /config
+// edit's name), from that configuration's route as it defines it: then a
+// pick equal to the one before changes the route too when the chosen
+// route differs from the one the session runs (chosenEntry).
+func (r *Runtime) routeChanges(before, after map[string]runtimecontrol.Route, chosen ...string) ([]routeSwap, error) {
 	var out []routeSwap
-	for _, actor := range []string{event.ActorOrchestrator, event.ActorTask, event.ActorNarrator} {
-		pick, ok := after[actor]
-		if !ok || pick == before[actor] || pick.Provider == "" || pick.Model == "" {
+	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
+		pick, ok := after[who]
+		if !ok || pick.Model == "" || r.models[who] == nil {
 			continue
 		}
-		a, err := config.PickRoute(r.opts.Project, r.configActor(actor), pick.Provider, pick.Model, pick.Effort)
+		_, named := r.chosenEntry(who, pick, chosen...)
+		if pick == before[who] && !named {
+			continue
+		}
+		a, err := r.resolvePick(who, pick, chosen...)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, err
+		}
+		// The pick names the effort the session reports (ApplyValues
+		// resolves it), "" (send none) included, so it is the one sent,
+		// not the configured route's.
+		a.ReasoningEffort = pick.Effort
+		if pick == before[who] && reflect.DeepEqual(a, r.models[who].conf) {
+			continue // the chosen route is the one the session runs
 		}
 		// The picked route itself must be usable (its key set); fallbacks
 		// without a key are skipped as usual.
 		if _, err := a.Endpoint(); err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, fmt.Errorf("%s: %w", who, err)
 		}
 		eps, err := a.Routes()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", actor, err)
+			return nil, fmt.Errorf("%s: %w", who, err)
 		}
-		out = append(out, routeSwap{actor: actor, pick: pick, eps: eps})
+		out = append(out, routeSwap{who: who, pick: pick, eps: eps, conf: a})
 	}
 	return out, nil
 }
 
-// configActor is the configured actor for a role.
-func (r *Runtime) configActor(actor string) config.Actor {
-	switch actor {
-	case event.ActorTask:
-		return r.cfg.Task
-	case event.ActorNarrator:
-		return r.cfg.Narrator
-	default:
-		return r.cfg.Orchestrator
+// pickBase is the configured route a pick of a model the session already
+// has starts from: the entry the session is on when the pick names that
+// one (an effort change on a fallback keeps the fallback's limits and key,
+// even when two entries name one model), else the entry of the configured
+// chain the pick names (the first route picked again is that route, with
+// its fallbacks), else the one of the routes a settings pick put in place.
+// A pick of another model has none: it starts from the configured route.
+// A configuration chosen in the change comes first: a pick that names its
+// route runs that route as the configuration defines it (fallback, reply
+// ceiling and key variable included).
+func (r *Runtime) pickBase(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, bool) {
+	project := r.opts.Project
+	m := r.models[who]
+	if entry, ok := r.chosenEntry(who, pick, chosen...); ok {
+		return entry, true
 	}
+	if cur := m.confAt(); cur != nil && runtimecontrol.Names(project, *cur, pick) {
+		return *cur, true
+	}
+	for _, chain := range []config.ModelRoute{r.configRoute(who), m.conf} {
+		if entry, ok := runtimecontrol.ChainEntry(project, chain, pick); ok {
+			return entry, true
+		}
+	}
+	return config.ModelRoute{}, false
 }
 
-// swapRoute installs a resolved route between turns (the control poll runs
-// on the loop goroutine) and records it; the Route event also refreshes the
-// phone's model chip.
-func (r *Runtime) swapRoute(sw routeSwap) {
-	nc := r.newClient(sw.eps[0], sw.actor)
-	switch sw.actor {
-	case event.ActorTask:
-		r.taskRoutes, r.taskClient = sw.eps, nc
-	case event.ActorNarrator:
-		r.narrRoutes, r.narrClient = sw.eps, nc
-	default:
-		r.orchRoutes, r.orchClient = sw.eps, nc
+// chosenEntry is the one place a configuration chosen in a change
+// (/config, named by chosen) decides a route: the entry of its route that
+// the pick names, as the configuration defines it, whether or not the
+// session runs that model already.
+func (r *Runtime) chosenEntry(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, bool) {
+	if len(chosen) == 0 || chosen[0] == "" {
+		return config.ModelRoute{}, false
 	}
-	r.append(event.New(event.Route, event.ActorHarness, event.RouteData{
-		Actor: sw.actor, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
+	project := r.opts.Project
+	var cfg config.Config
+	var err error
+	if b, isBundle := strings.CutPrefix(chosen[0], "bundle:"); isBundle {
+		cfg, err = config.LoadBundle(project, "", b)
+	} else {
+		cfg, err = config.ChosenPreset(project, chosen[0])
+	}
+	if err != nil {
+		return config.ModelRoute{}, false
+	}
+	route := cfg.Model
+	if who == runtimecontrol.RouteSummarizer {
+		// As choosing it sets the picks: a configuration whose summaries
+		// are inline leaves the session's summarizer route as it is.
+		if cfg.Summarizer.Mode != config.SummarizerDedicated {
+			return config.ModelRoute{}, false
+		}
+		route = cfg.Summarizer.Route(cfg.Model)
+	}
+	return runtimecontrol.ChainEntry(project, route, pick)
+}
+
+// resolvePick is the configured route a changed pick of who's model
+// starts from: the entry of a chain the session has that the pick names
+// (pickBase), else the configured route picked from the catalog.
+func (r *Runtime) resolvePick(who string, pick runtimecontrol.Route, chosen ...string) (config.ModelRoute, error) {
+	var a config.ModelRoute
+	base, known := r.pickBase(who, pick, chosen...)
+	switch {
+	case known && pick.Provider == "":
+		// An address no provider knows has no catalog to pick from:
+		// the entry as configured, at the effort asked for.
+		if pick.Effort != "" && config.EffortIndex(pick.Effort) == len(config.EffortOrder) {
+			return a, fmt.Errorf("%s: effort %q is not a known level (%s)", who, pick.Effort, strings.Join(config.EffortOrder, ", "))
+		}
+		a = base
+	case pick.Provider == "":
+		return a, fmt.Errorf("%s: model %q is not at an address eagent knows a provider for, and this session's routes do not have it; pick a provider", who, pick.Model)
+	default:
+		if !known {
+			base = r.configRoute(who)
+		}
+		var err error
+		if a, err = config.PickRoute(r.opts.Project, base, pick.Provider, pick.Model, pick.Effort); err != nil {
+			return a, fmt.Errorf("%s: %w", who, err)
+		}
+	}
+	return a, nil
+}
+
+// runningRoutes is Controller.Routes: for each of the session's models
+// that routes names, the chain it runs as configured (from the entry it is
+// on, so a session on a fallback is saved as that fallback and those
+// after it), or, for a pick this change makes, the one it will run once
+// the change is applied. Loop goroutine (the controller's poll).
+func (r *Runtime) runningRoutes(routes map[string]runtimecontrol.Route, chosen ...string) (map[string]config.ModelRoute, error) {
+	out := map[string]config.ModelRoute{}
+	for _, who := range []string{runtimecontrol.RouteEagent, runtimecontrol.RouteSummarizer} {
+		pick, ok := routes[who]
+		m := r.models[who]
+		if !ok || m == nil || pick.Model == "" {
+			continue
+		}
+		if _, named := r.chosenEntry(who, pick, chosen...); pick == r.activeSettings.Routes[who] && !named {
+			if cur := m.confAt(); cur != nil {
+				out[who] = *cur
+			} else {
+				out[who] = m.conf
+			}
+			continue
+		}
+		a, err := r.resolvePick(who, pick, chosen...)
+		if err != nil {
+			return nil, err
+		}
+		a.ReasoningEffort = pick.Effort
+		out[who] = a
+	}
+	return out, nil
+}
+
+// configRoute is the configured route of one of the session's models.
+func (r *Runtime) configRoute(who string) config.ModelRoute {
+	if who == runtimecontrol.RouteSummarizer {
+		return r.cfg.Summarizer.Route(r.cfg.Model)
+	}
+	return r.cfg.Model
+}
+
+// swapRoute installs a resolved route between calls (the control poll runs
+// on the loop goroutine; a call in flight finishes on the route it started
+// with) and records it; the Route event also refreshes the phone's model
+// chip. A new model has no cache of the conversation, so its first call
+// pays for the whole prompt once.
+func (r *Runtime) swapRoute(sw routeSwap) {
+	r.flushSilent() // the looks so far were made on the old route
+	moved := true
+	old := r.models[sw.who]
+	if old != nil && old.client != nil {
+		moved = !sameRoute(old.client.Endpoint, sw.eps[0])
+	}
+	r.models[sw.who] = &modelRoute{routes: sw.eps, client: r.newClient(sw.eps[0], sw.who), conf: sw.conf}
+	if !moved {
+		r.models[sw.who].told = old.told // the same model at the same address: an outage goes on
+	}
+	if sw.who == event.ActorEagent && moved {
+		// The new one starts clean (newModel) and is tried at the loop's
+		// next tick (the poll that applied the change is followed by one).
+		r.newModel()
+	}
+	r.recordRoute(event.RouteData{
+		Actor: sw.who, Provider: sw.eps[0].Protocol, BaseURL: sw.eps[0].BaseURL, Model: sw.eps[0].Model,
 		Reason: fmt.Sprintf("runtime settings: provider %s, model %s, effort %s", sw.pick.Provider, sw.pick.Model, sw.pick.Effort),
-	}))
-	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.actor, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
+	})
+	r.ui.Log("%s: runtime route -> %s %s @ %s", sw.who, sw.pick.Provider, sw.eps[0].Model, sw.pick.Effort)
+}
+
+// newModel forgets, when eagent's calls move to another model or address
+// (a pick in settings, swapRoute; a fallback, takeRoute), what the old model
+// did, which belongs to it: its failures and the wait before the next try
+// (up to an hour), a refusal of the prompt as too long (which would write
+// the next dossier from the files), and how its provider counts tokens
+// (recordRoute forgets the first call's size). The restarts in a row it
+// needed are forgotten by the move on the record (restartOf). If the new
+// one fails too, it backs off on its own count. A refusal that ended a
+// closing (refusedWhileClosing) was the old model's: the new one starts a
+// closing of its own count, and is asked. Loop goroutine.
+func (r *Runtime) newModel() {
+	t := &r.turns
+	t.failures, t.retryAt, t.failTold = 0, time.Time{}, false
+	t.overflowed, t.futileLogged = false, false
+	r.closings++
+	r.tokenScale = 0
 }

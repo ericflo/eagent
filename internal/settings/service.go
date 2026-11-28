@@ -11,9 +11,75 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 type Service struct{ Project, Preset, Bundle string }
+
+// host gives the configuration this process's host starts and resumes
+// sessions on (web.Server's loadConfig), once it registered one.
+var (
+	hostMu sync.Mutex
+	host   func(project string) (config.Config, error)
+)
+
+// SetHost registers the configuration the host starts sessions on and
+// returns the one it replaces (nil for none).
+func SetHost(fn func(project string) (config.Config, error)) func(project string) (config.Config, error) {
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	previous := host
+	host = fn
+	return previous
+}
+
+// Runs is the configuration a session started for the project runs on:
+// its host's, else the project's own (with this service's preset and
+// bundle). What the phone is offered to start, and the saved preset it may
+// not delete, follow it.
+func (s *Service) Runs() config.Config {
+	if cfg, ok := s.hostRuns(); ok {
+		return cfg
+	}
+	if cfg, err := config.LoadBundle(s.Project, s.Preset, s.Bundle); err == nil {
+		return cfg
+	}
+	return config.Defaults()
+}
+
+// hostRuns is the configuration the registered host starts sessions on,
+// when there is one and it gives it.
+func (s *Service) hostRuns() (config.Config, bool) {
+	hostMu.Lock()
+	fn := host
+	hostMu.Unlock()
+	if fn == nil {
+		return config.Config{}, false
+	}
+	cfg, err := fn(s.Project)
+	return cfg, err == nil
+}
+
+// inForce refuses to delete the saved preset name while sessions start on
+// it, saying everything that keeps it and what would free it
+// (config.Keeps): the file's default_config, and the bundle loading lays
+// where sessions start, by the layer that chose it, as loading itself
+// chose them. Sessions start on the host's configuration (its own flags
+// and environment) when a host is registered, else on this service's
+// (its flags).
+func (s *Service) inForce(name string) error {
+	res := config.Resolve(s.Project, s.Preset, s.Bundle)
+	laid, from := res.Loads.Name, res.Loads.From
+	if cfg, ok := s.hostRuns(); ok {
+		laid, from = cfg.Name, cfg.NameFrom
+	}
+	why := config.Keeps(res.Effective.DefaultConfig, laid, from, name)
+	if len(why) == 0 {
+		return nil
+	}
+	return fmt.Errorf("saved preset %s is in force: %s", name, strings.Join(why, "; "))
+}
+
 type Error struct {
 	Status   int
 	Message  string
@@ -31,7 +97,7 @@ func (s *Service) KnownKeyEnvs() []string {
 	for _, k := range config.KeyEnvsFor(s.Project) {
 		seen[k] = true
 	}
-	for _, a := range s.savedActors() {
+	for _, a := range s.savedRoutes() {
 		if a.APIKeyEnv != "" {
 			seen[a.APIKeyEnv] = true
 		}
@@ -44,12 +110,22 @@ func (s *Service) KnownKeyEnvs() []string {
 	return out
 }
 
-// savedActors lists every actor (and fallback) already on disk in the
+// configRoutes are the model routes a configuration names: the model's and,
+// when one is written, the summarizer's.
+func configRoutes(cfg config.Config) map[string]config.ModelRoute {
+	out := map[string]config.ModelRoute{"model": cfg.Model}
+	if cfg.Summarizer.Model != nil {
+		out["summarizer"] = *cfg.Summarizer.Model
+	}
+	return out
+}
+
+// savedRoutes lists every route (and fallback) already on disk in the
 // project file or its bundles; their hosts and key names are trusted.
-func (s *Service) savedActors() []config.Actor {
-	var out []config.Actor
+func (s *Service) savedRoutes() []config.ModelRoute {
+	var out []config.ModelRoute
 	collect := func(cfg config.Config) {
-		for _, a := range []config.Actor{cfg.Orchestrator, cfg.Task, cfg.Narrator} {
+		for _, a := range configRoutes(cfg) {
 			for cur := &a; cur != nil; cur = cur.Fallback {
 				out = append(out, *cur)
 			}
@@ -70,10 +146,11 @@ func (s *Service) savedActors() []config.Actor {
 // CheckRoutes refuses hosts and key names that neither the catalog, registered
 // servers, nor the saved configuration knows: custom endpoints must be
 // registered explicitly (via servers.json, CLI, or local UI) or written to
-// config.json, never smuggled in via a config save or remote edit.
-func (s *Service) CheckRoutes(cfg config.Config) error {
-	saved := s.savedActors()
-	known := func(a config.Actor) error {
+// config.json, never smuggled in via a config save or remote edit. An
+// undo's recorded routes count as saved ones (prepare).
+func (s *Service) CheckRoutes(cfg config.Config, recorded ...config.ModelRoute) error {
+	saved := append(s.savedRoutes(), recorded...)
+	known := func(a config.ModelRoute) error {
 		trimmed := strings.TrimRight(a.BaseURL, "/")
 		if pr, ok := config.ProviderForURLFor(s.Project, a.BaseURL); ok && pr.Custom {
 			// A registered custom/local server may use no key ("") or its own
@@ -89,7 +166,12 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 			}
 			return fmt.Errorf("%s is not a key variable registered for %s; update the server registration or edit %s", a.APIKeyEnv, pr.Label, config.File(s.Project))
 		}
-		hostOK := config.KnownBaseURL(a.BaseURL)
+		// A route with no address written sends nothing anywhere: there is
+		// no host to refuse (an inline summarizer may keep a field written
+		// for it, which is no route). One that is called and has none is a
+		// configuration that does not load (config.Problems), not this
+		// check's to report.
+		hostOK := a.BaseURL == "" || config.KnownBaseURL(a.BaseURL)
 		keyOK := a.APIKeyEnv == "" || config.KnownKeyEnv(a.APIKeyEnv)
 		for _, sa := range saved {
 			if strings.TrimRight(sa.BaseURL, "/") == trimmed {
@@ -107,7 +189,7 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 		}
 		return nil
 	}
-	for name, a := range map[string]config.Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
+	for name, a := range configRoutes(cfg) {
 		for cur := &a; cur != nil; cur = cur.Fallback {
 			if err := known(*cur); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
@@ -131,6 +213,54 @@ func (s *Service) CheckRoutes(cfg config.Config) error {
 	return nil
 }
 
+// CheckRemoteRoutes is CheckRoutes for a configuration an edit from a
+// connector would put in force, before being the one in force now. Beyond
+// known hosts and known key names, each route must pair them the way the
+// local user has: no key, the address's own provider's key variable, or a
+// pairing of that address and variable already in force or in the saved
+// files. So a remote edit never sends one provider's key to another, in one
+// edit or several, nor by moving an address while the environment pins the
+// key variable.
+func (s *Service) CheckRemoteRoutes(cfg, before config.Config, recorded ...config.ModelRoute) error {
+	if err := s.CheckRoutes(cfg, recorded...); err != nil {
+		return err
+	}
+	type pair struct{ host, key string }
+	trusted := map[pair]bool{}
+	for _, a := range append(s.savedRoutes(), recorded...) {
+		trusted[pair{strings.TrimRight(a.BaseURL, "/"), a.APIKeyEnv}] = true
+	}
+	for _, a := range configRoutes(before) {
+		for cur := &a; cur != nil; cur = cur.Fallback {
+			trusted[pair{strings.TrimRight(cur.BaseURL, "/"), cur.APIKeyEnv}] = true
+		}
+	}
+	for name, a := range configRoutes(cfg) {
+		for cur := &a; cur != nil; cur = cur.Fallback {
+			host := strings.TrimRight(cur.BaseURL, "/")
+			if cur.APIKeyEnv == "" || trusted[pair{host, cur.APIKeyEnv}] {
+				continue
+			}
+			pr, ok := config.ProviderForURLFor(s.Project, cur.BaseURL)
+			if ok && (pr.Custom || pr.KeyEnv == cur.APIKeyEnv) {
+				continue // a registered server's key CheckRoutes has checked
+			}
+			who := cur.BaseURL
+			if ok {
+				who = pr.Label
+			}
+			why := fmt.Sprintf("pairing them is done in eagent's own web UI or %s", config.File(s.Project))
+			for ptr, v := range config.EnvOverrides() {
+				if strings.HasSuffix(ptr, "/api_key_env") {
+					why = "$" + v + " sets the key variable in eagent's shell, so the address cannot move from here"
+				}
+			}
+			return fmt.Errorf("%s: %s is not the key variable for %s; %s", name, cur.APIKeyEnv, who, why)
+		}
+	}
+	return nil
+}
+
 type Request struct {
 	Config      json.RawMessage `json:"config"`
 	BasePreset  string          `json:"base_preset"`    // the preset the file should build on; "" for none
@@ -138,6 +268,10 @@ type Request struct {
 	IfMatch     *string         `json:"if_match"`       // the file etag the editor loaded; omit to skip the check
 	AllowShadow bool            `json:"allow_shadowed"` // write fields an EAGENT_* variable currently overrides anyway
 	Default     *string         `json:"default_config"` // set or clear default_config in the file
+	// Loaded is the configuration the form was loaded with, before the
+	// user's changes; omitted, it is the one in force. A window the form
+	// still shows as loaded is not the user's entry (SaveLocked).
+	Loaded json.RawMessage `json:"loaded,omitempty"`
 }
 
 type EnvField struct {
@@ -148,7 +282,7 @@ type EnvField struct {
 type Result struct {
 	Saved      config.SaveResult `json:"saved"`
 	Shadowed   []EnvField        `json:"shadowed_by_env,omitempty"` // fields written but overridden by the environment
-	Skipped    []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them
+	Skipped    []EnvField        `json:"skipped_by_env,omitempty"`  // fields not written because the environment overrides them; also a window following the server a variable moves its route to, which a request without loaded does not set
 	Kept       []EnvField        `json:"kept_from_file,omitempty"`  // pinned fields whose saved value was carried over unchanged
 	Resolution config.Resolution `json:"resolution"`
 }
@@ -217,10 +351,114 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	// once the variable is unset, and a save of something else must not lose it.
 	var shadowed, skipped, kept []EnvField
 	env := config.EnvOverrides()
+	// A route's window follows a model a variable moved it to, so it is
+	// that variable's too: the window of the environment's model is not
+	// written. A variable naming the model the route already has moved
+	// nothing (Resolve shows the model as the layers'), and the window
+	// stays the user's; unless the form picks another model there: the
+	// variable keeps that pick out of the file, and its window with it.
+	var res *config.Resolution
+	resolved := func() *config.Resolution {
+		if res == nil {
+			r := config.Resolve(s.Project, s.Preset, s.Bundle)
+			res = &r
+		}
+		return res
+	}
+	route := func(c *config.Config, ptr string) *config.ModelRoute {
+		if ptr == "/model" {
+			return &c.Model
+		}
+		return c.Summarizer.Model
+	}
+	for _, ptr := range []string{"/model", "/summarizer/model"} {
+		name, ok := env[ptr+"/model"]
+		if !ok {
+			continue
+		}
+		moved, _ := resolved().EnvMoved(ptr)
+		if want, runs := route(&cfg, ptr), route(&resolved().Effective, ptr); want != nil && runs != nil && want.Model != runs.Model {
+			moved = true
+		}
+		if _, has := env[ptr+"/context_tokens"]; moved && !has {
+			env[ptr+"/context_tokens"] = name
+		}
+	}
+	var onDisk map[string]json.RawMessage
+	readDisk := func() map[string]json.RawMessage {
+		if onDisk == nil {
+			onDisk = map[string]json.RawMessage{}
+			if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
+				_ = json.Unmarshal(raw, &onDisk)
+			}
+			onDisk, _ = config.MigrateLegacy(onDisk)
+		}
+		return onDisk
+	}
+	// A window no variable owns, on a route whose model or address a
+	// variable pins, is the file's to keep: the form shows what the
+	// environment makes of the route (another server's window, or one a
+	// list has since changed), not what the file says. One the user
+	// entered (it differs from the one the form was loaded with) is
+	// written, and holds as a window the file names; one left as loaded,
+	// with the route's model, is written as the file has it. A form that
+	// does not say what it was loaded with is compared with what is in
+	// force, except on a route an address variable moved: there a server's
+	// list may have changed since the form was read, so its window is
+	// taken as left as loaded, and one it carries that differs from the
+	// window in force is reported skipped as that variable's. A save told
+	// to write over the environment (AllowShadow) writes the window it was
+	// given, as it writes the rest.
+	var loaded config.Config
+	haveLoaded := len(b.Loaded) > 0 && string(b.Loaded) != "null" && json.Unmarshal(b.Loaded, &loaded) == nil
+	for _, ptr := range []string{"/model", "/summarizer/model"} {
+		_, model := env[ptr+"/model"]
+		_, addr := env[ptr+"/base_url"]
+		if _, owned := env[ptr+"/context_tokens"]; b.AllowShadow || owned || !model && !addr {
+			continue
+		}
+		was := &resolved().Effective
+		if haveLoaded {
+			was = &loaded
+		}
+		want, then := route(&cfg, ptr), route(was, ptr)
+		if want == nil || then == nil || want.Model != then.Model {
+			continue
+		}
+		unsaid, name := false, env[ptr+"/base_url"]
+		if !haveLoaded && addr {
+			res := resolved()
+			_, moved := res.EnvMoved(ptr)
+			unsaid = moved && route(&res.Layered, ptr) != nil
+		}
+		if want.ContextTokens != then.ContextTokens && !unsaid {
+			continue
+		}
+		segs := append(strings.Split(strings.TrimPrefix(ptr, "/"), "/"), "context_tokens")
+		fileVal, fileHas := pointerIn(readDisk(), segs)
+		keepFromFile(edits, segs, fileVal, fileHas)
+		if unsaid && want.ContextTokens != then.ContextTokens {
+			skipped = append(skipped, EnvField{ptr + "/context_tokens", name})
+		}
+	}
 	if len(env) > 0 && !b.AllowShadow {
-		onDisk := map[string]json.RawMessage{}
-		if raw, err := boundedfile.Read(config.File(s.Project), 1<<20); err == nil {
-			_ = json.Unmarshal(raw, &onDisk)
+		onDisk := readDisk()
+		// With no summarizer route written, the one in effect is made by the
+		// environment from the main model's: it is the environment's as a
+		// whole, and none of it is written.
+		if v, written := pointerIn(onDisk, []string{"summarizer", "model"}); !written || string(v) == "null" {
+			name := ""
+			for ptr, v := range env {
+				if strings.HasPrefix(ptr, "/summarizer/model/") {
+					if name == "" || v < name {
+						name = v
+					}
+					delete(env, ptr)
+				}
+			}
+			if name != "" {
+				env["/summarizer/model"] = name
+			}
 		}
 		var ptrs []string
 		for ptr := range env {
@@ -228,40 +466,20 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 		}
 		sort.Strings(ptrs)
 		for _, ptr := range ptrs {
-			top := strings.SplitN(strings.TrimPrefix(ptr, "/"), "/", 2)
-			fileVal, fileHas := pointerIn(onDisk, top)
+			segs := strings.Split(strings.TrimPrefix(ptr, "/"), "/")
+			fileVal, fileHas := pointerIn(onDisk, segs)
 			touched := false
-			if len(top) == 1 {
-				if v, present := edits[top[0]]; present && v != nil {
+			if len(segs) == 1 {
+				if v, present := edits[segs[0]]; present && v != nil {
 					touched = true
 				}
 				if fileHas {
-					edits[top[0]] = fileVal
+					edits[segs[0]] = fileVal
 				} else {
-					delete(edits, top[0])
+					delete(edits, segs[0])
 				}
 			} else {
-				var obj map[string]json.RawMessage
-				if v, present := edits[top[0]]; present && v != nil {
-					_ = json.Unmarshal(v, &obj)
-				}
-				if _, in := obj[top[1]]; in {
-					touched = true
-				}
-				if obj == nil {
-					obj = map[string]json.RawMessage{}
-				}
-				delete(obj, top[1])
-				if fileHas {
-					obj[top[1]] = fileVal
-				}
-				if len(obj) == 0 {
-					if _, present := edits[top[0]]; present {
-						edits[top[0]] = nil
-					}
-				} else {
-					edits[top[0]], _ = json.Marshal(obj)
-				}
+				touched = keepFromFile(edits, segs, fileVal, fileHas)
 			}
 			switch {
 			case fileHas:
@@ -288,7 +506,31 @@ func (s *Service) SaveLocked(editor *config.Editor, b Request) (Result, error) {
 	return Result{Saved: saved, Shadowed: shadowed, Skipped: skipped, Kept: kept, Resolution: config.Resolve(s.Project, s.Preset, s.Bundle)}, nil
 }
 
-// pointerIn reads a one- or two-segment pointer out of a raw JSON object.
+// keepFromFile puts the file's value of a field inside one of edits'
+// objects (segs, two or more segments) in place of the editor's, or
+// removes the editor's when the file has none. It reports whether edits
+// had a value there.
+func keepFromFile(edits map[string]json.RawMessage, segs []string, fileVal json.RawMessage, fileHas bool) bool {
+	var obj map[string]json.RawMessage
+	if v, present := edits[segs[0]]; present && v != nil {
+		_ = json.Unmarshal(v, &obj)
+	}
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	touched := replaceIn(obj, segs[1:], fileVal, fileHas)
+	if len(obj) == 0 {
+		if _, present := edits[segs[0]]; present {
+			edits[segs[0]] = nil
+		}
+	} else {
+		edits[segs[0]], _ = json.Marshal(obj)
+	}
+	return touched
+}
+
+// pointerIn reads a pointer, split into its segments, out of a raw JSON
+// object.
 func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bool) {
 	v, ok := m[segs[0]]
 	if !ok || v == nil {
@@ -301,15 +543,37 @@ func pointerIn(m map[string]json.RawMessage, segs []string) (json.RawMessage, bo
 	if json.Unmarshal(v, &obj) != nil {
 		return nil, false
 	}
-	f, ok := obj[segs[1]]
-	return f, ok && f != nil
+	return pointerIn(obj, segs[1:])
 }
 
-func orDefault(v, d string) string {
-	if v == "" {
-		return d
+// replaceIn removes the value at segs inside obj and, when has, puts val
+// there instead, creating and dropping the objects on the way as needed. It
+// reports whether obj had a value there.
+func replaceIn(obj map[string]json.RawMessage, segs []string, val json.RawMessage, has bool) bool {
+	key := segs[0]
+	if len(segs) == 1 {
+		_, had := obj[key]
+		delete(obj, key)
+		if has {
+			obj[key] = val
+		}
+		return had
 	}
-	return v
+	var child map[string]json.RawMessage
+	_ = json.Unmarshal(obj[key], &child)
+	if child == nil {
+		if !has {
+			return false
+		}
+		child = map[string]json.RawMessage{}
+	}
+	had := replaceIn(child, segs[1:], val, has)
+	if len(child) == 0 {
+		delete(obj, key)
+	} else {
+		obj[key], _ = json.Marshal(child)
+	}
+	return had
 }
 
 type RawRequest struct {
@@ -327,8 +591,15 @@ func (s *Service) SaveRaw(ctx context.Context, b RawRequest) (Result, error) {
 	if err := json.Unmarshal([]byte(b.Raw), &probe); err != nil {
 		return Result{}, &Error{Status: 422, Message: "not valid JSON: " + err.Error()}
 	}
+	if probe == nil {
+		return Result{}, &Error{Status: 422, Message: "the configuration must be a JSON object, not null"}
+	}
+	// Check the routes as they will load: keys of eagent's earlier design
+	// are carried over first.
+	probe, _ = config.MigrateLegacy(probe)
+	migrated, _ := json.Marshal(probe)
 	trial := config.Defaults()
-	if err := json.Unmarshal([]byte(b.Raw), &trial); err != nil {
+	if err := json.Unmarshal(migrated, &trial); err != nil {
 		return Result{}, &Error{Status: 422, Message: err.Error()}
 	}
 	if err := s.CheckRoutes(trial); err != nil {

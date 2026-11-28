@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -24,15 +23,37 @@ type PhoneMessage struct {
 	ID          string
 	Text        string
 	Attachments []event.Attachment
+	// Meta is the message's own meta, where the app puts the composer's
+	// route and delivery and the client's capabilities; the session that
+	// takes the message reads them there, as it does when it is running.
+	Meta map[string]any
+	// Refused are the message's files that could not be fetched: the
+	// session that takes the message records them refused (phone.refused),
+	// and its mirror tells the sender, as when it is running.
+	Refused []RefusedFile
+}
+
+// RefusedFile is a file of a phone message that was not passed on, and the
+// note owed to its sender.
+type RefusedFile struct {
+	AttachmentID string
+	Text         string
 }
 
 // ResumeHost is a long-lived process that can reopen finished sessions.
 type ResumeHost interface {
 	// Hosted reports whether this process is running the session.
 	Hosted(sessionID string) bool
-	// Resume reopens the session with the reply as its next turn.
+	// Resume reopens the session with the reply as its next turn. Once the
+	// host is shutting down it reopens nothing and answers ErrStopping.
 	Resume(sessionID string, msg PhoneMessage) error
 }
+
+// ErrStopping is a ResumeHost's answer once its process is shutting down.
+// The watcher, which stops with it, says nothing in the thread and keeps
+// nothing: the reply is still the thread's latest message, and the next
+// process's sweep resumes the session with it.
+var ErrStopping = errors.New("eagent is stopping")
 
 // StartResumeWatcher brings finished sessions back to life when the user
 // writes to their threads from the phone, the way writing to them in the web
@@ -75,6 +96,14 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	return func() { cancel(); <-done }
 }
 
+// leftToItsRun is the log line for a reply to a session that is running:
+// nothing is resumed for it. Whether that run mirrors is not known here.
+const leftToItsRun = "finalechat: session %s is running: its mirror reads the reply, or it is taken up once that run has stopped"
+
+// sweepEvery is how often the watcher sweeps the thread list. A variable so
+// tests can shorten it.
+var sweepEvery = time.Minute
+
 type resumeWatcher struct {
 	project string
 	host    ResumeHost
@@ -85,7 +114,8 @@ type resumeWatcher struct {
 	handled map[string]time.Time // message ids acted on, or being acted on
 }
 
-// pendingReply is a reply whose session could not be resumed yet.
+// pendingReply is a reply whose session could not be resumed yet, or one
+// that reached a running session (told false: keepUntilStopped).
 type pendingReply struct {
 	thread finalechat.Thread
 	msg    finalechat.Message
@@ -100,9 +130,10 @@ type replyRetries struct {
 	replies map[string]pendingReply
 }
 
-// watchResumes runs one connection to the event stream, sweeping first and
-// then every minute while it lasts, since the stream has no replay and a
-// busy server may drop an event for a subscriber.
+// watchResumes runs one connection to the event stream of the project
+// file's phone account (as main, whatever its enabled says), sweeping
+// first and then every minute while it lasts, since the stream has no
+// replay and a busy server may drop an event for a subscriber.
 func watchResumes(ctx context.Context, project string, host ResumeHost, retries *replyRetries, logf func(string, ...any)) error {
 	client, err := settingsAccount(project)
 	if err != nil {
@@ -114,7 +145,7 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 	sweepCtx, stopSweeps := context.WithCancel(ctx)
 	defer stopSweeps()
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(sweepEvery)
 		defer ticker.Stop()
 		for {
 			select {
@@ -142,14 +173,58 @@ func watchResumes(ctx context.Context, project string, host ResumeHost, retries 
 	})
 }
 
-// consider resumes the message's session when it is one of this project's,
-// nobody is running it, and the message is the user's own from the app.
-func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, m finalechat.Message) {
-	if m.Sender != "user" || m.Origin == "token" || m.Deleted || m.ID == "" {
+// consider resumes the thread's session when it is one of this project's,
+// nobody is running it, and the user wrote to it from the app since it
+// last took a message in. trigger is the message that brought the thread
+// up (from the event stream, or a retry); a sweep passes none. The session
+// is resumed with the earliest message it has not taken in, whatever
+// triggered it (nextPhoneMessage); its poll then takes the rest in order.
+func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message) {
+	w.considerHeld(ctx, thread, trigger, false)
+}
+
+// considerHeld is consider, with kept saying that trigger is a copy the
+// watcher kept from an earlier look (a reply it told the thread it keeps
+// trying), not one the event stream just brought.
+func (w *resumeWatcher) considerHeld(ctx context.Context, thread finalechat.Thread, trigger finalechat.Message, kept bool) {
+	if trigger.ID != "" && (trigger.Sender != "user" || trigger.Origin == "token" || trigger.Deleted) {
 		return
 	}
 	sid, ok := strings.CutPrefix(thread.ExternalID, "eagent:")
 	if !ok {
+		return
+	}
+	info, ok := w.session(sid)
+	if !ok {
+		return // not a session of this project
+	}
+	if store.Alive(info.Path) || w.host.Hosted(sid) {
+		if trigger.ID != "" {
+			// Said for a reply seen, not for each sweep's look at the
+			// one kept quietly for when the session stops.
+			w.logf(leftToItsRun, sid)
+			w.keepUntilStopped(info, thread, trigger)
+		}
+		return
+	}
+	var held *finalechat.Message
+	if trigger.ID != "" {
+		held = &trigger
+	}
+	m, found, err := nextPhoneMessage(ctx, w.client, info, held, kept)
+	if err != nil {
+		w.logf("finalechat: could not read the thread of session %s: %v (will retry)", sid, err)
+		return // a reply kept for retry stays kept
+	}
+	if !found {
+		if trigger.ID != "" {
+			w.retries.mu.Lock()
+			delete(w.retries.replies, trigger.ID)
+			w.retries.mu.Unlock()
+		}
+		// The session stopped and took in all there is: a reply kept
+		// while it ran (keepUntilStopped) has had its look.
+		w.dropKept(thread.ExternalID)
 		return
 	}
 	w.mu.Lock()
@@ -175,29 +250,78 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 			w.mu.Unlock()
 		}
 	}()
-	info, ok := w.session(sid)
-	if !ok {
-		settled = true
-		return // not a session of this project
-	}
-	if store.Alive(info.Path) || w.host.Hosted(sid) {
-		w.logf("finalechat: reply to session %s left to its running mirror", sid)
-		return
-	}
-	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body)}
-	for _, a := range m.Attachments {
-		saved, err := saveAttachment(ctx, w.client, info.Path, a)
+	msg := PhoneMessage{ID: m.ID, Text: strings.TrimSpace(m.Body), Meta: m.Meta}
+	failed := make([]error, len(m.Attachments))
+	for i, a := range m.Attachments {
+		// Each file, its tries again included, gets the time one download
+		// gets: it holds the event stream no longer than its one download
+		// did before it was tried again.
+		fetchCtx, stopFetch := context.WithTimeout(ctx, fetchBudget)
+		saved, err := saveAttachment(fetchCtx, w.client, info.Path, a)
+		// A download that may work later (the service could not be
+		// reached, or answered 429 or 5xx) is tried three times, as the
+		// client tries a post, before the file is refused.
+		for try := 1; try < 3 && err != nil && fetchCtx.Err() == nil && finalechat.Transient(err); try++ {
+			select {
+			case <-fetchCtx.Done():
+			case <-time.After(time.Duration(try) * fetchRetryStep):
+				saved, err = saveAttachment(fetchCtx, w.client, info.Path, a)
+			}
+		}
+		stopFetch()
 		if err != nil {
 			w.logf("finalechat: could not fetch %s for session %s: %v", a.Filename, sid, err)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				// The watcher is stopping (the serve is), which cut the
+				// fetch off: nobody is told anything, about this file or
+				// one before it, and nothing is taken. A reply kept for a
+				// retry stays kept; any other is still the thread's
+				// latest message. The next sweep, or the next serve,
+				// reads it.
+				return
+			}
+			failed[i] = err
 			continue
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
-	if msg.Text == "" && len(msg.Attachments) == 0 {
-		settled = true
+	for i, err := range failed {
+		if err == nil {
+			continue
+		}
+		// As the running mirror does: the session comes back with the
+		// rest of the message, and the sender is told, by the session
+		// that takes it: it records the file refused (phone.refused) in
+		// the step that takes the message, and its mirror posts the
+		// note. The watcher says nothing itself, so
+		// no notice is posted for a reply not taken.
+		msg.Refused = append(msg.Refused, RefusedFile{AttachmentID: m.Attachments[i].ID, Text: finalechat.RefusedNote(m.Attachments[i].Filename, err)})
+	}
+	// A message whose files were all refused still resumes the session:
+	// it takes the message in, so the ones after it are read in order
+	// instead of waiting behind it for ever.
+	err = w.host.Resume(sid, msg)
+	if err != nil && (store.Alive(info.Path) || w.host.Hosted(sid)) {
+		// It was resumed first from elsewhere (the browser; the serve
+		// answers web.ErrRunning): as for a session found running before
+		// the resume, the reply is that run's mirror's, kept quietly for
+		// when it stops, and nobody is told it could not be resumed.
+		w.logf(leftToItsRun, sid)
+		w.keepUntilStopped(info, thread, m)
 		return
 	}
-	if err := w.host.Resume(sid, msg); err != nil {
+	if trigger.ID != "" && trigger.ID != m.ID {
+		// The trigger is read by the session's poll, after m; when the
+		// resume failed, m is kept in its stead (retryLater).
+		w.retries.mu.Lock()
+		delete(w.retries.replies, trigger.ID)
+		w.retries.mu.Unlock()
+	}
+	if errors.Is(err, ErrStopping) {
+		w.logf("finalechat: reply to session %s left in its thread for the next eagent: this one is stopping", sid)
+		return
+	}
+	if err != nil {
 		w.logf("finalechat: could not resume session %s for your reply: %v (will retry)", sid, err)
 		w.retryLater(ctx, thread, m, "eagent could not resume this session for your reply yet: "+err.Error()+". It keeps trying every minute.")
 		return
@@ -206,7 +330,58 @@ func (w *resumeWatcher) consider(ctx context.Context, thread finalechat.Thread, 
 	w.retries.mu.Lock()
 	delete(w.retries.replies, m.ID)
 	w.retries.mu.Unlock()
+	// What the session does not take in before it stops again (a /quit it
+	// was resumed with ends it before it reads on) is looked for once it
+	// has stopped, as for any reply that reached it while it ran.
+	w.keepUntilStopped(info, thread, m)
 	w.logf("finalechat: session %s resumed with your reply from the phone", sid)
+}
+
+// fetchRetryStep is the wait before the second try of a download, twice it
+// before the third; a variable so tests can shorten it.
+var fetchRetryStep = time.Second
+
+// fetchBudget bounds one file's download and its tries again: the limit
+// of one download (finalechat's Download); a variable so tests can
+// shorten it.
+var fetchBudget = 120 * time.Second
+
+// keepUntilStopped keeps, quietly, a reply that reached a running session,
+// for this watcher's sweeps to look at once it has stopped: a session
+// shutting down may not take it in, and its closing note then hides the
+// thread from the sweep. The session's ledger says then whether it took
+// the reply in (nextPhoneMessage), so only a run that keeps the ledger has
+// it kept. One per thread is enough: the session is resumed with the
+// earliest message it has not taken in, whichever reply brought it up. A
+// watcher that stops forgets it; the reply then waits in its thread for
+// the session's next run, which takes it.
+func (w *resumeWatcher) keepUntilStopped(info store.Info, thread finalechat.Thread, m finalechat.Message) {
+	evs, err := store.Read(info.Path)
+	if err != nil || !ReadPhoneLedger(evs).Keeps {
+		return
+	}
+	w.retries.mu.Lock()
+	defer w.retries.mu.Unlock()
+	if _, kept := w.retries.replies[m.ID]; kept {
+		return // being retried, or sent twice by the stream
+	}
+	for id, p := range w.retries.replies {
+		if !p.told && p.thread.ExternalID == thread.ExternalID {
+			delete(w.retries.replies, id)
+		}
+	}
+	w.retries.replies[m.ID] = pendingReply{thread: thread, msg: m, since: time.Now()}
+}
+
+// dropKept forgets the replies keepUntilStopped kept for a thread.
+func (w *resumeWatcher) dropKept(externalID string) {
+	w.retries.mu.Lock()
+	defer w.retries.mu.Unlock()
+	for id, p := range w.retries.replies {
+		if !p.told && p.thread.ExternalID == externalID {
+			delete(w.retries.replies, id)
+		}
+	}
 }
 
 // retryLater keeps a reply that could not resume its session for the next
@@ -245,7 +420,17 @@ func (w *resumeWatcher) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		w.consider(ctx, p.thread, p.msg)
+		if !p.told {
+			// Kept while its session ran: the thread is read as a sweep
+			// reads it, not from the copy kept, which knows nothing of a
+			// deletion since.
+			w.consider(ctx, p.thread, finalechat.Message{})
+			continue
+		}
+		// Told that it keeps trying: tried again, as a copy kept (the
+		// thread says whether it still waits, where the session keeps the
+		// ledger).
+		w.considerHeld(ctx, p.thread, p.msg, true)
 	}
 }
 
@@ -263,7 +448,10 @@ func (w *resumeWatcher) session(id string) (store.Info, bool) {
 }
 
 // sweep finds threads whose latest message is the user's and newer than the
-// session's last log write: a reply nothing was watching for.
+// session's last log write: a reply nothing was watching for. Which message
+// to resume with is nextPhoneMessage's to say; a message the session never
+// took in that is older than its last write is still found then, first,
+// once the person writes again or the session is resumed from elsewhere.
 func (w *resumeWatcher) sweep(ctx context.Context) {
 	var page struct {
 		Threads []struct {
@@ -273,112 +461,106 @@ func (w *resumeWatcher) sweep(ctx context.Context) {
 			LastActivityAt time.Time  `json:"last_activity_at"`
 			ArchivedAt     *time.Time `json:"archived_at"`
 		} `json:"threads"`
+		NextCursor string `json:"next_cursor"`
 	}
 	sweepCtx, stop := context.WithTimeout(ctx, 60*time.Second)
 	defer stop()
 	w.retryPending(sweepCtx)
-	if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", url.Values{"limit": {"200"}}, nil, &page, 0); err != nil {
-		return
-	}
-	for _, t := range page.Threads {
-		if sweepCtx.Err() != nil {
-			return
-		}
-		sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
-		if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
-			continue
-		}
-		info, ok := w.session(sid)
-		if !ok || !t.LastActivityAt.After(info.Modified) || store.Alive(info.Path) || w.host.Hosted(sid) {
-			continue
-		}
-		last, ok, _ := w.lastUserMessage(sweepCtx, t.ExternalID)
-		if !ok || !last.CreatedAt.After(info.Modified) {
-			continue
-		}
-		w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, last)
-	}
-}
-
-// lastUserMessage pages through the user's messages in a thread and returns
-// the newest one the user wrote from the app. err says the thread could not
-// be read to the end.
-func (w *resumeWatcher) lastUserMessage(ctx context.Context, external string) (finalechat.Message, bool, error) {
-	var last finalechat.Message
-	found := false
-	after := ""
-	for i := 0; i < 50; i++ {
-		msgs, _, _, err := w.client.MessagesPage(ctx, finalechat.Ref(external), after, "user", 0, 100)
-		if err != nil {
-			return last, found, err
-		}
-		if len(msgs) == 0 {
-			break
-		}
-		for _, m := range msgs {
-			after = m.ID
-			if m.Sender == "user" && m.Origin != "token" && !m.Deleted {
-				last, found = m, true
+	// The list is newest first: it is read on, page after page, while a
+	// thread in it can be newer than the oldest last write of the
+	// project's sessions.
+	oldest := time.Now()
+	if infos, err := store.List(store.Root(w.project)); err == nil {
+		for _, info := range infos {
+			if info.Modified.Before(oldest) {
+				oldest = info.Modified
 			}
 		}
-		if len(msgs) < 100 {
-			break
-		}
 	}
-	return last, found, nil
+	q := url.Values{"limit": {"200"}}
+	for {
+		page.Threads, page.NextCursor = nil, ""
+		if err := w.client.Request(sweepCtx, "GET", "/api/v1/threads", q, nil, &page, 0); err != nil {
+			return
+		}
+		for _, t := range page.Threads {
+			if sweepCtx.Err() != nil {
+				return
+			}
+			sid, ok := strings.CutPrefix(t.ExternalID, "eagent:")
+			if !ok || t.PreviewSender != "user" || t.ArchivedAt != nil {
+				continue
+			}
+			info, ok := w.session(sid)
+			if !ok || store.Alive(info.Path) || w.host.Hosted(sid) {
+				continue
+			}
+			if !t.LastActivityAt.After(info.Modified) {
+				continue
+			}
+			w.consider(sweepCtx, finalechat.Thread{ID: t.ID, ExternalID: t.ExternalID}, finalechat.Message{})
+		}
+		if page.NextCursor == "" || len(page.Threads) == 0 || !page.Threads[len(page.Threads)-1].LastActivityAt.After(oldest) {
+			return
+		}
+		q.Set("cursor", page.NextCursor)
+	}
 }
 
-// PendingReply is the user's newest message in a session's thread when it
-// came after the session last wrote its log: a reply sent while nothing ran
-// the session. A session brought back without it would never see it (its
-// mirror reads on from its own first post), so whoever resumes the session
-// passes it as the prompt, as the reply watcher does. ok is false when
-// there is none, or no phone; err when the thread could not be read.
+// PendingReply is the earliest message in a session's thread that the user
+// sent from the app and the session has not taken in (nextPhoneMessage, as
+// the reply watcher picks it): a reply sent while nothing ran the session.
+// Whoever resumes the session passes it as the prompt; the session's poll
+// reads on after it and takes the rest in order. ok is false when there is
+// none, or no phone; err when the thread could not be read. The phone is
+// the project file's account, as the reply watcher watches.
 func PendingReply(ctx context.Context, project string, info store.Info) (PhoneMessage, bool, error) {
-	if finalechat.Disabled() {
-		return PhoneMessage{}, false, nil
-	}
 	client, err := settingsAccount(project)
 	if err != nil {
 		return PhoneMessage{}, false, nil // no phone account: nothing can have been sent
 	}
-	w := &resumeWatcher{project: project, client: client}
-	last, ok, err := w.lastUserMessage(ctx, "eagent:"+info.ID)
+	last, ok, err := nextPhoneMessage(ctx, client, info, nil, false)
 	if err != nil {
 		return PhoneMessage{}, false, err
 	}
-	if !ok || !last.CreatedAt.After(info.Modified) {
+	if !ok {
 		return PhoneMessage{}, false, nil
 	}
-	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body)}
+	msg := PhoneMessage{ID: last.ID, Text: strings.TrimSpace(last.Body), Meta: last.Meta}
 	for _, a := range last.Attachments {
 		saved, err := saveAttachment(ctx, client, info.Path, a)
+		if errors.Is(err, finalechat.ErrTooLarge) {
+			// It will never fit: the session comes back with the rest of
+			// the message and the file refused, as the watcher's resume
+			// passes one; the session records it and its mirror tells the
+			// sender. Nothing is posted here.
+			msg.Refused = append(msg.Refused, RefusedFile{AttachmentID: a.ID, Text: finalechat.RefusedNote(a.Filename, err)})
+			continue
+		}
 		if err != nil {
+			// A failed download posts nothing, so the thread's latest
+			// message is still the reply for the watcher's sweep.
 			return PhoneMessage{}, false, err
 		}
 		msg.Attachments = append(msg.Attachments, saved)
 	}
-	return msg, msg.Text != "" || len(msg.Attachments) > 0, nil
+	// Also a message whose files were all refused: the session takes it
+	// in, so the ones after it are read in order.
+	return msg, true, nil
 }
 
-var unsafeAttachmentName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
-
 // saveAttachment downloads a phone attachment under the session directory,
-// named the way the running mirror names them.
+// named the way the running mirror names them (finalechat.InboundFileName).
 func saveAttachment(ctx context.Context, client *finalechat.Client, sessionPath string, a finalechat.Attachment) (event.Attachment, error) {
 	dir := filepath.Join(sessionPath, "attachments")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return event.Attachment{}, err
 	}
-	short := a.ID
-	if len(short) > 8 {
-		short = short[:8]
+	if a.Size > finalechat.MaxAttachmentSize {
+		return event.Attachment{}, finalechat.ErrTooLarge
 	}
-	name := strings.Trim(unsafeAttachmentName.ReplaceAllString(filepath.Base(strings.TrimSpace(a.Filename)), "_"), "._")
-	if name == "" {
-		name = "file"
-	}
-	dst := filepath.Join(dir, "in-"+short+"-"+name)
+	file, name := finalechat.InboundFileName(a.ID, a.Filename)
+	dst := filepath.Join(dir, file)
 	f, err := os.Create(dst)
 	if err != nil {
 		return event.Attachment{}, err

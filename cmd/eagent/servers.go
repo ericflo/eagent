@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -229,37 +230,60 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 	if res.LoadError != "" {
 		return fail(errors.New(res.LoadError))
 	}
-	cfg := res.Effective
-	for _, a := range []*config.Actor{&cfg.Orchestrator, &cfg.Task, &cfg.Narrator} {
-		picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)
-		if err != nil {
-			// If the user typed a model ID not yet in the live cache on a custom
-			// server, apply it directly with the server's route details.
-			if pr.Custom {
-				picked = *a
-				picked.BaseURL = pr.BaseURL
-				picked.Model = modelID
-				picked.APIKeyEnv = pr.KeyEnv
-				picked.Protocol = pr.Protocol
-				picked.Fallback = nil
-				if opts.effort != "" {
-					picked.ReasoningEffort = opts.effort
-				}
-			} else {
-				return fail(err)
-			}
+	// The save skips what the environment pins, so a pinned field of the
+	// route would leave the file with half of it: another server's address
+	// with the pinned model. Nothing is written instead.
+	pinned := config.EnvOverrides()
+	for _, field := range []string{"model", "base_url", "protocol", "api_key_env"} {
+		if name, ok := pinned["/model/"+field]; ok {
+			return fail(fmt.Errorf("%s sets eagent's %s here, so the model cannot be changed in the file; unset it first", name, field))
 		}
-		if opts.protocol != "" {
-			picked.Protocol = opts.protocol
-			if picked.Protocol != llm.ProtocolResponses {
-				picked.ReplayReasoning = nil
-			}
-		}
-		*a = picked
 	}
+	// The save writes the route as its difference from the preset the file
+	// names. Where loading lays another preset in its place (a variable,
+	// the file's default_config or a saved preset names it), that
+	// difference would be laid over the wrong preset and run as neither.
+	// Nothing is written instead. Loading says which it laid, and why.
+	own, _ := config.ResolvePreset(res.File.Preset)
+	if laid, from, err := config.LaidPreset(project, nil); err == nil && from != "" && presetsDiffer(laid, own) {
+		cur, _ := config.Load(project, "") // (names the saved preset laid, and what lays it)
+		why, undo := laidAbove(cur, laid, from)
+		return fail(fmt.Errorf("%s, in place of the file's own, so a model written to the file would not run as written; nothing was changed. %s", why, undo))
+	}
+	cfg := res.Effective
+	a := &cfg.Model
+	picked, err := config.PickRoute(project, *a, pr.ID, modelID, opts.effort)
+	if err != nil {
+		// If the user typed a model ID not yet in the live cache on a custom
+		// server, apply it directly with the server's route details.
+		if pr.Custom {
+			picked = *a
+			picked.BaseURL = pr.BaseURL
+			picked.Model = modelID
+			picked.APIKeyEnv = pr.KeyEnv
+			picked.Protocol = pr.Protocol
+			picked.Fallback = nil
+			// No list gives this model's window: unknown, not the old model's.
+			picked.ContextTokens = 0
+			if opts.effort != "" {
+				picked.ReasoningEffort = opts.effort
+			}
+		} else {
+			return fail(err)
+		}
+	}
+	if opts.protocol != "" {
+		picked.Protocol = opts.protocol
+		// Chat Completions and Responses both read replay_reasoning;
+		// Anthropic Messages has no such setting.
+		if picked.Protocol == llm.ProtocolAnthropic {
+			picked.ReplayReasoning = nil
+		}
+	}
+	*a = picked
 	// If the model has a known context window smaller than RolloverTokens, pull
 	// RolloverTokens down to 75% of the window (at least 20k) so validation stays clean.
-	if w := cfg.Orchestrator.ContextTokens; w > 0 && cfg.RolloverTokens > w*3/4 {
+	if w := cfg.Model.ContextTokens; w > 0 && cfg.RolloverTokens > w*3/4 {
 		cfg.RolloverTokens = max(20_000, w*3/4)
 	}
 	rawCfg, err := json.Marshal(cfg)
@@ -282,8 +306,60 @@ func cmdServersUse(ctx context.Context, project string, args []string, opts serv
 		return 0
 	}
 	fmt.Printf("updated %s\n", saveRes.Saved.Path)
-	fmt.Printf("  orchestrator/task/narrator -> %s @ %s (%s)\n", cfg.Orchestrator.Model, cfg.Orchestrator.BaseURL, cfg.Orchestrator.Protocol)
+	// The line that says what eagent runs is what loading says runs here,
+	// whatever else is laid over the file.
+	now, err := config.Load(project, "")
+	switch {
+	case err != nil:
+		fmt.Printf("  written: %s @ %s (%s). The configuration does not load here, so no session starts until that is put right: %v\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol, err)
+	case !otherRoute(now.Model, cfg.Model):
+		fmt.Printf("  eagent -> %s @ %s (%s)\n", cfg.Model.Model, cfg.Model.BaseURL, cfg.Model.Protocol)
+	case now.Name != "":
+		// A saved preset laid over the file sets part of the route: what
+		// was written runs where none is laid over it. Both routes in
+		// full, and the parts in which they differ.
+		how := now.NameFrom + " lays it here: unset it"
+		if now.NameFrom == "default_config" {
+			how = "the project's default_config lays it here: `eagent presets use default` clears that"
+		}
+		fmt.Printf("  the saved preset %q is laid over the project file here, so eagent runs %s. That differs from what was written (%s) in its %s. What was written runs where no saved preset is laid over the file; %s.\n", now.Name, routeText(now.Model), routeText(cfg.Model), routeParts(now.Model, cfg.Model), how)
+	default:
+		fmt.Printf("  eagent runs %s here. That differs from what was written (%s) in its %s: something outside the project file sets it here.\n", routeText(now.Model), routeText(cfg.Model), routeParts(now.Model, cfg.Model))
+	}
 	return 0
+}
+
+// routeText is a route in full: its model, address, protocol and the
+// variable its key is read from.
+func routeText(m config.ModelRoute) string {
+	key := "no key variable"
+	if m.APIKeyEnv != "" {
+		key = "key $" + m.APIKeyEnv
+	}
+	return fmt.Sprintf("%s @ %s (%s, %s)", m.Model, m.BaseURL, m.Protocol, key)
+}
+
+// routeParts names the parts in which two routes differ, "" for one route.
+func routeParts(a, b config.ModelRoute) string {
+	var parts []string
+	for _, f := range routeFields {
+		if f.get(a) != f.get(b) {
+			parts = append(parts, f.name)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// routeFields are the parts of a route two routes are compared by: key is
+// the part's name in the configuration, name what the commands call it.
+var routeFields = []struct {
+	key, name string
+	get       func(config.ModelRoute) string
+}{
+	{"model", "model", func(m config.ModelRoute) string { return m.Model }},
+	{"base_url", "address", func(m config.ModelRoute) string { return strings.TrimRight(m.BaseURL, "/") }},
+	{"protocol", "protocol", func(m config.ModelRoute) string { return m.Protocol }},
+	{"api_key_env", "key variable", func(m config.ModelRoute) string { return m.APIKeyEnv }},
 }
 
 func printProbeResult(res config.ProbeResult, asJSON, saved bool) {
@@ -359,4 +435,47 @@ func modelMetaLine(m config.Model) string {
 		return ""
 	}
 	return " (" + strings.Join(parts, " · ") + ")"
+}
+
+// otherRoute says whether b is another route than a: another model, or the
+// same one reached at another address, by another protocol or with another
+// key variable.
+func otherRoute(a, b config.ModelRoute) bool { return routeParts(a, b) != "" }
+
+// presetsDiffer says whether two built-in presets give different settings.
+// The empty name is the defaults, which a preset can be too.
+func presetsDiffer(a, b string) bool {
+	lay := func(name string) []byte {
+		c := config.Defaults()
+		if preset, ok := config.Presets[name]; ok {
+			preset(&c)
+		}
+		raw, _ := json.Marshal(c)
+		return raw
+	}
+	return !bytes.Equal(lay(a), lay(b))
+}
+
+// laidAbove says what named the preset laid in place of the project
+// file's own "preset" key, and how that is undone. laid and from are
+// config.LaidPreset's; cfg, loaded beside them, names the saved preset
+// when that is what names it.
+func laidAbove(cfg config.Config, laid, from string) (why, undo string) {
+	why = fmt.Sprintf("%s names the preset %s here", from, laid)
+	if from == "default_config" {
+		why = fmt.Sprintf("the file's default_config names the preset %s here", laid)
+	}
+	if from == "bundle" {
+		from = cfg.NameFrom
+		lays := from
+		if from == "default_config" {
+			lays = "the file's default_config"
+		}
+		why = fmt.Sprintf("the saved preset %q, which %s lays over the project file here, names the preset %s", cfg.Name, lays, laid)
+	}
+	undo = "Unset " + from + " first"
+	if from == "default_config" {
+		undo = "`eagent presets use default` clears the file's default_config"
+	}
+	return why, undo
 }

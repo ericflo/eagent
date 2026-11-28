@@ -1,5 +1,7 @@
 # Relay sessions as a first-class feature: plan
 
+> Historical. This describes eagent's earlier design, which ran three models per session (an orchestrator, task workers and a narrator). The current design is in [DESIGN.md](DESIGN.md).
+
 Status: proposal, 2026-10-27. Based on every eagent session under `~/Development/**/.agents` (the grid and duel runs were left out: those are benchmarks with a fixed prompt), the Codex rollouts in `~/.codex/sessions` and Claude Code transcripts in `~/.claude/projects` for the relayed work, and the Finalechat repo at `3e2854c`.
 
 ## Status (2026-10-28)

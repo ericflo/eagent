@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"text/template"
 
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/prompts"
+	"github.com/ericflo/eagent/internal/protocol/control"
 )
 
 type BundleRequest struct {
@@ -25,18 +27,47 @@ type BundleRequest struct {
 // local forms and remote actions. It has no network or filesystem side effects.
 func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 	var cfg config.Config
-	var err error
 	if len(b.Config) > 0 && string(b.Config) != "null" {
 		cfg = config.Defaults()
+		// The JSON is one of two things. With no preset named and its main
+		// route given whole (protocol, address and model), it is a whole
+		// configuration, the editor's form: that route stands in place of
+		// the defaults', so a field the form shows empty is saved empty.
+		// Anything else is a layer over the preset it names, or over the
+		// defaults, laid as the loader lays it (config.BundleFromBytes): a
+		// route it moves to another model or address takes the window
+		// there unless it names one (followModel).
+		var named struct {
+			Preset string            `json:"preset"`
+			Model  config.ModelRoute `json:"model"`
+		}
+		_ = json.Unmarshal(b.Config, &named)
+		canon, preset := config.ResolvePreset(named.Preset)
+		if preset {
+			config.Presets[canon](&cfg)
+		}
+		whole := !preset && named.Model.Protocol != "" && named.Model.BaseURL != "" && named.Model.Model != ""
 		dec := json.NewDecoder(strings.NewReader(string(b.Config)))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&cfg); err != nil {
+		into := new(config.Config) // a layer is checked here, laid below
+		if whole {
+			cfg.Model, into = config.ModelRoute{}, &cfg
+		}
+		if err := dec.Decode(into); err != nil {
 			return cfg, &Error{Status: 400, Message: "config: " + err.Error()}
+		}
+		var m map[string]json.RawMessage
+		if !whole && json.Unmarshal(b.Config, &m) == nil {
+			if err := config.Layer(s.Project, &cfg, m, "bundle "+b.Name); err != nil {
+				return cfg, &Error{Status: 400, Message: err.Error()}
+			}
 		}
 		cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", ""
 	} else {
-		cfg, err = config.LoadBundle(s.Project, "", b.From)
-		if err != nil {
+		// That bundle, or with none named the configuration in force, as
+		// every save keeps it (CurrentLayers).
+		var err error
+		if cfg, err = CurrentLayers(s.Project, "", b.From); err != nil {
 			return cfg, &Error{Status: 400, Message: err.Error()}
 		}
 	}
@@ -47,6 +78,65 @@ func (s *Service) BundleConfig(b BundleRequest) (config.Config, error) {
 		return cfg, &Error{Status: 422, Message: err.Error()}
 	}
 	return cfg, nil
+}
+
+// CheckRemoteProfiles refuses agent profiles in a configuration a connector
+// would save, unless this machine already defines each one exactly, under
+// the same name: in config.json, a saved bundle, the configuration in force
+// or the built-in ones. A profile names a program and its arguments, so a
+// connector may not write one; the remote settings editor never offers
+// them for the same reason. Copying a saved bundle (from) or restoring its
+// bytes keeps working, since its profiles are already on this machine.
+func (s *Service) CheckRemoteProfiles(cfg config.Config) error {
+	return s.checkRemoteProfiles(cfg, nil)
+}
+
+// checkRemoteProfiles also knows the profiles in restored: bundle bytes an
+// undo puts back, taken from the record eagent kept of what was on this
+// machine before, never from the caller.
+func (s *Service) checkRemoteProfiles(cfg config.Config, restored []byte) error {
+	if len(cfg.Relay.Profiles) == 0 {
+		return nil
+	}
+	known := []map[string]config.RelayProfile{config.BuiltinRelayProfiles(), config.Resolve(s.Project, s.Preset, s.Bundle).Effective.Relay.Profiles}
+	if len(restored) > 0 {
+		var prior struct {
+			Relay config.Relay `json:"relay"`
+		}
+		if json.Unmarshal(restored, &prior) == nil {
+			known = append(known, prior.Relay.Profiles)
+		}
+	}
+	if c, err := config.LoadBundle(s.Project, "", ""); err == nil {
+		known = append(known, c.Relay.Profiles)
+	}
+	names, _ := config.ListBundles(s.Project)
+	for _, n := range names {
+		if c, err := config.LoadBundle(s.Project, "", n); err == nil {
+			known = append(known, c.Relay.Profiles)
+		}
+	}
+	for name, p := range cfg.Relay.Profiles {
+		if !slices.ContainsFunc(known, func(m map[string]config.RelayProfile) bool {
+			have, ok := m[name]
+			return ok && reflect.DeepEqual(have, p)
+		}) {
+			return &Error{Status: 422, Message: fmt.Sprintf("relay.profiles.%s: an agent profile names a program to run, so it is added or changed on this machine (eagent's web UI or %s), not from a connector", name, config.File(s.Project))}
+		}
+	}
+	return nil
+}
+
+// PrepareRestore is PrepareResource for an undo that puts back a bundle's
+// bytes from eagent's own record of the command it reverses (restored).
+// Agent profiles those bytes carry were on this machine, so they are
+// allowed; everything else is held to today's policy as usual. The caller
+// passes the record's bytes, never anything the request carried.
+func (s *Service) PrepareRestore(editor *config.Editor, inverse control.Proposal, grant control.Grant, restored []byte) (ResourceChange, error) {
+	if raw, _ := inverse.Parameters["config_json"].(string); inverse.Operation != "bundle.save" || raw != string(restored) {
+		restored = nil
+	}
+	return s.prepareResource(editor, inverse, grant, restored)
 }
 
 func (s *Service) SaveBundle(ctx context.Context, b BundleRequest) (string, error) {
@@ -76,9 +166,8 @@ func (s *Service) DeleteBundle(ctx context.Context, name string) error {
 		return err
 	}
 	defer editor.Close()
-	res := config.Resolve(s.Project, s.Preset, s.Bundle)
-	if res.Active.Kind == "bundle" && res.Active.Name == name || res.Effective.DefaultConfig == name {
-		return &Error{Status: 409, Message: "select a different default before deleting its preset"}
+	if err := s.inForce(name); err != nil {
+		return &Error{Status: 409, Message: err.Error()}
 	}
 	path, err := editor.RelatedPath("bundle", name)
 	if err != nil {
@@ -91,9 +180,12 @@ func (s *Service) DeleteBundle(ctx context.Context, name string) error {
 	return err
 }
 
+// PromptName resolves a prompt's name as the editors spell it. A retired
+// prompt's name resolves too, so its override can be deleted; SavePrompt
+// refuses to write one.
 func PromptName(raw string) (string, error) {
 	name := strings.ToUpper(strings.TrimSuffix(raw, ".md")) + ".md"
-	if slices.Contains(prompts.Names, name) {
+	if slices.Contains(prompts.Names, name) || slices.Contains(prompts.Retired, name) {
 		return name, nil
 	}
 	return "", &Error{Status: 404, Message: fmt.Sprintf("unknown prompt %s", raw)}
@@ -116,6 +208,9 @@ func (s *Service) SavePrompt(ctx context.Context, name, text string, remove bool
 	name, err := PromptName(name)
 	if err != nil {
 		return "", err
+	}
+	if !remove && slices.Contains(prompts.Retired, name) {
+		return "", &Error{Status: 400, Message: name + " is no longer read; its override can only be deleted"}
 	}
 	if !remove {
 		if err := ValidatePrompt(name, text); err != nil {

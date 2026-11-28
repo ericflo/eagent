@@ -10,7 +10,7 @@ import (
 
 func TestCapturedPricingSurvivesViewerCatalogChangesAndUnknownRoutes(t *testing.T) {
 	st := state.New()
-	route := state.RouteKey{Actor: event.ActorTask, Host: "https://fixture.invalid/", Model: "future-model"}
+	route := state.RouteKey{Actor: event.ActorEagent, Host: "https://fixture.invalid/", Model: "future-model"}
 	st.ByRoute[route] = event.Usage{Input: 1000000, Cached: 200000, Output: 100000}
 	meta := Metadata{Pricing: &PricingSnapshot{Basis: "catalog_at_capture", Rates: map[string]*config.Price{pricingKey(route.Host, route.Model): {In: 2, Cached: 1, Out: 5}}}}
 	detail := Detail(meta, st)

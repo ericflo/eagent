@@ -21,6 +21,8 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/prompts"
 	"github.com/ericflo/eagent/internal/settings"
+	"github.com/ericflo/eagent/internal/state"
+	"github.com/ericflo/eagent/internal/store"
 )
 
 // The configuration API behind the web editor. Every mutating route is
@@ -112,6 +114,15 @@ type configView struct {
 	Running    []runningView     `json:"running"`
 	Defaults   config.Config     `json:"defaults"`
 	Server     serverView        `json:"server"`
+	// Agents are the relay profiles a session can start, for the default
+	// agent choice.
+	Agents []profileView `json:"agents"`
+}
+
+type profileView struct {
+	Name  string `json:"name"`
+	Agent string `json:"agent"`
+	Label string `json:"label,omitempty"`
 }
 
 type phoneView struct {
@@ -173,6 +184,11 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 			v.Prompts = append(v.Prompts, promptView{Name: name, Source: set.Source[name]})
 		}
 	}
+	// Overrides of prompts the three-model eagent had. Nothing reads them;
+	// they are listed so they can be looked over and removed.
+	for _, path := range prompts.Ignored(s.Project) {
+		v.Prompts = append(v.Prompts, promptView{Name: filepath.Base(path), Source: path, Retired: true})
+	}
 	fc := res.Effective.Finalechat
 	switch client, found := finalechat.Resolve(fc.TokenEnvName(), fc.BaseURL); {
 	case !fc.Wanted():
@@ -182,14 +198,32 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	default:
 		v.Phone = phoneView{State: "on", Source: client.Source, Detail: "new sessions are mirrored to your phone (token from " + client.Source + ")"}
 	}
+	profiles := res.Effective.Relay.RelayProfiles()
+	v.Agents = []profileView{}
+	for _, name := range res.Effective.Relay.RelayProfileNames() {
+		v.Agents = append(v.Agents, profileView{Name: name, Agent: profiles[name].Agent, Label: profiles[name].Label})
+	}
 	v.Files["config"] = config.File(s.Project)
 	v.Files["bundles"] = config.BundlesDir(s.Project)
 	v.Files["prompts"] = prompts.Dir(s.Project)
+	// The models come from each session's record, not its live state: that
+	// state belongs to the session's loop, which changes it without a lock,
+	// and reading its maps from here can crash the whole server.
 	s.mu.Lock()
-	for id, h := range s.running {
-		v.Running = append(v.Running, runningView{ID: id, Models: h.rt.State().Models})
+	ids := make([]string, 0, len(s.running))
+	for id := range s.running {
+		ids = append(ids, id)
 	}
 	s.mu.Unlock()
+	for _, id := range ids {
+		models := map[string]string{}
+		if info, err := s.resolve(id); err == nil && info.ID == id {
+			if evs, err := store.Read(info.Path); err == nil {
+				models = state.Replay(evs).Models
+			}
+		}
+		v.Running = append(v.Running, runningView{ID: id, Models: models})
+	}
 	sort.Slice(v.Running, func(i, j int) bool { return v.Running[i].ID < v.Running[j].ID })
 	if v.Bundles == nil {
 		v.Bundles = []bundleView{}
@@ -278,12 +312,6 @@ func writeSettingsError(w http.ResponseWriter, err error) {
 	}
 	writeErr(w, 500, err)
 }
-func orDefault(v, d string) string {
-	if v == "" {
-		return d
-	}
-	return v
-}
 
 // ---- live route test -------------------------------------------------------------------
 
@@ -327,6 +355,10 @@ func (s *Server) loadChecks() map[string]checkRecord {
 	raw, err := os.ReadFile(s.checksPath())
 	if err == nil {
 		_ = json.Unmarshal(raw, &out)
+	}
+	if out == nil {
+		// A file holding null; recordCheck writes into what this returns.
+		out = map[string]checkRecord{}
 	}
 	return out
 }

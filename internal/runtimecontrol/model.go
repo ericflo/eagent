@@ -3,6 +3,7 @@
 package runtimecontrol
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,23 +14,47 @@ import (
 	"time"
 
 	"github.com/ericflo/eagent/internal/config"
+	"github.com/ericflo/eagent/internal/llm"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
 	"github.com/ericflo/eagent/internal/relay"
 	"github.com/ericflo/eagent/internal/settings"
 )
 
-const Schema = "eagent.runtime-settings/v1"
+const Schema = "eagent.runtime-settings/v2"
 const EventType = "settings.changed"
 
+// Route keys in Values.Routes.
+const (
+	// RouteEagent is the route of the model eagent runs on.
+	RouteEagent = "eagent"
+	// RouteSummarizer is the dedicated summarizer's route, present only when
+	// the session's summarizer is dedicated.
+	RouteSummarizer = "summarizer"
+)
+
+// routeOrder is the order route cards are shown in.
+var routeOrder = []string{RouteEagent, RouteSummarizer}
+
+// routeLabels are what each route's card is called. A reader puts the card's
+// name before a field's label ("eagent model", "Summarizer reasoning
+// effort"), so eagent's card is named for eagent, not "Model".
+var routeLabels = map[string]string{RouteEagent: "eagent", RouteSummarizer: "Summarizer"}
+
+// routeNames name each route in a sentence.
+var routeNames = map[string]string{RouteEagent: "eagent's model", RouteSummarizer: "the summarizer"}
+
 type Values struct {
-	Revision             uint64 `json:"revision"`
-	TaskConcurrency      int    `json:"task_concurrency"`
-	NarratorTickSeconds  int    `json:"narrator_tick_seconds"`
-	NarratorQuietSeconds int    `json:"narrator_quiet_seconds"`
-	// Routes is each actor's model route for this running session, as a
-	// provider id + model id + reasoning effort. Changed at runtime through
-	// the session-scoped settings resource; applied between turns.
+	Revision uint64 `json:"revision"`
+	// TickSeconds is how often eagent considers saying something while the
+	// agent works; QuietSeconds is the longest the user goes without a
+	// progress line (0: no limit).
+	TickSeconds  int `json:"tick_seconds"`
+	QuietSeconds int `json:"quiet_seconds"`
+	// Routes are this running session's model routes, each as a provider id
+	// + model id + reasoning effort: RouteEagent always, RouteSummarizer only
+	// when the summarizer is dedicated. Changed at runtime through the
+	// session-scoped settings resource; applied between turns.
 	Routes map[string]Route `json:"routes,omitempty"`
 	// Config is the configuration the routes were last set from as a whole
 	// (a preset, or bundle:NAME); routes changed one by one since still
@@ -57,7 +82,7 @@ type RelayRoute struct {
 	Waiting bool `json:"waiting,omitempty"`
 }
 
-// Route is one actor's model route pick.
+// Route is one model route pick.
 type Route struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
@@ -69,13 +94,9 @@ func FromConfig(c config.Config) Values {
 }
 
 func FromConfigFor(project string, c config.Config) Values {
-	v := Values{TaskConcurrency: c.TaskConcurrency, NarratorTickSeconds: c.NarratorTickSeconds, NarratorQuietSeconds: c.NarratorQuietSeconds, Routes: map[string]Route{}}
-	for actor, a := range map[string]config.Actor{"orchestrator": c.Orchestrator, "task": c.Task, "narrator": c.Narrator} {
-		pid := ""
-		if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
-			pid = pr.ID
-		}
-		v.Routes[actor] = Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
+	v := Values{TickSeconds: c.TickSeconds, QuietSeconds: c.QuietSeconds, Routes: map[string]Route{RouteEagent: routeFor(project, c.Model)}}
+	if c.Summarizer.Mode == config.SummarizerDedicated {
+		v.Routes[RouteSummarizer] = routeFor(project, c.Summarizer.Route(c.Model))
 	}
 	switch {
 	case c.Name != "":
@@ -83,9 +104,37 @@ func FromConfigFor(project string, c config.Config) Values {
 	case c.Preset != "":
 		v.Config = c.Preset
 	default:
-		v.Config = "glm" // the built-in defaults are its lineup
+		v.Config = "glm" // the built-in defaults are its model
 	}
 	return v
+}
+
+// routeFor is a configured route as a pick.
+func routeFor(project string, a config.ModelRoute) Route {
+	pid := ""
+	if pr, ok := config.ProviderForURLFor(project, a.BaseURL); ok {
+		pid = pr.ID
+	}
+	return Route{Provider: pid, Model: a.Model, Effort: a.ReasoningEffort}
+}
+
+// Names reports whether rt is a pick of the configured route a: its model
+// at its provider's address (no provider, for an address none knows).
+func Names(project string, a config.ModelRoute, rt Route) bool {
+	return a.Model == rt.Model && routeFor(project, a).Provider == rt.Provider
+}
+
+// ChainEntry is the entry of a configured chain (a route and its
+// fallbacks) that rt picks, with the fallbacks after it. A pick of a model
+// the chain already has starts from that entry, so its own limits and key
+// variable carry over rather than the first route's or the catalog's.
+func ChainEntry(project string, chain config.ModelRoute, rt Route) (config.ModelRoute, bool) {
+	for cur := &chain; cur != nil; cur = cur.Fallback {
+		if Names(project, *cur, rt) {
+			return *cur, true
+		}
+	}
+	return config.ModelRoute{}, false
 }
 
 // StopOperation stops the running session, as Stop in eagent's web UI does.
@@ -153,8 +202,55 @@ func View(project, session, generation string, values Values, available bool) (s
 	suggestions := map[string][]control.Suggestion{}
 	locked := "This runtime is unavailable. A replacement process requires its own current generation."
 
-	// Each relay's model and effort first: in a relay session they are
-	// what does the work.
+	// eagent's model routes, editable live: provider (enum of catalog
+	// providers and registered custom servers), model id (free string,
+	// validated at apply time against the catalog and live cache), and
+	// reasoning effort.
+	providerEnum := []any{}
+	for _, pr := range config.AllProviders(project) {
+		providerEnum = append(providerEnum, pr.ID)
+	}
+	effortEnum := []any{}
+	for _, e := range config.EffortOrder {
+		effortEnum = append(effortEnum, e)
+	}
+	for _, key := range routeOrder {
+		rt, ok := values.Routes[key]
+		if !ok {
+			continue
+		}
+		routeField := func(field, label string, shape control.Shape) {
+			f := control.Field{Key: "/routes/" + key + "/" + field, Label: label, Section: "Models", Group: routeLabels[key], Shape: shape, Writable: available, Unset: false, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+			if !available {
+				f.LockedReason = locked
+			}
+			fields = append(fields, f)
+		}
+		routeField("provider", "Provider", control.Shape{Type: "string", Enum: providerEnum})
+		routeField("model", "Model", control.Shape{Type: "string", MaxLength: 200})
+		routeField("effort", "Reasoning effort", control.Shape{Type: "string", Enum: effortEnum})
+		active["/routes/"+key+"/provider"] = rt.Provider
+		active["/routes/"+key+"/model"] = rt.Model
+		active["/routes/"+key+"/effort"] = rt.Effort
+
+	}
+	for _, spec := range []struct {
+		key, label, effect, description string
+		value, minimum, maximum         int
+	}{
+		{"/tick_seconds", "Seconds between progress looks", "immediate", "How often eagent considers telling you how the work is going. A look with nothing new costs nothing.", values.TickSeconds, 5, 86400},
+		{"/quiet_seconds", "Longest silence while the agent works", "next_turn", "In seconds: the longest you go without a progress line. 0 turns the limit off.", values.QuietSeconds, 0, 86400},
+	} {
+		minimum, maximum := float64(spec.minimum), float64(spec.maximum)
+		field := control.Field{Key: spec.key, Label: spec.label, Description: spec.description, Section: "Behavior", Group: "Progress", Shape: control.Shape{Type: "integer", Minimum: &minimum, Maximum: &maximum}, Writable: available, Unset: false, Class: "preference", EffectiveWhen: spec.effect, Source: "runtime:" + generation}
+		if !available {
+			field.LockedReason = locked
+		}
+		fields = append(fields, field)
+		active[spec.key] = spec.value
+	}
+
+	// Each agent's own model and effort.
 	names := make([]string, 0, len(values.Relays))
 	for name := range values.Relays {
 		names = append(names, name)
@@ -171,7 +267,7 @@ func View(project, session, generation string, values Values, available bool) (s
 		if rt.Waiting {
 			note += " A change is waiting for its current turn to end."
 		}
-		list := rt.Agent + "_models"
+		list := relay.ModelListName(rt.Agent)
 		if _, ok := suggestions[list]; !ok {
 			suggestions[list] = settings.RelayModelSuggestions(rt.Agent, project)
 		}
@@ -204,65 +300,20 @@ func View(project, session, generation string, values Values, available bool) (s
 		}
 	}
 
-	// Per-actor model routes, editable live: provider (enum of catalog
-	// providers and registered custom servers), model id (free string,
-	// validated at apply time against the catalog and live cache), and
-	// reasoning effort.
-	providerEnum := []any{}
-	for _, pr := range config.AllProviders(project) {
-		providerEnum = append(providerEnum, pr.ID)
-	}
-	effortEnum := []any{}
-	for _, e := range config.EffortOrder {
-		effortEnum = append(effortEnum, e)
-	}
-	// The configuration the routes come from: choosing one sets every
-	// actor's route to what it runs in this project.
+	// The configuration the routes come from: choosing one sets the
+	// session's routes to what it runs in this project.
 	configs := []any{}
 	for _, name := range settings.ConfigChoices(project) {
 		configs = append(configs, name)
 	}
-	configField := control.Field{Key: "/config", Label: "Configuration", Description: "Choosing one sets every actor's provider, model and effort to what it runs in this project. This session only.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", Enum: configs}, Writable: available, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
-	savePresetField := control.Field{Key: "/save_preset", Label: "Save as new preset", Description: "Type a name (letters, digits, '-', '_', '.') and tap Save to save this session's lineup as a reusable preset in this project.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", MaxLength: 64}, Writable: available, Unset: true, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+	configField := control.Field{Key: "/config", Label: "Configuration", Description: "Choosing one sets eagent's provider, model and effort to what it runs in this project. This session only.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", Enum: configs}, Writable: available, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
+	savePresetField := control.Field{Key: "/save_preset", Label: "Save as new preset", Description: "Type a name (letters, digits, '-', '_', '.') and tap Save to save this session's models and settings as a reusable preset in this project.", Section: "Models", Group: "Configuration", Shape: control.Shape{Type: "string", MaxLength: 64}, Writable: available, Unset: true, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
 	if !available {
 		configField.LockedReason = locked
 		savePresetField.LockedReason = locked
 	}
 	fields = append(fields, configField, savePresetField)
 	active["/config"] = values.Config
-	for _, actor := range []string{"orchestrator", "task", "narrator"} {
-		rt := values.Routes[actor]
-		routeField := func(key, group, label, description string, shape control.Shape) {
-			field := control.Field{Key: key, Label: label, Description: description, Section: "Models", Group: group, Shape: shape, Writable: available, Unset: false, Class: "route", EffectiveWhen: "immediate", Source: "runtime:" + generation}
-			if !available {
-				field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
-			}
-			fields = append(fields, field)
-		}
-		name := strings.ToUpper(actor[:1]) + actor[1:]
-		routeField("/routes/"+actor+"/provider", name, "Provider", "", control.Shape{Type: "string", Enum: providerEnum})
-		routeField("/routes/"+actor+"/model", name, "Model", "", control.Shape{Type: "string", MaxLength: 200})
-		routeField("/routes/"+actor+"/effort", name, "Reasoning effort", "", control.Shape{Type: "string", Enum: effortEnum})
-		active["/routes/"+actor+"/provider"] = rt.Provider
-		active["/routes/"+actor+"/model"] = rt.Model
-		active["/routes/"+actor+"/effort"] = rt.Effort
-	}
-	for _, spec := range []struct {
-		key, group, label, effect, description string
-		value, minimum, maximum                int
-	}{
-		{"/task_concurrency", "Work", "Tasks at once", "next_task", "Queued tasks start as workers free up; running tasks continue.", values.TaskConcurrency, 1, 128},
-		{"/narrator_tick_seconds", "Narrator", "Check interval (seconds)", "immediate", "How often the narrator looks in while work goes on.", values.NarratorTickSeconds, 1, 86400},
-		{"/narrator_quiet_seconds", "Narrator", "Quiet limit (seconds)", "next_turn", "The longest you go without a progress line while work continues. 0 turns the reminder off.", values.NarratorQuietSeconds, 0, 86400},
-	} {
-		minimum, maximum := float64(spec.minimum), float64(spec.maximum)
-		field := control.Field{Key: spec.key, Label: spec.label, Description: spec.description, Section: "Behavior", Group: spec.group, Shape: control.Shape{Type: "integer", Minimum: &minimum, Maximum: &maximum}, Writable: available, Unset: false, Class: "preference", EffectiveWhen: spec.effect, Source: "runtime:" + generation}
-		if !available {
-			field.LockedReason = "This runtime is unavailable. A replacement process requires its own current generation."
-		}
-		fields = append(fields, field)
-		active[spec.key] = spec.value
-	}
 	raw, _ := json.Marshal(map[string]any{"schema": Schema, "generation": generation, "values": values})
 	version := artifact.Digest(raw)
 	effective := map[string]any{}
@@ -287,7 +338,18 @@ func View(project, session, generation string, values Values, available bool) (s
 			Details: map[string]any{"session_id": session, "thread_external_id": "eagent:" + session, "persistence": "This process only. Project defaults and future or resumed sessions are unchanged."}}}, nil
 }
 
+// ApplyValues is the session's values with proposal applied, for a caller
+// that does not have the session's routes (the connector): the key a
+// route needs and a route at an address no provider knows are left to the
+// session (applyValues).
 func ApplyValues(project string, before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant) (Values, error) {
+	return applyValues(project, before, proposal, view, grant, nil)
+}
+
+// applyValues is ApplyValues where running (Controller.Routes) gives the
+// routes the session will run the picks on, as configured: their key
+// variables are the ones checked.
+func applyValues(project string, before Values, proposal control.Proposal, view settings.RemoteView, grant control.Grant, running func(map[string]Route) (map[string]config.ModelRoute, error)) (Values, error) {
 	if proposal.Generation != view.Generation || proposal.ExpectedVersion != view.Snapshot.Version || !view.Snapshot.RuntimeKnown {
 		return before, fmt.Errorf("runtime generation, version or availability changed")
 	}
@@ -311,6 +373,10 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		}
 	}
 	touched := map[string]bool{}
+	// effortNamed marks the routes whose effort this proposal names; any
+	// other touched route keeps its effort where the new model offers it,
+	// else takes the nearest it does.
+	effortNamed := map[string]bool{}
 	savePreset := ""
 	// A configuration chosen sets every route to what it runs here; route
 	// edits in the same proposal then apply on top of it.
@@ -322,17 +388,27 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 		if edit.Op != "set" || !ok {
 			return before, fmt.Errorf("choose a configuration by name")
 		}
-		preset, bundle := name, ""
+		var cfg config.Config
+		var err error
 		if b, isBundle := strings.CutPrefix(name, "bundle:"); isBundle {
-			preset, bundle = "", b
+			cfg, err = config.LoadBundle(project, "", b)
+		} else {
+			cfg, err = config.ChosenPreset(project, name)
 		}
-		cfg, err := config.LoadBundle(project, preset, bundle)
 		if err != nil {
 			return before, fmt.Errorf("configuration %s: %w", name, err)
 		}
-		for actor, rt := range FromConfigFor(project, cfg).Routes {
-			routes[actor] = rt
-			touched[actor] = true
+		// The session keeps the routes it has: a summarizer route, when
+		// there is one, takes the one the configuration would give it if
+		// the configuration has a dedicated summarizer (as sessionImplies
+		// says), and is kept otherwise.
+		chosen := map[string]Route{RouteEagent: routeFor(project, cfg.Model), RouteSummarizer: routeFor(project, cfg.Summarizer.Route(cfg.Model))}
+		for key := range routes {
+			if key == RouteSummarizer && cfg.Summarizer.Mode != config.SummarizerDedicated {
+				continue
+			}
+			routes[key] = chosen[key]
+			touched[key] = true
 		}
 		before.Config = name
 	}
@@ -389,9 +465,9 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 			if len(parts) != 2 {
 				return before, fmt.Errorf("unsupported runtime setting %q", edit.Key)
 			}
-			actor, field := parts[0], parts[1]
-			if actor != "orchestrator" && actor != "task" && actor != "narrator" {
-				return before, fmt.Errorf("unknown actor %q", actor)
+			key, field := parts[0], parts[1]
+			if _, ok := routes[key]; !ok {
+				return before, fmt.Errorf("no route %q in this session", key)
 			}
 			if edit.Op != "set" {
 				return before, fmt.Errorf("route fields cannot be unset; set them instead")
@@ -400,7 +476,7 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 			if !ok || s == "" {
 				return before, fmt.Errorf("%s must be a non-empty string", edit.Key)
 			}
-			rt := routes[actor]
+			rt := routes[key]
 			switch field {
 			case "provider":
 				rt.Provider = s
@@ -408,11 +484,12 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 				rt.Model = s
 			case "effort":
 				rt.Effort = s
+				effortNamed[key] = true
 			default:
 				return before, fmt.Errorf("unsupported route field %q", field)
 			}
-			routes[actor] = rt
-			touched[actor] = true
+			routes[key] = rt
+			touched[key] = true
 			continue
 		}
 		raw, _ := json.Marshal(edit.Value)
@@ -421,29 +498,61 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 			return before, err
 		}
 		switch edit.Key {
-		case "/task_concurrency":
-			before.TaskConcurrency = value
-		case "/narrator_tick_seconds":
-			before.NarratorTickSeconds = value
-		case "/narrator_quiet_seconds":
-			before.NarratorQuietSeconds = value
+		case "/tick_seconds":
+			before.TickSeconds = value
+		case "/quiet_seconds":
+			before.QuietSeconds = value
 		default:
 			return before, fmt.Errorf("unsupported runtime setting")
 		}
 	}
-	// Validate the final triplets of actors touched by this proposal, after
+	// Validate the final picks of the routes this proposal touched, after
 	// all edits are merged. Untouched routes pass through as they were.
-	for actor := range touched {
-		rt := routes[actor]
-		if rt.Provider == "" || rt.Model == "" {
-			return before, fmt.Errorf("actor %s needs both a provider and a model", actor)
+	for key := range touched {
+		rt := routes[key]
+		label := routeNames[key]
+		if rt.Model == "" {
+			return before, fmt.Errorf("%s needs both a provider and a model", label)
 		}
-		picked, err := config.PickRoute(project, config.Actor{}, rt.Provider, rt.Model, rt.Effort)
+		if rt.Provider == "" {
+			// An address no provider knows has no catalog to check the
+			// pick against; the session has it or refuses it (running).
+			continue
+		}
+		// The same rule as the project settings' (config.PickRoute with no
+		// effort named): an effort the new model lacks becomes the nearest
+		// one it offers. The pick then names the effort, so the session
+		// sends the effort it reports (it applies the pick to its own
+		// configured route, whose effort may differ).
+		base, effort := config.ModelRoute{}, rt.Effort
+		if !effortNamed[key] {
+			base.ReasoningEffort, effort = rt.Effort, ""
+		}
+		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, effort)
+		if err != nil {
+			// A provider that does not list the model a variable gives the
+			// route: no catalog fetch helps.
+			if pin := pinnedBy(key, rt.Model); pin != "" {
+				if _, _, listed := config.ResolveLiveModel(project, rt.Provider, rt.Model); !listed {
+					err = fmt.Errorf("%s would run %q at provider %q, which does not list it, because %s is set where this session runs", label, rt.Model, rt.Provider, pin)
+				}
+			}
+			return before, err
+		}
+		rt.Effort = picked.ReasoningEffort
+		routes[key] = rt
+	}
+	// The key is the one of the route the session runs the pick on (a
+	// fallback's or a saved preset's own variable), not the provider's.
+	if running != nil && len(touched) > 0 {
+		run, err := running(routes)
 		if err != nil {
 			return before, err
 		}
-		if picked.APIKeyEnv != "" && os.Getenv(picked.APIKeyEnv) == "" {
-			return before, fmt.Errorf("%s is not set where this session runs, so the %s cannot use %s", picked.APIKeyEnv, actor, rt.Provider)
+		for key := range touched {
+			if a := run[key]; a.APIKeyEnv != "" && os.Getenv(a.APIKeyEnv) == "" {
+				return before, fmt.Errorf("%s is not set where this session runs, so %s cannot use %s", a.APIKeyEnv, routeNames[key], cmp.Or(routes[key].Provider, a.BaseURL))
+			}
 		}
 	}
 	before.Routes = routes
@@ -455,8 +564,33 @@ func ApplyValues(project string, before Values, proposal control.Proposal, view 
 	return before, nil
 }
 
+// pinnedBy names the variable that gives the route key model where this
+// process runs, or "" when none does (the user named it, say).
+func pinnedBy(key, model string) string {
+	ptr := "/model/model"
+	if key == RouteSummarizer {
+		ptr = "/summarizer/model/model"
+	}
+	if name := config.EnvOverrides()[ptr]; name != "" && os.Getenv(name) == model {
+		return name
+	}
+	return ""
+}
+
 // SavePresetName returns the trimmed preset name when a proposal sets
 // /save_preset, or "" otherwise.
+// ChosenConfig is the configuration a change chooses (/config), by the
+// edit's name, or "": with a preset saved in the same change, the values'
+// Config names that preset instead.
+func ChosenConfig(p control.Proposal) string {
+	for _, e := range p.Edits {
+		if name, ok := e.Value.(string); ok && e.Key == "/config" && e.Op == "set" {
+			return name
+		}
+	}
+	return ""
+}
+
 func SavePresetName(p control.Proposal) string {
 	for _, edit := range p.Edits {
 		if edit.Key == "/save_preset" && edit.Op == "set" {
@@ -467,42 +601,97 @@ func SavePresetName(p control.Proposal) string {
 	return ""
 }
 
-// ConfigFromValues constructs a standalone Config representing a running
-// session's current model lineup and runtime settings so it can be saved as a
-// reusable project preset.
-func ConfigFromValues(project string, values Values) (config.Config, error) {
-	cfg, err := config.LoadBundle(project, "", "")
-	if err != nil {
-		cfg = config.Defaults()
+// ConfigFromRoutes constructs a standalone Config representing a running
+// session's current models and runtime settings so it can be saved as a
+// reusable project preset. running holds the routes the session runs, as
+// configured, by route key (Controller.Routes): those are saved as they
+// are, whatever the session was started on and wherever the preset is
+// saved. A route the session did not hand over (a controller with no
+// Routes) is looked up in the project's own configuration, else picked
+// from the catalog.
+func ConfigFromRoutes(project string, values Values, running map[string]config.ModelRoute) (config.Config, error) {
+	// What the session runs with from its files and bundle: the layers of
+	// the configuration values.Config names (the controller passes the one
+	// the session started from), below the environment, whose values are
+	// the session process's own, not the preset's.
+	preset, bundle := values.Config, ""
+	if name, ok := strings.CutPrefix(values.Config, "bundle:"); ok {
+		preset, bundle = "", name
 	}
-	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions = "", "", "", ""
-	if values.TaskConcurrency > 0 {
-		cfg.TaskConcurrency = values.TaskConcurrency
+	source := "the built-in defaults"
+	switch {
+	case bundle != "":
+		source = "bundle " + bundle
+	case preset != "":
+		source = "preset " + preset
 	}
-	if values.NarratorTickSeconds > 0 {
-		cfg.NarratorTickSeconds = values.NarratorTickSeconds
-	}
-	if values.NarratorQuietSeconds >= 0 {
-		cfg.NarratorQuietSeconds = values.NarratorQuietSeconds
-	}
-	actors := map[string]*config.Actor{
-		"orchestrator": &cfg.Orchestrator,
-		"task":         &cfg.Task,
-		"narrator":     &cfg.Narrator,
-	}
-	for name, ptr := range actors {
-		rt, ok := values.Routes[name]
-		if !ok || rt.Provider == "" || rt.Model == "" {
-			continue
+	res := config.Resolve(project, preset, bundle)
+	cfg, from := res.Layered, source+" and the project file"
+	if res.LoadError != "" {
+		// That configuration cannot be read now: the project file and the
+		// defaults, below the environment, and the description says so.
+		res = config.Resolve(project, "", "")
+		cfg, from = res.Layered, "the project file ("+source+" could not be read)"
+		if res.LoadError != "" {
+			cfg, from = config.Defaults(), "the built-in defaults (neither "+source+" nor the project file could be read)"
 		}
-		picked, err := config.PickRoute(project, *ptr, rt.Provider, rt.Model, rt.Effort)
+	}
+	cfg.Description = fmt.Sprintf("Saved from a running session: its models as it ran them; its other settings from %s, without environment variables.", from)
+	var err error
+	cfg.Preset, cfg.Name, cfg.DefaultConfig, cfg.Instructions, cfg.Migrated = "", "", "", "", nil
+	if values.TickSeconds > 0 {
+		cfg.TickSeconds = values.TickSeconds
+	}
+	if values.QuietSeconds >= 0 {
+		cfg.QuietSeconds = values.QuietSeconds
+	}
+	pick := func(key string, base config.ModelRoute) (config.ModelRoute, bool, error) {
+		rt, ok := values.Routes[key]
+		if !ok || rt.Model == "" {
+			return base, false, nil
+		}
+		if r, ok := running[key]; ok {
+			return r, true, nil
+		}
+		// A model the project's chain has (its fallback, say) is saved as
+		// that entry is configured.
+		if entry, ok := ChainEntry(project, base, rt); ok {
+			base = entry
+			if rt.Provider == "" {
+				// At an address no provider knows there is no catalog to
+				// pick from: the entry as it is, at the effort shown.
+				base.ReasoningEffort = rt.Effort
+				return base, true, nil
+			}
+		}
+		if rt.Provider == "" {
+			// Neither a catalog nor the project's chain has it: saving the
+			// project's own model under the new name would not be what runs.
+			return base, false, fmt.Errorf("%s: %s is at an address no provider is known for and is not in this project's configuration, so a preset cannot be built from it here; register its server (eagent servers add <url>) or save the preset in %s", routeNames[key], rt.Model, config.BundlesDir(project))
+		}
+		picked, err := config.PickRoute(project, base, rt.Provider, rt.Model, rt.Effort)
 		if err != nil {
-			return cfg, fmt.Errorf("%s: %w", name, err)
+			return base, false, fmt.Errorf("%s: %w", routeNames[key], err)
 		}
-		if strings.TrimRight(picked.BaseURL, "/") != strings.TrimRight(ptr.BaseURL, "/") || picked.Model != ptr.Model {
+		if !llm.SameBaseURL(picked.BaseURL, base.BaseURL) || picked.Model != base.Model {
 			picked.Fallback = nil
 		}
-		*ptr = picked
+		return picked, true, nil
+	}
+	summarizer := cfg.Summarizer.Route(cfg.Model)
+	if cfg.Model, _, err = pick(RouteEagent, cfg.Model); err != nil {
+		return cfg, err
+	}
+	picked, ok, err := pick(RouteSummarizer, summarizer)
+	if err != nil {
+		return cfg, err
+	}
+	if ok {
+		cfg.Summarizer = config.Summarizer{Mode: config.SummarizerDedicated, Model: &picked}
+	} else {
+		// A session with no summarizer route keeps its summaries inline,
+		// whatever config.json says now.
+		cfg.Summarizer = config.Summarizer{Mode: config.SummarizerInline}
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, err

@@ -17,7 +17,7 @@ import (
 func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Response, error) {
 	body := map[string]any{
 		"model":             c.Endpoint.Model,
-		"input":             responsesInput(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL),
+		"input":             responsesInputFor(req, c.Endpoint.ReplayReasoning, c.Endpoint.BaseURL, c.Endpoint.Model),
 		"stream":            true,
 		"store":             false,
 		"max_output_tokens": c.maxTokens(req),
@@ -76,7 +76,11 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 			return nil, fmt.Errorf("non-stream response was not JSON: %w", err)
 		}
 		if probe.Error != nil && probe.Error.Message != "" {
-			return nil, &APIError{Status: 502, Body: probe.Error.Message}
+			var whole struct {
+				Error json.RawMessage `json:"error"`
+			}
+			_ = json.Unmarshal(raw, &whole)
+			return nil, responsesFailure(whole.Error, nil, probe.Error.Message)
 		}
 		if probe.Status == "incomplete" {
 			incomplete = "incomplete"
@@ -89,11 +93,9 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 				Delta    string          `json:"delta"`
 				Item     json.RawMessage `json:"item"`
 				Response json.RawMessage `json:"response"`
-				Error    *struct {
-					Message string `json:"message"`
-					Code    any    `json:"code"`
-				} `json:"error"`
-				Message string `json:"message"`
+				Error    json.RawMessage `json:"error"`
+				Message  string          `json:"message"`
+				Code     any             `json:"code"`
 			}
 			if err := json.Unmarshal(ev.Data, &frame); err != nil {
 				return nil
@@ -120,22 +122,15 @@ func (c *Client) responses(ctx context.Context, req Request, obs *Observer) (*Re
 				incomplete = "incomplete"
 			case "response.failed":
 				final = frame.Response
-				msg := "response failed"
 				var r struct {
-					Error *struct {
-						Message string `json:"message"`
-					} `json:"error"`
+					Error json.RawMessage `json:"error"`
 				}
-				if json.Unmarshal(frame.Response, &r) == nil && r.Error != nil {
-					msg = r.Error.Message
-				}
-				failure = &APIError{Status: 502, Body: msg}
+				_ = json.Unmarshal(frame.Response, &r)
+				failure = responsesFailure(r.Error, nil, "response failed")
 			case "error":
-				msg := frame.Message
-				if frame.Error != nil {
-					msg = frame.Error.Message
-				}
-				failure = &APIError{Status: 502, Body: msg}
+				// The error is either the frame itself (code, message at
+				// the top) or an object inside it.
+				failure = responsesFailure(frame.Error, frame.Code, frame.Message)
 			}
 			return nil
 		})
@@ -315,6 +310,27 @@ func stripStatus(raw json.RawMessage) json.RawMessage {
 	return b
 }
 
+// responsesFailure builds the error for a failed or error frame from the
+// error object when there is one, else from the frame's own code and
+// message.
+func responsesFailure(obj json.RawMessage, code any, message string) *APIError {
+	if len(obj) > 0 && string(obj) != "null" {
+		var e struct {
+			Message string `json:"message"`
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+		}
+		if json.Unmarshal(obj, &e) == nil {
+			return streamError(e.Code, e.Type, e.Message, obj)
+		}
+	}
+	var raw []byte
+	if code != nil {
+		raw, _ = json.Marshal(map[string]any{"code": code, "message": message})
+	}
+	return streamError(code, "", message, raw)
+}
+
 // responsesInput renders history as Responses API input items.
 // sanitizeNativeArgs makes a stored function_call item safe to replay: a
 // call cut off mid-arguments has an unparseable arguments string, and the
@@ -344,9 +360,16 @@ func sanitizeNativeArgs(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
+// responsesInput renders history for a model it does not name.
 func responsesInput(req Request, replayReasoning bool, host string) []any {
+	return responsesInputFor(req, replayReasoning, host, "")
+}
+
+// responsesInputFor renders history as input items for model.
+func responsesInputFor(req Request, replayReasoning bool, host, model string) []any {
 	var items []any
-	for _, m := range req.Messages {
+	ids := newCallIDs(responsesAccepts)
+	for i, m := range req.Messages {
 		switch m.Role {
 		case "user":
 			if len(m.Images) == 0 {
@@ -363,30 +386,48 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 		case "assistant":
 			// Native items replay only at the host that minted them: encrypted
 			// reasoning and rs_/fc_ ids belong to that account, and a fallback
-			// route elsewhere would be rejected on every turn.
-			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) {
+			// route elsewhere would be rejected on every turn. They replay only
+			// to the model that made them, too: another model at the same host
+			// gets the turn rebuilt, which every model takes.
+			if len(m.Native) > 0 && m.NativeProtocol == ProtocolResponses && (m.NativeHost == "" || sameHost(m.NativeHost, host)) && sameModel(m.NativeModel, model) {
 				var native []json.RawMessage
 				if json.Unmarshal(m.Native, &native) == nil {
 					if replayReasoning {
 						native = dropDanglingReasoning(native)
-					} else {
-						native = dropReasoning(native)
+						if reasoningUnreplayable(native) {
+							native = nil
+						}
+					} else if kept := dropReasoning(native); len(kept) != len(native) {
+						// The turn's other items were made with the
+						// reasoning dropped here, and OpenAI refuses them
+						// without it: rebuild the turn instead.
+						native = nil
 					}
 				}
 				if len(native) > 0 {
+					var own []string
 					for _, it := range native {
+						var probe struct {
+							Type   string `json:"type"`
+							CallID string `json:"call_id"`
+						}
+						if json.Unmarshal(it, &probe) == nil && probe.Type == "function_call" {
+							own = append(own, probe.CallID)
+						}
 						items = append(items, sanitizeNativeArgs(it))
 					}
+					ids.kept(own)
 					continue
 				}
 			}
+			ids.rebuilt()
 			if m.Text != "" {
 				items = append(items, map[string]any{"role": "assistant", "content": m.Text})
 			}
-			for _, tc := range m.ToolCalls {
+			for j, tc := range m.ToolCalls {
 				items = append(items, map[string]any{
 					"type":      "function_call",
-					"call_id":   tc.ID,
+					"call_id":   ids.call(i, j, tc.ID),
 					"name":      tc.Name,
 					"arguments": argsString(tc.Args),
 				})
@@ -395,7 +436,7 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 			for _, r := range m.Results {
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
-					"call_id": r.CallID,
+					"call_id": ids.result(r.CallID),
 					"output":  r.Output,
 				})
 			}
@@ -405,6 +446,4 @@ func responsesInput(req Request, replayReasoning bool, host string) []any {
 }
 
 // sameHost compares two base URLs ignoring a trailing slash.
-func sameHost(a, b string) bool {
-	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
-}
+func sameHost(a, b string) bool { return SameBaseURL(a, b) }

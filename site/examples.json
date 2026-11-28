@@ -1,3 +1,3 @@
 {
-  "presets": ["openrouter-med", "opencode-med", "openai-med", "anthropic-med"]
+  "presets": ["openrouter-med", "opencode-med", "openai-high", "anthropic-med"]
 }

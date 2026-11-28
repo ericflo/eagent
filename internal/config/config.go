@@ -20,12 +20,17 @@ import (
 	"github.com/ericflo/eagent/internal/llm"
 )
 
-// Actor configures one model route.
-type Actor struct {
-	Protocol        string `json:"protocol"` // openai-chat | openai-responses | anthropic
-	BaseURL         string `json:"base_url"`
-	Model           string `json:"model"`
-	APIKeyEnv       string `json:"api_key_env"`
+// ModelRoute configures one model endpoint.
+type ModelRoute struct {
+	Protocol  string `json:"protocol"` // openai-chat | openai-responses | anthropic
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKeyEnv string `json:"api_key_env"`
+	// ReasoningEffort is the one effort every call of a session runs at:
+	// looks, decisions and the dossier alike. It never changes from call
+	// to call, because on many engines the effort is part of the rendered
+	// prompt (a line of the system block, a thinking setting), and a
+	// change would discard the provider's cache of the conversation.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// ReplayReasoning sends models their prior reasoning back on later
 	// calls (encrypted reasoning on OpenAI Responses; reasoning_content /
@@ -34,12 +39,41 @@ type Actor struct {
 	// prompts.
 	ReplayReasoning *bool `json:"replay_reasoning,omitempty"`
 	MaxTokens       int   `json:"max_tokens,omitempty"`
-	// ContextTokens is the model's usable window; the orchestrator rolls
-	// over to a new subsession when its prompt approaches RolloverTokens.
+	// ContextTokens is the model's usable window. The conversation restarts
+	// from a dossier before it fills: by default at half of it (Rollover).
 	ContextTokens int `json:"context_tokens,omitempty"`
 	// Fallback is tried when the primary route is unroutable (bad key, no
 	// access to the model, exhausted credits).
-	Fallback *Actor `json:"fallback,omitempty"`
+	Fallback *ModelRoute `json:"fallback,omitempty"`
+}
+
+// Summarizer modes.
+const (
+	// SummarizerInline has eagent's own loop keep the thread's title and
+	// summary, with the update_thread tool, on the prompt it already has
+	// cached.
+	SummarizerInline = "inline"
+	// SummarizerDedicated makes a separate small call for them, on a route
+	// of its own.
+	SummarizerDedicated = "dedicated"
+)
+
+// Summarizer says how the thread's title and summary are written.
+type Summarizer struct {
+	// Mode is "inline" (the default) or "dedicated".
+	Mode string `json:"mode"`
+	// Model is the route a dedicated summarizer calls, exactly as written
+	// here: nothing about it is adjusted behind the scenes. Left out, a
+	// dedicated summarizer uses the main model's route. Ignored when inline.
+	Model *ModelRoute `json:"model,omitempty"`
+}
+
+// Route is the route a dedicated summarizer calls: its own, else main.
+func (s Summarizer) Route(main ModelRoute) ModelRoute {
+	if s.Model != nil && s.Model.Model != "" {
+		return *s.Model
+	}
+	return main
 }
 
 // Config is the full effective configuration.
@@ -52,72 +86,74 @@ type Config struct {
 	// neither --config nor EAGENT_CONFIG is given.
 	DefaultConfig string `json:"default_config,omitempty"`
 
-	Preset       string `json:"preset,omitempty"`
-	Orchestrator Actor  `json:"orchestrator"`
-	Task         Actor  `json:"task"`
-	Narrator     Actor  `json:"narrator"`
+	Preset string `json:"preset,omitempty"`
+	// Model is the one model eagent runs on: it reads what the agent does,
+	// talks to the user, and drives the agent's terminal.
+	Model ModelRoute `json:"model"`
+	// Summarizer is how the thread's title and summary are kept.
+	Summarizer Summarizer `json:"summarizer"`
 
-	// TaskConcurrency caps simultaneously running task-worker tasks.
-	TaskConcurrency int `json:"task_concurrency"`
-	// MaxTaskTurns bounds model calls per task before it is failed.
-	MaxTaskTurns int `json:"max_task_turns"`
-	// MaxOrchestratorCallsPerTurn is the consecutive tool-calling round count
-	// at which the harness steers the orchestrator to delegate, wait, or
-	// yield. A nudge, not a hard cap.
-	MaxOrchestratorCallsPerTurn int `json:"max_orchestrator_calls_per_turn"`
-	// NarratorTickSeconds is how often the narrator is woken while the
-	// orchestrator is busy and nothing else has woken it.
-	NarratorTickSeconds int `json:"narrator_tick_seconds"`
-	// NarratorQuietSeconds is how long the user may go without hearing from
-	// the narrator while work continues before the steer asks for a short
-	// progress line. 0 disables the reminder.
-	NarratorQuietSeconds int `json:"narrator_quiet_seconds"`
-	// RolloverTokens is the orchestrator prompt size that triggers a new
-	// subsession and a dossier.
+	// MaxCallsPerTurn bounds the model calls one wake may make (a look at
+	// the screen, a key press, another look, ...).
+	MaxCallsPerTurn int `json:"max_calls_per_turn"`
+	// TickSeconds is how often eagent considers saying something while the
+	// agent works. A tick with nothing new costs no model call.
+	TickSeconds int `json:"tick_seconds"`
+	// QuietSeconds is the longest the user goes without a progress line
+	// while the agent works. 0 disables the limit.
+	QuietSeconds int `json:"quiet_seconds"`
+	// RolloverTokens is the prompt size at which the conversation is
+	// restarted from a dossier in a new subsession. 0, the default, follows
+	// the model in use: half its context window (AutoRollover). A number
+	// fixes it whatever the model.
 	RolloverTokens int `json:"rollover_tokens"`
-	// BashWaitSeconds is how long `bash` waits inline for a command before
-	// returning its handle.
-	BashWaitSeconds int `json:"bash_wait_seconds"`
-	// BashTimeoutSeconds is the default deadline for a command.
-	BashTimeoutSeconds int `json:"bash_timeout_seconds"`
-	// ToolOutputMaxChars truncates any single tool result.
-	ToolOutputMaxChars int `json:"tool_output_max_chars"`
-	// Persona overrides the narrator's voice.
+	// ReportMaxChars bounds how much of an agent's turn report eagent's own
+	// prompt carries. The user always gets the whole report.
+	ReportMaxChars int `json:"report_max_chars"`
+	// Persona overrides eagent's voice.
 	Persona string `json:"persona,omitempty"`
 	// Finalechat mirrors the conversation to the user's phone. It is on
 	// whenever a token is found unless enabled is explicitly false.
 	Finalechat Finalechat `json:"finalechat"`
-	// AllowOutsideProject lets file tools touch paths outside the project.
-	AllowOutsideProject bool `json:"allow_outside_project"`
-	// Relay configures relay sessions, where eagent runs an external coding
-	// agent (Codex, Claude Code) and passes the user's words to it.
+	// Relay configures the coding agents eagent can run.
 	Relay Relay `json:"relay,omitzero"`
-	// Instructions is loaded from AGENTS.md / .agents/eagent/INSTRUCTIONS.md.
+	// Instructions is the project's instructions for the agent's work, read
+	// from .agents/eagent/INSTRUCTIONS.md or, when that is missing or empty,
+	// the project's AGENTS.md. eagent is shown them so it can pass them on
+	// when they are relevant.
 	Instructions string `json:"-"`
+	// Migrated lists what was carried over from keys of the three-actor
+	// design when this configuration was read, for `eagent doctor`.
+	Migrated []string `json:"-"`
+	// NameFrom is the layer that chose the bundle Name when it was loaded:
+	// "flag", "EAGENT_PRESET", "EAGENT_CONFIG" or "default_config".
+	NameFrom string `json:"-"`
 }
 
 // Relay configures relay sessions. Profiles are kept in a map so the remote
 // settings editor (which walks scalar fields) never offers them: a profile
 // names a program to run.
 type Relay struct {
-	// Profiles are named ways to start an agent. The built-in "antigravity", "codex" and
-	// "claude" are always available; a profile here with the same name
-	// replaces the built-in one.
+	// Profiles are named ways to start an agent. The built-in ones
+	// (BuiltinRelayProfiles) are always available; a profile here with the
+	// same name replaces the built-in one.
 	Profiles map[string]RelayProfile `json:"profiles,omitempty"`
-	// QuietSeconds, when set, replaces NarratorQuietSeconds while a relayed
-	// agent works. Unset, a relay session keeps the same limit as any other.
-	QuietSeconds int `json:"quiet_seconds,omitempty"`
+	// Default names the profile a session starts when it is not told which.
+	// Empty picks the first built-in agent that is installed.
+	Default string `json:"default,omitempty"`
 }
 
 // RelayProfile is one way to start an external agent.
 type RelayProfile struct {
-	// Agent is the relay agent: "antigravity", "codex" or "claude".
+	// Agent is the relay agent, by the name its adapter registers in the
+	// relay package: "antigravity", "claude", "codex" or "pi".
 	Agent string `json:"agent"`
 	// Label is shown on the phone ("Codex"); empty reads as the agent's name
 	// with the model it runs.
 	Label string `json:"label,omitempty"`
 	// Model and Effort are passed to the agent (codex -m and
-	// model_reasoning_effort, claude --model and --effort). Empty passes
+	// model_reasoning_effort, claude --model and --effort, pi --model and
+	// --thinking). Empty passes
 	// nothing, so the agent uses its own configured default. A session may
 	// pick others when it starts the relay, and change them while it runs.
 	Model  string `json:"model,omitempty"`
@@ -140,6 +176,7 @@ func BuiltinRelayProfiles() map[string]RelayProfile {
 		"antigravity": {Agent: "antigravity", Label: "Antigravity", Args: []string{"--dangerously-skip-permissions"}},
 		"codex":       {Agent: "codex", Label: "Codex", Args: []string{"--yolo"}},
 		"claude":      {Agent: "claude", Label: "Claude Code", Args: []string{"--dangerously-skip-permissions"}},
+		"pi":          {Agent: "pi", Label: "Pi"},
 	}
 }
 
@@ -178,8 +215,10 @@ func (r Relay) RelayProfileNames() []string {
 type Finalechat struct {
 	// Artifacts enables proactive upload of native session logs and portable
 	// viewers, independently of conversation mirroring. On by default; set
-	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out.
-	Artifacts bool `json:"artifacts,omitempty"`
+	// false (or EAGENT_FINALECHAT_ARTIFACTS=0) to opt out. Always written:
+	// false is the opt-out, and a file that left it out would read as on.
+	// A file without the key means on, as it always has.
+	Artifacts bool `json:"artifacts"`
 	// Enabled: nil means "on when a token is found"; false turns it off even
 	// when a token is present; true makes a missing token an error at start.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -243,278 +282,311 @@ const (
 	nousURL       = "https://inference-api.nousresearch.com/v1"
 )
 
-// Defaults is the shipped configuration: GLM-5.3 orchestrating, GLM-5.3-Flash
-// doing the work, DeepSeek V4.1 Flash 1017 narrating, all on Together AI.
+// loopMaxTokens is the output ceiling of every call: room to think and to
+// write a dossier of a few pages. It is the same for every call, like the
+// effort, because some engines derive a thinking budget from it. A ceiling
+// costs nothing when a reply is short.
+const loopMaxTokens = 32768
+
+// loopEffort is the effort the presets run at: the one the orchestrator of
+// the three-actor design ran at. The one model makes the same decisions (a
+// stuck terminal, autopilot, what to tell the user), and it has one effort
+// for every call of a session, because many engines put the effort into
+// the prompt and a change of effort would cost the provider's cache of the
+// conversation. model.reasoning_effort sets another level.
+const loopEffort = "xhigh"
+
+// presetEffort is loopEffort where the model offers it, and otherwise the
+// highest effort it offers below max: high for GLM, Kimi, Mistral and
+// DeepSeek. Never none, never max.
+func presetEffort(baseURL, model string) string {
+	m, ok := Lookup(baseURL, model)
+	if !ok || len(m.Efforts) == 0 || contains(m.Efforts, loopEffort) {
+		return loopEffort
+	}
+	best := ""
+	for _, e := range m.Efforts {
+		if e == "none" || e == "max" {
+			continue
+		}
+		if best == "" || EffortIndex(e) > EffortIndex(best) {
+			best = e
+		}
+	}
+	if best == "" {
+		return loopEffort
+	}
+	return best
+}
+
+// AutoRollover is the prompt size at which a conversation restarts from a
+// dossier when rollover_tokens is not set: half the context window of the
+// model in use, in whole thousands. Half is what the conversation may fill.
+// The rest is the room a call needs for its reply and the dossier pass
+// needs to read the record it maps, on top of the conversation it is
+// written in. A small window with a large reply ceiling gets less than
+// half, so that pass still fits; nothing gets under 20,000.
+func AutoRollover(window, maxTokens int) int {
+	n, _ := autoRollover(window, maxTokens)
+	return n
+}
+
+// autoRollover is AutoRollover, and whether its number is half the window.
+func autoRollover(window, maxTokens int) (int, bool) {
+	if window <= 0 {
+		window = 200_000
+	}
+	n := window / 2
+	if room := window - maxTokens - rolloverReserve; n > room {
+		n = room
+	}
+	n = max(n/1000*1000, 20_000)
+	return n, n == window/2/1000*1000
+}
+
+// AutoRolloverWithin is AutoRollover held inside what the route can take
+// as input: its window less the reply ceiling (or the 16,384 tokens a call
+// asks for when the route sets none), of which fixed tokens are the system
+// prompt and the tool list that open every request. A conversation may
+// fill three quarters of what is left beside them, which leaves the rest
+// for the turn that carries it past the line, and is given at least a
+// quarter: AutoRollover's 20,000 floor knows nothing of the fixed part,
+// and on a window whose reply ceiling eats its reserve (64k to 96k with a
+// large ceiling) it can sit at or below what a long INSTRUCTIONS.md and
+// the tools take, where no restart could make room. On a window where
+// AutoRollover's number already fits (every ordinary cloud model) the
+// number is AutoRollover's. A window too small to hold the fixed part at
+// all is left at AutoRollover's: no restart can make room there.
+func AutoRolloverWithin(window, maxTokens, fixed int) int {
+	n, _ := autoRolloverWithin(window, maxTokens, fixed)
+	return n
+}
+
+// autoRolloverWithin is AutoRolloverWithin, and whether its number is half
+// the window.
+func autoRolloverWithin(window, maxTokens, fixed int) (int, bool) {
+	n, half := autoRollover(window, maxTokens)
+	if window <= 0 {
+		window = 200_000
+	}
+	if maxTokens <= 0 {
+		maxTokens = 16384
+	}
+	room := window - maxTokens - max(fixed, 0)
+	if room <= 0 {
+		return n, half
+	}
+	// In hundreds: on a window this small a thousand is a good part of
+	// the room the conversation has.
+	limit := max(fixed, 0) + room*3/4
+	if limit/100*100 > max(fixed, 0) {
+		limit = limit / 100 * 100
+	}
+	least := max(fixed, 0) + room/4
+	held := min(max(n, least), limit)
+	return held, half && held == n
+}
+
+// rolloverReserve is what a restart needs beside the conversation and the
+// reply: 8,000 tokens of slack and the least the dossier pass reads of the
+// record (60,000 characters, about 25,000 tokens with a fifth held back).
+const rolloverReserve = 8_000 + 25_000
+
+// Rollover is the prompt size at which this configuration's conversation
+// restarts: the number it sets, or AutoRollover for its model.
+func (c Config) Rollover() int {
+	n, _ := c.RolloverChosen("")
+	return n
+}
+
+// RolloverChosen is Rollover and how it was chosen, in words: the number
+// rollover_tokens sets, half of the model's context window, or the
+// small-window rule. The window is the one a running session takes
+// (harness Runtime.window): the route's own, or, when it sets none (a
+// cleared context_tokens), the one the catalog or the project's live list
+// gives its model (KnownContext).
+func (c Config) RolloverChosen(project string) (int, string) {
+	if c.RolloverTokens > 0 {
+		return c.RolloverTokens, "set by rollover_tokens"
+	}
+	window := c.Model.ContextTokens
+	if window <= 0 {
+		window = KnownContext(project, c.Model.BaseURL, c.Model.Model)
+	}
+	// The system prompt is not known here; a running session takes it off
+	// too, so on a small window it restarts a little later than this says.
+	n, half := autoRolloverWithin(window, c.Model.MaxTokens, 0)
+	if half {
+		return n, "half of the model's context window"
+	}
+	return n, "not half of the model's context window: the small-window rule, which keeps room for the reply and the dossier pass beside the conversation"
+}
+
+// glmDescription describes the built-in defaults, which the "glm" preset names.
+const glmDescription = "GLM-5.3 (Together AI)"
+
+// Defaults is the shipped configuration: GLM-5.3 on Together AI at the
+// effort its orchestrator ran at (high, the most GLM offers), with the
+// thread's title and summary kept inline.
 func Defaults() Config {
 	return Config{
-		Orchestrator: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "zai-org/GLM-5.3",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "high", MaxTokens: 32768, ContextTokens: 200_000,
-		},
-		Task: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "zai-org/GLM-5.3-Flash",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "medium", MaxTokens: 32768, ContextTokens: 200_000,
-		},
-		Narrator: Actor{
-			Protocol: llm.ProtocolChat, BaseURL: togetherURL, Model: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
-			APIKeyEnv: "TOGETHER_API_KEY", ReasoningEffort: "low", MaxTokens: 4096, ContextTokens: 1_048_576,
-		},
-		TaskConcurrency:             3,
-		MaxTaskTurns:                150,
-		MaxOrchestratorCallsPerTurn: 30,
-		NarratorTickSeconds:         30,
-		NarratorQuietSeconds:        180,
-		RolloverTokens:              150_000,
-		BashWaitSeconds:             20,
-		BashTimeoutSeconds:          600,
-		ToolOutputMaxChars:          24_000,
-		Finalechat:                  Finalechat{Artifacts: true},
+		Model:           chatRoute(togetherURL, "TOGETHER_API_KEY", "zai-org/GLM-5.3", 200_000),
+		Summarizer:      Summarizer{Mode: SummarizerInline},
+		MaxCallsPerTurn: 30,
+		TickSeconds:     30,
+		QuietSeconds:    180,
+		ReportMaxChars:  20000,
+		Finalechat:      Finalechat{Artifacts: true},
 	}
 }
 
-// Presets are named alternative routings. The provider-tier names
+// Presets are named models to run eagent on. The provider-tier names
 // (openai-high, openrouter-med, anthropic-med, ...) trade cost for capability
-// within one provider; glm is the default and astra is the spec's hybrid.
+// within one provider; glm is the default.
 //
-// Reasoning effort follows one policy in every preset: the orchestrator
-// runs at its model's highest effort below max (xhigh where the model has
-// it, otherwise high); the task worker runs high when it is a full-size
-// model and medium when it is a flash-class one, except GPT-6 Luna,
-// which always gets xhigh, and DeepSeek V4.1 Flash 1017, which offers no
-// medium and so runs high; the narrator always thinks a little (low),
-// never none.
+// Each preset runs the model its orchestrator ran in the three-actor design,
+// on the same route (presets_test.go holds the list).
+//
+// Every preset runs at one effort for every call, the one its orchestrator
+// ran at: xhigh, or the highest the model offers below max (see loopEffort
+// and presetEffort).
 var Presets = map[string]func(*Config){
 	"glm": func(c *Config) {}, // the defaults
-	"astra": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating (OpenAI, OpenRouter fallback); GLM-5.3-Flash and DeepSeek V4.1 Flash 1017 on Together"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.RolloverTokens = 300_000
-	},
-
-	// OpenAI: direct API first, the same model through OpenRouter when the
-	// direct route is unroutable (no key, no access, no credits).
 	"openai-high": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating, GPT-6.1 Sol working, GPT-6 Luna narrating"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6.1-sol", "high", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
-	},
-	"openai-med": func(c *Config) {
-		c.Description = "GPT-6 Astra orchestrating, GPT-6.1 Terra working, GPT-6 Luna narrating"
-		c.Orchestrator = openaiActor("gpt-6-astra", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6.1-terra", "high", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6 Astra (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6-astra")
 	},
 	"openai-low": func(c *Config) {
-		c.Description = "GPT-6.1 Sol orchestrating, GPT-6 Luna working and narrating"
-		c.Orchestrator = openaiActor("gpt-6.1-sol", "xhigh", 32768)
-		c.Task = openaiActor("gpt-6-luna", "xhigh", 32768)
-		c.Narrator = openaiActor("gpt-6-luna", "low", 4096)
-		c.RolloverTokens = 300_000
+		c.Description = "GPT-6.1 Sol (OpenAI, OpenRouter fallback)"
+		c.Model = openaiRoute("gpt-6.1-sol")
 	},
-
-	// OpenRouter: one key, many labs.
 	"openrouter-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenRouter)"
-		c.Orchestrator = openrouterActor("moonshotai/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = openrouterActor("z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Narrator = openrouterActor("z-ai/glm-5.3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (OpenRouter)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "moonshotai/kimi-k3", 1_000_000)
 	},
 	"openrouter-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (OpenRouter)"
-		c.Orchestrator = openrouterActor("z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Task = openrouterActor("z-ai/glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (OpenRouter)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "z-ai/glm-5.3", 200_000)
 	},
 	"openrouter-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (OpenRouter; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = openrouterActor("z-ai/glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = openrouterActor("deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (OpenRouter; cheapest)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "z-ai/glm-5.3-flash", 200_000)
 	},
-
-	// Anthropic.
 	"anthropic-high": func(c *Config) {
-		c.Description = "Claude Fable 5.1 orchestrating, Opus 5.5 working, Sonnet 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-fable-5-1", "xhigh", 32768)
-		c.Task = anthropicActor("claude-opus-5-5", "high", 32768)
-		c.Narrator = anthropicActor("claude-sonnet-5-5", "low", 4096)
+		c.Description = "Claude Fable 5.1"
+		c.Model = anthropicRoute("claude-fable-5-1")
 	},
 	"anthropic-med": func(c *Config) {
-		c.Description = "Claude Opus 5.5 orchestrating, Sonnet 5.5 working, Haiku 5.5 narrating"
-		c.Orchestrator = anthropicActor("claude-opus-5-5", "xhigh", 32768)
-		c.Task = anthropicActor("claude-sonnet-5-5", "medium", 32768)
-		c.Narrator = anthropicActor("claude-haiku-5-5", "low", 4096)
+		c.Description = "Claude Opus 5.5"
+		c.Model = anthropicRoute("claude-opus-5-5")
 	},
-
-	// DeepInfra.
 	"deepinfra-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (DeepInfra)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "moonshotai/Kimi-K3", "high", 32768, 1_000_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (DeepInfra)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "moonshotai/Kimi-K3", 1_000_000)
 	},
 	"deepinfra-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (DeepInfra)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (DeepInfra)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3", 200_000)
 	},
 	"deepinfra-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (DeepInfra; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", "high", 32768, 200_000)
-		c.Task = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(deepinfraURL, "DEEPINFRA_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (DeepInfra; cheapest)"
+		c.Model = chatRoute(deepinfraURL, "DEEPINFRA_API_KEY", "zai-org/GLM-5.3-Flash", 200_000)
 	},
-
-	// Fireworks.
 	"fireworks-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Fireworks)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "high", 32768, 200_000)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (Fireworks)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/kimi-k3", 1_000_000)
 	},
 	"fireworks-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Fireworks)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", "high", 32768, 200_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (Fireworks)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3", 200_000)
 	},
 	"fireworks-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (Fireworks; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/deepseek-v4p1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (Fireworks; cheapest)"
+		c.Model = chatRoute(fireworksURL, "FIREWORKS_API_KEY", "accounts/fireworks/models/glm-5p3-flash", 200_000)
 	},
-
-	// OpenCode Zen: one key for OpenAI, Anthropic, and open models at cost.
-	// (Zen's free-tier models only answer the OpenCode client, so there is
-	// no free preset.)
 	"opencode-high": func(c *Config) {
-		c.Description = "Claude Fable 5.1 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (OpenCode Zen)"
-		c.Orchestrator = Actor{
-			Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1",
-			APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: "xhigh", MaxTokens: 32768, ContextTokens: 1_000_000,
-		}
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "low", 4096, 200_000)
-		c.RolloverTokens = 300_000
+		c.Description = "Claude Fable 5.1 (OpenCode Zen)"
+		c.Model = ModelRoute{Protocol: llm.ProtocolAnthropic, BaseURL: zenURL, Model: "claude-fable-5-1", APIKeyEnv: "OPENCODE_ZEN_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"opencode-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (OpenCode Zen)"
-		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (OpenCode Zen)"
+		c.Model = chatRoute(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3", 200_000)
 	},
 	"opencode-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (OpenCode Zen; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(zenURL, "OPENCODE_ZEN_API_KEY", "deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (OpenCode Zen; cheapest)"
+		c.Model = chatRoute(zenURL, "OPENCODE_ZEN_API_KEY", "glm-5.3-flash", 200_000)
 	},
-
-	// Nous Portal.
 	"nous-high": func(c *Config) {
-		c.Description = "Kimi K3 orchestrating, GLM-5.3 working, GLM-5.3-Flash narrating (Nous Portal)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "moonshotai/kimi-k3", "high", 32768, 1_000_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "low", 4096, 200_000)
+		c.Description = "Kimi K3 (Nous Portal)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "moonshotai/kimi-k3", 1_000_000)
 	},
 	"nous-med": func(c *Config) {
-		c.Description = "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Nous Portal)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", "high", 32768, 200_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "medium", 32768, 200_000)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3 (Nous Portal)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3", 200_000)
 	},
 	"nous-low": func(c *Config) {
-		c.Description = "GLM-5.3-Flash orchestrating, DeepSeek V4.1 Flash 1017 working and narrating (Nous Portal; cheapest; 1017 has no medium, so the task worker runs high)"
-		c.Orchestrator = chatActor(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", "high", 32768, 200_000)
-		c.Task = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "high", 32768, 1_048_576)
-		c.Narrator = chatActor(nousURL, "NOUS_API_KEY", "deepseek/deepseek-v4.1-flash-1017", "low", 4096, 1_048_576)
+		c.Description = "GLM-5.3-Flash (Nous Portal; cheapest)"
+		c.Model = chatRoute(nousURL, "NOUS_API_KEY", "z-ai/glm-5.3-flash", 200_000)
 	},
-
-	// Single-model shapes: what you would get from one local model.
 	"deepseek": func(c *Config) {
-		c.Description = "DeepSeek V4.1 Flash 1017 for all three actors (Together; cheap; the shape of a single local model; no medium effort, so the task worker runs high)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, togetherURL, "TOGETHER_API_KEY"
-			a.Model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "DeepSeek V4.1 Flash 1017 (Together; cheap; the shape of a single local model)"
+		c.Model = chatRoute(togetherURL, "TOGETHER_API_KEY", "deepseek-ai/DeepSeek-V4.1-Flash-1017", 1_048_576)
 	},
 	"muse": func(c *Config) {
-		c.Description = "Muse Spark 1.3 Contributor (Meta) for all three actors"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolResponses, metaURL, "META_API_KEY"
-			a.Model = "muse-spark-1.3-contributor"
-			a.ContextTokens = 1_000_000
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Muse Spark 1.3 Contributor (Meta)"
+		c.Model = ModelRoute{Protocol: llm.ProtocolResponses, BaseURL: metaURL, Model: "muse-spark-1.3-contributor", APIKeyEnv: "META_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000}
 	},
 	"qwen": func(c *Config) {
-		c.Description = "Qwen 3.8 27B (via OpenRouter) for all three actors; a dense model you could run locally"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "qwen/qwen3.8-27b"
-			a.ContextTokens = 200_000
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "medium", "low"
+		c.Description = "Qwen 3.8 27B (OpenRouter; a dense model you could run locally)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "qwen/qwen3.8-27b", 200_000)
 	},
 	"mistral": func(c *Config) {
-		c.Description = "Mistral Large 4 for all three actors (OpenRouter; 1M context)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "mistralai/mistral-large-4-0"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Mistral Large 4 (OpenRouter; 1M context)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "mistralai/mistral-large-4-0", 1_048_576)
 	},
 	"muse-open": func(c *Config) {
-		c.Description = "Muse Spark Open, Meta's open-weight model, for all three actors (OpenRouter; 1M context)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "meta/muse-spark-open"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Muse Spark Open, Meta's open-weight model (OpenRouter; 1M context)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "meta/muse-spark-open", 1_048_576)
 	},
 	"beam": func(c *Config) {
-		c.Description = "Reflection Beam 1.0 501B A23B for all three actors (OpenRouter; 1M context, thinking always on)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "reflection/beam-1.0-501b-a23b"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "xhigh", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "Reflection Beam 1.0 501B A23B (OpenRouter; 1M context, thinking always on)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "reflection/beam-1.0-501b-a23b", 1_048_576)
 	},
 	"deepseek-1017": func(c *Config) {
-		c.Description = "DeepSeek V4.1 Flash 1017 for all three actors (OpenRouter; 1M context, weekday peak hours cost double; no medium effort, so the task worker runs high)"
-		for _, a := range []*Actor{&c.Orchestrator, &c.Task, &c.Narrator} {
-			a.Protocol, a.BaseURL, a.APIKeyEnv = llm.ProtocolChat, openrouterURL, "OPENROUTER_API_KEY"
-			a.Model = "deepseek/deepseek-v4.1-flash-1017"
-			a.ContextTokens = 1_048_576
-		}
-		c.Orchestrator.ReasoningEffort, c.Task.ReasoningEffort, c.Narrator.ReasoningEffort = "high", "high", "low"
-		c.RolloverTokens = 300_000
+		c.Description = "DeepSeek V4.1 Flash 1017 (OpenRouter; 1M context, weekday peak hours cost double)"
+		c.Model = chatRoute(openrouterURL, "OPENROUTER_API_KEY", "deepseek/deepseek-v4.1-flash-1017", 1_048_576)
 	},
 }
 
 // presetAliases keeps older names working.
-var presetAliases = map[string]string{"anthropic": "anthropic-high"}
+var presetAliases = map[string]string{
+	"anthropic":  "anthropic-high",
+	"astra":      "openai-high",
+	"openai-med": "openai-high",
+}
+
+// mergedPresets are the names that were presets of their own while a
+// preset set a model per actor. They ran the same orchestrator as the
+// preset they now name, and differed only in the task worker's model, so
+// with one model they are that preset. A config that names one is told
+// (PresetNote).
+var mergedPresets = map[string]bool{"astra": true, "openai-med": true}
+
+// PresetNote says what became of a preset name that is now another's, or
+// "" for any other name.
+func PresetNote(name string) string {
+	if !mergedPresets[name] {
+		return ""
+	}
+	canon := presetAliases[name]
+	return fmt.Sprintf("preset %q is now %q: both ran %s, and differed only in the task worker's model, which is gone", name, canon, PresetDescription(canon))
+}
 
 // PresetNames lists presets in a stable order.
 func PresetNames() []string {
 	return []string{
-		"glm", "astra",
-		"openai-high", "openai-med", "openai-low",
+		"glm",
+		"openai-high", "openai-low",
 		"openrouter-high", "openrouter-med", "openrouter-low",
 		"anthropic-high", "anthropic-med",
 		"deepinfra-high", "deepinfra-med", "deepinfra-low",
@@ -540,7 +612,7 @@ func ResolvePreset(name string) (string, bool) {
 func PresetDescription(name string) string {
 	c := Defaults()
 	if name == "glm" {
-		return "GLM-5.3 orchestrating, GLM-5.3-Flash working, DeepSeek V4.1 Flash 1017 narrating (Together AI)"
+		return glmDescription
 	}
 	if canon, ok := ResolvePreset(name); ok {
 		Presets[canon](&c)
@@ -548,33 +620,32 @@ func PresetDescription(name string) string {
 	return c.Description
 }
 
-func openaiActor(model, effort string, maxTokens int) Actor {
-	return Actor{
+// openaiRoute is a model on OpenAI's Responses API, with the same model
+// through OpenRouter when the direct route is unroutable (no key, no access,
+// no credits).
+func openaiRoute(model string) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolResponses, BaseURL: openaiURL, Model: model,
-		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_050_000,
-		Fallback: &Actor{
+		APIKeyEnv: "OPENAI_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
+		Fallback: &ModelRoute{
 			Protocol: llm.ProtocolResponses, BaseURL: openrouterURL, Model: "openai/" + model,
-			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_050_000,
+			APIKeyEnv: "OPENROUTER_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_050_000,
 		},
 	}
 }
 
-func openrouterActor(model, effort string, maxTokens, contextTokens int) Actor {
-	return chatActor(openrouterURL, "OPENROUTER_API_KEY", model, effort, maxTokens, contextTokens)
-}
-
-// chatActor is an OpenAI-compatible chat route on any provider.
-func chatActor(baseURL, keyEnv, model, effort string, maxTokens, contextTokens int) Actor {
-	return Actor{
+// chatRoute is an OpenAI-compatible chat route on any provider.
+func chatRoute(baseURL, keyEnv, model string, contextTokens int) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolChat, BaseURL: baseURL, Model: model,
-		APIKeyEnv: keyEnv, ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: contextTokens,
+		APIKeyEnv: keyEnv, ReasoningEffort: presetEffort(baseURL, model), MaxTokens: loopMaxTokens, ContextTokens: contextTokens,
 	}
 }
 
-func anthropicActor(model, effort string, maxTokens int) Actor {
-	return Actor{
+func anthropicRoute(model string) ModelRoute {
+	return ModelRoute{
 		Protocol: llm.ProtocolAnthropic, BaseURL: anthropicURL, Model: model,
-		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: effort, MaxTokens: maxTokens, ContextTokens: 1_000_000,
+		APIKeyEnv: "ANTHROPIC_API_KEY", ReasoningEffort: loopEffort, MaxTokens: loopMaxTokens, ContextTokens: 1_000_000,
 	}
 }
 
@@ -624,9 +695,8 @@ func DeleteBundle(project, name string) error {
 		return err
 	}
 	defer editor.Close()
-	res := Resolve(project, "", "")
-	if res.Effective.DefaultConfig == name {
-		return fmt.Errorf("select a different default before deleting %q", name)
+	if why := KeptBy(Resolve(project, "", ""), "", "", name); len(why) > 0 {
+		return fmt.Errorf("%q is in force: %s", name, strings.Join(why, "; "))
 	}
 	if _, err := os.Stat(BundlePath(project, name)); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("no saved preset %q in %s", name, BundlesDir(project))
@@ -649,25 +719,10 @@ func BundleBytes(name, description string, cfg Config) ([]byte, error) {
 		cfg.Description = description
 	}
 	cfg.DefaultConfig = ""
-	raw, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, err
-	}
-	// Spell out "fallback": null when an actor has no fallback so loading this
-	// saved preset on top of a project file whose preset carries fallbacks
-	// (such as openai-high) clears them instead of inheriting them.
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, err
-	}
-	for actorName, actor := range map[string]Actor{"orchestrator": cfg.Orchestrator, "task": cfg.Task, "narrator": cfg.Narrator} {
-		if actor.Fallback == nil {
-			if m, ok := obj[actorName].(map[string]any); ok {
-				m["fallback"] = nil
-			}
-		}
-	}
-	pretty, err := json.MarshalIndent(obj, "", "  ")
+	// A saved preset loads over the project file and the preset that file
+	// names, so every value it leaves empty is spelled out (spelled): a
+	// missing fallback or effort would otherwise be the file's or preset's.
+	pretty, err := json.MarshalIndent(spelled(cfg), "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -714,70 +769,219 @@ func LoadBundle(project, preset, bundle string) (Config, error) {
 
 // LoadBundleWithFile resolves proposed file contents through the actual
 // resolver without writing them or changing process environment variables.
-func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
-	cfg := Defaults()
-	var err error
-	// Explicit --preset / EAGENT_PRESET may name either a built-in preset or a
-	// saved preset in .agents/eagent/configs/<name>.json.
-	explicitPreset := preset
-	if explicitPreset == "" {
-		explicitPreset = os.Getenv("EAGENT_PRESET")
+// DefaultBundle is the bundle loading takes when none is named and no
+// explicit preset names a saved one: EAGENT_CONFIG, else the file's
+// default_config. It may name a built-in preset, which is then the preset.
+func DefaultBundle(fileCfg map[string]json.RawMessage) string {
+	bundle, _ := defaultBundle(fileCfg)
+	return bundle
+}
+
+// defaultBundle is DefaultBundle and the layer that chose it.
+func defaultBundle(fileCfg map[string]json.RawMessage) (string, string) {
+	if bundle := os.Getenv("EAGENT_CONFIG"); bundle != "" {
+		return bundle, "EAGENT_CONFIG"
 	}
-	if bundle == "" && explicitPreset != "" {
-		if _, isBuiltIn := ResolvePreset(explicitPreset); !isBuiltIn && validName(explicitPreset) {
-			if _, statErr := os.Stat(BundlePath(project, explicitPreset)); statErr == nil {
-				bundle = explicitPreset
-				preset = ""
-				explicitPreset = ""
-			}
-		}
+	var bundle string
+	if raw, ok := fileCfg["default_config"]; ok {
+		_ = json.Unmarshal(raw, &bundle)
 	}
-	if bundle == "" {
-		bundle = os.Getenv("EAGENT_CONFIG")
-	}
-	if bundle == "" {
-		if raw, ok := fileCfg["default_config"]; ok {
-			_ = json.Unmarshal(raw, &bundle)
-		}
-	}
-	var bundleCfg map[string]json.RawMessage
-	if bundle != "" {
-		// A bundle name may also be a built-in preset.
-		if canon, isPreset := ResolvePreset(bundle); isPreset {
-			if preset == "" {
-				preset = canon
-			}
-			bundle = ""
-		} else {
-			if !validName(bundle) {
-				return cfg, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
-			}
-			bundleCfg, err = readJSONMap(BundlePath(project, bundle))
-			if err != nil {
-				return cfg, err
-			}
-			if bundleCfg == nil {
-				names, _ := ListBundles(project)
-				return cfg, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
-			}
-		}
-	}
-	// Preset precedence: flag > env > bundle > file.
-	if preset == "" {
-		preset = explicitPreset
-	}
-	if preset == "" {
-		if raw, ok := bundleCfg["preset"]; ok {
-			_ = json.Unmarshal(raw, &preset)
-		}
-	}
-	if preset == "" {
-		if raw, ok := fileCfg["preset"]; ok {
-			_ = json.Unmarshal(raw, &preset)
-		}
+	return bundle, "default_config"
+}
+
+// chooseBundle is loading's choice of the bundle to lay for a caller's
+// preset and bundle over the file, and the layer that chose it (as
+// Config.NameFrom): the bundle named ("flag"), else a saved preset the
+// caller's preset ("flag") or EAGENT_PRESET names (explicitChoice), else
+// the default one (defaultBundle). A built-in named as the bundle is the
+// preset instead, and no bundle is laid. It also returns the preset and
+// the explicit preset still to apply.
+func chooseBundle(project, preset, bundle string, fileCfg map[string]json.RawMessage) (string, string, string, string) {
+	preset, bundle, explicit, from, _ := chooseBundleFrom(project, preset, bundle, fileCfg)
+	return preset, bundle, explicit, from
+}
+
+// chooseBundleFrom is chooseBundle, with the layer that named the preset
+// it returns (presetFrom, as layers has it; "" when it returns none).
+func chooseBundleFrom(project, preset, bundle string, fileCfg map[string]json.RawMessage) (_, _, _, _, presetFrom string) {
+	named, flagged := bundle != "", preset != ""
+	preset, bundle, explicit := explicitChoice(project, preset, bundle)
+	from := ""
+	switch {
+	case named || bundle != "" && flagged:
+		from = "flag"
+	case bundle != "":
+		from = "EAGENT_PRESET"
+	default:
+		bundle, from = defaultBundle(fileCfg)
 	}
 	if preset != "" {
+		presetFrom = "flag"
+	}
+	if canon, isPreset := ResolvePreset(bundle); bundle == "" || isPreset {
+		if isPreset && preset == "" {
+			preset, presetFrom = canon, from
+		}
+		bundle, from = "", ""
+	}
+	return preset, bundle, explicit, from, presetFrom
+}
+
+// layers is what loading lays under and over the project file: the preset
+// (as named, "" for none) with the layer that named it in place of the
+// file's own "preset" key (presetFrom: "flag", "EAGENT_PRESET",
+// "EAGENT_CONFIG", "default_config", or "bundle" when the saved preset
+// laid names it; "" for the file's own, or none), and the saved preset
+// (bundle, with from as Config.NameFrom) and its contents.
+type layers struct {
+	preset, presetFrom string
+	bundle, from       string
+	bundleCfg          map[string]json.RawMessage
+}
+
+// chooseLayers is loading's choice of layers for the project with fileCfg
+// as its file: the one place that makes it (LoadBundleWithFile lays them).
+func chooseLayers(project, preset, bundle string, fileCfg map[string]json.RawMessage) (l layers, err error) {
+	var explicitPreset string
+	l.preset, l.bundle, explicitPreset, l.from, l.presetFrom = chooseBundleFrom(project, preset, bundle, fileCfg)
+	if l.bundle != "" {
+		if !validName(l.bundle) {
+			return l, fmt.Errorf("config bundle names use letters, digits, '-', '_' and '.' only")
+		}
+		l.bundleCfg, err = readJSONMap(BundlePath(project, l.bundle))
+		if err != nil {
+			return l, err
+		}
+		if l.bundleCfg == nil {
+			names, _ := ListBundles(project)
+			return l, fmt.Errorf("no config bundle %q in %s (have: %s; built-in presets: %s)", l.bundle, BundlesDir(project), strings.Join(names, ", "), strings.Join(PresetNames(), ", "))
+		}
+	}
+	// Preset precedence: flag > env > bundle > file. (The flag's own came
+	// back as the preset; an explicit one still to apply is the
+	// variable's.)
+	if l.preset == "" && explicitPreset != "" {
+		l.preset, l.presetFrom = explicitPreset, "EAGENT_PRESET"
+	}
+	if l.preset == "" {
+		if raw, ok := l.bundleCfg["preset"]; ok {
+			_ = json.Unmarshal(raw, &l.preset)
+		}
+		if l.preset != "" {
+			l.presetFrom = "bundle"
+		}
+	}
+	if l.preset == "" {
+		if raw, ok := fileCfg["preset"]; ok {
+			_ = json.Unmarshal(raw, &l.preset)
+		}
+	}
+	return l, nil
+}
+
+// LaidPreset says which built-in preset loading lays for the project, by
+// its canonical name ("" for none, or one loading does not know), and the
+// layer that names it in place of the project file's own "preset" key:
+// "EAGENT_PRESET", "EAGENT_CONFIG", "default_config", or "bundle" when the
+// saved preset laid over the file names it (Config.Name, NameFrom); ""
+// when it is the file's own, or none. fileCfg is the file as proposed; nil
+// reads the project's file.
+func LaidPreset(project string, fileCfg map[string]json.RawMessage) (preset, from string, err error) {
+	if fileCfg == nil {
+		if fileCfg, err = readJSONMap(File(project)); err != nil {
+			return "", "", err
+		}
+	}
+	l, err := chooseLayers(project, "", "", fileCfg)
+	if err != nil {
+		return "", "", err
+	}
+	canon, ok := ResolvePreset(l.preset)
+	if !ok {
+		return "", "", nil
+	}
+	return canon, l.presetFrom, nil
+}
+
+// explicitChoice is the one place an explicit preset (the caller's, else
+// EAGENT_PRESET) is taken as loading takes it: a saved preset it names is
+// the bundle, unless the caller names a bundle, which outranks the
+// variable; anything else it names stays a preset. It returns the preset
+// and bundle to lay, and the explicit preset still to apply.
+func explicitChoice(project, preset, bundle string) (string, string, string) {
+	explicit, fromEnv := preset, preset == ""
+	if fromEnv {
+		explicit = os.Getenv("EAGENT_PRESET")
+	}
+	if _, isBuiltIn := ResolvePreset(explicit); explicit == "" || isBuiltIn || !validName(explicit) {
+		return preset, bundle, explicit
+	}
+	if _, err := os.Stat(BundlePath(project, explicit)); err != nil {
+		return preset, bundle, explicit
+	}
+	switch {
+	case bundle == "":
+		return "", explicit, ""
+	case fromEnv:
+		return preset, bundle, "" // the bundle named outranks the variable
+	}
+	return preset, bundle, explicit
+}
+
+// IsDefaultBundle says whether the saved bundle name is in force, so it is
+// not to be deleted (KeptBy).
+func IsDefaultBundle(res Resolution, name string) bool {
+	return len(KeptBy(res, "", "", name)) > 0
+}
+
+// KeptBy says what keeps the saved bundle name in force where res was
+// resolved (Resolve with the caller's preset and bundle, the two blanks),
+// so it is not to be deleted: Keeps, with the bundle loading lays there and
+// the layer that chose it, as loading itself chose them (res.Loads).
+func KeptBy(res Resolution, _, _ string, name string) []string {
+	return Keeps(res.Effective.DefaultConfig, res.Loads.Name, res.Loads.From, name)
+}
+
+// Keeps says what keeps the saved bundle name in force, each with what
+// would free it; none when nothing does. The file's default_config keeps
+// it, as every start naming none takes it; and so does the bundle a
+// context's loading lays (laid, as Config.Name), by the layer that chose it
+// (from, as Config.NameFrom).
+func Keeps(defaultConfig, laid, from, name string) []string {
+	if name == "" {
+		return nil
+	}
+	var why []string
+	if defaultConfig == name {
+		why = append(why, "it is the project's default (default_config); select a different default first")
+	}
+	if laid == name {
+		switch from {
+		case "flag":
+			why = append(why, "this eagent was started on it (--config or --preset); it can be deleted once eagent runs on another")
+		case "EAGENT_PRESET", "EAGENT_CONFIG":
+			why = append(why, from+" names it in eagent's environment; it can be deleted once that variable names another")
+		case "default_config":
+			if defaultConfig != name {
+				why = append(why, "it is the project's default (default_config); select a different default first")
+			}
+		}
+	}
+	return why
+}
+
+func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.RawMessage) (Config, error) {
+	cfg := Defaults()
+	l, err := chooseLayers(project, preset, bundle, fileCfg)
+	if err != nil {
+		return cfg, err
+	}
+	preset, bundle, from, bundleCfg := l.preset, l.bundle, l.from, l.bundleCfg
+	if preset != "" {
 		canon, ok := ResolvePreset(preset)
+		if note := PresetNote(preset); note != "" {
+			cfg.Migrated = append(cfg.Migrated, note)
+		}
 		if ok {
 			preset = canon
 		}
@@ -788,18 +992,111 @@ func LoadBundleWithFile(project, preset, bundle string, fileCfg map[string]json.
 		apply(&cfg)
 		cfg.Preset = preset
 	}
-	if err := overlay(&cfg, fileCfg, File(project)); err != nil {
+	var n named
+	if err := overlay(project, &cfg, fileCfg, File(project), &n); err != nil {
 		return cfg, err
 	}
+	cfg.Name = "" // the project file is no bundle, whatever "name" it carries
 	if bundle != "" {
-		if err := overlay(&cfg, bundleCfg, BundlePath(project, bundle)); err != nil {
+		if err := overlay(project, &cfg, bundleCfg, BundlePath(project, bundle), &n); err != nil {
 			return cfg, err
 		}
-		cfg.Name = bundle
+		cfg.Name, cfg.NameFrom = bundle, from
 	}
-	applyEnv(&cfg)
+	applyEnv(project, &cfg, n)
+	normalize(&cfg)
 	cfg.Instructions = loadInstructions(project)
 	return cfg, cfg.Validate()
+}
+
+// ChosenPreset is a built-in preset as a running session gets it when the
+// user picks it from the list of configurations: the project file's
+// settings over the preset, as at a start with --preset, except which model
+// the file names and where it is reached (and its default_config). The
+// model is what picking a preset chooses; the file's own would make every
+// preset the same model, or a broken one (a model name over another
+// provider's address). The file's effort and reply ceiling still apply.
+func ChosenPreset(project, preset string) (Config, error) {
+	file, err := readJSONMap(File(project))
+	if err != nil {
+		return Defaults(), err
+	}
+	return ChosenPresetWithFile(project, preset, file)
+}
+
+// ChosenPresetWithFile is ChosenPreset over given file contents.
+func ChosenPresetWithFile(project, preset string, file map[string]json.RawMessage) (Config, error) {
+	if _, ok := ResolvePreset(preset); !ok {
+		return Defaults(), fmt.Errorf("unknown preset %q (have %s)", preset, strings.Join(PresetNames(), ", "))
+	}
+	rest, _ := DropModelChoice(file)
+	delete(rest, "default_config")
+	delete(rest, "preset")
+	// The preset named as the bundle too: EAGENT_CONFIG does not replace it.
+	// A route the environment pins (EAGENT_MODEL and the like) still wins,
+	// as it does everywhere; a choice that cannot hold under it is refused.
+	cfg, err := LoadBundleWithFile(project, preset, preset, rest)
+	if err == nil {
+		OfferedEffort(project, &cfg)
+	}
+	return cfg, err
+}
+
+// OfferedEffort moves an effort kept that a route's model does not offer
+// (xhigh from a file written for openai-high, on GLM-5.3) to the nearest
+// one it does, as a live switch to that model makes it (PickRoute, with
+// the project's servers and lists): on the main route, and on a dedicated
+// summarizer's own route.
+func OfferedEffort(project string, cfg *Config) {
+	routes := []*ModelRoute{&cfg.Model}
+	if cfg.Summarizer.Mode == SummarizerDedicated && cfg.Summarizer.Model != nil && cfg.Summarizer.Model.Model != "" {
+		routes = append(routes, cfg.Summarizer.Model)
+	}
+	for _, a := range routes {
+		if pr, ok := ProviderForURLFor(project, a.BaseURL); ok {
+			if picked, err := PickRoute(project, ModelRoute{ReasoningEffort: a.ReasoningEffort}, pr.ID, a.Model, ""); err == nil {
+				a.ReasoningEffort = picked.ReasoningEffort
+			}
+		}
+	}
+}
+
+// modelChoiceFields are the fields of a route that say which model it is
+// and where it is reached: what choosing a preset chooses.
+var modelChoiceFields = []string{"protocol", "base_url", "model", "api_key_env", "context_tokens", "fallback"}
+
+// DropModelChoice returns a configuration object, carried over to today's
+// keys, without the model its route names or where it is reached, so a
+// preset under it decides them; the route's other settings (its effort,
+// its reply ceiling) stay. dropped is the model it named, "" when none.
+func DropModelChoice(file map[string]json.RawMessage) (out map[string]json.RawMessage, dropped string) {
+	migrated, _ := MigrateLegacy(file)
+	out = make(map[string]json.RawMessage, len(migrated))
+	for k, v := range migrated {
+		out[k] = v
+	}
+	route := object(out["model"])
+	if route == nil {
+		return out, ""
+	}
+	_ = json.Unmarshal(route["model"], &dropped)
+	for _, k := range modelChoiceFields {
+		delete(route, k)
+	}
+	if len(route) == 0 {
+		delete(out, "model")
+	} else {
+		out["model"], _ = json.Marshal(route)
+	}
+	return out, dropped
+}
+
+// normalize spells out what an empty setting means: an empty summarizer
+// mode is inline.
+func normalize(cfg *Config) {
+	if cfg.Summarizer.Mode == "" {
+		cfg.Summarizer.Mode = SummarizerInline
+	}
 }
 
 func readJSONMap(path string) (map[string]json.RawMessage, error) {
@@ -817,66 +1114,226 @@ func readJSONMap(path string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-// overlay merges a JSON object into cfg. Actor objects merge field by field
-// so a bundle can change just a model name.
-func overlay(cfg *Config, m map[string]json.RawMessage, source string) error {
+// named says, of the main route and of the summarizer's own, whether the
+// window it has is one a layer names for it: a variable that moves the
+// route's address leaves that window alone (applyEnv).
+type named struct{ main, summarizer bool }
+
+// overlay merges a JSON object into cfg, carrying over any keys of the
+// three-actor design first. Route objects merge field by field so a bundle
+// can change just a model name; a route whose model the object changes
+// without naming its context window gets the new model's (followModel).
+// names says afterwards whose windows a layer names.
+func overlay(project string, cfg *Config, m map[string]json.RawMessage, source string, names *named) error {
 	if len(m) == 0 {
 		return nil
 	}
+	m, notes := MigrateLegacy(m)
+	for _, n := range notes {
+		cfg.Migrated = append(cfg.Migrated, filepath.Base(source)+": "+n)
+	}
+	mainBefore, summarizerBefore := chainRoutes(&cfg.Model), chainRoutes(cfg.Summarizer.Model)
 	raw, _ := json.Marshal(m)
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		return fmt.Errorf("%s: %w", source, err)
 	}
+	names.main = followModel(project, &cfg.Model, mainBefore, m["model"], names.main)
+	names.summarizer = followModel(project, cfg.Summarizer.Model, summarizerBefore, object(m["summarizer"])["model"], names.summarizer)
 	return nil
 }
 
-func applyEnv(cfg *Config) {
+// Layer lays a configuration object over cfg as the loader lays the file
+// or a bundle (overlay): a route it moves to another model or address
+// without naming a window gets the window there, and a null clears what
+// lies below (followModel).
+func Layer(project string, cfg *Config, m map[string]json.RawMessage, source string) error {
+	return overlay(project, cfg, m, source, &named{})
+}
+
+// chainRoutes copies a route and each of its fallbacks.
+func chainRoutes(a *ModelRoute) []ModelRoute {
+	var out []ModelRoute
+	for cur := a; cur != nil; cur = cur.Fallback {
+		out = append(out, *cur)
+	}
+	return out
+}
+
+// moved says whether a route names another model than it did before, or
+// reaches it at another address (with or without a trailing slash, the
+// same address): its window is no longer the one it had.
+func moved(before, now ModelRoute) bool {
+	return now.Model != before.Model || strings.TrimRight(now.BaseURL, "/") != strings.TrimRight(before.BaseURL, "/")
+}
+
+// followModel gives each route of a chain whose model or address changed
+// from before the window of the model where it is now reached (0 when it
+// is not known), unless layer, the route object that changed it, names a
+// context window itself. A window is the model's at its server: one kept
+// from the model before, or from another server, would be wrong.
+//
+// A null in layer clears what the layers below set: the editor writes one
+// where it leaves a field empty that the preset sets, such as an effort of
+// "" (send none, the provider's default) under a preset's "high".
+//
+// It returns whether the route's own window is now one a layer names: yes
+// when layer names one, no when layer clears it or moves the route without
+// naming one, else named, as the layers below left it.
+func followModel(project string, a *ModelRoute, before []ModelRoute, layer json.RawMessage, named bool) bool {
+	if a == nil {
+		return false
+	}
+	obj := object(layer)
+	null := func(k string) bool { v, ok := obj[k]; return ok && string(v) == "null" }
+	for i, cur := 0, a; cur != nil; i, cur = i+1, cur.Fallback {
+		var prev ModelRoute
+		if i < len(before) {
+			prev = before[i]
+		}
+		_, window := obj["context_tokens"]
+		if i == 0 {
+			named = window && !null("context_tokens") || !window && named && !moved(prev, *cur)
+		}
+		switch {
+		case moved(prev, *cur) && (!window || null("context_tokens")):
+			cur.ContextTokens = KnownContext(project, cur.BaseURL, cur.Model)
+		case null("context_tokens"):
+			cur.ContextTokens = 0
+		}
+		if null("reasoning_effort") {
+			cur.ReasoningEffort = ""
+		}
+		if null("max_tokens") {
+			cur.MaxTokens = 0
+		}
+		obj = object(obj["fallback"])
+	}
+	return named
+}
+
+// envFirst returns the first of the named variables that is set and not
+// empty.
+func envFirst(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// applyRouteEnv overrides a route from EAGENT_<prefix>* variables; legacy
+// lists the prefixes the same settings had in the three-actor design, read
+// when the current name is unset.
+func applyRouteEnv(a *ModelRoute, prefix string, legacy ...string) {
+	names := func(suffix string) []string {
+		out := []string{"EAGENT_" + prefix + suffix}
+		for _, l := range legacy {
+			out = append(out, "EAGENT_"+l+suffix)
+		}
+		return out
+	}
+	if v := envFirst(names("MODEL")...); v != "" {
+		a.Model = v
+	}
+	if v := envFirst(names("PROTOCOL")...); v != "" {
+		a.Protocol = v
+	}
+	if v := envFirst(names("BASE_URL")...); v != "" {
+		a.BaseURL = v
+	}
+	for _, n := range names("API_KEY_ENV") {
+		if v, ok := os.LookupEnv(n); ok {
+			a.APIKeyEnv = v
+			break
+		}
+	}
+	if v, err := strconv.Atoi(envFirst(names("MAX_TOKENS")...)); err == nil && v > 0 {
+		a.MaxTokens = v
+	}
+	switch strings.ToLower(envFirst(names("REPLAY_REASONING")...)) {
+	case "1", "true", "on", "yes":
+		on := true
+		a.ReplayReasoning = &on
+	case "0", "false", "off", "no":
+		off := false
+		a.ReplayReasoning = &off
+	}
+}
+
+// summarizerEnv names the first EAGENT_SUMMARIZER_* variable that sets a
+// field of the summarizer's route, or "" when none does.
+func summarizerEnv() string {
+	for _, suffix := range []string{"MODEL", "PROTOCOL", "BASE_URL", "API_KEY_ENV", "REASONING_EFFORT", "MAX_TOKENS", "REPLAY_REASONING"} {
+		name := "EAGENT_SUMMARIZER_" + suffix
+		if _, ok := os.LookupEnv(name); (ok && suffix == "API_KEY_ENV") || os.Getenv(name) != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func applyEnv(project string, cfg *Config, n named) {
 	if value, err := strconv.ParseBool(os.Getenv("EAGENT_FINALECHAT_ARTIFACTS")); err == nil {
 		cfg.Finalechat.Artifacts = value
 	}
-	actors := map[string]*Actor{"ORCHESTRATOR": &cfg.Orchestrator, "TASK": &cfg.Task, "NARRATOR": &cfg.Narrator}
-	for name, a := range actors {
-		if v := os.Getenv("EAGENT_" + name + "_MODEL"); v != "" {
-			a.Model = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_PROTOCOL"); v != "" {
-			a.Protocol = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_BASE_URL"); v != "" {
-			a.BaseURL = v
-		}
-		if v, ok := os.LookupEnv("EAGENT_" + name + "_API_KEY_ENV"); ok {
-			a.APIKeyEnv = v
-		}
-		if v := os.Getenv("EAGENT_" + name + "_REASONING_EFFORT"); v != "" {
-			a.ReasoningEffort = v
-		}
-		if v, err := strconv.Atoi(os.Getenv("EAGENT_" + name + "_MAX_TOKENS")); err == nil && v > 0 {
-			a.MaxTokens = v
-		}
-		switch strings.ToLower(os.Getenv("EAGENT_" + name + "_REPLAY_REASONING")) {
-		case "1", "true", "on", "yes":
-			on := true
-			a.ReplayReasoning = &on
-		case "0", "false", "off", "no":
-			off := false
-			a.ReplayReasoning = &off
-		}
+	// EAGENT_MODEL, EAGENT_PROTOCOL, EAGENT_BASE_URL, ... The orchestrator's
+	// old names still name the model when the new ones are unset, and so
+	// does its effort: the one model does the orchestrator's work. The
+	// narrator's and the task worker's variables are not read; each one set
+	// gets a note. A variable that names another model gives the route that
+	// model's window; one that moves it to another address, that server's,
+	// unless a layer names the window for the route (n).
+	prev := cfg.Model
+	applyRouteEnv(&cfg.Model, "", "ORCHESTRATOR_")
+	if cfg.Model.Model != prev.Model || !n.main && moved(prev, cfg.Model) {
+		cfg.Model.ContextTokens = KnownContext(project, cfg.Model.BaseURL, cfg.Model.Model)
+		n.main = false
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_TASK_CONCURRENCY")); err == nil && v > 0 {
-		cfg.TaskConcurrency = v
+	if v := envFirst("EAGENT_REASONING_EFFORT", "EAGENT_ORCHESTRATOR_REASONING_EFFORT"); v != "" {
+		cfg.Model.ReasoningEffort = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v > 0 {
+	cfg.Migrated = append(cfg.Migrated, retiredEnvNotes()...)
+	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {
+		cfg.Summarizer.Mode = v
+	}
+	// Any EAGENT_SUMMARIZER_* route variable gives the summarizer a route of
+	// its own: the one written, else a copy of the main model's to change.
+	if summarizerEnv() != "" || cfg.Summarizer.Model != nil {
+		route := cfg.Summarizer.Route(cfg.Model)
+		route.Fallback = nil
+		own := n.main
+		if cfg.Summarizer.Model != nil {
+			route = *cfg.Summarizer.Model
+			own = n.summarizer
+		}
+		prev := route
+		applyRouteEnv(&route, "SUMMARIZER_")
+		if route.Model != prev.Model || !own && moved(prev, route) {
+			route.ContextTokens = KnownContext(project, route.BaseURL, route.Model)
+		}
+		if v := os.Getenv("EAGENT_SUMMARIZER_REASONING_EFFORT"); v != "" {
+			route.ReasoningEffort = v
+		}
+		cfg.Summarizer.Model = &route
+	}
+	// 0 is a value of its own: follow the model in use, over a number the
+	// file fixes.
+	if v, err := strconv.Atoi(os.Getenv("EAGENT_ROLLOVER_TOKENS")); err == nil && v >= 0 {
 		cfg.RolloverTokens = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
-		cfg.NarratorQuietSeconds = v
+	if v, err := strconv.Atoi(envFirst("EAGENT_QUIET_SECONDS", "EAGENT_NARRATOR_QUIET_SECONDS")); err == nil && v >= 0 {
+		cfg.QuietSeconds = v
 	}
-	if v, err := strconv.Atoi(os.Getenv("EAGENT_NARRATOR_TICK_SECONDS")); err == nil && v > 0 {
-		cfg.NarratorTickSeconds = v
+	if v, err := strconv.Atoi(envFirst("EAGENT_TICK_SECONDS", "EAGENT_NARRATOR_TICK_SECONDS")); err == nil && v > 0 {
+		cfg.TickSeconds = v
 	}
 	if v := os.Getenv("EAGENT_PERSONA"); v != "" {
 		cfg.Persona = v
+	}
+	// (EAGENT_RELAY is taken: it is set inside an agent's terminal.)
+	if v := os.Getenv("EAGENT_DEFAULT_RELAY"); v != "" {
+		cfg.Relay.Default = v
 	}
 	switch strings.ToLower(os.Getenv("EAGENT_FINALECHAT")) {
 	case "0", "off", "false", "no":
@@ -888,6 +1345,40 @@ func applyEnv(cfg *Config) {
 	}
 }
 
+// retiredEnvNotes names each variable of the three-actor design that is set
+// and no longer has any effect. A variable's value is never part of a note.
+func retiredEnvNotes() []string {
+	var notes []string
+	for _, actor := range []struct{ prefix, why string }{
+		{"EAGENT_NARRATOR_", "one model does every call now"},
+		{"EAGENT_TASK_", "there are no task workers now"},
+	} {
+		for _, suffix := range []string{"MODEL", "PROTOCOL", "BASE_URL", "API_KEY_ENV", "REASONING_EFFORT", "MAX_TOKENS", "REPLAY_REASONING"} {
+			if envSet(actor.prefix + suffix) {
+				notes = append(notes, actor.prefix+suffix+" is set but no longer read: "+actor.why)
+			}
+		}
+	}
+	if envSet("EAGENT_TASK_CONCURRENCY") {
+		notes = append(notes, "EAGENT_TASK_CONCURRENCY is set but no longer read: there are no task workers now")
+	}
+	return notes
+}
+
+// envSet reports whether a variable would have had an effect in the
+// three-actor design: set and not empty, or set at all for a key variable
+// (empty meant no key is needed).
+func envSet(name string) bool {
+	v, ok := os.LookupEnv(name)
+	if strings.HasSuffix(name, "_API_KEY_ENV") {
+		return ok
+	}
+	return v != ""
+}
+
+// loadInstructions reads the project's instructions for the agent's work:
+// .agents/eagent/INSTRUCTIONS.md, or the project's AGENTS.md when that is
+// missing or empty.
 func loadInstructions(project string) string {
 	for _, name := range []string{
 		filepath.Join(project, ".agents", "eagent", "INSTRUCTIONS.md"),
@@ -916,7 +1407,7 @@ func (c Config) Validate() error {
 
 // Endpoint builds the wire endpoint, reading the key from the environment
 // when APIKeyEnv is set (an empty APIKeyEnv means no key is needed).
-func (a Actor) Endpoint() (llm.Endpoint, error) {
+func (a ModelRoute) Endpoint() (llm.Endpoint, error) {
 	var key string
 	if a.APIKeyEnv != "" {
 		key = os.Getenv(a.APIKeyEnv)
@@ -944,7 +1435,7 @@ func (a Actor) Endpoint() (llm.Endpoint, error) {
 
 // Routes returns the primary endpoint followed by any fallbacks whose keys
 // are present. An error is returned only if no route has a key.
-func (a Actor) Routes() ([]llm.Endpoint, error) {
+func (a ModelRoute) Routes() ([]llm.Endpoint, error) {
 	var eps []llm.Endpoint
 	var errs []string
 	for cur := &a; cur != nil; cur = cur.Fallback {
@@ -973,12 +1464,14 @@ func Write(project string, cfg Config) (string, error) {
 		return path, err
 	}
 	defer editor.Close()
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	// The file builds on the preset it names, so what cfg leaves empty is
+	// spelled out to stay empty.
+	raw, err := marshalOrdered(spelled(cfg))
 	if err != nil {
 		return path, err
 	}
-	if len(raw)+1 > 1<<20 {
+	if len(raw) > 1<<20 {
 		return path, fmt.Errorf("configuration exceeds 1 MiB")
 	}
-	return path, filelock.CreateFile(path, append(raw, '\n'), 0o644)
+	return path, filelock.CreateFile(path, raw, 0o644)
 }
