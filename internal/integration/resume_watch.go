@@ -96,6 +96,10 @@ func StartResumeWatcher(ctx context.Context, project string, host ResumeHost, lo
 	return func() { cancel(); <-done }
 }
 
+// leftToItsRun is the log line for a reply to a session that is running:
+// nothing is resumed for it. Whether that run mirrors is not known here.
+const leftToItsRun = "finalechat: session %s is running: its mirror reads the reply, or it is taken up once that run has stopped"
+
 // sweepEvery is how often the watcher sweeps the thread list. A variable so
 // tests can shorten it.
 var sweepEvery = time.Minute
@@ -198,7 +202,7 @@ func (w *resumeWatcher) considerHeld(ctx context.Context, thread finalechat.Thre
 		if trigger.ID != "" {
 			// Said for a reply seen, not for each sweep's look at the
 			// one kept quietly for when the session stops.
-			w.logf("finalechat: reply to session %s left to its running mirror", sid)
+			w.logf(leftToItsRun, sid)
 			w.keepUntilStopped(info, thread, trigger)
 		}
 		return
@@ -302,7 +306,7 @@ func (w *resumeWatcher) considerHeld(ctx context.Context, thread finalechat.Thre
 		// answers web.ErrRunning): as for a session found running before
 		// the resume, the reply is that run's mirror's, kept quietly for
 		// when it stops, and nobody is told it could not be resumed.
-		w.logf("finalechat: reply to session %s left to its running mirror", sid)
+		w.logf(leftToItsRun, sid)
 		w.keepUntilStopped(info, thread, m)
 		return
 	}

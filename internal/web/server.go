@@ -169,6 +169,12 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 // composer's route and delivery, the client's capabilities), so it is
 // taken as it would be had the session been running. It decides one at a
 // time with the browser's deliver, so the two never both resume it.
+//
+// A run started for a reply mirrors to the phone, whatever this server's
+// configuration says of mirroring: the thread the reply came from is where
+// its refused files are told and where the user's next words are read. (A
+// restore after a restart with no reply waiting comes here with an empty
+// msg, and runs on the configuration as it is.)
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
@@ -182,7 +188,7 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return ErrRunning
 	}
-	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", true)
+	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", msg.ID != "")
 }
 
 // ErrRunning is Resume's answer for a session that is already running, here
@@ -571,7 +577,7 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 	// Nobody running it: resume here with the message as the prompt, from
 	// the web as the inbox message would be.
 	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "message", Text: b.Text, From: "web", Client: b.Client}, func() error {
-		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, true)
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text, PromptSource: "web", PromptClient: b.Client}, b.Config, b.Preset, false)
 	})
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
@@ -682,7 +688,7 @@ func (s *Server) postAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	how, inbox, err := s.deliverTo(info, harness.InboxMessage{Type: "answer", Text: b.Text, QuestionID: b.QuestionID, From: "web", Client: b.Client}, func() error {
-		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, true)
+		return s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Answer: b.Text, PromptClient: b.Client}, b.Config, b.Preset, false)
 	})
 	if err != nil {
 		writeErr(w, deliverCode(err), err)
@@ -779,7 +785,7 @@ func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, errors.New("session is already running"))
 		return
 	}
-	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, true); err != nil {
+	if err := s.host(info.Path, harness.Options{Project: s.Project, Interactive: true, Verbose: s.Verbose, Prompt: b.Text}, b.Config, b.Preset, false); err != nil {
 		writeErr(w, deliverCode(err), err)
 		return
 	}
@@ -888,14 +894,18 @@ func (s *Server) RegisterSessionStarter() func() {
 // host resumes an existing session in this process; its caller holds
 // resuming. Once the server's shutdown has begun it resumes nothing. It
 // runs on this server's own configuration, or on the bundle and preset the
-// page picked.
-func (s *Server) host(path string, opts harness.Options, bundle, preset string, _ bool) error {
+// page picked; with mirror, the phone's mirror is on for the run whatever
+// that configuration says of it (Resume).
+func (s *Server) host(path string, opts harness.Options, bundle, preset string, mirror bool) error {
 	if s.stopping {
 		return errStopping
 	}
 	cfg, err := s.loadConfig(bundle, preset)
 	if err != nil {
 		return err
+	}
+	if mirror {
+		cfg.Finalechat.Enabled = nil
 	}
 	ui := newWebUI(s.logf)
 	rt, err := harness.Resume(cfg, opts, ui, path)

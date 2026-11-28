@@ -1463,8 +1463,8 @@ func (r *Runtime) slashCommandFrom(line, source string, client *clientcaps.Caps)
 		r.beginShutdown("quit", 0)
 	case "/dismiss":
 		if q := r.st.Question; q != nil {
-			source := ""
-			if client != nil {
+			// Where it was typed, as the client names itself when it does.
+			if client != nil && client.Source != "" {
 				source = client.Source
 			}
 			r.dismissQuestion(q.ID, source)

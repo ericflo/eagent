@@ -239,7 +239,7 @@ func TestK1AKeptReplyIsLeftToTheMirrorInOneLogLine(t *testing.T) {
 	_, sid, _, f, _, w := r9Running(t, true)
 	var lines atomic.Int32
 	w.logf = func(format string, args ...any) {
-		if strings.Contains(format, "left to its running mirror") {
+		if format == leftToItsRun {
 			lines.Add(1)
 		}
 	}

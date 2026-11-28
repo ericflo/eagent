@@ -107,9 +107,10 @@ func k5Watch(t *testing.T, failures int) (project string, fr *r10Front, host *fl
 }
 
 // The session's own configuration turns its phone off. A resume for a
-// reply from the phone runs with the mirror on the thread's account all
-// the same (the serve's Resume), so the refusal goes along with the words
-// for that run's mirror to pay, and the watcher posts nothing itself.
+// reply from the phone runs with the mirror on all the same (the serve's
+// Resume; web: TestASessionBroughtBackByAPhoneReplyMirrors), so the
+// refusal goes along with the words for that run's mirror to pay, and the
+// watcher posts nothing itself.
 func TestK5AWatcherPassesTheRefusalWhatever(t *testing.T) {
 	project, fr, host, w := k5Watch(t, 0)
 	sr8PhoneOff(t, project)

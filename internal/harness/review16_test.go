@@ -93,3 +93,24 @@ func TestAFallbacksOwnFailureIsCountedAgainstIt(t *testing.T) {
 		}
 	}
 }
+
+// A question too long for a card is in the FinaleChat thread as a
+// message, and the user types /dismiss there, from an app that says
+// nothing of itself (no client details come with the message). The
+// dismissal came from the thread: the thread is not told the question
+// "was dismissed elsewhere".
+func TestADismissTypedInTheThreadIsNotCalledDismissedElsewhere(t *testing.T) {
+	fp := newPhoneFake(true)
+	t.Cleanup(fp.srv.Close)
+	g := r8AskSession(t, fp, "Which branch?", r8Choices(21))
+	waitFor(t, "the question in the thread", func() bool { return k1AskedAsMessage(fp, "Which branch?") == 1 })
+	r14Drained(t, g)
+	g.rt.sync(func() { g.rt.onInputFrom("/dismiss", "finalechat", "m9", "", nil) })
+	waitFor(t, "the dismissal on the record", func() bool { return len(g.events(event.UserDismiss)) == 1 })
+	r14Drained(t, g)
+	var d event.UserDismissData
+	_ = g.events(event.UserDismiss)[0].Decode(&d)
+	if d.Source != "finalechat" || k1Settled(fp) != 0 {
+		t.Fatalf("dismissed from %q, and the thread got %d notes that the question was dismissed elsewhere", d.Source, k1Settled(fp))
+	}
+}

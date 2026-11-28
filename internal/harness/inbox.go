@@ -116,13 +116,16 @@ func writeInbox(dir, stamp string, msg InboxMessage) error {
 
 // Take writes msg into the session's inbox and reads the inbox at once, on
 // the run's loop, unless the run has begun to end: then nothing is
-// written, and Take reports false. Handed over this way, words are taken
-// before Take returns or not at all; a file left from outside can come
-// after an ending run's last look. A file the poll could not take is taken
-// back, and that is the error; one that cannot be taken back is left for
-// a later look, and reported taken.
+// written, and Take reports false. What already waits in the inbox is
+// read first, in the order written: a stop there ends the run before msg
+// is taken. Handed over this way, words are taken before Take returns or
+// not at all; a file left from outside can come after an ending run's
+// last look. A file the poll could not take is taken back, and that is
+// the error; one that cannot be taken back is left for a later look, and
+// reported taken.
 func (r *Runtime) Take(msg InboxMessage) (took bool, err error) {
 	r.sync(func() {
+		r.pollInbox()
 		if r.ending {
 			return
 		}
@@ -178,7 +181,9 @@ func (r *Runtime) pollInbox() {
 		id := inboxFileID(raw, name)
 		var msg InboxMessage
 		bad := json.Unmarshal(raw, &msg) != nil
-		if id == "" && !bad {
+		if id == "" && !bad && !leaving && !r.ending && !r.loopGone() {
+			// Not a file that is left for the next run (below): that one
+			// keeps its name, and with it its place in the order written.
 			path, id = claimInbox(dir, path, msg)
 		}
 		// A file with no id (one written by hand that could not be given
