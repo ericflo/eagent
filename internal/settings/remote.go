@@ -924,7 +924,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	// loads only under a saved preset that gives the rest, and without it
 	// cannot be read here at all.
 	if was, _ := fileValues(res.File.Raw); picks && needsPreset(values) && !needsPreset(was) {
-		err = &pickRefused{"the project file would make the summarizer dedicated with only part of a model of its own, and would then load only with a saved preset that gives the rest; nothing was changed"}
+		err = &pickRefused{"the project file would leave a dedicated summarizer with only part of a model of its own, and would then load only with a saved preset that gives the rest; nothing was changed"}
 		return
 	}
 	var candidate []byte
@@ -961,10 +961,14 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 // dedicated and write a route for it that does not stand as written: the
 // route or its fallback lacks a part (or holds one that cannot load). The
 // loader takes a route as written, so that file loads only under a saved
-// preset that gives the rest. A field a variable gives is not the file's
-// to lack (variables reach the route's own fields, never its fallback's).
+// preset that gives the rest. What a variable gives is not the file's to
+// say or to lack: the mode, and the route's own fields (never its
+// fallback's), as the loader takes them.
 func needsPreset(values map[string]any) bool {
 	mode, _ := pointerValue(values, "/summarizer/mode")
+	if v := os.Getenv("EAGENT_SUMMARIZER_MODE"); v != "" {
+		mode = v
+	}
 	own, _ := pointerValue(values, "/summarizer/model")
 	if has, _ := own.(map[string]any); mode != config.SummarizerDedicated || len(has) == 0 {
 		return false

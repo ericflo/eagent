@@ -358,6 +358,26 @@ func TestSummarizerChangesLeaveARouteTheFileAlreadyHasAsWritten(t *testing.T) {
 			t.Fatalf("got %v, and the file is:\n%s", err, raw)
 		}
 	})
+	// A variable makes the summarizer dedicated, the file says nothing of
+	// it, and a saved preset in force gives the route. One field of the
+	// route set from the app would be all the file has of it: refused.
+	t.Run("a variable makes it dedicated", func(t *testing.T) {
+		for _, how := range []string{"EAGENT_CONFIG", "default_config"} {
+			t.Run(how, func(t *testing.T) {
+				file, env := `{"tick_seconds":40}`, map[string]string{"EAGENT_SUMMARIZER_MODE": "dedicated"}
+				if how == "default_config" {
+					file = `{"default_config":"mine","tick_seconds":40}`
+				} else {
+					env["EAGENT_CONFIG"] = "mine"
+				}
+				project, err := r17Apply(t, r17Case{file: file, bundle: r17Flash, env: env, edits: []control.Edit{effort}})
+				raw, _ := os.ReadFile(config.File(project))
+				if err == nil || !strings.Contains(err.Error(), "only part of a model of its own") || string(raw) != file {
+					t.Fatalf("got %v, and the file is:\n%s", err, raw)
+				}
+			})
+		}
+	})
 	// The same of the route's fallback: the file and the saved preset in
 	// force each give the summarizer a whole route with a whole fallback,
 	// and a field of the file's fallback is unset from the app (or one is
