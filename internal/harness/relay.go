@@ -363,6 +363,7 @@ type relayLaunch struct {
 	// messages with no outcome (writeBrief): they are left to the brief.
 	// One still being typed into the old agent then (its typing outlasted
 	// the wait on oldIdle) is settled by nothing when that typing ends.
+	// Under relays.mu: that typing's end reads it.
 	carried map[string]bool
 	// oldDrained is closed once all the old seat saw is on the record
 	// (watchSeat), closed the loop's end. undrained: run went on without it.
@@ -669,18 +670,19 @@ func (r *Runtime) awaitSend(done <-chan sendResult) sendResult {
 // is a send typed into a process that went meanwhile (nothing will confirm
 // it). No exit or restart seen in between can report it too. A send never
 // typed (untyped) that the loop did not take, as it has closed, is back at
-// the head of its queue, which finish records not sent. Then its waiter,
-// if any, is told. Not on the loop goroutine.
+// the head of its queue, which finish records not sent; not one a switch's
+// brief carries, which stays the brief's either way. Then its waiter, if
+// any, is told. Not on the loop goroutine.
 func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped bool) {
 	ran := r.onLoop(func() {
 		r.relays.mu.Lock()
 		gone, goneRel := q.gone, q.goneRel
 		q.typing, q.gone, q.goneRel = "", "", nil
-		by := q.movedTo
+		carried := q.movedTo != nil && q.movedTo.carried[h.id]
 		r.relays.mu.Unlock()
 		switch {
 		case h.barrier:
-		case by != nil && by.carried[h.id]:
+		case carried:
 			// The switch that took this seat went on without this send's
 			// typing (its bound, oldSendSettle), and its brief quoted the
 			// message whole for the new agent: it is left to the brief, as
@@ -701,7 +703,9 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	})
 	if !ran && untyped {
 		r.relays.mu.Lock()
-		q.items = append([]heldSend{h}, q.items...)
+		if q.movedTo == nil || !q.movedTo.carried[h.id] {
+			q.items = append([]heldSend{h}, q.items...)
+		}
 		r.relays.mu.Unlock()
 	}
 	if h.done != nil {
@@ -1068,7 +1072,10 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 			}
 		}
 		job.handover = ho
-		job.brief, job.carried = r.briefOf(ho, pending)
+		brief, carried := r.briefOf(ho, pending)
+		r.relays.mu.Lock()
+		job.brief, job.carried = brief, carried
+		r.relays.mu.Unlock()
 	}
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
 		r.append(event.New(event.RelayEnd, event.ActorHarness, event.RelayEndData{Name: job.replaces, Reason: job.endOld}))
