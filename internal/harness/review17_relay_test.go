@@ -205,33 +205,52 @@ func TestABriefThatDoesNotGoDoesNotFailAMessageAnEarlierBriefGave(t *testing.T) 
 	}
 }
 
-// The same switch, twice in a row before Claude has read anything: its
-// brief is still not known to have arrived and it has finished no turn.
-// The message is still quoted whole for pi, and is still pi's brief's to
-// lose: when that brief does not go, no agent that runs has the message,
-// and eagent is told to pass it on.
-func TestABriefThatDoesNotGoStillFailsAMessageNoAgentHas(t *testing.T) {
-	codex := newK2FeedSeat(t)
-	claude := &k2FeedSeat{fakeSeat: newFakeSeat("two"), feed: make(chan relay.Event), gone: make(chan struct{})}
-	t.Cleanup(claude.end)
-	rt, g, done := r10Session(t, codex, claude, &r16RefusingSeat{newFakeSeat("three")})
-	_, id := k2Forward(t, rt, codex, "then run the linter", "queue")
-	g.release <- struct{}{}
-	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
-	codex.waitGone(t)
-	recv(t, switched, "switch")
-	codex.end()
-	k1QueuesIdle(t, rt)
-	g.release <- struct{}{}
-	again := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "pi"})
-	claude.waitGone(t)
-	recv(t, again, "the second switch")
-	claude.end()
-	k1QueuesIdle(t, rt)
-	if o := k2Outcome(rt, id); o != state.SendNotSent {
-		t.Errorf("no agent that runs has the message, and the record says of it: %q", o)
+// The same two switches with Claude replaced before it finished a turn,
+// whether or not its brief was seen arriving: Claude was stopped part way,
+// so the message is still quoted whole for pi, however long it is, and is
+// still pi's brief's to lose. When that brief does not go, no agent that
+// runs has the message, and eagent is told to pass it on.
+func TestABriefThatDoesNotGoStillFailsAMessageNoAgentFinishedATurnOn(t *testing.T) {
+	long := "then run the linter" + strings.Repeat(", and say what it found in each file", 100)
+	for _, read := range []string{"Claude had read nothing", "Claude's brief had arrived"} {
+		t.Run(read, func(t *testing.T) {
+			codex := newK2FeedSeat(t)
+			claude := &k2FeedSeat{fakeSeat: newFakeSeat("two"), feed: make(chan relay.Event), gone: make(chan struct{})}
+			t.Cleanup(claude.end)
+			rt, g, done := r10Session(t, codex, claude, &r16RefusingSeat{newFakeSeat("three")})
+			_, id := k2Forward(t, rt, codex, long, "queue")
+			g.release <- struct{}{}
+			switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+			codex.waitGone(t)
+			recv(t, switched, "switch")
+			codex.end()
+			k1QueuesIdle(t, rt)
+			if read == "Claude's brief had arrived" {
+				claude.say(relay.Event{Kind: relay.KindDelivered, SendID: lastSendID(rt), OK: true})
+				rt.sync(func() {})
+			}
+			g.release <- struct{}{}
+			again := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "pi"})
+			claude.waitGone(t)
+			recv(t, again, "the second switch")
+			claude.end()
+			k1QueuesIdle(t, rt)
+			var brief string
+			last := lastSendID(rt)
+			rt.sync(func() {
+				if d, ok := sendRecord(rt.st, last); ok {
+					brief = d.Text
+				}
+			})
+			if !strings.Contains(brief, "- "+long+"\n") {
+				t.Errorf("pi's brief does not quote the message whole (%d characters of brief)", len(brief))
+			}
+			if o := k2Outcome(rt, id); o != state.SendNotSent {
+				t.Errorf("no agent that runs has the message, and the record says of it: %q", o)
+			}
+			r10Quit(t, rt, g, 0, done)
+		})
 	}
-	r10Quit(t, rt, g, 0, done)
 }
 
 // A switch leaves a message of the user's that its brief quotes without an

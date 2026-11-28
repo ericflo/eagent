@@ -2328,11 +2328,13 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		fmt.Fprintf(&b, " %s was started to take over in between and stopped before it finished a turn; it may have changed files.", strings.Join(ho.via, ", then "))
 	}
 	b.WriteString("\n\nThe user's instructions so far, verbatim, oldest first:\n")
-	// waits: the record has no word of how a send of it went, and no brief
-	// before this one gave it to an agent (reached). The brief is such a
-	// message's only way to the new agent, and the switch leaves it without
-	// an outcome on that account: it is quoted whole, however many came
-	// after it.
+	// waits: the record has no word of how a send of it went, and it was
+	// put to one of the agents this brief hands over from. The brief is
+	// such a message's only way to the new agent, and the switch leaves it
+	// without an outcome on that account: it is quoted whole, however many
+	// came after it, and it is this brief's to lose (carried). One put to
+	// an agent further back is one of the user's instructions like the
+	// others.
 	type quote struct {
 		text  string
 		waits bool
@@ -2350,29 +2352,6 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		names[n.name] = true
 	}
 	handed := handedOver(r.st)
-	// reached: a message put to the agent h, and never seen arriving
-	// there, has reached an agent since. The switch away from h quoted it
-	// in its brief, and that brief arrived or the agent it was typed into
-	// has finished a turn (or the same of the switch after that one). It
-	// is then one of the user's instructions like the others: not this
-	// brief's to carry, nor this brief's to lose.
-	reached := func(h holder) bool {
-		for steps := 0; steps <= len(handed); steps++ {
-			next, ok := handed[h]
-			if !ok {
-				return false
-			}
-			rel := r.st.RelayAt(next.name, next.start)
-			if rel == nil {
-				return false
-			}
-			if _, brief := briefedBy(r.st, rel); rel.Turns > 0 || r.st.SendOutcome(brief) == state.SendArrived {
-				return true
-			}
-			h = next
-		}
-		return false
-	}
 	quoted := map[string]bool{}
 	// A user message sent more than once (forwarded again after a send
 	// that did not go) is one instruction: quoted once, and not at all
@@ -2410,11 +2389,12 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		if at != nil {
 			ours = inChain(handed, holder{d.Name, at.StartSeq}, targets)
 		}
-		waits := func() bool {
-			return !r.hasOutcome(d.ID) && (at == nil || !reached(holder{d.Name, at.StartSeq}))
-		}
+		// (waits, above.) Put to an agent further back in the chain than
+		// the ones this brief hands over from, it was quoted by an earlier
+		// brief for an agent that has finished a turn since (handoverFor).
+		waits := !r.hasOutcome(d.ID) && (at == nil || targets[holder{d.Name, at.StartSeq}])
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
-			if i, ok := bySeq[d.Seq]; ok && ours && d.From == "user" && d.Seq > 0 && !pending[d.ID] && waits() {
+			if i, ok := bySeq[d.Seq]; ok && ours && d.From == "user" && d.Seq > 0 && !pending[d.ID] && waits {
 				texts[i].waits = true // sent again, and this send of it waits
 				carried[d.ID] = true
 			}
@@ -2428,8 +2408,8 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 			quotedSeq[d.Seq] = true
 			bySeq[d.Seq] = len(texts)
 		}
-		texts = append(texts, quote{d.Text, waits()})
-		if waits() {
+		texts = append(texts, quote{d.Text, waits})
+		if waits {
 			carried[d.ID] = true
 		}
 	}

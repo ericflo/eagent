@@ -1313,16 +1313,17 @@ queued:
 	// agent that was stopped or had exited meanwhile (settleExited left it
 	// to its typing's end): nothing will confirm it, and that is recorded
 	// now, as the loop would have. One a switch's brief carries stays the
-	// brief's.
+	// brief's. (Typed into an agent that runs, restarted or not, it waits
+	// for the seat a resume attaches.)
 	r.relays.mu.Lock()
 	var typed []*sendQueue
 	for _, q := range r.relays.queues {
-		if q.typing != "" && q.gone != "" {
+		if q.typing != "" && q.gone != "" && (q.goneRel.Ended || q.goneRel.State == "exited") {
 			typed = append(typed, q)
 		}
 	}
 	r.relays.mu.Unlock()
-	slices.SortFunc(typed, func(a, b *sendQueue) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(typed, func(a, b *sendQueue) int { return strings.Compare(a.typing, b.typing) })
 	for _, q := range typed {
 		d, _ := sendRecord(r.st, q.typing)
 		if r.leftToBrief(q.typing) == "" && !r.hasOutcome(q.typing) && !r.takeBack(q.goneRel, q.typing, d.Mode, q.gone) {
