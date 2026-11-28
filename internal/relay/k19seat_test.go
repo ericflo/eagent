@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Claude works, with a message in its own queue (its enqueue line read).
@@ -70,9 +71,7 @@ func TestK19ACommandIsNotTypedBehindWhatAnInterruptPutsBackInTheBox(t *testing.T
 // sent as one message; main types it the same way. It is refused until the
 // message has gone.
 func TestK19ACommandIsNotTypedBehindAMessageTheQueueGaveUp(t *testing.T) {
-	savedSettle, savedPause, savedInt := typeSettle, dialogPause, interruptPause
-	typeSettle, dialogPause, interruptPause = 0, 0, 0
-	t.Cleanup(func() { typeSettle, dialogPause, interruptPause = savedSettle, savedPause, savedInt })
+	k19Fast(t, 0)
 	const text = "also update the changelog"
 	for _, mode := range []string{"interrupt", "queue", "after_turn"} {
 		s, h, feed := k17Seat(t, text)
@@ -91,5 +90,113 @@ func TestK19ACommandIsNotTypedBehindAMessageTheQueueGaveUp(t *testing.T) {
 		if _, err := s.Send("r2", "and the README", mode); err != nil {
 			t.Errorf("%s: a plain message was refused: %v", mode, err)
 		}
+	}
+}
+
+// k19Fast drops the seat's pauses, and gives a command wait for a message
+// typed before it to show as read.
+func k19Fast(t *testing.T, wait time.Duration) {
+	t.Helper()
+	savedSettle, savedPause, savedInt, savedWait, savedLook := typeSettle, dialogPause, interruptPause, boxWait, boxLook
+	typeSettle, dialogPause, interruptPause, boxWait, boxLook = 0, 0, 0, wait, 2*time.Millisecond
+	t.Cleanup(func() {
+		typeSettle, dialogPause, interruptPause, boxWait, boxLook = savedSettle, savedPause, savedInt, savedWait, savedLook
+	})
+}
+
+func k19Typed(h *fakeHost) (string, []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return strings.Join(h.keys, " "), append([]string{}, h.typed...)
+}
+
+// Claude's queue threw its message away at a cancel (remove, with the
+// reason cleared_on_cancel): nothing went back into the input box. The
+// seat watches such a send as it does one put back in the box, and the
+// agent's own command sent to the idle Claude was refused for the 45
+// seconds until its report, with the words that the message sits in the
+// input box. The box is empty, and the command is typed.
+func TestK19ACommandIsTypedOnceTheQueueThrewItsMessageAway(t *testing.T) {
+	k19Fast(t, 0)
+	const text = "also update the changelog"
+	s, h, feed := k17Seat(t, text)
+	feed(k17Line("enqueue", text, ""))
+	feed(k17Line("remove", text, "cleared_on_cancel"), k17Prompt("[Request interrupted by user]"))
+	k17Idle(s, h, fmt.Sprintf(k17Box, ""))
+	drain(s.Events())
+	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
+		t.Fatalf("send: %v; want /compact typed into the empty box (the queue threw the message away)", err)
+	}
+	if _, typed := k19Typed(h); len(typed) != 1 || typed[0] != "/compact" {
+		t.Fatalf("typed %q, want the command", typed)
+	}
+}
+
+// The seat typed a message into an idle Claude and its Enter was lost: the
+// words sit in the input box, where the check of the screen reads them
+// before it presses Enter again. The agent's own command sent then was
+// pasted behind them, sent as the end of that message and not run, and
+// reported as typed (main does the same). It is refused while they show.
+func TestK19ACommandIsNotTypedBehindAMessageWhoseEnterWasLost(t *testing.T) {
+	k19Fast(t, 0)
+	const text = "also update the changelog"
+	for _, mode := range []string{"interrupt", "queue", "after_turn"} {
+		h := &fakeHost{alive: true}
+		s := newSeat(Spec{}, claudeAgent{}, h, "k19", "")
+		s.track("r1", text, "queue")
+		k17Idle(s, h, fmt.Sprintf(k17Box, text))
+		_, err := s.Send("c1", "/compact", mode)
+		if keys, typed := k19Typed(h); err == nil || !strings.Contains(err.Error(), "message r1") || !strings.Contains(err.Error(), "sits in its input box") || keys != "" || len(typed) != 0 {
+			t.Errorf("%s: send err %v, keys %q, typed %q; want the command refused for r1's words in the box, nothing pressed or typed", mode, err, keys, typed)
+		}
+	}
+}
+
+// A message just entered is drawn in Claude's output a moment before its
+// transcript shows it: for that moment it reads as the one above does. The
+// command sent right after it waits for the transcript, and is typed.
+func TestK19ACommandWaitsForTheMessageBeforeItToShowAsRead(t *testing.T) {
+	k19Fast(t, 5*time.Second)
+	const text = "also update the changelog"
+	h := &fakeHost{alive: true}
+	s := newSeat(Spec{}, claudeAgent{}, h, "k19", "")
+	s.track("r1", text, "queue")
+	k17Idle(s, h, "❯ "+text+"\n\n✻ Flowing…\n\n"+fmt.Sprintf(k17Box, ""))
+	p := &claudeParser{}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		for _, o := range p.line([]byte(k17Prompt(text))) {
+			s.fold(o)
+		}
+	}()
+	start := time.Now()
+	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
+		t.Fatalf("send: %v; want the command typed once r1 showed as read", err)
+	}
+	if _, typed := k19Typed(h); len(typed) != 1 || typed[0] != "/compact" {
+		t.Fatalf("typed %q, want the command", typed)
+	}
+	if took := time.Since(start); took < 15*time.Millisecond || took > 2*time.Second {
+		t.Fatalf("the command was typed after %v; want it to wait for the transcript and no longer", took)
+	}
+}
+
+// Antigravity's queue is not one the seat follows: a message typed while it
+// works stands in that queue, on its screen, until its turn, and a command
+// typed meanwhile is an entry of its own. It is typed, as on main.
+func TestK19ACommandForAWorkingAgentWhoseQueueIsNotFollowedIsTyped(t *testing.T) {
+	k19Fast(t, 0)
+	const text = "also update the changelog"
+	h := &fakeHost{alive: true}
+	s := newSeat(Spec{}, antigravityAgent{}, h, "k19", "")
+	s.track("r1", text, "queue")
+	h.mu.Lock()
+	h.screen = strings.Join([]string{"⣽  Working...", "▸ " + text + " (alt+m to send immediately)", realRule, ">", realRule, "Antigravity relay · working · Gemini 4 Neon (XHigh)"}, "\n")
+	h.mu.Unlock()
+	s.mu.Lock()
+	s.state, s.stateAt = "working", time.Now().Add(-time.Minute)
+	s.mu.Unlock()
+	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
+		t.Fatalf("send: %v; want the command typed (the words on screen stand in Antigravity's own queue)", err)
 	}
 }

@@ -654,11 +654,12 @@ func (s *Seat) Send(id, text, mode string) (string, error) {
 	if isAgentCommand(text) && (err == nil || errors.Is(err, errUnknownScreen) && mode == "interrupt") {
 		// A command typed behind words in the agent's input box is sent as
 		// the end of that message, and no command runs, though typed is
-		// delivered for a command. Words are there once the agent's own
-		// queue has given a message up (Claude's popAll), and an
-		// interrupt's Escape puts there what the queue holds.
+		// delivered for a command. Words are there while a message typed
+		// before it sits unsent (its Enter was lost, or the agent's own
+		// queue gave it back: Claude's popAll), and an interrupt's Escape
+		// puts there what the queue holds.
 		escape := mode == "interrupt" && (state == "working" || err != nil)
-		if why := s.boxWouldHold(escape); why != "" {
+		if why := s.boxWouldHold(escape, state == "working" || err != nil); why != "" {
 			label := s.agent.Label()
 			return "", fmt.Errorf("%s was not sent: %s; the command would be typed after it and sent as part of that message, not run. Send it once %s has read that message", strings.Fields(text)[0], fmt.Sprintf(why, label), label)
 		}
@@ -1218,20 +1219,72 @@ func (s *Seat) requeuedLeft() []Event {
 	return last
 }
 
+// boxWait is how long a command waits for a message typed before it to
+// show as read while that message's words are on the screen: a message
+// just entered is drawn in the agent's output a moment before its
+// transcript shows it. boxLook is the pause between its looks. Tests lower
+// them.
+var (
+	boxWait = 3 * time.Second
+	boxLook = 250 * time.Millisecond
+)
+
 // boxWouldHold says why the agent's input box would hold words when a
-// command is typed ("" when it would not; %s is the agent's label): a
-// message its own queue gave up sits there already (requeued), or, where
-// an Escape goes first, the queue holds one, as the transcript last said
-// (of a send, inQueue; of anything typed there, queueHolds), which the
-// Escape puts there.
-func (s *Seat) boxWouldHold(escape bool) string {
+// command is typed ("" when it would not; %s is the agent's label).
+//
+// Where an Escape goes first, the agent's queue holds a message, as the
+// transcript last said (of a send, inQueue; of anything typed there,
+// queueHolds): the Escape puts it there.
+//
+// Or a message sits there unsent: one the seat typed, or one the agent's
+// queue gave up, that no prompt has shown since, with its words on the
+// screen (unread). That is how the check of the screen reads a lost Enter
+// before it presses Enter again. A message just entered reads the same for
+// a moment, so the command waits up to boxWait for it to show as read.
+// A message the queue threw away has no words on the screen and holds
+// nothing up. Not read so: the screen of a working agent whose queue the
+// seat does not follow (working), where the words may stand in that queue
+// and a command typed now is an entry of its own.
+func (s *Seat) boxWouldHold(escape, working bool) string {
+	s.mu.Lock()
+	queued := escape && (s.queueHolds || len(s.inQueue) > 0)
+	s.mu.Unlock()
+	if queued {
+		return "%s's own queue holds a message, which the interrupt would put back into its input box"
+	}
+	if _, follows := s.agent.(queueHolder); working && !follows {
+		return ""
+	}
+	for end := time.Now().Add(boxWait); ; time.Sleep(boxLook) {
+		screen, err := s.host.Capture(s.target, 0)
+		if err != nil {
+			return ""
+		}
+		id := s.unread(screen)
+		if id == "" {
+			return ""
+		}
+		if !time.Now().Before(end) {
+			return "message " + id + ", typed before it, has not shown as read and its words are still on %s's screen: it sits in its input box"
+		}
+	}
+}
+
+// unread names a send whose words may sit unsent in the agent's input box:
+// typed there by the seat, or given up by the agent's queue, not shown by
+// any prompt since, and the start of its first line on the screen. Not a
+// send from before eagent restarted (its words on screen may be from long
+// ago), nor one held for the end of a turn (never typed).
+func (s *Seat) unread(screen string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if slices.ContainsFunc(s.pending, func(p *pending) bool { return p.requeued }) {
-		return "a message %s's own queue gave up sits in its input box"
-	}
-	if escape && (s.queueHolds || len(s.inQueue) > 0) {
-		return "%s's own queue holds a message, which the interrupt would put back into its input box"
+	for _, p := range s.pending {
+		if !p.timed() || p.restored || p.lost {
+			continue
+		}
+		if start := head(strings.TrimSpace(strings.SplitN(p.text, "\n", 2)[0]), 40); start != "" && strings.Contains(screen, start) {
+			return p.id
+		}
 	}
 	return ""
 }
