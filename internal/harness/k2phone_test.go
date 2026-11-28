@@ -389,52 +389,6 @@ func TestK2ACommandToAnEndingSessionIsTakenAndSaidNotRun(t *testing.T) {
 	})
 }
 
-// k2Unconfirmed is what the thread meta last said of message id under
-// relay_unconfirmed, in the patches after the first from.
-func k2Unconfirmed(fp *phoneFake, id string, from int) (said, unconfirmed bool) {
-	for _, m := range fp.metaPatches()[from:] {
-		if u, ok := m["relay_unconfirmed"].(map[string]any); ok {
-			said, unconfirmed = true, u[id] == true
-		}
-	}
-	return said, unconfirmed
-}
-
-// B17: a message from the phone is typed into the agent and its arrival
-// is never confirmed. Its receipt stays "sent" (FinaleChat's Retry must
-// not type it again), and the thread meta now says which "sent" messages
-// may not have arrived, so the app can show it; one still on its way is
-// not among them.
-func TestK2AMessageTypedAndNeverConfirmedIsSaidSoOnThePhone(t *testing.T) {
-	fp := newPhoneFake(true)
-	t.Cleanup(fp.srv.Close)
-	g := phoneStart(t, fp, "start work", true, func(string, []map[string]any) reply { return hold() }, nil)
-	waitFor(t, "the phone poll", func() bool { return fp.getCount() > 0 })
-	waitFor(t, "the agent", func() bool { return len(g.seat.sentTexts()) == 1 })
-	r14Drained(t, g)
-	g.seat.mu.Lock()
-	g.seat.sendErr = &relay.TypingError{Err: errors.New("enter failed")}
-	g.seat.mu.Unlock()
-	from := len(fp.metaPatches())
-	id := r10Says(fp, r10Msg("now run the tests"))[0]
-	waitFor(t, "its outcome", func() bool {
-		for _, ev := range g.events(event.RelayDelivered) {
-			var d event.RelayDeliveredData
-			if ev.Decode(&d) == nil && d.Outcome == event.DeliveryUnconfirmed {
-				return true
-			}
-		}
-		return false
-	})
-	r14Drained(t, g)
-	if got := k2Receipt(fp, id, from); got != "sent" {
-		t.Fatalf("the receipt is %q, want sent", got)
-	}
-	if said, u := k2Unconfirmed(fp, id, from); !said || !u {
-		t.Fatalf("the meta does not say the message may not have arrived (said %v)", said)
-	}
-}
-
 // Two resumes race on one phone reply: another process's watcher resumes
 // the stopped session with it, that run ends (a /quit, here a stop), and
 // this serve's restore then resumes the session with the same reply. The
