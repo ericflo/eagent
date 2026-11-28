@@ -67,6 +67,10 @@ type relaySeats struct {
 	// queues are the sends waiting to be typed into each seat, in the
 	// order they were accepted (enqueueSend).
 	queues map[relaySeat]*sendQueue
+	// carried are the user's sends that a switch's brief quoted whole, as
+	// messages with no outcome, while each was still being typed into the
+	// agent the switch replaced (briefOf, briefCarries).
+	carried map[string]bool
 	// stopping are the terminals relay_control stop is closing, by relay
 	// name, each closed when it is gone. Both share a terminal name, so a
 	// start under that name waits for it rather than racing the kill.
@@ -359,12 +363,6 @@ type relayLaunch struct {
 	// is closed once that send is settled: a send cut off by the old
 	// agent's stop then joins held before the new agent is launched.
 	oldIdle <-chan struct{}
-	// carried are the user's sends this start's brief quotes whole, as
-	// messages with no outcome (writeBrief): they are left to the brief.
-	// One still being typed into the old agent then (its typing outlasted
-	// the wait on oldIdle) is settled by nothing when that typing ends.
-	// Under relays.mu: that typing's end reads it.
-	carried map[string]bool
 	// oldDrained is closed once all the old seat saw is on the record
 	// (watchSeat), closed the loop's end. undrained: run went on without it.
 	oldDrained, closed <-chan struct{}
@@ -678,7 +676,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 		r.relays.mu.Lock()
 		gone, goneRel := q.gone, q.goneRel
 		q.typing, q.gone, q.goneRel = "", "", nil
-		carried := q.movedTo != nil && q.movedTo.carried[h.id]
+		carried := r.relays.carried[h.id]
 		r.relays.mu.Unlock()
 		switch {
 		case h.barrier:
@@ -703,7 +701,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	})
 	if !ran && untyped {
 		r.relays.mu.Lock()
-		if q.movedTo == nil || !q.movedTo.carried[h.id] {
+		if !r.relays.carried[h.id] {
 			q.items = append([]heldSend{h}, q.items...)
 		}
 		r.relays.mu.Unlock()
@@ -711,6 +709,17 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 	if h.done != nil {
 		h.done <- res
 	}
+}
+
+// briefCarries reports whether a switch's brief quoted the send whole, as
+// a message of the user's with no outcome, while it was still being typed
+// into the agent the switch replaced (its typing outlasted the wait on
+// oldIdle): it is left to the brief, as the user's other messages to that
+// agent are, and nothing records how that typing ended.
+func (r *Runtime) briefCarries(id string) bool {
+	r.relays.mu.Lock()
+	defer r.relays.mu.Unlock()
+	return r.relays.carried[id]
 }
 
 // hasOutcome reports whether the record says how a send ended.
@@ -1073,8 +1082,14 @@ func (r *Runtime) finishLaunch(job *relayLaunch) (_ string, err error) {
 		}
 		job.handover = ho
 		brief, carried := r.briefOf(ho, pending)
+		job.brief = brief
 		r.relays.mu.Lock()
-		job.brief, job.carried = brief, carried
+		if r.relays.carried == nil {
+			r.relays.carried = map[string]bool{}
+		}
+		for id := range carried {
+			r.relays.carried[id] = true
+		}
 		r.relays.mu.Unlock()
 	}
 	if rel := r.st.Relays[job.replaces]; job.endOld != "" && rel != nil && rel.Active() {
@@ -2371,6 +2386,13 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 			// or finish for one never typed), and that decides.
 			return fmt.Sprintf("The session ended before %s's send (%s) was confirmed; its outcome is recorded on its own.", rel.Who(), id), false
 		}
+		if r.briefCarries(id) {
+			// A switch went on without this typing, and its brief quotes
+			// the message whole for the agent that took over: how the
+			// typing into the old agent ended is not the message's outcome
+			// (settleSend), and the model is not told it did not go.
+			return fmt.Sprintf("%s was replaced while the message (%s) was being typed into it. The brief to the agent that took over quotes the message whole, so it is not to be sent again.", rel.Who(), id), false
+		}
 		if err != nil {
 			r.sync(func() {
 				// Under the relay the send is on the record for now: a
@@ -2817,21 +2839,21 @@ func (r *Runtime) briefOf(ho *handover, pending map[string]bool) (string, map[st
 		default:
 			continue
 		}
+		// Said to an agent whose work comes to this one: not to a later
+		// holder of a name, one that was stopped rather than handed over,
+		// or another agent altogether.
+		ours := names[d.Name]
+		if at := r.st.RelayAt(d.Name, ev.Seq); at != nil {
+			ours = inChain(handed, holder{d.Name, at.StartSeq}, targets)
+		}
 		if d.From != "user" || quoted[d.ID] || pending[d.ID] || d.Seq > 0 && quotedSeq[d.Seq] {
-			if i, ok := bySeq[d.Seq]; ok && d.From == "user" && d.Seq > 0 && !pending[d.ID] && !r.hasOutcome(d.ID) {
+			if i, ok := bySeq[d.Seq]; ok && ours && d.From == "user" && d.Seq > 0 && !pending[d.ID] && !r.hasOutcome(d.ID) {
 				texts[i].waits = true // sent again, and this send of it waits
 				carried[d.ID] = true
 			}
 			continue
 		}
-		if at := r.st.RelayAt(d.Name, ev.Seq); at == nil {
-			if !names[d.Name] {
-				continue
-			}
-		} else if !inChain(handed, holder{d.Name, at.StartSeq}, targets) {
-			// Said to an agent whose work did not come to this one: a
-			// later holder of a name, one that was stopped rather than
-			// handed over, or another agent altogether.
+		if !ours {
 			continue
 		}
 		quoted[d.ID] = true

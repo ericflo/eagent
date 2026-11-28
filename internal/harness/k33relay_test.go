@@ -196,3 +196,85 @@ func TestK33AMessageStillBeingTypedAtASwitchIsLeftToTheBrief(t *testing.T) {
 		})
 	}
 }
+
+// The same message, forwarded by the model itself: relay_forward waits on
+// the typing, and when the typing ended it recorded the failure as the
+// message's outcome on its own and told the model the message could not
+// be sent, beside a brief that had given it to the new agent whole. The
+// tool call says what happened and records nothing.
+func TestK33AForwardStillBeingTypedAtASwitchIsLeftToTheBrief(t *testing.T) {
+	saved := oldSendSettle
+	oldSendSettle = 50 * time.Millisecond
+	t.Cleanup(func() { oldSendSettle = saved })
+	for _, c := range []struct {
+		name string
+		ends error
+	}{
+		{"its terminal closed under it", relay.ErrClosed},
+		{"typed as the agent was stopped", nil},
+		{"typed part way", &relay.TypingError{Err: fmt.Errorf("the paste failed")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			seat := &k33StuckSeat{k2FeedSeat: newK2FeedSeat(t), entered: make(chan string, 1), release: make(chan error, 1)}
+			next := newFakeSeat("two")
+			g := useGatedLaunches(t, []relaySeat{seat, next}, nil)
+			rt := newLaunchRuntime(t)
+			var seq int64
+			rt.sync(func() {
+				seq = rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "fix the flaky test please"})).Seq
+			})
+			fwd := make(chan string, 1)
+			go func() {
+				text, isErr := forward(rt, map[string]any{"seq": seq})
+				fwd <- fmt.Sprintf("%v %s", isErr, text)
+			}()
+			select {
+			case <-seat.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the message was never being typed")
+			}
+			id := lastSendID(rt)
+			switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+			seat.waitGone(t)
+			seat.end()
+			g.release <- struct{}{}
+			recv(t, switched, "switch")
+			waitFor(t, "the brief typed", func() bool { return len(next.sentTexts()) > 0 })
+			if brief := next.sentTexts()[0]; !strings.Contains(brief, "- fix the flaky test please\n") {
+				t.Fatalf("the brief does not quote the message still being typed:\n%s", brief)
+			}
+			seat.release <- c.ends
+			out := recv(t, fwd, "relay_forward")
+			k1QueuesIdle(t, rt)
+			if got := deliveredFor(rt, id); len(got) != 0 || k2Outcome(rt, id) != state.SendWaiting {
+				t.Fatalf("the brief gave the new agent the message whole, and the record says of it %+v (%s); want it left to the brief, with no outcome", got, k2Outcome(rt, id))
+			}
+			if !strings.HasPrefix(out, "false ") || !strings.Contains(out, "quotes the message whole") || strings.Contains(out, "Could not send") {
+				t.Fatalf("the model was told %q; want it told the brief carries the message, and not that it could not be sent", out)
+			}
+		})
+	}
+}
+
+// A message sent to one agent and again to another that still runs: a
+// switch away from the first does not take the second send for its brief's
+// (it waits for the agent it was sent to), so when that send's typing fails
+// it is recorded as any failed typing is.
+func TestK33ASendToAnAgentOutsideTheSwitchIsNotTheBriefs(t *testing.T) {
+	useGatedLaunches(t, []relaySeat{newFakeSeat("one")}, nil)
+	rt := newLaunchRuntime(t)
+	rt.sync(func() {
+		seq := rt.append(event.New(event.UserMessage, event.ActorUser, event.UserMessageData{Text: "fix the flaky test please"})).Seq
+		rt.append(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "pi", Profile: "pi", Agent: "pi"}))
+		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "codex", ID: "r1", From: "user", Seq: seq, Mode: "queue", Text: "fix the flaky test please"}))
+		rt.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: true}))
+		rt.append(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "pi", ID: "r2", From: "user", Seq: seq, Mode: "queue", Text: "fix the flaky test please"}))
+		brief, carried := rt.briefOf(rt.handoverFor(rt.st.Relays["codex"]), nil)
+		if len(carried) != 0 {
+			t.Errorf("the brief from codex carries %v; want nothing: r1 was read, and r2 waits for pi, which this switch does not replace", carried)
+		}
+		if !strings.Contains(brief, "- fix the flaky test please\n") || strings.Contains(brief, "not yet shown as read") {
+			t.Errorf("the brief does not quote the message codex read as history:\n%s", brief)
+		}
+	})
+}
