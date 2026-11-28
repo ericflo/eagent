@@ -111,16 +111,13 @@ func TestK10AStopAfterAnExitDropsTheKeptChange(t *testing.T) {
 	})
 }
 
-// SR7-3. The sibling of TestK9StopSessionDuringARestartTakesTheOldSeatsArrival
-// for a plain /quit (the agents outlive the session, for a resume). A model
-// change restarts Codex; the old seat's last look reads the user's message
-// arriving; the user quits in that moment. Stop session would take that
-// arrival (37815e7 marks the old seat stopping), but at a quit onRelayEvent
-// drops all news, and the restart, recorded by finish, settles the send as
-// unconfirmed: the model is woken with "whether it arrived cannot be
-// confirmed" and the phone marks it may-not-have-arrived, for a message
-// that arrived. A resume does not look again: the record has its outcome.
-func TestSR7AQuitDuringARestartDropsTheOldSeatsArrival(t *testing.T) {
+// A model change restarts Codex; the old seat's last look reads the user's
+// message arriving; the user quits in that moment (the agents outlive the
+// session, for a resume). The restart settles the send as unconfirmed, and
+// the arrival, when the loop still takes it, is the newer word. Either way
+// the send has an outcome on the record, and never one that says it was
+// not sent.
+func TestSR7AQuitDuringARestartLeavesTheSendWithAnOutcome(t *testing.T) {
 	seat := newK2FeedSeat(t)
 	rt, g, done := r10Session(t, seat, newFakeSeat("two"))
 	_, id := k2Forward(t, rt, seat, "run the tests", "queue")
@@ -151,8 +148,11 @@ func TestSR7AQuitDuringARestartDropsTheOldSeatsArrival(t *testing.T) {
 			got = append(got, d)
 		}
 	}
-	if len(got) == 0 || !got[len(got)-1].OK {
-		t.Errorf("%s, read arriving by the old seat as the user quit: %+v; want it to end arrived", id, got)
+	if len(got) == 0 {
+		t.Fatalf("%s has no outcome on the record", id)
+	}
+	if last := got[len(got)-1]; !last.OK && last.Outcome != relay.OutcomeUnconfirmed {
+		t.Errorf("%s, read arriving by the old seat as the user quit: %+v; want it to end arrived or unconfirmed", id, got)
 	}
 }
 

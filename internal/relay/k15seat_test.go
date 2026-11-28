@@ -34,7 +34,7 @@ func workingCodex(t *testing.T) (*Seat, *fakeHost) {
 // A codex queue command that fails, by an exit code or by a signal of its
 // own, is followed by typing the message, as on main.
 func TestK15ACodexQueueThatFailsIsTyped(t *testing.T) {
-	for _, script := range []string{"echo no such thread >&2; exit 2", "kill -SEGV $$"} {
+	for _, script := range []string{"echo no such thread >&2; exit 2", "ulimit -c 0; kill -SEGV $$"} {
 		fakeCodex(t, script)
 		s, h := workingCodex(t)
 		if _, err := s.Send("r1", "then run the tests", "after_turn"); err != nil {
