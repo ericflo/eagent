@@ -414,3 +414,55 @@ func TestAPickAModelVariableKeepsOutLeavesNoWindowBehind(t *testing.T) {
 		}
 	}
 }
+
+// A read of this round's first fix for the summarizer found it writing a
+// route where none was asked for. Making the summarizer dedicated writes
+// no route of its own: what the change leaves either loads as it is, or
+// the change is refused and nothing is written.
+func TestMakingTheSummarizerDedicatedWritesNoRouteOfItsOwn(t *testing.T) {
+	dedicated := control.Edit{Op: "set", Key: "/summarizer/mode", Value: "dedicated"}
+	const effortAlone = `{"summarizer":{"model":{"reasoning_effort":"medium"}}}`
+	// The change also takes out the one field the file kept for the
+	// summarizer. What is left, a dedicated summarizer with no route,
+	// calls the main model and loads on its own: a connector allowed
+	// preferences only is not refused for an address it never asked to
+	// write.
+	for _, c := range []r17Case{
+		{name: "a connector allowed preferences only", file: effortAlone, classes: []string{"preference"}},
+		{name: "the same, the file saying inline", file: `{"summarizer":{"mode":"inline","model":{"reasoning_effort":"medium"}}}`, classes: []string{"preference"}},
+		{name: "a variable sets the summarizer's address", file: effortAlone, env: map[string]string{"EAGENT_SUMMARIZER_BASE_URL": "https://api.together.xyz/v1"}},
+	} {
+		t.Run("the field kept for it is taken out beside/"+c.name, func(t *testing.T) {
+			c.edits = []control.Edit{dedicated, {Op: "unset", Key: "/summarizer/model/reasoning_effort"}}
+			project, err := r17Apply(t, c)
+			raw, _ := os.ReadFile(config.File(project))
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if _, err := config.Load(project, ""); err != nil || !strings.Contains(string(raw), `"dedicated"`) || strings.Contains(string(raw), "base_url") {
+				t.Fatalf("the file loads: %v\n%s", err, raw)
+			}
+		})
+	}
+	// The file keeps part of a route for a summarizer that calls nothing:
+	// a model with no address, or an effort under a saved preset that
+	// gives the model. Made dedicated, that part would be the route. It is
+	// not filled in from the main model's (a Together model sent to OpenAI
+	// with OpenAI's key; the preset's model given the main model's reply
+	// ceiling): the change is refused, saying so.
+	for _, c := range []r17Case{
+		{name: "a model alone, the main model at OpenAI", file: `{"preset":"openai-high","summarizer":{"model":{"model":"zai-org/GLM-5.3-Flash"}}}`},
+		{name: "a model alone, the main model at DeepInfra", file: `{` + r17DeepInfra + `,"summarizer":{"model":{"model":"zai-org/GLM-5.3-Flash"}}}`},
+		{name: "an effort alone under EAGENT_CONFIG", file: effortAlone, bundle: r17Flash, env: map[string]string{"EAGENT_CONFIG": "mine"}},
+		{name: "an effort alone under the file's default preset", file: `{"default_config":"mine","summarizer":{"model":{"reasoning_effort":"medium"}}}`, bundle: r17Flash},
+	} {
+		t.Run("part of a route is kept/"+c.name, func(t *testing.T) {
+			c.edits = []control.Edit{dedicated}
+			project, err := r17Apply(t, c)
+			raw, _ := os.ReadFile(config.File(project))
+			if err == nil || !strings.Contains(err.Error(), "only part of a model of its own") || string(raw) != c.file {
+				t.Fatalf("got %v, and the file is:\n%s", err, raw)
+			}
+		})
+	}
+}

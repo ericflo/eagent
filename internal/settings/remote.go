@@ -851,20 +851,15 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	if inForce, err := CurrentLayers(s.Project, s.Preset, s.Bundle); err == nil {
 		layers = inForce
 	}
-	// The route the file writes for the summarizer is whole where the file
-	// needs it whole: where the file itself makes the summarizer dedicated
-	// (part of a route there loads only under a saved preset that gives
-	// the rest), and where nothing in force gives the summarizer a route
-	// (a model picked alone keeps the provider it is reached by). There a
-	// change that sets a field of a route the file does not have yet, or
-	// that makes a summarizer dedicated in a file with part of one, also
-	// writes what the route lacks, from the main model's: with no route
-	// written, a dedicated summarizer calls that one. Elsewhere a saved
-	// preset in force gives the route, the edit is of that one, and only
-	// the fields it names are written. The mode is the one this change
-	// leaves. A route written as null is none.
+	// A dedicated summarizer with no route written calls the main model's.
+	// An edit of its route starts from that one, so a model picked alone
+	// keeps the provider it is reached by. A route written as null is none.
+	// Where a saved preset in force gives the summarizer its route, the
+	// edit is of that one, and only the fields it names are written;
+	// unless the file itself makes the summarizer dedicated: a field alone
+	// there would not load without that preset. The mode is the one this
+	// change leaves.
 	mode, _ := pointerValue(values, "/summarizer/mode")
-	sets := false // a field of the summarizer's route
 	for _, e := range p.Edits {
 		if e.Key == "/summarizer/mode" {
 			mode = nil
@@ -872,13 +867,10 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 				mode = e.Value
 			}
 		}
-		sets = sets || e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
 	}
-	own, _ := pointerValue(values, "/summarizer/model")
-	has, _ := own.(map[string]any)
-	first := sets && len(has) == 0 && (mode == config.SummarizerDedicated || layers.Summarizer.Model == nil)
-	left := map[string]any{"summarizer": map[string]any{"mode": mode, "model": own}}
-	if picks && (first || needsPreset(left) && !needsPreset(values)) {
+	if v, written := pointerValue(values, "/summarizer/model"); picks && (!written || v == nil) && (layers.Summarizer.Model == nil || mode == config.SummarizerDedicated) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
+		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
+	}) {
 		// The route as the layers write it: a variable's value is not the
 		// file's to keep.
 		seed := layers.Model
@@ -886,21 +878,16 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 		var route map[string]any
 		b, _ := json.Marshal(seed)
 		_ = json.Unmarshal(b, &route)
-		// The rest of the route is written, so the proposal must be
-		// allowed every field of it: one it may not write (its grant does
-		// not cover where a model is reached, or its key variable) is not
+		// The whole route is written, so the proposal must be allowed
+		// every field of it: one it may not write (its grant does not
+		// cover where a model is reached, or its key variable) is not
 		// written for it, and its undo could not take it back.
 		for _, f := range before.Descriptor.Fields {
 			leaf, under := strings.CutPrefix(f.Key, "/summarizer/model/")
-			_, seeded := route[leaf]
-			if _, had := has[leaf]; !under || !seeded || had || f.Writable {
-				continue
+			if _, seeded := route[leaf]; under && seeded && !f.Writable {
+				err = &pickRefused{fmt.Sprintf("the project file gives the summarizer no model of its own yet, and giving it one there writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
+				return
 			}
-			err = &pickRefused{fmt.Sprintf("the project file gives the summarizer no whole model of its own yet, and giving it one there writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
-			return
-		}
-		for leaf, v := range has {
-			route[leaf] = v
 		}
 		setPointer(values, "/summarizer/model", route, false)
 	}
@@ -931,10 +918,11 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 			return
 		}
 	}
-	// No change leaves the file with part of a route for a summarizer it
-	// makes dedicated, where it had none or a whole one (one the proposal
-	// unsets a field of): that file loads only under a saved preset that
-	// gives the rest, and without it cannot be read here at all.
+	// No change leaves the file with part of a route for a summarizer that
+	// is dedicated, where it had no such part before (the mode set over a
+	// field kept for it, or a field unset from a whole route): that file
+	// loads only under a saved preset that gives the rest, and without it
+	// cannot be read here at all.
 	if was, _ := fileValues(res.File.Raw); picks && needsPreset(values) && !needsPreset(was) {
 		err = &pickRefused{"the project file would make the summarizer dedicated with only part of a model of its own, and would then load only with a saved preset that gives the rest; nothing was changed"}
 		return

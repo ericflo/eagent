@@ -349,7 +349,7 @@ func TestAnEffortThatWouldLeaveTheFileNeedingItsPresetIsRefused(t *testing.T) {
 	s := &Service{Project: project, Bundle: "mine"}
 	err := tryApply(t, s, control.Edit{Op: "set", Key: "/summarizer/model/reasoning_effort", Value: "low"})
 	raw, _ := os.ReadFile(config.File(project))
-	if err == nil || !strings.Contains(err.Error(), "the project file gives the summarizer no whole model of its own yet") || !strings.Contains(err.Error(), "bundle:mine") || string(raw) != before {
+	if err == nil || !strings.Contains(err.Error(), "the project file gives the summarizer no model of its own yet") || !strings.Contains(err.Error(), "bundle:mine") || string(raw) != before {
 		t.Errorf("got %v, and the file is:\n%s", err, raw)
 	}
 	if _, err := config.Load(project, ""); err != nil {
