@@ -14,7 +14,7 @@ eagent -c                                            # pick the latest session b
 
 - **Any agent.** Codex, Claude Code, Antigravity and pi are built in; add your own profile in the project config. The agent runs in a tmux terminal eagent owns (screen when tmux is missing) and keeps running when eagent restarts.
 - **Your words, unchanged.** A message reaches the agent the moment it arrives, before any model call. "Stop" and "wait" interrupt it first. Start a line with `@e` to talk to eagent itself; questions about the session ("how's it going?") stay with eagent too.
-- **Narration.** While the agent works, eagent says what it is doing every minute or two, from the agent's own transcript. When a turn ends you get the short version and the agent's report.
+- **Narration.** While the agent works, eagent says what it is doing every minute or two, from the agent's own transcript. When a turn ends you get the agent's report: on the phone, the short version with the report folded under it.
 - **Stuck terminals handled.** Trust prompts, update dialogs and menus are read off the screen and answered. A choice that is yours comes to you as a question.
 - **Autopilot.** "Keep it going until 10am" makes eagent send the agent on at every stop, in the spirit of your standing order, and decide its questions the way you would.
 - **Timers.** "At 9:00 tell it to deploy", "check back in half an hour".

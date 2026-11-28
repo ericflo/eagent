@@ -27,8 +27,12 @@ func hostedFile(project string) string {
 }
 
 type hostedList struct {
-	Sessions []string  `json:"sessions"`
-	At       time.Time `json:"at"`
+	Sessions []string `json:"sessions"`
+	// Mirror names those of them that a reply from the phone had started,
+	// which mirror whatever the configuration says (Server.Resume): they
+	// come back mirroring.
+	Mirror []string  `json:"mirror,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // rememberHosted lists the sessions this server hosts, before they stop.
@@ -42,12 +46,16 @@ func (s *Server) rememberHosted() {
 	s.stopping = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := make([]string, 0, len(s.running))
-	for id := range s.running {
-		ids = append(ids, id)
+	list := hostedList{At: time.Now().UTC()}
+	for id, h := range s.running {
+		list.Sessions = append(list.Sessions, id)
+		if h.mirror {
+			list.Mirror = append(list.Mirror, id)
+		}
 	}
-	sort.Strings(ids)
-	s.writeHosted(ids, time.Now().UTC())
+	sort.Strings(list.Sessions)
+	sort.Strings(list.Mirror)
+	s.writeHosted(list)
 }
 
 // forgetHosted takes a session the user stopped off the list, so the next
@@ -58,17 +66,19 @@ func (s *Server) forgetHosted(id string) {
 	if err != nil || json.Unmarshal(raw, &list) != nil || !slices.Contains(list.Sessions, id) {
 		return
 	}
-	s.writeHosted(slices.DeleteFunc(list.Sessions, func(x string) bool { return x == id }), list.At)
+	gone := func(x string) bool { return x == id }
+	list.Sessions, list.Mirror = slices.DeleteFunc(list.Sessions, gone), slices.DeleteFunc(list.Mirror, gone)
+	s.writeHosted(list)
 }
 
 // writeHosted writes the list of sessions to bring back.
-func (s *Server) writeHosted(ids []string, at time.Time) {
+func (s *Server) writeHosted(list hostedList) {
 	path := hostedFile(s.Project)
-	if len(ids) == 0 {
+	if len(list.Sessions) == 0 {
 		_ = os.Remove(path)
 		return
 	}
-	raw, _ := json.MarshalIndent(hostedList{Sessions: ids, At: at}, "", "  ")
+	raw, _ := json.MarshalIndent(list, "", "  ")
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(raw, '\n'), 0o644); err != nil {
 		s.logf("could not note the running sessions for the next start: %v", err)
@@ -80,8 +90,11 @@ func (s *Server) writeHosted(ids []string, at time.Time) {
 }
 
 // restoreSession resumes one session, with the reply that came while it was
-// down if there is one; tests substitute it.
-var restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error { return s.Resume(id, reply) }
+// down if there is one, mirroring for that reply or because it mirrored
+// so before (hostedList.Mirror); tests substitute it.
+var restoreSession = func(s *Server, id string, reply integration.PhoneMessage, mirror bool) error {
+	return s.resume(id, reply, mirror || reply.ID != "")
+}
 
 // pendingReply finds that reply; tests substitute it.
 var pendingReply = integration.PendingReply
@@ -126,7 +139,7 @@ func (s *Server) restoreHosted(ctx context.Context) {
 			s.logf("session %s: could not check its thread for a reply (%v); it comes back on your next message", id, err)
 			continue
 		}
-		if err := restoreSession(s, id, reply); err != nil {
+		if err := restoreSession(s, id, reply, slices.Contains(list.Mirror, id)); err != nil {
 			s.logf("session %s could not be brought back: %v", id, err)
 			continue
 		}

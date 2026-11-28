@@ -277,3 +277,56 @@ func TestSaveAsPresetSavesTheEmptyFieldsOfTheMainRouteEmpty(t *testing.T) {
 		t.Fatalf("the saved preset loads with effort %q, reply ceiling %d, window %d", m.ReasoningEffort, m.MaxTokens, m.ContextTokens)
 	}
 }
+
+// A saved preset in force gives the summarizer a route of its own and
+// names no effort for it; the project file gives it none. The summarizer's
+// effort is set from the app with the project's grant. The edit is of the
+// route the summarizer has: the effort alone is written, the summarizer
+// keeps its model, and the undo runs. (Under a preset eagent was started
+// on, it was refused in words that said the summarizer has no model of its
+// own; under the project's default preset, the main route was written into
+// the file for it.)
+func TestTheSummarizersEffortIsSavedUnderASavedPresetThatGivesItsRoute(t *testing.T) {
+	relay.OfflineCatalogs()
+	clearRouteEnv(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("TOGETHER_API_KEY", "x")
+	for _, c := range []struct{ name, before, bundle string }{
+		{"the preset eagent was started on", `{"tick_seconds":40}`, "mine"},
+		{"the project's default preset", `{"default_config":"mine"}`, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			project := t.TempDir()
+			writeProjectFile(t, project, c.before)
+			r16Bundle(t, project, "mine", `{"summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3-Flash","api_key_env":"TOGETHER_API_KEY"}}}`)
+			s := &Service{Project: project, Bundle: c.bundle}
+			g := s.Grant()
+			view, err := s.RemoteSnapshot(g)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inForce := RoutePairs(config.Resolve(project, s.Preset, s.Bundle).Effective)
+			cmd := control.Proposal{Operation: "settings.apply", SchemaVersion: SchemaVersion, ExpectedVersion: view.Snapshot.Version,
+				Edits: []control.Edit{{Op: "set", Key: "/summarizer/model/reasoning_effort", Value: "low"}}}
+			if _, _, err := s.Apply(context.Background(), cmd, g); err != nil {
+				t.Fatalf("the effort of a summarizer the saved preset gives a route: %v", err)
+			}
+			desired, _ := os.ReadFile(config.File(project))
+			cfg, err := config.Load(project, c.bundle)
+			if err != nil || cfg.Summarizer.Model == nil || cfg.Summarizer.Model.ReasoningEffort != "low" || cfg.Summarizer.Model.Model != "zai-org/GLM-5.3-Flash" || cfg.Summarizer.Model.BaseURL != "https://api.together.xyz/v1" {
+				t.Fatalf("after the save the summarizer is %+v (%v); the file:\n%s", cfg.Summarizer.Model, err, desired)
+			}
+			values, _ := fileValues(string(desired))
+			if v, has := pointerValue(values, "/summarizer/model/base_url"); has {
+				t.Errorf("an address was written into the file for it (%v):\n%s", v, desired)
+			}
+			_, raw, _, _, err := rv16Undo(t, s, g, cmd, c.before, string(desired), inForce)
+			if err != nil {
+				t.Fatalf("the undo: %v", err)
+			}
+			if values, _ := fileValues(raw); values["summarizer"] != nil {
+				t.Errorf("the undo leaves the file:\n%s", raw)
+			}
+		})
+	}
+}

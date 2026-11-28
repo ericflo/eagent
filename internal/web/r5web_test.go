@@ -98,7 +98,7 @@ func TestRestartBringsBackASessionWhoseThreadDoesNotExist(t *testing.T) {
 	var got []string
 	oldRestore, oldReply := restoreSession, pendingReply
 	t.Cleanup(func() { restoreSession, pendingReply = oldRestore, oldReply })
-	restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error {
+	restoreSession = func(s *Server, id string, reply integration.PhoneMessage, _ bool) error {
 		got = append(got, id+"|"+reply.Text)
 		return nil
 	}
@@ -123,7 +123,7 @@ func TestRestartLeavesASessionWhenA404IsNotFinaleChats(t *testing.T) {
 	var got []string
 	oldRestore, oldReply := restoreSession, pendingReply
 	t.Cleanup(func() { restoreSession, pendingReply = oldRestore, oldReply })
-	restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error {
+	restoreSession = func(s *Server, id string, reply integration.PhoneMessage, _ bool) error {
 		got = append(got, id)
 		return nil
 	}

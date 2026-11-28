@@ -40,7 +40,7 @@ func stubRestore(t *testing.T, replies map[string]string, unreadable map[string]
 	var mu sync.Mutex
 	var got []restored
 	oldRestore, oldReply := restoreSession, pendingReply
-	restoreSession = func(s *Server, id string, reply integration.PhoneMessage) error {
+	restoreSession = func(s *Server, id string, reply integration.PhoneMessage, _ bool) error {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, restored{id, reply.Text})

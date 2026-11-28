@@ -79,7 +79,7 @@ func k4Restores(t *testing.T) *[]string {
 	old := restoreSession
 	t.Cleanup(func() { restoreSession = old })
 	var replies []string
-	restoreSession = func(_ *Server, _ string, reply integration.PhoneMessage) error {
+	restoreSession = func(_ *Server, _ string, reply integration.PhoneMessage, _ bool) error {
 		replies = append(replies, reply.Text)
 		return nil
 	}

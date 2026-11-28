@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/finalechat"
@@ -416,7 +418,8 @@ func (r *Runtime) named(written, abs string) bool {
 	// The path counts when a text holds it whole, as the tool was given
 	// it or as it resolves, absolute or under ~, with nothing of a longer
 	// path on either side: so it may have a space in it, or stand in
-	// quotes, in a Markdown link or after a "=".
+	// quotes (a phone's curved ones too), in a Markdown link or after a
+	// "=".
 	whole := []string{written, abs}
 	if home, err := os.UserHomeDir(); err == nil {
 		homes := []string{home}
@@ -431,8 +434,13 @@ func (r *Runtime) named(written, abs string) bool {
 			}
 		}
 	}
-	pathByte := func(c byte) bool {
-		return c == '/' || c == '_' || c == '-' || c == '.' || c == '~' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+	// What a path goes on with: outside ASCII, anything that is not
+	// punctuation or a space.
+	pathRune := func(c rune) bool {
+		if c >= utf8.RuneSelf {
+			return !unicode.IsPunct(c) && !unicode.IsSpace(c)
+		}
+		return c == '/' || c == '_' || c == '-' || c == '.' || c == '~' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 	}
 	for _, text := range texts {
 		for _, w := range whole {
@@ -443,8 +451,11 @@ func (r *Runtime) named(written, abs string) bool {
 				}
 				i += from
 				end := i + len(w)
-				before := i == 0 || !pathByte(text[i-1])
-				after := end == len(text) || !pathByte(text[end]) || text[end] == '.' && (end+1 == len(text) || !pathByte(text[end+1]))
+				prev, _ := utf8.DecodeLastRuneInString(text[:i])
+				next, n := utf8.DecodeRuneInString(text[end:])
+				then, _ := utf8.DecodeRuneInString(text[end+n:])
+				before := i == 0 || !pathRune(prev)
+				after := end == len(text) || !pathRune(next) || next == '.' && (end+1 == len(text) || !pathRune(then))
 				if before && after {
 					return true
 				}
@@ -454,7 +465,9 @@ func (r *Runtime) named(written, abs string) bool {
 		// A word that is another way to write the same file (through a
 		// link, or with a ".." in it) names it too.
 		for _, word := range strings.Fields(text) {
-			word = strings.Trim(word, "\"'`()[]<>,;:!?")
+			word = strings.TrimFunc(word, func(c rune) bool {
+				return strings.ContainsRune("\"'`()[]<>,;:!?", c) || c >= utf8.RuneSelf && unicode.IsPunct(c)
+			})
 			if !strings.HasPrefix(word, "/") && !strings.HasPrefix(word, "~") {
 				continue
 			}

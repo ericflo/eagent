@@ -49,10 +49,11 @@ func TestAPictureNamedThroughASymlinkWithASpaceMayBeLookedAt(t *testing.T) {
 	}
 }
 
-// An agent or the user names a picture inside a Markdown link or image:
-// it is named all the same.
+// An agent or the user names a picture inside a Markdown link or image,
+// or in the curved quotes a phone's keyboard types: it is named all the
+// same.
 func TestAPictureNamedInAMarkdownLinkMayBeLookedAt(t *testing.T) {
-	for _, form := range []string{"![preview](%s)", "the shot is [here](%s).", "saved as out=%s"} {
+	for _, form := range []string{"![preview](%s)", "the shot is [here](%s).", "saved as out=%s", "the shot is \u201c%s\u201d, I think", "see \u2018%s\u2019"} {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "preview.png")
 		if err := os.WriteFile(path, tinyPNG, 0o644); err != nil {

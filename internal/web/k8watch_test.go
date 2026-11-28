@@ -41,10 +41,13 @@ func TestSR9WebADownServePhoneKeepsTheRestoreFromBringingSessionsBack(t *testing
 	info := sr9Session(t, project, srvA.URL)
 	first := New(project, nil)
 	first.Bundle = "work"
-	first.writeHosted([]string{info.ID}, time.Now().UTC())
+	first.writeHosted(hostedList{Sessions: []string{info.ID}, At: time.Now().UTC()})
 	var back []string
 	old := restoreSession
-	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage) error { back = append(back, id); return nil }
+	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage, _ bool) error {
+		back = append(back, id)
+		return nil
+	}
 	t.Cleanup(func() { restoreSession = old })
 	var logged []string
 	next := New(project, func(f string, args ...any) { logged = append(logged, fmt.Sprintf(f, args...)) })

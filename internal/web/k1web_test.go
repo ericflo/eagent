@@ -159,7 +159,7 @@ func TestK1WordsForARunHereThatThenStopsAreTaken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.run(rt, ui.webUI)
+	s.run(rt, ui.webUI, false)
 	<-ui.looked // its first look at the inbox is behind it
 	s.mu.Lock()
 	h := s.running[info.ID]

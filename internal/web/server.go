@@ -69,6 +69,9 @@ type hosted struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	code   int
+	// mirror: the run was started for a reply from the phone, and mirrors
+	// whatever the configuration says of mirroring (Resume).
+	mirror bool
 }
 
 // New builds a server for a project directory.
@@ -172,10 +175,15 @@ func (s *Server) Hosted(id string) bool { return s.isHosted(id) }
 //
 // A run started for a reply mirrors to the phone, whatever this server's
 // configuration says of mirroring: the thread the reply came from is where
-// its refused files are told and where the user's next words are read. (A
-// restore after a restart with no reply waiting comes here with an empty
-// msg, and runs on the configuration as it is.)
+// its refused files are told and where the user's next words are read. It
+// comes back so after a restart of the server too (restoreHosted); any
+// other session a restart brings back with no reply waiting runs on the
+// configuration as it is.
 func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
+	return s.resume(sessionID, msg, msg.ID != "")
+}
+
+func (s *Server) resume(sessionID string, msg integration.PhoneMessage, mirror bool) error {
 	info, err := store.Resolve(store.Root(s.Project), sessionID)
 	if err != nil {
 		return err
@@ -188,7 +196,7 @@ func (s *Server) Resume(sessionID string, msg integration.PhoneMessage) error {
 	if s.isHosted(info.ID) || alive(info.Path) {
 		return ErrRunning
 	}
-	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", msg.ID != "")
+	return s.host(info.Path, s.phoneResumeOptions(msg), "", "", mirror)
 }
 
 // ErrRunning is Resume's answer for a session that is already running, here
@@ -862,7 +870,7 @@ func (s *Server) hostNewCfg(opts harness.Options, cfg config.Config) (string, er
 	if err != nil {
 		return "", err
 	}
-	s.run(rt, ui)
+	s.run(rt, ui, false)
 	return rt.SessionID(), nil
 }
 
@@ -912,13 +920,13 @@ func (s *Server) host(path string, opts harness.Options, bundle, preset string, 
 	if err != nil {
 		return err
 	}
-	s.run(rt, ui)
+	s.run(rt, ui, mirror)
 	return nil
 }
 
-func (s *Server) run(rt *harness.Runtime, ui *webUI) {
+func (s *Server) run(rt *harness.Runtime, ui *webUI, mirror bool) {
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &hosted{rt: rt, ui: ui, cancel: cancel, done: make(chan struct{})}
+	h := &hosted{rt: rt, ui: ui, cancel: cancel, done: make(chan struct{}), mirror: mirror}
 	s.mu.Lock()
 	s.running[rt.SessionID()] = h
 	s.mu.Unlock()

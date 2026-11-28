@@ -113,7 +113,7 @@ func TestK13AServeThatCannotListenLeavesTheListAlone(t *testing.T) {
 	s, project := newTestServer(t)
 	sess := newSession(t, project)
 	_ = sess.Close()
-	s.writeHosted([]string{sess.ID}, time.Now().UTC())
+	s.writeHosted(hostedList{Sessions: []string{sess.ID}, At: time.Now().UTC()})
 	got := stubRestore(t, nil, nil)
 	taken, err := net.Listen("tcp", "127.0.0.1:0") // another program has the port
 	if err != nil {

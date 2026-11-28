@@ -540,7 +540,7 @@ func (r *Runtime) settleSend(q *sendQueue, h heldSend, res sendResult, untyped b
 // wrong with such a send afterwards is not the message's outcome: the
 // brief is its way to the new agent, and a failure recorded for it would
 // have it sent a second time. Once the brief is known not to have gone,
-// the send is like any other. Loop goroutine.
+// the send is like any other (briefDidNotGo). Loop goroutine.
 func (r *Runtime) leftToBrief(id string) string {
 	r.relays.mu.Lock()
 	brief := r.relays.carried[id]
@@ -549,6 +549,35 @@ func (r *Runtime) leftToBrief(id string) string {
 		return ""
 	}
 	return brief
+}
+
+// briefDidNotGo is called when typing a send has failed. If the send is a
+// switch's brief and nothing of it was typed, the messages of the user's
+// it quoted did not go to the agent that took over either, and nothing
+// else will say so (the agent they were typed into was replaced, and a
+// failure its terminal reported meanwhile was not recorded): each is
+// recorded not sent, so eagent is told to pass it on. (Not when the new
+// agent's own terminal says a brief it was typed did not go: that word can
+// still change, and the brief's failure is told as it is.) Loop goroutine.
+func (r *Runtime) briefDidNotGo(brief string) {
+	if r.st.SendOutcome(brief) != state.SendNotSent {
+		return
+	}
+	r.relays.mu.Lock()
+	var quoted []string
+	for id, b := range r.relays.carried {
+		if b == brief {
+			quoted = append(quoted, id)
+		}
+	}
+	r.relays.mu.Unlock()
+	slices.Sort(quoted)
+	for _, id := range quoted {
+		if !r.hasOutcome(id) {
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, ""), ID: id, OK: false, Outcome: event.DeliveryNotSent,
+				Detail: "the agent it was typed into was replaced, and the brief that quoted it for the agent that took over did not go in"}))
+		}
+	}
 }
 
 // hasOutcome reports whether the record says how a send ended.
@@ -582,6 +611,7 @@ func (r *Runtime) typingFailed(name, id string, err error) {
 		return
 	}
 	r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: id, OK: false, Outcome: sendErrOutcome(err), Detail: clipRunes(err.Error(), 2000)}))
+	r.briefDidNotGo(id)
 }
 
 // prepareLaunch settles what a start launches. Loop goroutine (or before

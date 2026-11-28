@@ -140,7 +140,7 @@ func k2Hosted(t *testing.T, s *Server, cfg config.Config, project string, info s
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.run(rt, ui.webUI)
+	s.run(rt, ui.webUI, false)
 	<-ui.looked
 	s.mu.Lock()
 	h := s.running[info.ID]

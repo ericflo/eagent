@@ -52,6 +52,56 @@ func TestAReplacedAgentsFailureOnAMessageItsBriefCarriesIsNotRecorded(t *testing
 	}
 }
 
+// The brief that quotes the user's message is still being typed into
+// Claude when Codex's terminal says the message did not go (or says
+// nothing more), and the brief then cannot be typed. Neither agent has the
+// message: the record says it did not go, and eagent is told to pass it
+// on, not that it waits to be taken up.
+func TestAMessageWhoseBriefDidNotGoIsNotLeftWaiting(t *testing.T) {
+	for _, said := range []string{"the old terminal says it did not go", "the old terminal says nothing"} {
+		t.Run(said, func(t *testing.T) {
+			seat := newK2FeedSeat(t)
+			inner := &k2FeedSeat{fakeSeat: newFakeSeat("two"), feed: make(chan relay.Event), gone: make(chan struct{})}
+			t.Cleanup(inner.end)
+			next := &k33StuckSeat{k2FeedSeat: inner, entered: make(chan string, 1), release: make(chan error, 1)}
+			g := useGatedLaunches(t, []relaySeat{seat, next}, nil)
+			rt := newLaunchRuntime(t)
+			_, id := k2Forward(t, rt, seat, "then run the linter", "queue")
+			g.release <- struct{}{}
+			switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+			seat.waitGone(t)
+			waitRelayStarts(t, rt)
+			select {
+			case brief := <-next.entered:
+				if !strings.Contains(brief, "- then run the linter\n") {
+					t.Fatalf("setup: the brief does not quote the message:\n%s", brief)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the brief was never being typed")
+			}
+			if said == "the old terminal says it did not go" {
+				seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: false, Outcome: relay.OutcomeNotSent, Detail: "the turn ended before it took this message"})
+			}
+			seat.end()
+			rt.sync(func() {})
+			if got := deliveredFor(rt, id); len(got) != 0 {
+				t.Fatalf("while the brief is on its way the record says of the message %+v", got)
+			}
+			next.release <- errors.New("the terminal took nothing")
+			recv(t, switched, "switch")
+			k1QueuesIdle(t, rt)
+			var user string
+			rt.sync(func() { user = rt.userTail("Claude") })
+			if o := k2Outcome(rt, id); o != state.SendNotSent {
+				t.Errorf("neither agent has the message, and the record says of it: %q", o)
+			}
+			if strings.Contains(user, "waits to be taken up") || !strings.Contains(user, "did not go") {
+				t.Errorf("eagent is told: %q", user)
+			}
+		})
+	}
+}
+
 // r16RefusingSeat is an agent whose terminal takes nothing.
 type r16RefusingSeat struct{ *fakeSeat }
 
