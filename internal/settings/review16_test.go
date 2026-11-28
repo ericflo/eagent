@@ -330,3 +330,29 @@ func TestTheSummarizersEffortIsSavedUnderASavedPresetThatGivesItsRoute(t *testin
 		})
 	}
 }
+
+// The project file itself makes the summarizer dedicated and gives it no
+// route (it calls the main model's), and eagent runs on a saved preset
+// that gives it one. The effort written alone into the file would leave a
+// file that does not load without that preset, and the whole route beside
+// it writes fields the preset sets here: the change is refused, saying so,
+// and nothing is written.
+func TestAnEffortThatWouldLeaveTheFileNeedingItsPresetIsRefused(t *testing.T) {
+	relay.OfflineCatalogs()
+	clearRouteEnv(t)
+	t.Setenv("EAGENT_FINALECHAT", "")
+	t.Setenv("TOGETHER_API_KEY", "x")
+	const before = `{"summarizer":{"mode":"dedicated"}}`
+	project := t.TempDir()
+	writeProjectFile(t, project, before)
+	r16Bundle(t, project, "mine", `{"summarizer":{"mode":"dedicated","model":{"protocol":"openai-chat","base_url":"https://api.together.xyz/v1","model":"zai-org/GLM-5.3-Flash","api_key_env":"TOGETHER_API_KEY"}}}`)
+	s := &Service{Project: project, Bundle: "mine"}
+	err := tryApply(t, s, control.Edit{Op: "set", Key: "/summarizer/model/reasoning_effort", Value: "low"})
+	raw, _ := os.ReadFile(config.File(project))
+	if err == nil || !strings.Contains(err.Error(), "the project file gives the summarizer no model of its own yet") || !strings.Contains(err.Error(), "bundle:mine") || string(raw) != before {
+		t.Errorf("got %v, and the file is:\n%s", err, raw)
+	}
+	if _, err := config.Load(project, ""); err != nil {
+		t.Errorf("the file no longer loads without the preset: %v", err)
+	}
+}

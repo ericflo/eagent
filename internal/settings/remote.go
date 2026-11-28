@@ -855,8 +855,11 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 	// An edit of its route starts from that one, so a model picked alone
 	// keeps the provider it is reached by. A route written as null is none.
 	// Where a saved preset in force gives the summarizer its route, the
-	// edit is of that one, and only the fields it names are written.
-	if v, written := pointerValue(values, "/summarizer/model"); picks && (!written || v == nil) && layers.Summarizer.Model == nil && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
+	// edit is of that one, and only the fields it names are written;
+	// unless the file itself makes the summarizer dedicated: a field alone
+	// there would not load without that preset.
+	mode, _ := pointerValue(values, "/summarizer/mode")
+	if v, written := pointerValue(values, "/summarizer/model"); picks && (!written || v == nil) && (layers.Summarizer.Model == nil || mode == config.SummarizerDedicated) && slices.ContainsFunc(p.Edits, func(e control.Edit) bool {
 		return e.Op == "set" && strings.HasPrefix(e.Key, "/summarizer/model/")
 	}) {
 		// The route as the layers write it: a variable's value is not the
@@ -873,7 +876,7 @@ func (s *Service) prepare(p control.Proposal, grant control.Grant, undo bool, in
 		for _, f := range before.Descriptor.Fields {
 			leaf, under := strings.CutPrefix(f.Key, "/summarizer/model/")
 			if _, seeded := route[leaf]; under && seeded && !f.Writable {
-				err = &pickRefused{fmt.Sprintf("the settings saved here give the summarizer no model of its own yet, and giving it one writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
+				err = &pickRefused{fmt.Sprintf("the project file gives the summarizer no model of its own yet, and giving it one there writes %s, which this change may not write (%s); nothing was changed", f.Key, f.LockedReason)}
 				return
 			}
 		}

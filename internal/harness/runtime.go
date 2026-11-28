@@ -1281,14 +1281,24 @@ queued:
 			untyped[h.id] = true
 		}
 	}
+	// A switch's brief among them never took the user's messages it
+	// quoted to the agent that took over (briefDidNotGo).
+	quoted := map[string]bool{}
+	for id, brief := range r.relays.carried {
+		quoted[id] = untyped[brief]
+	}
 	r.relays.mu.Unlock()
 	for _, ev := range r.st.Events {
 		var d event.RelaySendData
-		if ev.Type != event.RelaySend || ev.Decode(&d) != nil || !untyped[d.ID] || r.hasOutcome(d.ID) {
+		if ev.Type != event.RelaySend || ev.Decode(&d) != nil || !untyped[d.ID] && !quoted[d.ID] || r.hasOutcome(d.ID) {
 			continue
 		}
 		name := sendHolder(r.st, d.ID, d.Name)
-		gone := event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: "the session is ending"})
+		detail := "the session is ending"
+		if quoted[d.ID] {
+			detail = briefLost
+		}
+		gone := event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: name, ID: d.ID, OK: false, Outcome: event.DeliveryNotSent, Detail: detail})
 		if rel := r.st.Relays[name]; rel != nil {
 			// At the relay's last news, not now: a reattach takes what its
 			// transcript shows after that as new, and what the agent did

@@ -274,3 +274,27 @@ func TestALateArrivalDoesNotMakeAStoppedAgentsMessageTheFreshAgents(t *testing.T
 		})
 	}
 }
+
+// The same, as the session ends: the brief is still waiting to be typed
+// into Claude when the user quits, so it was never typed. The record a
+// resume reads says of the brief, and of the user's message it quoted,
+// that they did not go, before the session's end.
+func TestAMessageWhoseBriefWasNeverTypedAsTheSessionEndedIsNotLeftWaiting(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	next := &r12dWaitingSeat{fakeSeat: newFakeSeat("two"), entered: make(chan string, 4), closed: make(chan struct{})}
+	rt, g, done := r10Session(t, seat, next)
+	_, id := k2Forward(t, rt, seat, "then run the linter", "queue")
+	g.release <- struct{}{}
+	relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	seat.waitGone(t)
+	var brief string
+	select {
+	case brief = <-next.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the brief was never begun")
+	}
+	seat.end()
+	evs := r10Quit(t, rt, g, 0, done)
+	r10NotSentBeforeEnd(t, evs, brief)
+	r10NotSentBeforeEnd(t, evs, id)
+}

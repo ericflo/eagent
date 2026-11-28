@@ -558,7 +558,8 @@ func (r *Runtime) leftToBrief(id string) string {
 // failure its terminal reported meanwhile was not recorded): each is
 // recorded not sent, so eagent is told to pass it on. (Not when the new
 // agent's own terminal says a brief it was typed did not go: that word can
-// still change, and the brief's failure is told as it is.) Loop goroutine.
+// still change, and the brief's failure is told as it is.) finish does the
+// same for a brief still untyped as the session ends. Loop goroutine.
 func (r *Runtime) briefDidNotGo(brief string) {
 	if r.st.SendOutcome(brief) != state.SendNotSent {
 		return
@@ -574,11 +575,14 @@ func (r *Runtime) briefDidNotGo(brief string) {
 	slices.Sort(quoted)
 	for _, id := range quoted {
 		if !r.hasOutcome(id) {
-			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, ""), ID: id, OK: false, Outcome: event.DeliveryNotSent,
-				Detail: "the agent it was typed into was replaced, and the brief that quoted it for the agent that took over did not go in"}))
+			r.append(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: sendHolder(r.st, id, ""), ID: id, OK: false, Outcome: event.DeliveryNotSent, Detail: briefLost}))
 		}
 	}
 }
+
+// briefLost is what the record says of a message of the user's that a
+// brief which did not go had quoted.
+const briefLost = "the agent it was typed into was replaced, and the brief that quoted it for the agent that took over did not go in"
 
 // hasOutcome reports whether the record says how a send ended.
 func (r *Runtime) hasOutcome(id string) bool {
