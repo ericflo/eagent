@@ -66,7 +66,7 @@ func TestANotSentAfterTheRestartSettledItEndsNotSent(t *testing.T) {
 // hands over the arrival it had read, and the record ends "arrived". The
 // model, which was told the older word, is told the newer one too: its
 // conversation and its wake say the message did arrive in the agent it
-// was typed into, and to check the one running now before sending again.
+// was typed into, and to check an agent running now before sending again.
 func TestALateArrivalAfterARestartIsToldToTheModel(t *testing.T) {
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
@@ -149,7 +149,7 @@ func TestALateArrivalInTheAgentASwitchStoppedIsNotCalledDone(t *testing.T) {
 			t.Errorf("Claude never got %q, yet eagent's model is told it is done with: %q", "run the tests", tail)
 		}
 	}
-	if !strings.Contains(tail, "whether the one running now is acting on it") || !strings.Contains(view, "("+id+") did arrive in the agent it was typed into") {
+	if !strings.Contains(tail, "whether an agent running now is acting on it") || !strings.Contains(view, "("+id+") did arrive in the agent it was typed into") {
 		t.Errorf("the model is not told where %s arrived and what to check: wake %q", id, tail)
 	}
 }
