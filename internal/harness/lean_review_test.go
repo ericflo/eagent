@@ -65,8 +65,8 @@ func TestANotSentAfterTheRestartSettledItEndsNotSent(t *testing.T) {
 // restart settles the send as unconfirmed; the old seat's watcher then
 // hands over the arrival it had read, and the record ends "arrived". The
 // model, which was told the older word, is told the newer one too: its
-// conversation says the message arrived after all, and the wake for the
-// unconfirmed send no longer tells it to send again.
+// conversation and its wake say the message did arrive in the agent it
+// was typed into, and to check the one running now before sending again.
 func TestALateArrivalAfterARestartIsToldToTheModel(t *testing.T) {
 	seat := newK2FeedSeat(t)
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
@@ -99,11 +99,58 @@ func TestALateArrivalAfterARestartIsToldToTheModel(t *testing.T) {
 		b, _ := json.Marshal(rt.st.View(nil))
 		view = string(b)
 	})
-	if strings.Contains(tail, "send it again") || !strings.Contains(tail, "arrived after all") {
+	if strings.Contains(tail, "could not be confirmed. Look") || !strings.Contains(tail, "did arrive in the agent it was typed into") {
 		t.Errorf("the record says %s arrived, but eagent's wake says: %q", id, tail)
 	}
-	if !strings.Contains(view, "("+id+") arrived after all") {
-		t.Errorf("the conversation does not say that %s arrived after all", id)
+	if !strings.Contains(view, "("+id+") did arrive in the agent it was typed into") {
+		t.Errorf("the conversation does not say that %s did arrive", id)
+	}
+}
+
+// The same after a switch: eagent's own message arrived in the Codex the
+// switch stopped, and Claude, which has the work now, never got it (the
+// brief quotes only the user's messages). The model is told where the
+// message arrived and to check the agent running now; it is not told that
+// nothing needs doing.
+func TestALateArrivalInTheAgentASwitchStoppedIsNotCalledDone(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	two := newFakeSeat("two")
+	g := useGatedLaunches(t, []relaySeat{seat, two}, nil)
+	rt := newLaunchRuntime(t)
+	if out, isErr := rt.relayTool("relay_send", argStr(map[string]any{"text": "run the tests"}), argNum(nil), argList(nil), false); isErr {
+		t.Fatalf("relay_send: %s", out)
+	}
+	id := lastSendID(rt)
+	k1QueuesIdle(t, rt)
+	g.release <- struct{}{} // the new agent comes up at once
+	switched := relayToolAsync(rt, map[string]any{"action": "switch", "profile": "claude"})
+	seat.waitGone(t)
+	waitRelayStarts(t, rt)
+	recv(t, switched, "switch")
+	if o := k2Outcome(rt, id); o != state.SendUnconfirmed {
+		t.Fatalf("%s after the switch: %q; want unconfirmed (the setup)", id, o)
+	}
+	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: true})
+	seat.end()
+	waitFor(t, "the arrival recorded", func() bool { return k2Outcome(rt, id) == state.SendArrived })
+	var tail, view string
+	rt.sync(func() {
+		tail = rt.attentionTail("Codex")
+		b, _ := json.Marshal(rt.st.View(nil))
+		view = string(b)
+	})
+	for _, s := range two.sentTexts() {
+		if strings.Contains(s, "run the tests") {
+			t.Fatalf("setup: Claude was given the message: %q", s)
+		}
+	}
+	for _, said := range []string{tail, view} {
+		if strings.Contains(said, "Nothing needs doing") || strings.Contains(said, "need not be sent again") {
+			t.Errorf("Claude never got %q, yet eagent's model is told it is done with: %q", "run the tests", tail)
+		}
+	}
+	if !strings.Contains(tail, "whether the one running now is acting on it") || !strings.Contains(view, "("+id+") did arrive in the agent it was typed into") {
+		t.Errorf("the model is not told where %s arrived and what to check: wake %q", id, tail)
 	}
 }
 

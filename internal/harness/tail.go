@@ -486,8 +486,8 @@ func (r *Runtime) attentionTail(fallback string) string {
 				}
 			}
 			if ok && r.st.SendOutcome(d.ID) == state.SendArrived {
-				// Its terminal's later word: it arrived (the conversation
-				// says so too).
+				// Its terminal's later word: it arrived in the agent it was
+				// typed into (the conversation says so too).
 				late = who
 				continue
 			}
@@ -500,7 +500,7 @@ func (r *Runtime) attentionTail(fallback string) string {
 		}
 	}
 	if late != "" {
-		return "The message to " + late + " that was in doubt has arrived after all. Nothing needs doing about it."
+		return "The message to " + late + " that could not be confirmed did arrive in the agent it was typed into. If that agent was stopped, started again or replaced since, look at relay_screen to see whether the one running now is acting on it, and send it again only if it is not."
 	}
 	return fallback + " needs attention; see above."
 }

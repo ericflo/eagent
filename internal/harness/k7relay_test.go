@@ -71,7 +71,8 @@ func TestSR4StopSessionSettlesBeforeTheArrivalTheSeatAlreadyRead(t *testing.T) {
 // being typed the user picks another effort in the thread's settings. pi
 // is idle, so the seat types /new straight into its prompt as a command;
 // no turn follows. The change waits for the command and is applied once it
-// is recorded typed: it does not wait for a turn that will not come.
+// is recorded typed and the grace after it is over (zero in tests): it
+// does not wait for a turn that will not come.
 func TestAChangeWaitingOnAnAfterTurnCommandTypedIntoAnIdleAgentIsApplied(t *testing.T) {
 	seat := &sr4CommandSeat{fakeSeat: newFakeSeat("…"), entered: make(chan string, 4), gate: make(chan struct{})}
 	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
@@ -106,8 +107,8 @@ func TestAChangeWaitingOnAnAfterTurnCommandTypedIntoAnIdleAgentIsApplied(t *test
 		rt.sync(func() { done = rt.st.SendOutcome(id) == state.SendArrived })
 		return done
 	})
-	// The command's delivered applies the change: a restart is under way
-	// once it is taken.
+	// The command's delivered ends the wait (the grace is zero here): a
+	// restart is under way once it is taken.
 	var launching, waiting bool
 	var st string
 	var awaited int

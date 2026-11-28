@@ -508,9 +508,11 @@ func (s *State) relayNotice(ev event.Event, opts ViewOptions) string {
 		case SendArrived:
 			// Said only where the conversation holds an earlier word that
 			// it did not (a stop settled it before its terminal's last
-			// look was in).
+			// look was in). Where it arrived is all that is known: the
+			// agent it was typed into may be gone, or started again with
+			// the message's turn cut off.
 			if s.lateArrivals[ev.Seq] {
-				return fmt.Sprintf("[%s The message to %s (%s) arrived after all; it need not be sent again.]", ts, s.relayWho(d.Name, ev.Seq), d.ID)
+				return fmt.Sprintf("[%s The message to %s (%s) did arrive in the agent it was typed into, though an earlier word here said otherwise. If that agent was stopped, started again or replaced since, check whether the one running now is acting on it before sending it again.]", ts, s.relayWho(d.Name, ev.Seq), d.ID)
 			}
 		case SendNotSent:
 			// Only records that say so: what older ones rendered stays.
