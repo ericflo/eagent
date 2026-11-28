@@ -330,42 +330,6 @@ func (c k1Case) run(t *testing.T) {
 	}
 }
 
-// A16: Claude records a message typed while it works twice, as it queues
-// it (an enqueue line) and as the prompt it runs once it takes it off the
-// queue (the user line right after a dequeue). That is one arrival: with
-// two waiting sends of the same words, it confirms one, live or in the
-// history a reattached seat re-reads; and two queued messages run one
-// after the other confirm their own two sends and not a third.
-func TestK1ClaudesQueuedMessageConfirmsOneSend(t *testing.T) {
-	for _, c := range []k1Case{
-		{"one_queued_two_waiting",
-			[][2]string{{"r1", "continue"}, {"r2", "continue"}}, []string{k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", "")},
-			nil, claudeUser(time.Now(), "continue"), []string{"r1"}},
-		{"two_queued_run_one_by_one",
-			[][2]string{{"r1", "continue"}, {"r2", "continue"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "continue"), k1TurnEnd(), k1Queue("dequeue", ""), claudeUser(time.Now(), "continue"), k1TurnEnd(), k1Queue("dequeue", "")},
-			[][2]string{{"r3", "continue"}}, claudeUser(time.Now(), "continue"), []string{"r1", "r2"}},
-		{"two_queued_run_joined",
-			[][2]string{{"r1", "continue"}, {"r2", "continue"}, {"r3", "check the logs"}}, []string{k1Queue("enqueue", "continue"), k1Queue("enqueue", "check the logs"), k1TurnEnd(), k1Queue("dequeue", ""), k1Queue("dequeue", "")},
-			nil, claudeUser(time.Now(), "continue\n\ncheck the logs"), []string{"r1", "r3"}},
-	} {
-		t.Run(c.name, c.run)
-	}
-	t.Run("history", func(t *testing.T) {
-		since := time.Now()
-		sent := since.Add(-time.Minute)
-		s := attachSeat(Spec{Restore: []Restored{{ID: "r1", Text: "continue", Mode: "queue", At: sent}, {ID: "r2", Text: "continue", Mode: "queue", At: sent}}}, claudeAgent{}, &fakeHost{alive: true}, "x", "", "", since)
-		at := sent.Add(time.Second)
-		history := []string{
-			fmt.Sprintf(`{"type":"queue-operation","operation":"enqueue","timestamp":"%s","content":"continue"}`, stamp(at)),
-			fmt.Sprintf(`{"type":"queue-operation","operation":"dequeue","timestamp":"%s"}`, stamp(at)),
-			claudeUser(at, "continue"),
-		}
-		if ok := claudeLines(s, history...); !slices.Equal(ok, []string{"r1"}) {
-			t.Fatalf("confirmed %v; want r1 only", ok)
-		}
-	})
-}
-
 // What stays an arrival: a prompt typed again after its queued copy was
 // taken into the running turn (no dequeue before it), a prompt run off the
 // queue whose enqueue line showed other words (so the prompt is the first

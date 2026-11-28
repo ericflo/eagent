@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 )
@@ -25,18 +24,6 @@ type obs struct {
 	// pos is where the line it was read from starts in the transcript
 	// (the watcher sets it).
 	pos int64
-	// again: a user line that records once more a message that arrived at
-	// an earlier line (Claude's prompt for a message it had queued). It
-	// confirms nothing.
-	again bool
-	// queue: on a user line, that it is the agent's own queue taking the
-	// message (Claude's enqueue): it has arrived, and no prompt has shown
-	// it yet. The number is the parser's for that message. The kinds
-	// "dequeued" and "unqueued" say that the message with the number has
-	// left the queue: read (a prompt showed it, the running turn took it,
-	// or how is not known), or unread (back into the input box, or thrown
-	// away).
-	queue int
 }
 
 // parser turns transcript lines into observations. It keeps whatever state
@@ -231,45 +218,12 @@ const (
 type claudeParser struct {
 	held   string // the latest assistant text; it is either progress or the turn's report
 	inTurn bool   // a turn is open: a prompt arrived and no turn_duration closed it yet
-	// queued are the words of the messages in the queue Claude keeps
-	// while it works, as its queue lines show them (at most 64); taken
-	// counts the dequeue lines whose messages no prompt has shown yet.
-	// Claude takes the most urgent first, so the prompt after a dequeue
-	// says which it took. A queue line whose effect is not known clears
-	// the list: nothing is marked until the queue is known again. The
-	// first old of queued were read as history (readAsHistory): they still
-	// mark a copy, and hold nothing (holding). Each has the number of its
-	// enqueue line (enqueued counts them). How one read as news leaves the
-	// list is noted in left, and said with the line being read (at at).
-	queued   []queuedMsg
-	old      int
-	taken    int
-	enqueued int
-	left     []obs
-	at       time.Time
 	// erred: an API error answer ended the last turn, and Claude has
 	// answered nothing since; a turn_duration now is that turn's.
 	erred bool
 }
 
-// queuedMsg is a message in Claude's queue: its words, and the number of
-// its enqueue line (obs.queue).
-type queuedMsg struct {
-	text string
-	n    int
-}
-
 func (p *claudeParser) line(raw []byte) []obs {
-	out := p.read(raw)
-	if len(p.left) > 0 {
-		// How queued messages left the queue, before what the line itself
-		// says (the prompt that showed one).
-		out, p.left = append(p.left, out...), nil
-	}
-	return out
-}
-
-func (p *claudeParser) read(raw []byte) []obs {
 	var ev struct {
 		Type        string          `json:"type"`
 		Subtype     string          `json:"subtype"`
@@ -278,7 +232,6 @@ func (p *claudeParser) read(raw []byte) []obs {
 		IsMeta      bool            `json:"isMeta"`
 		SessionID   string          `json:"sessionId"`
 		Operation   string          `json:"operation"`
-		Reason      string          `json:"reason"`
 		Content     json.RawMessage `json:"content"`
 		DurationMS  int64           `json:"durationMs"`
 		APIError    bool            `json:"isApiErrorMessage"`
@@ -291,45 +244,13 @@ func (p *claudeParser) read(raw []byte) []obs {
 		return nil
 	}
 	at := parseTime(ev.Timestamp)
-	p.at = at
 	switch ev.Type {
 	case "queue-operation":
-		var s string
-		_ = json.Unmarshal(ev.Content, &s)
-		switch op := ev.Operation; {
-		case op == "enqueue" && s != "":
-			p.enqueued++
-			if p.queued = append(p.queued, queuedMsg{s, p.enqueued}); len(p.queued) > 64 {
-				p.leave(0, 1, "dequeued")
+		if ev.Operation == "enqueue" {
+			var s string
+			if json.Unmarshal(ev.Content, &s) == nil && s != "" {
+				return []obs{{kind: "user", text: s, at: at}}
 			}
-			return []obs{{kind: "user", text: s, at: at, queue: p.enqueued}}
-		case op == "dequeue":
-			p.taken++
-		case s != "" && (op == "remove" || op == "popOne"):
-			// One taken off the queue. popOne: back into the input box,
-			// unread (a person pulls it up to edit). remove: into the
-			// running turn, or, when the line gives cleared_on_cancel as
-			// its reason, thrown away unread. Words that are none of the
-			// queue's: not known.
-			i := slices.IndexFunc(p.queued, func(q queuedMsg) bool { return normalize(q.text) == normalize(s) })
-			if i < 0 {
-				p.clearQueue()
-				return nil
-			}
-			how := "dequeued"
-			if op == "popOne" || ev.Reason == "cleared_on_cancel" {
-				how = "unqueued"
-			}
-			p.leave(i, 1, how)
-		case op == "popAll":
-			// All of them, back into the input box (Escape does it while
-			// messages are queued), unread. Claude writes a line for each;
-			// the first is taken for all.
-			p.leave(0, len(p.queued), "unqueued")
-			p.clearQueue()
-		default:
-			// Any other line's effect is not known.
-			p.clearQueue()
 		}
 		return nil
 	case "system":
@@ -358,9 +279,6 @@ func (p *claudeParser) read(raw []byte) []obs {
 			if isText && strings.HasPrefix(s, stopHookPrefix) {
 				return p.userText(s, at)
 			}
-			if isText && p.taken > 0 {
-				p.unqueue(s) // a queued message Claude ran as a meta line
-			}
 			return nil
 		}
 		if isText {
@@ -384,9 +302,6 @@ func (p *claudeParser) read(raw []byte) []obs {
 		}
 		return p.userText(strings.Join(texts, "\n"), at)
 	case "assistant":
-		if p.taken > 0 {
-			p.clearQueue() // what the dequeue took never showed
-		}
 		if ev.Message == nil {
 			return nil
 		}
@@ -456,60 +371,10 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 		p.held, p.inTurn = "", true
 		return append(out, obs{kind: "user", text: strings.TrimPrefix(s, stopHookPrefix), at: at}, obs{kind: "working", at: at})
 	case strings.HasPrefix(s, "<local-command") || strings.HasPrefix(s, "<command-name>") || strings.HasPrefix(s, "<bash-"):
-		// The TUI's own bookkeeping. After a dequeue it is what Claude
-		// took (one of its commands), not as its words were queued.
-		if p.taken > 0 {
-			p.clearQueue()
-		}
-		return nil
+		return nil // the TUI's own bookkeeping
 	}
 	p.held, p.inTurn = "", true
-	// After a dequeue the prompt is what Claude took off its queue: when
-	// its words are a queued message's (or several joined), they arrived
-	// at their enqueue lines, and this line records them again. Words that
-	// are none of them leave the queue unknown.
-	again := false
-	if p.taken > 0 {
-		if again = p.unqueue(s); !again {
-			p.clearQueue()
-		}
-	}
-	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
-}
-
-// clearQueue: what the queue holds is not known any more.
-func (p *claudeParser) clearQueue() {
-	p.leave(0, len(p.queued), "dequeued")
-	p.queued, p.old, p.taken = nil, 0, 0
-}
-
-// leave takes n queued messages from i off the list, and notes of each
-// that was read as news how it left (obs.queue): "dequeued", or "unqueued"
-// for one that left unread.
-func (p *claudeParser) leave(i, n int, how string) {
-	for k := max(i, p.old); k < i+n; k++ {
-		p.left = append(p.left, obs{kind: how, text: p.queued[k].text, at: p.at, queue: p.queued[k].n})
-	}
-	p.old -= min(p.old, i+n) - min(p.old, i)
-	p.queued = slices.Delete(p.queued, i, i+n)
-}
-
-// unqueue takes off the list the queued messages, no more than the dequeue
-// lines took, whose words joined are those of s, and says whether there
-// were such.
-func (p *claudeParser) unqueue(s string) bool {
-	got := normalize(s)
-	for i := range p.queued {
-		run := ""
-		for n := 1; n <= p.taken && i+n <= len(p.queued) && len(run) < len(got); n++ {
-			if run = strings.TrimSpace(run + " " + normalize(p.queued[i+n-1].text)); run == got {
-				p.leave(i, n, "dequeued")
-				p.taken -= n
-				return true
-			}
-		}
-	}
-	return false
+	return []obs{{kind: "user", text: s, at: at}, {kind: "working", at: at}}
 }
 
 func claudeTool(name string, in map[string]any, at time.Time) []obs {

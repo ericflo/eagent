@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-// claudeLoginScreen is a startup screen the seat knows no answer to: text
-// and an Enter typed into it would pick a login method.
-const claudeLoginScreen = " Select login method:\n\n ❯ 1. Claude account with subscription\n   2. Anthropic Console account\n"
-
 // stateEvents is the states a seat said, in order.
 func stateEvents(s *Seat) []string {
 	var said []string

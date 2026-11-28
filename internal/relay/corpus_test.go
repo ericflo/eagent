@@ -102,7 +102,6 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 		// queued message (queueAnalysis), the entry of its enqueue line;
 		// -1 otherwise.
 		first int
-		again bool // the parser's mark: no arrival under today's rule
 	}
 	type tally struct{ replayed, oldOK, newOK, twice, seconds, secondsHit int }
 	tallies := map[string]*tally{}
@@ -128,7 +127,7 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 			}
 			for _, o := range p.line(sc.Bytes()) {
 				if o.kind == "user" {
-					entries = append(entries, entry{o.text, o.at, first, o.again})
+					entries = append(entries, entry{o.text, o.at, first})
 				}
 			}
 		}
@@ -164,7 +163,7 @@ func TestCorpusArrivalsAgainstTheOldRule(t *testing.T) {
 							s.oldBy = ei
 						}
 					}
-				} else if !e.again {
+				} else {
 					views := make([]sendView, len(pending))
 					for i, s := range pending {
 						views[i].text = s.text
