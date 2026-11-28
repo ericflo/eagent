@@ -902,14 +902,16 @@ func (s *Seat) sweepSpool(detail string) {
 // the screen (after going quiet) is no turn end, and leaves the spool to
 // the hook.
 //
-// A held message tracked before that turn ended whose file is gone, or
-// still claimed (.taken) now, is lost from now: the hook claimed it and may
-// have died before handing it over. It is confirmed if the transcript shows
-// it, reported unconfirmed after the usual wait otherwise; a claimed file
-// left behind is removed. An agent with no spool (Codex, Antigravity) holds
-// an after-turn send in its own queue, which starts the next turn as soon
-// as one ends: one tracked before that turn ended is lost from now in the
-// same way (the agent dropped its queue).
+// A held message whose file is gone, or still claimed (.taken) now, is lost
+// from now: the hook claimed it and may have died before handing it over.
+// It is confirmed if the transcript shows it, reported unconfirmed after
+// the usual wait otherwise; a claimed file left behind is removed. An agent
+// with no spool (Codex, Antigravity) holds an after-turn send in its own
+// queue, which starts the next turn as soon as one ends: with the turn
+// over and no other begun, it is lost from now in the same way (the agent
+// dropped its queue). That holds whether the turn ended after the message
+// was handed over or just before (during the send's last look at the
+// screen): either way no turn is left for it to wait on.
 func (s *Seat) reportLeftOvers(now time.Time) { s.leftOvers(now, true) }
 
 // leftOvers is reportLeftOvers; with sweep false, for an agent whose own
@@ -949,7 +951,7 @@ func (s *Seat) leftOvers(now time.Time, sweep bool) {
 			continue
 		}
 		queued := s.spec.Spool == "" && p.mode == "after_turn"
-		if same && (p.held || queued) && !p.dormant && !p.lost && !p.handing && p.at.Before(end) && !holds(names, p.id) {
+		if same && (p.held || queued) && !p.dormant && !p.lost && !p.handing && !holds(names, p.id) {
 			p.lost, p.at = true, now
 			for _, n := range names {
 				if strings.HasSuffix(n, "-"+p.id+".txt.taken") {
@@ -1588,19 +1590,25 @@ func (s *Seat) closeEvents() {
 // readTail folds what the transcript gained since the last read, each
 // observation with where its line starts. When the tailer starts the file
 // again from the top (truncated or replaced), what it holds now is new: no
-// mark taken on what it held before applies to it (pending.after).
+// mark taken on what it held before applies to it (pending.after), nor
+// does the record's read mark (readFrom), which a file now shorter than
+// the mark was not read to either (replaced while eagent was down). Its
+// lines are then judged by time, as on main.
 func (s *Seat) readTail(tail *tailer, p parser, now time.Time) error {
 	start := tail.offset
 	lines, starts, err := tail.next()
+	s.mu.Lock()
 	if tail.offset < start {
-		s.mu.Lock()
 		for _, q := range s.pending {
 			if q.afterIn == tail.path {
 				q.afterIn = ""
 			}
 		}
-		s.mu.Unlock()
 	}
+	if tail.path == s.readIn && (tail.offset < start || err == nil && tail.size < s.readFrom) {
+		s.readFrom, s.readIn = 0, ""
+	}
+	s.mu.Unlock()
 	if err == nil && len(lines) > 0 {
 		s.mu.Lock()
 		s.lastLine = now

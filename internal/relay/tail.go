@@ -15,8 +15,10 @@ type tailer struct {
 	// skipPartial drops the bytes up to the first newline: the read started
 	// mid-file, inside a line.
 	skipPartial bool
-	// atEnd: the last call read up to the end the file had then.
+	// atEnd: the last call read up to the end the file had then; size is
+	// how long the file was then.
 	atEnd bool
+	size  int64
 }
 
 // tailChunk is the most one read takes. Tests shrink it.
@@ -34,6 +36,7 @@ func (t *tailer) next() ([][]byte, []int64, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	t.size = st.Size()
 	if st.Size() < t.offset {
 		// Truncated or replaced: start again from the top.
 		t.offset, t.rest = 0, nil
