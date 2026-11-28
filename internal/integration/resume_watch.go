@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -120,26 +119,6 @@ type keptReply struct {
 	Released bool `json:"released,omitempty"`
 	// (An "account" field, written for a while, is read and ignored: the
 	// watcher watches one account, the project file's.)
-}
-
-// AccountOf is the account a base URL names, for comparing two phone
-// services (a server's stop finding the account of a session's thread):
-// the scheme and host lower-cased, localhost as 127.0.0.1, the default
-// port filled in, no trailing slash. Two spellings of one service are one
-// account.
-func AccountOf(baseURL string) string {
-	u, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || u.Host == "" {
-		return strings.ToLower(strings.TrimRight(baseURL, "/"))
-	}
-	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
-	if host == "localhost" {
-		host = "127.0.0.1"
-	}
-	if port == "" {
-		port = map[string]string{"http": "80", "https": "443"}[scheme]
-	}
-	return scheme + "://" + net.JoinHostPort(host, port) + strings.TrimRight(u.EscapedPath(), "/")
 }
 
 // lockKept holds the kept file for one process's read and write of it: two

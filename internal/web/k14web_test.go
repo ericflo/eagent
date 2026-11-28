@@ -3,154 +3,17 @@ package web
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/event"
 	"github.com/ericflo/eagent/internal/harness"
 	"github.com/ericflo/eagent/internal/store"
 )
-
-// The user resumed a session from the page with a saved configuration
-// picked ("nophone", which turns the phone mirror off; the project's own
-// file has it on), so the run never mirrored. The server's shutdown begins
-// and the user presses Stop: stopAgentsOf tells the phone through
-// TellPhoneStopped, but with the server's own configuration
-// (sessionConfig), not the one the session ran on, so a thread the
-// session never had is written to (TestSR7WebAStopDuringTheShutdownOfAPhoneSessionTellsThePhoneNothing
-// is the other way). (Adapted when the server went back to one
-// configuration for every session: whether a stop tells a phone is read
-// from the record, and this session's never shows one, so nothing is
-// told.)
-func TestSR7WebAStopDuringTheShutdownTellsThePhoneByTheConfigurationTheSessionRan(t *testing.T) {
-	s, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	// The project's file: the phone on (the default).
-	cfg := r11Model(t)
-	cfg.Finalechat.Enabled = nil
-	if _, err := config.Write(project, cfg); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Shutdown(5 * time.Second) })
-	if c, err := s.loadConfig("", ""); err != nil || !c.Finalechat.Wanted() {
-		t.Fatalf("setup: the server's configuration does not want the phone: %v", err)
-	}
-	// A saved configuration "nophone" that turns it off.
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "nophone"), []byte(`{"finalechat":{"enabled":false}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if ran, err := s.loadConfig("nophone", ""); err != nil || ran.Finalechat.Wanted() {
-		t.Fatalf("setup: the picked configuration wants the phone: %v", err)
-	}
-	var told []config.Config
-	old := tellPhoneStopped
-	tellPhoneStopped = func(cfgs []config.Config, _ string, _ func(event.Event)) error {
-		told = append(told, cfgs[0])
-		return nil
-	}
-	t.Cleanup(func() { tellPhoneStopped = old })
-	info := r11Session(t, project)
-	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "nophone"}, nil); w.Code != http.StatusOK {
-		t.Fatalf("resume: %d %s", w.Code, w.Body)
-	}
-	s.mu.Lock()
-	h := s.running[info.ID]
-	s.mu.Unlock()
-	if h == nil {
-		t.Fatal("setup: the session is not hosted")
-	}
-	// The server's shutdown begins and ends the run; the user presses Stop.
-	s.resuming.Lock()
-	s.stopping = true
-	s.resuming.Unlock()
-	s.mu.Lock()
-	s.writeHosted([]string{info.ID}, time.Now().UTC())
-	s.mu.Unlock()
-	h.cancel()
-	<-h.done
-	if w := do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil); w.Code != http.StatusOK {
-		t.Fatalf("stop: %d %s", w.Code, w.Body)
-	}
-	if len(told) != 0 {
-		t.Fatalf("the session ran with the phone off (the page's pick, config nophone) and never mirrored; the stop told the phone %d time(s), so a thread the session never had is written to (header, closing note)", len(told))
-	}
-}
-
-// The other way: the project's file has the phone off and the user resumed
-// the session from the page with "phone" picked, so the run mirrored to
-// the phone. The shutdown ends the run (its closing note: "eagent was
-// interrupted. Resume the session to continue.") and the user presses
-// Stop, which the answer calls done; the phone is told nothing of it (no
-// "eagent stopped this session", no header or receipts), because the stop
-// went by the server's own configuration, which has the phone off.
-func TestSR7WebAStopDuringTheShutdownOfAPhoneSessionTellsThePhoneNothing(t *testing.T) {
-	s, project := newTestServer(t)
-	k1Model(t, s, project) // the project's file: the phone off
-	t.Setenv("EAGENT_FINALECHAT", "")
-	f := &sr6Phone{keys: map[string]bool{}}
-	srv := httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(srv.Close)
-	t.Setenv("FINALECHAT_TOKEN", "fc_test")
-	t.Setenv("FINALECHAT_URL", srv.URL)
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "phone"), []byte(`{"finalechat":{"enabled":true}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if ran, err := s.loadConfig("phone", ""); err != nil || !ran.Finalechat.Wanted() {
-		t.Fatalf("setup: the picked configuration does not want the phone: %v", err)
-	}
-	info := r11Session(t, project)
-	if w := do(s, "POST", "/api/sessions/"+info.ID+"/resume", map[string]any{"config": "phone"}, nil); w.Code != http.StatusOK {
-		t.Fatalf("resume: %d %s", w.Code, w.Body)
-	}
-	s.mu.Lock()
-	h := s.running[info.ID]
-	s.mu.Unlock()
-	if h == nil {
-		t.Fatal("setup: the session is not hosted")
-	}
-	s.resuming.Lock()
-	s.stopping = true
-	s.resuming.Unlock()
-	s.mu.Lock()
-	s.writeHosted([]string{info.ID}, time.Now().UTC())
-	s.mu.Unlock()
-	h.cancel()
-	<-h.done
-	reasons := func() []string {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		var out []string
-		for _, n := range f.notes {
-			meta, _ := n["meta"].(map[string]any)
-			r, _ := meta["reason"].(string)
-			out = append(out, r)
-		}
-		return out
-	}
-	if got := reasons(); len(got) != 1 || got[0] != "interrupted" {
-		t.Fatalf("setup: the run's closing notes: %q", got)
-	}
-	w := do(s, "POST", "/api/sessions/"+info.ID+"/stop", nil, nil)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Stopped") {
-		t.Fatalf("stop: %d %s", w.Code, w.Body)
-	}
-	if got := reasons(); !slices.Contains(got, "quit") {
-		t.Fatalf("the user pressed Stop and was answered %s, but the phone of the session, which mirrored to it, was told nothing: its last word is %q", strings.TrimSpace(w.Body.String()), got)
-	}
-}
 
 // sr7WatcherGone waits until no watchInbox goroutine is left, or the
 // session is hosted here; it reports whether it is hosted. (The server no

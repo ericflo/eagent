@@ -48,9 +48,6 @@ type Server struct {
 
 	mu      sync.Mutex
 	running map[string]*hosted
-	// stops are the stops the shutdown overtook, by session, under way or
-	// done (stopForShutdown). Under mu.
-	stops map[string]*stopAnswer
 	// resuming is held while a request from the browser decides between a
 	// session's inbox and resuming it (deliver), and while a reply from the
 	// phone decides whether to resume it (Resume).
@@ -648,12 +645,7 @@ func (s *Server) deliverTo(info store.Info, msg harness.InboxMessage, resume fun
 		s.resuming.Lock()
 	}
 	defer s.resuming.Unlock()
-	if running, stopped := s.lockState(info); running || stopped {
-		if stopped {
-			// Locked by a stop of this server's that the shutdown
-			// overtook, not by a run: nothing will read its inbox.
-			return "", "", errStopping
-		}
+	if alive(info.Path) || s.isHosted(info.ID) {
 		if s.isHosted(info.ID) {
 			return "inbox", "", harness.PostInbox(info.Path, msg)
 		}
@@ -732,15 +724,8 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err)
 		return
 	}
-	running, stopped := s.lockState(info)
-	if !running && !stopped {
+	if !alive(info.Path) && !s.isHosted(info.ID) {
 		writeErr(w, 409, errors.New("the session is not running; a message resumes it"))
-		return
-	}
-	if stopped {
-		// Locked by a stop of this server's that the shutdown overtook,
-		// not by a run: nothing will read its inbox.
-		writeErr(w, handCode(errEnding), errEnding)
 		return
 	}
 	if err := s.hand(info, harness.InboxMessage{Type: "dismiss", QuestionID: b.QuestionID, From: "web"}); err != nil {
@@ -750,7 +735,10 @@ func (s *Server) postDismiss(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"delivered": "inbox"})
 }
 
-var errEnding = errors.New("the session is stopping and takes nothing more")
+// errEnding: said of a run here that is ending, on its own or with this
+// server; a session the server's shutdown ends comes back with the next
+// server (restoreHosted), as it was.
+var errEnding = errors.New("the session is stopping and takes nothing more; if eagent is restarting, the session comes back with it: do this again then")
 
 // hand gives a dismissal or a stop to a session that is running: to a run
 // here on its own loop (Take), so it is taken before the answer, and not
@@ -783,163 +771,17 @@ func (s *Server) postStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, err)
 		return
 	}
-	running, stopped := s.lockState(info)
-	if !running && !stopped {
-		if s.stopForShutdown(w, info) {
-			return
-		}
-		// A stop for a session nobody runs would sit in the inbox and quit
-		// the next resume before its first tick.
+	if !alive(info.Path) && !s.isHosted(info.ID) {
+		// A stop left in the inbox of a session nobody runs is ignored by
+		// its next run.
 		writeErr(w, 409, errors.New("session is not running"))
 		return
 	}
-	// Locked by a stop of this server's that the shutdown overtook, not by a
-	// run: that stop's answer.
-	if stopped && s.answerStop(w, info.ID) {
-		return
-	}
 	if err := s.hand(info, harness.InboxMessage{Type: "stop", From: "web"}); err != nil {
-		if errors.Is(err, errEnding) && s.stopForShutdown(w, info) {
-			return
-		}
 		writeErr(w, handCode(err), err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
-}
-
-// stopForShutdown honours a stop the server's shutdown has overtaken: the
-// run here is ending with the server, or has ended and is on the list the
-// next server brings back. Once that run has let go of the session, the
-// agents its record shows running are stopped as a stop the run takes
-// stops them (stopAgents), the session comes off the list, and the answer
-// says what was stopped. It reports false, doing nothing, for any other
-// session, and before the shutdown has begun.
-// One stop at a time per session: a Stop pressed while another is under
-// way, or after it, gets that one's answer (answerStop).
-func (s *Server) stopForShutdown(w http.ResponseWriter, info store.Info) bool {
-	s.resuming.Lock()
-	stopping := s.stopping
-	s.resuming.Unlock()
-	if !stopping {
-		return false
-	}
-	s.mu.Lock()
-	h, a := s.running[info.ID], s.stops[info.ID]
-	if a == nil {
-		if h == nil && !s.listed(info.ID) {
-			s.mu.Unlock()
-			return false
-		}
-		// Made before the session's lock is taken, so a request that finds
-		// the session locked meanwhile finds this too.
-		a = &stopAnswer{done: make(chan struct{})}
-		if s.stops == nil {
-			s.stops = map[string]*stopAnswer{}
-		}
-		s.stops[info.ID] = a
-		s.mu.Unlock()
-		a.msg, a.err = s.stopAgentsOf(info, h)
-		close(a.done)
-	} else {
-		s.mu.Unlock()
-	}
-	<-a.done
-	a.write(w)
-	return true
-}
-
-// stopAnswer is the answer of a stop the shutdown overtook, once done is
-// closed.
-type stopAnswer struct {
-	done chan struct{}
-	msg  string
-	err  error
-}
-
-func (a *stopAnswer) write(w http.ResponseWriter) {
-	if a.err != nil {
-		writeErr(w, 500, a.err)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "message": a.msg})
-}
-
-// lockState looks at the session's lock: running says a run holds it (here
-// or in another process), stopped that a stop of this server's that the
-// shutdown overtook holds it, which reads no inbox. A stop that had
-// finished before the lock was looked at holds nothing: a lock seen after
-// it is a run's (another process resumed the session meanwhile), and what
-// is sent to the session goes to that run, as it does to any session
-// another process runs. One rule for a Stop, a dismissal and words.
-func (s *Server) lockState(info store.Info) (running, stopped bool) {
-	s.mu.Lock()
-	a := s.stops[info.ID]
-	s.mu.Unlock()
-	finished := false
-	if a != nil {
-		select {
-		case <-a.done:
-			finished = true
-		default:
-		}
-	}
-	if !alive(info.Path) && !s.isHosted(info.ID) {
-		return false, false
-	}
-	if finished {
-		return true, false
-	}
-	// (A stop made since the first look is found here: its answer is made
-	// before it takes the lock.)
-	s.mu.Lock()
-	stopped = s.stops[info.ID] != nil
-	s.mu.Unlock()
-	return !stopped, stopped
-}
-
-// answerStop answers a Stop with the answer of the stop the shutdown
-// overtook that is under way for the session, or done, if there is one.
-func (s *Server) answerStop(w http.ResponseWriter, id string) bool {
-	s.mu.Lock()
-	a := s.stops[id]
-	s.mu.Unlock()
-	if a == nil {
-		return false
-	}
-	<-a.done
-	a.write(w)
-	return true
-}
-
-// stopAgentsOf stops a session the shutdown ends: it marks the stop on the
-// list first (the process may exit while its run finishes, and the next
-// server then finishes the stop instead of bringing the session back),
-// stops its agents once its run here (h, if any) has let go of it, from
-// the record as it then stands, and then takes it off the list.
-func (s *Server) stopAgentsOf(info store.Info, h *hosted) (string, error) {
-	s.mu.Lock()
-	s.markStop(info.ID)
-	s.mu.Unlock()
-	if h != nil {
-		<-h.done
-	}
-	stopped, failed, err := stopAgents(s.Project, info.Path, s.stopConfigs(info), s.logf)
-	if err != nil {
-		return "", fmt.Errorf("could not stop the session's agents: %w", err)
-	}
-	s.mu.Lock()
-	s.forgetHosted(info.ID)
-	s.mu.Unlock()
-	msg := "Stopped"
-	if len(stopped) > 0 {
-		msg += ", with " + strings.Join(stopped, " and ")
-	}
-	msg += ": eagent is shutting down, and will not bring this session back when it starts again."
-	if len(failed) > 0 {
-		msg += " Could not stop " + strings.Join(failed, "; ") + "."
-	}
-	return msg, nil
 }
 
 func (s *Server) postResume(w http.ResponseWriter, r *http.Request) {

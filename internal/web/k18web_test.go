@@ -3,12 +3,10 @@ package web
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -228,108 +226,6 @@ func sr9Session(t *testing.T, project, base string) store.Info {
 	return info
 }
 
-// The stop half of the review's TestSR9WebAPhoneReplyOnTheProjectsAccount-
-// IsAnsweredOnTheServesBundle: the project's file has the phone at a,
-// where the session (run from the terminal, on the project's own
-// configuration) has its thread; the serve runs the bundle "work", whose
-// phone is at b. The stop tells a.
-func TestSR9WebAStopOnTheProjectsAccountTellsIt(t *testing.T) {
-	const a, b = "https://phone-a.invalid", "https://phone-b.invalid"
-	s, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	t.Setenv("FINALECHAT_TOKEN", "fc_test")
-	t.Setenv("FINALECHAT_URL", "")
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"base_url": "`+a+`"}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "work"), []byte(`{"finalechat": {"base_url": "`+b+`"}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s.Bundle = "work"
-	info := sr9Session(t, project, a)
-	stop := s.stopConfigs(info)
-	stopAt := "nothing"
-	if len(stop) > 0 {
-		stopAt = stop[0].Finalechat.BaseURL
-	}
-	if stopAt != a {
-		t.Fatalf("thread at %s (the project file's account): the stop tells %s; want %s", a, stopAt, a)
-	}
-}
-
-// The stop half of the review's TestSR9WebTwoTokensOnOneServiceAnswerOn-
-// TheWrongAccount: two accounts on one service (two tokens on
-// finale.chat). The project's file reads the work token, where the
-// session's thread is; the serve runs the bundle "personal", with the
-// personal token on the same service. The stop tells with the work token.
-func TestSR9WebTwoTokensOnOneServiceStopOnTheWorkAccount(t *testing.T) {
-	const u = "https://phone.invalid"
-	s, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	t.Setenv("FINALECHAT_URL", u)
-	t.Setenv("SR9_WORK", "fc_work")
-	t.Setenv("SR9_PERSONAL", "fc_personal")
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"token_env": "SR9_WORK"}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.BundlePath(project, "personal"), []byte(`{"finalechat": {"token_env": "SR9_PERSONAL"}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s.Bundle = "personal"
-	info := sr9Session(t, project, u)
-	stop := s.stopConfigs(info)
-	stopTok := "nothing"
-	if len(stop) > 0 {
-		stopTok = stop[0].Finalechat.TokenEnvName()
-	}
-	if stopTok != "SR9_WORK" {
-		t.Fatalf("thread on the work account: the stop tells with %s; want $SR9_WORK", stopTok)
-	}
-}
-
-// The project's phone is turned off in its file (a token is still set).
-// A session mirrored to the phone (its thread is on the record) is
-// stopped from outside any run. The record decides whether the phone is
-// told, the configuration only the account; TellPhoneStopped returned at
-// once on the configuration's enabled: false: no closing note, no header,
-// no receipts, no owed notes.
-func TestSR9WebAStopOfAMirroredSessionWithThePhoneOffTellsNothing(t *testing.T) {
-	s, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	f := &sr6Phone{keys: map[string]bool{}}
-	srv := httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(srv.Close)
-	t.Setenv("FINALECHAT_TOKEN", "fc_test")
-	t.Setenv("FINALECHAT_URL", srv.URL)
-	if err := os.MkdirAll(config.BundlesDir(project), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.File(project), []byte(`{"finalechat": {"enabled": false}}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	k5Kills(t)
-	info := srAgentSession(t, project)
-	k16Mirrored(t, info)
-	cfg := s.stopConfigs(info)
-	if len(cfg) == 0 {
-		t.Fatal("setup: no configuration for the stop")
-	}
-	if _, _, err := stopAgents(project, info.Path, cfg, nil); err != nil {
-		t.Fatal(err)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.notes) != 1 {
-		t.Fatalf("a stop of a session whose record shows it mirrored posted %d closing notes, want 1 (the configuration's phone is off: %v)", len(f.notes), !cfg[0].Finalechat.Wanted())
-	}
-}
-
 // k18Accounts is a phone service with two accounts (tokens fc_work and
 // fc_personal) on which only the work account has the thread "t" (by its
 // id, and under the session's reference). It keeps each request's method,
@@ -358,64 +254,6 @@ func (f *k18Accounts) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// A stop never makes a thread: it posts only to the thread the record
-// names, and tells nothing (saying why) on an account that does not have
-// it, even one on the same service; on the account that has it, it posts
-// there. It used to post by the session's external id, which makes a
-// thread on an account that has none.
-func TestK18AStopNeverMakesAThread(t *testing.T) {
-	_, project := newTestServer(t)
-	t.Setenv("EAGENT_FINALECHAT", "")
-	f := &k18Accounts{}
-	srv := httptest.NewServer(http.HandlerFunc(f.serve))
-	t.Cleanup(srv.Close)
-	t.Setenv("FINALECHAT_URL", srv.URL)
-	t.Setenv("K18_WORK", "fc_work")
-	t.Setenv("K18_PERSONAL", "fc_personal")
-	info := sr9Session(t, project, srv.URL)
-	posts := func(tok string) []string {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		var out []string
-		for _, s := range f.seen {
-			if strings.HasPrefix(s, "POST ") && strings.HasSuffix(s, " "+tok) {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	on := func(env string) []config.Config {
-		cfg := config.Defaults()
-		cfg.Finalechat.TokenEnv = env
-		return []config.Config{cfg}
-	}
-	var logged []string
-	logf := func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
-	if _, _, err := stopAgents(project, info.Path, on("K18_PERSONAL"), logf); err != nil {
-		t.Fatal(err)
-	}
-	if got := posts("fc_personal"); len(got) != 0 {
-		t.Fatalf("the stop posted on an account without the session's thread: %q", got)
-	}
-	if !slices.ContainsFunc(logged, func(l string) bool {
-		return strings.Contains(l, "not told") && strings.Contains(l, "not on the phone account")
-	}) {
-		t.Fatalf("the log does not say why the phone is not told: %q", logged)
-	}
-	if _, _, err := stopAgents(project, info.Path, on("K18_WORK"), logf); err != nil {
-		t.Fatal(err)
-	}
-	got := posts("fc_work")
-	if len(got) == 0 {
-		t.Fatal("the stop told the account with the thread nothing")
-	}
-	for _, p := range got {
-		if !strings.HasPrefix(p, "POST /api/v1/threads/t/") {
-			t.Fatalf("the stop posted outside the record's thread: %q", got)
-		}
-	}
-}
-
 // A reply from the phone during this server's shutdown resumes nothing,
 // and its answer says what is true for the phone: the reply is kept, and
 // there is nothing to send again (errStopping's words are the page's).
@@ -431,43 +269,5 @@ func TestK18APhoneReplyDuringTheShutdownIsToldItIsKept(t *testing.T) {
 	}
 	if s.isHosted(info.ID) {
 		t.Fatal("the session was resumed during the shutdown")
-	}
-}
-
-// A list of sessions to bring back written with the names of their
-// configurations ("configs", and on its stop marks), as the last head
-// wrote it, still reads: the marked stop is finished and the listed
-// session brought back.
-func TestK18AListWrittenWithConfigurationNamesStillReads(t *testing.T) {
-	_, project := newTestServer(t)
-	k5Kills(t)
-	listed, marked := r11Session(t, project), r11Session(t, project)
-	at := time.Now().UTC().Format(time.RFC3339Nano)
-	list := fmt.Sprintf(`{"sessions": [%q], "at": %q, "configs": {%q: {"config": "nophone", "preset": "-"}}, "stop": [{"session": %q, "at": %q, "config": "nophone", "preset": "-"}]}`, listed.ID, at, listed.ID, marked.ID, at)
-	if err := os.MkdirAll(filepath.Dir(hostedFile(project)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hostedFile(project), []byte(list), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var back []string
-	old := restoreSession
-	restoreSession = func(_ *Server, id string, _ integration.PhoneMessage) error { back = append(back, id); return nil }
-	t.Cleanup(func() { restoreSession = old })
-	oldReply := pendingReply
-	pendingReply = func(context.Context, string, store.Info) (integration.PhoneMessage, bool, error) {
-		return integration.PhoneMessage{}, false, nil
-	}
-	t.Cleanup(func() { pendingReply = oldReply })
-	s := New(project, nil)
-	s.restoreHosted(context.Background())
-	if !slices.Equal(back, []string{listed.ID}) {
-		t.Fatalf("brought back %q, want the listed session", back)
-	}
-	s.mu.Lock()
-	still := s.listed(marked.ID)
-	s.mu.Unlock()
-	if still {
-		t.Fatal("the marked stop was not finished")
 	}
 }

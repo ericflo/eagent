@@ -1663,8 +1663,7 @@ func (r *Runtime) settleEnded() {
 // (the relay's agent and name): the profile the agent was started under may
 // be renamed or gone from the configuration that settles its record now,
 // or that configuration may be another's (every resume from eagent serve
-// runs on the server's own). One rule for a run's own take-back (takeBack)
-// and for a stop from outside a run (web stopAgents).
+// runs on the server's own).
 func SpoolOf(path string, rel *state.Relay) string {
 	spec := relay.Spec{Profile: config.RelayProfile{Agent: rel.Agent}}
 	if relay.Prepare(&spec, filepath.Join(path, "relays", rel.Name)) != nil {
@@ -1682,8 +1681,7 @@ func SpoolOf(path string, rel *state.Relay) string {
 // since (state Holders), so that start inherits none of them, but for
 // keep: after a switch, the user's messages stay as the switch left
 // them, since its brief carried them (finishLaunch), unless that brief
-// certainly did not go. One rule for a resume (settleEnded) and for a stop
-// from outside a run (web stopAgents).
+// certainly did not go.
 func EndedWaiting(st *state.State) (rels []*state.Relay, keep []string) {
 	names := slices.Sorted(maps.Keys(st.Relays))
 	handed := handedOver(st)

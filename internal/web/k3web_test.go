@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/ericflo/eagent/internal/integration"
-	"github.com/ericflo/eagent/internal/store"
 )
 
 // k3Listed is what the next server would bring back.
@@ -52,51 +50,6 @@ func TestK3ASessionTheUserStopsDuringTheShutdownIsNotBroughtBack(t *testing.T) {
 	s.Shutdown(5 * time.Second)
 	if got := k3Listed(t, project); !slices.Equal(got, []string{kept.ID}) {
 		t.Fatalf("the next server would bring back %q, want only %s (the user stopped %s)", got, kept.ID, stopped.ID)
-	}
-}
-
-// A Stop pressed once the server's shutdown has begun ending the run, or
-// has ended it, is a stop: the session comes off the list the next server
-// brings back, and the answer says it is stopped. It used to be refused
-// (409), and the next serve brought the session back.
-func TestK3AStopDuringTheShutdownIsHonoured(t *testing.T) {
-	s, project := newTestServer(t)
-	cfg := k1Model(t, s, project)
-	ending, ended := r11Session(t, project), r11Session(t, project)
-	rt, ui := r11Ended(t, cfg, project, ending)
-	lock, _, err := store.Open(ending.Path, time.Now()) // the run is finishing
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = lock.Close() })
-	finishing := &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
-	s.mu.Lock()
-	s.running[ending.ID] = finishing
-	s.running[ended.ID] = &hosted{rt: rt, ui: ui, cancel: func() {}, done: make(chan struct{})}
-	s.mu.Unlock()
-	s.rememberHosted() // the shutdown begins: the list, then the mark
-	s.resuming.Lock()
-	s.stopping = true
-	s.resuming.Unlock()
-	s.mu.Lock()
-	delete(s.running, ended.ID) // its run has stopped
-	s.mu.Unlock()
-	if w := do(s, "POST", "/api/sessions/"+ended.ID+"/stop", nil, nil); w.Code != http.StatusOK {
-		t.Fatalf("stop of the ended run's session: %d %s", w.Code, w.Body)
-	}
-	// The stop of the one whose run is finishing waits for it to let go.
-	got := make(chan *httptest.ResponseRecorder, 1)
-	go func() { got <- do(s, "POST", "/api/sessions/"+ending.ID+"/stop", nil, nil) }()
-	_ = lock.Close() // as s.run has it once Run has returned
-	s.mu.Lock()
-	delete(s.running, ending.ID)
-	s.mu.Unlock()
-	close(finishing.done)
-	if w := <-got; w.Code != http.StatusOK {
-		t.Fatalf("stop of the ending run's session: %d %s", w.Code, w.Body)
-	}
-	if got := k3Listed(t, project); len(got) != 0 {
-		t.Fatalf("the next server would bring back %q, which the user stopped", got)
 	}
 }
 

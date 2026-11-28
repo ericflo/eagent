@@ -1650,9 +1650,7 @@ func (p *phone) tellRefused(r *Runtime, ctx context.Context) {
 // record of each note posted, also one tellRefused posted that the loop
 // did not record (nil writes none); what cannot go in that time stays owed
 // on the record for the next run, and is said in the log. Called as a run
-// ends, after its loop (finish), and for a session stopped from outside
-// any run (TellPhoneStopped: set the phone's owed to owedRefusals of the
-// record, and call this before close).
+// ends, after its loop (finish).
 func (p *phone) payOwed(record func(event.Event)) {
 	p.mu.Lock()
 	p.paying = true

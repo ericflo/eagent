@@ -59,26 +59,17 @@ func k27Outcome(t *testing.T, info store.Info, id string) string {
 	return out
 }
 
-// The same record, settled by a stop from outside a run (stopAgents) and by
-// a resume (harness settleEnded), settles the same way: a held message
-// whose copy is still unclaimed in the spool is not_sent. Also when the
-// agent's profile is no longer in the configuration (the user renamed or
-// removed it): both find the spool from the record (harness.SpoolOf). (The
-// resume looked it up through the profile, found none, recorded the message
-// unconfirmed and left the copy in the spool.)
+// A resume settles a held message whose copy is still unclaimed in the
+// spool as not_sent, also when the agent's profile is no longer in the
+// configuration (the user renamed or removed it): the spool is found from
+// the record (harness.SpoolOf). (The resume looked it up through the
+// profile, found none, recorded the message unconfirmed and left the copy
+// in the spool.)
 func TestK27AResumeTakesAHeldMessageBackWhenItsProfileIsGone(t *testing.T) {
 	_, project := newTestServer(t)
 	cfg := r11Model(t)
 	if _, ok := cfg.Relay.RelayProfiles()["helper"]; ok {
 		t.Fatal("setup: the configuration has a helper profile")
-	}
-	old := killAgent
-	t.Cleanup(func() { killAgent = old })
-	killAgent = func(string, string) error { return nil }
-
-	byStop := k27Held(t, project, "helper")
-	if _, _, err := stopAgents(project, byStop.Path, nil, nil); err != nil {
-		t.Fatal(err)
 	}
 	byResume := k27Held(t, project, "helper")
 	ui := newWebUI(func(string, ...any) {})
@@ -91,8 +82,8 @@ func TestK27AResumeTakesAHeldMessageBackWhenItsProfileIsGone(t *testing.T) {
 	rt.Run(stopped)
 
 	left := relay.Unspool(filepath.Join(byResume.Path, "relays", "helper", "after_turn"), "h1")
-	stopSays, resumeSays := k27Outcome(t, byStop, "h1"), k27Outcome(t, byResume, "h1")
-	t.Logf("stop: %q; resume: %q; copy still in the spool after the resume: %v", stopSays, resumeSays, left)
+	resumeSays := k27Outcome(t, byResume, "h1")
+	t.Logf("resume: %q; copy still in the spool after the resume: %v", resumeSays, left)
 	// Control: the same record under a profile the configuration has.
 	if _, ok := cfg.Relay.RelayProfiles()["claude"]; ok {
 		ctl := k27Held(t, project, "claude")
@@ -104,6 +95,6 @@ func TestK27AResumeTakesAHeldMessageBackWhenItsProfileIsGone(t *testing.T) {
 		t.Logf("control (profile claude present): resume says %q", k27Outcome(t, ctl, "h1"))
 	}
 	if resumeSays != event.DeliveryNotSent+";" {
-		t.Errorf("a held message whose copy is unclaimed in the spool, after a resume: %q (stop from outside a run: %q); want not_sent", resumeSays, stopSays)
+		t.Errorf("a held message whose copy is unclaimed in the spool, after a resume: %q; want not_sent", resumeSays)
 	}
 }
