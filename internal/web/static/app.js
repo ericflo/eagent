@@ -226,11 +226,17 @@ function renderSessionShell() {
 // sessionTools is the toolbar beside the tabs: what the session runs on,
 // what it has cost, and Stop or Resume. The button is made once and only
 // relabelled (renderTools), so a click never lands on a button that is
-// being swapped out; what it does is decided when it is clicked.
+// being swapped out; what it does is decided when it is clicked. It is the
+// button of the session it was built for, and stays on the page past a
+// click on another session until that one has loaded: it acts on its own
+// session, and while the page's state is not that session's it does what
+// its label says.
 function sessionTools(d) {
+  const sid = S.sid;
   const act = ARCHIVE ? null : h('button', {id: 'session-act', onclick: async () => {
-    if (S.detail && S.detail.alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) { try { await api(`/api/sessions/${S.sid}/stop`, {method: 'POST', body: '{}'}); } catch (e) { toast(e.message, 'bad'); } } return; }
-    try { await api(`/api/sessions/${S.sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); }
+    const alive = S.sid === sid && S.detail ? S.detail.alive : act.textContent === 'Stop';
+    if (alive) { if (confirm('Stop this session and its agent? It can be resumed later.')) { try { await api(`/api/sessions/${sid}/stop`, {method: 'POST', body: '{}'}); } catch (e) { toast(e.message, 'bad'); } } return; }
+    try { await api(`/api/sessions/${sid}/resume`, {method: 'POST', body: '{}'}); toast('resuming'); } catch (e) { toast(e.message, 'bad'); }
   }}, d.alive ? 'Stop' : 'Resume');
   return h('div', {class: 'tools', id: 'session-tools'}, h('span', {id: 'session-badges', style: 'display:contents'}, ...toolBadges(d)), act);
 }
@@ -384,7 +390,7 @@ async function send() {
   ta.value = ''; ta.style.height = 'auto'; delete S.drafts[sid];
   // /screen shows the agent's terminal here, as its Screen button does: the
   // session itself shows it only at its own terminal and on the phone.
-  const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped');
+  const agent = d && d.alive && !d.question && /^\/screen(\s|$)/i.test(text) && (d.agents || []).find(a => a.state !== 'stopped' && a.state !== 'exited');
   if (agent) { showScreen(agent.name); return; }
   try {
     let r;
@@ -431,8 +437,10 @@ function takeQueued(ev) {
   const [q] = S.queued.splice(i, 1);
   const n = document.querySelector(`[data-queued="${q.id}"]`); if (n) n.remove();
 }
-async function dismissQuestion() { try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
-async function answer(text) { try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
+// A question's buttons outlast a click on another session until that one
+// has loaded; nothing is asked of the page's session then.
+async function dismissQuestion() { if (!S.detail || !S.detail.question) return; try { await api(`/api/sessions/${S.sid}/dismiss`, {method: 'POST', body: JSON.stringify({question_id: S.detail.question.ID})}); } catch (e) { toast(e.message, 'bad'); } }
+async function answer(text) { if (!S.detail || !S.detail.question) return; try { await api(`/api/sessions/${S.sid}/answer`, {method: 'POST', body: JSON.stringify({text, question_id: S.detail.question.ID, client: clientCaps()})}); } catch (e) { toast(e.message, 'bad'); } }
 
 // What a thread.title event changed, in words: the session's own summary
 // (by "summary"), a name set at the user's request, or the thread as the
@@ -477,8 +485,10 @@ function chatNode(ev) {
         text ? h('div', {class: 'text', html: md(text)}) : h('div', {class: 'sub'}, 'it ended the turn without a message')));
     }
     case 'relay.delivered': {
-      // A quiet receipt for a message of the user's that went to the agent.
-      const sent = S.events.find(e => e.type === 'relay.send' && e.data && e.data.id === d.id && e.data.name === d.name);
+      // A quiet receipt for a message of the user's that went to the agent,
+      // under the agent the receipt names: a switch passes a message on its
+      // way on to the next agent (relay.moved), and it arrives there.
+      const sent = S.events.find(e => (e.type === 'relay.send' || e.type === 'relay.moved') && e.data && e.data.id === d.id);
       if (!sent || sent.data.from !== 'user') return null;
       // Only a failure that says nothing was typed is "did not reach"; one
       // that was typed (or an older record that does not say) may have.

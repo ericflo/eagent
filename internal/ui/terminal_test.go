@@ -18,7 +18,7 @@ func testTerminal(t *testing.T, verbose bool) (*Terminal, *bytes.Buffer, func() 
 		t.Fatal(err)
 	}
 	out := &bytes.Buffer{}
-	term := &Terminal{out: out, err: errFile, verbose: verbose, who: map[string]string{}, sends: map[string]string{}, stopSpin: make(chan struct{})}
+	term := &Terminal{out: out, err: errFile, verbose: verbose, who: map[string]string{}, sends: map[string]bool{}, stopSpin: make(chan struct{})}
 	return term, out, func() string {
 		raw, _ := os.ReadFile(errFile.Name())
 		return string(raw)
@@ -50,6 +50,23 @@ func TestAgentTurnAndDeliveryReachTheUser(t *testing.T) {
 		t.Fatalf("stdout = %q", s)
 	}
 	if s := errText(); strings.Count(s, "delivered to Codex") != 1 || !strings.Contains(s, "Codex started in /w") {
+		t.Fatalf("stderr = %q", s)
+	}
+}
+
+// A message of the user's on its way to Claude is passed on to Codex by a
+// switch, and arrives there: the receipt names Codex, where it arrived
+// (it named Claude, which was stopped). And an arrival that shows after
+// the message was first called not confirmed is printed too.
+func TestADeliveryReceiptNamesTheAgentItArrivedIn(t *testing.T) {
+	term, _, errText := testTerminal(t, false)
+	term.Trace(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "claude", Agent: "claude", AgentLabel: "Claude", Dir: "/w"}))
+	term.Trace(event.New(event.RelaySend, event.ActorHarness, event.RelaySendData{Name: "claude", ID: "r1", From: "user", Text: "hi"}))
+	term.Trace(event.New(event.RelayStart, event.ActorHarness, event.RelayStartData{Name: "codex", Agent: "codex", AgentLabel: "Codex", Dir: "/w"}))
+	term.Trace(event.New(event.RelayMoved, event.ActorHarness, event.RelayMovedData{RelaySendData: event.RelaySendData{Name: "codex", ID: "r1", From: "user", Text: "hi"}, Prev: "claude"}))
+	term.Trace(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: false, Outcome: event.DeliveryUnconfirmed, Detail: "its transcript never showed it"}))
+	term.Trace(event.New(event.RelayDelivered, event.ActorHarness, event.RelayDeliveredData{Name: "codex", ID: "r1", OK: true}))
+	if s := errText(); !strings.Contains(s, "not confirmed by Codex") || !strings.Contains(s, "delivered to Codex") || strings.Contains(s, "by Claude") || strings.Contains(s, "to Claude") {
 		t.Fatalf("stderr = %q", s)
 	}
 }

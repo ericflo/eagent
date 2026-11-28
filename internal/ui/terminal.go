@@ -36,10 +36,10 @@ type Terminal struct {
 	spinner  int
 	stream   streamState
 	// who names each agent for people ("Claude"), from relay.start; sends
-	// are the user's messages typed into an agent, by send id, until the
-	// agent's transcript shows them.
+	// are the user's messages typed into an agent, by send id: what the
+	// record says became of each is shown.
 	who      map[string]string
-	sends    map[string]string
+	sends    map[string]bool
 	idle     bool
 	question bool
 	input    chan string
@@ -70,7 +70,7 @@ func New(opts Options) *Terminal {
 		interactive: opts.Interactive,
 		stopSpin:    make(chan struct{}),
 		who:         map[string]string{},
-		sends:       map[string]string{},
+		sends:       map[string]bool{},
 		started:     time.Now(),
 		lastOutput:  time.Now(),
 	}
@@ -430,26 +430,28 @@ func (t *Terminal) Trace(ev event.Event) {
 		_ = ev.Decode(&d)
 		if d.From == "user" {
 			t.mu.Lock()
-			t.sends[d.ID] = d.Name
+			t.sends[d.ID] = true
 			t.mu.Unlock()
 		}
 	case event.RelayDelivered:
+		// Each word on a message of the user's is shown, under the agent
+		// it is about: a message passed on to another agent arrives
+		// there, and an arrival can show after "not confirmed".
 		var d event.RelayDeliveredData
 		_ = ev.Decode(&d)
 		t.mu.Lock()
-		name, mine := t.sends[d.ID]
-		delete(t.sends, d.ID)
+		mine := t.sends[d.ID]
 		t.mu.Unlock()
 		if !mine || t.jsonOut {
 			break
 		}
 		if d.OK {
-			t.write(t.err, t.dim("  ✓ delivered to "+t.agentName(name))+"\n")
+			t.write(t.err, t.dim("  ✓ delivered to "+t.agentName(d.Name))+"\n")
 		} else if d.Outcome == event.DeliveryNotSent {
-			t.write(t.err, t.red("  ✗ ")+t.dim("did not reach "+t.agentName(name)+": "+clip(d.Detail, 160))+"\n")
+			t.write(t.err, t.red("  ✗ ")+t.dim("did not reach "+t.agentName(d.Name)+": "+clip(d.Detail, 160))+"\n")
 		} else {
 			// Typed (or an older record that does not say): it may have.
-			t.write(t.err, t.red("  ✗ ")+t.dim("not confirmed by "+t.agentName(name)+": "+clip(d.Detail, 160))+"\n")
+			t.write(t.err, t.red("  ✗ ")+t.dim("not confirmed by "+t.agentName(d.Name)+": "+clip(d.Detail, 160))+"\n")
 		}
 		return
 	}
