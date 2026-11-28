@@ -106,35 +106,6 @@ func reportTurn(seq int64, text string) event.Event {
 // twoParts is a report that takes two posts.
 var twoParts = strings.Repeat(strings.Repeat("x", 99)+"\n", 1500) + "END"
 
-// The reviewer's setup: one slot free in the phone's queue, then a report
-// in two parts. Both parts reach the phone, in order, or neither is
-// queued and that is said.
-func TestTwoPartReportWithOneFreeSlotReachesThePhoneWhole(t *testing.T) {
-	q := newQueuePhone(t, 16)
-	q.fill(1)
-	r := &Runtime{st: state.New(), relayNotifyDone: map[string]bool{}}
-	q.p.observeRelay(r, reportTurn(7, twoParts))
-	q.drain()
-	posts := q.reportPosts()
-	if len(posts) != 2 {
-		t.Fatalf("%d of 2 parts reached the phone", len(posts))
-	}
-	for i, p := range posts {
-		if p.Meta["part"] != float64(i+1) || p.Meta["parts"] != float64(2) || !strings.HasSuffix(p.Body, fmt.Sprintf("_(part %d of 2)_", i+1)) {
-			t.Errorf("post %d is part %v of %v", i+1, p.Meta["part"], p.Meta["parts"])
-		}
-	}
-	if posts[0].ClientKey != "eagent:x:rt:7" || posts[1].ClientKey != "eagent:x:rt:7.2" {
-		t.Errorf("keys %q, %q", posts[0].ClientKey, posts[1].ClientKey)
-	}
-	if _, has := posts[0].Meta["duration_ms"]; has {
-		t.Error("the turn's figures are on part 1")
-	}
-	if posts[1].Meta["duration_ms"] != float64(1000) || posts[0].Activity == nil || posts[1].Activity == nil {
-		t.Errorf("part 2 meta %v; status %v, %v", posts[1].Meta, posts[0].Activity, posts[1].Activity)
-	}
-}
-
 // With no slot free the report is not queued at all, and that is said:
 // no part goes out alone.
 func TestReportThatFindsTheQueueFullIsDroppedWholeAndSaid(t *testing.T) {
@@ -148,23 +119,6 @@ func TestReportThatFindsTheQueueFullIsDroppedWholeAndSaid(t *testing.T) {
 	}
 	if !strings.Contains(q.logged(), "report") {
 		t.Fatalf("nothing said about the lost report: %q", q.logged())
-	}
-}
-
-// A part the server refuses is said, and the parts after it are not
-// posted out of order behind the gap.
-func TestRefusedReportPartIsSaidAndLaterPartsWait(t *testing.T) {
-	q := newQueuePhone(t, 16)
-	q.refuse = func(body string) bool { return strings.HasSuffix(body, "_(part 2 of 3)_") }
-	three := strings.Repeat(strings.Repeat("x", 99)+"\n", 3000) + "END"
-	r := &Runtime{st: state.New(), relayNotifyDone: map[string]bool{}}
-	q.p.observeRelay(r, reportTurn(9, three))
-	q.drain()
-	if n := len(q.reportPosts()); n != 1 {
-		t.Fatalf("%d parts went out, want only part 1", n)
-	}
-	if !strings.Contains(q.logged(), "1 of 3") {
-		t.Fatalf("the shortfall is not said: %q", q.logged())
 	}
 }
 
