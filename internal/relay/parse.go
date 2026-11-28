@@ -477,15 +477,6 @@ func (p *claudeParser) userText(s string, at time.Time) []obs {
 	return []obs{{kind: "user", text: s, at: at, again: again}, {kind: "working", at: at}}
 }
 
-// holding: Claude's queue holds a message read as news that no prompt
-// has shown running yet (a dequeue alone is not that: Claude records the
-// prompt after its prompt hooks). Status.Quiet waits for it.
-func (p *claudeParser) holding() bool { return len(p.queued) > p.old }
-
-// readAsHistory: what the queue holds now was read as history. It holds
-// nothing: the agent that queued it may be gone (a restart).
-func (p *claudeParser) readAsHistory() { p.old = len(p.queued) }
-
 // clearQueue: what the queue holds is not known any more.
 func (p *claudeParser) clearQueue() {
 	p.leave(0, len(p.queued), "dequeued")

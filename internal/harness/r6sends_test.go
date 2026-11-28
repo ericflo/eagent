@@ -20,7 +20,6 @@ type quietSeat struct {
 }
 
 func (q *quietSeat) Send(id, text, mode string) (_ string, err error) {
-	defer q.sendStart(id)(&err)
 	q.fakeSeat.mu.Lock()
 	err = q.fakeSeat.sendErr
 	q.fakeSeat.mu.Unlock()

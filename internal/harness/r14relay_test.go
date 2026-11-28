@@ -42,7 +42,6 @@ func TestR14AMovedSendThatDidNotGoIsNotSent(t *testing.T) {
 type r14HeldSeat struct{ *lingerSeat }
 
 func (s r14HeldSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.mu.Unlock()

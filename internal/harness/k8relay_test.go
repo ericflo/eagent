@@ -31,7 +31,6 @@ func (s *sr5CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
-	defer s.sendStart(id)(&err)
 	s.entered <- text // pasted; typeSettle, then Enter
 	<-s.gate
 	if s.wasKilled() {

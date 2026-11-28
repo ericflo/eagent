@@ -27,7 +27,6 @@ func newClosingSeat(reply string) *closingSeat {
 }
 
 func (c *closingSeat) Send(id, text, mode string) (_ string, err error) {
-	defer c.sendStart(id)(&err)
 	c.entered <- text
 	<-c.gone
 	return "", relay.ErrClosed

@@ -268,8 +268,8 @@ func TestK14AHeldMessageWaitsThroughAQuietTurnOfClaudeCodeAsItDrawsItNow(t *test
 	}
 	s.reportLeftOvers(now.Add(time.Hour))
 	typed, lost := reportsOf(s, h)
-	if st := s.Snapshot(); st.State != "blocked" || st.Stuck || len(typed) != 0 || len(lost) != 0 {
-		t.Fatalf("state %s, stuck %v, typed %q, reported as not arrived %v; want the turn still running: blocked, not stuck, nothing typed or reported", st.State, st.Stuck, typed, lost)
+	if st := s.Snapshot(); st.State != "blocked" || len(typed) != 0 || len(lost) != 0 {
+		t.Fatalf("state %s, typed %q, reported as not arrived %v; want the turn still running: blocked, nothing typed or reported", st.State, typed, lost)
 	}
 	if names, _ := filepath.Glob(filepath.Join(spool, "*.txt")); len(names) != 1 {
 		t.Fatalf("the spool holds %v; want the held message still there", names)

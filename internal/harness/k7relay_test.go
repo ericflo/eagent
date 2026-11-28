@@ -33,7 +33,6 @@ func (s *sr4CommandSeat) Send(id, text, mode string) (_ string, err error) {
 	if !first {
 		return s.fakeSeat.Send(id, text, mode)
 	}
-	defer s.sendStart(id)(&err) // as relay.Seat: not quiet from Send's start to its delivered
 	s.entered <- text
 	<-s.gate
 	s.fakeSeat.mu.Lock()

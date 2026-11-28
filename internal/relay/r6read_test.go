@@ -64,7 +64,7 @@ func (w *reattachedSeat) news() []string {
 	defer w.mu.Unlock()
 	var out []string
 	for _, ev := range w.events {
-		if ev.Kind != KindDelivered && ev.Kind != KindQuiet {
+		if ev.Kind != KindDelivered {
 			out = append(out, ev.Kind+"/"+ev.State+"/"+ev.Text)
 		}
 	}

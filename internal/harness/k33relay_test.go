@@ -129,7 +129,6 @@ type k33StuckSeat struct {
 }
 
 func (s *k33StuckSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.entered <- text
 	return "", <-s.release
 }

@@ -119,7 +119,6 @@ func TestRelayModelPickedAtStartAndChangedBetweenTurns(t *testing.T) {
 	seat.setState("idle")
 	rt.sync(func() {
 		rt.onRelayEvent("codex", relay.Event{Kind: relay.KindTurn, Text: "finished"})
-		rt.onRelayEvent("codex", relay.Event{Kind: relay.KindQuiet}) // as the seat says after it
 	})
 	waitRelayStarts(t, rt)
 	if len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "gpt-6.2-astra" || launchedSpecs(launched)[1].Profile.Effort != "" || !seat.wasKilled() {
@@ -268,10 +267,7 @@ func TestRelayChangeFromLiveSettings(t *testing.T) {
 	}
 	relayServeLoop(t, rt)
 	seat.setState("idle")
-	rt.sync(func() {
-		rt.onRelayEvent("claude", relay.Event{Kind: relay.KindState, State: "idle"})
-		rt.onRelayEvent("claude", relay.Event{Kind: relay.KindQuiet})
-	})
+	rt.sync(func() { rt.onRelayEvent("claude", relay.Event{Kind: relay.KindState, State: "idle"}) })
 	waitRelayStarts(t, rt)
 	rt.sync(func() { rt.pollRuntimeSettings() })
 	if got := c.Values.Relays["claude"]; got.Waiting || len(launchedSpecs(launched)) != 2 || launchedSpecs(launched)[1].Profile.Model != "sonnet" {

@@ -415,20 +415,8 @@ type fakeSeat struct {
 	// closed: its events have ended (Close), as a real seat's do once its
 	// watcher stops; what it would say after that is lost.
 	closed bool
-	// What Snapshot says, as a real seat keeps it: the state and dialog it
-	// last said, the Sends under way (sendStart), the sends sent and not yet
-	// said delivered, and whether it has said it is quiet (KindQuiet) since
-	// its last other news.
+	// What Snapshot says: the state and dialog it last said.
 	state, dialog string
-	sending       int
-	unsaid        map[string]bool
-	quietSaid     bool
-	// stuck: a block it says is one the seat knows stuck (Status.Stuck),
-	// not a quiet agent at work (setStuck).
-	stuck bool
-	// quietTo, when set, is where a quiet said at a Send's end goes (a
-	// seat whose events go out on a channel of its own: k2FeedSeat).
-	quietTo func(relay.Event)
 }
 
 func newFakeSeat(reply string) *fakeSeat {
@@ -437,40 +425,7 @@ func newFakeSeat(reply string) *fakeSeat {
 
 func (f *fakeSeat) Events() <-chan relay.Event { return f.events }
 
-// sendStart keeps the seat as relay.Seat keeps itself over a Send: not quiet
-// from the Send's start (its sending count) until the send's outcome is said
-// (delivered: an arrival, a command's held delivered, a hand-over's end). A
-// Send that returns an error waits on nothing more, and the seat says it is
-// quiet again if it is. Every fake Send that types calls it first, as
-// `defer s.sendStart(id)(&err)`.
-func (f *fakeSeat) sendStart(id string) func(*error) {
-	f.mu.Lock()
-	f.sending++
-	if f.unsaid == nil {
-		f.unsaid = map[string]bool{}
-	}
-	f.unsaid[id] = true
-	f.mu.Unlock()
-	return func(err *error) {
-		f.mu.Lock()
-		f.sending--
-		if *err != nil {
-			delete(f.unsaid, id)
-			f.quietSaid = false
-		}
-		due, to := !f.closed && f.quietDueLocked(), f.quietTo
-		if due && to == nil {
-			f.events <- relay.Event{Kind: relay.KindQuiet}
-		}
-		f.mu.Unlock()
-		if due && to != nil {
-			to(relay.Event{Kind: relay.KindQuiet})
-		}
-	}
-}
-
 func (f *fakeSeat) Send(id, text, mode string) (_ string, err error) {
-	defer f.sendStart(id)(&err)
 	f.mu.Lock()
 	err = f.sendErr
 	if err == nil {
@@ -527,15 +482,7 @@ func (f *fakeSeat) Close() {
 func (f *fakeSeat) Snapshot() relay.Status {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return relay.Status{State: f.stateLocked(), Since: time.Now(), Dialog: f.dialog, Quiet: f.quietLocked(), Stuck: f.state == "blocked" && f.dialog == "" && f.stuck}
-}
-
-// setStuck says whether a block the seat says is one it knows stuck (its
-// screen shows nothing at work) or a quiet agent at work.
-func (f *fakeSeat) setStuck(stuck bool) {
-	f.mu.Lock()
-	f.stuck = stuck
-	f.mu.Unlock()
+	return relay.Status{State: f.stateLocked(), Since: time.Now(), Dialog: f.dialog}
 }
 
 // setState sets what the seat sees the agent doing (Snapshot) without its
@@ -553,11 +500,6 @@ func (f *fakeSeat) stateLocked() string {
 	return f.state
 }
 
-// quietLocked is Status.Quiet: idle, no dialog, no Send under way, no send
-// it has not said delivered. The caller holds f.mu.
-func (f *fakeSeat) quietLocked() bool {
-	return f.stateLocked() == "idle" && f.dialog == "" && f.sending == 0 && len(f.unsaid) == 0
-}
 func (f *fakeSeat) sentTexts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -571,9 +513,7 @@ func (f *fakeSeat) sentModes() []string {
 func (f *fakeSeat) wasKilled() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.killed }
 
 // emit makes the agent report something on its own; once its events have
-// ended (Close, Kill), nothing more is heard. As a real seat does at the end
-// of a look, it then says it is quiet (KindQuiet) if it has become so and
-// has not said so since its last other news.
+// ended (Close, Kill), nothing more is heard.
 func (f *fakeSeat) emit(evs ...relay.Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -584,34 +524,14 @@ func (f *fakeSeat) emit(evs ...relay.Event) {
 		f.noteLocked(ev)
 		f.events <- ev
 	}
-	if f.quietDueLocked() {
-		f.events <- relay.Event{Kind: relay.KindQuiet}
-	}
 }
 
 // noteLocked keeps what Snapshot says from one event the seat says. The
 // caller holds f.mu.
 func (f *fakeSeat) noteLocked(ev relay.Event) {
-	switch ev.Kind {
-	case relay.KindState:
+	if ev.Kind == relay.KindState {
 		f.state, f.dialog = ev.State, ev.Dialog
-	case relay.KindDelivered:
-		delete(f.unsaid, ev.SendID)
 	}
-	if ev.Kind != relay.KindQuiet && ev.Kind != relay.KindActivity {
-		f.quietSaid = false
-	}
-}
-
-// quietDueLocked says whether the seat is to say it is quiet now (it is, and
-// has not said so since its last other news), and marks it said. The caller
-// holds f.mu.
-func (f *fakeSeat) quietDueLocked() bool {
-	if f.quietSaid || !f.quietLocked() {
-		return false
-	}
-	f.quietSaid = true
-	return true
 }
 
 // useFakeRelays makes every agent the session starts or reattaches to the

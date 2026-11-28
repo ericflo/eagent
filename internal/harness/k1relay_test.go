@@ -20,7 +20,6 @@ type k1QuietSeat struct{ *lingerSeat }
 func newK1QuietSeat() k1QuietSeat { return k1QuietSeat{&lingerSeat{newFakeSeat("one")}} }
 
 func (s k1QuietSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.mu.Lock()
 	s.sent = append(s.sent, text)
 	s.modes = append(s.modes, mode)
@@ -254,14 +253,9 @@ func (s *k1HeldSeat) setDialog(title string) {
 }
 
 func (s *k1HeldSeat) Snapshot() relay.Status {
-	s.fakeSeat.mu.Lock()
-	unsaid := len(s.fakeSeat.unsaid)
-	s.fakeSeat.mu.Unlock()
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	// Blocked with no dialog (set): the seat knows it stuck, its screen
-	// showing nothing at work, as these tests have it.
-	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog, Quiet: s.state == "idle" && s.dialog == "" && unsaid == 0, Stuck: s.state == "blocked" && s.dialog == ""}
+	return relay.Status{State: s.state, Since: time.Now(), Dialog: s.dialog}
 }
 
 const (

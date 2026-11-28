@@ -30,7 +30,6 @@ func newPastingSeat() *pastingSeat {
 }
 
 func (p *pastingSeat) Send(id, text, mode string) (_ string, err error) {
-	defer p.sendStart(id)(&err)
 	p.entered <- id
 	<-p.gone
 	return "", p.fail
@@ -283,7 +282,6 @@ type heldSendSeat struct {
 }
 
 func (s *heldSendSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.entered <- id
 	if err := <-s.result; err != nil {
 		return "", err

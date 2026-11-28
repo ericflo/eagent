@@ -95,25 +95,3 @@ func TestSR9SeatSendQueuedInPiIsReportedUnconfirmedWhileADialogHoldsTheRun(t *te
 		t.Fatalf("outcomes %+v; want q1 delivered by its arrival after the dialog, never unconfirmed while pi held it mid-run", got)
 	}
 }
-
-// SR9-2. The same flicker at the screen check that blocks a quiet turn:
-// that check alone sets Stuck, and the blocked event says it at once,
-// though c249eef says a value of Stuck is said only once two checks in a
-// row find it. The harness applies a model change that waited for the
-// turn's end on that event (heldBack: Stuck holds nothing back), so the
-// agent is started again in the middle of its turn.
-func TestSR9SeatOneFlickerAtTheBlockSaysStuck(t *testing.T) {
-	busy := "• Running go test ./... (12m 03s • esc to interrupt)\n› "
-	h := &fakeHost{alive: true, screen: "$ "}
-	s := newSeat(Spec{}, codexAgent{}, h, "sr9-flicker-block", "thread-1")
-	s.state, s.stateAt = "working", time.Now().Add(-11*time.Minute)
-	s.checkScreen(time.Now()) // the busy line missing at this one capture
-	evs := drain(s.events)
-	h.mu.Lock()
-	h.screen = busy
-	h.mu.Unlock()
-	s.checkScreen(time.Now()) // at work
-	if len(evs) != 1 || evs[0].State != "blocked" || evs[0].Stuck || s.Snapshot().Stuck {
-		t.Fatalf("one capture without the busy line said %+v; stuck now %v; want blocked, not said stuck before two checks find it", evs, s.Snapshot().Stuck)
-	}
-}

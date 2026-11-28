@@ -27,7 +27,6 @@ func newGateSeat(reply string) *gateSeat {
 }
 
 func (g *gateSeat) Send(id, text, mode string) (_ string, err error) {
-	defer g.sendStart(id)(&err)
 	g.gmu.Lock()
 	g.calls++
 	first := g.calls == 1

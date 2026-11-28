@@ -10,24 +10,6 @@ import (
 	"time"
 )
 
-// SR7-3, a reattach's half: a block a reattach kept or made (hung, not yet
-// judged) that the first screen check finds stuck is said, as one that
-// turns stuck later is.
-func TestK9AReattachedBlockFoundStuckIsSaid(t *testing.T) {
-	h := &fakeHost{alive: true, screen: "$ "}
-	s := newSeat(Spec{}, codexAgent{}, h, "k9-reattach-stuck", "thread-1")
-	s.state, s.hung = "blocked", true // as attachSeat leaves a quiet turn
-	s.checkScreen(s.stateAt)
-	s.checkScreen(s.stateAt) // held two checks in a row
-	if !s.Snapshot().Stuck {
-		t.Fatal("not stuck at a shell prompt")
-	}
-	evs := drain(s.events)
-	if len(evs) != 1 || evs[0].Kind != KindState || evs[0].State != "blocked" || !evs[0].Stuck {
-		t.Fatalf("events %+v; want blocked said again, stuck", evs)
-	}
-}
-
 // A busy line whose words hold parentheses of their own (Claude shows the
 // active task's words there, "Fixing the parser (step 2)") is still the
 // busy line: what makes it one is its glyph and the closing "(… esc to
@@ -122,46 +104,6 @@ func TestK9AHookThatClaimsFirstWinsOverTheScreenTakeBack(t *testing.T) {
 	}
 }
 
-// Each change of Stuck is said (blocked again, which wakes eagent), so it
-// is said only once the new value has held at two screen checks in a row:
-// a busy line that flickers says nothing. And a state event never says
-// stuck while a dialog is up, as Status.Stuck never does.
-func TestK9AFlickeringBusyLineSaysNothing(t *testing.T) {
-	busy := "• Running go test ./... (12m 03s • esc to interrupt)\n› "
-	h := &fakeHost{alive: true, screen: busy}
-	s := newSeat(Spec{}, codexAgent{}, h, "k9-flicker", "thread-1")
-	s.state, s.stateAt = "working", time.Now().Add(-11*time.Minute)
-	s.checkScreen(time.Now()) // blocked at work, not stuck
-	_ = drain(s.events)
-	look := func(screen string) {
-		h.mu.Lock()
-		h.screen = screen
-		h.mu.Unlock()
-		s.checkScreen(time.Now())
-	}
-	for i := 0; i < 6; i++ {
-		look("$ ")
-		look(busy)
-	}
-	if evs := drain(s.events); len(evs) != 0 || s.Snapshot().Stuck {
-		t.Fatalf("a flickering busy line said %+v, stuck %v; want nothing", evs, s.Snapshot().Stuck)
-	}
-	look("$ ")
-	look("$ ")
-	look("$ ")
-	evs := drain(s.events)
-	if len(evs) != 1 || !evs[0].Stuck || !s.Snapshot().Stuck {
-		t.Fatalf("held stuck three checks: said %+v; want it said once", evs)
-	}
-	s.mu.Lock()
-	s.dialogUp = "Allow the edit?"
-	s.mu.Unlock()
-	s.setDialogState("blocked", "a dialog", "Allow the edit?", s.emit)
-	if evs := drain(s.events); len(evs) != 1 || evs[0].Stuck {
-		t.Fatalf("under a dialog: %+v; want a state event that does not say stuck", evs)
-	}
-}
-
 // piCompactDriver runs the extension and calls its compaction handlers as
 // pi 1.6.1 does (session_before_compact, then session_compact or, on any
 // failure, a cancel by a later extension among them, session_compact_failed),
@@ -208,32 +150,5 @@ func TestK9PiExtensionSaysWhilePiCompacts(t *testing.T) {
 	want := []string{"start idle - ", "before idle compacting nothing", "compacted idle - ", "failed idle - "}
 	if !slices.Equal(got, want) {
 		t.Fatalf("status through a compaction %q; want %q", got, want)
-	}
-}
-
-// SR7-2, the seat's half: pi's compaction holds quiet while it runs, and
-// once it ends (and the command's own hold is over) the seat is quiet.
-func TestK9PiIsQuietOnceItsCompactionEnds(t *testing.T) {
-	isolatePi(t)
-	saved := typeSettle
-	typeSettle = 0
-	t.Cleanup(func() { typeSettle = saved })
-	now := time.Now().Add(-time.Minute)
-	lines := append([]string{piHeaderLine("first", now)}, piTurnLines("t1", "sort the shelves", "Sorted.", now.Add(time.Second))...)
-	w := newPiSwitchSeat(t, time.Time{}, lines, entries(0))
-	s := w.s
-	if got := quietOrder(t, s, 5*time.Second); got[len(got)-1] != "quiet" {
-		t.Fatalf("never quiet at the start: %q", got)
-	}
-	writePiStatus(t, w.status, piStatus{State: "idle", Compacting: true, SessionFile: w.first, SessionID: "first", SessionEntries: entries(0)})
-	if _, err := s.Send("c1", "/compact", "queue"); err != nil {
-		t.Fatal(err)
-	}
-	if got := quietOrder(t, s, looks(2*quietMoveLooks)); slices.Contains(got, "quiet") {
-		t.Fatalf("events %q: quiet while pi compacts", got)
-	}
-	writePiStatus(t, w.status, piStatus{State: "idle", SessionFile: w.first, SessionID: "first", SessionEntries: entries(0)})
-	if got := quietOrder(t, s, looks(8)); got[len(got)-1] != "quiet" {
-		t.Fatalf("events %q; want quiet once pi's compaction is over", got)
 	}
 }

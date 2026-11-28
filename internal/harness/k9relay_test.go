@@ -58,7 +58,6 @@ type k9HalfSeat struct {
 }
 
 func (s *k9HalfSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.entered <- id
 	<-s.gate
 	return "", &relay.TypingError{Err: errors.New("can't find pane: k9")}

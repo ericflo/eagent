@@ -20,7 +20,6 @@ type r12dWaitingSeat struct {
 }
 
 func (s *r12dWaitingSeat) Send(id, text, mode string) (_ string, err error) {
-	defer s.sendStart(id)(&err)
 	s.entered <- id
 	<-s.closed
 	return "", relay.ErrClosed
