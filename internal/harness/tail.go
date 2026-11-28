@@ -166,7 +166,7 @@ func (r *Runtime) tail(w wake, now time.Time) string {
 					reasons = append(reasons, s)
 				}
 			case wakeTurnEnd:
-				s := fmt.Sprintf("%s finished a turn; its report is above. Give the user the short version, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who))
+				s := fmt.Sprintf("%s finished a turn; its report is above. Tell the user what it says, and ask them what it asks or keep it going, as your instructions say.", r.turnEndWho(who))
 				if r.phone != nil {
 					s += " If this finishes what the user asked for, or stops on something only they can settle, mark your message important so their phone buzzes."
 				}

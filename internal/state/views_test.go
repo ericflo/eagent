@@ -95,30 +95,35 @@ func TestUserMessageOverrideTemplate(t *testing.T) {
 }
 
 // An answer to a question asked in an earlier subsession still carries the
-// question text through the USER_ANSWER.md template.
+// question text through the USER_ANSWER.md template: whether the briefing
+// took the question in (covers 4), or it was asked after the last event
+// the briefing took in and is carried over without eagent's own call
+// that asked it (covers 2).
 func TestUserAnswerTemplateCarriesQuestion(t *testing.T) {
-	st := New()
-	seq := int64(0)
-	add := func(ev event.Event) {
-		seq++
-		ev.Seq = seq
-		st.Apply(ev)
-	}
-	add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
-	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
-	add(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
-	add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
-	add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
-	add(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "the dossier", CoversSeq: 4, By: "eagent"}))
-	add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "SQLite"}))
-	joined := ""
-	for _, m := range st.View(nil) {
-		joined += m.Text
-	}
-	if !strings.Contains(joined, "Which database?") || !strings.Contains(joined, "SQLite | Postgres") || !strings.Contains(joined, "SQLite") {
-		t.Fatalf("the answer lost its question across the rollover: %s", joined)
-	}
-	if !strings.Contains(joined, "q1") {
-		t.Fatalf("the answer lost its question id: %s", joined)
+	for _, covers := range []int64{4, 2} {
+		st := New()
+		seq := int64(0)
+		add := func(ev event.Event) {
+			seq++
+			ev.Seq = seq
+			st.Apply(ev)
+		}
+		add(event.New(event.SessionStart, event.ActorHarness, event.SessionStartData{}))
+		add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "1.jsonl", Index: 0, Reason: "start"}))
+		add(event.New(event.Question, event.ActorEagent, event.QuestionData{ID: "q1", Text: "Which database?", Options: []string{"SQLite", "Postgres"}}))
+		add(event.New(event.SubsessionEnd, event.ActorHarness, event.SubsessionEndData{Reason: "context full", NextFile: "2.jsonl"}))
+		add(event.New(event.SubsessionStart, event.ActorHarness, event.SubsessionStartData{File: "2.jsonl", Index: 1, Reason: "rollover"}))
+		add(event.New(event.Dossier, event.ActorHarness, event.DossierData{Text: "the dossier", CoversSeq: covers, By: "eagent"}))
+		add(event.New(event.UserAnswer, event.ActorUser, event.UserAnswerData{QuestionID: "q1", Text: "SQLite"}))
+		joined := ""
+		for _, m := range st.View(nil) {
+			joined += m.Text
+		}
+		if !strings.Contains(joined, "Which database?") || !strings.Contains(joined, "SQLite | Postgres") || !strings.Contains(joined, "SQLite") {
+			t.Fatalf("covers %d: the answer lost its question across the rollover: %s", covers, joined)
+		}
+		if !strings.Contains(joined, "q1") {
+			t.Fatalf("covers %d: the answer lost its question id: %s", covers, joined)
+		}
 	}
 }

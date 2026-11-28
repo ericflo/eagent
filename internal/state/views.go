@@ -92,12 +92,13 @@ func (s *State) viewEvents() ([]event.Event, *event.Event) {
 	// What the user and the agents put in the previous file after the last
 	// event the briefing took in is carried over whole. eagent's own calls
 	// there are not: they belong to the conversation the briefing replaced
-	// and was written in, so it accounts for them.
+	// and was written in, so it accounts for them. A question one of
+	// those calls asked goes with it, so its answer restates it (View).
 	carried := make([]event.Event, 0, len(s.Events)-from)
 	for _, ev := range s.Events[from:start] {
 		if ev.Actor == event.ActorEagent && ev.Task == "" {
 			switch ev.Type {
-			case event.Steer, event.Assistant, event.ToolResult:
+			case event.Steer, event.Assistant, event.ToolResult, event.Question:
 				continue
 			}
 		}

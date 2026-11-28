@@ -905,7 +905,8 @@
               in a short tail at the end. Every call uses one model at one
               reasoning effort, so the provider&rsquo;s prompt cache keeps
               hitting. A look where nothing is worth saying costs a cached read
-              and a few output tokens.
+              and what the model writes before it holds, which follows the
+              effort it runs at.
             </p>
             <a
               class="text-link"

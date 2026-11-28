@@ -2149,6 +2149,7 @@ func (r *Runtime) relayToolAt(name string, str func(string) string, num func(str
 					r.settleExited(cur)
 				}
 				r.armAutopilots()
+				r.syncRelaySettings()
 			}) {
 				return errEnding.Error(), true
 			}
