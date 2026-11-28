@@ -130,6 +130,35 @@ func TestAChangeAskedRightAfterATurnsEndWaitsAMoment(t *testing.T) {
 	k1Relay(t, rt, "the change applied", func(rel *state.Relay) bool { return rel.Model == "gpt-6.2-astra" })
 }
 
+// A change still waiting when the session is ending is not applied (its
+// timer can come due then): no agent is started once a session ends, and
+// no error is recorded for the change.
+func TestAWaitingChangeIsNotAppliedOnceTheSessionIsEnding(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	seat.say(relay.Event{Kind: relay.KindState, State: "idle"})
+	k1Relay(t, rt, "idle", func(rel *state.Relay) bool { return rel.State == "idle" })
+	var errs []string
+	launching := false
+	rt.sync(func() {
+		rt.setWaitingPick("codex", relayPick{"gpt-6.2-astra", ""})
+		rt.ending = true
+		rt.applyWaitingRepick("codex")
+		rt.ending = false
+		launching = rt.relays.launch("codex") != nil
+		for _, ev := range rt.st.Events {
+			var d event.ErrorData
+			if ev.Type == event.Error && ev.Decode(&d) == nil {
+				errs = append(errs, d.Text)
+			}
+		}
+	})
+	if launching || len(errs) != 0 {
+		t.Fatalf("a waiting change as the session ends: restart under way %v, errors recorded %q; want neither", launching, errs)
+	}
+}
+
 // A second message kept for eagent that arrives while a turn runs, after the
 // turn already sent back a hold on the first one, is owed its own send-back
 // in that turn: without it the hold on it stands with the model never told

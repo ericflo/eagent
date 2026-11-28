@@ -241,8 +241,8 @@ func (r *Runtime) applyWaitingRepick(name string) {
 		r.syncRelaySettings()
 		return
 	}
-	if r.relays.launch(name) != nil || rel.State != "idle" || rel.Awaited() > 0 {
-		return
+	if r.ending || r.relays.launch(name) != nil || rel.State != "idle" || rel.Awaited() > 0 {
+		return // (no agent is started once the session is ending)
 	}
 	if wait := repickGrace - time.Since(rel.LastEventAt); wait > 0 {
 		time.AfterFunc(wait, func() { r.post(func() { r.applyWaitingRepick(name) }) })
