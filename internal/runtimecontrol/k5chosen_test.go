@@ -9,6 +9,7 @@ import (
 	"github.com/ericflo/eagent/internal/config"
 	"github.com/ericflo/eagent/internal/protocol/artifact"
 	"github.com/ericflo/eagent/internal/protocol/control"
+	"github.com/ericflo/eagent/internal/settings"
 )
 
 // A preset saved in a change that chooses a configuration asks the session
@@ -37,14 +38,28 @@ func TestK5ASaveWithAChosenConfigurationAsksWithItsName(t *testing.T) {
 	}
 	defer c.Close()
 	defer runLoop(t, c)()
+	seen := ""
 	for _, edits := range [][]control.Edit{
 		{{Op: "set", Key: "/tick_seconds", Value: float64(45)}, {Op: "set", Key: "/save_preset", Value: "plain"}},
 		{{Op: "set", Key: "/config", Value: "openai-high"}, {Op: "set", Key: "/save_preset", Value: "picked"}},
 	} {
-		view, err := View(project, "s-chosen", c.Generation, c.Values, true)
-		if err != nil {
-			t.Fatal(err)
+		// The version a client saves against is the published status's,
+		// which the session writes right after it acknowledges a save.
+		var view settings.RemoteView
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+			if status, err := ReadStatus(project, "s-chosen"); err == nil {
+				if view, err = View(project, "s-chosen", status.Generation, status.Values, true); err != nil {
+					t.Fatal(err)
+				}
+				if view.Snapshot.Version != seen {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the status never showed the save before")
+			}
 		}
+		seen = view.Snapshot.Version
 		grant, _ := Grant(project, "s-chosen")
 		prop := control.Proposal{Operation: "settings.apply", SchemaVersion: Schema, ExpectedVersion: view.Snapshot.Version, Generation: c.Generation, Edits: edits}
 		raw, _ := json.Marshal(prop)
