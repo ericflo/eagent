@@ -15,6 +15,52 @@ import (
 	"github.com/ericflo/eagent/internal/store"
 )
 
+// Review 15, finding 5, with the old seat's not_sent reaching the loop only
+// after the restart has brought the new agent up (and settled the send as
+// unconfirmed at the stop). The send must end not_sent: forwarding it again
+// is allowed, the phone receipt is "failed", and the model's conversation
+// says it did not go.
+func TestANotSentAfterTheRestartSettledItEndsNotSent(t *testing.T) {
+	seat := newK2FeedSeat(t)
+	g := useGatedLaunches(t, []relaySeat{seat, newFakeSeat("two")}, nil)
+	rt := newLaunchRuntime(t)
+	seq, id := k2Forward(t, rt, seat, "then run the linter", "after_turn")
+	g.release <- struct{}{} // the new agent comes up at once
+	rt.sync(func() {
+		if err := rt.restartRelayWith(rt.st.Relays["codex"], relayPick{"gpt-6.2-astra", ""}); err != nil {
+			t.Errorf("restart: %v", err)
+		}
+	})
+	seat.waitGone(t)
+	waitRelayStarts(t, rt)
+	first := k2Outcome(rt, id)
+	t.Logf("%s after the restart, before the old seat's word: %q", id, first)
+	seat.say(relay.Event{Kind: relay.KindDelivered, SendID: id, OK: false, Outcome: relay.OutcomeNotSent, Detail: "it was still in the spool when the turn ended; taken back unread"})
+	seat.end()
+	waitFor(t, "the not_sent recorded", func() bool { return k2Outcome(rt, id) == state.SendNotSent })
+	got := deliveredFor(rt, id)
+	if last := got[len(got)-1]; last.Outcome != event.DeliveryNotSent {
+		t.Fatalf("%s: %+v; want it to end not_sent", id, got)
+	}
+	var prev, why, receipt, view string
+	rt.sync(func() {
+		prev, why = forwardedAs(rt.st, "codex", seq, "")
+		receipt = sendsReceipt(rt.st, map[string]int64{id: seq}, seq)
+		b, _ := json.Marshal(rt.st.View(nil))
+		view = string(b)
+	})
+	if prev != "" {
+		t.Errorf("forwarding the message again is refused as %s: %q", prev, why)
+	}
+	if receipt != "failed" {
+		t.Errorf("phone receipt %q, want failed", receipt)
+	}
+	if !strings.Contains(view, "("+id+") did not go") {
+		t.Errorf("the conversation does not say %s did not go", id)
+	}
+	t.Logf("outcomes on the record: %+v", got)
+}
+
 // eagent sends Codex "run the tests" itself and then restarts it. The
 // restart settles the send as unconfirmed; the old seat's watcher then
 // hands over the arrival it had read, and the record ends "arrived". The
