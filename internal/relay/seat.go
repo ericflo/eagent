@@ -2551,15 +2551,19 @@ func (s *Seat) ready(screen string) bool {
 // interrupt)", "• Working (3s • esc to interrupt)"); its words may hold
 // parentheses of their own (Claude shows the active task's words there). A
 // markdown bullet ("-", "1.") or a sentence that quotes the words is not it.
-func spinnerLine(glyphs string) *regexp.Regexp {
-	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^\n]*\([^()\n]*esc to interrupt[^()\n]*\)\s*$`)
+// tail is what the agent may draw after the parenthesis.
+func spinnerLine(glyphs, tail string) *regexp.Regexp {
+	return regexp.MustCompile(`(?im)^\s*[` + regexp.QuoteMeta(glyphs) + `]\s+[^\n]*\([^()\n]*esc to interrupt[^()\n]*\)` + tail + `\s*$`)
 }
 
 // The spinner glyphs each agent draws: Claude cycles through these frames,
-// Codex draws a bullet.
+// Codex draws a bullet. While a shell it started still runs, Codex goes on
+// after the parenthesis ("• Working (14s • esc to interrupt) · 1 background
+// terminal running · /ps to view · /stop to close", Codex 0.171 as captured
+// on 2026-11-27): that is how it draws every long command.
 var (
-	claudeSpinner = spinnerLine("·✢✳✶✻✽*")
-	codexSpinner  = spinnerLine("•")
+	claudeSpinner = spinnerLine("·✢✳✶✻✽*", "")
+	codexSpinner  = spinnerLine("•", `( · [^\n]*)?`)
 )
 
 // claudeHint matches the part of Claude's footer that says how to stop a
@@ -2567,6 +2571,17 @@ var (
 // draws at the right end of the same row (a notice of the context left, of
 // an update). The words in a sentence are not it.
 var claudeHint = regexp.MustCompile(`^esc to interrupt(\s{2,}\S.*)?$`)
+
+// claudeTurn matches the line Claude Code 2.1.332 draws above its input box
+// for the length of a turn: at the start of a row one of its spinner's
+// glyphs, the turn's word or the active task's words up to an ellipsis,
+// and then nothing or the turn's figures in parentheses ("✢ Flowing…",
+// "· Fiddle-faddling… (10s · ↓ 98 tokens)", as captured on 2026-11-27).
+// After the turn the line says how long it took and has no ellipsis ("✻
+// Baked for 26s · done 4:52 PM"). What tools print, what Claude answers
+// and what the box holds past its first line are indented, so such a line
+// at the start of a row is Claude's own.
+var claudeTurn = regexp.MustCompile(`(?m)^[·✢✳✶✻✽*] [^\n]*…( \([^\n]*\))?[ \t]*$`)
 
 // busyScreen is an agent whose prompt or status line stays on screen while
 // it works (Claude's footer, Antigravity's relay line), and that shows

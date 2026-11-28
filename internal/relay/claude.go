@@ -45,7 +45,10 @@ func (claudeAgent) ready(screen string) bool {
 // box's lower rule where that shows there; the spinner line from the foot, or
 // from further up while the prompt shows under it (its todo list is drawn
 // between the two). The same words in its output above a dialog, or in a
-// sentence of its last answer, are not it.
+// sentence of its last answer, are not it. Claude Code hides the hint
+// while its input box holds words (Escape would clear them first), so the
+// line it draws above the box for the length of a turn counts as well
+// (claudeTurn), read as the spinner line is.
 func (c claudeAgent) busy(screen string) bool {
 	f := foot(screen)
 	lines := strings.Split(f, "\n")
@@ -60,7 +63,8 @@ func (c claudeAgent) busy(screen string) bool {
 			}
 		}
 	}
-	return claudeSpinner.MatchString(f) || c.ready(screen) && claudeSpinner.MatchString(screen)
+	turn := func(s string) bool { return claudeSpinner.MatchString(s) || claudeTurn.MatchString(s) }
+	return turn(f) || c.ready(screen) && turn(screen)
 }
 
 func (claudeAgent) dialogs() []dialog {

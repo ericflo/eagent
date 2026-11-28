@@ -138,10 +138,22 @@ func k14HungOnADialog(t *testing.T, what string, a Agent, screen string) {
 // source draws the hint among the footer's parts while a turn can be
 // interrupted, and drops the mode line's "(shift+tab to cycle)" where the
 // line does not fit); earlier versions said it on the spinner line, as
-// Codex does on its working line. The other screens here are drawn after
-// those, not captured.
+// Codex does on its working line. With words in its input box Claude Code
+// 2.1.332 hides the hint, and the line above the box is what says a turn
+// runs. Codex 0.171's and Antigravity 1.5.18's
+// screens marked "as captured" are the real programs' of the same day, in
+// and after a turn that ran a slow shell command, with messages typed and
+// queued meanwhile. The other screens here are drawn after those, not
+// captured.
 func TestK14EachWorkScreenIsSeenAsTheRealProgramDrawsIt(t *testing.T) {
 	t.Parallel()
+	// Codex 0.171's working line while a shell it started still runs, and
+	// its composer: the box's line, its status line, and the hint under it
+	// (none after a turn while the box holds words).
+	const codexShell = "• Working (14s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close"
+	codexBox := func(box, hint string) []string {
+		return []string{box, "", "  GPT-6.2-Astra max · /home/u/project · Run sleep command", hint}
+	}
 	output := []string{"● Bash(make build)", "  ⎿  ok", "", "●"}
 	turn := func(mode string) []string {
 		return []string{"✻ Slithering… (2s · ↓ 118 tokens · thinking)", realRule, "❯ ", realRule, mode}
@@ -159,6 +171,14 @@ func TestK14EachWorkScreenIsSeenAsTheRealProgramDrawsIt(t *testing.T) {
 		{"Claude Code 2.1.332 in a turn, a notice at the right end of the footer's row", claudeAgent{}, shown(output, "", turn("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"+strings.Repeat(" ", 90)+"Context left until auto-compact: 8%")), true},
 		{"Claude Code 2.1.332 in a turn, a hint after the interrupt's and a notice", claudeAgent{}, shown(output, "", turn("  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks"+strings.Repeat(" ", 60)+"1 MCP server failed · /mcp")), true},
 		{"Claude Code 2.1.332 after a turn, a notice that names the hint", claudeAgent{}, shown(output, "", []string{"✻ Sautéed for 2s", realRule, "❯ ", realRule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)" + strings.Repeat(" ", 60) + "press esc to interrupt a turn"}), false},
+		{"Claude Code 2.1.332 in a turn, a shell it started still running, as captured", claudeAgent{}, shown(output, "", []string{"✢ Transmogrifying… (14s · ↓ 213 tokens · thought for 1s)", "", realRule, "❯ ", realRule, "  ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ↓ to manage"}), true},
+		{"Claude Code 2.1.332 in a turn, words in its input box, as captured", claudeAgent{}, shown(output, "", []string{"· Fiddle-faddling… (10s · ↓ 98 tokens)", "  ⎿  Tip: Use /voice for push-to-talk dictation", "", realRule, "❯ a draft left in the box", realRule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"}), true},
+		{"Claude Code 2.1.332 as a turn begins, words in its input box and a shell running, as captured", claudeAgent{}, shown(output, "", []string{"✢ Flowing… ", "  ⎿  Tip: Press ctrl+x = or ctrl+x - at the prompt to raise or lower effort for this session", "", realRule, "❯ left in the box", realRule, "  ⏵⏵ bypass permissions on · 1 shell"}), true},
+		{"Claude Code 2.1.332 after a turn, words in its input box, as captured", claudeAgent{}, shown(output, "", []string{"● done", "", "✻ Baked for 26s · done 4:52 PM", "", realRule, "❯ a draft left in the box", realRule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)"}), false},
+		{"Claude Code 2.1.332 after a turn, a shell still running, as captured", claudeAgent{}, shown(output, "", []string{"✻ Churned for 15s · done 4:50 PM · 1 shell still running", "", realRule, "❯ After that, also reply with the word ok.", realRule, "  ⏵⏵ bypass permissions on · 1 shell"}), false},
+		{"Claude Code 2.1.332 asking a question, as captured", claudeAgent{}, shown(output, "", []string{"❯ Use the AskUserQuestion tool to ask me which of two colors I prefer, red or blue.", "", realRule, " ☐ Color ", "", "Which color do you prefer, red or blue?", "", "❯ 1. Red", "     You prefer the color red.", "  2. Blue", "     You prefer the color blue.", "  3. Type something.", realRule, "  4. Chat about this", "", "Enter to select · ↑/↓ to navigate · Esc to cancel"}), false},
+		{"Claude Code at its prompt, a turn's line quoted in its last answer", claudeAgent{}, shown([]string{"● The line above the box read:", "  ✢ Flowing…", "  · Fiddle-faddling… (10s · ↓ 98 tokens)"}, "", claudePromptLines), false},
+		{"Claude Code at its prompt, a turn's line in what a tool printed", claudeAgent{}, shown([]string{"● Bash(head -2 shot.txt)", "  ⎿  ✢ Flowing…", "     · Fiddle-faddling… (10s · ↓ 98 tokens)"}, "", claudePromptLines), false},
 		{"Claude Code 2.1.332 after a turn, as captured", claudeAgent{}, shown(output, "", []string{"✻ Sautéed for 2s · done 3:03 PM", realRule, "❯ ", realRule, "  ⏵⏵ auto mode on (shift+tab to cycle)"}), false},
 		{"Claude Code at its prompt, the hint's words in its last answer", claudeAgent{}, shown([]string{"● Press esc to interrupt it."}, "", claudePromptLines), false},
 		{"Claude Code at its prompt, the hint itself the last line of its output", claudeAgent{}, shown([]string{"● Bash(tail -1 footer.txt)", "  ⎿    ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt"}, "", claudePromptLines), false},
@@ -167,6 +187,15 @@ func TestK14EachWorkScreenIsSeenAsTheRealProgramDrawsIt(t *testing.T) {
 		{"Codex in a turn, lines between its working line and its composer", codexAgent{}, shown(output, "", append([]string{"• Working (3s • esc to interrupt)", "", "  ↳ and the README too", "  ↳ then run the tests", "  ↳ then commit"}, codexPromptLines...)), true},
 		{"Codex in a turn, its composer holding text", codexAgent{}, shown(output, "", []string{"• Working (3s • esc to interrupt)", "", "› and the README too", "", "  GPT-6.2-Astra max · /home/u/project", "  ← for agents · ? for shortcuts"}), true},
 		{"Codex at its prompt", codexAgent{}, shown(output, "", codexPromptLines), false},
+		{"Codex 0.171 in a turn, as captured", codexAgent{}, shown(output, "", append([]string{"• Working (4s • esc to interrupt)", "", ""}, codexBox("› Ask Codex to do anything", "  ← for agents · ? for shortcuts")...)), true},
+		{"Codex 0.171 in a turn, a shell it started still running, as captured", codexAgent{}, shown(output, "", append([]string{"• Running sleep 45.", "", codexShell, "", ""}, codexBox("› Ask Codex to do anything", "  ← for agents · ? for shortcuts")...)), true},
+		{"Codex 0.171 in a turn, words in its composer, as captured", codexAgent{}, shown(output, "", append([]string{"• Running sleep 45.", "", codexShell, "", ""}, codexBox("› After that, also reply with the word ok.", "  tab to queue message")...)), true},
+		{"Codex 0.171 in a turn, a message queued with Tab, as captured", codexAgent{}, shown(output, "", append([]string{codexShell, "", "• Queued follow-up inputs", "  ↳ typed and left in the box", "    shift+← edit last queued message", "", ""}, codexBox("› Ask Codex to do anything", "  ← for agents · ? for shortcuts")...)), true},
+		{"Codex 0.171 after a turn, as captured", codexAgent{}, shown(output, "", append([]string{"• I received “typed and left in the box” as a chat message.", "", "  Worked for 6s • 4:44 PM", "", ""}, codexBox("› Ask Codex to do anything", "  ← for agents · ? for shortcuts")...)), false},
+		{"Codex 0.171 after a turn, its working line in a sentence of its answer", codexAgent{}, shown([]string{"• The line read Working (14s • esc to interrupt) and after it the shells that still ran."}, "", codexBox("› Ask Codex to do anything", "  ← for agents · ? for shortcuts")), false},
+		{"Antigravity 1.5.18 in a turn, as captured", antigravityAgent{}, shown(output, "", []string{"○ Running (sleep 40) (ctrl+o to expand)", "⢿  Running command... 6s", realRule, ">", realRule, "Antigravity relay · working · Gemini 4 Neon (XHigh)"}), true},
+		{"Antigravity 1.5.18 in a turn, a queued message and a shell's line, as captured", antigravityAgent{}, shown(output, "", []string{"▸ After that, also reply with the word ok. (alt+m to send immediately)", realRule, ">", realRule, "  ● [16:38:09] sleep 40 running", realRule, "Antigravity relay · working · Gemini 4 Neon (XHigh)"}), true},
+		{"Antigravity 1.5.18 after a turn, as captured", antigravityAgent{}, shown(output, "", []string{"  done", "  ok", "", realRule, ">", realRule, "Antigravity relay · idle · Gemini 4 Neon (XHigh)"}), false},
 		{"Antigravity in a turn", antigravityAgent{}, shown(output, "", []string{"", realRule, "> ", realRule, "Antigravity relay · running · Gemini 4 Neon"}), true},
 		{"Antigravity at its prompt", antigravityAgent{}, shown(output, "", agyPromptLines), false},
 		{"Antigravity's trust dialog over its status line", antigravityAgent{}, agyTrustScreen, false},
